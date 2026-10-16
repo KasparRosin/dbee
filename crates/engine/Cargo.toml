@@ -1,0 +1,10 @@
+[package]
+name = "dbee-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "dbee engine: sessions, the command registry, undo (L5)"
+
+[lints]
+workspace = true

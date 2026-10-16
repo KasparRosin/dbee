@@ -1,0 +1,105 @@
+# Agents
+
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** major (scaffold)
+
+dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
+
+# Part 1: driving dbee
+
+Nothing in Part 1 exists yet. Each item is **(planned)** and documented first so the implementation has a contract to meet. Today `dbee-cli` prints its version and the app opens a placeholder window.
+
+## 1. MCP server (planned)
+
+`dbee-cli mcp` serves MCP on stdio, headless (`--demo`, a seeded in-memory SQLite database) or bridged to a running app (`--bridge HOST:PORT`). The core tools `command_list`, `command_run`, `command_batch`, `doc_inspect` and `render_preview` work in both modes. Database tools: `connection_list`, `schema_inspect`, `query_run`, `table_read`. Bridge-only: the `ui_*` tools and `screenshot`. Full reference: [`mcp.md`](mcp.md).
+
+Typical loop: `connection_list` / `schema_inspect` to get names, `command_run` or `query_run`, `table_read` or a screenshot to look at the result, `edit.undo` if it is wrong.
+
+## 2. Control channel (planned)
+
+`dbee --control 9876` listens on `127.0.0.1` only: one JSON request per line, one JSON reply per line.
+
+```jsonc
+{"id":1,"method":"engine.commands"}
+{"id":2,"method":"engine.execute","params":{"command":"connection.open","params":{"name":"demo"}}}
+{"id":3,"method":"ui.screenshot","params":{"path":"/tmp/dbee.png"}}
+```
+
+Replies look like `{"id":2,"ok":true,"result":{…}}` or `{"id":2,"ok":false,"error":"…"}`. Method table: [`control-protocol.md`](control-protocol.md).
+
+## 3. Command line (planned)
+
+Every command is one shell call away: `dbee-cli exec <id> k=v…`, `run <script.jsonl>`, `query --connection <name> <sql>`. Output is JSON; exit status is 0 on success, 1 when a command fails and 2 on a usage error. Reference: [`cli.md`](cli.md).
+
+## 4. Verifying UI work (planned)
+
+For any UI change, look at the result:
+
+1. `cargo run --release -p dbee -- --control 9876`
+2. Drive the feature through the control channel or the MCP bridge: commands first, then clicks and keys.
+3. Assert on `ui.inspect` and `document.inspect`.
+4. Take `ui.screenshot` (the whole window) and open the PNG.
+
+Until `--control` exists, run `cargo run -p dbee` and take a window screenshot by window id. Screenshots you commit follow the asset rule in [`AGENTS.md`](../AGENTS.md): synthetic data only, and a row in `ATTRIBUTION.md`. Screenshots of Beekeeper Studio are never committed.
+
+# Part 2: developing dbee
+
+## 5. Orientation, in this order
+
+1. [`AGENTS.md`](../AGENTS.md): absolute rules (assets, clean-room, never crash).
+2. [`docs/standards/`](standards/): [never crash](standards/never-crash.md), [progress docs](standards/progress-docs.md), [licensing](standards/licensing.md).
+3. [`ROADMAP.md`](../ROADMAP.md), then [`gaps.md`](gaps.md) (the ranked work list).
+4. [`architecture.md`](architecture.md).
+5. [`testing.md`](testing.md).
+
+Maintainers also keep a local planning folder, `plan/` (gitignored): the status file, the task plan and behaviour notes. If you don't have it, the public docs above are enough to contribute; ask a maintainer for a task id.
+
+## 6. Autonomous work loop
+
+1. **Orient.** Pick the next task: the next one in the maintainer status file, or the top open entry in [`gaps.md`](gaps.md).
+2. **Plan tests first.** Write down the acceptance test before the code.
+3. **Implement and test.**
+4. **Verify.** Run `cargo xtask ci`. For UI work, also take a screenshot of the window and look at it.
+5. **Record.** Update the progress docs the change touches (ROADMAP.md, `docs/gaps.md`, the parity docs, with their status lines and revision history). Commit as `M<n>.<k>: …`, one task id per commit, then move on.
+
+For parallel agents see §9.
+
+## 7. Decision rules
+
+Don't block on choices you can make yourself. Where Beekeeper Studio's behaviour is undocumented, choose what database clients most commonly do and record the choice in the crate README. Never inspect Beekeeper Studio's internals (clean-room rule in `AGENTS.md`).
+
+Ask a human only about:
+
+- licences outside the allowlist ([licensing](standards/licensing.md));
+- spending money;
+- publishing or pushing;
+- personal data;
+- destructive git operations;
+- anything AGENTS.md leaves unclear ("when in doubt, leave it out").
+
+## 8. Definition of Done
+
+A feature is done when:
+
+- [ ] its command is registered with label, menu path, shortcut (if any) and a params doc;
+- [ ] engine tests cover it, including undo/redo and the disabled case;
+- [ ] the UI is wired: menu, panel control and shortcut;
+- [ ] you have driven it through the control channel and reviewed a screenshot;
+- [ ] all gates pass (`cargo xtask ci`) and new assets have rows in `ATTRIBUTION.md`;
+- [ ] the progress docs are updated where relevant;
+- [ ] it is committed with its task id.
+
+### Reporting progress honestly
+
+ROADMAP.md and [`target-app-parity.md`](target-app-parity.md) keep two numbers: **feature breadth** (does it exist?) and **ready for real work** (does it hold up?). The rules are in [progress docs](standards/progress-docs.md). In short:
+
+- say how a number was obtained: *measured* or *estimated*;
+- count an approximation, a stub or a partly wired setting as such, never as done;
+- record known bugs and limitations in [`gaps.md`](gaps.md), not only what works;
+- benchmarks state the machine, the load average and before/after on the same build;
+- don't raise a percentage without evidence a reviewer can rerun.
+
+## 9. Parallel agents
+
+- One git worktree and one `CARGO_TARGET_DIR` per agent; delete your target dir when done.
+- Each crate has one owner at a time. Edit only the crates you own.
+- A new crate is registered in `xtask/src/layers.rs` and [`architecture.md`](architecture.md) in the same change.

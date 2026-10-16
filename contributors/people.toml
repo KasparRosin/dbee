@@ -1,0 +1,14 @@
+# Contributor names for the About window (docs/contributors.md).
+#
+# Everyone who contributes is credited by their git author name automatically. Anything more is
+# up to you: add YOUR OWN entry below (commit it yourself). Never add someone else.
+#
+# Copy this block, replacing your-github-username (every field is optional):
+#
+#   [people.your-github-username]
+#   real_name = "Your Name"        # shown when the viewer picks "Real name"
+#   display_name = "Nickname"      # shown when the viewer picks "Display name"
+#   sync_github_name = true        # or: use the name on your public GitHub profile as display name
+#   emails = ["you@example.org"]   # your commit addresses, so your commits count under this entry
+#
+# To remove your names, delete your entry. The next `cargo xtask contributors` run drops them.

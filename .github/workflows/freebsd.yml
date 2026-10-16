@@ -1,0 +1,84 @@
+# Builds and tests the workspace on FreeBSD, inside a FreeBSD VM on a Linux runner
+# (GitHub has no FreeBSD runners). GPU tests skip themselves when the VM has no adapter.
+# Test builds run only from the `release` branch (a manual run from any other branch is skipped).
+# release.yml has its own FreeBSD packaging job; the `package` input here builds the same
+# tarball (packaging/freebsd/package.sh) for a manual run, and needs no secrets.
+name: FreeBSD
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Build the release tarball instead of running the tests"
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        description: "Version for the artifact name (empty: Cargo.toml)"
+        type: string
+        default: ""
+      version_override:
+        description: "Also write the version into Cargo.toml before building (test runs)"
+        type: boolean
+        default: false
+      package:
+        type: boolean
+        default: false
+
+concurrency:
+  # One group per workflow and ref.
+  group: freebsd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.workflow == 'FreeBSD' }}
+
+permissions:
+  contents: read
+
+jobs:
+  freebsd:
+    name: FreeBSD 15.1 (${{ inputs.package && 'package' || 'build + test' }})
+    if: github.ref == 'refs/heads/release' || inputs.package
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      DBEE_VERSION: ${{ inputs.version }}
+      DBEE_VERSION_OVERRIDE: ${{ inputs.version_override && '1' || '' }}
+      DBEE_PACKAGE: ${{ inputs.package && '1' || '' }}
+      DBEE_BUILD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build in a FreeBSD VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "15.1"
+          usesh: true
+          cpu: 4
+          mem: 12288
+          envs: "DBEE_VERSION DBEE_VERSION_OVERRIDE DBEE_PACKAGE DBEE_BUILD_SHA"
+          # Only the packaging run brings files back (dist/release). The target dir lives outside
+          # the synced checkout, because copying it out of the VM fails on large builds.
+          copyback: ${{ inputs.package }}
+          prepare: |
+            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            . "$HOME/.cargo/env"
+            # The checkout is synced in under another owner; let tests that call git read it.
+            git config --global --add safe.directory "*"
+            export CARGO_TARGET_DIR=/var/tmp/dbee-target CARGO_PROFILE_DEV_DEBUG=0
+            rustc --version
+            if [ -n "$DBEE_PACKAGE" ]; then
+              if [ -n "$DBEE_VERSION_OVERRIDE" ]; then
+                cargo run -q -p xtask --no-default-features -- version set "$DBEE_VERSION"
+              fi
+              bash packaging/freebsd/package.sh
+            else
+              cargo build --workspace --all-targets --locked
+              cargo test --workspace --locked
+            fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.package
+        with:
+          name: release-freebsd
+          path: dist/release/*
+          if-no-files-found: error

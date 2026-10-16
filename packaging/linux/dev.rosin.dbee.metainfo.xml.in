@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata (software centres, Flathub). Template: package.sh and the Flatpak
+     manifest substitute @VERSION@ and @DATE@ from Cargo.toml and the build date. -->
+<component type="desktop-application">
+  <id>dev.rosin.dbee</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>dbee</name>
+  <summary>Desktop database client</summary>
+  <developer id="dev.rosin">
+    <name>Kaspar Rosin</name>
+  </developer>
+  <description>
+    <p>
+      dbee is an open-source desktop database client built in Rust. This is an early
+      pre-release with no features yet.
+    </p>
+  </description>
+  <launchable type="desktop-id">dev.rosin.dbee.desktop</launchable>
+  <icon type="stock">dev.rosin.dbee</icon>
+  <url type="homepage">https://dbee.rosin.dev</url>
+  <url type="bugtracker">https://github.com/KasparRosin/dbee/issues</url>
+  <url type="vcs-browser">https://github.com/KasparRosin/dbee</url>
+  <categories>
+    <category>Development</category>
+    <category>Database</category>
+  </categories>
+  <keywords>
+    <keyword>database</keyword>
+    <keyword>sql</keyword>
+    <keyword>sqlite</keyword>
+  </keywords>
+  <!-- App colours from the icon palette: amber #f5a524 / charcoal #1f2328 (assets/app-icon/README.md). -->
+  <branding>
+    <color type="primary" scheme_preference="light">#f5a524</color>
+    <color type="primary" scheme_preference="dark">#1f2328</color>
+  </branding>
+  <requires>
+    <display_length compare="ge">760</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <provides>
+    <binary>dbee</binary>
+    <binary>dbee-cli</binary>
+    <mediatype>application/vnd.sqlite3</mediatype>
+    <mediatype>application/x-sqlite3</mediatype>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

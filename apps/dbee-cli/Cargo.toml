@@ -1,0 +1,14 @@
+[package]
+name = "dbee-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "dbee command line (placeholder: version and help)"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "dbee-cli"
+path = "src/main.rs"
