@@ -792,6 +792,14 @@ name = "dbee-mcp"
 version = "0.0.0"
 
 [[package]]
+name = "dbee-sql"
+version = "0.0.0"
+dependencies = [
+ "dbee-core",
+ "proptest",
+]
+
+[[package]]
 name = "dbee-testkit"
 version = "0.0.0"
 dependencies = [

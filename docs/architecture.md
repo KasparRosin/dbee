@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (core)
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (sql)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -12,6 +12,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 |---|---|---|
 | `crates/core` | exists | L0. Cells, result sets, the schema model (`Catalog`, `TableInfo`), grid text and the clipboard copy formats. Plain values with serde shapes; no I/O. |
 | `crates/testkit` | exists | L0, a dev-dependency only. Finds the Docker test servers (`cargo xtask testdb`), the skip rule (`require_testdb!`), a `psql` helper, unique names and throwaway home directories. |
+| `crates/sql` | exists | L1. Identifier and literal quoting, the SQL lexer, statement splitting. Pure text; no I/O. |
 | `crates/engine` | exists, empty | L5. `Session`, the command registry (`cmd/*`), undo and the journal. |
 | `crates/ui-egui` | exists, placeholder | L6. The egui UI and the control channel. |
 | `crates/mcp` | exists, empty | L6. MCP server over stdio. |
@@ -24,7 +25,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 
 | Layer | Crates | Job |
 |---|---|---|
-| L0–L4 | `core`, `testkit` (L0, tests only); domain crates **(planned)**, e.g. `sql`, `drivers`, `model` | Values and types, SQL parsing and quoting, database drivers and wire protocols, the connection and schema model. No UI, no engine. |
+| L0–L4 | `core`, `testkit` (L0, tests only); `sql` (L1); domain crates **(planned)**, e.g. `drivers`, `model` | Values and types, SQL parsing and quoting, database drivers and wire protocols, the connection and schema model. No UI, no engine. |
 | L5 | `engine` | Session, commands, undo, journal. Depends on L0–L4 only. |
 | L6 | `ui-egui`, `mcp` | Front ends over the engine. egui and friends are allowed here and above (`ui-egui` for the UI, `mcp` for UI control), never below. |
 | L7 | `apps/dbee`, `apps/dbee-cli` | Binaries that wire a front end to the engine. |
@@ -61,6 +62,7 @@ Everything. The repository is a scaffold: no driver, command, query editor, resu
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | `crates/sql` (L1): quoting, lexer, statement splitting |
 | 2026-10-19 | minor | `crates/core` (L0): cells, schema model, grid text, copy formats |
 | 2026-10-19 | minor | `crates/testkit` (L0) and `cargo xtask testdb` |
 | 2026-10-15 | major | Rewritten for dbee: workspace, layers, data flow, agent control, platforms, known gaps |

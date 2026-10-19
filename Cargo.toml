@@ -13,6 +13,7 @@ homepage = "https://dbee.rosin.dev"
 [workspace.dependencies]
 # internal
 dbee-core = { path = "crates/core" }
+dbee-sql = { path = "crates/sql" }
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }
 dbee-mcp = { path = "crates/mcp" }
