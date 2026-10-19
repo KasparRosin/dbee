@@ -540,7 +540,7 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             }
             kind = TokenKind::Whitespace;
         } else if c == b'-' && at(b, i + 1) == b'-' {
-            while i < b.len() && b[i] != b'\n' {
+            while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
                 i += 1;
             }
             kind = TokenKind::Comment;
@@ -748,6 +748,16 @@ mod tests {
     }
 
     #[test]
+    fn line_comment_ends_at_bare_cr() {
+        use TokenKind::*;
+        let sql = "x -- a\r; drop table t";
+        assert_eq!(kinds(sql)[1], (Comment, "-- a"));
+        assert!(has_top_level_semicolon(sql));
+        let got: Vec<&str> = statements(sql).into_iter().map(|r| &sql[r]).collect();
+        assert_eq!(got, ["x", "drop table t"]);
+    }
+
+    #[test]
     fn unterminated_runs_to_end() {
         use TokenKind::*;
         assert_eq!(kinds("'abc"), [(String, "'abc")]);
@@ -810,7 +820,7 @@ mod tests {
             for r in statements(&s) { prop_assert!(s.get(r).is_some()); }
         }
         #[test]
-        fn sqlish_input_covers_and_splits(s in "[a-z0-9 ;'\"$E&U\\\\/*\\n-]{0,200}") {
+        fn sqlish_input_covers_and_splits(s in "[a-z0-9 ;'\"$E&U\\\\/*\\n\\r-]{0,200}") {
             let t = tokenize(&s);
             prop_assert_eq!(t.last().map(|k| k.range.end).unwrap_or(0), s.len());
             let st = statements(&s);
