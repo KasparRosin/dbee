@@ -165,3 +165,51 @@ fn secret_error_never_shows_secret() {
     assert!(!format!("{e} {e:?}").contains("pw"));
     assert_eq!(MemoryStore::default().name(), "memory");
 }
+
+#[test]
+fn url_parts_debug_hides_password() {
+    let d = format!("{:?}", parse_url("postgres://u:hunter2@h").unwrap());
+    assert!(!d.contains("hunter2"), "{d}");
+    assert!(d.contains("redacted"));
+}
+
+#[test]
+fn unreadable_file_is_never_overwritten() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    // a directory where the file should be: reading it fails with a non-NotFound error
+    std::fs::create_dir_all(dir.join(FILE).join("keep")).unwrap();
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    assert!(warn.unwrap().contains("untouched"));
+    assert!(s.dir.is_none());
+    s.upsert(cfg("a"));
+    s.save().unwrap();
+    assert!(dir.join(FILE).join("keep").is_dir());
+}
+
+#[test]
+fn failed_bad_rename_leaves_file_untouched() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    std::fs::write(dir.join(FILE), "{oops").unwrap();
+    // a non-empty directory at the .bad path makes the rename fail
+    std::fs::create_dir_all(dir.join("connections.json.bad").join("x")).unwrap();
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    assert!(warn.unwrap().contains("untouched"));
+    assert!(s.dir.is_none());
+    s.upsert(cfg("a"));
+    s.save().unwrap();
+    assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), "{oops");
+}
+
+#[test]
+fn save_leaves_no_temp_files() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut s, _) = ConnectionStore::load(Some(&dir));
+    s.upsert(cfg("a"));
+    s.save().unwrap();
+    s.save().unwrap();
+    let tmp = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
+    assert_eq!(tmp, 0);
+}

@@ -2,6 +2,7 @@
 
 use crate::connection::{ConfigError, ConnectionConfig};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// File name inside the config directory.
@@ -49,7 +50,11 @@ impl ConnectionStore {
         let text = match std::fs::read(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (store, None),
-            Err(e) => return (store, Some(format!("could not read {}: {e}", path.display()))),
+            Err(e) => {
+                // Memory only from here on, so a later save cannot overwrite the unreadable file.
+                store.dir = None;
+                return (store, Some(format!("could not read {}: {e}; the file was left untouched and changes will not be saved", path.display())));
+            }
         };
         match serde_json::from_slice::<FileBody>(&text) {
             Ok(body) => {
@@ -62,7 +67,10 @@ impl ConnectionStore {
                 let bad = dir.join(format!("{FILE}.bad"));
                 let moved = match std::fs::rename(&path, &bad) {
                     Ok(()) => format!("moved it to {}", bad.display()),
-                    Err(re) => format!("could not move it aside: {re}"),
+                    Err(re) => {
+                        store.dir = None;
+                        format!("could not move it aside ({re}); the file was left untouched and changes will not be saved")
+                    }
                 };
                 (store, Some(format!("{} is damaged ({e}); {moved}", path.display())))
             }
@@ -76,9 +84,17 @@ impl ConnectionStore {
         let body = FileBody { version: 1, saved: self.saved.clone(), recent: self.recent.clone() };
         let json = serde_json::to_vec_pretty(&body).map_err(|e| ConfigError::Io(e.to_string()))?;
         std::fs::create_dir_all(dir).map_err(|e| io("create directory", e))?;
-        let tmp = dir.join(format!("{FILE}.tmp"));
-        std::fs::write(&tmp, json).map_err(|e| io("write", e))?;
-        std::fs::rename(&tmp, dir.join(FILE)).map_err(|e| io("rename", e))
+        let tmp = dir.join(format!("{FILE}.{}.tmp", crate::connection::new_id()));
+        let written = (|| {
+            let mut file = std::fs::File::create(&tmp).map_err(|e| io("write", e))?;
+            file.write_all(&json).map_err(|e| io("write", e))?;
+            file.sync_all().map_err(|e| io("sync", e))
+        })();
+        let result = written.and_then(|()| std::fs::rename(&tmp, dir.join(FILE)).map_err(|e| io("rename", e)));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
 
     /// Replaces the saved connection with the same id, or appends.

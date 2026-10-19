@@ -158,8 +158,8 @@ impl ConnectionConfig {
     }
 }
 
-/// What a connection URL fills in. Absent parts stay `None`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// What a connection URL fills in. Absent parts stay `None`. `Debug` hides the password.
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct UrlParts {
     pub host: Option<String>,
     pub port: Option<u16>,
@@ -167,6 +167,19 @@ pub struct UrlParts {
     pub password: Option<String>,
     pub database: Option<String>,
     pub ssl_mode: Option<SslMode>,
+}
+
+impl std::fmt::Debug for UrlParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UrlParts")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("database", &self.database)
+            .field("ssl_mode", &self.ssl_mode)
+            .finish()
+    }
 }
 
 fn percent_decode(s: &str) -> Result<String, ConfigError> {
