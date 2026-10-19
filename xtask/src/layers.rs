@@ -31,6 +31,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("testkit", Class::Layer(0)),
     ("sql", Class::Layer(1)),
     ("config", Class::Layer(1)),
+    ("ssh", Class::Layer(2)),
     ("engine", Class::Layer(5)),
     ("ui-egui", Class::Layer(6)),
     ("mcp", Class::Layer(6)),
@@ -204,7 +205,7 @@ mod tests {
     #[test]
     fn table_lists_only_dbee_crates() {
         let names: Vec<&str> = TABLE.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, vec!["core", "testkit", "sql", "config", "engine", "ui-egui", "mcp", "dbee", "cli", "xtask"]);
+        assert_eq!(names, vec!["core", "testkit", "sql", "config", "ssh", "engine", "ui-egui", "mcp", "dbee", "cli", "xtask"]);
         assert!(INTRA_LAYER_ORDER.is_empty());
     }
 

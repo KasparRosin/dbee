@@ -15,6 +15,7 @@ homepage = "https://dbee.rosin.dev"
 dbee-core = { path = "crates/core" }
 dbee-sql = { path = "crates/sql" }
 dbee-config = { path = "crates/config" }
+dbee-ssh = { path = "crates/ssh" }
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }
 dbee-mcp = { path = "crates/mcp" }
@@ -26,6 +27,10 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
 proptest = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# network
+russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 
 # ui
 egui = "0.36"

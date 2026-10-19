@@ -28,6 +28,11 @@ AllowStreamLocalForwarding no
 GatewayPorts no
 X11Forwarding no
 PermitTunnel no
+# The SSH tests fail logins and leave before logging in on purpose (wrong password, unknown host
+# key), all from the Docker gateway's one address, and run in parallel: no per-source penalties
+# (OpenSSH 9.8+ would soon refuse every connection) and no early drops of unauthenticated ones.
+PerSourcePenalties no
+MaxStartups 100
 
 Match User dbeepw
     PubkeyAuthentication no

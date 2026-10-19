@@ -1,0 +1,19 @@
+[package]
+name = "dbee-ssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "dbee SSH tunnel (L2): host key check against known_hosts, key, agent and password login, direct-tcpip streams"
+
+[lints]
+workspace = true
+
+[dependencies]
+dbee-config = { workspace = true }
+russh = { workspace = true }
+tokio = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+dbee-testkit = { workspace = true }
