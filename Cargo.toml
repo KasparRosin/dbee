@@ -16,6 +16,7 @@ dbee-core = { path = "crates/core" }
 dbee-sql = { path = "crates/sql" }
 dbee-config = { path = "crates/config" }
 dbee-ssh = { path = "crates/ssh" }
+dbee-pg = { path = "crates/pg" }
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }
 dbee-mcp = { path = "crates/mcp" }
@@ -31,6 +32,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # network
 russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+tokio-postgres = "0.7.18"
+tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
+futures-util = "0.3"
 
 # ui
 egui = "0.36"

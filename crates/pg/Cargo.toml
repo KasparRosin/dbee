@@ -1,0 +1,25 @@
+[package]
+name = "dbee-pg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "dbee Postgres connection (L3): TLS, SSH tunnel, read-only mode, cancel, simple-query runner"
+
+[lints]
+workspace = true
+
+[dependencies]
+dbee-core = { workspace = true }
+dbee-config = { workspace = true }
+dbee-ssh = { workspace = true }
+tokio = { workspace = true }
+tokio-postgres = { workspace = true }
+tokio-postgres-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+futures-util = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+dbee-testkit = { workspace = true }
