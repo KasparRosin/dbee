@@ -22,6 +22,7 @@ dbee-testkit = { path = "crates/testkit" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
+proptest = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # ui

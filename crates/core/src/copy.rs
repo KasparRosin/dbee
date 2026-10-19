@@ -1,10 +1,10 @@
 //! Clipboard formats: TSV, CSV, JSON, Markdown.
 
-use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cell::Column;
+use crate::json;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,18 +105,13 @@ fn json_value(base_type: &str, v: Option<&str>) -> String {
         "int2" | "int4" | "int8" | "float4" | "float8" | "numeric" | "oid" if is_json_number(text) => text.to_string(),
         "bool" if text == "t" => "true".to_string(),
         "bool" if text == "f" => "false".to_string(),
-        "json" | "jsonb" if is_valid_json(text) => text.to_string(),
+        "json" | "jsonb" if json::is_valid(text) => text.to_string(),
         _ => json_string(text),
     }
 }
 
 fn is_json_number(s: &str) -> bool {
     s.trim() == s && matches!(serde_json::from_str::<Value>(s), Ok(Value::Number(_)))
-}
-
-/// serde_json caps nesting at 128 levels, so hostile input returns an error instead of recursing deeply.
-fn is_valid_json(s: &str) -> bool {
-    serde_json::from_str::<IgnoredAny>(s).is_ok()
 }
 
 fn markdown(columns: &[Column], rows: &[Vec<Option<&str>>]) -> String {

@@ -6,6 +6,7 @@
 pub mod cell;
 pub mod copy;
 pub mod display;
+pub mod json;
 pub mod schema;
 
 pub use cell::{Cell, Column, ResultSet};
