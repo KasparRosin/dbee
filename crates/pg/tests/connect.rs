@@ -196,7 +196,10 @@ async fn tls_verify_full_needs_trusted_ca() {
         open(&ConnectionConfig { ssl_mode: SslMode::VerifyCa, ..with_ca.clone() }, db).await;
         let ca_wrong = ConnectionConfig { ssl_mode: SslMode::VerifyCa, ca_file: Some(wrong_ca(db)), ..local.clone() };
         assert_eq!(code(connect(target(&ca_wrong, Some(&db.password))).await), "tls");
-        assert_eq!(code(connect(target(&ConnectionConfig { ssl_mode: SslMode::VerifyCa, ..local.clone() }, Some(&db.password))).await), "tls");
+        // verify-ca without a CA file is refused before connecting (libpq refuses it with the system roots).
+        let e = connect(target(&ConnectionConfig { ssl_mode: SslMode::VerifyCa, ..local.clone() }, Some(&db.password))).await.err().unwrap();
+        assert_eq!(e.code(), "tls", "{e:?}");
+        assert!(e.to_string().contains("verify-ca needs a CA file"), "{e}");
     }
 }
 

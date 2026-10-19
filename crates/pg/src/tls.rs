@@ -5,12 +5,14 @@
 //! | `disable` | never | none |
 //! | `prefer` | when the server offers it, else plain | none |
 //! | `require` | always | none; the chain against `ca_file` when one is set (libpq's rule) |
-//! | `verify-ca` | always | the chain; the host name is ignored |
+//! | `verify-ca` | always | the chain against `ca_file`; the host name is ignored. Refused without a CA file |
 //! | `verify-full` | always | the chain and the host name |
 //!
-//! The roots are the certificates in `ca_file` when one is given (only them), else the OS's
-//! through `rustls-platform-verifier`. The host name checked is the configured `host`, also
-//! through an SSH tunnel.
+//! The roots are the certificates in `ca_file` when one is given (only them), else, for
+//! `verify-full`, the OS's through `rustls-platform-verifier`. `verify-ca` without a CA file is
+//! refused, as libpq refuses it with the system roots: a chain check alone against public roots
+//! would accept any publicly trusted certificate for any host. The host name checked is the
+//! configured `host`, also through an SSH tunnel.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -22,7 +24,7 @@ use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signat
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
-use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use tokio_postgres::config::SslMode as PgSslMode;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
@@ -30,6 +32,9 @@ use crate::PgError;
 
 /// A CA file larger than this is refused (a big system bundle is about 250 KiB).
 const MAX_CA_FILE: u64 = 4 * 1024 * 1024;
+
+/// Why `verify-ca` without a CA file is refused.
+const VERIFY_CA_NEEDS_CA_FILE: &str = "verify-ca needs a CA file; use verify-full to check against the system's certificates";
 
 /// The ALPN protocol id Postgres 17 and newer expect; older servers ignore it.
 const ALPN_POSTGRESQL: &[u8] = b"postgresql";
@@ -60,14 +65,14 @@ impl Tls {
     }
 
     /// The same settings without TLS: `prefer`'s second try after a failed handshake.
-    pub fn plain(&self) -> Tls {
+    pub(crate) fn plain(&self) -> Tls {
         Tls { pg_mode: PgSslMode::Disable, ..self.clone() }
     }
 }
 
 /// The TLS settings for `mode`. `ca_file` is read only by the modes that verify (`require`,
 /// `verify-ca`, `verify-full`); a missing, unreadable or certificate-less file is
-/// [`PgError::Tls`].
+/// [`PgError::Tls`], and so is `verify-ca` without a CA file.
 pub fn make(mode: SslMode, ca_file: Option<&Path>) -> Result<Tls, PgError> {
     let provider = provider();
     let verifier = verifier(mode, ca_file)?;
@@ -92,6 +97,9 @@ fn provider() -> Arc<CryptoProvider> {
 
 /// The certificate check for `mode`.
 fn verifier(mode: SslMode, ca_file: Option<&Path>) -> Result<Arc<dyn ServerCertVerifier>, PgError> {
+    if mode == SslMode::VerifyCa && ca_file.is_none() {
+        return Err(PgError::Tls(VERIFY_CA_NEEDS_CA_FILE.into()));
+    }
     let provider = provider();
     let roots = match mode {
         SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => ca_file.map(load_roots).transpose()?,
@@ -105,13 +113,13 @@ fn verifier(mode: SslMode, ca_file: Option<&Path>) -> Result<Arc<dyn ServerCertV
         (SslMode::VerifyFull, Some(roots)) => WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
             .build()
             .map_err(|e| PgError::Tls(format!("cannot check certificates: {e}")))?,
-        (SslMode::VerifyCa, None) => Arc::new(OsChainOnly(os_verifier(provider)?)),
-        (SslMode::VerifyFull, None) => Arc::new(os_verifier(provider)?),
+        (SslMode::VerifyFull, None) => Arc::new(
+            rustls_platform_verifier::Verifier::new(provider)
+                .map_err(|e| PgError::Tls(format!("cannot use the system's trusted certificates: {e}")))?,
+        ),
+        // Refused above.
+        (SslMode::VerifyCa, None) => return Err(PgError::Tls(VERIFY_CA_NEEDS_CA_FILE.into())),
     })
-}
-
-fn os_verifier(provider: Arc<CryptoProvider>) -> Result<rustls_platform_verifier::Verifier, PgError> {
-    rustls_platform_verifier::Verifier::new(provider).map_err(|e| PgError::Tls(format!("cannot use the system's trusted certificates: {e}")))
 }
 
 /// The certificates in the PEM file at `path`.
@@ -222,59 +230,6 @@ impl ServerCertVerifier for ChainOnly {
     }
 }
 
-/// On these platforms the OS verifier is webpki, which checks the whole chain before it looks at
-/// the name, so a name-only failure proves the chain is good. The macOS and Windows verifiers
-/// report one error without a documented order, so there `verify-ca` without a CA file checks
-/// the name too (stricter, never weaker).
-const OS_CHECKS_NAME_LAST: bool = cfg!(all(unix, not(target_vendor = "apple"), not(target_os = "android")));
-
-/// `verify-ca` against the OS roots: the OS verifier, with a wrong name forgiven where that is
-/// provably the only fault (see [`OS_CHECKS_NAME_LAST`]).
-#[derive(Debug)]
-struct OsChainOnly(rustls_platform_verifier::Verifier);
-
-impl ServerCertVerifier for OsChainOnly {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
-        now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        match self.0.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now) {
-            Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. }))
-                if OS_CHECKS_NAME_LAST =>
-            {
-                Ok(ServerCertVerified::assertion())
-            }
-            other => other,
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.0.verify_tls12_signature(message, cert, dss)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.0.verify_tls13_signature(message, cert, dss)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0.supported_verify_schemes()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,7 +270,21 @@ mod tests {
             assert!(accepts(db, mode, ca, "localhost"), "{mode:?}");
             assert!(!accepts(db, mode, Some(&wrong), "localhost"), "{mode:?}");
         }
-        assert!(!accepts(db, SslMode::VerifyCa, None, "localhost"));
+        let tls = make(SslMode::VerifyCa, ca).unwrap();
+        assert_eq!((tls.mode(), tls.pg_mode()), (SslMode::VerifyCa, tokio_postgres::config::SslMode::Require));
+    }
+
+    #[test]
+    fn verify_ca_without_a_ca_file_is_refused() {
+        // On every platform, before any certificate is looked at: the OS roots alone would accept
+        // any publicly trusted certificate for any host.
+        let e = verifier(SslMode::VerifyCa, None).err().unwrap();
+        assert_eq!(e.code(), "tls");
+        assert_eq!(e, PgError::Tls(VERIFY_CA_NEEDS_CA_FILE.into()));
+        let e = make(SslMode::VerifyCa, None).err().unwrap();
+        assert!(e.to_string().contains("verify-ca needs a CA file") && e.to_string().contains("verify-full"), "{e}");
+        // verify-full may use the OS roots.
+        make(SslMode::VerifyFull, None).unwrap();
     }
 
     #[test]
@@ -338,13 +307,9 @@ mod tests {
     #[test]
     fn make_maps_modes() {
         use tokio_postgres::config::SslMode as Pg;
-        let modes = [
-            (SslMode::Disable, Pg::Disable),
-            (SslMode::Prefer, Pg::Prefer),
-            (SslMode::Require, Pg::Require),
-            (SslMode::VerifyCa, Pg::Require),
-            (SslMode::VerifyFull, Pg::Require),
-        ];
+        let modes =
+            [(SslMode::Disable, Pg::Disable), (SslMode::Prefer, Pg::Prefer), (SslMode::Require, Pg::Require), (SslMode::VerifyFull, Pg::Require)];
+        // verify-ca needs a CA file: its mapping is checked in `verify_ca_and_require_check_the_chain_only`.
         for (mode, pg) in modes {
             let tls = make(mode, None).unwrap();
             assert_eq!(tls.pg_mode(), pg, "{mode:?}");
