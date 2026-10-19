@@ -797,6 +797,8 @@ version = "0.0.0"
 dependencies = [
  "dbee-core",
  "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
