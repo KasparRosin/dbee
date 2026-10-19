@@ -27,6 +27,7 @@ impl Class {
 /// without the `dbee-` prefix. L0–L4 are free for the domain crates added with the first
 /// features; register each one here in the same change.
 pub const TABLE: &[(&str, Class)] = &[
+    ("testkit", Class::Layer(0)),
     ("engine", Class::Layer(5)),
     ("ui-egui", Class::Layer(6)),
     ("mcp", Class::Layer(6)),
@@ -200,7 +201,7 @@ mod tests {
     #[test]
     fn table_lists_only_dbee_crates() {
         let names: Vec<&str> = TABLE.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, vec!["engine", "ui-egui", "mcp", "dbee", "cli", "xtask"]);
+        assert_eq!(names, vec!["testkit", "engine", "ui-egui", "mcp", "dbee", "cli", "xtask"]);
         assert!(INTRA_LAYER_ORDER.is_empty());
     }
 

@@ -13,6 +13,7 @@ mod layers;
 mod licenses;
 mod provenance;
 mod stats;
+mod testdb;
 mod version;
 
 use std::path::{Path, PathBuf};
@@ -22,13 +23,16 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
 
 commands:
-  ci              fmt --check, clippy -D warnings, test, assets, layers, provenance (stops at the first failure)
+  ci              fmt --check, clippy -D warnings, testdb up (when `docker info` answers), test, assets, layers,
+                  provenance (stops at the first failure)
   assets          check that every icon/image/font/sample file is attributed in ATTRIBUTION.md
   layers          enforce the crate dependency layering (AGENTS.md \"Layering\")
   licenses        list dependencies outside the licence allowlist (docs/standards/licensing.md); not a ci step
   provenance      fail on names or terms from the base project in tracked files (xtask/src/provenance.rs)
   version [set X.Y.Z[-pre]]
                   print or set the workspace version ([workspace.package] in Cargo.toml)
+  testdb up|down|status
+                  the Docker test servers (Postgres 14 and newest, sshd); `up` writes target/testdb/env.json
   stats [--exact] count tests and lines per crate (--exact: ask the test harness via `-- --list`)
   ico <out.ico> <in.png>...
                   pack square PNGs (<= 256 px) into a Windows .ico (see packaging/icons.sh)
@@ -47,6 +51,7 @@ fn main() -> ExitCode {
         Some("provenance") => provenance::run(&root()),
         Some("ci") => cmd_ci(),
         Some("stats") => stats::run(&root(), rest.contains(&"--exact")),
+        Some("testdb") => testdb::run(&root(), &rest),
         Some("ico") => ico::run(&rest),
         Some("icns") => icns::run(&rest),
         Some("version") => version::run(&root(), &rest),
@@ -128,7 +133,17 @@ fn cmd_layers() -> Result<(), String> {
 
 fn cmd_ci() -> Result<(), String> {
     type Step = (&'static str, Box<dyn Fn() -> Result<(), String>>);
-    let steps: Vec<Step> = vec![
+    // Driver tests need the Docker test servers; without Docker they skip, which
+    // DBEE_REQUIRE_ORACLES=1 turns into a failure (docs/testing.md).
+    let docker = testdb::docker_available();
+    let required = std::env::var("DBEE_REQUIRE_ORACLES").is_ok_and(|v| v == "1");
+    let testdb_step: Option<Step> = match (docker, required) {
+        (true, _) => Some(("testdb", Box::new(|| testdb::up(&root()).map(|_| ())))),
+        (false, true) => Some(("testdb", Box::new(|| Err("Docker is not available and DBEE_REQUIRE_ORACLES=1".into())))),
+        (false, false) => None,
+    };
+    let skipped: &[&str] = if testdb_step.is_none() { &["driver tests (no Docker)"] } else { &[] };
+    let mut steps: Vec<Step> = vec![
         (
             "fmt",
             Box::new(|| {
@@ -157,6 +172,11 @@ fn cmd_ci() -> Result<(), String> {
         ("layers", Box::new(cmd_layers)),
         ("provenance", Box::new(|| provenance::run(&root()))),
     ];
+    if let Some(step) = testdb_step {
+        // Before `test`, so the driver tests find the servers.
+        let at = steps.iter().position(|(n, _)| *n == "test").unwrap_or(steps.len());
+        steps.insert(at, step);
+    }
     let mut done = Vec::new();
     for (name, f) in &steps {
         eprintln!("\n=== ci: {name} ===");
@@ -169,10 +189,16 @@ fn cmd_ci() -> Result<(), String> {
             for (n, _) in steps.iter().skip(done.len() + 1) {
                 println!("  skip  {n}");
             }
+            for s in skipped {
+                println!("  skip  {s}");
+            }
             return Err(format!("ci failed at `{name}`"));
         }
         done.push(*name);
     }
     println!("\nCI summary: all {} steps passed ({})", done.len(), done.join(", "));
+    for s in skipped {
+        println!("  skip  {s}");
+    }
     Ok(())
 }

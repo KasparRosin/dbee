@@ -714,6 +714,13 @@ name = "dbee-mcp"
 version = "0.0.0"
 
 [[package]]
+name = "dbee-testkit"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "dbee-ui-egui"
 version = "0.0.0"
 

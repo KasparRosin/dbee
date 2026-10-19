@@ -1,0 +1,77 @@
+# dbee test servers: Postgres 14, the newest Postgres major and an SSH server, local and test-only.
+# Managed by `cargo xtask testdb up|down|status` (xtask/src/testdb.rs), which writes the variables
+# below to target/testdb/compose.env. By hand:
+#   docker compose -p dbee-testdb -f xtask/testdb/compose.yml --env-file target/testdb/compose.env ps
+name: dbee-testdb
+
+x-after-init: &after-init
+  init:
+    condition: service_completed_successfully
+
+x-postgres: &postgres
+  depends_on: *after-init
+  environment:
+    POSTGRES_PASSWORD: ${DBEE_TEST_PASSWORD:?run cargo xtask testdb up}
+    POSTGRES_DB: dbee
+  command: ["postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/secrets/server.crt", "-c", "ssl_key_file=/secrets/server.key"]
+  volumes:
+    - secrets:/secrets:ro
+    - ./seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+  ports:
+    - "127.0.0.1::5432"
+  shm_size: 256m
+  # The entrypoint seeds on a socket-only server, so TCP answers only once the seed is in.
+  healthcheck:
+    test: ["CMD", "pg_isready", "-q", "-h", "127.0.0.1", "-U", "postgres", "-d", "dbee"]
+    interval: 5s
+    timeout: 5s
+    retries: 5
+    start_period: 900s
+    start_interval: 2s
+
+services:
+  # Builds the tools image; `sshd` runs the same image. Only one service builds it, so a cached
+  # rebuild keeps the image id and `up --build` reuses the running containers.
+  init:
+    build:
+      context: .
+      dockerfile: tools.Dockerfile
+      provenance: false
+      sbom: false
+    image: dbee-testdb-tools:local
+    command: ["/usr/local/bin/tools-init.sh"]
+    environment:
+      DBEE_TEST_PASSPHRASE: ${DBEE_TEST_PASSPHRASE:?run cargo xtask testdb up}
+    volumes:
+      - secrets:/secrets
+    restart: "no"
+
+  pg14:
+    <<: *postgres
+    image: postgres:14-alpine
+
+  pgnew:
+    <<: *postgres
+    image: postgres:${PG_NEWEST:?run cargo xtask testdb up}-alpine
+
+  sshd:
+    image: dbee-testdb-tools:local
+    pull_policy: never
+    depends_on: *after-init
+    command: ["sh", "-c", "echo \"dbeepw:$${DBEE_TEST_PASSWORD}\" | chpasswd >/dev/null && exec /usr/sbin/sshd -D -e"]
+    environment:
+      DBEE_TEST_PASSWORD: ${DBEE_TEST_PASSWORD:?run cargo xtask testdb up}
+    volumes:
+      - secrets:/secrets:ro
+    ports:
+      - "127.0.0.1::22"
+    healthcheck:
+      test: ["CMD", "test", "-s", "/run/sshd.pid"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
+
+volumes:
+  secrets:

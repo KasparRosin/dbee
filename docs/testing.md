@@ -1,11 +1,12 @@
 # Testing
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** major (scaffold)
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (§3 Docker test servers)
 
 ```sh
 cargo test --workspace                              # everything; oracle tests skip without their tool
 cargo test -p dbee-engine                           # one crate
-cargo xtask ci                                      # all gates (fmt, clippy, test, assets, layers, provenance)
+cargo xtask testdb up                               # start the Docker test servers (§3); ci does it when Docker answers
+cargo xtask ci                                      # all gates (fmt, clippy, testdb, test, assets, layers, provenance)
 DBEE_REQUIRE_ORACLES=1 cargo test --workspace       # CI: a missing oracle tool fails instead of skipping
 cargo test --workspace -- --ignored                 # performance tests
 ```
@@ -21,7 +22,7 @@ The scaffold has no features, so most layers below are **(planned)**. They are t
 | Scripted UI **(planned)** | `crates/ui-egui/tests/` | headless app driven over the control channel: open a connection, run a query, click by automation id |
 | Golden images **(planned)** | `crates/ui-egui/tests/` | small screenshots of fixed states, compared with a tolerance |
 | Oracle **(planned)** | driver and engine tests | query results checked against the `sqlite3` CLI (§2) |
-| Driver **(planned)** | `crates/drivers` tests | PostgreSQL and MySQL against throwaway containers (§3) |
+| Driver **(planned)** | `crates/pg`, `crates/ssh` tests | PostgreSQL 14 and the newest major, and SSH tunnels, against the Docker test servers (§3, which exist) |
 | Robustness / fuzz **(planned)** | engine, wire parsers | `every_command_survives_empty_params`, command-sequence fuzz, hostile wire input (§5) |
 | Performance (`#[ignore]`) **(planned)** | engine, ui-egui | scrolling a million-row result, streaming a large export (§6) |
 
@@ -37,13 +38,33 @@ For SQLite the oracle is the `sqlite3` command-line shell, an independent implem
 
 Oracle tests skip with a printed `SKIPPED` when `sqlite3` is not on `PATH`, unless `DBEE_REQUIRE_ORACLES=1` is set (CI sets it). State the pass criterion in the test: results are exact, and any tolerance (floating point text) is named.
 
-## 3. Driver tests: throwaway containers
+## 3. Driver tests: the Docker test servers
 
-PostgreSQL and MySQL tests run against containers started by the test or by `cargo xtask`:
+Postgres and SSH tests run against local containers from `cargo xtask testdb` (compose project `dbee-testdb`, files in `xtask/testdb/`):
 
-- the container is local, created for the run and removed afterwards, with a random port and a generated password;
-- **never a real server**, and never a connection string from the environment that points elsewhere;
-- tests skip when no container runtime is available, unless `DBEE_REQUIRE_ORACLES=1`.
+```sh
+cargo xtask testdb up       # start, or reuse what runs; the seed runs once (well under a minute)
+cargo xtask testdb status   # ports from the env file, and docker compose ps
+cargo xtask testdb down     # remove the containers, their volumes and target/testdb
+```
+
+- **Servers.** Each listens on a random port on `127.0.0.1`.
+  - `pg14` runs `postgres:14-alpine`, the oldest supported major.
+  - `pgnew` runs `postgres:<PG_NEWEST_MAJOR>-alpine`, the newest released major (`xtask/src/testdb.rs`; 18 on 2026-10-19).
+  - Both have database `dbee`, superuser `postgres` with the generated password, and TLS on. Their certificate is for `localhost`, `127.0.0.1`, `pg14` and `pgnew`, signed by a generated CA.
+  - `sshd`: user `dbee` logs in with the test keys (ed25519, ed25519 with a passphrase, RSA 3072), user `dbeepw` only with the generated password. Forwarding reaches `pg14:5432` and `pgnew:5432` and nothing else.
+- **Env file.** `up` writes `<repo>/target/testdb/env.json`, always under the repository's `target/`, whatever `CARGO_TARGET_DIR` says.
+  - It holds the password, every port, the SSH users and `known_hosts` line, the key files (copied to `target/testdb/keys/`, mode 0600) with the passphrase, and the CA file.
+  - `dbee_testkit::testdb()` reads it. `target/testdb/compose.env` holds the variables every `docker compose` call passes with `--env-file`.
+- **Seed.** `xtask/testdb/seed.sql`, the same on every server, synthetic data only.
+  - Schema `shop`: an enum, a domain and a composite type; customers (500 rows), orders (5,000) and their items and shipments with single and composite foreign keys; `all_types` with exotic types; a table without a key; a view and a materialized view; a partitioned table; `big_rows` (1,000,000 rows); and `big_cell`, one row with a 20,000,000-character text and a jsonb of about that size.
+  - Schema `many`: 300 tables. Schema `odd`: names that need quoting (quotes, spaces, upper case, `Ö`, emoji).
+  - Schema `scratch` is empty. The seed is read-only: a test that writes creates its own table in `scratch`, named with `dbee_testkit::unique(..)`, and drops it at the end.
+- **Skip rule.** A test that needs the servers starts with `let db = dbee_testkit::require_testdb!();`.
+  - When the env file is missing or a server does not answer, it prints `SKIPPED: …` and returns. With `DBEE_REQUIRE_ORACLES=1` it fails instead.
+  - `cargo xtask ci` runs `testdb up` before `test` when `docker info` answers. Otherwise its summary says `skip  driver tests (no Docker)`, and with `DBEE_REQUIRE_ORACLES=1` ci fails.
+- **Helpers.** `dbee_testkit::psql(server, sql)` runs `psql` inside a server's container, for set-up and for checking what dbee wrote. `dbee_testkit::temp_home(..)` gives SSH tests a throwaway home with a key and `known_hosts`.
+- **Never a real server**, and never a connection string from the environment that points elsewhere. Tests never touch the real `~/.ssh`, SSH agent or keyring.
 
 ## 4. UI: control channel and screenshots (planned)
 

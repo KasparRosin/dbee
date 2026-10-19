@@ -15,6 +15,7 @@ homepage = "https://dbee.rosin.dev"
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }
 dbee-mcp = { path = "crates/mcp" }
+dbee-testkit = { path = "crates/testkit" }
 
 # foundation
 serde_json = { version = "1", features = ["float_roundtrip"] }

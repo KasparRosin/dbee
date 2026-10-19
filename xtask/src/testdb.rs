@@ -1,0 +1,505 @@
+//! `cargo xtask testdb up|down|status`: the Docker test servers for driver tests.
+//!
+//! Compose project `dbee-testdb` (`xtask/testdb/compose.yml`): Postgres 14 (`pg14`), the newest
+//! Postgres major (`pgnew`, [`PG_NEWEST_MAJOR`]) and an SSH server (`sshd`), all published on
+//! random `127.0.0.1` ports. `up` writes `<repo>/target/testdb/env.json` (always under the repo's
+//! `target/`, whatever `CARGO_TARGET_DIR` says), which `dbee-testkit` reads; the shape is in
+//! [`Env::to_json`]. It also writes `compose.env` there, the variables every `docker compose` call
+//! passes with `--env-file`, so `exec`, `port` and `cp` parse the compose file the same way `up` did.
+//!
+//! `up` is idempotent: running containers and existing credentials are reused, so the seed runs
+//! once. New credentials (no earlier `compose.env` or `env.json`) start from a clean project.
+
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use serde_json::{Value, json};
+
+/// The compose project; nothing else on the machine is touched.
+pub const PROJECT: &str = "dbee-testdb";
+
+/// The newest Postgres major released on Docker Hub (`postgres:<n>-alpine`) when this was written.
+/// `postgres:19-alpine` did not exist yet on 2026-10-19.
+pub const PG_NEWEST_MAJOR: u32 = 18;
+
+/// `up --wait` gives the seed (a million rows and a 20 MB cell) this long.
+const WAIT_TIMEOUT_SECS: u32 = 900;
+
+/// The compose file's variables.
+const VAR_PG_NEWEST: &str = "PG_NEWEST";
+const VAR_PASSWORD: &str = "DBEE_TEST_PASSWORD";
+const VAR_PASSPHRASE: &str = "DBEE_TEST_PASSPHRASE";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Server {
+    pub name: String,
+    pub major: u32,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sshd {
+    pub port: u16,
+    pub user: String,
+    pub password_user: String,
+    pub known_hosts_line: String,
+    pub pg_host: String,
+    pub pg_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keys {
+    pub plain: PathBuf,
+    pub encrypted: PathBuf,
+    pub passphrase: String,
+    pub rsa: PathBuf,
+}
+
+/// The contents of `env.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Env {
+    pub password: String,
+    pub servers: Vec<Server>,
+    pub sshd: Sshd,
+    pub keys: Keys,
+    pub ca_file: PathBuf,
+}
+
+impl Env {
+    /// The binding shape read by `dbee-testkit`.
+    pub fn to_json(&self) -> Value {
+        let path = |p: &Path| Value::String(p.to_string_lossy().into_owned());
+        json!({
+            "password": self.password,
+            "servers": self.servers.iter().map(|s| json!({"name": s.name, "major": s.major, "port": s.port})).collect::<Vec<_>>(),
+            "sshd": {
+                "port": self.sshd.port,
+                "user": self.sshd.user,
+                "passwordUser": self.sshd.password_user,
+                "knownHostsLine": self.sshd.known_hosts_line,
+                "pgHost": self.sshd.pg_host,
+                "pgPort": self.sshd.pg_port,
+            },
+            "keys": {
+                "plain": path(&self.keys.plain),
+                "encrypted": path(&self.keys.encrypted),
+                "passphrase": self.keys.passphrase,
+                "rsa": path(&self.keys.rsa),
+            },
+            "caFile": path(&self.ca_file),
+        })
+    }
+
+    pub fn from_json(v: &Value) -> Option<Env> {
+        let text = |v: &Value, k: &str| v.get(k)?.as_str().map(str::to_owned);
+        let port = |v: &Value, k: &str| u16::try_from(v.get(k)?.as_u64()?).ok();
+        let mut servers = Vec::new();
+        for s in v.get("servers")?.as_array()? {
+            servers.push(Server { name: text(s, "name")?, major: u32::try_from(s.get("major")?.as_u64()?).ok()?, port: port(s, "port")? });
+        }
+        let sshd = v.get("sshd")?;
+        let keys = v.get("keys")?;
+        Some(Env {
+            password: text(v, "password")?,
+            servers,
+            sshd: Sshd {
+                port: port(sshd, "port")?,
+                user: text(sshd, "user")?,
+                password_user: text(sshd, "passwordUser")?,
+                known_hosts_line: text(sshd, "knownHostsLine")?,
+                pg_host: text(sshd, "pgHost")?,
+                pg_port: port(sshd, "pgPort")?,
+            },
+            keys: Keys {
+                plain: text(keys, "plain")?.into(),
+                encrypted: text(keys, "encrypted")?.into(),
+                passphrase: text(keys, "passphrase")?,
+                rsa: text(keys, "rsa")?.into(),
+            },
+            ca_file: text(v, "caFile")?.into(),
+        })
+    }
+}
+
+/// Write `env` to `path` (directories created, mode 0600 on unix: it holds the password).
+pub fn write_env(path: &Path, env: &Env) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(&env.to_json()).map_err(|e| format!("env.json: {e}"))?;
+    write_private(path, &format!("{text}\n"))
+}
+
+pub fn read_env(path: &Path) -> Option<Env> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Env::from_json(&serde_json::from_str(&text).ok()?)
+}
+
+/// The values the compose file interpolates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposeVars {
+    pg_newest: u32,
+    password: String,
+    passphrase: String,
+}
+
+impl ComposeVars {
+    fn render(&self) -> String {
+        format!(
+            "# Written by `cargo xtask testdb up`; passed to every docker compose call with --env-file.\n\
+             {VAR_PG_NEWEST}={}\n{VAR_PASSWORD}={}\n{VAR_PASSPHRASE}={}\n",
+            self.pg_newest, self.password, self.passphrase
+        )
+    }
+
+    fn parse(text: &str) -> Option<ComposeVars> {
+        let get =
+            |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+        Some(ComposeVars { pg_newest: get(VAR_PG_NEWEST)?.parse().ok()?, password: get(VAR_PASSWORD)?, passphrase: get(VAR_PASSPHRASE)? })
+    }
+}
+
+/// `<repo>/target/testdb`.
+pub fn state_dir(root: &Path) -> PathBuf {
+    root.join("target").join("testdb")
+}
+
+fn env_path(root: &Path) -> PathBuf {
+    state_dir(root).join("env.json")
+}
+
+fn compose_env_path(root: &Path) -> PathBuf {
+    state_dir(root).join("compose.env")
+}
+
+fn keys_dir(root: &Path) -> PathBuf {
+    state_dir(root).join("keys")
+}
+
+fn compose_file(root: &Path) -> PathBuf {
+    root.join("xtask").join("testdb").join("compose.yml")
+}
+
+/// `cargo xtask testdb <args>`.
+pub fn run(root: &Path, args: &[&str]) -> Result<(), String> {
+    match args {
+        ["up"] => up(root).map(|env| print_env(root, &env)),
+        ["down"] => down(root),
+        ["status"] => status(root),
+        _ => Err("usage: cargo xtask testdb up|down|status".into()),
+    }
+}
+
+/// `docker info` answers.
+pub fn docker_available() -> bool {
+    Command::new("docker")
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// `docker compose -p dbee-testdb -f <compose.yml> --env-file <compose.env>`. Before the first `up`
+/// there is no env file; placeholders then let `down` and `status` parse the compose file.
+fn compose(root: &Path) -> Command {
+    let mut c = Command::new("docker");
+    c.current_dir(root).stdin(Stdio::null()).arg("compose").args(["-p", PROJECT, "-f"]).arg(compose_file(root));
+    let env_file = compose_env_path(root);
+    if env_file.is_file() {
+        c.arg("--env-file").arg(env_file);
+        for var in [VAR_PG_NEWEST, VAR_PASSWORD, VAR_PASSPHRASE] {
+            c.env_remove(var);
+        }
+    } else {
+        c.env(VAR_PG_NEWEST, PG_NEWEST_MAJOR.to_string()).env(VAR_PASSWORD, "unset").env(VAR_PASSPHRASE, "unset");
+    }
+    c
+}
+
+/// Run with inherited output.
+fn run_shown(mut cmd: Command, what: &str) -> Result<(), String> {
+    eprintln!("$ {what}");
+    let status = cmd.status().map_err(|e| format!("{what}: failed to spawn: {e}"))?;
+    if status.success() { Ok(()) } else { Err(format!("{what}: exited with {status}")) }
+}
+
+/// Run and return stdout.
+fn run_captured(mut cmd: Command, what: &str) -> Result<String, String> {
+    let out = cmd.output().map_err(|e| format!("{what}: failed to spawn: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!("{what}: exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
+/// 24 hex characters from std's randomly keyed hasher.
+fn secret() -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+    let mut out = String::with_capacity(32);
+    while out.len() < 24 {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_u32(std::process::id());
+        h.write_usize(out.len());
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out.truncate(24);
+    out
+}
+
+/// The port in `docker compose port` output (`127.0.0.1:49153`).
+fn parse_port(out: &str) -> Option<u16> {
+    let line = out.lines().map(str::trim).find(|l| !l.is_empty())?;
+    line.rsplit(':').next()?.parse().ok().filter(|p| *p != 0)
+}
+
+/// A `known_hosts` line for the host key `pubkey` (`ssh-ed25519 AAAA… comment`) on a local port.
+fn known_hosts_line(port: u16, pubkey: &str) -> Option<String> {
+    let mut fields = pubkey.split_whitespace();
+    let (kind, key) = (fields.next()?, fields.next()?);
+    Some(format!("[127.0.0.1]:{port} {kind} {key}"))
+}
+
+fn write_private(path: &Path, text: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    set_private(&tmp)?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(unix)]
+fn set_private(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("chmod {}: {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Credentials to reuse: `compose.env` (what the containers were created with), else `env.json`.
+fn existing_vars(root: &Path) -> Option<ComposeVars> {
+    let from_file = std::fs::read_to_string(compose_env_path(root)).ok().and_then(|t| ComposeVars::parse(&t));
+    let vars = from_file.or_else(|| {
+        let env = read_env(&env_path(root))?;
+        let major = env.servers.iter().find(|s| s.name == "pgnew")?.major;
+        Some(ComposeVars { pg_newest: major, password: env.password, passphrase: env.keys.passphrase })
+    })?;
+    // A different newest major needs a fresh data directory.
+    (vars.pg_newest == PG_NEWEST_MAJOR).then_some(vars)
+}
+
+fn compose_port(root: &Path, service: &str, port: u16) -> Result<u16, String> {
+    let mut c = compose(root);
+    c.args(["port", service, &port.to_string()]);
+    let out = run_captured(c, &format!("docker compose port {service} {port}"))?;
+    parse_port(&out).ok_or_else(|| format!("docker compose port {service} {port}: no port in {out:?}"))
+}
+
+fn server_major(root: &Path, service: &str) -> Result<u32, String> {
+    let mut c = compose(root);
+    c.args(["exec", "-T", service, "psql", "-U", "postgres", "-d", "dbee", "-At", "-c", "SHOW server_version_num"]);
+    let out = run_captured(c, &format!("server version of {service}"))?;
+    out.trim().parse::<u32>().map(|n| n / 10_000).map_err(|e| format!("server version of {service}: {out:?}: {e}"))
+}
+
+/// Start (or reuse) the servers and write `env.json`.
+pub fn up(root: &Path) -> Result<Env, String> {
+    if !docker_available() {
+        return Err("Docker is not available".into());
+    }
+    let vars = match existing_vars(root) {
+        Some(v) => v,
+        None => {
+            // New credentials: volumes from an earlier run hold other passwords and keys.
+            let mut c = compose(root);
+            c.args(["down", "-v", "--remove-orphans"]);
+            run_shown(c, "docker compose down -v (new credentials)")?;
+            ComposeVars { pg_newest: PG_NEWEST_MAJOR, password: secret(), passphrase: secret() }
+        }
+    };
+    write_private(&compose_env_path(root), &vars.render())?;
+
+    let mut c = compose(root);
+    c.args(["up", "-d", "--wait", "--wait-timeout", &WAIT_TIMEOUT_SECS.to_string(), "--build"]);
+    run_shown(c, "docker compose up -d --wait --build")?;
+
+    for (service, major) in [("pg14", 14), ("pgnew", PG_NEWEST_MAJOR)] {
+        let got = server_major(root, service)?;
+        if got != major {
+            return Err(format!("{service} runs Postgres {got}, expected {major}"));
+        }
+    }
+    let pg14 = compose_port(root, "pg14", 5432)?;
+    let pgnew = compose_port(root, "pgnew", 5432)?;
+    let ssh = compose_port(root, "sshd", 22)?;
+
+    let keys = keys_dir(root);
+    if keys.exists() {
+        std::fs::remove_dir_all(&keys).map_err(|e| format!("{}: {e}", keys.display()))?;
+    }
+    std::fs::create_dir_all(&keys).map_err(|e| format!("{}: {e}", keys.display()))?;
+    let mut c = compose(root);
+    c.args(["cp", "sshd:/secrets/."]).arg(&keys);
+    run_captured(c, "docker compose cp sshd:/secrets/.")?;
+    // tools-init.sh's completion marker is not a key.
+    let _ = std::fs::remove_file(keys.join(".done"));
+    for entry in std::fs::read_dir(&keys).map_err(|e| format!("{}: {e}", keys.display()))? {
+        let entry = entry.map_err(|e| format!("{}: {e}", keys.display()))?;
+        if entry.path().is_file() {
+            set_private(&entry.path())?;
+        }
+    }
+
+    let mut c = compose(root);
+    c.args(["exec", "-T", "sshd", "cat", "/etc/ssh/ssh_host_ed25519_key.pub"]);
+    let host_key = run_captured(c, "read the sshd host key")?;
+    let known_hosts_line = known_hosts_line(ssh, &host_key).ok_or_else(|| format!("sshd host key: unexpected {host_key:?}"))?;
+
+    let env = Env {
+        password: vars.password,
+        servers: vec![Server { name: "pg14".into(), major: 14, port: pg14 }, Server { name: "pgnew".into(), major: PG_NEWEST_MAJOR, port: pgnew }],
+        sshd: Sshd { port: ssh, user: "dbee".into(), password_user: "dbeepw".into(), known_hosts_line, pg_host: "pg14".into(), pg_port: 5432 },
+        keys: Keys { plain: keys.join("id_ed25519"), encrypted: keys.join("id_ed25519_enc"), passphrase: vars.passphrase, rsa: keys.join("id_rsa") },
+        ca_file: keys.join("ca.crt"),
+    };
+    write_env(&env_path(root), &env)?;
+    Ok(env)
+}
+
+fn print_env(root: &Path, env: &Env) {
+    println!("test servers ({PROJECT}):");
+    for s in &env.servers {
+        println!("  {:<6} Postgres {:<3} 127.0.0.1:{}", s.name, s.major, s.port);
+    }
+    println!("  {:<6} SSH          127.0.0.1:{} (users {}, {})", "sshd", env.sshd.port, env.sshd.user, env.sshd.password_user);
+    println!("env file: {}", env_path(root).display());
+}
+
+/// Stop and remove the servers, their volumes and `target/testdb`.
+pub fn down(root: &Path) -> Result<(), String> {
+    if !docker_available() {
+        return Err("Docker is not available".into());
+    }
+    let mut c = compose(root);
+    c.args(["down", "-v", "--remove-orphans"]);
+    run_shown(c, "docker compose down -v")?;
+    let dir = state_dir(root);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Print the env file's servers and `docker compose ps`.
+pub fn status(root: &Path) -> Result<(), String> {
+    match read_env(&env_path(root)) {
+        Some(env) => print_env(root, &env),
+        None => println!("no env file at {} (run `cargo xtask testdb up`)", env_path(root).display()),
+    }
+    if !docker_available() {
+        println!("Docker is not available");
+        return Ok(());
+    }
+    let mut c = compose(root);
+    c.args(["ps", "--all"]);
+    run_shown(c, "docker compose ps --all")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn env_json_round_trip() {
+        let keys = PathBuf::from("/repo/target/testdb/keys");
+        let env = Env {
+            password: "0123456789abcdef01234567".into(),
+            servers: vec![
+                Server { name: "pg14".into(), major: 14, port: 49_001 },
+                Server { name: "pgnew".into(), major: PG_NEWEST_MAJOR, port: 49_002 },
+            ],
+            sshd: Sshd {
+                port: 49_003,
+                user: "dbee".into(),
+                password_user: "dbeepw".into(),
+                known_hosts_line: "[127.0.0.1]:49003 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample".into(),
+                pg_host: "pg14".into(),
+                pg_port: 5432,
+            },
+            keys: Keys {
+                plain: keys.join("id_ed25519"),
+                encrypted: keys.join("id_ed25519_enc"),
+                passphrase: "fedcba9876543210fedcba98".into(),
+                rsa: keys.join("id_rsa"),
+            },
+            ca_file: keys.join("ca.crt"),
+        };
+        let dir = std::env::temp_dir().join(format!("dbee-xtask-env-{}", std::process::id()));
+        let path = dir.join("env.json");
+        write_env(&path, &env).unwrap();
+        let back = read_env(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(back, env);
+        assert_eq!(back.servers[1].port, 49_002);
+        assert_eq!(back.sshd.port, 49_003);
+        assert_eq!(back.keys.encrypted, keys.join("id_ed25519_enc"));
+        assert_eq!(back.ca_file, keys.join("ca.crt"));
+    }
+
+    #[test]
+    fn env_json_has_the_binding_keys() {
+        let v: Value = serde_json::from_str(
+            r#"{"password":"p","servers":[{"name":"pg14","major":14,"port":1},{"name":"pgnew","major":18,"port":2}],
+                "sshd":{"port":3,"user":"dbee","passwordUser":"dbeepw","knownHostsLine":"[127.0.0.1]:3 ssh-ed25519 AAAA",
+                        "pgHost":"pg14","pgPort":5432},
+                "keys":{"plain":"/k/id_ed25519","encrypted":"/k/id_ed25519_enc","passphrase":"q","rsa":"/k/id_rsa"},
+                "caFile":"/k/ca.crt"}"#,
+        )
+        .unwrap();
+        let env = Env::from_json(&v).unwrap();
+        assert_eq!(env.to_json(), v);
+        assert_eq!(env.sshd.known_hosts_line, "[127.0.0.1]:3 ssh-ed25519 AAAA");
+        // A port that does not fit in u16 is not an env file.
+        let mut bad = v.clone();
+        bad["sshd"]["port"] = json!(70_000);
+        assert!(Env::from_json(&bad).is_none());
+    }
+
+    #[test]
+    fn compose_vars_round_trip() {
+        let vars = ComposeVars { pg_newest: 18, password: "abc".into(), passphrase: "def".into() };
+        assert_eq!(ComposeVars::parse(&vars.render()), Some(vars));
+        assert_eq!(ComposeVars::parse("PG_NEWEST=18\nDBEE_TEST_PASSWORD=\nDBEE_TEST_PASSPHRASE=x\n"), None);
+    }
+
+    #[test]
+    fn secrets_are_24_hex_and_differ() {
+        let (a, b) = (secret(), secret());
+        assert_eq!(a.len(), 24);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn port_from_compose_output() {
+        assert_eq!(parse_port("127.0.0.1:49153\n"), Some(49_153));
+        assert_eq!(parse_port("\n[::1]:5432\n"), Some(5432));
+        assert_eq!(parse_port(""), None);
+        assert_eq!(parse_port("127.0.0.1:0"), None);
+        assert_eq!(parse_port("127.0.0.1:99999"), None);
+    }
+
+    #[test]
+    fn known_hosts_line_from_host_key() {
+        assert_eq!(known_hosts_line(2222, "ssh-ed25519 AAAAC3Nza dbee-testdb-host\n").as_deref(), Some("[127.0.0.1]:2222 ssh-ed25519 AAAAC3Nza"));
+        assert_eq!(known_hosts_line(2222, "garbage"), None);
+    }
+}
