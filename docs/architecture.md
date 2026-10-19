@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (testkit, testdb)
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (core)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -10,6 +10,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 
 | Path | Status | Job |
 |---|---|---|
+| `crates/core` | exists | L0. Cells, result sets, the schema model (`Catalog`, `TableInfo`), grid text and the clipboard copy formats. Plain values with serde shapes; no I/O. |
 | `crates/testkit` | exists | L0, a dev-dependency only. Finds the Docker test servers (`cargo xtask testdb`), the skip rule (`require_testdb!`), a `psql` helper, unique names and throwaway home directories. |
 | `crates/engine` | exists, empty | L5. `Session`, the command registry (`cmd/*`), undo and the journal. |
 | `crates/ui-egui` | exists, placeholder | L6. The egui UI and the control channel. |
@@ -17,13 +18,13 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `apps/dbee` | exists | L7. Desktop binary; opens a placeholder window. |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
 | `xtask` | exists | Exempt from layering. `ci`, `assets`, `layers`, `licenses`, `provenance`, `testdb`, `version`, `stats`, `ico`, `icns`, `contributors`. `xtask/testdb/` holds the test servers' compose file, tools image and seed. |
-| L0–L4 domain crates | **(planned)** | Named when the first features land, for example `core`, `sql`, `drivers`, `model`. |
+| L1–L4 domain crates | **(planned)** | Named when the first features land, for example `sql`, `drivers`, `model`. |
 
 ## Layers
 
 | Layer | Crates | Job |
 |---|---|---|
-| L0–L4 | `testkit` (L0, tests only); domain crates **(planned)**, e.g. `core`, `sql`, `drivers`, `model` | Values and types, SQL parsing and quoting, database drivers and wire protocols, the connection and schema model. No UI, no engine. |
+| L0–L4 | `core`, `testkit` (L0, tests only); domain crates **(planned)**, e.g. `sql`, `drivers`, `model` | Values and types, SQL parsing and quoting, database drivers and wire protocols, the connection and schema model. No UI, no engine. |
 | L5 | `engine` | Session, commands, undo, journal. Depends on L0–L4 only. |
 | L6 | `ui-egui`, `mcp` | Front ends over the engine. egui and friends are allowed here and above (`ui-egui` for the UI, `mcp` for UI control), never below. |
 | L7 | `apps/dbee`, `apps/dbee-cli` | Binaries that wire a front end to the engine. |
@@ -60,5 +61,6 @@ Everything. The repository is a scaffold: no driver, command, query editor, resu
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | `crates/core` (L0): cells, schema model, grid text, copy formats |
 | 2026-10-19 | minor | `crates/testkit` (L0) and `cargo xtask testdb` |
 | 2026-10-15 | major | Rewritten for dbee: workspace, layers, data flow, agent control, platforms, known gaps |

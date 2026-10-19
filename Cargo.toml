@@ -12,12 +12,14 @@ homepage = "https://dbee.rosin.dev"
 
 [workspace.dependencies]
 # internal
+dbee-core = { path = "crates/core" }
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }
 dbee-mcp = { path = "crates/mcp" }
 dbee-testkit = { path = "crates/testkit" }
 
 # foundation
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }

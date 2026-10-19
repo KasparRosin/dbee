@@ -1,0 +1,14 @@
+[package]
+name = "dbee-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "dbee core values (L0): cells, result sets, schema model, grid text and copy formats"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
