@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "dbee workspace tooling: cargo xtask ci | assets | layers | provenance | version | stats | ico | icns | contributors"
+description = "dbee workspace tooling: cargo xtask ci | assets | layers | licenses | provenance | version | stats | ico | icns | contributors"
 
 [lints]
 workspace = true

@@ -10,6 +10,7 @@ mod contributors;
 mod icns;
 mod ico;
 mod layers;
+mod licenses;
 mod provenance;
 mod stats;
 mod version;
@@ -24,6 +25,7 @@ commands:
   ci              fmt --check, clippy -D warnings, test, assets, layers, provenance (stops at the first failure)
   assets          check that every icon/image/font/sample file is attributed in ATTRIBUTION.md
   layers          enforce the crate dependency layering (AGENTS.md \"Layering\")
+  licenses        list dependencies outside the licence allowlist (docs/standards/licensing.md); not a ci step
   provenance      fail on names or terms from the base project in tracked files (xtask/src/provenance.rs)
   version [set X.Y.Z[-pre]]
                   print or set the workspace version ([workspace.package] in Cargo.toml)
@@ -41,6 +43,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("assets") => assets::run(&root()),
         Some("layers") => cmd_layers(),
+        Some("licenses") => licenses::run(&root()),
         Some("provenance") => provenance::run(&root()),
         Some("ci") => cmd_ci(),
         Some("stats") => stats::run(&root(), rest.contains(&"--exact")),

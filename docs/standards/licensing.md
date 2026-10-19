@@ -12,6 +12,8 @@ Allowed: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0, CC
 
 Never GPL, LGPL or AGPL, linked or vendored. A licence outside the list needs a human decision.
 
+`cargo xtask licenses` lists dependencies outside the allowlist (run it by hand after adding one; it is not a ci step).
+
 Every new dependency gets a one-line justification in its commit and, for a significant one, an entry in [`docs/decisions.md`](../decisions.md).
 
 ## Assets

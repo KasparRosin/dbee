@@ -1,8 +1,8 @@
 # dbee roadmap
 
-**Stage: pre-alpha** · next: alpha (the first core workflow, connect → browse → query, works end to end)
+**Stage: pre-alpha** · next: alpha (the first core workflow, connect to Postgres → browse → query, works end to end; M1 "Daily Postgres workflow" in progress)
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** major (scaffold) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (M1 started) · **Target:** Beekeeper Studio 5.5.7
 
 Why pre-alpha: the repository holds the scaffold only (rules, docs, tooling, packaging, release
 pipeline). No feature exists yet. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md),
@@ -43,16 +43,19 @@ pipeline). No feature exists yet. Detail: [`docs/target-app-parity.md`](docs/tar
 
 ## Upcoming
 
-1. M1: first milestone, defined in `docs/roadmap.md` once the Beekeeper observation notes exist.
+1. M1 Daily Postgres workflow (in progress): connect, browse and filter, query, edit a row, copy results. Defined in `docs/roadmap.md`.
+2. M2 Import and export.
 
 ## Progress log
 
 | Date | Entry |
 |---|---|
+| 2026-10-19 | M1 "Daily Postgres workflow" started: licence check (`cargo xtask licenses`) and roadmap. |
 | 2026-10-15 | Scaffold: rules, docs, tooling, packaging and release pipeline in place; placeholder app. |
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | M1 started: next line, upcoming list and progress log. |
 | 2026-10-15 | major | First version (scaffold). |

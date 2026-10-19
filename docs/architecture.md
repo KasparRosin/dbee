@@ -15,7 +15,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `crates/mcp` | exists, empty | L6. MCP server over stdio. |
 | `apps/dbee` | exists | L7. Desktop binary; opens a placeholder window. |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
-| `xtask` | exists | Exempt from layering. `ci`, `assets`, `layers`, `provenance`, `version`, `stats`, `ico`, `icns`, `contributors`. |
+| `xtask` | exists | Exempt from layering. `ci`, `assets`, `layers`, `licenses`, `provenance`, `version`, `stats`, `ico`, `icns`, `contributors`. |
 | L0–L4 domain crates | **(planned)** | Named when the first features land, for example `core`, `sql`, `drivers`, `model`. |
 
 ## Layers
