@@ -1,0 +1,27 @@
+[package]
+name = "dbee-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "dbee connection settings (L1): URL parsing, the saved and recent connections file, secret stores"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+keyring-core = "1"
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"
+
+[dev-dependencies]
+dbee-testkit = { workspace = true }
