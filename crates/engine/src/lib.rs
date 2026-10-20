@@ -453,10 +453,7 @@ impl Session {
         let result = match outcome {
             Ok(apply) if orphan => {
                 drop(apply);
-                Err(EngineError::Internal {
-                    id: label.to_string(),
-                    msg: "the call that started this job panicked, so its result was dropped".into(),
-                })
+                Err(EngineError::Internal { id: label.to_string(), msg: "the call that started this job panicked, so its result was dropped".into() })
             }
             Ok(apply) => {
                 self.jobs.set_applying(Some(job));
