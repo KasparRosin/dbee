@@ -212,18 +212,23 @@ impl Cache {
 /// How much of the text `inspect()` carries.
 pub(crate) const INSPECT_TEXT_BYTES: usize = 4 * 1024;
 
-/// `inspect()`'s `value`: the metadata and at most the first 4 KiB of the text.
+/// `inspect()`'s `value`: the metadata and at most the first 4 KiB of the text. Built field by
+/// field, so the whole text (up to [`VALUE_VIEW_MAX_BYTES`]) is never copied or escaped.
 pub(crate) fn summary(v: &ValueView) -> Json {
     let text = cut(&v.text, INSPECT_TEXT_BYTES);
-    let mut j = serde_json::to_value(v).unwrap_or(Json::Null);
-    if let Some(o) = j.as_object_mut() {
-        o.insert("text".into(), Json::String(text.to_owned()));
-        o.insert("textCut".into(), Json::Bool(text.len() < v.text.len()));
-        if let Some(n) = o.remove("byteLen") {
-            o.insert("bytes".into(), n);
-        }
-    }
-    j
+    let kind = kind_id(&v.kind, serde_json::value::Serializer).unwrap_or(Json::Null);
+    serde_json::json!({
+        "column": v.column,
+        "typeLabel": v.type_label,
+        "kind": kind,
+        "kindLabel": v.kind_label,
+        "text": text,
+        "pretty": v.pretty,
+        "truncated": v.truncated,
+        "isNull": v.is_null,
+        "bytes": v.byte_len,
+        "textCut": text.len() < v.text.len(),
+    })
 }
 
 /// `inspect()`'s `selection`: `{anchor: [row, col], focus: [row, col]}` or null.
@@ -261,6 +266,35 @@ mod tests {
         let long = "é".repeat(VALUE_VIEW_MAX_BYTES / 2 + 1);
         let v = ValueView::new(&col("t", "text"), Some(&long));
         assert!(v.truncated && v.text.len() <= VALUE_VIEW_MAX_BYTES && v.byte_len == long.len());
+    }
+
+    #[test]
+    fn summary_is_the_view_with_its_text_cut() {
+        let long = format!("{}é{}", "a".repeat(INSPECT_TEXT_BYTES - 1), "b".repeat(VALUE_VIEW_MAX_BYTES));
+        let v = ValueView::new(&col("t", "text"), Some(&long));
+        let s = summary(&v);
+        let expected = serde_json::json!({
+            "column": "t", "typeLabel": "text", "kind": "notJson", "kindLabel": "", "text": "a".repeat(INSPECT_TEXT_BYTES - 1),
+            "pretty": false, "truncated": true, "isNull": false, "bytes": long.len(), "textCut": true,
+        });
+        assert_eq!(s, expected);
+        let v = ValueView::new(&col("j", "jsonb"), Some(r#"{"a":1}"#));
+        let expected = serde_json::json!({
+            "column": "j", "typeLabel": "jsonb", "kind": "jsonb", "kindLabel": "jsonb", "text": v.text,
+            "pretty": true, "truncated": false, "isNull": false, "bytes": 7, "textCut": false,
+        });
+        assert_eq!(summary(&v), expected);
+        let v = ValueView::new(&col("n", "int4"), None);
+        assert_eq!(summary(&v)["isNull"], true);
+        assert_eq!(summary(&v)["text"], "");
+        // The same keys as the view itself, with `byteLen` named `bytes`, plus `textCut`.
+        let mut keys: Vec<String> = serde_json::to_value(&v).unwrap().as_object().unwrap().keys().cloned().collect();
+        keys.retain(|k| k != "byteLen");
+        keys.extend(["bytes".to_string(), "textCut".to_string()]);
+        keys.sort();
+        let mut got: Vec<String> = summary(&v).as_object().unwrap().keys().cloned().collect();
+        got.sort();
+        assert_eq!(got, keys);
     }
 
     #[test]
