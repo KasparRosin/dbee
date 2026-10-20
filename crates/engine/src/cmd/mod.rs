@@ -4,6 +4,13 @@
 //! shows, a params doc, an `enabled` check and a `run`. Ids follow Beekeeper Studio's menus plus
 //! primitives. Commands call each other's functions, never [`Session::execute`], so the journal
 //! records only what the caller asked for.
+//!
+//! **Stale job results.** A job's `Apply` first checks that what it worked for still exists: its
+//! tab is open (and still runs this job), and the connection it used is still the session's
+//! (`Session::is_current_browse`, or `Arc::ptr_eq` on the query connection). When not, because
+//! the tab closed or the connection was closed or replaced while the job ran, it changes nothing
+//! and returns `Ok(`[`ignored()`]`)`: never an error, and never a `Needs` prompt, since nobody is
+//! waiting for that answer any more. The check comes before the job's own error is mapped.
 
 pub mod connection;
 pub mod tabs;
@@ -114,6 +121,11 @@ pub fn always(_: &Session) -> Result<(), String> {
 /// At least one tab is open.
 pub fn has_tabs(s: &Session) -> Result<(), String> {
     if s.state.tabs.is_empty() { Err("no tab is open".into()) } else { Ok(()) }
+}
+
+/// The result of a job whose tab or connection went away while it ran: `{"ignored": true}`.
+pub(crate) fn ignored() -> Json {
+    serde_json::json!({ "ignored": true })
 }
 
 /// Why a command that needs a connection cannot run on the connection screen.

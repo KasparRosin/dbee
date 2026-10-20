@@ -3,26 +3,34 @@
 //!
 //! Secrets (the database password, the SSH password and the key passphrase) come from the
 //! params first (`password`, `sshPassword`, `sshPassphrase`; an empty string counts as not
-//! given), then the secret store under the connection's id, then nowhere. They are kept only in
-//! the store and in the crate-private [`Connected::credentials`] (for reconnects), never in the
-//! config, the connections file, `inspect()`, `Debug`, logs, errors or the journal (the journal
-//! drops secret params by key, and `connection.parseUrl`, whose URL may carry a password, is
-//! not journaled). Store reads and the writes of `savePassword` run in the job, so a slow
-//! keyring never holds up the UI thread.
+//! given), then the secret store, then nowhere. The store keeps secrets only for saved
+//! connections, under their id, and a stored secret is used only where it was saved for
+//! ([`reuse`]): the database password for the saved host, port and user; the SSH password for the
+//! saved SSH host, port and user; the passphrase also for the same key file. So an edited form or
+//! an agent that sends a saved id with another server never gets the saved secrets. Secrets are
+//! kept only in the store and in the crate-private [`Connected::credentials`] (for reconnects),
+//! never in the config, the connections file, `inspect()`, `Debug`, logs, errors or the journal
+//! (the journal drops secret params by key, and `connection.parseUrl`, whose URL may carry a
+//! password, is not journaled). Store reads run in the job, so a slow keyring never holds up the
+//! UI thread; writes (`connection.save`, `savePassword`) run on the caller's thread with the
+//! saved-connection change they belong to.
 //!
 //! Connecting is a job: the tunnel, the browse connection and, for open and reconnect, the
-//! catalog. The prompts come back as [`EngineError::Needs`]: an unknown host key, a key
-//! passphrase, the SSH password, or the database password when none was given; the caller asks
-//! the user and runs the command again with the answer in its params.
+//! catalog, whose load is bounded ([`CATALOG_TIMEOUT`]: past it, it is cancelled, the connection
+//! is discarded and the job fails with `timeout`). The prompts come back as
+//! [`EngineError::Needs`]: an unknown host key, a key passphrase, the SSH password, or the
+//! database password when none was given; the caller asks the user and runs the command again
+//! with the answer in its params.
 //!
 //! A lost connection: when a browse operation fails with `connectionLost` (or the connection
 //! has closed), the session is marked [`Connected::lost`] and the commands that need the
 //! database are disabled with [`LOST`] until `connection.reconnect` replaces the connections.
-//! Database work is stopped only through `Canceller`s, never by dropping a running future; a
-//! job whose connection was closed or replaced meanwhile has its result dropped.
+//! Database work is stopped only through `Canceller`s, never by dropping a running apply; a job
+//! whose connection was closed or replaced meanwhile is ignored (`{"ignored": true}`, see
+//! [`super`]).
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dbee_config::{ConnectionConfig, SecretKind, SecretStore, SshAuth, new_id, parse_url};
 use dbee_core::Catalog;
@@ -32,7 +40,7 @@ use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
 
-use super::{CommandSpec, LOST, NOT_CONNECTED, always, connected, needs_db, not_connected, p};
+use super::{CommandSpec, LOST, NOT_CONNECTED, always, connected, ignored, needs_db, not_connected, p};
 use crate::state::{Connected, Credentials};
 use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
 
@@ -181,10 +189,11 @@ fn disabled(why: &str) -> EngineError {
     EngineError::Disabled { id: String::new(), why: why.to_string() }
 }
 
-/// The result of a job whose connection was closed or replaced while it ran.
-fn stale(label: &str) -> EngineError {
-    EngineError::Disabled { id: label.to_string(), why: "the connection was closed or replaced while this ran, so its result was dropped".into() }
-}
+/// The longest a catalog load may take inside a job (open, reconnect, refresh).
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// After a timed-out catalog load is cancelled, how long it gets to end before it is given up.
+const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 // ---- params ----------------------------------------------------------------------------------
 
@@ -285,17 +294,47 @@ fn secret_store_failed(s: &mut Session, what: &str) {
     s.ui_requests.push(UiRequest::Notice(format!("The secret store refused to {what}; dbee will ask when a secret is needed.")));
 }
 
-/// `c` with what it lacks filled from the store under `config.id`: params first, then the
-/// store, then none. Only the secrets this config can use are read.
-async fn fill_from_store(mut c: Credentials, store: Option<Arc<dyn SecretStore>>, config: &ConnectionConfig) -> Credentials {
+/// Which stored secrets of a saved connection a config may use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Reuse {
+    db: bool,
+    ssh_password: bool,
+    passphrase: bool,
+}
+
+/// The stored secrets of `saved` that `given` may use: each only where it was saved for. The
+/// database password when the host, port and user are the same; the SSH password when the SSH
+/// host, port and user are the same; the key passphrase when, in addition, both log in with the
+/// same key file.
+fn reuse(saved: &ConnectionConfig, given: &ConnectionConfig) -> Reuse {
+    let db = saved.host == given.host && saved.port == given.port && saved.user == given.user;
+    let (ssh_password, passphrase) = match (&saved.ssh, &given.ssh) {
+        (Some(a), Some(b)) if a.host == b.host && a.port == b.port && a.user == b.user => {
+            let same_key = matches!((&a.auth, &b.auth), (SshAuth::Key { path: x }, SshAuth::Key { path: y }) if x == y);
+            (true, same_key)
+        }
+        _ => (false, false),
+    };
+    Reuse { db, ssh_password, passphrase }
+}
+
+/// What `config` may use of the stored secrets: those of the saved connection with its id, as
+/// [`reuse`] allows; nothing when no saved connection has that id.
+fn stored_reuse(s: &Session, config: &ConnectionConfig) -> Reuse {
+    s.state.store.saved.iter().find(|c| c.id == config.id).map_or(Reuse::default(), |saved| reuse(saved, config))
+}
+
+/// `c` with what it lacks filled from the store under `id`: params first, then the store, then
+/// none. Only what `allowed` permits and the config's login can use is read.
+async fn fill_from_store(mut c: Credentials, store: Option<Arc<dyn SecretStore>>, config: &ConnectionConfig, allowed: Reuse) -> Credentials {
     let Some(store) = store else { return c };
     if config.id.is_empty() {
         return c;
     }
-    let want_db = c.password.is_none();
+    let want_db = c.password.is_none() && allowed.db;
     let (want_ssh_password, want_passphrase) = match config.ssh.as_ref().map(|ssh| &ssh.auth) {
-        Some(SshAuth::Password) => (c.ssh.password.is_none(), false),
-        Some(SshAuth::Key { .. }) => (false, c.ssh.passphrase.is_none()),
+        Some(SshAuth::Password) => (c.ssh.password.is_none() && allowed.ssh_password, false),
+        Some(SshAuth::Key { .. }) => (false, c.ssh.passphrase.is_none() && allowed.passphrase),
         Some(SshAuth::Agent) | None => (false, false),
     };
     if !(want_db || want_ssh_password || want_passphrase) {
@@ -449,14 +488,47 @@ async fn open_connection(config: &ConnectionConfig, env: &SshEnv, creds: &Creden
     }
 }
 
-/// [`open_connection`], then the catalog.
+/// Why a bounded catalog load gave no catalog.
+enum CatalogLoad {
+    Failed(PgError),
+    /// It took longer than its limit; it was cancelled, and the connection must be discarded.
+    TimedOut,
+}
+
+/// `load_catalog`, bounded by `limit`. Past it the statement is cancelled through the
+/// connection's `Canceller` and the load gets [`CANCEL_GRACE`] to end (its result is discarded
+/// either way); then it is `TimedOut`, and the caller discards the connection.
+async fn load_catalog_within(conn: &PgConnection, limit: Duration) -> Result<Catalog, CatalogLoad> {
+    let mut load = std::pin::pin!(load_catalog(conn));
+    match tokio::time::timeout(limit, &mut load).await {
+        Ok(result) => result.map_err(CatalogLoad::Failed),
+        Err(_) => {
+            log::info!("the catalog did not load within {} s; cancelling it", limit.as_secs());
+            if conn.canceller().cancel().await.is_err() {
+                log::info!("the cancel request was not delivered");
+            }
+            let _ = tokio::time::timeout(CANCEL_GRACE, &mut load).await;
+            Err(CatalogLoad::TimedOut)
+        }
+    }
+}
+
+fn catalog_error(e: CatalogLoad) -> EngineError {
+    match e {
+        CatalogLoad::Failed(e) => db_error(&e),
+        CatalogLoad::TimedOut => EngineError::Timeout,
+    }
+}
+
+/// [`open_connection`], then the catalog (bounded by [`CATALOG_TIMEOUT`]). On any failure the
+/// new connection and tunnel are closed.
 async fn connect_and_load(config: &ConnectionConfig, env: &SshEnv, creds: &Credentials) -> Result<(Opened, Catalog), EngineError> {
     let opened = open_connection(config, env, creds).await?;
-    match load_catalog(&opened.conn).await {
+    match load_catalog_within(&opened.conn, CATALOG_TIMEOUT).await {
         Ok(catalog) => Ok((opened, catalog)),
         Err(e) => {
             opened.close().await;
-            Err(db_error(&e))
+            Err(catalog_error(e))
         }
     }
 }
@@ -623,9 +695,10 @@ fn ssh_key(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = target_config(s, params)?;
     let creds = given(params)?;
+    let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(TEST, async move {
-        let creds = fill_from_store(creds, store, &config).await;
+        let creds = fill_from_store(creds, store, &config, allowed).await;
         let result = match open_connection(&config, &env, &creds).await {
             Ok(opened) => {
                 let info = opened.conn.info();
@@ -644,30 +717,30 @@ fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 /// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?}` → a
 /// job returning `{connection, server, tables, warnings}`: the tunnel, the browse connection and
 /// the catalog. On success the workspace shows, the connection goes to the top of the recent
-/// list (an unsaved config gets an id for it) and the file is written; with `savePassword` the
-/// secrets given in the params are stored. One open at a time (`Busy`).
+/// list (an unsaved config gets an id for it) and the file is written. One open at a time
+/// (`Busy`).
+///
+/// `savePassword: true` asks to keep the secrets given in the params: the result then has
+/// `secretsSaved`, and `secretsNote` when they were not kept. They are kept only for a saved
+/// connection whose settings match the saved ones ([`reuse`]); that turns its `saveSecrets` on
+/// (in the file) and stores them. For an unsaved config nothing is stored.
 fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if s.jobs.is_running_label(OPEN) {
         return Err(EngineError::Busy("a connection is being opened".into()));
     }
     let mut config = target_config(s, params)?;
     let typed = given(params)?;
-    let save_secrets = p::bool_or(params, "savePassword", false)?;
+    let keep = p::bool_or(params, "savePassword", false)?;
     if config.id.is_empty() {
         config.id = new_id();
     }
+    let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(OPEN, async move {
-        let creds = fill_from_store(typed.clone(), store.clone(), &config).await;
+        let creds = fill_from_store(typed.clone(), store, &config, allowed).await;
         let result = connect_and_load(&config, &env, &creds).await;
-        let stored = match (&result, save_secrets, store) {
-            (Ok(_), true, Some(store)) => {
-                let id = config.id.clone();
-                Some(tokio::task::spawn_blocking(move || store_secrets(store.as_ref(), &id, &typed)).await.unwrap_or(false))
-            }
-            _ => None,
-        };
-        let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds, result, stored));
+        let typed = keep.then_some(typed);
+        let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds, result, typed));
         apply
     });
     Ok(Outcome::Started(job))
@@ -675,10 +748,10 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 
 fn apply_open(
     s: &mut Session,
-    config: ConnectionConfig,
+    mut config: ConnectionConfig,
     credentials: Credentials,
     result: Result<(Opened, Catalog), EngineError>,
-    stored: Option<bool>,
+    keep: Option<Credentials>,
 ) -> Result<Json, EngineError> {
     let (opened, catalog) = result?;
     if s.state.connected.is_some() {
@@ -686,21 +759,53 @@ fn apply_open(
         // connection closes as it is dropped.
         return Err(EngineError::Busy("already connected".into()));
     }
+    let kept = keep.map(|typed| keep_secrets(s, &mut config, &typed));
     let Opened { conn, tunnel } = opened;
     let info = conn.info().clone();
     s.state.store.touch_recent(&config, unix_now());
     let c = Connected { config, info, catalog: Arc::new(catalog), lost: false, browse: Arc::new(conn), query: None, tunnel, credentials };
-    let result = opened_json(&c);
+    let mut result = opened_json(&c);
+    match kept {
+        Some(Ok(())) => result["secretsSaved"] = json!(true),
+        Some(Err(note)) => {
+            result["secretsSaved"] = json!(false);
+            result["secretsNote"] = json!(note);
+        }
+        None => {}
+    }
     for w in &c.info.warnings {
         s.ui_requests.push(UiRequest::Notice(w.clone()));
     }
     s.state.connected = Some(c);
     s.state.screen = Screen::Workspace;
     save_store_or_tell(s);
-    if stored == Some(false) {
-        secret_store_failed(s, "save the password");
-    }
     Ok(result)
+}
+
+/// `savePassword` after a successful open: keeps `typed` for the saved connection `config.id`
+/// when its settings match the saved ones, turning the saved `saveSecrets` on first (and
+/// `config`'s, for the recent list and the session). `Err` says why nothing was kept.
+fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credentials) -> Result<(), String> {
+    let Some(secret_store) = s.secrets.clone() else { return Err("there is no secret store, so dbee asks each time".into()) };
+    let Some(saved) = s.state.store.saved.iter().find(|c| c.id == config.id).cloned() else {
+        return Err("the connection is not saved; save it to keep its secrets".into());
+    };
+    let r = reuse(&saved, config);
+    if (typed.password.is_some() && !r.db) || (typed.ssh.password.is_some() && !r.ssh_password) || (typed.ssh.passphrase.is_some() && !r.passphrase) {
+        return Err("the settings differ from the saved connection; save them to keep the secrets".into());
+    }
+    if !saved.save_secrets {
+        let mut store = s.state.store.clone();
+        store.upsert(ConnectionConfig { save_secrets: true, ..saved });
+        store.save().map_err(|e| format!("the connections file could not be written: {e}"))?;
+        s.state.store = store;
+    }
+    config.save_secrets = true;
+    if !store_secrets(secret_store.as_ref(), &config.id, typed) {
+        secret_store_failed(s, "save the password");
+        return Err("the secret store refused them".into());
+    }
+    Ok(())
 }
 
 /// `{password?, sshPassword?, sshPassphrase?, trustHostKey?}` → a job returning `{connection,
@@ -721,9 +826,10 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     creds.trust = answers.trust.or(creds.trust);
     let config = c.config.clone();
     let old = Arc::clone(&c.browse);
+    let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(RECONNECT, async move {
-        let creds = fill_from_store(creds, store, &config).await;
+        let creds = fill_from_store(creds, store, &config, allowed).await;
         let result = connect_and_load(&config, &env, &creds).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, &old, creds, result));
         apply
@@ -737,11 +843,12 @@ fn apply_reconnect(
     credentials: Credentials,
     result: Result<(Opened, Catalog), EngineError>,
 ) -> Result<Json, EngineError> {
-    let (opened, catalog) = result?;
     let Some(c) = s.state.connected.as_mut().filter(|c| Arc::ptr_eq(&c.browse, old)) else {
-        // Closed or reconnected meanwhile; the new connection closes as it is dropped.
-        return Err(stale(RECONNECT));
+        // Closed or reconnected meanwhile: ignored, whatever the outcome (a new connection closes
+        // as it is dropped, and a prompt is answered by nobody).
+        return Ok(ignored());
     };
+    let (opened, catalog) = result?;
     let Opened { conn, tunnel } = opened;
     c.info = conn.info().clone();
     c.catalog = Arc::new(catalog);
@@ -758,16 +865,27 @@ fn apply_reconnect(
 }
 
 /// `{}` → a job returning `{tables}`: reloads the catalog on the browse connection. Tabs keep
-/// their tables.
+/// their tables. A load past [`CATALOG_TIMEOUT`] is cancelled and fails with `timeout`, and the
+/// connection is discarded (the session is marked lost, so a reconnect replaces it).
 fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let conn = s.browse()?;
     let job = s.spawn_job(REFRESH, async move {
-        let result = load_catalog(&conn).await;
+        let result = load_catalog_within(&conn, CATALOG_TIMEOUT).await;
         let apply: Apply = Box::new(move |s: &mut Session| {
             if !s.is_current_browse(&conn) {
-                return Err(stale(REFRESH));
+                return Ok(ignored());
             }
-            let catalog = result.map_err(|e| s.db_failed(&conn, &e))?;
+            let catalog = match result {
+                Ok(catalog) => catalog,
+                Err(CatalogLoad::Failed(e)) => return Err(s.db_failed(&conn, &e)),
+                Err(CatalogLoad::TimedOut) => {
+                    // The connection is discarded: the session is lost until a reconnect.
+                    if let Some(c) = s.state.connected.as_mut() {
+                        c.lost = true;
+                    }
+                    return Err(EngineError::Timeout);
+                }
+            };
             let tables = catalog.table_count();
             if let Some(c) = s.state.connected.as_mut() {
                 c.catalog = Arc::new(catalog);
@@ -802,4 +920,81 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         cancel_statements(s, std::iter::once(Arc::clone(&c.browse)).chain(c.query.clone()));
     }
     Ok(Outcome::Done(json!({ "closed": c.config.id })))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use dbee_config::SshConfig;
+
+    use super::*;
+
+    fn saved() -> ConnectionConfig {
+        ConnectionConfig {
+            id: "a".into(),
+            host: "db.example".into(),
+            port: 5432,
+            user: "ann".into(),
+            database: "shop".into(),
+            ssh: Some(SshConfig { host: "jump".into(), port: 22, user: "ann".into(), auth: SshAuth::Key { path: Some(PathBuf::from("/k/id")) } }),
+            ..ConnectionConfig::default()
+        }
+    }
+
+    fn with_ssh(f: impl FnOnce(&mut SshConfig)) -> ConnectionConfig {
+        let mut c = saved();
+        if let Some(ssh) = c.ssh.as_mut() {
+            f(ssh);
+        }
+        c
+    }
+
+    #[test]
+    fn stored_secrets_are_reused_only_for_the_same_server() {
+        let all = Reuse { db: true, ssh_password: true, passphrase: true };
+        assert_eq!(reuse(&saved(), &saved()), all);
+        // The database name and the display settings do not matter.
+        assert_eq!(reuse(&saved(), &ConnectionConfig { database: "other".into(), name: "x".into(), ..saved() }), all);
+        // Another database host, port or user: no database password; the tunnel is the same.
+        let ssh_only = Reuse { db: false, ssh_password: true, passphrase: true };
+        assert_eq!(reuse(&saved(), &ConnectionConfig { host: "evil.example".into(), ..saved() }), ssh_only);
+        assert_eq!(reuse(&saved(), &ConnectionConfig { port: 1, ..saved() }), ssh_only);
+        assert_eq!(reuse(&saved(), &ConnectionConfig { user: "bob".into(), ..saved() }), ssh_only);
+        // Another SSH host, port or user: no SSH secret.
+        let db_only = Reuse { db: true, ssh_password: false, passphrase: false };
+        assert_eq!(reuse(&saved(), &with_ssh(|s| s.host = "evil".into())), db_only);
+        assert_eq!(reuse(&saved(), &with_ssh(|s| s.port = 2222)), db_only);
+        assert_eq!(reuse(&saved(), &with_ssh(|s| s.user = "bob".into())), db_only);
+        // Another key file (or another login method): no passphrase.
+        let no_passphrase = Reuse { db: true, ssh_password: true, passphrase: false };
+        assert_eq!(reuse(&saved(), &with_ssh(|s| s.auth = SshAuth::Key { path: Some("/k/other".into()) })), no_passphrase);
+        assert_eq!(reuse(&saved(), &with_ssh(|s| s.auth = SshAuth::Key { path: None })), no_passphrase);
+        assert_eq!(reuse(&saved(), &with_ssh(|s| s.auth = SshAuth::Password)), no_passphrase);
+        // No tunnel on either side: no SSH secret.
+        assert_eq!(reuse(&saved(), &ConnectionConfig { ssh: None, ..saved() }), db_only);
+        assert_eq!(reuse(&ConnectionConfig { ssh: None, ..saved() }, &saved()), db_only);
+    }
+
+    #[tokio::test]
+    async fn catalog_load_is_bounded() {
+        let db = dbee_testkit::require_testdb!();
+        let server = db.servers.iter().find(|s| s.major == 14).unwrap();
+        let config = ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port: server.port,
+            user: "postgres".into(),
+            database: "dbee".into(),
+            ..ConnectionConfig::default()
+        };
+        let conn = dbee_pg::connect(Target { config: &config, password: Some(&db.password), tunnel: None }).await.unwrap();
+        // No load can answer within no time at all: the first poll only sends the query.
+        let started = Instant::now();
+        assert!(matches!(load_catalog_within(&conn, Duration::ZERO).await, Err(CatalogLoad::TimedOut)));
+        assert!(started.elapsed() < CANCEL_GRACE + Duration::from_secs(5), "{:?}", started.elapsed());
+        let fresh = dbee_pg::connect(Target { config: &config, password: Some(&db.password), tunnel: None }).await.unwrap();
+        assert!(load_catalog_within(&fresh, CATALOG_TIMEOUT).await.is_ok_and(|c| c.table_count() > 10));
+        assert_eq!(catalog_error(CatalogLoad::TimedOut).code(), "timeout");
+    }
 }

@@ -82,7 +82,9 @@ pub enum EngineError {
     Db { code: &'static str, message: String, data: Json },
     /// Something is already running that this command would collide with.
     Busy(String),
-    /// [`Session::wait`] or [`Session::run_blocking`] gave up waiting; the job goes on.
+    /// Gave up waiting: [`Session::wait`] or [`Session::run_blocking`] ran out of time (the job
+    /// goes on), or a bounded step of a job took too long (a catalog load past 60 s, which was
+    /// cancelled and its connection discarded).
     Timeout,
     /// A bug: the command, the job or its `Apply` panicked. The state and the UI requests were
     /// put back as they were before the call, and jobs the call started are orphaned: they run to
@@ -143,7 +145,7 @@ impl std::fmt::Display for EngineError {
             EngineError::BadParams { id, msg } => write!(f, "bad params for `{id}`: {msg}"),
             EngineError::Needs { message, .. } | EngineError::Db { message, .. } => write!(f, "{message}"),
             EngineError::Busy(what) => write!(f, "busy: {what}"),
-            EngineError::Timeout => write!(f, "gave up waiting; the job is still running"),
+            EngineError::Timeout => write!(f, "gave up waiting: it took too long"),
             EngineError::Internal { id, msg } => write!(f, "internal error in `{id}` (the session was kept as it was): {msg}"),
             EngineError::Config(m) => write!(f, "{m}"),
         }

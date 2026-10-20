@@ -254,17 +254,82 @@ fn password_in_params_beats_the_stored_one() {
 }
 
 #[test]
-fn save_password_on_open_keeps_it_for_next_time() {
+fn save_password_on_open_of_a_saved_connection_turns_saving_on() {
     let _db = require_testdb!();
     let mut s = session();
-    open(&mut s, json!({ "config": pg14_config(), "password": pw(), "savePassword": true }));
-    let id = s.state().store.recent[0].config.id.clone();
-    assert!(!id.is_empty(), "an unsaved config gets an id when it is used");
-    assert_eq!(s.state().connected.as_ref().unwrap().config.id, id);
+    let id = save(&mut s, ConnectionConfig { save_secrets: false, ..pg14_config() }, Some(pw()));
+    assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), None, "saveSecrets is off");
+    let r = open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
+    assert_eq!(r["secretsSaved"], true, "{r}");
     assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), Some(pw()));
+    assert!(s.state().store.saved[0].save_secrets, "the saved flag agrees with the store");
+    let file = std::fs::read_to_string(s.home.home.join("config").join(dbee_config::store::FILE)).unwrap();
+    let body: Json = serde_json::from_str(&file).unwrap();
+    assert_eq!(body["saved"][0]["saveSecrets"], true, "{file}");
     s.run_blocking("connection.close", json!({}), T).unwrap();
     open(&mut s, json!({ "id": id }));
     assert_secret_hidden(&s, &pw());
+}
+
+#[test]
+fn save_password_on_open_of_an_ad_hoc_config_stores_nothing() {
+    let _db = require_testdb!();
+    let mut s = session();
+    let r = open(&mut s, json!({ "config": pg14_config(), "password": pw(), "savePassword": true }));
+    assert_eq!(r["secretsSaved"], false, "{r}");
+    assert!(r["secretsNote"].as_str().unwrap().contains("not saved"), "{r}");
+    let id = s.state().store.recent[0].config.id.clone();
+    assert!(!id.is_empty(), "an unsaved config gets an id when it is used");
+    for kind in [SecretKind::DbPassword, SecretKind::SshPassword, SecretKind::SshPassphrase] {
+        assert_eq!(s.secrets.get(&id, kind).unwrap(), None, "{kind:?}");
+    }
+    assert!(s.state().store.saved.is_empty());
+    let plain = open_or_err_after_close(&mut s, json!({ "id": id }));
+    assert_eq!(plain.code(), "needsPassword", "the recent entry has no stored password: {plain}");
+}
+
+/// Closes the connection, then opens `params`, expecting an error.
+fn open_or_err_after_close(s: &mut TestSession, params: Json) -> EngineError {
+    s.run_blocking("connection.close", json!({}), T).unwrap();
+    run_err(s, "connection.open", params)
+}
+
+#[test]
+fn stored_password_goes_only_to_its_own_server() {
+    let _db = require_testdb!();
+    let mut s = session();
+    let saved = ConnectionConfig { id: "shop".into(), ..pg14_config() };
+    save(&mut s, saved.clone(), Some(pw()));
+    // The saved settings themselves use the stored password.
+    s.run_blocking("connection.test", json!({ "config": saved }), T).unwrap();
+    // The same id with another user (or host, or port) does not get it.
+    let other_user = ConnectionConfig { user: "someone_else".into(), ..saved.clone() };
+    let e = run_err(&mut s, "connection.test", json!({ "config": other_user }));
+    assert_eq!(e.code(), "needsPassword", "the stored password must not be sent for another user: {e}");
+    let e = run_err(&mut s, "connection.open", json!({ "config": ConnectionConfig { user: "someone_else".into(), ..saved } }));
+    assert_eq!(e.code(), "needsPassword", "{e}");
+}
+
+#[test]
+fn stored_passphrase_needs_the_same_key_file_and_ssh_login() {
+    let db = require_testdb!();
+    let mut s = session_in(temp_home(None, Some(&db.sshd.known_hosts_line)));
+    let saved = ConnectionConfig { id: "tunnel".into(), ..via_ssh(SshAuth::Key { path: Some(db.keys.encrypted.clone()) }) };
+    s.run_blocking("connection.save", json!({ "config": saved, "password": pw(), "sshPassphrase": db.keys.passphrase }), T).unwrap();
+    // The same key at another path: the stored passphrase is not tried on it.
+    let copy = s.home.home.join("same_key_elsewhere");
+    std::fs::copy(&db.keys.encrypted, &copy).unwrap();
+    let mut moved = saved.clone();
+    moved.ssh.as_mut().unwrap().auth = SshAuth::Key { path: Some(copy) };
+    let e = run_err(&mut s, "connection.open", json!({ "config": moved }));
+    assert_eq!(e.code(), "needsPassphrase", "{e}");
+    // Another SSH user: not reused either.
+    let mut other = saved.clone();
+    other.ssh.as_mut().unwrap().user = "someone_else".into();
+    let e = run_err(&mut s, "connection.open", json!({ "config": other }));
+    assert_eq!(e.code(), "needsPassphrase", "{e}");
+    // The saved settings work with the stored secrets.
+    open(&mut s, json!({ "config": saved }));
 }
 
 #[test]
@@ -539,7 +604,9 @@ fn without_a_secret_store_dbee_asks_each_time() {
     let id = save(&mut s, pg14_config(), Some(pw()));
     let e = run_err(&mut s, "connection.open", json!({ "id": id }));
     assert_eq!(e.code(), "needsPassword", "{e}");
-    open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
+    let r = open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
+    assert_eq!(r["secretsSaved"], false, "{r}");
+    assert!(r["secretsNote"].as_str().unwrap().contains("secret store"), "{r}");
     assert_eq!(s.take_ui_requests(), [], "no store, so nothing failed");
     assert_secret_hidden(&s, &pw());
 }
@@ -554,7 +621,8 @@ fn a_failing_secret_store_is_not_fatal() {
     assert!(matches!(notices.as_slice(), [UiRequest::Notice(n)] if n.contains("secret store")), "{notices:?}");
     let e = run_err(&mut s, "connection.open", json!({ "id": id }));
     assert_eq!(e.code(), "needsPassword", "an unreadable store counts as no password: {e}");
-    open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
+    let r = open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
+    assert_eq!(r["secretsSaved"], false, "{r}");
     let notices = s.take_ui_requests();
     assert!(notices.iter().any(|r| matches!(r, UiRequest::Notice(n) if n.contains("save the password"))), "{notices:?}");
     s.run_blocking("connection.close", json!({}), T).unwrap();
@@ -568,8 +636,7 @@ fn closing_while_a_refresh_runs_drops_its_result() {
     let mut s = connected();
     let Outcome::Started(job) = s.execute("schema.refresh", json!({})).unwrap() else { panic!("refresh is a job") };
     s.run_blocking("connection.close", json!({}), T).unwrap();
-    let e = s.wait(job, T).unwrap_err();
-    assert_eq!(e.code(), "disabled", "{e}");
+    assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }), "a stale result is ignored, not an error");
     assert_eq!(s.inspect()["screen"], "connections");
     assert_eq!(s.inspect()["connection"], Json::Null);
 }
@@ -581,9 +648,22 @@ fn closing_while_reconnecting_drops_the_new_connection() {
     let Outcome::Started(job) = s.execute("connection.reconnect", json!({})).unwrap() else { panic!("reconnect is a job") };
     assert_eq!(s.execute("connection.reconnect", json!({})).unwrap_err().code(), "busy");
     s.run_blocking("connection.close", json!({}), T).unwrap();
-    let e = s.wait(job, T).unwrap_err();
-    assert_eq!(e.code(), "disabled", "{e}");
+    assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }), "a stale result is ignored, not an error");
     assert_eq!(s.inspect()["connection"], Json::Null);
     let id = s.state().store.recent[0].config.id.clone();
     open(&mut s, json!({ "id": id }));
+}
+
+#[test]
+fn a_failed_reconnect_after_close_is_ignored() {
+    let db = require_testdb!();
+    let mut s = session_in(temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line)));
+    open(&mut s, json!({ "config": via_ssh(SshAuth::Key { path: None }), "password": pw() }));
+    // Without its key file the tunnel cannot log in again, so a reconnect fails.
+    std::fs::remove_file(s.home.ssh_dir().join("id_ed25519")).unwrap();
+    let e = run_err(&mut s, "connection.reconnect", json!({}));
+    assert_eq!(e.code(), "ssh", "{e}");
+    let Outcome::Started(job) = s.execute("connection.reconnect", json!({})).unwrap() else { panic!("reconnect is a job") };
+    s.run_blocking("connection.close", json!({}), T).unwrap();
+    assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }), "checked for staleness before its error");
 }

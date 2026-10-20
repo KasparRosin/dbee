@@ -197,13 +197,23 @@ pub fn connected_exclusive() -> TestSession {
     connect(exclusive_session())
 }
 
-/// Terminates every dbee backend on `server` and waits (up to 5 s each) until they are gone.
-/// Only inside an [`exclusive_session`]: it kills every dbee connection on the server.
+/// Terminates every dbee backend on `server`, then waits (up to 10 s) until none is left. Only
+/// inside an [`exclusive_session`]: it kills every dbee connection on the server.
 pub fn kill_dbee_backends(s: &TestSession, server: &PgServer) {
     assert!(matches!(s.hold, Hold::Exclusive(_)), "kill_dbee_backends needs an exclusive_session()");
-    // The two-argument form (Postgres 14+) waits until the backend has exited.
+    // The two-argument form (Postgres 14+) waits until the backend has exited. A backend of an
+    // earlier test may already be exiting by itself and report `f`; the session's own is `t`.
     let sql = "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = 'dbee'";
     let out = dbee_testkit::psql(server, sql).unwrap();
     assert!(out.lines().any(|l| l.trim() == "t"), "no dbee backend was terminated on {}: {out:?}", server.name);
-    assert!(out.lines().all(|l| l.trim() == "t"), "a dbee backend did not exit within 5 s on {}: {out:?}", server.name);
+    let count = "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee'";
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = dbee_testkit::psql(server, count).unwrap();
+        if left.trim() == "0" {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{} dbee backend(s) still on {} after 10 s", left.trim(), server.name);
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
