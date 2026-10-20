@@ -13,6 +13,7 @@ use dbee_ssh::{SshSecrets, Tunnel};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::edits::Edits;
 use crate::{JobId, Json, TabId};
 
 /// Which screen the window shows.
@@ -169,9 +170,15 @@ pub struct PageView {
 /// `shown` is what `data` was loaded with; number the rows from `shown.page`. A load that fails
 /// puts `applied`, `sort` and `page` back to `shown` and sets `error`; `data` stays.
 ///
-/// `loading` and `counting` name the jobs in flight for the tab, always on the session's
-/// current browse connection: a job clears its own when its result arrives (stale or not), and
-/// a reconnect clears them all ([`TableTab::drop_dead_jobs`]).
+/// `loading`, `counting` and `applying` name the jobs in flight for the tab, always on the
+/// session's current browse connection: a job clears its own when its result arrives (stale or
+/// not), the session clears any left once the job has ended (its future or its `Apply`
+/// panicked, [`TableTab::job_ended`]), and a reconnect clears them all
+/// ([`TableTab::drop_dead_jobs`]).
+///
+/// `edits` holds the staged edits, on the rows of `data`: while any are staged, the tab loads no
+/// other page ([`TableTab::has_staged_edits`]), and they are not changed while a page loads or
+/// an Apply runs. A new page starts a new undo history.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableTab {
     pub id: TabId,
@@ -203,6 +210,10 @@ pub struct TableTab {
     pub seq: u64,
     /// What `data` was loaded with.
     pub shown: PageView,
+    /// The staged edits (behind `Arc`: the state is cloned before every command).
+    pub edits: Arc<Edits>,
+    /// The job writing the edits (`edit.apply`).
+    pub applying: Option<JobId>,
 }
 
 impl TableTab {
@@ -226,6 +237,8 @@ impl TableTab {
             error: None,
             seq: 0,
             shown: view,
+            edits: Arc::default(),
+            applying: None,
         }
     }
 
@@ -236,13 +249,40 @@ impl TableTab {
 
     /// The connection the tab's jobs ran on was replaced (a reconnect): they are dead, and their
     /// results will be ignored. A load in flight counts as failed without a message (the view
-    /// goes back to `shown`), and a count in flight leaves the estimate it showed.
+    /// goes back to `shown`), a count in flight leaves the estimate it showed, and an Apply in
+    /// flight ends with an unknown outcome (the edits stay, `failed` says so).
     pub(crate) fn drop_dead_jobs(&mut self) {
         if self.loading.take().is_some() {
             self.back_to_shown();
         }
         self.counting = None;
         self.total = self.total.settled();
+        if self.applying.take().is_some() {
+            self.apply_outcome_unknown();
+        }
+    }
+
+    /// Job `job` has ended and its result was applied, or dropped because it panicked: a marker
+    /// that still names it is cleared as [`TableTab::drop_dead_jobs`] would clear it, so no
+    /// marker outlives its job.
+    pub(crate) fn job_ended(&mut self, job: JobId) {
+        if self.loading == Some(job) {
+            self.loading = None;
+            self.back_to_shown();
+        }
+        if self.counting == Some(job) {
+            self.counting = None;
+            self.total = self.total.settled();
+        }
+        if self.applying == Some(job) {
+            self.applying = None;
+            self.apply_outcome_unknown();
+        }
+    }
+
+    fn apply_outcome_unknown(&mut self) {
+        let loaded = self.data.as_ref().map_or(0, |d| d.rows.len());
+        Arc::make_mut(&mut self.edits).mark_unknown(loaded);
     }
 
     /// A load ended without rows: `applied`, `sort` and `page` go back to what the rows shown were
@@ -258,10 +298,9 @@ impl TableTab {
     }
 
     /// Edits are staged: filters, paging, sort and refresh wait until they are applied or reset
-    /// (they would throw the staged rows away). The one place that answers it; staged edits
-    /// arrive with M1.17.
+    /// (they would throw the staged rows away). The one place that answers it.
     pub fn has_staged_edits(&self) -> bool {
-        false
+        !self.edits.is_empty()
     }
 }
 

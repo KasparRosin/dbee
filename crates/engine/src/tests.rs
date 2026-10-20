@@ -5,16 +5,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dbee_config::MemoryStore;
+use dbee_core::TableRef;
 use dbee_ssh::SshEnv;
 use serde_json::json;
 
 use crate::cmd::{self, CommandSpec, p};
-use crate::state::Tab;
+use crate::edits::UNKNOWN_OUTCOME;
+use crate::state::{PageView, Tab, TableTab, Total};
 use crate::{EngineError, Json, Outcome, Session, SessionOptions, TabId};
 
 /// `test.panic` changes the state, then panics; `test.panicEnabled` panics in its `enabled`;
 /// `test.panicAfterJob` starts a job, then panics; `test.sleepJob {ms, tab?, panic?: "job" |
-/// "apply" | "applyAfterJob"}` is a job that sleeps.
+/// "apply" | "applyAfterJob"}` is a job that sleeps. With `tab`, the job is the tab's marker:
+/// `running` of a query tab (which its `Apply` clears), or `loading`, `counting` and `applying`
+/// of a table tab (which it leaves for the session to clear).
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "test.panic",
@@ -128,8 +132,14 @@ fn run_sleep_job(s: &mut Session, params: &Json) -> Result<Outcome, EngineError>
         });
         apply
     });
-    if let Some(Tab::Query(q)) = tab.and_then(|t| s.state.tab_mut(t)) {
-        q.running = Some(job);
+    match tab.and_then(|t| s.state.tab_mut(t)) {
+        Some(Tab::Query(q)) => q.running = Some(job),
+        Some(Tab::Table(t)) => {
+            t.loading = Some(job);
+            t.counting = Some(job);
+            t.applying = Some(job);
+        }
+        None => {}
     }
     Ok(Outcome::Started(job))
 }
@@ -151,6 +161,51 @@ fn started(o: Outcome) -> crate::JobId {
     match o {
         Outcome::Started(j) => j,
         Outcome::Done(v) => panic!("expected a job, got {v}"),
+    }
+}
+
+/// A table tab on no server, active, asking for page 4 of a load that never comes (page 0 shows),
+/// counting with an estimate of 5, and one new row staged.
+fn table_tab(s: &mut Session) -> TabId {
+    let id = s.state.take_tab_id();
+    let mut t = TableTab::new(id, TableRef { schema: "s".into(), name: "t".into() }, vec![], PageView::default());
+    t.page = 3;
+    t.total = Total::Counting { estimate: Some(5) };
+    Arc::make_mut(&mut t.edits).add_row(&dbee_core::ResultSet::default());
+    s.state.tabs.push(Tab::Table(t));
+    s.state.active = Some(id);
+    id
+}
+
+#[test]
+fn no_marker_outlives_its_job() {
+    for panic in [None, Some("job"), Some("apply")] {
+        let mut s = session();
+        let query = new_query(&mut s, "");
+        let table = table_tab(&mut s);
+        let with = |tab: TabId| {
+            let mut p = json!({ "ms": 1, "tab": tab.0 });
+            if let Some(how) = panic {
+                p["panic"] = json!(how);
+            }
+            p
+        };
+        let a = started(s.execute("test.sleepJob", with(query)).unwrap());
+        let b = started(s.execute("test.sleepJob", with(table)).unwrap());
+        let Some(Tab::Table(t)) = s.state().tab(table) else { panic!("no table tab") };
+        assert_eq!((t.loading, t.counting, t.applying), (Some(b), Some(b), Some(b)));
+        let ra = s.wait(a, Duration::from_secs(5));
+        let rb = s.wait(b, Duration::from_secs(5));
+        assert_eq!((ra.is_ok(), rb.is_ok()), (panic.is_none(), panic.is_none()), "{panic:?}");
+        let Some(Tab::Query(q)) = s.state().tab(query) else { panic!("no query tab") };
+        assert_eq!(q.running, None, "{panic:?}");
+        let Some(Tab::Table(t)) = s.state().tab(table) else { panic!("no table tab") };
+        assert_eq!((t.loading, t.counting, t.applying), (None, None, None), "{panic:?}");
+        // As if the load failed, the count ended without a number and the outcome of the apply
+        // is not known.
+        assert_eq!((t.page, t.total), (0, Total::Estimate(5)), "{panic:?}");
+        assert_eq!(t.edits.failed, Some((0, None, UNKNOWN_OUTCOME.to_owned())), "{panic:?}");
+        assert_eq!(t.edits.count(), 1);
     }
 }
 

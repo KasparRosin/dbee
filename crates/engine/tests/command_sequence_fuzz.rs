@@ -8,13 +8,20 @@
 //!
 //! Every engine task adds its commands' param shapes to [`PARAM_HINTS`]; the test
 //! `every_command_has_param_hints` fails when one is missing.
+//!
+//! `undoing_every_edit_then_redoing_restores_them` runs random edit commands on a table tab of the
+//! test server (it needs `cargo xtask testdb up`): undoing until `edit.undo` is disabled must leave
+//! no staged edit, and redoing as often must bring back as many as before (and redoing further
+//! goes on only where redo was possible before the undos).
+
+mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use dbee_config::MemoryStore;
 use dbee_engine::cmd::is_secret_param;
-use dbee_engine::{EngineError, Json, Outcome, Session, SessionOptions};
+use dbee_engine::{EngineError, Json, Outcome, Session, SessionOptions, Tab};
 use dbee_ssh::SshEnv;
 use serde_json::json;
 
@@ -64,6 +71,15 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("table.refresh", &[]),
     ("table.read", &[("offset", Hint::Count), ("limit", Hint::Count)]),
     ("table.followForeignKey", &[("row", Hint::Count), ("column", COLUMN)]),
+    ("cell.edit", &[("row", GRID_ROW), ("column", EDIT_COLUMN), ("value", VALUE)]),
+    ("cell.setNull", &[("row", GRID_ROW), ("column", EDIT_COLUMN)]),
+    ("cell.clear", &[("row", GRID_ROW), ("column", EDIT_COLUMN)]),
+    ("row.add", &[]),
+    ("row.delete", &[("rows", Hint::Custom(grid_rows))]),
+    ("edit.apply", &[]),
+    ("edit.reset", &[]),
+    ("edit.undo", &[]),
+    ("edit.redo", &[]),
 ];
 
 /// Table commands: names from the seed data, odd ones and ones that do not exist.
@@ -82,6 +98,38 @@ fn filters(r: &mut Rng, s: &Session) -> Json {
         .map(|_| json!({ "column": column(r, s), "op": r.pick(&ops), "value": if r.chance(20) { hostile(r) } else { text(r) } }))
         .collect();
     Json::Array(rows)
+}
+
+/// Edit commands: rows of the active table tab's grid (loaded and new), now and then one past it;
+/// the columns of the edit test table; values that fit some columns and not others.
+const GRID_ROW: Hint = Hint::Custom(grid_row);
+const EDIT_COLUMN: Hint = Hint::Custom(edit_column);
+const VALUE: Hint = Hint::Custom(value);
+
+fn grid_size(s: &Session) -> usize {
+    match s.state().active_tab() {
+        Some(Tab::Table(t)) => t.data.as_ref().map_or(0, |d| t.edits.grid_rows(d)),
+        _ => 0,
+    }
+}
+
+fn grid_row(r: &mut Rng, s: &Session) -> Json {
+    json!(r.below(grid_size(s) + 2))
+}
+
+fn grid_rows(r: &mut Rng, s: &Session) -> Json {
+    Json::Array((0..r.below(4)).map(|_| grid_row(r, s)).collect())
+}
+
+fn edit_column(r: &mut Rng, _: &Session) -> Json {
+    if r.chance(30) { json!(r.below(8)) } else { json!(r.pick(&["id", "name", "total", "shipped_at", "flag", "doc", "nope"])) }
+}
+
+fn value(r: &mut Rng, _: &Session) -> Json {
+    if r.chance(15) {
+        return Json::Null;
+    }
+    json!(r.pick(&["", "1", "42", "-7.5", "x", "2025-01-01", "not a date", "true", "{}", "[1, 2]", "it's \"q\" 🐝", "Alice"]))
 }
 
 fn page_to(r: &mut Rng, _: &Session) -> Json {
@@ -400,4 +448,105 @@ fn every_command_has_param_hints() {
     for (id, _) in PARAM_HINTS {
         assert!(s.commands().iter().any(|c| c.id == *id), "PARAM_HINTS names `{id}`, which is not a command");
     }
+}
+
+/// The staged edits of the active table tab.
+fn staged(s: &Session) -> usize {
+    match s.state().active_tab() {
+        Some(Tab::Table(t)) => t.edits.count(),
+        _ => 0,
+    }
+}
+
+fn can_redo(s: &Session) -> bool {
+    match s.state().active_tab() {
+        Some(Tab::Table(t)) => t.edits.can_redo(),
+        _ => false,
+    }
+}
+
+/// Runs `id` until it is disabled; returns how often it ran.
+fn until_disabled(s: &mut Session, id: &str, at: &str) -> usize {
+    for n in 0..100_000 {
+        match s.execute(id, json!({})) {
+            Ok(_) => {}
+            Err(EngineError::Disabled { .. }) => return n,
+            Err(e) => panic!("{at}: {id}: {e}"),
+        }
+    }
+    panic!("{at}: {id} never became disabled");
+}
+
+/// Drops the scratch table when the test ends, also when it fails.
+struct DropTable(String);
+
+impl Drop for DropTable {
+    fn drop(&mut self) {
+        let _ = dbee_testkit::psql(common::pg14(), &format!("DROP TABLE IF EXISTS scratch.{}", self.0));
+    }
+}
+
+#[test]
+fn undoing_every_edit_then_redoing_restores_them() {
+    let _db = dbee_testkit::require_testdb!();
+    let seed = env_u64("DBEE_FUZZ_SEED")
+        .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64));
+    eprintln!("undoing_every_edit_then_redoing_restores_them: DBEE_FUZZ_SEED={seed}");
+    let name = dbee_testkit::unique("t_fuzz_edit");
+    let _drop = DropTable(name.clone());
+    dbee_testkit::psql(
+        common::pg14(),
+        &format!(
+            "CREATE TABLE scratch.{name} (id int PRIMARY KEY, name text, total numeric(12,2), shipped_at date, flag bool, doc jsonb);
+             INSERT INTO scratch.{name} VALUES (1, 'Alice', 10.50, '2025-01-02', true, '{{}}'), (2, 'Bob', 20, NULL, false, NULL), (3, NULL, NULL, NULL, NULL, NULL);"
+        ),
+    )
+    .unwrap();
+    let mut s = common::connected();
+    s.run_blocking("table.open", json!({ "schema": "scratch", "table": name }), common::T).unwrap();
+    // Mostly cell edits; now and then an Apply, which writes to the scratch table.
+    let commands = [
+        "cell.edit",
+        "cell.edit",
+        "cell.edit",
+        "cell.setNull",
+        "cell.clear",
+        "row.add",
+        "row.delete",
+        "edit.undo",
+        "edit.undo",
+        "edit.redo",
+        "edit.reset",
+        "edit.apply",
+    ];
+    let mut r = Rng::new(seed);
+    let (mut ran, mut undos) = (0, 0);
+    for round in 0..6 {
+        for step in 0..30 {
+            let id = *r.pick(&commands);
+            let p = params(&mut r, id, &s);
+            let at = format!("seed {seed} round {round} step {step} `{id}` {}", short(&p));
+            match s.execute(id, p) {
+                Ok(Outcome::Started(job)) => no_internal(&s.wait(job, common::T), &at),
+                Ok(Outcome::Done(_)) => ran += 1,
+                Err(e) => no_internal(&Err(e), &at),
+            }
+            check(&s, &at);
+        }
+        let at = format!("seed {seed} round {round}");
+        let (before, could_redo) = (staged(&s), can_redo(&s));
+        let undone = until_disabled(&mut s, "edit.undo", &at);
+        undos += undone;
+        assert_eq!(staged(&s), 0, "{at}: {undone} undos left staged edits");
+        // Redoing every undo brings the edits back; past them is only what could be redone before.
+        for i in 0..undone {
+            if let Err(e) = s.execute("edit.redo", json!({})) {
+                panic!("{at}: redo {i} of {undone}: {e}");
+            }
+        }
+        assert_eq!((staged(&s), can_redo(&s)), (before, could_redo), "{at}: after redoing every undo");
+        until_disabled(&mut s, "edit.redo", &at);
+    }
+    eprintln!("seed {seed}: {ran} edit commands ran, {undos} undos");
+    assert!(ran >= 30 && undos >= 6, "seed {seed}: too few edits ran ({ran}, {undos} undos) to test anything");
 }

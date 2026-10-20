@@ -12,6 +12,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod cmd;
+pub mod edits;
 pub mod fuzzy;
 mod jobs;
 pub mod state;
@@ -28,6 +29,7 @@ use serde::Serialize;
 use serde_json::{Map, json};
 
 pub use cmd::{CommandInfo, CommandSpec};
+pub use edits::Edits;
 pub(crate) use jobs::Apply;
 pub use state::{Connected, PageView, QueryTab, Screen, Selection, State, Tab, TableTab, Total};
 
@@ -450,11 +452,28 @@ impl Session {
             }
             Err(e) => Err(e),
         };
+        self.job_ended(job);
         match &result {
             Ok(_) => log::debug!("job {} ({label}): done in {took:?}", job.0),
             Err(e) => log::debug!("job {} ({label}): {} in {took:?}", job.0, e.code()),
         }
         (job, result)
+    }
+
+    /// No marker outlives its job: once `job`'s result was applied, or dropped because the job's
+    /// future or its `Apply` panicked (and the state was put back with the markers it had), every
+    /// marker that still names it is cleared.
+    fn job_ended(&mut self, job: JobId) {
+        for tab in &mut self.state.tabs {
+            match tab {
+                Tab::Table(t) => t.job_ended(job),
+                Tab::Query(q) => {
+                    if q.running == Some(job) {
+                        q.running = None;
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -77,7 +77,7 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
 Follow [never crash](standards/never-crash.md). Beyond a regression test per fixed crash:
 
 - `every_command_survives_empty_params` (`crates/engine/src/tests.rs`) runs every registered command with empty params;
-- the command-sequence fuzz (`crates/engine/tests/command_sequence_fuzz.rs`) runs random commands with random, often hostile, params and checks the session's invariants after every step: no `internal` error, `inspect()` serializes, the active tab is an open one, and no journal entry keeps a secret. A new command adds its param shapes to `PARAM_HINTS` there (a test fails without them). The undo/redo invariant arrives with staged edits **(planned)**;
+- the command-sequence fuzz (`crates/engine/tests/command_sequence_fuzz.rs`) runs random commands with random, often hostile, params and checks the session's invariants after every step: no `internal` error, `inspect()` serializes, the active tab is an open one, and no journal entry keeps a secret. A new command adds its param shapes to `PARAM_HINTS` there (a test fails without them). With the test servers up it also runs random edit commands on a table tab and checks the undo/redo invariant: undoing until `edit.undo` is disabled leaves no staged edit, and as many redos bring back the edits from before;
 
   ```sh
   cargo test -p dbee-engine --test command_sequence_fuzz                      # 300 steps, seed from the clock (printed)

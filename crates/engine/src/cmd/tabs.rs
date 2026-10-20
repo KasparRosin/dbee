@@ -116,8 +116,10 @@ fn set_text(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 }
 
 /// `{tab?, force?}` → `{closed, active}`: closes the tab (default: the active one). A query tab
-/// with text asks first unless `force`. A job still running for the tab goes on, and its result
-/// is ignored. Closing the active tab activates the one to its right, else the one to its left.
+/// with text, or a table tab with staged edits, asks first unless `force`
+/// (`Needs::Confirm { what: "queryText" | "stagedEdits" }`). A job still running for the tab goes
+/// on (an Apply too), and its result is ignored. Closing the active tab activates the one to its
+/// right, else the one to its left.
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
     let id = match p::opt_tab_id(params, "tab")? {
@@ -125,20 +127,33 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         None => s.state.active_tab().map(Tab::id).ok_or_else(|| bad("no tab is active; name one with `tab`"))?,
     };
     let at = s.state.tabs.iter().position(|t| t.id() == id).ok_or_else(|| bad(&format!("no tab {}", id.0)))?;
-    if !force
-        && let Some(Tab::Query(q)) = s.state.tabs.get(at)
-        && !q.text.trim().is_empty()
-    {
-        return Err(EngineError::Needs {
-            need: Need::Confirm { what: "queryText".into() },
-            message: format!("Close {}? Its query text will be lost.", q.title),
-        });
+    if !force {
+        match s.state.tabs.get(at) {
+            Some(Tab::Query(q)) if !q.text.trim().is_empty() => {
+                return Err(EngineError::Needs {
+                    need: Need::Confirm { what: "queryText".into() },
+                    message: format!("Close {}? Its query text will be lost.", q.title),
+                });
+            }
+            Some(Tab::Table(t)) if t.has_staged_edits() => {
+                return Err(EngineError::Needs {
+                    need: Need::Confirm { what: "stagedEdits".into() },
+                    message: format!("Close {}? Its {} will be lost.", t.table.display(), staged_changes(t.edits.count())),
+                });
+            }
+            _ => {}
+        }
     }
     s.state.tabs.remove(at);
     if s.state.active == Some(id) {
         s.state.active = s.state.tabs.get(at).or_else(|| at.checked_sub(1).and_then(|i| s.state.tabs.get(i))).map(Tab::id);
     }
     Ok(Outcome::Done(json!({ "closed": id, "active": s.state.active })))
+}
+
+/// `1 staged change`, `3 staged changes`.
+pub(crate) fn staged_changes(n: usize) -> String {
+    if n == 1 { "1 staged change".into() } else { format!("{n} staged changes") }
 }
 
 fn bad(msg: &str) -> EngineError {

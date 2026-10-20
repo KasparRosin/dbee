@@ -965,19 +965,30 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Started(job))
 }
 
-/// `{force?}` → `{closed}`: back to the connection screen. Query tabs with text ask first
-/// (`Needs::Confirm { what: "queryText" }`) unless `force`. Every tab closes; statements still
-/// running are cancelled through their connections' cancellers, and the connections are let go
-/// (they close once the jobs using them end; those jobs' results are dropped).
+/// `{force?}` → `{closed}`: back to the connection screen. Query tabs with text and table tabs
+/// with staged edits ask first (`Needs::Confirm { what: "queryText" }`, or `"stagedEdits"` when
+/// only edits would be lost) unless `force`. Every tab closes; statements still running are
+/// cancelled through their connections' cancellers (an Apply then rolls back), and the
+/// connections are let go (they close once the jobs using them end; those jobs' results are
+/// dropped).
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
     let c = s.state.connected.as_ref().ok_or_else(|| disabled(NOT_CONNECTED))?;
     let with_text = s.state.tabs.iter().filter(|t| matches!(t, Tab::Query(q) if !q.text.trim().is_empty())).count();
-    if with_text > 0 && !force {
-        let tabs = if with_text == 1 { "1 query tab".to_string() } else { format!("{with_text} query tabs") };
+    let with_edits = s.state.tabs.iter().filter(|t| matches!(t, Tab::Table(t) if t.has_staged_edits())).count();
+    if (with_text > 0 || with_edits > 0) && !force {
+        let tabs = |n: usize, what: &str| if n == 1 { format!("1 {what} tab") } else { format!("{n} {what} tabs") };
+        let mut lost = Vec::new();
+        if with_text > 0 {
+            lost.push(format!("text of {}", tabs(with_text, "query")));
+        }
+        if with_edits > 0 {
+            lost.push(format!("staged changes of {}", tabs(with_edits, "table")));
+        }
+        let what = if with_text > 0 { "queryText" } else { "stagedEdits" };
         return Err(EngineError::Needs {
-            need: Need::Confirm { what: "queryText".into() },
-            message: format!("Disconnect from {}? The text of {tabs} will be lost.", c.config.display_name()),
+            need: Need::Confirm { what: what.into() },
+            message: format!("Disconnect from {}? The {} will be lost.", c.config.display_name(), lost.join(" and the ")),
         });
     }
     let Some(c) = s.state.connected.take() else { return Err(disabled(NOT_CONNECTED)) };

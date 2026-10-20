@@ -2,8 +2,10 @@
 //! following a foreign key.
 //!
 //! Every command needs a connected session that is not lost. `table.open` opens a new tab; the
-//! others act on the active tab, which must be a table tab. Filters, paging, sort and refresh
-//! wait while edits are staged ([`STAGED`], asked of `TableTab::has_staged_edits`).
+//! others act on the active tab, which must be a table tab. Applying filters, paging, sort and
+//! refresh wait while edits are staged ([`STAGED`], asked of `TableTab::has_staged_edits`), since
+//! the edits name rows of the page shown; typing in the filter bar (`table.setFilters` with
+//! `apply: false`) does not. A page never lands on staged edits: one that would is ignored.
 //!
 //! **Loading a page** is a job on the browse connection. The command builds the statement first
 //! (SQL that cannot be built, like an unknown column or a `;` in the raw condition, is
@@ -23,10 +25,12 @@
 //!
 //! **In-flight markers.** `loading` and `counting` name the tab's jobs. A job clears the marker
 //! that names it when its result arrives, stale or not (clearing the marker of a job that has
-//! ended is not applying its result), and a reconnect clears them all, since every job started
-//! before it ran on the old connection (`TableTab::drop_dead_jobs`). So a marker that names a
-//! running job names one on the current browse connection, which is what `table.cancel` relies
-//! on. A count that fails leaves the estimate it showed, unless a newer count runs.
+//! ended is not applying its result); when its future or its `Apply` panicked, the session
+//! clears it once the job has ended (`TableTab::job_ended`), so no marker outlives its job; and a
+//! reconnect clears them all, since every job started before it ran on the old connection
+//! (`TableTab::drop_dead_jobs`). So a marker names a running job on the current browse
+//! connection, which is what `table.cancel` relies on. A count that fails leaves the estimate it
+//! showed, unless a newer count runs.
 //!
 //! **The total** is counted only when asked. `table.count` shows the planner's estimate at once
 //! for an unfiltered table, materialized view or partitioned table (`reltuples` from the
@@ -94,7 +98,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         menu: &[],
         shortcut: None,
         params: "{filters?: [{column, op, value}], raw?, rawMode?, apply? = true}",
-        enabled: table_view,
+        enabled: active_table,
         run: set_filters,
         journal: true,
         undoable: false,
@@ -213,11 +217,11 @@ fn sql_bad(e: SqlError) -> EngineError {
     bad(e.to_string())
 }
 
-fn catalog(s: &Session) -> Result<Arc<Catalog>, EngineError> {
+pub(crate) fn catalog(s: &Session) -> Result<Arc<Catalog>, EngineError> {
     s.state.connected.as_ref().map(|c| Arc::clone(&c.catalog)).ok_or_else(|| disabled(NOT_CONNECTED))
 }
 
-fn lookup<'a>(catalog: &'a Catalog, table: &TableRef) -> Result<&'a TableInfo, EngineError> {
+pub(crate) fn lookup<'a>(catalog: &'a Catalog, table: &TableRef) -> Result<&'a TableInfo, EngineError> {
     catalog.table(table).ok_or_else(|| bad(format!("the schema has no table `{}` (refresh the schema if it is new)", table.display())))
 }
 
@@ -229,7 +233,7 @@ fn active(s: &Session) -> Result<&TableTab, EngineError> {
     }
 }
 
-fn table_tab_mut(s: &mut Session, id: TabId) -> Option<&mut TableTab> {
+pub(crate) fn table_tab_mut(s: &mut Session, id: TabId) -> Option<&mut TableTab> {
     match s.state.tab_mut(id) {
         Some(Tab::Table(t)) => Some(t),
         _ => None,
@@ -330,6 +334,9 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "error": t.error,
         "editable": reason.is_none(),
         "notEditableReason": reason,
+        "edits": super::edit::summary(&t.edits, t.data.as_ref().map_or(0, |d| d.rows.len())),
+        "failed": t.edits.failed.as_ref().map(|(row, column, message)| json!({ "row": row, "column": column, "message": message })),
+        "applying": t.applying,
     })
 }
 
@@ -394,7 +401,7 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
 }
 
 /// What a page job brings back: the count `last` made, and the page number with its rows.
-struct Loaded {
+pub(crate) struct Loaded {
     counted: Option<u64>,
     page: Result<(u64, ResultSet), PgError>,
 }
@@ -471,8 +478,15 @@ fn apply_load(
         return Ok(ignored());
     }
     t.loading = None;
+    if t.has_staged_edits() {
+        // The edits name rows of the page shown; another page would put them on other rows.
+        t.back_to_shown();
+        return Ok(ignored());
+    }
     match loaded.page {
         Ok((page, rs)) => {
+            // Nothing is staged; what could be undone or redone named the rows of the old page.
+            t.edits = Arc::default();
             view.page = page;
             let (data, has_next) = page_data(rs, columns);
             let (rows, width) = (data.rows.len(), data.columns.len());
@@ -492,6 +506,34 @@ fn apply_load(
             t.back_to_shown();
             Err(s.db_failed(conn, &e))
         }
+    }
+}
+
+/// Loading the page a tab shows again, inside another job: `edit.apply` reloads in its own job
+/// after it writes. [`Reload::prepare`] runs on the caller's thread and moves the tab's `seq` on;
+/// [`Reload::run`] loads in the job; [`Reload::finish`] applies the page like any other load.
+pub(crate) struct Reload {
+    info: TableInfo,
+    view: PageView,
+    columns: Vec<Column>,
+    seq: u64,
+}
+
+impl Reload {
+    pub(crate) fn prepare(s: &mut Session, tab: TabId, info: &TableInfo) -> Result<Reload, EngineError> {
+        let view = table_tab_mut(s, tab).map(|t| t.shown.clone()).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
+        check(info, &view, false)?;
+        let t = table_tab_mut(s, tab).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
+        t.seq = t.seq.wrapping_add(1);
+        Ok(Reload { info: info.clone(), view, columns: info.columns.iter().map(ColumnInfo::column).collect(), seq: t.seq })
+    }
+
+    pub(crate) async fn run(&self, conn: &PgConnection) -> Loaded {
+        load(conn, &self.info, &self.view, false).await
+    }
+
+    pub(crate) fn finish(self, s: &mut Session, conn: &Arc<PgConnection>, tab: TabId, loaded: Loaded) -> Result<Json, EngineError> {
+        apply_load(s, conn, tab, self.seq, self.view, false, self.columns, loaded)
     }
 }
 
@@ -540,6 +582,9 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let raw_mode = opt_bool(params, "rawMode")?;
     let apply = p::bool_or(params, "apply", true)?;
     let t = active(s)?;
+    if apply && t.has_staged_edits() {
+        return Err(disabled(STAGED));
+    }
     let (tab, table, sort) = (t.id, t.table.clone(), t.sort.clone());
     let filters = filters.unwrap_or_else(|| t.filters.clone());
     let raw = raw.unwrap_or_else(|| t.raw.clone());
@@ -598,20 +643,26 @@ fn parse_to(params: &Json) -> Result<To, EngineError> {
 }
 
 /// `{to}` → a job returning `{tab, page, rows, hasNext, total}`. `prev` on the first page and
-/// `next` on the last one stay there (and load it again); `last` counts the rows first (and
-/// `total` ends exact).
+/// `next` on the last one stay there (and load it again): the last page is the one shown when
+/// it is the one asked for and nothing follows it, or with an exact total the last one counted.
+/// `last` counts the rows first (and `total` ends exact).
 fn page(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let to = parse_to(params)?;
     let t = active(s)?;
     let mut view = t.view();
-    // The last page is known only once it shows (and no other page is on its way).
-    let at_end = view.page == t.shown.page && !t.has_next;
+    // The end shows: the page asked for is the one shown, and nothing follows it. With an exact
+    // count the last page is known also while another page is on its way.
+    let at_end = view == t.shown && !t.has_next;
+    let counted_last = match t.total {
+        Total::Exact(n) => last_page(n),
+        _ => MAX_PAGE,
+    };
     let last = matches!(to, To::Last);
     view.page = match to {
         To::First => 0,
         To::Prev => view.page.saturating_sub(1),
         To::Next if at_end => view.page,
-        To::Next => view.page.saturating_add(1).min(MAX_PAGE),
+        To::Next => view.page.saturating_add(1).min(counted_last).min(MAX_PAGE),
         To::Last => view.page,
         To::Page(n) => n,
     };
@@ -705,9 +756,9 @@ fn apply_count(
 
 /// `{}` → `{sent}`: while the tab loads a page or counts, sends a cancel request for the
 /// statement running on the browse connection (the job then ends with `cancelled`, and the rows
-/// from before stay). `sent: false` when the tab runs nothing. The tab's markers name only jobs
-/// on the current browse connection (see the module docs); a marker whose job is no longer
-/// running (left by an `Apply` that panicked and was rolled back) does not count.
+/// from before stay). `sent: false` when the tab runs nothing. The tab's markers name only
+/// running jobs on the current browse connection (see the module docs); a marker whose job is
+/// not running does not count, all the same. An Apply is not cancelled here.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));

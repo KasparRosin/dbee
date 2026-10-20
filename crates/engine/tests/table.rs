@@ -321,6 +321,40 @@ fn follow_null_reference_is_an_error() {
 }
 
 #[test]
+fn next_goes_on_from_the_page_asked_for() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    open_table(&mut s, "shop", "big_rows");
+    // The page shown is the only page of its filter …
+    let r = run(&mut s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "le", "value": "50" }] }));
+    assert_eq!((r["rows"].as_u64(), r["hasNext"].as_bool()), (Some(50), Some(false)));
+    // … but a wider filter is on its way, so "next" is not at the end.
+    let wider = json!({ "filters": [{ "column": "id", "op": "le", "value": "500" }] });
+    let Outcome::Started(job) = s.execute("table.setFilters", wider).unwrap() else { panic!("a job") };
+    let r = page(&mut s, json!("next"));
+    assert_eq!((r["page"].as_u64(), r["hasNext"].as_bool()), (Some(1), Some(true)));
+    assert_eq!(first_id(&mut s), 101);
+    assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }));
+}
+
+#[test]
+fn next_stops_at_the_last_counted_page() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    open_table(&mut s, "shop", "big_rows");
+    assert_eq!(run(&mut s, "table.count", json!({}))["total"], json!({ "exact": 1_000_000 }));
+    assert_eq!(page(&mut s, json!(9999))["page"], 9998);
+    // The first "next" asks for the last page; the second, before it shows, stays there.
+    let Outcome::Started(a) = s.execute("table.page", json!({ "to": "next" })).unwrap() else { panic!("a job") };
+    let Outcome::Started(b) = s.execute("table.page", json!({ "to": "next" })).unwrap() else { panic!("a job") };
+    assert_eq!(s.inspect()["table"]["requestedPage"], 9999);
+    let r = s.wait(b, T).unwrap();
+    assert_eq!((r["page"].as_u64(), r["rows"].as_u64()), (Some(9999), Some(100)), "{r}");
+    assert_eq!(s.wait(a, T).unwrap(), json!({ "ignored": true }));
+    assert_eq!(first_id(&mut s), 999_901);
+}
+
+#[test]
 fn stale_page_results_are_ignored() {
     let _db = require_testdb!();
     let mut s = connected();
