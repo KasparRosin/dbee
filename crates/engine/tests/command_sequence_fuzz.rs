@@ -43,7 +43,106 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("tab.list", &[]),
     ("query.setText", &[("text", Hint::Text)]),
     ("tab.close", &[("tab", Hint::Tab), ("force", Hint::Bool)]),
+    ("connection.list", &[]),
+    ("connection.save", &[("config", CONFIG), ("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text)]),
+    ("connection.delete", &[("id", SAVED_ID)]),
+    ("connection.duplicate", &[("id", SAVED_ID)]),
+    ("connection.parseUrl", &[("url", Hint::Custom(url))]),
+    ("connection.sshKey", &[("config", CONFIG)]),
+    ("connection.test", CONNECT),
+    ("connection.open", OPEN),
+    ("connection.reconnect", SECRETS),
+    ("schema.refresh", &[]),
+    ("connection.close", &[("force", Hint::Bool)]),
 ];
+
+/// Connection configs. Every host is 127.0.0.1 and every port 1, which refuses at once, for the
+/// database and for SSH: the fuzz never reaches a server, and never names a host that would need
+/// a DNS lookup.
+const CONFIG: Hint = Hint::Custom(config);
+const SAVED_ID: Hint = Hint::Custom(saved_id);
+/// For commands that take `id` or `config`: mostly absent, so `config` alone gets through too.
+const MAYBE_ID: Hint = Hint::Custom(maybe_id);
+const SECRETS: &[(&str, Hint)] =
+    &[("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text), ("trustHostKey", FINGERPRINT)];
+const CONNECT: &[(&str, Hint)] = &[
+    ("id", MAYBE_ID),
+    ("config", CONFIG),
+    ("password", Hint::Text),
+    ("sshPassword", Hint::Text),
+    ("sshPassphrase", Hint::Text),
+    ("trustHostKey", FINGERPRINT),
+];
+const OPEN: &[(&str, Hint)] = &[
+    ("id", MAYBE_ID),
+    ("config", CONFIG),
+    ("password", Hint::Text),
+    ("sshPassword", Hint::Text),
+    ("sshPassphrase", Hint::Text),
+    ("trustHostKey", FINGERPRINT),
+    ("savePassword", Hint::Bool),
+];
+const FINGERPRINT: Hint = Hint::OneOf(&["SHA256:AAAA", "SHA256:", "", "md5:00:11"]);
+
+fn config(r: &mut Rng, s: &Session) -> Json {
+    let mut c = json!({
+        "host": "127.0.0.1",
+        "port": if r.chance(5) { 0 } else { 1 },
+        "name": text(r),
+        "user": r.pick(&["", "postgres", "it's", "🐝"]),
+        "database": r.pick(&["", "dbee", "a\"b", "🐝"]),
+        "sslMode": if r.chance(5) { "bogus" } else { *r.pick(&["disable", "prefer", "require", "verify-ca", "verify-full"]) },
+        "color": if r.chance(5) { "plaid" } else { *r.pick(&["none", "red", "blue"]) },
+        "readOnly": r.chance(50),
+        "saveSecrets": r.chance(70),
+    });
+    if r.chance(10) {
+        c["caFile"] = json!("/nonexistent/dbee-fuzz/ca.crt");
+    }
+    if r.chance(15) {
+        c["id"] = saved_id(r, s);
+    }
+    if r.chance(40) {
+        let auth = if r.chance(5) {
+            json!({ "method": "telepathy" })
+        } else {
+            r.pick(&[
+                json!({ "method": "key", "path": null }),
+                json!({ "method": "key", "path": "/nonexistent/dbee-fuzz/id_ed25519" }),
+                json!({ "method": "agent" }),
+                json!({ "method": "password" }),
+            ])
+            .clone()
+        };
+        c["ssh"] = json!({ "host": "127.0.0.1", "port": 1, "user": if r.chance(10) { "" } else { "dbee" }, "auth": auth });
+    }
+    c
+}
+
+/// A saved connection's id most of the time, else one that is not saved.
+fn saved_id(r: &mut Rng, s: &Session) -> Json {
+    let saved = &s.state().store.saved;
+    if !saved.is_empty() && r.chance(80) { json!(r.pick(saved).id) } else { json!(r.pick(&["", "nope", "🐝", "../x"])) }
+}
+
+fn maybe_id(r: &mut Rng, s: &Session) -> Json {
+    if r.chance(60) { Json::Null } else { saved_id(r, s) }
+}
+
+fn url(r: &mut Rng, _: &Session) -> Json {
+    json!(r.pick(&[
+        "postgres://u:p%40ss@127.0.0.1:1/db?sslmode=require",
+        "postgresql://127.0.0.1",
+        "postgres://",
+        "postgres://u@/db",
+        "postgres://127.0.0.1:99999/x",
+        "postgres://%zz@127.0.0.1/x",
+        "postgres://[127.0.0.1/x",
+        "postgres://127.0.0.1/x?sslmode=bogus",
+        "mysql://127.0.0.1/x",
+        "",
+    ]))
+}
 
 /// xorshift64.
 struct Rng(u64);

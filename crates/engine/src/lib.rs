@@ -198,7 +198,6 @@ pub struct Session {
     pub(crate) jobs: jobs::Jobs,
     pub(crate) ui_requests: Vec<UiRequest>,
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
-    #[expect(dead_code, reason = "the connection commands (M1.14) read it")]
     pub(crate) ssh: SshEnv,
     journal: Vec<(String, Json)>,
 }
@@ -395,20 +394,7 @@ impl Session {
     /// tabs and the active one in detail, and the running jobs. Never contains a secret.
     pub fn inspect(&self) -> Json {
         let st = &self.state;
-        let connection = st.connected.as_ref().map(|c| {
-            json!({
-                "id": c.config.id,
-                "name": c.config.display_name(),
-                "host": c.config.host,
-                "port": c.config.port,
-                "database": c.config.database,
-                "user": c.config.user,
-                "ssh": c.config.ssh.is_some(),
-                "readOnly": c.info.read_only,
-                "server": c.info.version,
-                "lost": c.lost,
-            })
-        });
+        let connection = st.connected.as_ref().map(Connected::summary);
         let active = st.active_tab();
         let query = match active {
             Some(Tab::Query(q)) => json!({ "tab": q.id, "title": q.title, "text": q.text, "running": q.running }),
@@ -436,7 +422,6 @@ impl Session {
     /// guard; a panic in the future becomes `Internal` naming `label`. A job is never aborted:
     /// it runs to its end, and an `Apply` whose tab is gone must ignore its result. A job started
     /// by a call that then panics is orphaned: its `Apply` is dropped.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the first job commands outside tests arrive with M1.14"))]
     pub(crate) fn spawn_job(&mut self, label: &'static str, fut: impl Future<Output = Apply> + Send + 'static) -> JobId {
         self.jobs.spawn(label, fut)
     }

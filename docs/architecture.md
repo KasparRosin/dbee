@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (engine core)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (connection commands)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -16,7 +16,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `crates/config` | exists | L1. Connection settings, URL parsing, the saved and recent connections file, and the secret stores (OS keyring, in-memory). No passwords in the file. |
 | `crates/ssh` | exists | L2. The SSH tunnel (russh with ring): host key check against `known_hosts` (unknown hosts ask once and can be learned, changed keys are refused), key, agent and password login, and a direct-tcpip channel per connection. Everything it reads from the machine comes in through `SshEnv`. |
 | `crates/pg` | exists | L3. The Postgres connection (tokio-postgres): TCP or a channel through the SSH tunnel, TLS with rustls (ring) and the OS certificate verifier, `application_name=dbee`, `standard_conforming_strings = on`, read-only mode, cancel requests, and a simple-query runner that returns values as text exactly as Postgres prints them. |
-| `crates/engine` | exists | L5. `Session`: the session state, the command registry (`cmd/*`, so far the tab commands), background jobs on a tokio runtime, the panic guard and the journal. |
+| `crates/engine` | exists | L5. `Session`: the session state, the command registry (`cmd/*`, so far the tab and connection commands), background jobs on a tokio runtime, the panic guard and the journal. |
 | `crates/ui-egui` | exists, placeholder | L6. The egui UI and the control channel. |
 | `crates/mcp` | exists, empty | L6. MCP server over stdio. |
 | `apps/dbee` | exists | L7. Desktop binary; opens a placeholder window. |
@@ -46,8 +46,9 @@ A crate may depend only on lower layers. Register every new crate in `xtask/src/
    4. records a successful journaled command in the **journal**.
 3. **Jobs.** A command either finishes (`Outcome::Done`) or starts a job (`Outcome::Started`). Jobs are futures on the session's tokio runtime (2 worker threads named `dbee-db`). A job's future ends in an `Apply` closure; `Session::pump`, which the UI will call every frame **(planned)**, runs each `Apply` on the UI thread under the same panic guard, so the window never waits on the database. `wait`, `wait_idle` and `run_blocking` serve tests and the control channel. `notify` (the UI's repaint request) is called after each result. A job is never aborted: it runs to its end, a Postgres apply is never abandoned mid-transaction, and database work is stopped through the Postgres cancel request. A result whose tab has gone is ignored. Dropping the session shuts the runtime down without waiting (safe in async code too); jobs still running are dropped with it.
 4. **Journal.** Successful journaled commands with their params, in memory and replayable; the localhost control channel will serve it **(planned)**. Secret params (`password`, `passphrase`, and keys ending in `Password` or `Passphrase`) are left out at any depth. It keeps the newest 10,000 entries at most (it drops the oldest 5,000), and consecutive `query.setText` entries replace each other. Logs carry command ids, job labels, error codes and timings only: never params, secrets, cell values or SQL text.
-5. **The UI is thin.** Panels read `Session::state()` and act only through commands. `Session::inspect()` is the JSON summary agents read (`document.inspect`).
-6. **Programmatic calls never open dialogs.** Only menu-style invocation opens a dialog (`UiRequest::Dialog`, collected with `take_ui_requests`).
+5. **Connections.** `connection.open`, `connection.test` and `connection.reconnect` are jobs: the SSH tunnel, the browse connection and (for open and reconnect) the catalog. Secrets come from the params, then the secret store, then nowhere; the ones a connect used stay in memory, in crate-private fields, for reconnects. Unknown host keys, key passphrases, the SSH password and a missing database password come back as `needs…` errors. A browse operation that finds the connection gone marks the session `lost`, and commands that need the database are disabled ("connection lost — reconnect") until a reconnect replaces the connections, keeping the tabs. `connection.close` cancels running statements through the Postgres cancel request and lets the connections go; jobs that used them have their results dropped.
+6. **The UI is thin.** Panels read `Session::state()` and act only through commands. `Session::inspect()` is the JSON summary agents read (`document.inspect`).
+7. **Programmatic calls never open dialogs.** Only menu-style invocation opens a dialog (`UiRequest::Dialog`, collected with `take_ui_requests`).
 
 ## Agent control
 
@@ -63,12 +64,13 @@ Desktop only: macOS, Windows, Linux and FreeBSD. There is no web build and no wa
 
 ## Known gaps
 
-Most of M1. The domain crates and the engine core exist; the engine has only its tab commands so far, and no UI, query editor, result grid or schema browser exists. The ranked work list is [`gaps.md`](gaps.md).
+Most of M1. The domain crates and the engine core exist; the engine has only its tab and connection commands so far, and no UI, query editor, result grid or schema browser exists. The ranked work list is [`gaps.md`](gaps.md).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | minor | `crates/engine`: connection commands (save, list, test, open, reconnect, close, schema refresh), secret resolution, prompts, lost connections |
 | 2026-10-20 | minor | `crates/engine` (L5): session, command registry, jobs, panic guard, journal; data flow describes what exists |
 | 2026-10-19 | minor | `crates/pg` (L3): Postgres connection with TLS, SSH tunnel, read-only mode and cancel |
 | 2026-10-19 | minor | `crates/ssh` (L2): SSH tunnel with host key check, key, agent and password login |

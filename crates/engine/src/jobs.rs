@@ -121,6 +121,18 @@ impl Jobs {
         job
     }
 
+    /// Runs `fut` on the runtime with no result and no tracking: it never counts as a running
+    /// job (cancel requests sent while disconnecting). A panic in it ends only that task.
+    pub fn spawn_detached(&self, fut: impl Future<Output = ()> + Send + 'static) {
+        // Detach: dropping the handle does not cancel the task.
+        drop(self.handle.spawn(fut));
+    }
+
+    /// A job with this label is running.
+    pub fn is_running_label(&self, label: &str) -> bool {
+        self.running.values().any(|l| *l == label)
+    }
+
     pub fn busy(&self) -> bool {
         !self.running.is_empty()
     }

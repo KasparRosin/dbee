@@ -5,6 +5,7 @@
 //! primitives. Commands call each other's functions, never [`Session::execute`], so the journal
 //! records only what the caller asked for.
 
+pub mod connection;
 pub mod tabs;
 
 use serde::Serialize;
@@ -59,7 +60,7 @@ impl CommandInfo {
 }
 
 /// Every command table, in menu order. A new command module adds its `SPECS` here.
-const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS];
+const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS];
 
 #[cfg(test)]
 fn test_specs() -> &'static [CommandSpec] {
@@ -113,6 +114,31 @@ pub fn always(_: &Session) -> Result<(), String> {
 /// At least one tab is open.
 pub fn has_tabs(s: &Session) -> Result<(), String> {
     if s.state.tabs.is_empty() { Err("no tab is open".into()) } else { Ok(()) }
+}
+
+/// Why a command that needs a connection cannot run on the connection screen.
+pub const NOT_CONNECTED: &str = "not connected";
+
+/// Why a command that needs the database cannot run after the connection broke.
+pub const LOST: &str = "connection lost — reconnect";
+
+/// A connection is open, lost or not.
+pub fn connected(s: &Session) -> Result<(), String> {
+    if s.state.connected.is_some() { Ok(()) } else { Err(NOT_CONNECTED.into()) }
+}
+
+/// No connection is open (one connection per window).
+pub fn not_connected(s: &Session) -> Result<(), String> {
+    if s.state.connected.is_some() { Err("already connected; disconnect first".into()) } else { Ok(()) }
+}
+
+/// A connection is open and not lost: for every command that needs the database.
+pub fn needs_db(s: &Session) -> Result<(), String> {
+    match &s.state.connected {
+        None => Err(NOT_CONNECTED.into()),
+        Some(c) if c.lost => Err(LOST.into()),
+        Some(_) => Ok(()),
+    }
 }
 
 /// The active tab is a query tab.

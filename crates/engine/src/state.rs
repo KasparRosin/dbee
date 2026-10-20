@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
 use dbee_core::{Catalog, TableRef};
-use dbee_pg::ServerInfo;
+use dbee_pg::{PgConnection, ServerInfo};
+use dbee_ssh::{SshSecrets, Tunnel};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -23,13 +24,84 @@ pub enum Screen {
 }
 
 /// The open connection.
-#[derive(Clone, Debug)]
+///
+/// The connections are crate-private: commands reach them through the session, and a job that
+/// used one checks that it is still the session's before applying its result. `Debug` shows no
+/// secret.
+#[derive(Clone)]
 pub struct Connected {
     pub config: ConnectionConfig,
     pub info: ServerInfo,
     pub catalog: Arc<Catalog>,
     /// The connection broke; commands that need the database wait for a reconnect.
     pub lost: bool,
+    /// Table pages, counts, the catalog and applies.
+    pub(crate) browse: Arc<PgConnection>,
+    /// Query tabs' statements; opened on the first query run (and again after a reconnect).
+    pub(crate) query: Option<Arc<PgConnection>>,
+    /// The SSH tunnel both connections run through, when the config has one.
+    pub(crate) tunnel: Option<Arc<Tunnel>>,
+    /// What the connect used, kept in memory for reconnects (and the query connection).
+    pub(crate) credentials: Credentials,
+}
+
+impl std::fmt::Debug for Connected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connected")
+            .field("config", &self.config)
+            .field("info", &self.info)
+            .field("tables", &self.catalog.table_count())
+            .field("lost", &self.lost)
+            .field("browse", &self.browse)
+            .field("query", &self.query)
+            .field("tunnel", &self.tunnel)
+            .field("credentials", &self.credentials)
+            .finish()
+    }
+}
+
+impl Connected {
+    /// `{id, name, color, host, port, database, user, ssh, readOnly, server, lost}`, as
+    /// `inspect()` and `connection.open` show it. Never a secret.
+    pub fn summary(&self) -> Json {
+        let c = &self.config;
+        json!({
+            "id": c.id,
+            "name": c.display_name(),
+            "color": c.color,
+            "host": c.host,
+            "port": c.port,
+            "database": c.database,
+            "user": c.user,
+            "ssh": c.ssh.is_some(),
+            "readOnly": self.info.read_only,
+            "server": self.info.version,
+            "lost": self.lost,
+        })
+    }
+}
+
+/// The secrets of one connect and the SSH host key fingerprint the user accepted. Kept only in
+/// crate-private fields; `Debug` hides the secrets.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct Credentials {
+    /// The database password.
+    pub password: Option<String>,
+    /// The SSH password and key passphrase.
+    pub ssh: SshSecrets,
+    /// The fingerprint from `trustHostKey`, so a key accepted for this connection only (no
+    /// `known_hosts` to learn it into) is accepted again on a reconnect.
+    pub trust: Option<String>,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("ssh", &self.ssh)
+            .field("trust", &self.trust)
+            .finish()
+    }
 }
 
 /// An inclusive rectangle of grid cells, `(row, column)`: where the selection started and
