@@ -84,12 +84,15 @@ pub async fn describe(conn: &PgConnection, sql: &str) -> Option<Vec<Column>> {
     Some(columns)
 }
 
-/// [`describe`], then [`run_untyped`]; the described columns replace the untyped ones when the
-/// counts match.
+/// [`run_untyped`], then (for a single statement that returned columns) [`describe`] to type
+/// them. Running comes first so the user always sees the statement's own error and a failed
+/// prepare cannot abort a transaction they opened; the described columns replace the untyped
+/// ones when the counts match.
 pub async fn run(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
-    let described = describe(conn, sql).await;
     let mut result = run_untyped(conn, sql, limits).await?;
-    if let Some(columns) = described
+    if !result.columns.is_empty()
+        && dbee_sql::lexer::statements(sql).len() == 1
+        && let Some(columns) = describe(conn, sql).await
         && columns.len() == result.columns.len()
     {
         result.columns = columns;

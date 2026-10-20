@@ -1113,6 +1113,7 @@ version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-core",
+ "dbee-sql",
  "dbee-ssh",
  "dbee-testkit",
  "futures-util",

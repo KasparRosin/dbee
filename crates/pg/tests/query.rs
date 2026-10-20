@@ -4,7 +4,7 @@
 
 use dbee_config::{ConnectionConfig, SslMode};
 use dbee_core::ResultSet;
-use dbee_pg::query::{Limits, QUERY_LIMITS, describe, run, run_untyped, scalar_u64};
+use dbee_pg::query::{Limits, QUERY_LIMITS, describe, run, scalar_u64};
 use dbee_pg::{PgConnection, PgError, Target, connect};
 use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
 
@@ -75,7 +75,7 @@ async fn byte_cap_stops_collecting() {
     let db = require_testdb!();
     for (major, c) in conns(db).await {
         let r = ok(&c, "SELECT repeat('x', 100000) FROM generate_series(1, 100)", Limits { max_rows: 1000, max_bytes: 1 << 20 }).await;
-        assert!(!r.complete && r.rows.len() <= 11, "pg{major}: {} rows", r.rows.len());
+        assert!(!r.complete && r.rows.len() == 10, "pg{major}: {} rows", r.rows.len());
         assert_eq!(r.rows_seen, 100, "pg{major}");
         assert_eq!(scalar_u64(&c, "SELECT 1").await.unwrap(), 1);
     }
@@ -163,10 +163,24 @@ async fn scalar_u64_reads_a_count_and_rejects_the_rest() {
 }
 
 #[tokio::test]
-async fn run_uses_untyped_columns_when_describe_does_not_match() {
+async fn run_inside_a_transaction_does_not_abort_it() {
     let db = require_testdb!();
-    for (_, c) in conns(db).await {
-        let r = run_untyped(&c, "SELECT 1 AS a", QUERY_LIMITS).await.unwrap();
-        assert_eq!(r.columns[0].base_type, "");
+    for (major, c) in conns(db).await {
+        ok(&c, "BEGIN", QUERY_LIMITS).await;
+        match run(&c, "SELECT nope", QUERY_LIMITS).await {
+            Err(PgError::Server { code, position, .. }) => {
+                assert_eq!(code, "42703", "pg{major}");
+                assert_eq!(position, Some(8), "pg{major}");
+            }
+            other => panic!("{other:?}"),
+        }
+        ok(&c, "ROLLBACK", QUERY_LIMITS).await;
+        ok(&c, "BEGIN", QUERY_LIMITS).await;
+        let r = ok(&c, "SELECT 1 AS a; SELECT 2 AS b", QUERY_LIMITS).await;
+        assert_eq!(r.columns.len(), 1, "pg{major}");
+        assert_eq!((r.columns[0].name.as_str(), r.columns[0].base_type.as_str()), ("b", ""), "pg{major}");
+        assert_eq!(r.rows, vec![vec![Some("2".to_string())]], "pg{major}");
+        ok(&c, "SELECT 3", QUERY_LIMITS).await;
+        ok(&c, "ROLLBACK", QUERY_LIMITS).await;
     }
 }
