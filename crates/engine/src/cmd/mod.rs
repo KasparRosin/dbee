@@ -13,6 +13,7 @@
 //! waiting for that answer any more. The check comes before the job's own error is mapped.
 
 pub mod connection;
+pub mod schema;
 pub mod tabs;
 
 use serde::Serialize;
@@ -67,7 +68,7 @@ impl CommandInfo {
 }
 
 /// Every command table, in menu order. A new command module adds its `SPECS` here.
-const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS];
+const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS, schema::SPECS];
 
 #[cfg(test)]
 fn test_specs() -> &'static [CommandSpec] {

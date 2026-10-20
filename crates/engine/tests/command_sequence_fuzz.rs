@@ -20,7 +20,6 @@ use serde_json::json;
 
 /// How to build a plausible value for one param.
 #[derive(Clone, Copy)]
-#[expect(dead_code, reason = "some variants are there for later tasks' hints")]
 enum Hint {
     /// Any text, SQL-looking or not.
     Text,
@@ -53,6 +52,8 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("connection.open", OPEN),
     ("connection.reconnect", SECRETS),
     ("schema.refresh", &[]),
+    ("schema.inspect", &[("schema", Hint::Text), ("table", Hint::Text)]),
+    ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count)]),
     ("connection.close", &[("force", Hint::Bool)]),
 ];
 
