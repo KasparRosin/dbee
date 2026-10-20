@@ -337,6 +337,7 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "notEditableReason": reason,
         "edits": super::edit::summary(&t.edits, t.data.as_ref().map_or(0, |d| d.rows.len())),
         "failed": t.edits.failed.as_ref().map(|(row, column, message)| json!({ "row": row, "column": column, "message": message })),
+        "outcomeUnknown": t.edits.outcome_unknown(),
         "applying": t.applying,
     })
 }
@@ -788,7 +789,8 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 }
 
 /// `{offset? = 0, limit? = 100}` → `{tab, columns, rows, offset, page, requestedPage, hasNext,
-/// total, editable, notEditableReason, loading, error}`: the loaded rows from `offset`, at most
+/// total, editable, notEditableReason, outcomeUnknown, loading, error}`: the loaded rows from
+/// `offset`, at most
 /// `limit`, each a list of text or `null`, and the 0-based page they are (`requestedPage` is the
 /// one asked for, which differs while a load runs). Before the first page arrives, the
 /// catalog's columns and no rows.
@@ -816,6 +818,7 @@ fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         "total": t.total,
         "editable": reason.is_none(),
         "notEditableReason": reason,
+        "outcomeUnknown": t.edits.outcome_unknown(),
         "loading": t.loading,
         "error": t.error,
     })))

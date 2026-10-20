@@ -14,8 +14,8 @@ use dbee_ssh::{SshSecrets, Tunnel};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::cmd::query::QueryRun;
 use crate::edits::Edits;
+use crate::jobs::Stop;
 use crate::{JobId, Json, TabId};
 
 /// Which screen the window shows.
@@ -88,6 +88,13 @@ impl Connected {
             "lost": self.lost,
         })
     }
+}
+
+/// The session's query run in progress ([`Connected::query_run`]): its job, and how to stop it.
+#[derive(Clone, Debug)]
+pub(crate) struct QueryRun {
+    pub job: JobId,
+    pub stop: Arc<Stop>,
 }
 
 /// The secrets of one connect and the SSH host key fingerprint the user accepted. Kept only in

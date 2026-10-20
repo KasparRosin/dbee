@@ -441,16 +441,16 @@ pub(crate) fn db_error(e: &PgError) -> EngineError {
 
 impl Session {
     /// The browse connection, for a command that needs the database. `Disabled` when there is
-    /// none or it is lost; when it has closed since its last use, the session is marked lost and
-    /// the error is `connectionLost`.
+    /// none or it is lost; when it or the tunnel it runs through has closed since its last use,
+    /// the session is marked lost and the error is `connectionLost`.
     pub(crate) fn browse(&mut self) -> Result<Arc<PgConnection>, EngineError> {
         let c = self.state.connected.as_mut().ok_or_else(|| disabled(NOT_CONNECTED))?;
         if c.lost {
             return Err(disabled(LOST));
         }
-        if c.browse.is_closed() {
+        if c.browse.is_closed() || c.tunnel.as_ref().is_some_and(|t| t.is_closed()) {
             c.lost = true;
-            log::info!("the browse connection has closed; the session is marked lost");
+            log::info!("the browse connection or its tunnel has closed; the session is marked lost");
             return Err(db_error(&PgError::ConnectionLost));
         }
         Ok(Arc::clone(&c.browse))
@@ -835,13 +835,11 @@ fn apply_open(
         credentials,
     };
     let mut result = opened_json(&c);
-    match kept {
-        Some(Ok(())) => result["secretsSaved"] = json!(true),
-        Some(Err(note)) => {
-            result["secretsSaved"] = json!(false);
-            result["secretsNote"] = json!(note);
+    if let (Json::Object(map), Some(kept)) = (&mut result, kept) {
+        map.insert("secretsSaved".into(), json!(kept.is_ok()));
+        if let Err(note) = kept {
+            map.insert("secretsNote".into(), json!(note));
         }
-        None => {}
     }
     for w in &c.info.warnings {
         s.ui_requests.push(UiRequest::Notice(w.clone()));

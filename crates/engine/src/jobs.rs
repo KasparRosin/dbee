@@ -9,15 +9,57 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
+use tokio::sync::Notify;
 
 use crate::{EngineError, JobId, Json, Session, panic_text};
 
 /// What a finished job does to the session, run on the caller's thread by [`Session::pump`].
 pub(crate) type Apply = Box<dyn FnOnce(&mut Session) -> Result<Json, EngineError> + Send>;
+
+/// Asks a running job to stop, cooperatively: set once and for good. The job looks at it between
+/// steps and waits on it while a step runs (a query run: before each statement, and while one
+/// runs, when it sends the cancel request itself).
+#[derive(Default)]
+pub(crate) struct Stop {
+    set: AtomicBool,
+    notify: Notify,
+}
+
+impl Stop {
+    pub(crate) fn stop(&self) {
+        self.set.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) fn is_set(&self) -> bool {
+        self.set.load(Ordering::Acquire)
+    }
+
+    /// Returns once [`Stop::stop`] was called, also when that was before.
+    pub(crate) async fn stopped(&self) {
+        loop {
+            let notified = self.notify.notified();
+            let mut notified = std::pin::pin!(notified);
+            // Waiting from here on, so a stop after the check below wakes it.
+            notified.as_mut().enable();
+            if self.is_set() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl std::fmt::Debug for Stop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stop").field("set", &self.is_set()).finish()
+    }
+}
 
 /// Worker threads of the job runtime.
 const WORKERS: usize = 2;
@@ -221,5 +263,28 @@ impl Drop for Jobs {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_is_seen_before_and_while_waiting() {
+        let stop = Arc::new(Stop::default());
+        assert!(!stop.is_set());
+        let waiting = tokio::spawn({
+            let stop = Arc::clone(&stop);
+            async move { stop.stopped().await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        stop.stop();
+        tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap();
+        // Once set, it stays set, and waiting returns at once.
+        assert!(stop.is_set());
+        tokio::time::timeout(Duration::from_secs(5), stop.stopped()).await.unwrap();
     }
 }

@@ -437,6 +437,7 @@ fn connection_lost_during_apply_keeps_the_edits() {
     let table = s.inspect()["table"].clone();
     assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["message"].as_str()), (Some(0), Some(UNKNOWN)), "{table}");
     assert_eq!(count(&s), 1, "the edit is kept");
+    assert_eq!(table["outcomeUnknown"], true, "{table}");
     assert_eq!(s.inspect()["connection"]["lost"], true);
     assert_eq!(why(&refused(&mut s, "edit.apply", json!({}))), "connection lost — reconnect");
     // Reset, undo and redo need no database: the edits can always be dropped.
@@ -480,19 +481,21 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
     assert_eq!(count(&s), 1);
     assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 2")), "Bob", "the reconnect cancelled it");
     assert_eq!(table["failed"]["message"], UNKNOWN);
+    assert_eq!((&table["outcomeUnknown"], &read(&mut s)["outcomeUnknown"]), (&json!(true), &json!(true)), "the UI can see why Apply asks");
     let e = refused(&mut s, "edit.apply", json!({}));
     assert_eq!((e.code(), e.data()["what"].as_str()), ("needsConfirm", Some("applyAfterUnknownOutcome")));
     // A reset clears the mark, but the doubt stays until the page loads again: the same edits
     // brought back by an undo still ask.
     run(&mut s, "edit.reset", json!({}));
-    assert_eq!(s.inspect()["table"]["failed"], Json::Null);
+    assert_eq!((&s.inspect()["table"]["failed"], &s.inspect()["table"]["outcomeUnknown"]), (&Json::Null, &json!(true)));
     run(&mut s, "edit.undo", json!({}));
     assert_eq!(count(&s), 1);
     assert_eq!(refused(&mut s, "edit.apply", json!({})).code(), "needsConfirm");
     // Reset and reload: what was written shows, and new edits apply without asking.
     run(&mut s, "edit.reset", json!({}));
     run(&mut s, "table.refresh", json!({}));
-    assert_eq!(cell(&read(&mut s), 1, "name"), Some("Bob"));
+    let d = read(&mut s);
+    assert_eq!((cell(&d, 1, "name"), &d["outcomeUnknown"]), (Some("Bob"), &json!(false)));
     run(&mut s, "cell.edit", json!({ "row": 1, "column": "name", "value": "again" }));
     assert_eq!(run(&mut s, "edit.apply", json!({}))["written"], 1);
     assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 2")), "again");

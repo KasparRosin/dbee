@@ -104,10 +104,19 @@ fn run_current_runs_statement_under_cursor() {
     assert_eq!(results.len(), 1, "{r}");
     assert_eq!(names(&results[0]), ["b"]);
     assert_eq!(r["shown"], 0);
-    // Past the end is the last statement; `current` needs the cursor.
-    let r = run(&mut s, "query.run", json!({ "current": true, "cursor": 999 }));
+    // At the end is the last statement; `current` needs the cursor, inside the text and on a
+    // character boundary.
+    let r = run(&mut s, "query.run", json!({ "current": true, "cursor": text.len() }));
     assert_eq!(names(&r["results"][0]), ["c"]);
     assert_eq!(s.execute("query.run", json!({ "current": true })).unwrap_err().code(), "badParams");
+    for cursor in [text.len() + 1, 999, usize::MAX] {
+        assert_eq!(s.execute("query.run", json!({ "current": true, "cursor": cursor })).unwrap_err().code(), "badParams", "{cursor}");
+    }
+    run(&mut s, "query.setText", json!({ "text": "select 'é' as e" }));
+    let inside = "select 'é".len() - 1;
+    let e = s.execute("query.run", json!({ "current": true, "cursor": inside })).unwrap_err();
+    assert_eq!(e.code(), "badParams", "{e}");
+    assert_eq!(names(&run(&mut s, "query.run", json!({ "current": true, "cursor": inside + 1 }))["results"][0]), ["e"]);
     // Nothing to run: blank text or only comments.
     tab(&mut s, "  -- just a comment\n ; ");
     assert_eq!(s.execute("query.run", json!({})).unwrap_err().code(), "disabled");
@@ -349,24 +358,52 @@ fn reconnect_during_query_stops_it() {
     assert_eq!(names(&run(&mut s, "query.run", json!({}))["results"][0]), ["two"]);
 }
 
+/// `pg_backend_pid()` of the active query tab's connection, from a run of its own.
+fn query_backend(s: &mut Session) -> String {
+    run(s, "query.setText", json!({ "text": "select pg_backend_pid()" }));
+    run(s, "query.run", json!({}));
+    let Some(Tab::Query(t)) = s.state().active_tab() else { panic!("a query tab is active") };
+    t.results[0].result.rows[0][0].clone().unwrap()
+}
+
+/// Terminates one backend on pg14 and waits until it has exited.
+fn terminate(pid: &str) {
+    assert_eq!(q(&format!("SELECT pg_terminate_backend({pid}, 5000)")), "t");
+}
+
 #[test]
 fn lost_query_connection_is_opened_again() {
     let _db = require_testdb!();
-    let mut s = connected_exclusive();
-    tab(&mut s, "select 1 as one");
+    let mut s = connected();
+    tab(&mut s, "BEGIN");
     run(&mut s, "query.run", json!({}));
-    kill_dbee_backends(&s, pg14());
-    // The dead connection is found at the next run, or fails it; the run after opens a new one.
-    let r = match s.run_blocking("query.run", json!({}), T) {
-        Ok(r) => r,
-        Err(e) => {
-            assert_eq!(e.code(), "connectionLost", "{e}");
-            assert_eq!(shown(&s)["error"]["code"], "connectionLost");
-            run(&mut s, "query.run", json!({}))
-        }
-    };
-    assert_eq!(names(&r["results"][0]), ["one"]);
+    let pid = query_backend(&mut s);
+    // Only the query connection dies: its session, with the open transaction, is gone.
+    terminate(&pid);
+    run(&mut s, "query.setText", json!({ "text": "COMMIT" }));
+    let e = run_err(&mut s, json!({}));
+    let lost = "the query connection was lost, and its session with it: an open transaction was rolled back, and SET values and temporary tables are gone. Run again to open a new one";
+    assert_eq!((e.code(), e.to_string().as_str()), ("connectionLost", lost));
+    assert_eq!(e.data()["action"], Json::Null, "running again is enough: {}", e.data());
+    let i = shown(&s);
+    assert_eq!((&i["error"]["message"], &i["error"]["code"], &i["running"]), (&json!(lost), &json!("connectionLost"), &Json::Null), "{i}");
+    // The session is not lost: the browse connection works on.
+    assert_eq!(s.inspect()["connection"]["lost"], false);
+    run(&mut s, "table.open", json!({ "schema": "shop", "table": "customers" }));
+    // The next run opens a new query connection.
+    let query = s.state().tabs[0].id().0;
+    run(&mut s, "tab.activate", json!({ "tab": query }));
+    let fresh = query_backend(&mut s);
+    assert_ne!(fresh, pid);
     assert_eq!(shown(&s)["error"], Json::Null);
+    // Lost in the middle of a run: it stops at that statement, with the same message.
+    run(&mut s, "query.setText", json!({ "text": format!("select 1; select pg_terminate_backend({fresh}); select 3") }));
+    let e = run_err(&mut s, json!({}));
+    assert_eq!((e.code(), e.to_string().as_str(), e.data()["statement"].as_u64()), ("connectionLost", lost, Some(1)), "{}", e.data());
+    assert_eq!(e.data()["action"], Json::Null);
+    assert_eq!(shown(&s)["results"].as_array().map(Vec::len), Some(1));
+    assert_eq!(s.inspect()["connection"]["lost"], false);
+    assert_ne!(query_backend(&mut s), fresh);
 }
 
 #[test]
