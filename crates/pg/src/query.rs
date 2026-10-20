@@ -29,6 +29,12 @@ pub const PAGE_LIMITS: Limits = Limits { max_rows: 101, max_bytes: 256 * 1024 * 
 /// the cell text kept.
 pub async fn run_untyped(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
     let _guard = conn.lock().await;
+    run_locked(conn, sql, limits).await
+}
+
+/// [`run_untyped`] for a caller that already holds the connection lock (an apply, which keeps
+/// it from `BEGIN` to `COMMIT`).
+pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
     let stream = conn.client().simple_query_raw(sql).await.map_err(|e| conn.error(&e))?;
     let mut stream = std::pin::pin!(stream);
     let mut result = ResultSet { complete: true, ..ResultSet::default() };

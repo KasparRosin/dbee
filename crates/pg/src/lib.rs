@@ -7,12 +7,14 @@
 //! passwords, server messages or cell values.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod apply;
 pub mod catalog;
 pub mod connect;
 pub mod error;
 pub mod query;
 pub mod tls;
 
+pub use apply::{ApplyError, apply};
 pub use connect::{CONNECT_TIMEOUT, Canceller, MIN_VERSION_NUM, PgConnection, ServerInfo, Target, connect, version_warning};
 pub use error::PgError;
 pub use query::{Limits, PAGE_LIMITS, QUERY_LIMITS};

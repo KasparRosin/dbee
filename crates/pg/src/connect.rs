@@ -120,6 +120,12 @@ impl PgConnection {
         self.lock.lock().await
     }
 
+    /// Mark the session unusable, for an operation that was abandoned half-way (a dropped apply
+    /// future leaves the server inside a transaction); the engine then reconnects.
+    pub(crate) fn mark_closed(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
     /// Map an error of an operation on this connection; a lost session marks it closed.
     pub(crate) fn error(&self, e: &tokio_postgres::Error) -> PgError {
         let mapped = error::map(e, Phase::Session);
