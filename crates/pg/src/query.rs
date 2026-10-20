@@ -17,36 +17,89 @@ pub struct Limits {
 /// The query editor's caps: 10,000 rows or 256 MiB of cell text.
 pub const QUERY_LIMITS: Limits = Limits { max_rows: 10_000, max_bytes: 256 * 1024 * 1024 };
 
+/// A table page: 100 rows plus one, so the caller can tell whether another page exists.
+pub const PAGE_LIMITS: Limits = Limits { max_rows: 101, max_bytes: 256 * 1024 * 1024 };
+
 /// Run `sql` (one or more statements) as one simple-query message, holding the connection lock.
 ///
 /// The result holds the last row-returning statement's columns (untyped) and rows;
 /// `rows_affected` is the count of the last `CommandComplete`. The first failing statement ends
-/// the run with its error. `limits` is not applied yet.
+/// the run with its error. Rows past `limits` are still read (so the connection stays in sync)
+/// and counted in `rows_seen`, but not kept, and `complete` becomes false. The byte cap counts
+/// the cell text kept.
 pub async fn run_untyped(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
-    let _ = limits;
     let _guard = conn.lock().await;
     let stream = conn.client().simple_query_raw(sql).await.map_err(|e| conn.error(&e))?;
     let mut stream = std::pin::pin!(stream);
     let mut result = ResultSet { complete: true, ..ResultSet::default() };
+    let mut bytes: usize = 0;
     while let Some(message) = stream.next().await {
         match message.map_err(|e| conn.error(&e))? {
             SimpleQueryMessage::RowDescription(columns) => {
                 result.columns = columns.iter().map(|c| Column::untyped(c.name())).collect();
                 result.rows.clear();
                 result.rows_seen = 0;
+                result.complete = true;
+                bytes = 0;
             }
             SimpleQueryMessage::Row(row) => {
+                result.rows_seen = result.rows_seen.saturating_add(1);
+                if !result.complete {
+                    continue;
+                }
                 let mut cells: Vec<Cell> = Vec::with_capacity(row.len());
+                let mut row_bytes: usize = 0;
                 for i in 0..row.len() {
                     let value = row.try_get(i).map_err(|_| PgError::Other("the server sent a value that is not valid UTF-8".into()))?;
+                    row_bytes = row_bytes.saturating_add(value.map_or(0, str::len));
                     cells.push(value.map(str::to_owned));
                 }
+                if result.rows.len() >= limits.max_rows || bytes.saturating_add(row_bytes) > limits.max_bytes {
+                    result.complete = false;
+                    continue;
+                }
+                bytes += row_bytes;
                 result.rows.push(cells);
-                result.rows_seen = result.rows_seen.saturating_add(1);
             }
             SimpleQueryMessage::CommandComplete(n) => result.rows_affected = Some(n),
             _ => {}
         }
     }
     Ok(result)
+}
+
+/// The columns `sql` would return, typed by name (`base_type` and `type_label` are the type's
+/// name), found by preparing it on the connection; the statement is closed again. `None` on any
+/// error (several statements, a syntax error, a lost connection): the connection stays usable.
+pub async fn describe(conn: &PgConnection, sql: &str) -> Option<Vec<Column>> {
+    let _guard = conn.lock().await;
+    let statement = conn.client().prepare(sql).await.ok()?;
+    let columns = statement
+        .columns()
+        .iter()
+        .map(|c| Column { name: c.name().to_owned(), base_type: c.type_().name().to_owned(), type_label: c.type_().name().to_owned() })
+        .collect();
+    // Dropping the statement sends its Close ahead of the next message on this connection.
+    drop(statement);
+    Some(columns)
+}
+
+/// [`describe`], then [`run_untyped`]; the described columns replace the untyped ones when the
+/// counts match.
+pub async fn run(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
+    let described = describe(conn, sql).await;
+    let mut result = run_untyped(conn, sql, limits).await?;
+    if let Some(columns) = described
+        && columns.len() == result.columns.len()
+    {
+        result.columns = columns;
+    }
+    Ok(result)
+}
+
+/// The first cell of the first row as an unsigned integer (a count).
+pub async fn scalar_u64(conn: &PgConnection, sql: &str) -> Result<u64, PgError> {
+    let result = run_untyped(conn, sql, Limits { max_rows: 1, ..QUERY_LIMITS }).await?;
+    let cell = result.rows.first().and_then(|row| row.first()).and_then(|c| c.as_deref());
+    cell.and_then(|text| text.trim().parse::<u64>().ok()).ok_or_else(|| PgError::Other("the query did not return a count".into()))
 }

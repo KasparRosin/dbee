@@ -15,4 +15,4 @@ pub mod tls;
 
 pub use connect::{CONNECT_TIMEOUT, Canceller, MIN_VERSION_NUM, PgConnection, ServerInfo, Target, connect, version_warning};
 pub use error::PgError;
-pub use query::{Limits, QUERY_LIMITS};
+pub use query::{Limits, PAGE_LIMITS, QUERY_LIMITS};
