@@ -51,6 +51,7 @@ use dbee_sql::select::{PAGE_SIZE, count_sql, page_sql};
 use serde_json::json;
 
 use super::connection::cancel_statements;
+use super::edit;
 use super::{CommandSpec, NOT_CONNECTED, ignored, needs_db, p};
 use crate::state::{PageView, TableTab, Total};
 use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
@@ -758,13 +759,21 @@ fn apply_count(
 /// statement running on the browse connection (the job then ends with `cancelled`, and the rows
 /// from before stay). `sent: false` when the tab runs nothing. The tab's markers name only
 /// running jobs on the current browse connection (see the module docs); a marker whose job is
-/// not running does not count, all the same. An Apply is not cancelled here.
+/// not running does not count, all the same.
+///
+/// A cancel request cancels whatever statement runs on the connection at that moment, and every
+/// tab shares the browse connection. So while any `edit.apply` job runs (of any tab, or of one
+/// closed meanwhile) nothing is sent and the result is `Busy`: the tab's load may still be
+/// waiting behind the Apply, and the request would roll the Apply back instead.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));
     let running = alive(t.loading) || alive(t.counting);
     if !running {
         return Ok(Outcome::Done(json!({ "sent": false })));
+    }
+    if s.jobs.is_running_label(edit::APPLY) {
+        return Err(EngineError::Busy(edit::APPLYING.into()));
     }
     let conn = s.browse()?;
     cancel_statements(s, std::iter::once(conn));

@@ -20,6 +20,12 @@
 //! moves up with the rows when a new row before it is deleted, and goes with Reset, with the next
 //! Apply and when nothing is staged any more.
 //!
+//! **An unknown outcome** (the connection was lost, or replaced, while an Apply ran: nobody knows
+//! what it wrote) also leaves a doubt, [`Edits::outcome_unknown`]: applying again could write the
+//! same changes twice, so the engine asks first. The doubt outlives `failed`: Reset, undo and redo
+//! keep it (an undo can bring back the very edits that may be written), and only the next Apply
+//! that goes ahead ([`Edits::apply_started`]) or a new page (which starts new edits) ends it.
+//!
 //! **Statements** ([`Edits::statements`]): one `UPDATE` per changed loaded row setting only its
 //! staged columns, one `INSERT` per new row with only its staged columns (the others get their
 //! defaults), one `DELETE` per marked row, in that order. A loaded row is found by the table's
@@ -42,7 +48,8 @@ pub const UNDO_BYTES: usize = 64 * 1024 * 1024;
 
 /// `failed`'s message when an Apply ended without the tab knowing what it wrote: its connection
 /// was lost (or replaced by a reconnect) while it ran.
-pub const UNKNOWN_OUTCOME: &str = "connection lost during Apply — the outcome is unknown; reload the page before applying again";
+pub const UNKNOWN_OUTCOME: &str =
+    "connection lost during Apply — the outcome is unknown. Reset and reload to check what was written, or Apply again to retry";
 
 /// What a snapshot is counted for each value, new row and mark, beyond the text.
 const ENTRY_BYTES: usize = 64;
@@ -58,6 +65,8 @@ pub struct Edits {
     pub deleted: BTreeSet<usize>,
     /// The last Apply's failure: `(grid row, column if known, message)`.
     pub failed: Option<(usize, Option<usize>, String)>,
+    /// An Apply of these edits ended with an unknown outcome, and none went ahead since.
+    unknown: bool,
     undo: VecDeque<Arc<Staged>>,
     redo: Vec<Arc<Staged>>,
     /// What `undo` and `redo` hold, counted by [`Staged::bytes`].
@@ -192,9 +201,30 @@ impl Edits {
     }
 
     /// The Apply of these edits ended and nobody knows what it wrote: `failed` says so, at the
-    /// first change (when anything is staged).
+    /// first change, and the outcome is doubted (when anything is staged).
     pub(crate) fn mark_unknown(&mut self, loaded: usize) {
-        self.failed = self.first_row(loaded).map(|row| (row, None, UNKNOWN_OUTCOME.to_owned()));
+        match self.first_row(loaded) {
+            Some(row) => self.unknown_at(row),
+            None => self.failed = None,
+        }
+    }
+
+    /// [`Edits::mark_unknown`] at grid row `row`.
+    pub(crate) fn unknown_at(&mut self, row: usize) {
+        self.failed = Some((row, None, UNKNOWN_OUTCOME.to_owned()));
+        self.unknown = true;
+    }
+
+    /// An Apply of these edits ended with an unknown outcome and none went ahead since, so applying
+    /// again could write them twice (see the module docs).
+    pub fn outcome_unknown(&self) -> bool {
+        self.unknown
+    }
+
+    /// An Apply of these edits goes ahead: the last one's failure and doubt are over.
+    pub(crate) fn apply_started(&mut self) {
+        self.failed = None;
+        self.unknown = false;
     }
 
     /// Stages `value` for grid cell `(row, col)`; `true` when that changed the edits. `Err` names
@@ -576,6 +606,29 @@ mod tests {
         assert_eq!(e.failed.as_ref().map(|f| f.0), Some(a));
         e.delete_rows(&d, &[a]).unwrap();
         assert_eq!(e.failed, None);
+    }
+
+    #[test]
+    fn an_unknown_outcome_is_doubted_until_the_next_apply() {
+        let d = data();
+        let mut e = Edits::default();
+        e.mark_unknown(d.rows.len());
+        assert!(!e.outcome_unknown(), "nothing staged, nothing was being written");
+        e.stage(&d, 0, 1, text("1")).unwrap();
+        e.mark_unknown(d.rows.len());
+        assert!(e.outcome_unknown());
+        // The mark goes with a reset; the doubt stays, also for the edits an undo brings back.
+        e.reset();
+        assert_eq!((e.failed.clone(), e.outcome_unknown()), (None, true));
+        e.undo();
+        assert!(e.outcome_unknown());
+        e.stage(&d, 1, 1, text("2")).unwrap();
+        assert!(e.outcome_unknown());
+        // An Apply that goes ahead clears it.
+        e.apply_started();
+        assert_eq!((e.failed.clone(), e.outcome_unknown()), (None, false));
+        assert_eq!(e.count(), 2);
+        assert!(!Edits::default().outcome_unknown());
     }
 
     #[test]

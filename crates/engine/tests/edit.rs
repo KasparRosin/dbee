@@ -433,20 +433,31 @@ fn connection_lost_during_apply_keeps_the_edits() {
     let e = s.wait(job, T).unwrap_err();
     assert_eq!(e.code(), "connectionLost", "{e}");
     assert_eq!(e.data()["action"], "connection.reconnect");
-    let unknown = "connection lost during Apply — the outcome is unknown; reload the page before applying again";
-    assert_eq!(e.to_string(), unknown);
+    assert_eq!(e.to_string(), UNKNOWN);
     let table = s.inspect()["table"].clone();
-    assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["message"].as_str()), (Some(0), Some(unknown)), "{table}");
+    assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["message"].as_str()), (Some(0), Some(UNKNOWN)), "{table}");
     assert_eq!(count(&s), 1, "the edit is kept");
     assert_eq!(s.inspect()["connection"]["lost"], true);
     assert_eq!(why(&refused(&mut s, "edit.apply", json!({}))), "connection lost — reconnect");
+    // Reset, undo and redo need no database: the edits can always be dropped.
+    let infos = s.commands();
+    let enabled = |id: &str| infos.iter().find(|c| c.id == id).is_some_and(|c| c.enabled);
+    assert!(enabled("edit.reset") && enabled("edit.undo"), "lost: reset and undo stay enabled");
+    assert!(!enabled("cell.edit") && !enabled("edit.apply"));
     // Nothing was retried, and the server rolled the transaction back with the connection.
     assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 1")), "Alice");
     run(&mut s, "connection.reconnect", json!({}));
     assert_eq!(count(&s), 1);
-    assert_eq!(run(&mut s, "edit.apply", json!({}))["written"], 1);
+    // Applying again could write twice: it asks first.
+    let e = refused(&mut s, "edit.apply", json!({}));
+    assert_eq!((e.code(), e.data()["what"].as_str(), e.to_string().as_str()), ("needsConfirm", Some("applyAfterUnknownOutcome"), UNKNOWN));
+    assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 1")), "Alice");
+    assert_eq!(run(&mut s, "edit.apply", json!({ "force": true }))["written"], 1);
     assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 1")), "lost");
 }
+
+/// `failed`'s message after an Apply whose outcome is unknown.
+const UNKNOWN: &str = "connection lost during Apply — the outcome is unknown. Reset and reload to check what was written, or Apply again to retry";
 
 #[test]
 fn reconnect_during_apply_marks_the_outcome_unknown() {
@@ -468,6 +479,65 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
     assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }));
     assert_eq!(count(&s), 1);
     assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 2")), "Bob", "the reconnect cancelled it");
+    assert_eq!(table["failed"]["message"], UNKNOWN);
+    let e = refused(&mut s, "edit.apply", json!({}));
+    assert_eq!((e.code(), e.data()["what"].as_str()), ("needsConfirm", Some("applyAfterUnknownOutcome")));
+    // A reset clears the mark, but the doubt stays until the page loads again: the same edits
+    // brought back by an undo still ask.
+    run(&mut s, "edit.reset", json!({}));
+    assert_eq!(s.inspect()["table"]["failed"], Json::Null);
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(count(&s), 1);
+    assert_eq!(refused(&mut s, "edit.apply", json!({})).code(), "needsConfirm");
+    // Reset and reload: what was written shows, and new edits apply without asking.
+    run(&mut s, "edit.reset", json!({}));
+    run(&mut s, "table.refresh", json!({}));
+    assert_eq!(cell(&read(&mut s), 1, "name"), Some("Bob"));
+    run(&mut s, "cell.edit", json!({ "row": 1, "column": "name", "value": "again" }));
+    assert_eq!(run(&mut s, "edit.apply", json!({}))["written"], 1);
+    assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 2")), "again");
+}
+
+#[test]
+fn table_cancel_never_cancels_an_apply() {
+    let _db = require_testdb!();
+    let (t, mut drop) = make_table();
+    drop.0.push(slow_updates(&t));
+    let mut s = opened(&t);
+    run(&mut s, "cell.edit", json!({ "row": 0, "column": "name", "value": "kept" }));
+    let Outcome::Started(apply) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
+    std::thread::sleep(Duration::from_millis(300));
+    // Another tab's page load waits behind the Apply on the browse connection; cancelling it
+    // would cancel the Apply's statement instead.
+    let Outcome::Started(load) = s.execute("table.open", json!({ "schema": "scratch", "table": t })).unwrap() else {
+        panic!("table.open starts a job")
+    };
+    let e = refused(&mut s, "table.cancel", json!({}));
+    assert_eq!((e.code(), e.to_string().as_str()), ("busy", "busy: apply in progress"));
+    assert_eq!(s.wait(apply, T).unwrap()["written"], 1);
+    assert_eq!(s.wait(load, T).unwrap()["rows"], 3);
+    assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 1")), "kept");
+}
+
+#[test]
+fn reset_undo_redo_work_when_the_tab_is_no_longer_editable() {
+    let _db = require_testdb!();
+    let (t, _drop) = make_table();
+    let mut s = opened(&t);
+    run(&mut s, "cell.edit", json!({ "row": 0, "column": "name", "value": "a" }));
+    run(&mut s, "cell.edit", json!({ "row": 1, "column": "name", "value": "b" }));
+    q(&format!("DROP TABLE scratch.{t}"));
+    run(&mut s, "schema.refresh", json!({}));
+    let gone = "the table is no longer in the schema";
+    assert_eq!(s.inspect()["table"]["notEditableReason"], gone);
+    assert_eq!(why(&refused(&mut s, "edit.apply", json!({}))), gone, "Apply stays refused");
+    assert_eq!(why(&refused(&mut s, "cell.edit", json!({ "row": 2, "column": "name", "value": "c" }))), gone);
+    assert_eq!(run(&mut s, "edit.undo", json!({}))["count"], 1);
+    assert_eq!(run(&mut s, "edit.redo", json!({}))["count"], 2);
+    assert_eq!(run(&mut s, "edit.reset", json!({}))["count"], 0);
+    // Nothing staged: the tab closes without asking.
+    run(&mut s, "tab.close", json!({}));
+    assert!(s.state().tabs.is_empty());
 }
 
 #[test]

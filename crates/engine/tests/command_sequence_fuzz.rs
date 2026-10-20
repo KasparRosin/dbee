@@ -76,7 +76,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("cell.clear", &[("row", GRID_ROW), ("column", EDIT_COLUMN)]),
     ("row.add", &[]),
     ("row.delete", &[("rows", Hint::Custom(grid_rows))]),
-    ("edit.apply", &[]),
+    ("edit.apply", &[("force", Hint::Bool)]),
     ("edit.reset", &[]),
     ("edit.undo", &[]),
     ("edit.redo", &[]),

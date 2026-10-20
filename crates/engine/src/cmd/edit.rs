@@ -1,12 +1,14 @@
 //! Staged edits of a table tab: `cell.edit`, `cell.setNull`, `cell.clear`, `row.add`,
 //! `row.delete`, `edit.apply`, `edit.reset`, `edit.undo` and `edit.redo`.
 //!
-//! Every command acts on the active tab, which must be a table tab on a connection that is not
-//! lost, whose rows can be edited (`table::not_editable`: not read-only, a table with a row key),
-//! and whose page has loaded ([`NOT_LOADED`]). Edits wait while a page loads ([`LOADING`]) and
-//! while the tab's Apply runs ([`APPLYING`]), so they always name rows of the page shown. Rows are
-//! grid rows (see [`crate::edits`]); `column` is a name or a 0-based index into the page's
-//! columns. A value is text or `null`; a number or a boolean is taken as its text.
+//! Every command acts on the active tab, which must be a table tab whose page has loaded
+//! ([`NOT_LOADED`]). Edits wait while a page loads ([`LOADING`]) and while the tab's Apply runs
+//! ([`APPLYING`]), so they always name rows of the page shown. Staging and Apply also need a
+//! connection that is not lost and rows that can be edited (`table::not_editable`: not read-only,
+//! a table with a row key). Reset, undo and redo do not: they change only the staged edits, so a
+//! tab whose table was dropped, or that reconnected to a read-only server, can always drop them.
+//! Rows are grid rows (see [`crate::edits`]); `column` is a name or a 0-based index into the
+//! page's columns. A value is text or `null`; a number or a boolean is taken as its text.
 //!
 //! **Apply** builds every statement on the caller's thread (`Edits::statements`; edits it cannot
 //! build are `BadParams` and change nothing), then runs one job on the browse connection:
@@ -16,8 +18,10 @@
 //! the Apply fails nothing was written: every edit stays, and `failed` names the grid row of the
 //! change that failed (its column when that change wrote one) and the message. When the
 //! connection is lost meanwhile, the outcome is unknown ([`UNKNOWN_OUTCOME`]): the edits stay,
-//! the session is marked lost, and nothing is tried again. An Apply is never dropped: its job
-//! runs to its end. One runs at a time (`busy`).
+//! the session is marked lost, and nothing is tried again. Applying those edits again could write
+//! them twice, so it asks first (`Needs::Confirm { what: "applyAfterUnknownOutcome" }`) unless
+//! `force` (see `Edits::outcome_unknown`). An Apply is never dropped: its job runs to its end. One
+//! runs at a time (`busy`).
 //!
 //! **Stale results** (see [`super`]): an Apply whose tab closed, or whose connection was closed or
 //! replaced, is ignored. A reconnect while it runs marks its outcome unknown
@@ -40,14 +44,15 @@ use super::table::{Loaded, NO_TABLE_TAB, Reload, active_table, catalog, lookup, 
 use super::{CommandSpec, ignored, p};
 use crate::edits::{Edits, UNKNOWN_OUTCOME};
 use crate::state::{TableTab, Total};
-use crate::{Apply, EngineError, Json, Outcome, Session, Tab, TabId};
+use crate::{Apply, EngineError, Json, Need, Outcome, Session, Tab, TabId};
 
 const EDIT: &str = "cell.edit";
 const SET_NULL: &str = "cell.setNull";
 const CLEAR: &str = "cell.clear";
 const ADD_ROW: &str = "row.add";
 const DELETE_ROWS: &str = "row.delete";
-const APPLY: &str = "edit.apply";
+/// Its jobs' label too: `table.cancel` checks for one.
+pub(crate) const APPLY: &str = "edit.apply";
 const RESET: &str = "edit.reset";
 const UNDO: &str = "edit.undo";
 const REDO: &str = "edit.redo";
@@ -125,7 +130,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Apply",
         menu: &[],
         shortcut: Some("Ctrl+S"),
-        params: "{}",
+        params: "{force?}",
         enabled: can_apply,
         run: apply,
         journal: false,
@@ -196,19 +201,33 @@ fn can_apply(s: &Session) -> Result<(), String> {
     if editable_tab(s)?.has_staged_edits() { Ok(()) } else { Err(NOTHING_STAGED.into()) }
 }
 
+/// The active tab is a table tab with its page loaded, no page on its way and no Apply running:
+/// for reset, undo and redo, which change only the staged edits. They need neither the database
+/// nor rows that can be edited, so a tab is never stuck with edits it cannot drop.
+fn history_tab(s: &Session) -> Result<&TableTab, String> {
+    let Some(Tab::Table(t)) = s.state.active_tab() else { return Err(NO_TABLE_TAB.into()) };
+    if t.loading.is_some() {
+        return Err(LOADING.into());
+    }
+    if t.data.is_none() {
+        return Err(NOT_LOADED.into());
+    }
+    if t.applying.is_some() {
+        return Err(APPLYING.into());
+    }
+    Ok(t)
+}
+
 fn can_reset(s: &Session) -> Result<(), String> {
-    can_edit(s)?;
-    can_apply(s)
+    if history_tab(s)?.has_staged_edits() { Ok(()) } else { Err(NOTHING_STAGED.into()) }
 }
 
 fn can_undo(s: &Session) -> Result<(), String> {
-    can_edit(s)?;
-    if editable_tab(s)?.edits.can_undo() { Ok(()) } else { Err("nothing to undo".into()) }
+    if history_tab(s)?.edits.can_undo() { Ok(()) } else { Err("nothing to undo".into()) }
 }
 
 fn can_redo(s: &Session) -> Result<(), String> {
-    can_edit(s)?;
-    if editable_tab(s)?.edits.can_redo() { Ok(()) } else { Err("nothing to redo".into()) }
+    if history_tab(s)?.edits.can_redo() { Ok(()) } else { Err("nothing to redo".into()) }
 }
 
 // ---- helpers ---------------------------------------------------------------------------------
@@ -385,8 +404,10 @@ struct Applying {
     reshaped: bool,
 }
 
-/// `{}` → a job returning `{tab, written, page, rows, hasNext, total}` (see the module docs).
-fn apply(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
+/// `{force?}` → a job returning `{tab, written, page, rows, hasNext, total}` (see the module
+/// docs). After an unknown outcome it asks first unless `force`.
+fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    let force = p::bool_or(params, "force", false)?;
     if s.jobs.is_running_label(APPLY) {
         return Err(EngineError::Busy(APPLYING.into()));
     }
@@ -401,6 +422,9 @@ fn apply(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     if statements.is_empty() {
         return Err(disabled(NOTHING_STAGED));
     }
+    if edits.outcome_unknown() && !force {
+        return Err(EngineError::Needs { need: Need::Confirm { what: "applyAfterUnknownOutcome".into() }, message: UNKNOWN_OUTCOME.into() });
+    }
     let loaded = data.rows.len();
     let applying = Applying {
         statements: statements.iter().map(|&(row, _)| (row, edits.only_column(loaded, row))).collect(),
@@ -410,9 +434,9 @@ fn apply(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let conn = s.browse()?;
     let reload = Reload::prepare(s, tab, info)?;
     if let Some(t) = table_tab_mut(s, tab)
-        && t.edits.failed.is_some()
+        && (t.edits.failed.is_some() || t.edits.outcome_unknown())
     {
-        Arc::make_mut(&mut t.edits).failed = None;
+        Arc::make_mut(&mut t.edits).apply_started();
     }
     let job_conn = Arc::clone(&conn);
     let job = s.spawn_job(APPLY, async move {
@@ -460,19 +484,23 @@ fn applied(
                 None => Err(bad("the page was not loaded again")),
             };
             Ok(match shown {
-                Ok(mut r) => {
-                    r["written"] = json!(n);
-                    r
-                }
+                Ok(r) => with_written(r, n),
                 Err(e) => json!({ "tab": tab, "written": n, "reloadError": e.to_string() }),
             })
         }
         Err(ApplyError { index, error }) => {
             let lost = error == PgError::ConnectionLost;
             let (row, column) = applying.statements.get(index).or(applying.statements.first()).copied().unwrap_or((0, None));
+            let edits = Arc::make_mut(&mut t.edits);
+            let message = if lost {
+                edits.unknown_at(row);
+                UNKNOWN_OUTCOME.to_owned()
+            } else {
+                let message = ApplyError { index, error: error.clone() }.to_string();
+                edits.failed = Some((row, column, message.clone()));
+                message
+            };
             let column = if lost { None } else { column };
-            let message = if lost { UNKNOWN_OUTCOME.to_owned() } else { ApplyError { index, error: error.clone() }.to_string() };
-            Arc::make_mut(&mut t.edits).failed = Some((row, column, message.clone()));
             Err(match s.db_failed(conn, &error) {
                 EngineError::Db { code, mut data, .. } => {
                     if let Json::Object(map) = &mut data {
@@ -484,6 +512,27 @@ fn applied(
                 }
                 other => other,
             })
+        }
+    }
+}
+
+/// `r` with `written: n` when it is an object (the page result always is).
+fn with_written(mut r: Json, n: u64) -> Json {
+    if let Json::Object(map) = &mut r {
+        map.insert("written".into(), json!(n));
+    }
+    r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn written_goes_into_objects_only() {
+        assert_eq!(with_written(json!({ "tab": 1 }), 2), json!({ "tab": 1, "written": 2 }));
+        for other in [Json::Null, json!([1]), json!("x"), json!(3)] {
+            assert_eq!(with_written(other.clone(), 2), other);
         }
     }
 }
