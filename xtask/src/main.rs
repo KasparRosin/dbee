@@ -42,7 +42,8 @@ commands:
   contributors    write contributors/contributors.json from git history and contributors/people.toml
   run-isolated [--release] [--port N] [-- args]
                   build and run dbee on a throwaway home (target/isolated/<port>/home) with the control
-                  channel on 127.0.0.1:<port> (default 7979), no SSH agent and in-memory secrets
+                  channel on 127.0.0.1:<port> (default 7979) and in-memory secrets; no SSH agent on
+                  Linux and macOS (on Windows the OpenSSH agent pipe is still reachable)
 ";
 
 fn main() -> ExitCode {

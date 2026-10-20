@@ -34,7 +34,7 @@ Every command is one shell call away: `dbee-cli exec <id> k=v…`, `run <script.
 
 For any UI change, look at the result:
 
-1. `cargo xtask run-isolated --port 7979` (add `--release` for a release build). It builds dbee and runs it on a throwaway home, `target/isolated/<port>/home`, with the control channel on that port, no SSH agent and in-memory secrets; with the Docker test servers up, that home's `.ssh` holds their test key and host key.
+1. `cargo xtask run-isolated --port 7979` (add `--release` for a release build). It builds dbee and runs it on a throwaway home, `target/isolated/<port>/home`, with the control channel on that port, in-memory secrets and no SSH agent on Linux and macOS (on Windows the OpenSSH agent pipe is still reachable); with the Docker test servers up, that home's `.ssh` holds their test key and host key.
 2. Drive the feature through the control channel (the MCP bridge is planned): commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
 3. Assert on `ui.inspect` and `document.inspect`.
 4. Take `ui.screenshot` (the whole window) and open the PNG; `app.quit` ends the run.

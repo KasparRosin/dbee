@@ -9,17 +9,17 @@ dbee --control 7979            # or DBEE_CONTROL_PORT=7979
 cargo xtask run-isolated       # the same on a throwaway home (docs/agents.md §4)
 ```
 
-The app listens on `127.0.0.1` only, before the window opens: a port in use stops the start, so an agent never drives another dbee by mistake. Any local process can connect, so it is meant for agents and tests. Send newline-delimited JSON; every request line gets one reply line, in order:
+The app listens on `127.0.0.1` only, before the window opens: a port in use stops the start, so an agent never drives another dbee by mistake. Any local process can connect, so it is meant for agents and tests. HTTP requests are refused (an `httpRefused` reply, then the connection closes, with nothing run), so web pages cannot use the channel through the browser. Send newline-delimited JSON; every request line gets one reply line, in order:
 
 ```json
 {"id":1,"method":"engine.execute","params":{"command":"tab.newQuery","params":{"text":"select 1"}}}
 {"id":1,"ok":true,"result":{"tab":1}}
 ```
 
-Errors look like `{"id":…,"ok":false,"error":"…","code":"…","data":{…}}`. `code` is stable: an engine error's code (`disabled`, `badParams`, `unknownCommand`, `needsPassword`, `connectionLost`, `server`, `busy`, `timeout`, …) with its `data` (`{command, why}` for `disabled`), or one of the channel's own: `invalidJson`, `badRequest` (not a request object, no `method`), `unknownMethod`, `badParams`, `notFound` (no such automation id), `lineTooLong`, `timeout`, `busy` (too many connections or too much queued input), `closed` (the app is closing), `screenshot`. A line that is not JSON gets an error reply and the server keeps serving; blank lines get none.
+Errors look like `{"id":…,"ok":false,"error":"…","code":"…","data":{…}}`. `code` is stable: an engine error's code (`disabled`, `badParams`, `unknownCommand`, `needsPassword`, `connectionLost`, `server`, `busy`, `timeout`, …) with its `data` (`{command, why}` for `disabled`), or one of the channel's own: `invalidJson`, `badRequest` (not a request object, no `method`), `unknownMethod`, `badParams`, `notFound` (no such automation id), `lineTooLong`, `httpRefused`, `timeout`, `busy` (too many connections or too much queued input), `closed` (the app is closing), `screenshot`. A line that is not JSON gets an error reply and the server keeps serving; blank lines get none.
 
 - A request line holds at most 64 MiB.
-- `params` is an object (or left out). Every method takes `timeoutMs` (default 60,000, at most 600,000): how long its reply may wait. A reply that waits longer is a `timeout` error; a job it waited for goes on.
+- `params` is an object (or left out). Every method takes `timeoutMs` (default 60,000, at most 600,000): how long its reply may wait. A reply that waits longer is a `timeout` error; a job it waited for goes on. A request still waiting to be handled when its reply timed out is not run.
 - Requests are handled in the window's frames, so the window must be shown (not minimised) for replies to come.
 
 ## Methods
@@ -36,7 +36,7 @@ Errors look like `{"id":…,"ok":false,"error":"…","code":"…","data":{…}}`
 | `ui.key` | `{key, shift?, cmd?, alt?, ctrl?}` | `{}`, once the key was handled. `key` is egui's name (`Enter`, `Escape`, `ArrowDown`, `A`, `F2`; `esc`, `down` and the like work too). `cmd` is Cmd on macOS and Ctrl elsewhere; with it, `C` and `X` arrive as copy and cut, as from the keyboard. Type text with `ui.text`. |
 | `ui.text` | `{text}` | `{}`: the text typed into the focused field. |
 | `ui.screenshot` | `{path?}` | A PNG of the window: written to `path` (relative to the app's working directory, folders created) as `{path, width, height}`, or `{base64, width, height}`. |
-| `app.quit` | | `{}`; the window closes. |
+| `app.quit` | | `{}`; the window closes a frame later, after the reply is written. |
 
 Planned: `ui.dialog.*` (open, fill in, confirm and cancel dialogs) and `app.open {path}`.
 

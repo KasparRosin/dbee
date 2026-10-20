@@ -12,7 +12,9 @@
 //! Only the child's environment changes ([`command`]): `HOME` and `USERPROFILE` are the
 //! throwaway home, the XDG directories and `APPDATA`/`LOCALAPPDATA` lie inside it,
 //! `SSH_AUTH_SOCK` and `DBEE_CONTROL_PORT` are removed and `DBEE_SECRET_STORE=memory`. So the run
-//! never reads or writes the real home, `~/.ssh`, the SSH agent or the keyring.
+//! never reads or writes the real home, `~/.ssh` or the keyring, and on Linux and macOS never
+//! reaches the SSH agent. On Windows the OpenSSH agent pipe is still reachable: dbee finds it
+//! without `SSH_AUTH_SOCK`.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

@@ -47,6 +47,9 @@ pub struct DbeeApp {
     pub(crate) deferred: Vec<Deferred>,
     /// The last screenshot token handed out.
     pub(crate) shots: u64,
+    /// `app.quit` was answered when this many frames were drawn: close the window at a later
+    /// frame, from this instant on.
+    pub(crate) quit: Option<(u64, std::time::Instant)>,
     frames: u64,
     /// Jobs started by the user's own actions, whose errors show as notices.
     ui_jobs: Vec<(JobId, &'static str)>,
@@ -104,6 +107,7 @@ impl DbeeApp {
             input: Input::default(),
             deferred: Vec::new(),
             shots: 0,
+            quit: None,
             frames: 0,
             ui_jobs: Vec::new(),
             clipboard: Vec::new(),
@@ -451,6 +455,31 @@ mod tests {
         assert!(answer["result"]["x"].as_f64().is_some(), "{answer}");
         assert!(h.state().view.new_connection, "the click reached the button");
         assert!(h.state().frames() >= 3);
+    }
+
+    #[test]
+    fn quit_closes_the_window_after_the_reply() {
+        let home = temp_home(None, None);
+        let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut h = Harness::builder().build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), DbeeApp::new(session, Some(rx)));
+        h.step();
+        let closes = |h: &Harness<'_, DbeeApp>| {
+            h.output().viewport_output.values().flat_map(|v| v.commands.iter()).any(|c| *c == egui::ViewportCommand::Close)
+        };
+        let (req, reply) = ControlRequest::new("app.quit", json!({}));
+        tx.send(req).unwrap();
+        h.step();
+        assert_eq!(reply.try_recv().unwrap()["ok"], true);
+        assert!(!closes(&h), "the window stays open in the frame that queued the reply");
+        let start = std::time::Instant::now();
+        let mut closed = false;
+        while !closed && start.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            h.step();
+            closed = closes(&h);
+        }
+        assert!(closed, "a later frame closes the window");
     }
 
     #[test]

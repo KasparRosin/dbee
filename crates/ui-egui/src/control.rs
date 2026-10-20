@@ -12,6 +12,9 @@
 //! - `ui.click`, `ui.key`, `ui.text`: until the frame that received the input has run;
 //! - `ui.screenshot`: until the picture of the window arrives.
 //!
+//! `app.quit` is answered at once and closes the window a frame later (at least
+//! `QUIT_DELAY` on), so its reply is written before the app exits.
+//!
 //! A wait gives up after the request's `timeoutMs` ([`DEFAULT_TIMEOUT`], at most
 //! [`MAX_TIMEOUT`]) with a `timeout` error; a job goes on. Requests are hostile input: a wrong
 //! type is `badParams`, never a panic. Logs name the method, never params or results.
@@ -31,6 +34,9 @@ use crate::DbeeApp;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// The longest `timeoutMs` honoured.
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How long after its reply `app.quit` closes the window (at the earliest, the next frame).
+const QUIT_DELAY: Duration = Duration::from_millis(100);
 
 /// Most synthetic input batches waiting for frames; past it input requests are `busy`.
 const MAX_QUEUED_BATCHES: usize = 10_000;
@@ -55,6 +61,9 @@ pub struct ControlRequest {
     pub method: String,
     pub params: Json,
     pub(crate) reply: Sender<Json>,
+    /// When the sender stops waiting (the server then answers `timeout`): a request still queued
+    /// at that instant is dropped, not run. `None` waits as long as it takes.
+    pub deadline: Option<Instant>,
 }
 
 impl std::fmt::Debug for ControlRequest {
@@ -68,7 +77,7 @@ impl ControlRequest {
     /// A request and the receiver its reply (without the `id`) arrives on.
     pub fn new(method: impl Into<String>, params: Json) -> (ControlRequest, Receiver<Json>) {
         let (reply, rx) = channel();
-        (ControlRequest { method: method.into(), params, reply }, rx)
+        (ControlRequest { method: method.into(), params, reply, deadline: None }, rx)
     }
 }
 
@@ -199,19 +208,28 @@ enum Handled {
     Later(Wait),
 }
 
-/// Handles `req` (step 3 of the frame).
+/// Handles `req` (step 3 of the frame). A request past its deadline is not run: its sender has
+/// already given up (the server answered `timeout`), and running it now, a `query.run` say,
+/// could run it twice when the caller retries.
 pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context, req: ControlRequest) {
     let started = Instant::now();
-    let ControlRequest { method, params, reply } = req;
+    let ControlRequest { method, params, reply, deadline } = req;
+    let logged = METHODS.iter().find(|m| **m == method).copied().unwrap_or("(unknown)");
+    if deadline.is_some_and(|d| started >= d) {
+        log::warn!("control {logged}: dropped without running it, its reply had already timed out");
+        let _ = reply.send(error("timeout", "the request waited past its deadline before the app could take it, so it was not run", json!({})));
+        return;
+    }
     let timeout = timeout_of(&params).unwrap_or(DEFAULT_TIMEOUT);
+    let wait_until = started.checked_add(timeout).unwrap_or(started);
+    let wait_until = deadline.map_or(wait_until, |d| d.min(wait_until));
     let handled = dispatch(app, ctx, &method, params);
     match handled {
         Handled::Now(r) => {
             let _ = reply.send(r);
         }
-        Handled::Later(wait) => app.deferred.push(Deferred { wait, reply, deadline: started.checked_add(timeout).unwrap_or(started) }),
+        Handled::Later(wait) => app.deferred.push(Deferred { wait, reply, deadline: wait_until }),
     }
-    let logged = METHODS.iter().find(|m| **m == method).copied().unwrap_or("(unknown)");
     log::debug!("control {logged}: handled in {:?}", started.elapsed());
     ctx.request_repaint();
 }
@@ -240,7 +258,9 @@ fn dispatch(app: &mut DbeeApp, ctx: &egui::Context, method: &str, params: Json) 
             Some(_) => Handled::Now(bad("`path` must be a file path (a string)")),
         },
         "app.quit" => {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            // The window closes in a later frame, so the reply is written before the app exits.
+            let now = Instant::now();
+            app.quit = Some((app.frames(), now.checked_add(QUIT_DELAY).unwrap_or(now)));
             Handled::Now(ok(json!({})))
         }
         other => Handled::Now(error("unknownMethod", format!("there is no method `{}`", shown(other)), json!({}))),
@@ -574,6 +594,13 @@ pub(crate) fn answer_deferred(
     let now = Instant::now();
     let idle = !app.session().busy();
     let frames = app.frames();
+    if let Some((queued, at)) = app.quit
+        && frames > queued
+        && now >= at
+    {
+        app.quit = None;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
     let mut waiting = Vec::new();
     for mut d in std::mem::take(&mut app.deferred) {
         let done = match &mut d.wait {
@@ -615,7 +642,7 @@ pub(crate) fn answer_deferred(
 
 /// A waiting reply needs frames to come (input to feed, a picture to take), not only a job.
 pub(crate) fn needs_frames(app: &DbeeApp) -> bool {
-    app.input.pending() || app.deferred.iter().any(|d| matches!(d.wait, Wait::Input { .. } | Wait::Shot { .. }))
+    app.input.pending() || app.quit.is_some() || app.deferred.iter().any(|d| matches!(d.wait, Wait::Input { .. } | Wait::Shot { .. }))
 }
 
 #[cfg(test)]
@@ -659,6 +686,26 @@ mod tests {
         assert_eq!(handle_line(&mut app, &ctx, &deep).unwrap()["code"], "invalidJson");
         let r = handle_line(&mut app, &ctx, r#"{"id":"s","method":"engine.commands","params":{"timeoutMs":"soon"}}"#).unwrap();
         assert_eq!((r["id"].clone(), r["code"].clone()), (json!("s"), json!("badParams")), "{r}");
+    }
+
+    #[test]
+    fn a_request_past_its_deadline_is_not_run() {
+        let (mut app, _home) = app();
+        let ctx = egui::Context::default();
+        let run = |app: &mut DbeeApp, deadline: Option<Instant>| {
+            let (mut req, rx) = ControlRequest::new("engine.execute", json!({ "command": "tab.newQuery" }));
+            req.deadline = deadline;
+            handle(app, &ctx, req);
+            rx.try_recv().unwrap()
+        };
+        // The server already answered `timeout`: running it now would run it behind the caller's back.
+        let late = run(&mut app, Some(Instant::now()));
+        assert_eq!((late["ok"].clone(), late["code"].clone()), (json!(false), json!("timeout")), "{late}");
+        assert_eq!(app.session().state().tabs.len(), 0, "the late request did not run");
+        let in_time = run(&mut app, Instant::now().checked_add(Duration::from_secs(60)));
+        assert_eq!(in_time["ok"], true, "{in_time}");
+        assert_eq!(run(&mut app, None)["ok"], true);
+        assert_eq!(app.session().state().tabs.len(), 2);
     }
 
     #[test]
