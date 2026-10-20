@@ -181,6 +181,9 @@ fn paging_on_a_million_rows() {
     assert_eq!((d["page"].as_u64(), rows(&d), d["hasNext"].as_bool()), (Some(9999), 100, Some(false)));
     assert_eq!(d["total"], json!({ "exact": 1_000_000 }));
     assert_eq!(cell(&d, 99, "id"), Some("1000000"));
+    // Next on the last page stays there.
+    assert_eq!(page(&mut s, json!("next"))["page"], 9999);
+    assert_eq!(first_id(&mut s), 999_901);
     page(&mut s, json!("prev"));
     assert_eq!(read(&mut s)["page"], 9998);
     assert_eq!(first_id(&mut s), 999_801);
@@ -323,6 +326,10 @@ fn stale_page_results_are_ignored() {
     let mut s = connected();
     open_table(&mut s, "shop", "big_rows");
     let Outcome::Started(a) = s.execute("table.page", json!({ "to": "next" })).unwrap() else { panic!("a job") };
+    // Until it arrives, the rows and their page are the ones from before.
+    let d = read(&mut s);
+    assert_eq!((d["page"].as_u64(), d["requestedPage"].as_u64(), cell(&d, 0, "id")), (Some(0), Some(1), Some("1")));
+    assert_eq!((s.inspect()["table"]["page"].as_u64(), s.inspect()["table"]["requestedPage"].as_u64()), (Some(0), Some(1)));
     let Outcome::Started(b) = s.execute("table.page", json!({ "to": "next" })).unwrap() else { panic!("a job") };
     assert!(s.wait_idle(T));
     let results: Vec<_> = s.pump();
@@ -363,6 +370,62 @@ fn views_and_keyless_tables_are_read_only() {
     open_table(&mut s, "shop", "customers");
     let d = read(&mut s);
     assert_eq!((d["editable"].as_bool(), d["notEditableReason"].as_str()), (Some(false), Some("read-only connection")));
+}
+
+#[test]
+fn reconnect_forgets_the_loads_and_counts_it_cut_off() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    open_table(&mut s, "shop", "orders");
+    let slow = json!({ "raw": "(SELECT true FROM pg_sleep(2))", "rawMode": true });
+    let Outcome::Started(load) = s.execute("table.setFilters", slow).unwrap() else { panic!("a job") };
+    let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
+    let t = s.inspect()["table"].clone();
+    assert_eq!((t["loading"].as_u64(), &t["total"]), (Some(load.0), &json!({ "counting": { "estimate": null } })));
+    std::thread::sleep(Duration::from_millis(300));
+    run(&mut s, "connection.reconnect", json!({}));
+    // Both jobs ran on the connection the reconnect let go: nothing is loading or counting any
+    // more, the tab is back to the rows it shows, and there is nothing to cancel.
+    let t = s.inspect()["table"].clone();
+    assert_eq!((&t["loading"], &t["counting"], &t["total"], &t["applied"]), (&Json::Null, &Json::Null, &json!("unknown"), &json!("none")));
+    assert_eq!(run(&mut s, "table.cancel", json!({})), json!({ "sent": false }));
+    assert_eq!(s.wait(load, T).unwrap(), json!({ "ignored": true }));
+    assert_eq!(s.wait(count, T).unwrap(), json!({ "ignored": true }));
+    assert_eq!((&s.inspect()["table"]["loading"], &s.inspect()["table"]["total"]), (&Json::Null, &json!("unknown")));
+    assert_eq!(page(&mut s, json!("next"))["page"], 1);
+}
+
+#[test]
+fn a_failed_count_leaves_a_newer_count_alone() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    open_table(&mut s, "shop", "orders");
+    run(&mut s, "table.setFilters", json!({ "raw": "(SELECT true FROM pg_sleep(2))", "rawMode": true }));
+    // `last` counts first; its count is cancelled while a newer count waits behind it.
+    let Outcome::Started(last) = s.execute("table.page", json!({ "to": "last" })).unwrap() else { panic!("a job") };
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(run(&mut s, "table.cancel", json!({})), json!({ "sent": true }));
+    let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
+    assert_eq!(s.wait(last, T).unwrap_err().code(), "cancelled");
+    let t = s.inspect()["table"].clone();
+    assert_eq!((&t["total"], t["counting"].as_u64()), (&json!({ "counting": { "estimate": null } }), Some(count.0)));
+    assert_eq!(s.wait(count, T).unwrap()["total"], json!({ "exact": 5000 }));
+    assert_eq!(s.inspect()["table"]["counting"], Json::Null);
+}
+
+#[test]
+fn typed_filters_survive_a_lost_connection() {
+    let _db = require_testdb!();
+    let mut s = connected_exclusive();
+    open_table(&mut s, "shop", "orders");
+    kill_dbee_backends(&s, pg14());
+    let typed = json!([{ "column": "id", "op": "eq", "value": "5" }]);
+    let e = run_err(&mut s, "table.setFilters", json!({ "filters": typed }));
+    assert_eq!(e.code(), "connectionLost", "{e}");
+    assert_eq!(s.inspect()["connection"]["lost"], true);
+    assert_eq!(s.inspect()["table"]["filters"], typed);
+    run(&mut s, "connection.reconnect", json!({}));
+    assert_eq!(run(&mut s, "table.setFilters", json!({}))["rows"], 1);
 }
 
 #[test]

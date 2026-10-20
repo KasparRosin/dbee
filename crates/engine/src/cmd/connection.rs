@@ -872,7 +872,8 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
 /// server, tables, warnings}`: a new tunnel, browse connection and catalog with the secrets kept
 /// from the open (the params answer a prompt). On success the old connections are let go (a
 /// statement still running on one is cancelled), the query connection is opened again on the
-/// next run, and `lost` clears; tabs and their contents stay.
+/// next run, and `lost` clears; tabs and their contents stay, but table tabs forget the loads and
+/// counts that ran on the old connection (`TableTab::drop_dead_jobs`).
 fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if s.jobs.is_running_label(RECONNECT) {
         return Err(EngineError::Busy("a reconnect is in progress".into()));
@@ -918,6 +919,12 @@ fn apply_reconnect(
     c.credentials = credentials;
     c.lost = false;
     let result = opened_json(c);
+    // Every table job started before the swap ran on the old connection: it is dead.
+    for tab in &mut s.state.tabs {
+        if let Tab::Table(t) = tab {
+            t.drop_dead_jobs();
+        }
+    }
     if s.busy() {
         cancel_statements(s, std::iter::once(old_browse).chain(old_query));
     }

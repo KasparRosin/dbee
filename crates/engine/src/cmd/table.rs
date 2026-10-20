@@ -12,13 +12,21 @@
 //! 100 are kept, and the 101st sets `has_next`. Columns are typed from the catalog. A load that
 //! fails sets `error` (the server's text) and puts `applied`, `sort` and `page` back to what the
 //! rows still shown were loaded with; the job's result is the error. `table.page {to: "last"}`
-//! counts first, in the same job.
+//! counts first, in the same job. `table.read` and `inspect()` give the rows with the page they
+//! are (`page`, from `shown`) and the page asked for (`requestedPage`).
 //!
 //! **Stale results** (see [`super`]): a page whose tab closed, whose `seq` is no longer the
 //! tab's, or whose connection was closed or replaced is `{"ignored": true}` and changes nothing.
 //! A count is stale when its tab closed, its connection went, or the tab's `applied` condition
 //! is no longer the one counted: paging and sorting do not change a count, so a count that
 //! `last` ran is kept even when a newer page load made its page stale.
+//!
+//! **In-flight markers.** `loading` and `counting` name the tab's jobs. A job clears the marker
+//! that names it when its result arrives, stale or not (clearing the marker of a job that has
+//! ended is not applying its result), and a reconnect clears them all, since every job started
+//! before it ran on the old connection (`TableTab::drop_dead_jobs`). So a marker that names a
+//! running job names one on the current browse connection, which is what `table.cancel` relies
+//! on. A count that fails leaves the estimate it showed, unless a newer count runs.
 //!
 //! **The total** is counted only when asked. `table.count` shows the planner's estimate at once
 //! for an unfiltered table, materialized view or partitioned table (`reltuples` from the
@@ -41,7 +49,7 @@ use serde_json::json;
 use super::connection::cancel_statements;
 use super::{CommandSpec, NOT_CONNECTED, ignored, needs_db, p};
 use crate::state::{PageView, TableTab, Total};
-use crate::{Apply, EngineError, Json, Outcome, Session, Tab, TabId};
+use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
 
 const OPEN: &str = "table.open";
 const SET_FILTERS: &str = "table.setFilters";
@@ -312,11 +320,13 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "rawMode": t.raw_mode,
         "applied": t.applied,
         "sort": t.sort,
-        "page": t.page,
+        "page": t.shown.page,
+        "requestedPage": t.page,
         "rows": t.data.as_ref().map_or(0, |d| d.rows.len()),
         "hasNext": t.has_next,
         "total": t.total,
         "loading": t.loading,
+        "counting": t.counting,
         "error": t.error,
         "editable": reason.is_none(),
         "notEditableReason": reason,
@@ -334,13 +344,18 @@ struct Plan {
     last: bool,
 }
 
-/// Checks that the statements for `view` can be built (`BadParams` when not) and takes the
-/// browse connection. Changes nothing but a lost mark.
-fn prepare(s: &mut Session, info: &TableInfo, view: PageView, last: bool) -> Result<Plan, EngineError> {
+/// Checks that the statements for `view` can be built: `BadParams` when not.
+fn check(info: &TableInfo, view: &PageView, last: bool) -> Result<(), EngineError> {
     page_sql(info, &view.applied, view.sort.as_ref(), view.page).map_err(sql_bad)?;
     if last {
         count_sql(info, &view.applied).map_err(sql_bad)?;
     }
+    Ok(())
+}
+
+/// [`check`], then takes the browse connection. Changes nothing but a lost mark.
+fn prepare(s: &mut Session, info: &TableInfo, view: PageView, last: bool) -> Result<Plan, EngineError> {
+    check(info, &view, last)?;
     let conn = s.browse()?;
     Ok(Plan { conn, info: info.clone(), view, last })
 }
@@ -371,6 +386,9 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     });
     if let Some(t) = table_tab_mut(s, tab) {
         t.loading = Some(job);
+        if last {
+            t.counting = Some(job);
+        }
     }
     Ok(Outcome::Started(job))
 }
@@ -431,11 +449,23 @@ fn apply_load(
     if !s.is_current_browse(conn) {
         return Ok(ignored());
     }
+    let me = s.applying_job();
     let Some(t) = table_tab_mut(s, tab) else { return Ok(ignored()) };
-    // The count `last` made holds while the condition does, even when a newer load (another
-    // page, a sort) made this page stale; otherwise the total would stay `Counting`.
-    if last && t.applied == view.applied {
-        t.total = loaded.counted.map_or(t.total.settled(), Total::Exact);
+    if last {
+        // The count holds while the condition does, even when a newer load (another page, a
+        // sort) made this page stale.
+        if let Some(n) = loaded.counted
+            && t.applied == view.applied
+        {
+            t.total = Total::Exact(n);
+        }
+        if t.counting.is_some() && t.counting == me {
+            t.counting = None;
+            if loaded.counted.is_none() {
+                // The count failed and no newer one runs: back to the estimate.
+                t.total = t.total.settled();
+            }
+        }
     }
     if t.seq != seq {
         return Ok(ignored());
@@ -459,14 +489,7 @@ fn apply_load(
         }
         Err(e) => {
             t.error = Some(e.to_string());
-            let shown = t.shown.clone();
-            if t.applied != shown.applied {
-                // The total was about the condition that failed.
-                t.total = Total::Unknown;
-            }
-            t.applied = shown.applied;
-            t.sort = shown.sort;
-            t.page = shown.page;
+            t.back_to_shown();
             Err(s.db_failed(conn, &e))
         }
     }
@@ -521,10 +544,14 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let filters = filters.unwrap_or_else(|| t.filters.clone());
     let raw = raw.unwrap_or_else(|| t.raw.clone());
     let raw_mode = raw_mode.unwrap_or(t.raw_mode);
-    let plan = if apply {
+    // SQL dbee will not build leaves the bar as it was; past that check the bar keeps what was
+    // typed, even when the connection then turns out to be lost.
+    let checked = if apply {
         let catalog = catalog(s)?;
+        let info = lookup(&catalog, &table)?;
         let view = PageView { applied: condition(&filters, &raw, raw_mode), sort, page: 0 };
-        Some(prepare(s, lookup(&catalog, &table)?, view, false)?)
+        check(info, &view, false)?;
+        Some((info.clone(), view))
     } else {
         None
     };
@@ -532,8 +559,11 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     t.filters = filters;
     t.raw = raw;
     t.raw_mode = raw_mode;
-    match plan {
-        Some(plan) => start(s, SET_FILTERS, tab, plan),
+    match checked {
+        Some((info, view)) => {
+            let conn = s.browse()?;
+            start(s, SET_FILTERS, tab, Plan { conn, info, view, last: false })
+        }
         None => Ok(Outcome::Done(json!({ "tab": tab, "filters": t.filters, "raw": t.raw, "rawMode": t.raw_mode }))),
     }
 }
@@ -567,15 +597,20 @@ fn parse_to(params: &Json) -> Result<To, EngineError> {
     }
 }
 
-/// `{to}` → a job returning `{tab, page, rows, hasNext, total}`. `prev` on the first page stays
-/// there; `last` counts the rows first (and `total` ends exact).
+/// `{to}` → a job returning `{tab, page, rows, hasNext, total}`. `prev` on the first page and
+/// `next` on the last one stay there (and load it again); `last` counts the rows first (and
+/// `total` ends exact).
 fn page(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let to = parse_to(params)?;
-    let mut view = active(s)?.view();
+    let t = active(s)?;
+    let mut view = t.view();
+    // The last page is known only once it shows (and no other page is on its way).
+    let at_end = view.page == t.shown.page && !t.has_next;
     let last = matches!(to, To::Last);
     view.page = match to {
         To::First => 0,
         To::Prev => view.page.saturating_sub(1),
+        To::Next if at_end => view.page,
         To::Next => view.page.saturating_add(1).min(MAX_PAGE),
         To::Last => view.page,
         To::Page(n) => n,
@@ -621,15 +656,16 @@ fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let sql = count_sql(info, &condition).map_err(sql_bad)?;
     let estimate = quick_estimate(info, &condition);
     let conn = s.browse()?;
-    if let Some(t) = table_tab_mut(s, tab) {
-        t.total = Total::Counting { estimate };
-    }
     let job_conn = Arc::clone(&conn);
     let job = s.spawn_job(COUNT, async move {
         let rows = scalar_u64(&job_conn, &sql).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_count(s, &conn, tab, &condition, rows));
         apply
     });
+    if let Some(t) = table_tab_mut(s, tab) {
+        t.total = Total::Counting { estimate };
+        t.counting = Some(job);
+    }
     Ok(Outcome::Started(job))
 }
 
@@ -643,14 +679,25 @@ fn apply_count(
     if !s.is_current_browse(conn) {
         return Ok(ignored());
     }
-    let Some(t) = table_tab_mut(s, tab).filter(|t| t.applied == *condition) else { return Ok(ignored()) };
+    let me = s.applying_job();
+    let Some(t) = table_tab_mut(s, tab) else { return Ok(ignored()) };
+    let newest = t.counting.is_some() && t.counting == me;
+    if newest {
+        t.counting = None;
+    }
+    if t.applied != *condition {
+        return Ok(ignored());
+    }
     match rows {
         Ok(n) => {
             t.total = Total::Exact(n);
             Ok(json!({ "tab": tab, "total": t.total }))
         }
         Err(e) => {
-            t.total = t.total.settled();
+            if newest {
+                // No newer count runs: back to the estimate.
+                t.total = t.total.settled();
+            }
             Err(s.db_failed(conn, &e))
         }
     }
@@ -658,10 +705,13 @@ fn apply_count(
 
 /// `{}` → `{sent}`: while the tab loads a page or counts, sends a cancel request for the
 /// statement running on the browse connection (the job then ends with `cancelled`, and the rows
-/// from before stay). `sent: false` when the tab runs nothing.
+/// from before stay). `sent: false` when the tab runs nothing. The tab's markers name only jobs
+/// on the current browse connection (see the module docs); a marker whose job is no longer
+/// running (left by an `Apply` that panicked and was rolled back) does not count.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
-    let running = t.loading.is_some_and(|job| s.jobs.is_running(job)) || matches!(t.total, Total::Counting { .. });
+    let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));
+    let running = alive(t.loading) || alive(t.counting);
     if !running {
         return Ok(Outcome::Done(json!({ "sent": false })));
     }
@@ -677,9 +727,11 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     reload(s, REFRESH, view, false)
 }
 
-/// `{offset? = 0, limit? = 100}` → `{tab, columns, rows, offset, page, hasNext, total, editable,
-/// notEditableReason, loading, error}`: the loaded rows from `offset`, at most `limit`, each a
-/// list of text or `null`. Before the first page arrives, the catalog's columns and no rows.
+/// `{offset? = 0, limit? = 100}` → `{tab, columns, rows, offset, page, requestedPage, hasNext,
+/// total, editable, notEditableReason, loading, error}`: the loaded rows from `offset`, at most
+/// `limit`, each a list of text or `null`, and the 0-based page they are (`requestedPage` is the
+/// one asked for, which differs while a load runs). Before the first page arrives, the
+/// catalog's columns and no rows.
 fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let offset = p::opt_usize(params, "offset")?.unwrap_or(0);
     let limit = p::opt_usize(params, "limit")?.unwrap_or(READ_LIMIT);
@@ -698,7 +750,8 @@ fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         "columns": columns,
         "rows": rows,
         "offset": offset,
-        "page": t.page,
+        "page": t.shown.page,
+        "requestedPage": t.page,
         "hasNext": t.has_next,
         "total": t.total,
         "editable": reason.is_none(),

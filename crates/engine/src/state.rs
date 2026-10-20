@@ -164,9 +164,14 @@ pub struct PageView {
 
 /// A table data tab.
 ///
-/// `applied`, `sort` and `page` are what the rows were loaded with, or are being loaded with
-/// while `loading` runs (so a second "next" goes on from the page asked for). A load that fails
-/// puts them back to `shown`, what `data` was loaded with, and sets `error`; `data` stays.
+/// `applied`, `sort` and `page` are what the tab asks for: what the rows were loaded with, or are
+/// being loaded with while `loading` runs (so a second "next" goes on from the page asked for).
+/// `shown` is what `data` was loaded with; number the rows from `shown.page`. A load that fails
+/// puts `applied`, `sort` and `page` back to `shown` and sets `error`; `data` stays.
+///
+/// `loading` and `counting` name the jobs in flight for the tab, always on the session's
+/// current browse connection: a job clears its own when its result arrives (stale or not), and
+/// a reconnect clears them all ([`TableTab::drop_dead_jobs`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableTab {
     pub id: TabId,
@@ -190,6 +195,8 @@ pub struct TableTab {
     pub total: Total,
     /// The job loading a page.
     pub loading: Option<JobId>,
+    /// The job counting the rows (`table.count`, or `table.page` to the last page).
+    pub counting: Option<JobId>,
     /// Why the last load failed, the server's text; the rows from before stay.
     pub error: Option<String>,
     /// Bumped by every page load; a result whose `seq` is not the tab's is stale and ignored.
@@ -215,6 +222,7 @@ impl TableTab {
             has_next: false,
             total: Total::Unknown,
             loading: None,
+            counting: None,
             error: None,
             seq: 0,
             shown: view,
@@ -224,6 +232,29 @@ impl TableTab {
     /// What `applied`, `sort` and `page` ask for.
     pub fn view(&self) -> PageView {
         PageView { applied: self.applied.clone(), sort: self.sort.clone(), page: self.page }
+    }
+
+    /// The connection the tab's jobs ran on was replaced (a reconnect): they are dead, and their
+    /// results will be ignored. A load in flight counts as failed without a message (the view
+    /// goes back to `shown`), and a count in flight leaves the estimate it showed.
+    pub(crate) fn drop_dead_jobs(&mut self) {
+        if self.loading.take().is_some() {
+            self.back_to_shown();
+        }
+        self.counting = None;
+        self.total = self.total.settled();
+    }
+
+    /// A load ended without rows: `applied`, `sort` and `page` go back to what the rows shown were
+    /// loaded with. A total about the condition that did not load is forgotten.
+    pub(crate) fn back_to_shown(&mut self) {
+        let shown = self.shown.clone();
+        if self.applied != shown.applied {
+            self.total = Total::Unknown;
+        }
+        self.applied = shown.applied;
+        self.sort = shown.sort;
+        self.page = shown.page;
     }
 
     /// Edits are staged: filters, paging, sort and refresh wait until they are applied or reset

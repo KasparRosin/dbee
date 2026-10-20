@@ -430,7 +430,6 @@ impl Session {
     }
 
     /// The job whose result is being applied, inside an [`Apply`]; `None` elsewhere.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the first job commands outside tests arrive with M1.14"))]
     pub(crate) fn applying_job(&self) -> Option<JobId> {
         self.jobs.applying()
     }
