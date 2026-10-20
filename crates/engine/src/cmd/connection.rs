@@ -877,8 +877,9 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
 }
 
 /// `{password?, sshPassword?, sshPassphrase?, trustHostKey?}` → a job returning `{connection,
-/// server, tables, warnings}`: a new tunnel, browse connection and catalog with the secrets kept
-/// from the open (the params answer a prompt). On success the old connections are let go (a
+/// server, tables, warnings, querySessionReset?}` (`querySessionReset: true` when a query
+/// connection was open, so its transaction and SETs are dropped): a new tunnel, browse
+/// connection and catalog with the secrets kept from the open (the params answer a prompt). On success the old connections are let go (a
 /// statement still running on one is cancelled, and a query run stops), the query connection is
 /// opened again on the next run, and `lost` clears; tabs and their contents stay, but table tabs
 /// forget the loads and counts that ran on the old connection (`TableTab::drop_dead_jobs`) and a
@@ -924,13 +925,18 @@ fn apply_reconnect(
     c.catalog = Arc::new(catalog);
     let old_browse = std::mem::replace(&mut c.browse, Arc::new(conn));
     let old_query = c.query.take();
+    let query_reset = old_query.is_some();
     if let Some(run) = c.query_run.take() {
         run.stop.stop();
     }
     c.tunnel = tunnel;
     c.credentials = credentials;
     c.lost = false;
-    let result = opened_json(c);
+    let mut result = opened_json(c);
+    if query_reset && let Some(o) = result.as_object_mut() {
+        // The query session (an open transaction, SETs, temporary tables) went with its connection.
+        o.insert("querySessionReset".into(), Json::Bool(true));
+    }
     // Every job started before the swap ran on the old connections: it is dead.
     for tab in &mut s.state.tabs {
         match tab {

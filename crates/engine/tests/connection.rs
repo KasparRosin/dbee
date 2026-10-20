@@ -489,11 +489,23 @@ fn reconnect_after_backend_killed() {
 
     let r = s.run_blocking("connection.reconnect", json!({}), T).unwrap();
     assert!(r["server"].as_str().unwrap().starts_with("PostgreSQL 14"), "{r}");
+    assert_eq!(r["querySessionReset"], Json::Null, "no query connection was open: {r}");
     assert_eq!(s.inspect()["connection"]["lost"], false);
     assert_eq!(s.inspect()["screen"], "workspace");
     assert_eq!(s.inspect()["query"]["text"], "select 1");
     s.run_blocking("schema.refresh", json!({}), T).unwrap();
     assert_secret_hidden(&s, &pw());
+}
+
+#[test]
+fn reconnect_says_when_the_query_session_was_reset() {
+    let _db = require_testdb!();
+    let mut s = exclusive_session();
+    open(&mut s, json!({ "config": pg14_config(), "password": pw() }));
+    s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
+    s.run_blocking("query.run", json!({}), T).unwrap();
+    let r = s.run_blocking("connection.reconnect", json!({}), T).unwrap();
+    assert_eq!(r["querySessionReset"], true, "{r}");
 }
 
 #[test]

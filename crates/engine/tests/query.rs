@@ -382,7 +382,7 @@ fn lost_query_connection_is_opened_again() {
     terminate(&pid);
     run(&mut s, "query.setText", json!({ "text": "COMMIT" }));
     let e = run_err(&mut s, json!({}));
-    let lost = "the query connection was lost, and its session with it: an open transaction was rolled back, and SET values and temporary tables are gone. Run again to open a new one";
+    let lost = "the query connection was lost, and its session with it: the statement that was running may or may not have taken effect (its outcome is unknown), any other uncommitted work in the transaction is gone, and SET values and temporary tables are gone. Run again to open a new one";
     assert_eq!((e.code(), e.to_string().as_str()), ("connectionLost", lost));
     assert_eq!(e.data()["action"], Json::Null, "running again is enough: {}", e.data());
     let i = shown(&s);

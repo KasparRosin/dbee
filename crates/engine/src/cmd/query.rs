@@ -15,12 +15,13 @@
 //! **A lost connection.** When the browse connection or the tunnel has closed, the run is refused
 //! as every command that needs the database is: the session is marked lost, and the error is
 //! `connectionLost` naming `connection.reconnect` in `data.action`. When only the query connection
-//! has closed (found before the run, or failing a statement of it), the session goes on: the
-//! connection is let go, and this run fails at that statement, before sending it, with
-//! [`QUERY_SESSION_LOST`] (code `connectionLost`, no `action`). Its session state is gone, an open
-//! transaction, `SET`s and temporary tables, so dbee never runs the rest on a new connection as if
-//! nothing happened (a `COMMIT` there would succeed with nothing to commit). The next run opens a
-//! new one.
+//! has closed, the session goes on: the connection is let go and the run fails with
+//! [`QUERY_SESSION_LOST`]. Found before the run, it fails at its first statement, before sending
+//! it; failing a statement, the outcome of that statement is unknown (it may have been the
+//! `COMMIT` or an auto-commit write), and the statements after it are not sent. The error has
+//! code `connectionLost` and no `action`. Its session state is gone, an open transaction, `SET`s
+//! and temporary tables, so dbee never runs the rest on a new connection as if nothing happened
+//! (a `COMMIT` there would succeed with nothing to commit). The next run opens a new one.
 //!
 //! **Stopping.** `query.cancel`, closing the running tab, `connection.close` and a reconnect stop
 //! the run through its `Stop`. The job then sends the cancel request itself, through the query
@@ -66,7 +67,7 @@ pub const RUN_LIMITS: Limits = QUERY_LIMITS;
 
 /// The error of a run whose query connection was lost while the session was not (see the module
 /// docs).
-pub const QUERY_SESSION_LOST: &str = "the query connection was lost, and its session with it: an open transaction was rolled back, and SET values and temporary tables are gone. Run again to open a new one";
+pub const QUERY_SESSION_LOST: &str = "the query connection was lost, and its session with it: the statement that was running may or may not have taken effect (its outcome is unknown), any other uncommitted work in the transaction is gone, and SET values and temporary tables are gone. Run again to open a new one";
 
 /// The error of a statement holding a NUL character, which the protocol cannot carry.
 const NUL: &str = "the statement holds a NUL character (U+0000), which Postgres cannot take";
@@ -413,8 +414,8 @@ fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<PgConnection>, ran: 
 // ---- the commands ----------------------------------------------------------------------------
 
 /// `{current? = false, cursor?}` → a job returning `{tab, results, shown}` (see the module docs).
-/// `current` runs only the statement under `cursor`, a byte offset into the text (past the end:
-/// the last statement). A run that stops early fails with the error, and the results before it
+/// `current` runs only the statement under `cursor`, a byte offset into the text: `cursor == len`
+/// gives the last statement, a cursor past the end is `BadParams`. A run that stops early fails with the error, and the results before it
 /// are kept.
 fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let current = p::bool_or(params, "current", false)?;

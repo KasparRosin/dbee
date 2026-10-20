@@ -790,10 +790,9 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 
 /// `{offset? = 0, limit? = 100}` → `{tab, columns, rows, offset, page, requestedPage, hasNext,
 /// total, editable, notEditableReason, outcomeUnknown, loading, error}`: the loaded rows from
-/// `offset`, at most
-/// `limit`, each a list of text or `null`, and the 0-based page they are (`requestedPage` is the
-/// one asked for, which differs while a load runs). Before the first page arrives, the
-/// catalog's columns and no rows.
+/// `offset`, at most `limit`, each a list of text or `null`, and the 0-based page they are
+/// (`requestedPage` is the one asked for, which differs while a load runs). Before the first
+/// page arrives, the catalog's columns and no rows.
 fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let offset = p::opt_usize(params, "offset")?.unwrap_or(0);
     let limit = p::opt_usize(params, "limit")?.unwrap_or(READ_LIMIT);
