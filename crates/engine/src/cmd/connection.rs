@@ -823,7 +823,17 @@ fn apply_open(
     let Opened { conn, tunnel } = opened;
     let info = conn.info().clone();
     s.state.store.touch_recent(&config, unix_now());
-    let c = Connected { config, info, catalog: Arc::new(catalog), lost: false, browse: Arc::new(conn), query: None, tunnel, credentials };
+    let c = Connected {
+        config,
+        info,
+        catalog: Arc::new(catalog),
+        lost: false,
+        browse: Arc::new(conn),
+        query: None,
+        query_run: None,
+        tunnel,
+        credentials,
+    };
     let mut result = opened_json(&c);
     match kept {
         Some(Ok(())) => result["secretsSaved"] = json!(true),
@@ -871,9 +881,10 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
 /// `{password?, sshPassword?, sshPassphrase?, trustHostKey?}` → a job returning `{connection,
 /// server, tables, warnings}`: a new tunnel, browse connection and catalog with the secrets kept
 /// from the open (the params answer a prompt). On success the old connections are let go (a
-/// statement still running on one is cancelled), the query connection is opened again on the
-/// next run, and `lost` clears; tabs and their contents stay, but table tabs forget the loads and
-/// counts that ran on the old connection (`TableTab::drop_dead_jobs`).
+/// statement still running on one is cancelled, and a query run stops), the query connection is
+/// opened again on the next run, and `lost` clears; tabs and their contents stay, but table tabs
+/// forget the loads and counts that ran on the old connection (`TableTab::drop_dead_jobs`) and a
+/// query tab its run.
 fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if s.jobs.is_running_label(RECONNECT) {
         return Err(EngineError::Busy("a reconnect is in progress".into()));
@@ -915,14 +926,18 @@ fn apply_reconnect(
     c.catalog = Arc::new(catalog);
     let old_browse = std::mem::replace(&mut c.browse, Arc::new(conn));
     let old_query = c.query.take();
+    if let Some(run) = c.query_run.take() {
+        run.stop.stop();
+    }
     c.tunnel = tunnel;
     c.credentials = credentials;
     c.lost = false;
     let result = opened_json(c);
-    // Every table job started before the swap ran on the old connection: it is dead.
+    // Every job started before the swap ran on the old connections: it is dead.
     for tab in &mut s.state.tabs {
-        if let Tab::Table(t) = tab {
-            t.drop_dead_jobs();
+        match tab {
+            Tab::Table(t) => t.drop_dead_jobs(),
+            Tab::Query(q) => q.running = None,
         }
     }
     if s.busy() {
@@ -968,9 +983,9 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// `{force?}` → `{closed}`: back to the connection screen. Query tabs with text and table tabs
 /// with staged edits ask first (`Needs::Confirm { what: "queryText" }`, or `"stagedEdits"` when
 /// only edits would be lost) unless `force`. Every tab closes; statements still running are
-/// cancelled through their connections' cancellers (an Apply then rolls back), and the
-/// connections are let go (they close once the jobs using them end; those jobs' results are
-/// dropped).
+/// cancelled through their connections' cancellers (an Apply then rolls back, and a query run
+/// stops), and the connections are let go (they close once the jobs using them end; those jobs'
+/// results are dropped).
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
     let c = s.state.connected.as_ref().ok_or_else(|| disabled(NOT_CONNECTED))?;
@@ -995,6 +1010,9 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     s.state.screen = Screen::Connections;
     s.state.tabs.clear();
     s.state.active = None;
+    if let Some(run) = &c.query_run {
+        run.stop.stop();
+    }
     if s.busy() {
         cancel_statements(s, std::iter::once(Arc::clone(&c.browse)).chain(c.query.clone()));
     }

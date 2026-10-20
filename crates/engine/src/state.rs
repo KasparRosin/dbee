@@ -3,6 +3,7 @@
 //! [`State`] is cloned before every command (the panic guard's snapshot), so large data sits
 //! behind `Arc`.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
@@ -13,6 +14,7 @@ use dbee_ssh::{SshSecrets, Tunnel};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::cmd::query::QueryRun;
 use crate::edits::Edits;
 use crate::{JobId, Json, TabId};
 
@@ -39,8 +41,12 @@ pub struct Connected {
     pub lost: bool,
     /// Table pages, counts, the catalog and applies.
     pub(crate) browse: Arc<PgConnection>,
-    /// Query tabs' statements; opened on the first query run (and again after a reconnect).
+    /// Query tabs' statements; opened on the first query run (and again after a reconnect, or
+    /// once it was lost).
     pub(crate) query: Option<Arc<PgConnection>>,
+    /// The query run in progress: one at a time, since the query connection runs one statement at
+    /// a time and a cancel request hits whatever runs on it.
+    pub(crate) query_run: Option<QueryRun>,
     /// The SSH tunnel both connections run through, when the config has one.
     pub(crate) tunnel: Option<Arc<Tunnel>>,
     /// What the connect used, kept in memory for reconnects (and the query connection).
@@ -56,6 +62,7 @@ impl std::fmt::Debug for Connected {
             .field("lost", &self.lost)
             .field("browse", &self.browse)
             .field("query", &self.query)
+            .field("query_run", &self.query_run)
             .field("tunnel", &self.tunnel)
             .field("credentials", &self.credentials)
             .finish()
@@ -115,6 +122,10 @@ pub struct Selection {
 }
 
 /// A query editor tab.
+///
+/// `results`, `shown` and `error` are the last run's: they change when a run ends (not when it
+/// starts), all together. Byte offsets (`StatementOutcome::range`, `QueryError::position`) are
+/// into the tab text as it was when that run started; the text may have been edited since.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryTab {
     pub id: TabId,
@@ -122,7 +133,52 @@ pub struct QueryTab {
     pub text: String,
     /// The job running this tab's statements.
     pub running: Option<JobId>,
+    /// In the shown result's grid.
     pub selection: Option<Selection>,
+    /// One per statement that ran without an error, in order.
+    pub results: Vec<StatementOutcome>,
+    /// The index of the result the grid shows: the last one after a run (0 when there is none).
+    pub shown: usize,
+    /// Why the last run stopped early: an error, or a cancel.
+    pub error: Option<QueryError>,
+}
+
+impl QueryTab {
+    /// A tab with `text` that has not run.
+    pub fn new(id: TabId, title: String, text: String) -> QueryTab {
+        QueryTab { id, title, text, running: None, selection: None, results: Vec::new(), shown: 0, error: None }
+    }
+
+    /// The result the grid shows, when there is one.
+    pub fn shown_result(&self) -> Option<&StatementOutcome> {
+        self.results.get(self.shown)
+    }
+}
+
+/// One statement's result in a query tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatementOutcome {
+    /// Where the statement is in the tab text: bytes, without the `;` and the comments around it.
+    pub range: Range<usize>,
+    /// Behind `Arc`: up to 10,000 rows or 256 MiB of text, and the state is cloned per command.
+    pub result: Arc<ResultSet>,
+}
+
+/// Why a query run stopped before its last statement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryError {
+    /// The error's `EngineError` code: `server`, `cancelled`, `readOnly`, `connectionLost`, ….
+    pub code: &'static str,
+    /// The server's message with its SQLSTATE (`column "x" does not exist (SQLSTATE 42703)`), or
+    /// dbee's text for errors that are not the server's.
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+    /// Where the server says the error is, as a byte offset into the tab text.
+    pub position: Option<usize>,
+    /// The 0-based index of the statement that failed, among those the run ran.
+    pub statement: usize,
 }
 
 /// A table tab's row count.

@@ -83,7 +83,7 @@ fn new_query(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     // At most `used.len()` numbers are taken, so a free one is found within `used.len() + 1`.
     let number = (1..=u64::MAX).find(|n| !used.contains(n)).unwrap_or(u64::MAX);
     let id = s.state.take_tab_id();
-    s.state.tabs.push(Tab::Query(QueryTab { id, title: format!("{QUERY_TITLE}{number}"), text, running: None, selection: None }));
+    s.state.tabs.push(Tab::Query(QueryTab::new(id, format!("{QUERY_TITLE}{number}"), text)));
     s.state.active = Some(id);
     Ok(Outcome::Done(json!({ "tab": id })))
 }
@@ -117,9 +117,9 @@ fn set_text(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 
 /// `{tab?, force?}` → `{closed, active}`: closes the tab (default: the active one). A query tab
 /// with text, or a table tab with staged edits, asks first unless `force`
-/// (`Needs::Confirm { what: "queryText" | "stagedEdits" }`). A job still running for the tab goes
-/// on (an Apply too), and its result is ignored. Closing the active tab activates the one to its
-/// right, else the one to its left.
+/// (`Needs::Confirm { what: "queryText" | "stagedEdits" }`). A query run of the tab is cancelled;
+/// any other job still running for the tab goes on (an Apply too). Either way its result is
+/// ignored. Closing the active tab activates the one to its right, else the one to its left.
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
     let id = match p::opt_tab_id(params, "tab")? {
@@ -144,7 +144,11 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             _ => {}
         }
     }
-    s.state.tabs.remove(at);
+    if let Tab::Query(q) = s.state.tabs.remove(at)
+        && let Some(job) = q.running
+    {
+        super::query::stop_run(s, job);
+    }
     if s.state.active == Some(id) {
         s.state.active = s.state.tabs.get(at).or_else(|| at.checked_sub(1).and_then(|i| s.state.tabs.get(i))).map(Tab::id);
     }

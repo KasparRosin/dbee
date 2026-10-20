@@ -31,7 +31,7 @@ use serde_json::{Map, json};
 pub use cmd::{CommandInfo, CommandSpec};
 pub use edits::Edits;
 pub(crate) use jobs::Apply;
-pub use state::{Connected, PageView, QueryTab, Screen, Selection, State, Tab, TableTab, Total};
+pub use state::{Connected, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total};
 
 /// Params, results and error data.
 pub type Json = serde_json::Value;
@@ -402,7 +402,7 @@ impl Session {
         let connection = st.connected.as_ref().map(Connected::summary);
         let active = st.active_tab();
         let query = match active {
-            Some(Tab::Query(q)) => json!({ "tab": q.id, "title": q.title, "text": q.text, "running": q.running }),
+            Some(Tab::Query(q)) => cmd::query::summary(q),
             _ => Json::Null,
         };
         let table = match active {
@@ -464,6 +464,11 @@ impl Session {
     /// future or its `Apply` panicked (and the state was put back with the markers it had), every
     /// marker that still names it is cleared.
     fn job_ended(&mut self, job: JobId) {
+        if let Some(c) = self.state.connected.as_mut()
+            && c.query_run.as_ref().is_some_and(|run| run.job == job)
+        {
+            c.query_run = None;
+        }
         for tab in &mut self.state.tabs {
             match tab {
                 Tab::Table(t) => t.job_ended(job),

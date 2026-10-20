@@ -14,6 +14,7 @@
 
 pub mod connection;
 pub mod edit;
+pub mod query;
 pub mod schema;
 pub mod table;
 pub mod tabs;
@@ -70,7 +71,7 @@ impl CommandInfo {
 }
 
 /// Every command table, in menu order. A new command module adds its `SPECS` here.
-const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS, schema::SPECS, table::SPECS, edit::SPECS];
+const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS, schema::SPECS, table::SPECS, edit::SPECS, query::SPECS];
 
 #[cfg(test)]
 fn test_specs() -> &'static [CommandSpec] {
@@ -156,11 +157,14 @@ pub fn needs_db(s: &Session) -> Result<(), String> {
     }
 }
 
+/// Why a query tab command cannot run when the active tab is not a query tab.
+pub const NO_QUERY_TAB: &str = "no query tab is active";
+
 /// The active tab is a query tab.
 pub fn active_query(s: &Session) -> Result<(), String> {
     match s.state.active_tab() {
         Some(crate::Tab::Query(_)) => Ok(()),
-        _ => Err("no query tab is active".into()),
+        _ => Err(NO_QUERY_TAB.into()),
     }
 }
 
