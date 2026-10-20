@@ -84,7 +84,9 @@ pub enum EngineError {
     Busy(String),
     /// [`Session::wait`] or [`Session::run_blocking`] gave up waiting; the job goes on.
     Timeout,
-    /// A bug: the command or job panicked, and the session was restored to how it was before.
+    /// A bug: the command, the job or its `Apply` panicked. The state and the UI requests were
+    /// put back as they were before the call, and jobs the call started are orphaned: they run to
+    /// their end, and their results are dropped (each ends as `Internal` too).
     Internal { id: String, msg: String },
     /// Settings or the connections file could not be used.
     Config(String),
@@ -266,16 +268,20 @@ impl Session {
     }
 
     /// Runs `f` under the panic guard: on a panic the state and the UI requests are put back as
-    /// they were, and the result is `Internal` naming `what`.
+    /// they were, the jobs `f` started are orphaned (their results will be dropped, since they
+    /// were meant for the state that was thrown away), and the result is `Internal` naming
+    /// `what`.
     pub(crate) fn guarded<T>(&mut self, what: &str, f: impl FnOnce(&mut Session) -> Result<T, EngineError>) -> Result<T, EngineError> {
         let snapshot = self.state.clone();
         let requests = self.ui_requests.len();
+        let jobs_before = self.jobs.last_id();
         match catch_unwind(AssertUnwindSafe(|| f(self))) {
             Ok(r) => r,
             Err(payload) => {
                 self.state = snapshot;
                 self.ui_requests.truncate(requests);
-                log::error!("{what} panicked; the session was restored");
+                let orphans = self.jobs.orphan_since(jobs_before);
+                log::error!("{what} panicked; the session was restored and {orphans} job(s) it started were orphaned");
                 Err(EngineError::Internal { id: what.to_string(), msg: panic_text(payload.as_ref()) })
             }
         }
@@ -428,7 +434,8 @@ impl Session {
     /// Starts `fut` on the job runtime and returns its id at once. When the future finishes, its
     /// [`Apply`] runs on the caller's thread in [`Session::pump`] (or a wait) under the panic
     /// guard; a panic in the future becomes `Internal` naming `label`. A job is never aborted:
-    /// it runs to its end, and an `Apply` whose tab is gone must ignore its result.
+    /// it runs to its end, and an `Apply` whose tab is gone must ignore its result. A job started
+    /// by a call that then panics is orphaned: its `Apply` is dropped.
     #[cfg_attr(not(test), expect(dead_code, reason = "the first job commands outside tests arrive with M1.14"))]
     pub(crate) fn spawn_job(&mut self, label: &'static str, fut: impl Future<Output = Apply> + Send + 'static) -> JobId {
         self.jobs.spawn(label, fut)
@@ -442,8 +449,15 @@ impl Session {
 
     fn apply(&mut self, done: jobs::Finished) -> (JobId, Result<Json, EngineError>) {
         let jobs::Finished { job, label, outcome, took } = done;
-        self.jobs.finish(job);
+        let orphan = self.jobs.finish(job);
         let result = match outcome {
+            Ok(apply) if orphan => {
+                drop(apply);
+                Err(EngineError::Internal {
+                    id: label.to_string(),
+                    msg: "the call that started this job panicked, so its result was dropped".into(),
+                })
+            }
             Ok(apply) => {
                 self.jobs.set_applying(Some(job));
                 let r = self.guarded(label, apply);

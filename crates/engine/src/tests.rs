@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dbee_config::MemoryStore;
 use dbee_ssh::SshEnv;
@@ -13,7 +13,8 @@ use crate::state::Tab;
 use crate::{EngineError, Json, Outcome, Session, SessionOptions, TabId};
 
 /// `test.panic` changes the state, then panics; `test.panicEnabled` panics in its `enabled`;
-/// `test.sleepJob {ms, tab?, panic?: "job" | "apply"}` is a job that sleeps.
+/// `test.panicAfterJob` starts a job, then panics; `test.sleepJob {ms, tab?, panic?: "job" |
+/// "apply" | "applyAfterJob"}` is a job that sleeps.
 pub(crate) const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: "test.panic",
@@ -34,6 +35,17 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         params: "{}",
         enabled: panic_enabled,
         run: run_panic,
+        journal: true,
+        undoable: false,
+    },
+    CommandSpec {
+        id: "test.panicAfterJob",
+        label: "Panic after starting a job (test)",
+        menu: &[],
+        shortcut: None,
+        params: "{}",
+        enabled: cmd::always,
+        run: run_panic_after_job,
         journal: true,
         undoable: false,
     },
@@ -60,6 +72,23 @@ fn run_panic(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     panic!("test.panic panics on purpose");
 }
 
+/// A job whose `Apply` leaves a mark in the state, so a run that should have been dropped shows.
+fn marking_job(s: &mut Session) -> crate::JobId {
+    s.spawn_job("test.mark", async {
+        let apply: crate::Apply = Box::new(|s: &mut Session| {
+            s.state.store_warning = Some("an orphaned job was applied".into());
+            Ok(json!({}))
+        });
+        apply
+    })
+}
+
+fn run_panic_after_job(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
+    marking_job(s);
+    s.state.tabs.clear();
+    panic!("test.panicAfterJob panics on purpose");
+}
+
 fn panic_enabled(_: &Session) -> Result<(), String> {
     panic!("test.panicEnabled panics on purpose");
 }
@@ -83,6 +112,10 @@ fn run_sleep_job(s: &mut Session, params: &Json) -> Result<Outcome, EngineError>
             if panic_in.as_deref() == Some("apply") {
                 s.state.tabs.clear();
                 panic!("the sleep job's apply panics on purpose");
+            }
+            if panic_in.as_deref() == Some("applyAfterJob") {
+                marking_job(s);
+                panic!("the sleep job's apply panics after starting a job, on purpose");
             }
             // Only touch the tab when it is still open and still runs this job.
             let me = s.applying_job();
@@ -222,8 +255,16 @@ fn journal_keeps_the_newest_entries() {
     for _ in 0..10_001 {
         s.execute("tab.activate", json!({"tab": t.0})).unwrap();
     }
-    let len = s.journal().len();
-    assert!((5_000..=10_000).contains(&len), "{len}");
+    // 10,002 entries pushed; each time the journal passes 10,000 the oldest 5,000 go.
+    let mut expected = 0;
+    for _ in 0..1 + 10_001 {
+        expected += 1;
+        if expected > 10_000 {
+            expected -= 5_000;
+        }
+    }
+    assert_eq!(expected, 5_002);
+    assert_eq!(s.journal().len(), expected);
     assert_eq!(s.journal()[0].0, "tab.activate", "the oldest entries went first");
 }
 
@@ -514,6 +555,12 @@ fn notify_is_called_after_each_result() {
         let j = started(s.execute("test.sleepJob", json!({ "ms": ms })).unwrap());
         s.wait(j, Duration::from_secs(5)).unwrap();
     }
+    // The worker sends the result first and calls `notify` after it, so `wait` can return
+    // before the last call: poll.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while count.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(count.load(Ordering::SeqCst), 2);
 }
 
@@ -571,6 +618,54 @@ fn corrupt_connections_file_gives_a_store_warning() {
     assert_eq!(s.inspect()["storeWarning"], json!(w));
     let clean = Session::new(options()).unwrap();
     assert_eq!(clean.state().store_warning, None);
+}
+
+#[test]
+fn jobs_started_by_a_panicking_command_are_orphaned() {
+    let mut s = session();
+    new_query(&mut s, "keep");
+    let before = s.inspect();
+    assert_eq!(s.execute("test.panicAfterJob", json!({})).unwrap_err().code(), "internal");
+    // The job is not aborted: it runs to its end, and then its result is dropped.
+    assert!(s.wait_idle(Duration::from_secs(5)));
+    let results = s.pump();
+    assert_eq!(results.len(), 1, "{results:?}");
+    let e = results[0].1.clone().unwrap_err();
+    assert_eq!((e.code(), e.data()["command"].as_str()), ("internal", Some("test.mark")));
+    assert_eq!(s.state().store_warning, None, "the orphan's Apply must not run");
+    assert_eq!(s.inspect(), before);
+}
+
+#[test]
+fn jobs_started_by_a_panicking_apply_are_orphaned() {
+    let mut s = session();
+    let before = s.inspect();
+    let j = started(s.execute("test.sleepJob", json!({"ms": 1, "panic": "applyAfterJob"})).unwrap());
+    assert_eq!(s.wait(j, Duration::from_secs(5)).unwrap_err().code(), "internal");
+    assert!(s.wait_idle(Duration::from_secs(5)));
+    let results = s.pump();
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(results[0].1.clone().unwrap_err().code(), "internal");
+    assert_eq!(s.state().store_warning, None, "the orphan's Apply must not run");
+    assert_eq!(s.inspect(), before);
+}
+
+#[test]
+fn jobs_of_a_successful_command_are_not_orphaned_by_a_later_panic() {
+    let mut s = session();
+    let j = started(s.execute("test.sleepJob", json!({"ms": 50})).unwrap());
+    assert_eq!(s.execute("test.panic", json!({})).unwrap_err().code(), "internal");
+    assert_eq!(s.wait(j, Duration::from_secs(5)).unwrap(), json!({"slept": 50}));
+}
+
+#[test]
+fn session_can_be_dropped_inside_async_code() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let mut s = session();
+    started(s.execute("test.sleepJob", json!({"ms": 10_000})).unwrap());
+    let t = Instant::now();
+    rt.block_on(async move { drop(s) });
+    assert!(t.elapsed() < Duration::from_secs(5), "dropping waited for the job");
 }
 
 #[test]

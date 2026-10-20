@@ -6,7 +6,7 @@
 //! is stopped cooperatively, through `dbee_pg::Canceller`. A result whose tab has gone is
 //! ignored by its `Apply`.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -57,11 +57,15 @@ impl Deadline {
 }
 
 pub(crate) struct Jobs {
-    runtime: tokio::runtime::Runtime,
+    /// Owned for the shutdown on drop; always `Some` until then.
+    runtime: Option<tokio::runtime::Runtime>,
+    handle: tokio::runtime::Handle,
     tx: mpsc::Sender<Finished>,
     rx: mpsc::Receiver<Finished>,
     /// Started and not yet applied, with their labels.
     running: BTreeMap<JobId, &'static str>,
+    /// Started inside a call that panicked: they run to their end, and their `Apply` is dropped.
+    orphaned: BTreeSet<JobId>,
     /// Applied while a wait was waiting for something else; the next pump returns them.
     delivered: VecDeque<(JobId, Result<Json, EngineError>)>,
     last: u64,
@@ -77,8 +81,20 @@ impl Jobs {
             .enable_all()
             .build()
             .map_err(|e| EngineError::Internal { id: "session".into(), msg: format!("could not start the job runtime: {e}") })?;
+        let handle = runtime.handle().clone();
         let (tx, rx) = mpsc::channel();
-        Ok(Jobs { runtime, tx, rx, running: BTreeMap::new(), delivered: VecDeque::new(), last: 0, applying: None, notify })
+        Ok(Jobs {
+            runtime: Some(runtime),
+            handle,
+            tx,
+            rx,
+            running: BTreeMap::new(),
+            orphaned: BTreeSet::new(),
+            delivered: VecDeque::new(),
+            last: 0,
+            applying: None,
+            notify,
+        })
     }
 
     pub fn spawn(&mut self, label: &'static str, fut: impl Future<Output = Apply> + Send + 'static) -> JobId {
@@ -88,7 +104,7 @@ impl Jobs {
         let tx = self.tx.clone();
         let notify = self.notify.clone();
         log::debug!("job {} ({label}): started", job.0);
-        let task = self.runtime.spawn(async move {
+        let task = self.handle.spawn(async move {
             let start = Instant::now();
             let outcome = AssertUnwindSafe(fut).catch_unwind().await.map_err(|payload| {
                 log::error!("job {} ({label}) panicked", job.0);
@@ -117,9 +133,24 @@ impl Jobs {
         self.running.iter().map(|(j, l)| (*j, *l))
     }
 
-    /// The job's result is being applied: it no longer counts as running.
-    pub fn finish(&mut self, job: JobId) {
+    /// The id of the newest job so far; jobs started later have larger ids.
+    pub fn last_id(&self) -> u64 {
+        self.last
+    }
+
+    /// Orphans every running job started after [`Jobs::last_id`] was `last`; returns how many.
+    pub fn orphan_since(&mut self, last: u64) -> usize {
+        let since: Vec<JobId> = self.running.keys().copied().filter(|j| j.0 > last).collect();
+        let n = since.len();
+        self.orphaned.extend(since);
+        n
+    }
+
+    /// The job's result is being applied: it no longer counts as running. `true` when it is an
+    /// orphan, whose `Apply` must be dropped.
+    pub fn finish(&mut self, job: JobId) -> bool {
         self.running.remove(&job);
+        self.orphaned.remove(&job)
     }
 
     pub fn applying(&self) -> Option<JobId> {
@@ -167,5 +198,16 @@ impl Jobs {
     pub fn take_delivered_job(&mut self, job: JobId) -> Option<Result<Json, EngineError>> {
         let at = self.delivered.iter().position(|(j, _)| *j == job)?;
         self.delivered.remove(at).map(|(_, r)| r)
+    }
+}
+
+impl Drop for Jobs {
+    /// Shuts the runtime down without waiting for its threads, so a session can be dropped
+    /// anywhere, async code included. Jobs still running are dropped with it (at quit), and an
+    /// open Postgres transaction ends with its connection, rolled back by the server.
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }

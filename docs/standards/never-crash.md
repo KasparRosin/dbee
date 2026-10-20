@@ -10,7 +10,7 @@ People trust dbee with their databases. A crash can lose an unsaved query or lea
 - **Errors are `Result<T, E>`** through the crate's error type and `?`. Why: the caller decides what to show, and the session stays alive.
 - **Input-derived numbers are hostile.** Use `get()` instead of indexing, checked or saturating arithmetic, and cap every allocation sized by input (huge result sets, wide rows, large BLOBs). Why: a server, file or agent can send any value, and an overflow or out-of-range index is a panic.
 - **Bound recursion** (nested JSON values, recursive schema relationships, nested queries). Why: unbounded depth overflows the stack, which no handler can catch.
-- **Last-resort guard:** `Session::execute` snapshots the session state, runs the command under `catch_unwind`, and on a panic restores the snapshot and returns an `internal` error. `Session::pump` guards each job result the same way, and a panic inside a job's future becomes an `internal` result. Why: it is a safety net for the bug nobody foresaw, not a licence to panic. It relies on unwinding (no profile sets `panic = "abort"`).
+- **Last-resort guard:** `Session::execute` snapshots the session state, runs the command under `catch_unwind`, and on a panic restores the snapshot and returns an `internal` error; jobs the command started are orphaned (they run to their end and their results are dropped). `Session::pump` guards each job result the same way, and a panic inside a job's future becomes an `internal` result. Why: it is a safety net for the bug nobody foresaw, not a licence to panic. It relies on unwinding (no profile sets `panic = "abort"`).
 - **Prove it:** every crash fix lands with a regression test. Why: a crash that came back once will come back again.
 
 ## Enforcement
@@ -38,5 +38,5 @@ Before merging code that reads from outside the process, ask what happens with:
 2. Fix the code.
 3. Extend the fuzz tests in `crates/engine`:
    - `every_command_survives_empty_params` (`src/tests.rs`) runs every command with empty params.
-   - `tests/command_sequence_fuzz.rs` runs random commands with random, often hostile, params (number edges, quotes, NUL, emoji, 10 kB strings, nulls, arrays, 64-deep nesting). After every step no result is `internal`, `inspect()` serializes and the active tab is an open one. A new command adds its param shapes to `PARAM_HINTS` there (a test fails without them). `DBEE_FUZZ_SEED` replays a run (the seed is printed) and `DBEE_FUZZ_STEPS` sets its length (300 by default).
+   - `tests/command_sequence_fuzz.rs` runs random commands with random, often hostile, params (number edges, quotes, NUL, emoji, 10 kB strings, nulls, arrays, 64-deep nesting). After every step no result is `internal`, `inspect()` serializes, the active tab is an open one and no journal entry keeps a secret. A new command adds its param shapes to `PARAM_HINTS` there (a test fails without them). `DBEE_FUZZ_SEED` replays a run (the seed is printed) and `DBEE_FUZZ_STEPS` sets its length (300 by default).
    - The undo/redo invariant arrives with staged edits.

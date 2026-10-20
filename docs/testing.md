@@ -1,6 +1,6 @@
 # Testing
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (§3 Docker test servers)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (§5 engine fuzz tests exist)
 
 ```sh
 cargo test --workspace                              # everything; oracle tests skip without their tool
@@ -23,7 +23,7 @@ The scaffold has no features, so most layers below are **(planned)**. They are t
 | Golden images **(planned)** | `crates/ui-egui/tests/` | small screenshots of fixed states, compared with a tolerance |
 | Oracle **(planned)** | driver and engine tests | query results checked against the `sqlite3` CLI (§2) |
 | Driver **(planned)** | `crates/pg`, `crates/ssh` tests | PostgreSQL 14 and the newest major, and SSH tunnels, against the Docker test servers (§3, which exist) |
-| Robustness / fuzz **(planned)** | engine, wire parsers | `every_command_survives_empty_params`, command-sequence fuzz, hostile wire input (§5) |
+| Robustness / fuzz | engine; wire parsers **(planned)** | `every_command_survives_empty_params`, the command-sequence fuzz (`DBEE_FUZZ_SEED`, `DBEE_FUZZ_STEPS`), hostile wire input **(planned)** (§5) |
 | Performance (`#[ignore]`) **(planned)** | engine, ui-egui | scrolling a million-row result, streaming a large export (§6) |
 
 Test databases are built in code (a SQL script or the driver API run at the start of the test). Never commit database files or large binary fixtures.
@@ -76,8 +76,14 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
 
 Follow [never crash](standards/never-crash.md). Beyond a regression test per fixed crash:
 
-- `every_command_survives_empty_params` fuzzes every registered command **(planned)**;
-- a command-sequence fuzz test applies random commands and checks undo/redo invariants **(planned)**;
+- `every_command_survives_empty_params` (`crates/engine/src/tests.rs`) runs every registered command with empty params;
+- the command-sequence fuzz (`crates/engine/tests/command_sequence_fuzz.rs`) runs random commands with random, often hostile, params and checks the session's invariants after every step: no `internal` error, `inspect()` serializes, the active tab is an open one, and no journal entry keeps a secret. A new command adds its param shapes to `PARAM_HINTS` there (a test fails without them). The undo/redo invariant arrives with staged edits **(planned)**;
+
+  ```sh
+  cargo test -p dbee-engine --test command_sequence_fuzz                      # 300 steps, seed from the clock (printed)
+  DBEE_FUZZ_SEED=42 DBEE_FUZZ_STEPS=5000 cargo test -p dbee-engine --test command_sequence_fuzz   # replay or a longer run
+  ```
+
 - wire parsers (PostgreSQL, MySQL, TDS) take truncated, oversized and random bytes and return errors, never panic **(planned)**.
 
 ## 6. Performance

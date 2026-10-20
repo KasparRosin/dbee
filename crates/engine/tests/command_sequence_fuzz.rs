@@ -3,7 +3,8 @@
 //! `DBEE_FUZZ_SEED` picks the sequence (default: from the clock, printed so a failure can be
 //! replayed); `DBEE_FUZZ_STEPS` is its length (default 300). After every step the session must
 //! hold its invariants: no command or job result is `Internal` (a caught panic), `inspect()`
-//! serializes, and the active tab is an open tab (`None` exactly when no tab is open).
+//! serializes, the active tab is an open tab (`None` exactly when no tab is open), and no
+//! journal entry keeps a secret param at any depth.
 //!
 //! Every engine task adds its commands' param shapes to [`PARAM_HINTS`]; the test
 //! `every_command_has_param_hints` fails when one is missing.
@@ -12,13 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dbee_config::MemoryStore;
+use dbee_engine::cmd::is_secret_param;
 use dbee_engine::{EngineError, Json, Outcome, Session, SessionOptions};
 use dbee_ssh::SshEnv;
 use serde_json::json;
 
 /// How to build a plausible value for one param.
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Variants are there for later tasks' hints.
+#[expect(dead_code, reason = "some variants are there for later tasks' hints")]
 enum Hint {
     /// Any text, SQL-looking or not.
     Text,
@@ -110,7 +112,7 @@ fn hostile(r: &mut Rng) -> Json {
         9 => json!("🐝🐝🐝"),
         10 => Json::String("x".repeat(10_000)),
         11 => Json::Null,
-        12 => json!([1, "two", null, [3], {"four": 4}]),
+        12 => json!([1, "two", null, [3], {"four": 4, "inner": {"sshPassword": "pw"}}]),
         13 => nested(64),
         14 => json!(r.chance(50)),
         _ => r.pick(&[json!(""), json!({}), json!([]), json!(0)]).clone(),
@@ -188,6 +190,25 @@ fn check(s: &Session, at: &str) {
     assert_eq!(ids.len(), st.tabs.len(), "{at}: duplicate tab ids");
 }
 
+/// No journal entry from `from` on holds a secret param, at any depth (R2).
+fn no_secrets_in_journal(s: &Session, from: usize, at: &str) {
+    for (id, params) in s.journal().iter().skip(from) {
+        let mut stack = vec![params];
+        while let Some(v) = stack.pop() {
+            match v {
+                Json::Object(map) => {
+                    if let Some(k) = map.keys().find(|k| is_secret_param(k)) {
+                        panic!("{at}: the journal entry for `{id}` keeps secret param `{k}`");
+                    }
+                    stack.extend(map.values());
+                }
+                Json::Array(items) => stack.extend(items),
+                _ => {}
+            }
+        }
+    }
+}
+
 fn no_internal(r: &Result<Json, EngineError>, at: &str) {
     if let Err(e @ EngineError::Internal { .. }) = r {
         panic!("{at}: {e}");
@@ -216,12 +237,16 @@ fn random_command_sequences_keep_the_invariants() {
             (id, params(&mut r, id, &s))
         };
         let at = format!("seed {seed} step {step} `{id}` {}", short(&p));
+        let journal_before = s.journal().len();
         let result = s.execute(id, p).map(|o| match o {
             Outcome::Done(v) => v,
             Outcome::Started(j) => json!({ "started": j.0 }),
         });
         no_internal(&result, &at);
         check(&s, &at);
+        // A step adds an entry or replaces the last one; when the cap dropped the oldest, check all.
+        let from = if s.journal().len() >= journal_before { journal_before.saturating_sub(1) } else { 0 };
+        no_secrets_in_journal(&s, from, &at);
         for (job, r) in s.pump() {
             no_internal(&r, &format!("{at}, job {}", job.0));
         }
@@ -232,6 +257,7 @@ fn random_command_sequences_keep_the_invariants() {
         no_internal(&r, &format!("seed {seed}, job {} at the end", job.0));
     }
     check(&s, &format!("seed {seed}, end"));
+    no_secrets_in_journal(&s, 0, &format!("seed {seed}, end"));
 }
 
 #[test]
