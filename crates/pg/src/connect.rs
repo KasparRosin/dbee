@@ -115,13 +115,21 @@ impl PgConnection {
         &self.client
     }
 
-    /// Serializes operations: hold the guard for the whole operation.
-    pub(crate) async fn lock(&self) -> MutexGuard<'_, ()> {
-        self.lock.lock().await
+    /// Serializes operations: hold the guard for the whole operation. Refuses with
+    /// [`PgError::ConnectionLost`] once the connection is closed, checked after the mutex is
+    /// taken so an operation queued behind an abandoned apply cannot run inside its transaction.
+    pub(crate) async fn lock(&self) -> Result<MutexGuard<'_, ()>, PgError> {
+        let guard = self.lock.lock().await;
+        if self.is_closed() {
+            return Err(PgError::ConnectionLost);
+        }
+        Ok(guard)
     }
 
     /// Mark the session unusable, for an operation that was abandoned half-way (a dropped apply
-    /// future leaves the server inside a transaction); the engine then reconnects.
+    /// future leaves the server inside a transaction). Every later operation is refused with
+    /// `ConnectionLost`; the socket and the server-side transaction stay open until the
+    /// `PgConnection` is dropped, so the engine must drop it and reconnect.
     pub(crate) fn mark_closed(&self) {
         self.closed.store(true, Ordering::Release);
     }

@@ -125,7 +125,7 @@ async fn read_only_connection_refuses() {
         let stmts = vec![format!("UPDATE {t} SET name = 'uno' WHERE id = 1")];
         let err = apply(&ro, &stmts).await.expect_err("must fail");
         assert_eq!((err.index, err.error.code()), (0, "readOnly"), "pg{major}");
-        assert!(!err.to_string().contains("uno"), "Display must not carry values");
+        assert!(!err.to_string().contains(&t), "Display must not carry statement text");
         // The refused transaction was rolled back; the connection still answers.
         assert!(!ro.is_closed());
         assert_eq!(rows(&ro, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
@@ -147,12 +147,36 @@ async fn empty_apply_sends_nothing() {
 async fn dropped_apply_marks_the_connection_closed() {
     let db = require_testdb!();
     with_table(db, |major, w, r, t| async move {
-        let stmts = vec![format!("UPDATE {t} SET name = 'slow' WHERE id = 1 AND pg_sleep(5) IS NOT NULL")];
+        let stmts = vec![format!("UPDATE {t} SET name = 'abandoned' WHERE id = 1 AND pg_sleep(5) IS NOT NULL")];
         let out = tokio::time::timeout(Duration::from_millis(300), apply(&w, &stmts)).await;
         assert!(out.is_err(), "apply should still be running");
-        assert!(w.is_closed(), "pg{major}: a connection dropped mid-transaction must not be reused");
-        // The abandoned write never committed.
-        assert_eq!(rows(&r, &t).await[0], "1:one:1.5", "pg{major}");
+        assert!(w.is_closed(), "pg{major}");
+        // Nothing may run on it: it is still inside the abandoned transaction.
+        let e = run_untyped(&w, "SELECT now() <> statement_timestamp()", QUERY_LIMITS).await.expect_err("refused");
+        assert_eq!(e.code(), "connectionLost", "pg{major}");
+        let later = vec![format!("UPDATE {t} SET name = 'later' WHERE id = 2")];
+        let e = apply(&w, &later).await.expect_err("refused");
+        assert_eq!(e.error.code(), "connectionLost", "pg{major}");
+        // Stop the sleeping statement, drop the connection, and the original rows remain.
+        let _ = w.canceller().cancel().await;
+        drop(w);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn multi_statement_text_is_refused_before_sending() {
+    let db = require_testdb!();
+    with_table(db, |major, w, r, t| async move {
+        for bad in [format!("UPDATE {t} SET name = 'x' WHERE id = 1; COMMIT"), format!("UPDATE {t} SET name = 'x' WHERE id = 1; SELECT 1")] {
+            let stmts = vec![format!("UPDATE {t} SET name = 'ok' WHERE id = 2"), bad];
+            let err = apply(&w, &stmts).await.expect_err("refused");
+            assert_eq!((err.index, err.error.code()), (1, "other"), "pg{major}");
+        }
+        assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
+        assert!(!w.is_closed());
     })
     .await;
 }

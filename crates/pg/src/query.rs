@@ -28,7 +28,7 @@ pub const PAGE_LIMITS: Limits = Limits { max_rows: 101, max_bytes: 256 * 1024 * 
 /// and counted in `rows_seen`, but not kept, and `complete` becomes false. The byte cap counts
 /// the cell text kept.
 pub async fn run_untyped(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
-    let _guard = conn.lock().await;
+    let _guard = conn.lock().await?;
     run_locked(conn, sql, limits).await
 }
 
@@ -78,7 +78,7 @@ pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -
 /// name), found by preparing it on the connection; the statement is closed again. `None` on any
 /// error (several statements, a syntax error, a lost connection): the connection stays usable.
 pub async fn describe(conn: &PgConnection, sql: &str) -> Option<Vec<Column>> {
-    let _guard = conn.lock().await;
+    let Ok(_guard) = conn.lock().await else { return None };
     let statement = conn.client().prepare(sql).await.ok()?;
     let columns = statement
         .columns()

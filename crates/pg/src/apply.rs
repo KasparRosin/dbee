@@ -15,7 +15,12 @@ pub struct ApplyError {
 
 impl std::fmt::Display for ApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "change {} failed, nothing was written: {}", self.index.saturating_add(1), self.error)
+        let n = self.index.saturating_add(1);
+        match self.error {
+            PgError::ConnectionLost => write!(f, "the connection was lost while writing change {n}; the outcome is unknown, so re-read the rows"),
+            PgError::RowNotFound { .. } => write!(f, "{}", self.error),
+            _ => write!(f, "change {n} failed, so nothing was written: {}", self.error),
+        }
     }
 }
 
@@ -26,9 +31,10 @@ impl std::error::Error for ApplyError {
 }
 
 /// Marks the connection closed if dropped before [`finish`](Self::finish): the apply future was
-/// cancelled between `BEGIN` and its end, so the server may still hold an open transaction and
-/// a later statement on this connection would run inside it. A closed connection is reported as
-/// lost and the engine reconnects, which discards the transaction.
+/// cancelled between `BEGIN` and its end, so the server may still hold an open transaction.
+/// Every later operation on the connection is refused with `ConnectionLost`; the socket and the
+/// server-side transaction stay open until the `PgConnection` is dropped, so the engine must
+/// drop it and reconnect (which discards the transaction).
 struct OpenTransaction<'a> {
     conn: &'a PgConnection,
     armed: bool,
@@ -53,13 +59,20 @@ const NO_ROWS: Limits = Limits { max_rows: 0, max_bytes: 0 };
 /// Run `statements` in one transaction and return the rows they changed in total.
 ///
 /// Each statement must change exactly one row, else it is [`PgError::RowNotFound`] for its
-/// index. Any failure rolls back; a `ROLLBACK` that itself fails is [`PgError::ConnectionLost`].
+/// index, and each must be exactly one SQL statement (checked before anything is sent). A
+/// failing `COMMIT` (a deferred constraint, say) is reported at the last statement's index. A
+/// `ConnectionLost` during `COMMIT` leaves the outcome unknown. Any failure rolls back; a `ROLLBACK` that itself fails is [`PgError::ConnectionLost`].
 /// The connection lock is held from `BEGIN` to the end. An empty list sends nothing.
 pub async fn apply(conn: &PgConnection, statements: &[String]) -> Result<u64, ApplyError> {
     if statements.is_empty() {
         return Ok(0);
     }
-    let _lock = conn.lock().await;
+    for (i, sql) in statements.iter().enumerate() {
+        if dbee_sql::lexer::statements(sql).len() != 1 {
+            return Err(ApplyError { index: i, error: PgError::Other("a change must be exactly one SQL statement".into()) });
+        }
+    }
+    let _lock = conn.lock().await.map_err(|error| ApplyError { index: 0, error })?;
     let mut open = OpenTransaction { conn, armed: true };
     let last = statements.len() - 1;
     let outcome = write_all(conn, statements).await;
