@@ -4,7 +4,22 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "dbee engine: sessions, the command registry, undo (L5)"
+description = "dbee engine (L5): the session, the command registry, background jobs, the panic guard and the journal"
 
 [lints]
 workspace = true
+
+[dependencies]
+dbee-core = { workspace = true }
+dbee-sql = { workspace = true }
+dbee-config = { workspace = true }
+dbee-ssh = { workspace = true }
+dbee-pg = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+dbee-testkit = { workspace = true }

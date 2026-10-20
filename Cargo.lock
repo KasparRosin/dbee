@@ -1102,6 +1102,19 @@ dependencies = [
 [[package]]
 name = "dbee-engine"
 version = "0.0.0"
+dependencies = [
+ "dbee-config",
+ "dbee-core",
+ "dbee-pg",
+ "dbee-sql",
+ "dbee-ssh",
+ "dbee-testkit",
+ "futures-util",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "dbee-mcp"
