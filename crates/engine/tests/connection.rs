@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use dbee_config::{ConnectionColor, ConnectionConfig, SecretError, SecretKind, SecretStore, SshAuth, SshConfig};
+use dbee_config::{ConnectionColor, ConnectionConfig, SecretError, SecretKind, SecretStore, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, Json, Outcome, UiRequest};
 use dbee_testkit::{require_testdb, temp_home, unique};
 use serde_json::json;
@@ -666,4 +666,71 @@ fn a_failed_reconnect_after_close_is_ignored() {
     let Outcome::Started(job) = s.execute("connection.reconnect", json!({})).unwrap() else { panic!("reconnect is a job") };
     s.run_blocking("connection.close", json!({}), T).unwrap();
     assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }), "checked for staleness before its error");
+}
+
+#[test]
+fn saving_new_settings_forgets_the_secrets_that_no_longer_apply() {
+    let mut s = session();
+    let key = |path: &str| SshAuth::Key { path: Some(path.into()) };
+    let base = ConnectionConfig {
+        id: "edit".into(),
+        ssh: Some(SshConfig { host: "127.0.0.1".into(), port: 1, user: "dbee".into(), auth: key("/k/one") }),
+        ..refused_config("edit")
+    };
+    let stored = |s: &TestSession| {
+        [SecretKind::DbPassword, SecretKind::SshPassword, SecretKind::SshPassphrase].map(|k| s.secrets.get("edit", k).unwrap().is_some())
+    };
+    s.run_blocking("connection.save", json!({ "config": base, "password": "db", "sshPassword": "sp", "sshPassphrase": "pp" }), T).unwrap();
+    assert_eq!(stored(&s), [true, true, true]);
+    // A change that concerns no secret keeps them all.
+    let renamed = ConnectionConfig { name: "renamed".into(), database: "other".into(), ..base };
+    save(&mut s, renamed.clone(), None);
+    assert_eq!(stored(&s), [true, true, true]);
+    // Another key file: the passphrase goes.
+    let mut other_key = renamed;
+    other_key.ssh.as_mut().unwrap().auth = key("/k/two");
+    save(&mut s, other_key.clone(), None);
+    assert_eq!(stored(&s), [true, true, false]);
+    // Another database host: the password goes, unless it is given again.
+    let moved = ConnectionConfig { host: "127.0.0.2".into(), ..other_key };
+    save(&mut s, moved.clone(), None);
+    assert_eq!(stored(&s), [false, true, false]);
+    save(&mut s, moved.clone(), Some("db2".into()));
+    assert_eq!(s.secrets.get("edit", SecretKind::DbPassword).unwrap().as_deref(), Some("db2"));
+    // A weaker TLS mode: the password goes.
+    save(&mut s, ConnectionConfig { ssl_mode: SslMode::Disable, ..moved.clone() }, None);
+    assert_eq!(stored(&s), [false, true, false]);
+    // Another SSH host is another tunnel: the database password and the SSH secrets go.
+    save(&mut s, moved.clone(), Some("db3".into()));
+    assert_eq!(stored(&s), [true, true, false]);
+    let mut jump = moved;
+    jump.ssh.as_mut().unwrap().host = "127.0.0.3".into();
+    save(&mut s, jump, None);
+    assert_eq!(stored(&s), [false, false, false]);
+    assert_secret_hidden(&s, "db3");
+}
+
+#[test]
+fn edit_host_save_connect_does_not_send_the_old_password() {
+    let _db = require_testdb!();
+    let mut s = session();
+    let id = save(&mut s, pg14_config(), Some(pw()));
+    // The ordinary edit: another server, Save, then Connect.
+    save(&mut s, ConnectionConfig { id: id.clone(), port: pgnew().port, ..pg14_config() }, None);
+    assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), None, "the old server's password is forgotten");
+    let e = run_err(&mut s, "connection.open", json!({ "id": id }));
+    assert_eq!(e.code(), "needsPassword", "{e}");
+}
+
+#[test]
+fn a_weaker_tls_mode_does_not_get_the_stored_password() {
+    let db = require_testdb!();
+    let mut s = session();
+    let strict = ConnectionConfig { id: "strict".into(), ssl_mode: SslMode::VerifyFull, ca_file: Some(db.ca_file.clone()), ..pg14_config() };
+    save(&mut s, strict.clone(), Some(pw()));
+    s.run_blocking("connection.test", json!({ "config": strict }), T).unwrap();
+    let plain = ConnectionConfig { ssl_mode: SslMode::Disable, ..strict.clone() };
+    let e = run_err(&mut s, "connection.test", json!({ "config": plain }));
+    assert_eq!(e.code(), "needsPassword", "a downgrade must not get the stored password: {e}");
+    s.run_blocking("connection.test", json!({ "config": strict }), T).unwrap();
 }

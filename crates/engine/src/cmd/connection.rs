@@ -5,9 +5,16 @@
 //! params first (`password`, `sshPassword`, `sshPassphrase`; an empty string counts as not
 //! given), then the secret store, then nowhere. The store keeps secrets only for saved
 //! connections, under their id, and a stored secret is used only where it was saved for
-//! ([`reuse`]): the database password for the saved host, port and user; the SSH password for the
-//! saved SSH host, port and user; the passphrase also for the same key file. So an edited form or
-//! an agent that sends a saved id with another server never gets the saved secrets. Secrets are
+//! ([`reuse`]):
+//! - the database password: the same host, port and user, the same tunnel (no tunnel on either
+//!   side, or the same SSH host and port), and a TLS mode at least as strong as the saved one
+//!   (disable < prefer < require < verify-ca < verify-full);
+//! - the SSH password: the same SSH host, port and user;
+//! - the key passphrase: the same SSH host, port and user, and the same key file.
+//!
+//! So an edited form or an agent that sends a saved id with another server never gets the saved
+//! secrets, and saving new settings forgets the stored secrets they no longer apply to (unless
+//! the save gives them again). Secrets are
 //! kept only in the store and in the crate-private [`Connected::credentials`] (for reconnects),
 //! never in the config, the connections file, `inspect()`, `Debug`, logs, errors or the journal
 //! (the journal drops secret params by key, and `connection.parseUrl`, whose URL may carry a
@@ -32,7 +39,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dbee_config::{ConnectionConfig, SecretKind, SecretStore, SshAuth, new_id, parse_url};
+use dbee_config::{ConnectionConfig, SecretKind, SecretStore, SshAuth, SslMode, new_id, parse_url};
 use dbee_core::Catalog;
 use dbee_pg::catalog::load_catalog;
 use dbee_pg::{Canceller, PgConnection, PgError, ServerInfo, Target};
@@ -279,6 +286,22 @@ fn store_secrets(store: &dyn SecretStore, id: &str, c: &Credentials) -> bool {
     ok
 }
 
+/// Deletes each secret of `id` that `still` no longer allows and `given` does not hold again;
+/// `false` when the store refused.
+fn forget_stale_secrets(store: &dyn SecretStore, id: &str, still: Reuse, given: &Credentials) -> bool {
+    let mut ok = true;
+    for (kind, applies, again) in [
+        (SecretKind::DbPassword, still.db, given.password.is_some()),
+        (SecretKind::SshPassword, still.ssh_password, given.ssh.password.is_some()),
+        (SecretKind::SshPassphrase, still.passphrase, given.ssh.passphrase.is_some()),
+    ] {
+        if !applies && !again {
+            ok &= store.delete(id, kind).is_ok();
+        }
+    }
+    ok
+}
+
 /// Deletes every secret of `id`; `false` when the store refused.
 fn forget_secrets(store: &dyn SecretStore, id: &str) -> bool {
     let mut ok = true;
@@ -302,12 +325,34 @@ struct Reuse {
     passphrase: bool,
 }
 
-/// The stored secrets of `saved` that `given` may use: each only where it was saved for. The
-/// database password when the host, port and user are the same; the SSH password when the SSH
-/// host, port and user are the same; the key passphrase when, in addition, both log in with the
-/// same key file.
+/// How strong a TLS mode is: disable < prefer < require < verify-ca < verify-full.
+fn tls_strength(mode: SslMode) -> u8 {
+    match mode {
+        SslMode::Disable => 0,
+        SslMode::Prefer => 1,
+        SslMode::Require => 2,
+        SslMode::VerifyCa => 3,
+        SslMode::VerifyFull => 4,
+    }
+}
+
+/// The stored secrets of `saved` that `given` may use: each only where it was saved for.
+/// - The database password: the same host, port and user; the same tunnel (no tunnel on either
+///   side, or the same SSH host and port, since behind a tunnel the database host is usually
+///   `localhost` of another machine); and a TLS mode at least as strong as the saved one.
+/// - The SSH password: the same SSH host, port and user.
+/// - The key passphrase: the same SSH host, port and user, and the same key file.
 fn reuse(saved: &ConnectionConfig, given: &ConnectionConfig) -> Reuse {
-    let db = saved.host == given.host && saved.port == given.port && saved.user == given.user;
+    let same_tunnel = match (&saved.ssh, &given.ssh) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.host == b.host && a.port == b.port,
+        _ => false,
+    };
+    let db = saved.host == given.host
+        && saved.port == given.port
+        && saved.user == given.user
+        && same_tunnel
+        && tls_strength(given.ssl_mode) >= tls_strength(saved.ssl_mode);
     let (ssh_password, passphrase) = match (&saved.ssh, &given.ssh) {
         (Some(a), Some(b)) if a.host == b.host && a.port == b.port && a.user == b.user => {
             let same_key = matches!((&a.auth, &b.auth), (SshAuth::Key { path: x }, SshAuth::Key { path: y }) if x == y);
@@ -513,6 +558,17 @@ async fn load_catalog_within(conn: &PgConnection, limit: Duration) -> Result<Cat
     }
 }
 
+/// A refresh whose catalog load timed out: its connection was discarded and the session is lost,
+/// so the error offers the reconnect like every lost connection. (`EngineError::Timeout` carries
+/// no data, so this is a `Db` error with the same code.)
+fn lost_by_timeout() -> EngineError {
+    EngineError::Db {
+        code: "timeout",
+        message: format!("the catalog did not load within {} s, so the connection was dropped; reconnect to go on", CATALOG_TIMEOUT.as_secs()),
+        data: json!({ "action": RECONNECT }),
+    }
+}
+
 fn catalog_error(e: CatalogLoad) -> EngineError {
     match e {
         CatalogLoad::Failed(e) => db_error(&e),
@@ -583,21 +639,25 @@ fn list(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 
 /// `{config, password?, sshPassword?, sshPassphrase?}` → `{id}`: adds or replaces the saved
 /// connection with the config's id (a new id when it is empty) and writes the file. With
-/// `saveSecrets` and a secret store, the given secrets are stored (the ones not given are kept);
-/// without `saveSecrets`, the stored ones are forgotten.
+/// `saveSecrets` and a secret store, the given secrets are stored, and of the ones not given
+/// those the new settings still allow ([`reuse`] against the settings saved before) are kept
+/// while the others are forgotten; without `saveSecrets`, every stored one is forgotten.
 fn save(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let mut config = connect_config(params)?.ok_or_else(|| bad("`config` is required (a connection object)"))?;
     let secrets = given(params)?;
     if config.id.is_empty() {
         config.id = new_id();
     }
+    let before = s.state.store.saved.iter().find(|c| c.id == config.id).cloned();
     let mut store = s.state.store.clone();
     store.upsert(config.clone());
     store.save().map_err(|e| EngineError::Config(e.to_string()))?;
     s.state.store = store;
     if let Some(secret_store) = s.secrets.clone() {
         let ok = if config.save_secrets {
-            store_secrets(secret_store.as_ref(), &config.id, &secrets)
+            let still = before.as_ref().map_or(Reuse::default(), |b| reuse(b, &config));
+            let forgot = forget_stale_secrets(secret_store.as_ref(), &config.id, still, &secrets);
+            store_secrets(secret_store.as_ref(), &config.id, &secrets) && forgot
         } else {
             forget_secrets(secret_store.as_ref(), &config.id)
         };
@@ -865,8 +925,9 @@ fn apply_reconnect(
 }
 
 /// `{}` → a job returning `{tables}`: reloads the catalog on the browse connection. Tabs keep
-/// their tables. A load past [`CATALOG_TIMEOUT`] is cancelled and fails with `timeout`, and the
-/// connection is discarded (the session is marked lost, so a reconnect replaces it).
+/// their tables. A load past [`CATALOG_TIMEOUT`] is cancelled and the connection is discarded:
+/// the session is marked lost, and the error (code `timeout`) names the reconnect in
+/// `data.action`.
 fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let conn = s.browse()?;
     let job = s.spawn_job(REFRESH, async move {
@@ -883,7 +944,7 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
                     if let Some(c) = s.state.connected.as_mut() {
                         c.lost = true;
                     }
-                    return Err(EngineError::Timeout);
+                    return Err(lost_by_timeout());
                 }
             };
             let tables = catalog.table_count();
@@ -954,6 +1015,7 @@ mod tests {
     #[test]
     fn stored_secrets_are_reused_only_for_the_same_server() {
         let all = Reuse { db: true, ssh_password: true, passphrase: true };
+        let nothing = Reuse::default();
         assert_eq!(reuse(&saved(), &saved()), all);
         // The database name and the display settings do not matter.
         assert_eq!(reuse(&saved(), &ConnectionConfig { database: "other".into(), name: "x".into(), ..saved() }), all);
@@ -962,19 +1024,45 @@ mod tests {
         assert_eq!(reuse(&saved(), &ConnectionConfig { host: "evil.example".into(), ..saved() }), ssh_only);
         assert_eq!(reuse(&saved(), &ConnectionConfig { port: 1, ..saved() }), ssh_only);
         assert_eq!(reuse(&saved(), &ConnectionConfig { user: "bob".into(), ..saved() }), ssh_only);
-        // Another SSH host, port or user: no SSH secret.
+        // Another SSH host or port is another tunnel, so another machine behind the same DB host
+        // name: no secret at all.
+        assert_eq!(reuse(&saved(), &with_ssh(|s| s.host = "evil".into())), nothing);
+        assert_eq!(reuse(&saved(), &with_ssh(|s| s.port = 2222)), nothing);
+        // Another SSH user: the same tunnel endpoint, so the database password still applies.
         let db_only = Reuse { db: true, ssh_password: false, passphrase: false };
-        assert_eq!(reuse(&saved(), &with_ssh(|s| s.host = "evil".into())), db_only);
-        assert_eq!(reuse(&saved(), &with_ssh(|s| s.port = 2222)), db_only);
         assert_eq!(reuse(&saved(), &with_ssh(|s| s.user = "bob".into())), db_only);
         // Another key file (or another login method): no passphrase.
         let no_passphrase = Reuse { db: true, ssh_password: true, passphrase: false };
         assert_eq!(reuse(&saved(), &with_ssh(|s| s.auth = SshAuth::Key { path: Some("/k/other".into()) })), no_passphrase);
         assert_eq!(reuse(&saved(), &with_ssh(|s| s.auth = SshAuth::Key { path: None })), no_passphrase);
         assert_eq!(reuse(&saved(), &with_ssh(|s| s.auth = SshAuth::Password)), no_passphrase);
-        // No tunnel on either side: no SSH secret.
-        assert_eq!(reuse(&saved(), &ConnectionConfig { ssh: None, ..saved() }), db_only);
-        assert_eq!(reuse(&ConnectionConfig { ssh: None, ..saved() }, &saved()), db_only);
+        // A tunnel on one side only: another route, so nothing.
+        assert_eq!(reuse(&saved(), &ConnectionConfig { ssh: None, ..saved() }), nothing);
+        assert_eq!(reuse(&ConnectionConfig { ssh: None, ..saved() }, &saved()), nothing);
+        // No tunnel on either side: the database password by its own rule.
+        let direct = ConnectionConfig { ssh: None, ..saved() };
+        assert_eq!(reuse(&direct, &direct), Reuse { db: true, ssh_password: false, passphrase: false });
+    }
+
+    #[test]
+    fn stored_password_needs_tls_at_least_as_strong() {
+        use dbee_config::SslMode::{Disable, Prefer, Require, VerifyCa, VerifyFull};
+        let order = [Disable, Prefer, Require, VerifyCa, VerifyFull];
+        for (i, &was) in order.iter().enumerate() {
+            for (j, &now) in order.iter().enumerate() {
+                let r = reuse(&ConnectionConfig { ssl_mode: was, ..saved() }, &ConnectionConfig { ssl_mode: now, ..saved() });
+                assert_eq!(r.db, j >= i, "saved {was:?}, given {now:?}");
+                assert!(r.ssh_password && r.passphrase, "TLS does not concern the tunnel: saved {was:?}, given {now:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_refresh_timeout_offers_the_reconnect() {
+        let e = lost_by_timeout();
+        assert_eq!(e.code(), "timeout");
+        assert_eq!(e.data(), json!({ "action": "connection.reconnect" }));
+        assert!(e.to_string().contains("60 s"), "{e}");
     }
 
     #[tokio::test]
