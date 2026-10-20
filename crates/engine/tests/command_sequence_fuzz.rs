@@ -83,6 +83,10 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("edit.reset", &[]),
     ("edit.undo", &[]),
     ("edit.redo", &[]),
+    ("selection.set", &[("anchor", CELL), ("focus", CELL)]),
+    ("selection.all", &[]),
+    ("copy.selection", &[("format", Hint::OneOf(&["tsv", "tsvHeader", "csv", "json", "markdown", "xml", ""]))]),
+    ("value.show", &[]),
 ];
 
 /// Table commands: names from the seed data, odd ones and ones that do not exist.
@@ -118,6 +122,13 @@ fn grid_size(s: &Session) -> usize {
 
 fn grid_row(r: &mut Rng, s: &Session) -> Json {
     json!(r.below(grid_size(s) + 2))
+}
+
+/// Selection: `[row, column]` in or just outside the active table grid.
+const CELL: Hint = Hint::Custom(cell);
+
+fn cell(r: &mut Rng, s: &Session) -> Json {
+    if r.chance(5) { json!([r.below(3), r.below(3)]) } else { json!([r.below(grid_size(s) + 2), r.below(8)]) }
 }
 
 fn grid_rows(r: &mut Rng, s: &Session) -> Json {

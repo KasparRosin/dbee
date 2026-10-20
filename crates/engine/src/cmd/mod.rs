@@ -16,6 +16,7 @@ pub mod connection;
 pub mod edit;
 pub mod query;
 pub mod schema;
+pub mod selection;
 pub mod table;
 pub mod tabs;
 
@@ -71,7 +72,7 @@ impl CommandInfo {
 }
 
 /// Every command table, in menu order. A new command module adds its `SPECS` here.
-const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS, schema::SPECS, table::SPECS, edit::SPECS, query::SPECS];
+const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS, schema::SPECS, table::SPECS, edit::SPECS, query::SPECS, selection::SPECS];
 
 #[cfg(test)]
 fn test_specs() -> &'static [CommandSpec] {

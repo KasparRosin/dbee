@@ -16,6 +16,7 @@ pub mod edits;
 pub mod fuzzy;
 mod jobs;
 pub mod state;
+pub mod view;
 
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -32,6 +33,7 @@ pub use cmd::{CommandInfo, CommandSpec};
 pub use edits::Edits;
 pub(crate) use jobs::Apply;
 pub use state::{Connected, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total};
+pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};
 
 /// Params, results and error data.
 pub type Json = serde_json::Value;
@@ -205,6 +207,7 @@ pub struct Session {
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) ssh: SshEnv,
     journal: Vec<(String, Json)>,
+    value_cache: view::Cache,
 }
 
 impl std::fmt::Debug for Session {
@@ -223,7 +226,15 @@ impl Session {
         if store_warning.is_some() {
             log::warn!("the connections file could not be used; connections are kept in memory or start empty");
         }
-        Ok(Session { state: State::new(store, store_warning), jobs, ui_requests: Vec::new(), secrets: o.secrets, ssh: o.ssh, journal: Vec::new() })
+        Ok(Session {
+            state: State::new(store, store_warning),
+            jobs,
+            ui_requests: Vec::new(),
+            secrets: o.secrets,
+            ssh: o.ssh,
+            journal: Vec::new(),
+            value_cache: view::Cache::default(),
+        })
     }
 
     /// Runs command `id`. In order: find it, check `enabled`, check that `params` is an object
@@ -395,6 +406,26 @@ impl Session {
         &self.state
     }
 
+    /// The value panel's content: the focus cell of the active tab's selection, with staged
+    /// values, pretty-printed when it is JSON and cut to [`VALUE_VIEW_MAX_BYTES`]. `None` without
+    /// a selection. Cheap to call every frame: the view is built once per tab, cell, page and
+    /// staged-edit state (see [`view`]); this copies the text, [`Session::value_view_shared`]
+    /// does not.
+    pub fn value_view(&self) -> Option<ValueView> {
+        self.value_view_shared().map(|v| (*v).clone())
+    }
+
+    /// [`Session::value_view`] without the copy of the text.
+    pub fn value_view_shared(&self) -> Option<Arc<ValueView>> {
+        self.value_cache.get(self.state.active_tab()?)
+    }
+
+    /// How many value views this session has built (for tests of the caching).
+    #[doc(hidden)]
+    pub fn value_view_computations(&self) -> usize {
+        self.value_cache.built()
+    }
+
     /// A JSON summary for agents and tests (`document.inspect`): the screen, the connection, the
     /// tabs and the active one in detail, and the running jobs. Never contains a secret.
     pub fn inspect(&self) -> Json {
@@ -418,6 +449,8 @@ impl Session {
             "active": st.active,
             "query": query,
             "table": table,
+            "selection": view::selection_json(active),
+            "value": self.value_view_shared().map_or(Json::Null, |v| view::summary(&v)),
             "jobs": self.jobs.running().map(|(job, label)| json!({ "job": job, "label": label })).collect::<Vec<_>>(),
         })
     }

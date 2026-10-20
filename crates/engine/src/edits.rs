@@ -35,6 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dbee_core::{ColumnInfo, ResultSet, TableInfo};
 use dbee_sql::SqlError;
@@ -67,10 +68,31 @@ pub struct Edits {
     pub failed: Option<(usize, Option<usize>, String)>,
     /// An Apply of these edits ended with an unknown outcome, and none went ahead since.
     unknown: bool,
+    /// Changes whenever the staged values do (see [`Edits::revision`]).
+    revision: Revision,
     undo: VecDeque<Arc<Staged>>,
     redo: Vec<Arc<Staged>>,
     /// What `undo` and `redo` hold, counted by [`Staged::bytes`].
     history_bytes: usize,
+}
+
+/// A stamp for the staged values: a number never given twice in the process, so a cache can tell
+/// that they changed without comparing them. Always equal to another, so it takes no part in
+/// comparing [`Edits`].
+#[derive(Clone, Copy, Debug, Default)]
+struct Revision(u64);
+
+impl PartialEq for Revision {
+    fn eq(&self, _: &Revision) -> bool {
+        true
+    }
+}
+
+impl Revision {
+    fn bump(&mut self) {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        self.0 = NEXT.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// One snapshot of the staged edits, shared between clones of the history.
@@ -121,6 +143,14 @@ impl Edits {
 
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// A stamp that is never the same for two different sets of staged values of the same page:
+    /// every stage, add, delete, reset, undo and redo that changes them gives a new one (a few
+    /// that change nothing visible may too). `0` for edits never changed. A cache of something
+    /// derived from a shown value keys on it.
+    pub fn revision(&self) -> u64 {
+        self.revision.0
     }
 
     /// Rows in the grid: the loaded ones, then the new ones.
@@ -333,6 +363,7 @@ impl Edits {
     /// Back to the edits before the last change; `false` when there is none.
     pub(crate) fn undo(&mut self) -> bool {
         let Some(previous) = self.undo.pop_back() else { return false };
+        self.revision.bump();
         let current = self.take_current();
         self.history_bytes = self.history_bytes.saturating_sub(previous.bytes).saturating_add(current.bytes);
         self.redo.push(Arc::new(current));
@@ -343,6 +374,7 @@ impl Edits {
     /// Forward again to the edits the last undo left; `false` when there is none.
     pub(crate) fn redo(&mut self) -> bool {
         let Some(next) = self.redo.pop() else { return false };
+        self.revision.bump();
         let current = self.take_current();
         self.history_bytes = self.history_bytes.saturating_sub(next.bytes).saturating_add(current.bytes);
         self.undo.push_back(Arc::new(current));
@@ -352,6 +384,7 @@ impl Edits {
 
     /// Before a change: the edits as they are become an undo step, and nothing can be redone.
     fn record(&mut self) {
+        self.revision.bump();
         let snapshot = Staged::new(self.cells.clone(), self.new_rows.clone(), self.deleted.clone());
         self.history_bytes = self.history_bytes.saturating_add(snapshot.bytes);
         self.undo.push_back(Arc::new(snapshot));
