@@ -615,7 +615,7 @@ fn save_store_or_tell(s: &mut Session) {
 /// Sends a cancel request for the statement running on each of `conns` that is still open, in
 /// a detached task. The jobs running them then end with an error (and their results are
 /// dropped where their connection is gone).
-fn cancel_statements(s: &Session, conns: impl IntoIterator<Item = Arc<PgConnection>>) {
+pub(crate) fn cancel_statements(s: &Session, conns: impl IntoIterator<Item = Arc<PgConnection>>) {
     let cancellers: Vec<Canceller> = conns.into_iter().filter(|c| !c.is_closed()).map(|c| c.canceller()).collect();
     if cancellers.is_empty() {
         return;

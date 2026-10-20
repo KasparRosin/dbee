@@ -55,7 +55,38 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("schema.inspect", &[("schema", Hint::Text), ("table", Hint::Text)]),
     ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count)]),
     ("connection.close", &[("force", Hint::Bool)]),
+    ("table.open", &[("schema", SCHEMA), ("table", TABLE), ("filters", FILTERS)]),
+    ("table.setFilters", &[("filters", FILTERS), ("raw", Hint::Text), ("rawMode", Hint::Bool), ("apply", Hint::Bool)]),
+    ("table.page", &[("to", Hint::Custom(page_to))]),
+    ("table.sort", &[("column", COLUMN), ("dir", Hint::OneOf(&["asc", "desc", "none", "up", ""]))]),
+    ("table.count", &[]),
+    ("table.cancel", &[]),
+    ("table.refresh", &[]),
+    ("table.read", &[("offset", Hint::Count), ("limit", Hint::Count)]),
+    ("table.followForeignKey", &[("row", Hint::Count), ("column", COLUMN)]),
 ];
+
+/// Table commands: names from the seed data, odd ones and ones that do not exist.
+const SCHEMA: Hint = Hint::OneOf(&["shop", "odd", "scratch", "", "🐝"]);
+const TABLE: Hint = Hint::OneOf(&["orders", "customers", "big_rows", "order_totals", "Odd \"Name\" 🐝", "nope"]);
+const COLUMN: Hint = Hint::Custom(column);
+const FILTERS: Hint = Hint::Custom(filters);
+
+fn column(r: &mut Rng, _: &Session) -> Json {
+    if r.chance(30) { json!(r.below(12)) } else { json!(r.pick(&["id", "customer_id", "total", "Total $", "nope", ""])) }
+}
+
+fn filters(r: &mut Rng, s: &Session) -> Json {
+    let ops = ["eq", "ne", "like", "notLike", "ilike", "notIlike", "lt", "le", "gt", "ge", "in", "isNull", "isNotNull", "between"];
+    let rows: Vec<Json> = (0..r.below(4))
+        .map(|_| json!({ "column": column(r, s), "op": r.pick(&ops), "value": if r.chance(20) { hostile(r) } else { text(r) } }))
+        .collect();
+    Json::Array(rows)
+}
+
+fn page_to(r: &mut Rng, _: &Session) -> Json {
+    if r.chance(40) { json!(r.pick(&[0u64, 1, 2, 10_000, u64::MAX])) } else { json!(r.pick(&["first", "prev", "next", "last", "middle"])) }
+}
 
 /// Connection configs. Every host is 127.0.0.1 and every port 1, which refuses at once, for the
 /// database and for SSH: the fuzz never reaches a server, and never names a host that would need

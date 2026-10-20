@@ -14,6 +14,7 @@
 
 pub mod connection;
 pub mod schema;
+pub mod table;
 pub mod tabs;
 
 use serde::Serialize;
@@ -68,7 +69,7 @@ impl CommandInfo {
 }
 
 /// Every command table, in menu order. A new command module adds its `SPECS` here.
-const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS, schema::SPECS];
+const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS, schema::SPECS, table::SPECS];
 
 #[cfg(test)]
 fn test_specs() -> &'static [CommandSpec] {

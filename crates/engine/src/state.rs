@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
-use dbee_core::{Catalog, TableRef};
+use dbee_core::{Catalog, ResultSet, TableRef};
 use dbee_pg::{PgConnection, ServerInfo};
+use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -123,15 +124,118 @@ pub struct QueryTab {
     pub selection: Option<Selection>,
 }
 
+/// A table tab's row count.
+///
+/// As JSON: `"unknown"`, `{"estimate": n}`, `{"counting": {"estimate": n | null}}` or
+/// `{"exact": n}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Total {
+    /// Not counted.
+    #[default]
+    Unknown,
+    /// The planner's estimate (`reltuples`), shown as `~n`; a count that failed or was
+    /// cancelled leaves it.
+    Estimate(u64),
+    /// An exact count is running; the estimate shows meanwhile when there is one.
+    Counting { estimate: Option<u64> },
+    /// Counted.
+    Exact(u64),
+}
+
+impl Total {
+    /// What is left when a count ends without a number: the estimate it showed, else unknown.
+    pub fn settled(self) -> Total {
+        match self {
+            Total::Counting { estimate: Some(n) } => Total::Estimate(n),
+            Total::Counting { estimate: None } => Total::Unknown,
+            other => other,
+        }
+    }
+}
+
+/// What a table page was loaded with: the condition, the sort and the 0-based page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageView {
+    pub applied: Condition,
+    pub sort: Option<Sort>,
+    pub page: u64,
+}
+
 /// A table data tab.
+///
+/// `applied`, `sort` and `page` are what the rows were loaded with, or are being loaded with
+/// while `loading` runs (so a second "next" goes on from the page asked for). A load that fails
+/// puts them back to `shown`, what `data` was loaded with, and sets `error`; `data` stays.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableTab {
     pub id: TabId,
     pub table: TableRef,
     pub selection: Option<Selection>,
+    /// The filter bar's rows, as edited (applied or not).
+    pub filters: Vec<Filter>,
+    /// The filter bar's raw `WHERE` condition, as edited.
+    pub raw: String,
+    /// The filter bar shows the raw condition instead of the rows.
+    pub raw_mode: bool,
+    pub applied: Condition,
+    pub sort: Option<Sort>,
+    /// 0-based.
+    pub page: u64,
+    /// The loaded page: at most 100 rows, columns typed from the catalog. `None` until the first
+    /// page arrives.
+    pub data: Option<Arc<ResultSet>>,
+    /// More rows follow this page (the page statement got 101).
+    pub has_next: bool,
+    pub total: Total,
+    /// The job loading a page.
+    pub loading: Option<JobId>,
+    /// Why the last load failed, the server's text; the rows from before stay.
+    pub error: Option<String>,
+    /// Bumped by every page load; a result whose `seq` is not the tab's is stale and ignored.
+    pub seq: u64,
+    /// What `data` was loaded with.
+    pub shown: PageView,
+}
+
+impl TableTab {
+    /// A tab for `table` about to load `view`; nothing loaded yet.
+    pub fn new(id: TabId, table: TableRef, filters: Vec<Filter>, view: PageView) -> TableTab {
+        TableTab {
+            id,
+            table,
+            selection: None,
+            filters,
+            raw: String::new(),
+            raw_mode: false,
+            applied: view.applied.clone(),
+            sort: view.sort.clone(),
+            page: view.page,
+            data: None,
+            has_next: false,
+            total: Total::Unknown,
+            loading: None,
+            error: None,
+            seq: 0,
+            shown: view,
+        }
+    }
+
+    /// What `applied`, `sort` and `page` ask for.
+    pub fn view(&self) -> PageView {
+        PageView { applied: self.applied.clone(), sort: self.sort.clone(), page: self.page }
+    }
+
+    /// Edits are staged: filters, paging, sort and refresh wait until they are applied or reset
+    /// (they would throw the staged rows away). The one place that answers it; staged edits
+    /// arrive with M1.17.
+    pub fn has_staged_edits(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant, reason = "a window holds a few dozen tabs at most, and every command matches `Tab::Table(TableTab)`")]
 pub enum Tab {
     Table(TableTab),
     Query(QueryTab),

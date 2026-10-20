@@ -29,7 +29,7 @@ use serde_json::{Map, json};
 
 pub use cmd::{CommandInfo, CommandSpec};
 pub(crate) use jobs::Apply;
-pub use state::{Connected, QueryTab, Screen, Selection, State, Tab, TableTab};
+pub use state::{Connected, PageView, QueryTab, Screen, Selection, State, Tab, TableTab, Total};
 
 /// Params, results and error data.
 pub type Json = serde_json::Value;
@@ -404,7 +404,7 @@ impl Session {
             _ => Json::Null,
         };
         let table = match active {
-            Some(Tab::Table(t)) => json!({ "tab": t.id, "title": t.table.display(), "schema": t.table.schema, "name": t.table.name }),
+            Some(Tab::Table(t)) => cmd::table::summary(self, t),
             _ => Json::Null,
         };
         json!({
