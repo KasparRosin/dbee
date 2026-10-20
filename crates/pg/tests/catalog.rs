@@ -6,8 +6,9 @@ use std::time::Instant;
 use dbee_config::{ConnectionConfig, SslMode};
 use dbee_core::schema::{Catalog, RelKind, TableRef};
 use dbee_pg::catalog::load_catalog;
+use dbee_pg::query::{self, QUERY_LIMITS};
 use dbee_pg::{PgConnection, Target, connect};
-use dbee_testkit::{PgServer, TestDb, require_testdb};
+use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
 
 fn tr(schema: &str, name: &str) -> TableRef {
     TableRef { schema: schema.into(), name: name.into() }
@@ -166,5 +167,34 @@ async fn big_rows_estimate() {
     for (_, cat) in catalogs(db).await {
         let n = cat.table(&tr("shop", "big_rows")).expect("big_rows").estimated_rows.expect("estimate");
         assert!(n >= 900_000, "{n}");
+    }
+}
+
+#[tokio::test]
+async fn composite_key_order_is_key_order_not_attnum() {
+    let db = require_testdb!();
+    for s in &db.servers {
+        let c = conn(s, db).await;
+        let (target, refer) = (unique("keyt"), unique("keyr"));
+        let setup = format!(
+            "CREATE TABLE scratch.\"{target}\" (a int, b int, c int, PRIMARY KEY (b, a), UNIQUE (c, a)); \
+             CREATE TABLE scratch.\"{refer}\" (x int, y int, FOREIGN KEY (y, x) REFERENCES scratch.\"{target}\" (b, a))"
+        );
+        let created = query::run_untyped(&c, &setup, QUERY_LIMITS).await;
+        let loaded = match created {
+            Ok(_) => load_catalog(&c).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let drop = format!("DROP TABLE IF EXISTS scratch.\"{refer}\", scratch.\"{target}\"");
+        let dropped = query::run_untyped(&c, &drop, QUERY_LIMITS).await;
+        let cat = loaded.expect("catalog with key tables");
+        dropped.expect("drop");
+        let t = cat.table(&tr("scratch", &target)).expect("target");
+        assert_eq!(t.primary_key, ["b", "a"]);
+        assert_eq!(t.unique_keys, vec![vec!["c".to_string(), "a".to_string()]]);
+        let fk = &cat.table(&tr("scratch", &refer)).expect("referencing").foreign_keys[0];
+        assert_eq!(fk.columns, ["y", "x"]);
+        assert_eq!(fk.target_columns, ["b", "a"]);
+        assert_eq!(fk.target, tr("scratch", &target));
     }
 }

@@ -7,7 +7,7 @@
 //! from `unnest(conkey) WITH ORDINALITY`, so no array text is parsed.
 //!
 //! Limits: a catalog must never be truncated, so the queries run with limits no real catalog
-//! reaches (`CATALOG_LIMITS`: 100 million rows and 4 GiB of text) instead of the 10,000-row
+//! reaches (`CATALOG_LIMITS`: 5 million rows and 512 MiB of text; a result that still hits them is an error, never a partial catalog) instead of the 10,000-row
 //! query cap, because a database with a few hundred tables already has more columns than that.
 
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ use crate::error::PgError;
 use crate::query::{self, Limits};
 
 /// Limits for catalog queries: far above any real catalog, so nothing is ever cut.
-pub const CATALOG_LIMITS: Limits = Limits { max_rows: 100_000_000, max_bytes: 4 * 1024 * 1024 * 1024 };
+pub const CATALOG_LIMITS: Limits = Limits { max_rows: 5_000_000, max_bytes: 512 * 1024 * 1024 };
 
 /// Schemas and relations. A schema without relations yields one row with NULL relation columns.
 /// Partitions (`relispartition`) are hidden; the partitioned parent (`p`) is shown.
@@ -117,8 +117,26 @@ fn estimate(s: &str) -> Option<u64> {
     (v.is_finite() && v >= 0.0).then(|| v.round() as u64)
 }
 
+/// A catalog result that was cut by the limits is an error: a partial catalog would be wrong.
+fn require_complete(r: ResultSet) -> Result<ResultSet, PgError> {
+    if r.complete { Ok(r) } else { Err(PgError::Other(format!("catalog too large: stopped after {} rows", r.rows_seen))) }
+}
+
 async fn run(conn: &PgConnection, sql: &str) -> Result<ResultSet, PgError> {
-    query::run_untyped(conn, sql, CATALOG_LIMITS).await
+    require_complete(query::run_untyped(conn, sql, CATALOG_LIMITS).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_result_is_an_error() {
+        let cut = ResultSet { complete: false, rows_seen: 7, ..ResultSet::default() };
+        let err = require_complete(cut).expect_err("must fail");
+        assert!(err.to_string().contains("catalog too large"), "{err}");
+        assert!(require_complete(ResultSet { complete: true, ..ResultSet::default() }).is_ok());
+    }
 }
 
 /// Load every schema, relation, column and key. User schemas come first by name, then
