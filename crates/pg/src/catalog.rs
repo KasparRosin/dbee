@@ -126,19 +126,6 @@ async fn run(conn: &PgConnection, sql: &str) -> Result<ResultSet, PgError> {
     require_complete(query::run_untyped(conn, sql, CATALOG_LIMITS).await?)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncated_result_is_an_error() {
-        let cut = ResultSet { complete: false, rows_seen: 7, ..ResultSet::default() };
-        let err = require_complete(cut).expect_err("must fail");
-        assert!(err.to_string().contains("catalog too large"), "{err}");
-        assert!(require_complete(ResultSet { complete: true, ..ResultSet::default() }).is_ok());
-    }
-}
-
 /// Load every schema, relation, column and key. User schemas come first by name, then
 /// `information_schema` and `pg_catalog`; tables by name; columns by `attnum`.
 pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, PgError> {
@@ -232,4 +219,17 @@ pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, PgError> {
         s.tables.sort_by(|a, b| a.table.name.cmp(&b.table.name));
     }
     Ok(Catalog { schemas })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_result_is_an_error() {
+        let cut = ResultSet { complete: false, rows_seen: 7, ..ResultSet::default() };
+        let err = require_complete(cut).expect_err("must fail");
+        assert!(err.to_string().contains("catalog too large"), "{err}");
+        assert!(require_complete(ResultSet { complete: true, ..ResultSet::default() }).is_ok());
+    }
 }
