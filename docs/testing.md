@@ -1,6 +1,6 @@
 # Testing
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (§5 engine fuzz tests exist)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (§4 scripted UI tests and isolated runs exist)
 
 ```sh
 cargo test --workspace                              # everything; oracle tests skip without their tool
@@ -19,7 +19,7 @@ The scaffold has no features, so most layers below are **(planned)**. They are t
 |---|---|---|
 | Unit | `src/` `#[cfg(test)]` modules | identifier quoting, type mapping, value formatting, command parameter parsing |
 | Property (`proptest`) **(planned)** | domain crates, engine | quote then unquote is the identity, undo/redo restores state, export then import round-trips |
-| Scripted UI **(planned)** | `crates/ui-egui/tests/` | headless app driven over the control channel: open a connection, run a query, click by automation id |
+| Scripted UI | `crates/ui-egui/tests/` | headless app driven over the control channel: open a connection, run a query, click by automation id |
 | Golden images **(planned)** | `crates/ui-egui/tests/` | small screenshots of fixed states, compared with a tolerance |
 | Oracle **(planned)** | driver and engine tests | query results checked against the `sqlite3` CLI (§2) |
 | Driver **(planned)** | `crates/pg`, `crates/ssh` tests | PostgreSQL 14 and the newest major, and SSH tunnels, against the Docker test servers (§3, which exist) |
@@ -66,11 +66,11 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
 - **Helpers.** `dbee_testkit::psql(server, sql)` runs `psql` inside a server's container, for set-up and for checking what dbee wrote. `dbee_testkit::temp_home(..)` gives SSH tests a throwaway home with a key and `known_hosts`.
 - **Never a real server**, and never a connection string from the environment that points elsewhere. Tests never touch the real `~/.ssh`, SSH agent or keyring.
 
-## 4. UI: control channel and screenshots (planned)
+## 4. UI: control channel and screenshots
 
-- **Scripted tests** run the app headlessly (egui_kittest) and drive it only through the control channel and automation ids, asserting on `ui.inspect` and `document.inspect`.
-- **Golden images** are procedural: a fixed in-code database, a fixed window size, one state per image. Update a golden image only after looking at the new picture.
-- **Interactive checks** run the real app with `--control`, drive it and take `ui.screenshot`. Do this for every UI change (see [`agents.md`](agents.md) §4).
+- **Scripted tests** (`crates/ui-egui/tests/control.rs`) run `DbeeApp::ui` in an egui_kittest harness, frame by frame, and drive it only through control requests and automation ids, asserting on `ui.inspect` and `document.inspect`. Each frame first feeds the app's synthetic input (`DbeeApp::feed_input`), as eframe's raw-input hook does.
+- **Golden images (planned)** are procedural: a fixed in-code database, a fixed window size, one state per image. Update a golden image only after looking at the new picture.
+- **Interactive checks** run the real app with `cargo xtask run-isolated`, drive it and take `ui.screenshot`. The launch time check (`cargo test -p xtask -- --ignored`) starts the release build that way and prints how long the connection screen takes. Do this for every UI change (see [`agents.md`](agents.md) §4).
 
 ## 5. Robustness and fuzz
 

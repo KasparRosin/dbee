@@ -1,8 +1,16 @@
-//! dbee desktop app. Placeholder: an empty window titled `dbee <version>`.
+//! dbee desktop app: reads the command line and the environment, builds the session's options,
+//! and runs the window ([`dbee_ui_egui::DbeeApp`]).
 //!
-//! The scaffold ships this window so packaging and the release pipeline can be proven before any
-//! feature exists. The logger (`logging.rs`) and the Windows graphics start-up (`graphics.rs`)
-//! are the real thing and stay.
+//! - `--version` (`-V`) prints the version.
+//! - `--control <port>` (or `DBEE_CONTROL_PORT`) serves the control channel on
+//!   `127.0.0.1:<port>` (`docs/control-protocol.md`). It listens before the window opens, so a
+//!   port in use stops the start: an agent must never drive another dbee by mistake.
+//! - `DBEE_SECRET_STORE=memory` keeps passwords in memory only; otherwise the OS keyring, and
+//!   without one none (a warning is logged and passwords are asked each time).
+//! - `DBEE_NO_PREFS` keeps no connections file and no log file.
+//! - SSH uses `~/.ssh` and the OS agent ([`SshEnv::from_os`]).
+//!
+//! The logger (`logging.rs`) and the Windows graphics start-up (`graphics.rs`) are set up first.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
@@ -11,7 +19,15 @@
 mod graphics;
 mod logging;
 
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::{Arc, OnceLock};
+
+use dbee_config::{MemoryStore, SecretStore, keyring_store};
+use dbee_engine::{Session, SessionOptions};
+use dbee_ssh::SshEnv;
+use dbee_ui_egui::DbeeApp;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_ID: &str = "dev.rosin.dbee";
@@ -29,7 +45,8 @@ fn config_dir() -> Option<PathBuf> {
     }
 }
 
-/// Runs without preferences (`DBEE_NO_PREFS`, agents' test runs) keep no log file.
+/// Runs without preferences (`DBEE_NO_PREFS`, agents' test runs) keep no log file and no
+/// connections file.
 fn prefs_enabled() -> bool {
     std::env::var_os("DBEE_NO_PREFS").is_none()
 }
@@ -43,17 +60,61 @@ fn icon() -> Option<egui::IconData> {
     Some(egui::IconData { width: img.width(), height: img.height(), rgba: img.into_raw() })
 }
 
-struct Placeholder;
-
-impl eframe::App for Placeholder {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.centered_and_justified(|ui| {
-            ui.heading(format!("dbee {VERSION}"));
-        });
+/// The control port: `--control <port>` or `--control=<port>`, else `env` (`DBEE_CONTROL_PORT`;
+/// empty is unset). Other arguments are left alone.
+fn control_port(args: &[OsString], env: Option<OsString>) -> Result<Option<u16>, String> {
+    let parse = |v: &str| match v.parse::<u16>() {
+        Ok(p) if p > 0 => Ok(p),
+        _ => Err(format!("the control port must be a number from 1 to 65535, not `{v}`")),
+    };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let a = a.to_string_lossy();
+        if a == "--control" {
+            let v = it.next().ok_or("--control needs a port: --control 7979")?;
+            return parse(&v.to_string_lossy()).map(Some);
+        }
+        if let Some(v) = a.strip_prefix("--control=") {
+            return parse(v).map(Some);
+        }
+    }
+    match env.map(|v| v.to_string_lossy().into_owned()).filter(|v| !v.is_empty()) {
+        Some(v) => parse(&v).map(Some).map_err(|e| format!("DBEE_CONTROL_PORT: {e}")),
+        None => Ok(None),
     }
 }
 
-fn main() -> eframe::Result<()> {
+/// `DBEE_SECRET_STORE=memory`.
+fn memory_secrets(env: Option<OsString>) -> bool {
+    env.is_some_and(|v| v == "memory")
+}
+
+fn secret_store() -> Option<Arc<dyn SecretStore>> {
+    if memory_secrets(std::env::var_os("DBEE_SECRET_STORE")) {
+        log::info!("secrets are kept in memory for this run (DBEE_SECRET_STORE=memory)");
+        return Some(Arc::new(MemoryStore::default()));
+    }
+    match keyring_store() {
+        Ok(k) => Some(Arc::new(k)),
+        Err(e) => {
+            log::warn!("no keyring ({e}); passwords are asked each time and not saved");
+            None
+        }
+    }
+}
+
+fn session_options(notify: Arc<dyn Fn() + Send + Sync>) -> SessionOptions {
+    SessionOptions { config_dir: config_dir().filter(|_| prefs_enabled()), secrets: secret_store(), ssh: SshEnv::from_os(), notify: Some(notify) }
+}
+
+/// What the panic hook logs: where, not the message, which can quote cell values or SQL (the
+/// command that panicked returns it to its caller instead).
+fn panic_line(location: Option<&std::panic::Location<'_>>, thread: Option<&str>) -> String {
+    let at = location.map_or_else(|| "an unknown place".to_string(), |l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+    format!("internal error: a panic on thread {} at {at}", thread.unwrap_or("?"))
+}
+
+fn main() -> ExitCode {
     let logger = logging::install();
     if let Some(logger) = logger {
         match config_dir().filter(|_| prefs_enabled()) {
@@ -67,20 +128,55 @@ fn main() -> eframe::Result<()> {
         }
     }
     std::panic::set_hook(Box::new(|info| {
+        let line = panic_line(info.location(), std::thread::current().name());
         if log::log_enabled!(log::Level::Error) {
-            log::error!("internal error: {info}");
+            log::error!("{line}");
         } else {
-            let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("dbee: internal error: {info}\n"));
+            let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("dbee: {line}\n"));
         }
     }));
-    if std::env::args_os().skip(1).any(|a| a == "--version" || a == "-V") {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
         let _ = std::io::Write::write_fmt(&mut std::io::stdout(), format_args!("dbee {VERSION}\n"));
-        return Ok(());
+        return ExitCode::SUCCESS;
     }
+    let port = match control_port(&args, std::env::var_os("DBEE_CONTROL_PORT")) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("dbee: {e}\n"));
+            return ExitCode::from(2);
+        }
+    };
+    // Listening before the window exists: requests wait in the queue until the first frame, and
+    // wake the window once it has a context.
+    let window: Arc<OnceLock<egui::Context>> = Arc::new(OnceLock::new());
+    let control = match port {
+        None => None,
+        Some(port) => {
+            let w = Arc::clone(&window);
+            let wake = Arc::new(move || {
+                if let Some(ctx) = w.get() {
+                    ctx.request_repaint();
+                }
+            });
+            match dbee_ui_egui::control_server::listen(port, wake) {
+                Ok((_, rx)) => Some(rx),
+                Err(e) => {
+                    log::error!("control channel: cannot listen on 127.0.0.1:{port}: {e}");
+                    let _ = std::io::Write::write_fmt(
+                        &mut std::io::stderr(),
+                        format_args!("dbee: control channel: cannot listen on 127.0.0.1:{port}: {e}\n"),
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    };
+    let control = std::cell::Cell::new(control);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(format!("dbee {VERSION}"))
-        .with_inner_size([960.0, 600.0])
-        .with_min_inner_size([480.0, 320.0])
+        .with_inner_size([1100.0, 720.0])
+        .with_min_inner_size([640.0, 420.0])
         .with_app_id(APP_ID);
     if let Some(i) = icon() {
         viewport = viewport.with_icon(i);
@@ -103,25 +199,84 @@ fn main() -> eframe::Result<()> {
         eframe::run_native(
             "dbee",
             options,
-            Box::new(|_cc| {
+            Box::new(|cc| {
                 created.set(true);
-                Ok(Box::new(Placeholder))
+                let _ = window.set(cc.egui_ctx.clone());
+                let ctx = cc.egui_ctx.clone();
+                let session = Session::new(session_options(Arc::new(move || ctx.request_repaint())))?;
+                Ok(Box::new(DbeeApp::new(session, control.take())))
             }),
         )
     };
     let result = run(options);
     // A graphics error before the window existed: start once more with the other backend.
     #[cfg(target_os = "windows")]
-    if let Err(eframe::Error::Wgpu(e)) = &result
-        && !created.get()
-        && let Some(backends) = graphics::fallback_backends(backend_override, first_backends)
-    {
-        log::error!("graphics: the renderer didn't start on {first_backends:?} ({e}); trying {backends:?}");
-        let mut options = retry_options;
-        graphics::configure_backends(&mut options, backends);
-        return run(options);
+    let result = match result {
+        Err(eframe::Error::Wgpu(e)) if !created.get() => match graphics::fallback_backends(backend_override, first_backends) {
+            Some(backends) => {
+                log::error!("graphics: the renderer didn't start on {first_backends:?} ({e}); trying {backends:?}");
+                let mut options = retry_options;
+                graphics::configure_backends(&mut options, backends);
+                run(options)
+            }
+            None => Err(eframe::Error::Wgpu(e)),
+        },
+        other => other,
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            log::error!("the window could not run: {e}");
+            let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("dbee: {e}\n"));
+            ExitCode::FAILURE
+        }
     }
-    result
+}
+
+#[cfg(test)]
+mod start_tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<OsString> {
+        a.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn the_control_port_comes_from_the_flag_or_the_environment() {
+        assert_eq!(control_port(&args(&[]), None), Ok(None));
+        assert_eq!(control_port(&args(&["--control", "7979"]), None), Ok(Some(7979)));
+        assert_eq!(control_port(&args(&["--control=8001"]), None), Ok(Some(8001)));
+        assert_eq!(control_port(&args(&[]), Some("7000".into())), Ok(Some(7000)));
+        // The flag wins over the environment.
+        assert_eq!(control_port(&args(&["--control", "7979"]), Some("7000".into())), Ok(Some(7979)));
+        // An empty variable is unset.
+        assert_eq!(control_port(&args(&[]), Some("".into())), Ok(None));
+        // Other arguments (a file the desktop asks dbee to open) are left alone.
+        assert_eq!(control_port(&args(&["/tmp/a.sqlite"]), None), Ok(None));
+        for bad in [&["--control"][..], &["--control", "x"], &["--control", "70000"], &["--control", "0"], &["--control="], &["--control", "-1"]] {
+            assert!(control_port(&args(bad), None).is_err(), "{bad:?}");
+        }
+        assert!(control_port(&args(&[]), Some("seven".into())).is_err());
+    }
+
+    #[test]
+    fn memory_secrets_only_when_asked() {
+        assert!(memory_secrets(Some("memory".into())));
+        assert!(!memory_secrets(Some("keyring".into())));
+        assert!(!memory_secrets(Some("".into())));
+        assert!(!memory_secrets(None));
+    }
+
+    #[test]
+    fn the_panic_line_names_the_place_not_the_message() {
+        let here = std::panic::Location::caller();
+        let line = panic_line(Some(here), Some("dbee-db"));
+        assert!(line.starts_with("internal error: a panic on thread dbee-db at "), "{line}");
+        assert!(line.contains("main.rs:"), "{line}");
+        assert_eq!(panic_line(None, None), "internal error: a panic on thread ? at an unknown place");
+    }
 }
 
 #[cfg(test)]

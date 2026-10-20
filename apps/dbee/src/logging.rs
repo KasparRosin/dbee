@@ -11,7 +11,9 @@
 //! Levels: `info` for dbee's own crates, `warn` for everything else (wgpu and naga are
 //! chatty). `RUST_LOG` replaces that with env_logger-style directives: `debug`,
 //! `warn,dbee_engine=trace`, `wgpu_core=info`. A directive ending in `*` matches every target
-//! that starts with it (`dbee*=debug`).
+//! that starts with it (`dbee*=debug`). The Postgres and SSH protocol crates ([`CAPPED`]) never
+//! log below `info`, whatever `RUST_LOG` says: at debug and trace they log SQL text, parameters
+//! and protocol data, and logs never hold secrets or cell values.
 //!
 //! Records logged before the settings directory is known are kept (up to [`MAX_PENDING`]) and
 //! written once the file is attached. Writing never panics: a file that can't be created or
@@ -37,6 +39,8 @@ pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_PENDING: usize = 512;
 /// The built-in filter when `RUST_LOG` is unset or empty.
 pub const DEFAULT_FILTER: &str = "warn,dbee*=info";
+/// Targets that never log more than `info` (directive syntax: `russh*` is every `russh` crate).
+pub const CAPPED: &[&str] = &["tokio_postgres", "russh*"];
 
 /// Per-target level filter parsed from env_logger-style directives.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,9 +72,16 @@ impl Filter {
         f
     }
 
-    /// The level that applies to `target` (the most specific matching directive wins).
+    /// The level that applies to `target` (the most specific matching directive wins), at most
+    /// `info` for the [`CAPPED`] targets.
     pub fn level_for(&self, target: &str) -> LevelFilter {
-        self.directives.iter().filter(|(name, _)| matches(name, target)).max_by_key(|(name, _)| name.len()).map_or(self.default, |(_, level)| *level)
+        let level = self
+            .directives
+            .iter()
+            .filter(|(name, _)| matches(name, target))
+            .max_by_key(|(name, _)| name.len())
+            .map_or(self.default, |(_, level)| *level);
+        if CAPPED.iter().any(|name| matches(name, target)) { level.min(LevelFilter::Info) } else { level }
     }
 
     /// The most verbose level any target can reach (for `log::set_max_level`).
@@ -340,6 +351,32 @@ mod tests {
         // Levels are case-insensitive and surrounding blanks are ignored.
         assert_eq!(Filter::parse(" WARN , dbee = Debug ").level_for("dbee"), LevelFilter::Debug);
         assert_eq!(Filter::parse(" WARN , dbee = Debug ").level_for("eframe"), LevelFilter::Warn);
+    }
+
+    #[test]
+    fn protocol_crates_never_log_below_info() {
+        // They log SQL text, parameters and protocol data at debug and trace.
+        let targets = ["tokio_postgres", "tokio_postgres::query", "tokio_postgres::prepare", "russh", "russh::client", "russh_keys::agent"];
+        for spec in
+            ["trace", "debug", "*=trace", "tokio_postgres=trace,russh*=trace", "tokio_postgres::query=trace,russh=debug,russh_keys=trace,info"]
+        {
+            let f = Filter::parse(spec);
+            for target in targets {
+                assert_eq!(f.level_for(target), LevelFilter::Info, "{spec}: {target}");
+            }
+        }
+        // A directive for one of them caps that one; the rest keep their level.
+        let f = Filter::parse("tokio_postgres=trace");
+        assert_eq!((f.level_for("tokio_postgres::query"), f.level_for("russh")), (LevelFilter::Info, LevelFilter::Error));
+        // Quieter levels still apply, and other crates are not capped.
+        assert_eq!(Filter::parse(DEFAULT_FILTER).level_for("tokio_postgres"), LevelFilter::Warn);
+        assert_eq!(Filter::parse("tokio_postgres=off").level_for("tokio_postgres::query"), LevelFilter::Off);
+        assert_eq!(Filter::parse("trace").level_for("tokio_postgres_rustls"), LevelFilter::Trace);
+        assert_eq!(Filter::parse("trace").level_for("dbee_engine"), LevelFilter::Trace);
+        let logger = AppLogger::new(Filter::parse("trace"), false);
+        use log::Log;
+        assert!(!logger.enabled(&log::Metadata::builder().level(log::Level::Debug).target("tokio_postgres::query").build()));
+        assert!(logger.enabled(&log::Metadata::builder().level(log::Level::Info).target("russh::client").build()));
     }
 
     #[test]

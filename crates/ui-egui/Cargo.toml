@@ -4,7 +4,24 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "dbee user interface on egui (L6)"
+description = "dbee user interface on egui (L6): the app shell, screens, shortcuts and the localhost control channel"
 
 [lints]
 workspace = true
+
+[dependencies]
+dbee-engine = { workspace = true }
+dbee-core = { workspace = true }
+dbee-sql = { workspace = true }
+dbee-config = { workspace = true }
+egui = { workspace = true }
+# The same features as the app, so building this crate alone compiles eframe once.
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
+egui_extras = { workspace = true }
+image = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+dbee-testkit = { workspace = true }

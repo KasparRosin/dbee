@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** minor (tokio-postgres, rustls)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (egui_extras, egui_kittest)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -78,3 +78,8 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** TLS uses `rustls` 0.23 (default features off; `ring`, `std`, `tls12`) through `tokio-postgres-rustls` 0.14 (`ring`). The modes follow libpq: `disable`; `prefer` and `require` without verification (`prefer` falls back to plain when the server has no TLS or the handshake fails; `require` checks the chain when a CA file is set); `verify-ca` checks the chain against the CA file only, and is refused without a CA file; `verify-full` checks the chain and the configured host name, also through a tunnel. The roots are the CA file's certificates when one is set, otherwise (`verify-full` only) the operating system's through `rustls-platform-verifier` 0.7. `verify-ca` against the system roots is refused on every platform, as libpq refuses it: a chain check alone would accept any publicly trusted certificate for any host. `tokio-postgres` is pinned exactly (`=0.7.18`) because dbee-pg classifies its errors by their texts.
 - **Why:** `ring` keeps `aws-lc-sys` and `aws-lc-rs` out of the build (the build rules forbid them), and the platform verifier uses the trust store and policies the user already manages instead of a bundled root list (`webpki-roots` is forbidden too).
+
+## 2026-10-20: egui_extras for the grid, egui_kittest for UI tests
+
+- **Decision:** `crates/ui-egui` takes `egui_extras` 0.36 (default features off: no image loaders, no syntax highlighting) for its table layout, and `egui_kittest` 0.36 as a dev-dependency, which runs `DbeeApp::ui` frame by frame without a window. Both are from the egui project, versioned with egui, MIT OR Apache-2.0.
+- **Why:** The result grid needs virtual scrolling over thousands of rows with resizable columns, which `egui_extras`' table gives; writing our own would be a second grid to maintain. kittest drives the real UI code in tests (frames, input, accessibility queries) with no display, so the UI tasks get tests that run in `cargo xtask ci`.

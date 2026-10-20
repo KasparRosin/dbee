@@ -9,6 +9,7 @@ mod assets;
 mod contributors;
 mod icns;
 mod ico;
+mod isolated;
 mod layers;
 mod licenses;
 mod provenance;
@@ -39,6 +40,9 @@ commands:
   icns <out.icns> <in.png>...
                   pack square PNGs (16-1024 px) into a macOS .icns, on any OS (see packaging/icons.sh)
   contributors    write contributors/contributors.json from git history and contributors/people.toml
+  run-isolated [--release] [--port N] [-- args]
+                  build and run dbee on a throwaway home (target/isolated/<port>/home) with the control
+                  channel on 127.0.0.1:<port> (default 7979), no SSH agent and in-memory secrets
 ";
 
 fn main() -> ExitCode {
@@ -56,6 +60,7 @@ fn main() -> ExitCode {
         Some("icns") => icns::run(&rest),
         Some("version") => version::run(&root(), &rest),
         Some("contributors") => contributors::run(&root()),
+        Some("run-isolated") => isolated::run(&root(), &rest),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");
             Ok(())

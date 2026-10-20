@@ -43,6 +43,8 @@ futures-util = "0.3"
 # ui
 egui = "0.36"
 eframe = { version = "0.36", default-features = false }
+egui_extras = { version = "0.36", default-features = false }
+egui_kittest = "0.36"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
