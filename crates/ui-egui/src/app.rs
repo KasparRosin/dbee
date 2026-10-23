@@ -4,10 +4,12 @@
 //! 1. `session.pump()`: the results of finished jobs are applied;
 //! 2. the control replies that waited (for a job, idleness, input or a picture) are answered;
 //! 3. the control requests that arrived are handled ([`crate::control`]);
-//! 4. the keyboard shortcuts run ([`crate::shortcuts`]), before any widget sees the keys (not
-//!    while a dialog or the quick search is open: the quick search handles its own keys);
+//! 4. the open cell editor takes its keys and commits on a press outside it, or Enter over a
+//!    selection opens one ([`crate::editors`]); then the keyboard shortcuts run
+//!    ([`crate::shortcuts`]), before any widget sees the keys (not while a dialog or the quick
+//!    search is open: the quick search handles its own keys);
 //! 5. the screen is drawn, tagging its widgets ([`crate::automation`]), then the dialog, if any
-//!    ([`crate::dialogs`]);
+//!    ([`crate::dialogs`]); then the cell editor's key acts, on the text it has now;
 //! 6. the session's UI requests (dialogs, notices) are taken, to show from the next frame.
 //!
 //! While a job runs the window repaints every 100 ms, so waits time out and progress shows even
@@ -16,7 +18,8 @@
 //! [`DbeeApp::start`], which hands its outcome back to where it came from ([`Origin`]), at once
 //! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; other
 //! errors show as a notice (a command that cannot run now says why), or under the connection
-//! form's buttons. Logs name command ids and error codes only.
+//! form's buttons; the database error of a page load's job or an Apply's shows only in the table
+//! tab's card. Logs name command ids and error codes only.
 //!
 //! The connection screen is [`crate::connections`]; the workspace (menu bar, tree, tabs, status
 //! bar, quick search) is [`crate::workspace`].
@@ -34,7 +37,10 @@ use crate::control::{self, ControlRequest, Deferred, Input};
 use crate::dialogs::{self, Dialog, Rerun};
 use crate::theme::{RADIUS, TOKENS};
 use crate::workspace::Workspace;
-use crate::{shortcuts, theme, ui_commands, workspace};
+use crate::{editors, shortcuts, theme, ui_commands, workspace};
+
+/// The Apply command, whose job errors the table tab's card shows.
+const APPLY: &str = "edit.apply";
 
 /// How often a busy session repaints.
 const BUSY_REPAINT: Duration = Duration::from_millis(100);
@@ -64,6 +70,9 @@ pub struct DbeeApp {
     ui_jobs: Vec<UiJob>,
     clipboard: Vec<String>,
     themed: bool,
+    /// Keyboard events held back for the next frame: those after a cell editor's key in the same
+    /// frame ([`crate::editors::before_frame`]).
+    pub(crate) carry: Vec<egui::Event>,
 }
 
 /// Where a command the user started came from, so its outcome goes back there.
@@ -155,6 +164,7 @@ impl DbeeApp {
             ui_jobs: Vec::new(),
             clipboard: Vec::new(),
             themed: false,
+            carry: Vec::new(),
         }
     }
 
@@ -188,9 +198,13 @@ impl DbeeApp {
     }
 
     /// Feeds the synthetic input of `ui.click`, `ui.key` and `ui.text` (one batch per frame) into
-    /// the raw input of the frame about to run. eframe calls it through `raw_input_hook`; a test
-    /// harness calls it before each frame.
+    /// the raw input of the frame about to run, after the keyboard events held back from the last
+    /// frame (they came first). eframe calls it through `raw_input_hook`; a test harness calls it
+    /// before each frame.
     pub fn feed_input(&mut self, raw: &mut egui::RawInput) {
+        if !self.carry.is_empty() {
+            raw.events.splice(0..0, self.carry.drain(..));
+        }
         self.input.feed(raw, self.frames);
     }
 
@@ -261,8 +275,10 @@ impl DbeeApp {
             Origin::KeyLine => connections::key_line_done(self, job, result),
             Origin::Form(generation) => connections::form_done(self, command, params, generation, job, result),
             Origin::Menu | Origin::Page => {
-                // The card above the grid shows a page load's job error (`TableTab::error`).
-                let in_card = origin == Origin::Page && job.is_some() && matches!(result, Err(EngineError::Db { .. }));
+                // The card above the grid shows a page load's job error (`TableTab::error`), and
+                // an Apply's however it was started (`Edits::failed`).
+                let carded = origin == Origin::Page || command == APPLY;
+                let in_card = carded && job.is_some() && matches!(result, Err(EngineError::Db { .. }));
                 if let Err(e) = result
                     && !dialogs::ask(self, &e, Rerun { command, params, origin })
                     && !in_card
@@ -301,13 +317,15 @@ impl DbeeApp {
             }
             self.control = Some(rx);
         }
-        // 4. Shortcuts, unless a dialog or the quick search is open.
+        // 4. The cell editor, then shortcuts, unless a dialog or the quick search is open.
+        editors::before_frame(self, &ctx);
         if self.view.dialog.is_none() && !self.view.work.quick.open {
             shortcuts::handle(self, &ctx);
         }
-        // 5. Draw.
+        // 5. Draw, then the cell editor's key.
         self.tags.begin_frame();
         self.draw(ui);
+        editors::after_draw(self, &ctx);
         // 6. Dialogs and notices for the next frame.
         let requests = self.session.take_ui_requests();
         if !requests.is_empty() {
@@ -325,7 +343,7 @@ impl DbeeApp {
         if self.session.busy() {
             ctx.request_repaint_after(BUSY_REPAINT);
         }
-        if control::needs_frames(self) {
+        if control::needs_frames(self) || !self.carry.is_empty() {
             ctx.request_repaint();
         }
         self.frames = self.frames.saturating_add(1);

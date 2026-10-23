@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (the table tab)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (cell editing)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -17,7 +17,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `crates/ssh` | exists | L2. The SSH tunnel (russh with ring): host key check against `known_hosts` (unknown hosts ask once and can be learned, changed keys are refused), key, agent and password login, and a direct-tcpip channel per connection. Everything it reads from the machine comes in through `SshEnv`. |
 | `crates/pg` | exists | L3. The Postgres connection (tokio-postgres): TCP or a channel through the SSH tunnel, TLS with rustls (ring) and the OS certificate verifier, `application_name=dbee`, `standard_conforming_strings = on`, read-only mode, cancel requests, and a simple-query runner that returns values as text exactly as Postgres prints them. |
 | `crates/engine` | exists | L5. `Session`: the session state, the command registry (`cmd/*`, so far the tab and connection commands), background jobs on a tokio runtime, the panic guard and the journal. |
-| `crates/ui-egui` | exists | L6. The egui UI and the control channel: the app shell (`DbeeApp`), theme, code-drawn icons, automation ids, shortcuts, UI-only commands, the connection screen (saved and recent lists, the connection form), the workspace (a menu bar built from the commands' menu paths, the schema tree, the tabs strip, the status bar, the quick search), the table tab (the data grid, the filter bar, the paging bar) and the dialogs a command's `needs…` answer opens. |
+| `crates/ui-egui` | exists | L6. The egui UI and the control channel: the app shell (`DbeeApp`), theme, code-drawn icons, automation ids, shortcuts, UI-only commands, the connection screen (saved and recent lists, the connection form), the workspace (a menu bar built from the commands' menu paths, the schema tree, the tabs strip, the status bar, the quick search), the table tab (the data grid with its inline cell editors, the filter bar, the paging bar) and the dialogs a command's `needs…` answer opens. |
 | `crates/mcp` | exists, empty | L6. MCP server over stdio. |
 | `apps/dbee` | exists | L7. Desktop binary: reads `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE`, `DBEE_NO_PREFS` and `DBEE_ALLOW_TARGETS` (an isolated run's allowed connection targets), builds the session's options and runs `DbeeApp`. |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
@@ -62,12 +62,13 @@ Desktop only: macOS, Windows, Linux and FreeBSD. There is no web build and no wa
 
 ## Known gaps
 
-Most of M1's UI. The domain crates and the engine with its commands exist, and the UI has its shell, control channel, connection screen and workspace; cell editing, the query editor and the value panel do not exist yet (the workspace shows a query tab as a plain editor). The ranked work list is [`gaps.md`](gaps.md).
+Most of M1's UI. The domain crates and the engine with its commands exist, and the UI has its shell, control channel, connection screen, workspace and table tab with cell editing; the query editor and the value panel do not exist yet (the workspace shows a query tab as a plain editor). The ranked work list is [`gaps.md`](gaps.md).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-23 | minor | `crates/ui-egui`: inline cell editors, "+ Row", the failed Apply's card |
 | 2026-10-23 | minor | `crates/ui-egui`: the table tab (data grid, filter bar, paging bar) |
 | 2026-10-23 | minor | `crates/ui-egui`: the workspace (menu bar, schema tree, tabs, status bar, quick search) |
 | 2026-10-23 | minor | `crates/ui-egui`: the connection screen and its dialogs |

@@ -19,6 +19,12 @@
 //! the pointer. A right-click selects the cell unless it is already selected, and opens the menu:
 //! Set as NULL, Copy, Copy with header, Copy as CSV / JSON / Markdown, Delete row(s).
 //!
+//! **Editing.** A double-click (or a triple one) asks to edit the cell ([`GridAct::Edit`]); the
+//! caller decides
+//! whether it can. While a cell is being edited ([`Grid::editing`]) the grid keeps where that
+//! cell was drawn and which part of the rows was in view ([`GridState::editing_rect`]), for the
+//! editor to sit over it ([`crate::editors`]).
+//!
 //! **Marks.** A staged cell, a new row, a row to delete and the row whose change the last Apply
 //! failed on each have their own colour ([`crate::theme::Tokens`]); a row to delete is also
 //! struck through, failed or not.
@@ -176,6 +182,8 @@ pub enum GridAct {
     Copy(&'static str),
     /// `row.delete`.
     DeleteRows(Vec<usize>),
+    /// The cell was double-clicked: edit it.
+    Edit { row: usize, col: usize },
 }
 
 /// What the grid keeps between frames (the caller keeps one per grid: per tab).
@@ -191,6 +199,18 @@ pub struct GridState {
     offset_x: f32,
     view_w: f32,
     content_w: f32,
+    /// Where the cell being edited was drawn this frame (`None`: out of view), and the rows' part
+    /// of the grid in view.
+    edit_cell: Option<Rect>,
+    rows_view: Option<Rect>,
+}
+
+impl GridState {
+    /// Where the cell being edited ([`Grid::editing`]) was drawn by the last [`Grid::show`], and
+    /// the window rect of the rows in view; `None` when that cell was out of view.
+    pub fn editing_rect(&self) -> Option<(Rect, Rect)> {
+        self.edit_cell.zip(self.rows_view)
+    }
 }
 
 /// The cell `id` names when it is a cell (`grid-cell-<row>-<col>`) or a foreign key link
@@ -223,6 +243,8 @@ pub struct Grid<'a> {
     pub links: bool,
     /// The number the gutter shows for row 0 (a page's offset plus one).
     pub first_number: u64,
+    /// The cell an editor is open on, if any.
+    pub editing: Option<(usize, usize)>,
 }
 
 /// The inclusive rows and columns `sel` covers: `(rows, columns)`.
@@ -348,6 +370,7 @@ impl Grid<'_> {
         let mut first_drawn: Option<(usize, f32)> = None;
         let mut drag_over: Option<(usize, usize)> = None;
         let mut drag_start: Option<(usize, usize)> = None;
+        let mut edit_cell: Option<Rect> = None;
         let rect = ui.available_rect_before_wrap();
         let mut grid_ui = ui.new_child(UiBuilder::new().id(self.id).max_rect(rect).layout(Layout::top_down(Align::Min)));
         let mut sideways = ScrollArea::horizontal().id_salt("dbee-grid-h").auto_shrink([false, false]);
@@ -427,6 +450,15 @@ impl Grid<'_> {
                         }
                         tags.tag_value(&format!("{CELL}{r}-{c}"), resp, serde_json::Value::Object(value));
                         let here = (r, c);
+                        if self.editing == Some(here) {
+                            edit_cell = Some(resp.rect);
+                        }
+                        // egui counts a click as a third when the click before the last came
+                        // soon enough, wherever it was: a double-click on another cell just
+                        // after one here can arrive as a triple click.
+                        if resp.double_clicked() || resp.triple_clicked() {
+                            acts.push(GridAct::Edit { row: r, col: c });
+                        }
                         if resp.clicked() {
                             let anchor = match self.selection {
                                 Some(sel) if shift => sel.anchor,
@@ -465,6 +497,9 @@ impl Grid<'_> {
         state.offset_x = out.state.offset.x;
         state.view_w = out.inner_rect.width();
         state.content_w = out.content_size.x;
+        state.edit_cell = edit_cell;
+        let view = out.inner_rect;
+        state.rows_view = Some(Rect::from_min_max(pos2(view.left(), (view.top() + HEADER_H).min(view.bottom())), view.max));
         if let Some((row, top)) = first_drawn {
             let top = top - ROW_H * row as f32;
             tags.tag_cells_out_of_view(CellBlock { prefix: CELL.into(), rows, top, row_height: ROW_H, columns: heads });

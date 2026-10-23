@@ -36,6 +36,7 @@ use serde_json::json;
 
 use crate::app::Origin;
 use crate::connections::line_galley;
+use crate::editors::CellEditor;
 use crate::quick_search::{self, QuickSearch};
 use crate::table_tab::{self, Grids};
 use crate::theme::{RADIUS, TOKENS, connection_color};
@@ -59,6 +60,8 @@ pub(crate) struct Workspace {
     pub refocus: Option<egui::Id>,
     /// Each table tab's grid (its column widths), dropped with the tab.
     pub grids: Grids,
+    /// The cell editor, while one is open ([`crate::editors`]).
+    pub editor: Option<CellEditor>,
     /// The connection this state belongs to; another one starts afresh.
     connection: Option<String>,
 }
@@ -67,7 +70,7 @@ impl Workspace {
     /// The workspace is not shown (back on the connection screen): its state goes, so the quick
     /// search cannot stay open (and hold the shortcuts) and the next connection starts afresh.
     pub(crate) fn leave(&mut self) {
-        if self.connection.is_some() || self.quick.open {
+        if self.connection.is_some() || self.quick.open || self.editor.is_some() {
             *self = Workspace::default();
         }
     }

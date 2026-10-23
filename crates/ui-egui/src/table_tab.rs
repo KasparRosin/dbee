@@ -3,22 +3,27 @@
 //! - a small note when the rows cannot be edited, saying why (`table-note`: a view, no row key,
 //!   a read-only connection);
 //! - the filter bar ([`crate::filter_bar`]);
-//! - an inline card when the last page load failed (`table-error`), with the rows from before
-//!   kept underneath;
+//! - an inline card (`table-error`) when the last Apply failed, with the server's message (the
+//!   staged changes stay, and the grid marks the row it failed on), or else when the last page
+//!   load failed, with the rows from before kept underneath;
 //! - the grid ([`crate::grid`]) on the loaded page and its staged edits, sortable by a header
-//!   click, with foreign key links on the selected row;
-//! - the paging bar ([`crate::paging`]).
+//!   click, with foreign key links on the selected row, and the cell editor over it while one is
+//!   open ([`crate::editors`]; a double-click opens one);
+//! - the paging bar ([`crate::paging`]), with "+ Row": the new row is selected and scrolled to.
 //!
 //! It reads the tab from the engine each frame and acts only through commands, started with
 //! [`DbeeApp::start`] after drawing (so a `needs…` answer opens its dialog and an error shows as a
-//! notice, except a page load's database error, which the card shows). The window keeps one [`GridState`] per tab (the column widths), dropped with the tab.
+//! notice, except a page load's or an Apply's database error, which the card shows). Whether the
+//! rows take edits is the engine's rule (`cmd::edit::can_edit`). The window keeps one
+//! [`GridState`] per tab (the column widths), dropped with the tab.
 
 use std::collections::HashMap;
 
 use dbee_core::{ResultSet, TableInfo};
+use dbee_engine::cmd::LOST;
+use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
-use dbee_engine::cmd::{LOST, edit::APPLYING};
-use dbee_engine::{Edits, Json, Tab, TabId, TableTab};
+use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab};
 use dbee_sql::select::PAGE_SIZE;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, RichText, Stroke, UiBuilder, pos2};
 use serde_json::json;
@@ -26,8 +31,9 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::editors;
 use crate::filter_bar::{self, Bar};
-use crate::grid::{Grid, GridAct, GridSource, GridState, Key, Mark};
+use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark};
 use crate::paging::{self, BAR_H, Paging};
 use crate::theme::{RADIUS, TOKENS};
 
@@ -106,6 +112,8 @@ fn command(act: GridAct, data: Option<&ResultSet>) -> Option<(&'static str, Json
         GridAct::SetNull { row, col } => ("cell.setNull", json!({ "row": row, "column": col })),
         GridAct::Copy(format) => ("clipboard.copy", json!({ "format": format })),
         GridAct::DeleteRows(rows) => ("row.delete", json!({ "rows": rows })),
+        // The editor opens without a command (see `show`).
+        GridAct::Edit { .. } => return None,
     })
 }
 
@@ -121,8 +129,8 @@ fn blocked(t: &TableTab, lost: bool) -> Option<&'static str> {
     }
 }
 
-/// What the paging bar shows for `t`.
-fn paging(t: &TableTab, info: Option<&TableInfo>, lost: bool) -> Paging {
+/// What the paging bar shows for `t`; `edit_blocked` is why it takes no edits now.
+fn paging(t: &TableTab, info: Option<&TableInfo>, lost: bool, edit_blocked: Option<String>) -> Paging {
     Paging {
         page: t.shown.page,
         at_end: t.view() == t.shown && !t.has_next,
@@ -141,6 +149,7 @@ fn paging(t: &TableTab, info: Option<&TableInfo>, lost: bool) -> Paging {
         } else {
             None
         },
+        add_blocked: edit_blocked,
     }
 }
 
@@ -151,26 +160,60 @@ fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str) {
     tags.tag_value("table-note", &r, text.as_str());
 }
 
-/// The card of a page load that failed.
-fn error_card(ui: &mut egui::Ui, tags: &mut Tags, error: &str) {
+/// What the tab's card says: a failed Apply's heading, message and note, else a failed page
+/// load's; `None` when neither failed.
+fn card_text(t: &TableTab) -> Option<(&'static str, &str, &'static str)> {
+    if let Some((_, _, message)) = &t.edits.failed {
+        return Some(if t.edits.outcome_unknown() {
+            ("The connection was lost during Apply", message.as_str(), "")
+        } else {
+            (
+                "The changes were not applied",
+                message.as_str(),
+                "The changes are still staged, and the row the Apply failed on is marked: fix it and apply again, or reset.",
+            )
+        });
+    }
+    t.error.as_deref().map(|e| ("The page did not load", e, "The rows below are the ones from before."))
+}
+
+/// The tab's card: something failed (see [`card_text`]).
+fn error_card(ui: &mut egui::Ui, tags: &mut Tags, (heading, error, note): (&str, &str, &str)) {
     let t = TOKENS;
     let frame =
         Frame::new().fill(t.card).stroke(Stroke::new(1.0, t.danger)).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(12, 8));
     let r = frame
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("The page did not load").strong().color(t.danger));
+            ui.label(RichText::new(heading).strong().color(t.danger));
             ui.add(egui::Label::new(RichText::new(error).color(t.danger)).wrap());
-            ui.label(RichText::new("The rows below are the ones from before.").size(11.5).color(t.text_muted));
+            if !note.is_empty() {
+                ui.add(egui::Label::new(RichText::new(note).size(11.5).color(t.text_muted)).wrap());
+            }
         })
         .response;
     tags.tag_value("table-error", &r, error);
+}
+
+/// "+ Row": adds a row, then selects its first cell and scrolls to it.
+fn add_row(app: &mut DbeeApp) {
+    match app.run("row.add", json!({})) {
+        Ok(Outcome::Done(v)) => {
+            if let Some(row) = v["row"].as_u64() {
+                app.start("selection.set", json!({ "anchor": [row, 0], "focus": [row, 0] }), Origin::Menu);
+                app.tags.scroll_to(&format!("{CELL}{row}-0"));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => app.notice(e.to_string()),
+    }
 }
 
 /// Draws table tab `id` into `ui` and runs what it asks for.
 pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     let t = TOKENS;
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
+    let mut edit: Option<(usize, usize)> = None;
     {
         let DbeeApp { session, view, tags, .. } = app;
         let Some(Tab::Table(tab)) = session.state().tab(id) else { return };
@@ -187,6 +230,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         );
         top.add_space(6.0);
         let read_only = dbee_engine::cmd::table::not_editable(session, tab);
+        // As the engine's edit commands allow: rows that can be edited, a connection that is not
+        // lost, no page on its way and no Apply running.
+        let edit_blocked = can_edit(session).err();
         if let Some(why) = read_only {
             note(&mut top, tags, why);
             top.add_space(2.0);
@@ -208,8 +254,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         };
         runs.extend(filter_bar::show(&mut top, &bar, tags));
         top.add_space(6.0);
-        if let Some(e) = &tab.error {
-            error_card(&mut top, tags, e);
+        if let Some(text) = card_text(tab) {
+            error_card(&mut top, tags, text);
             top.add_space(6.0);
         }
         match tab.data.as_deref() {
@@ -225,15 +271,24 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     sort,
                     sortable: true,
                     blocked: blocked(tab, lost),
-                    // As the engine's edit commands allow: rows that can be edited, a connection
-                    // that is not lost, no page on its way and no Apply running.
-                    editable: read_only.is_none() && !lost && tab.loading.is_none() && tab.applying.is_none(),
+                    editable: edit_blocked.is_none(),
                     links: !lost,
                     first_number: tab.shown.page.saturating_mul(PAGE_SIZE).saturating_add(1),
+                    editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),
                 };
                 let state = view.work.grids.entry(id).or_default();
                 for act in grid.show(&mut top, state, tags) {
+                    if let GridAct::Edit { row, col } = act {
+                        edit = Some((row, col));
+                    }
                     runs.extend(command(act, Some(data)));
+                }
+                if let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id) {
+                    match state.editing_rect() {
+                        Some((cell, rows)) => editors::show(top.ctx(), editor, cell, rows, tags),
+                        // Scrolled out of view: it stays open, and shows again with its cell.
+                        None => editors::hide(editor),
+                    }
                 }
             }
             None if tab.loading.is_some() => {
@@ -248,13 +303,22 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         }
         let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(full.left(), split), full.max)));
         if tab.data.is_some() {
-            runs.extend(paging::show(&mut bottom, &paging(tab, info, lost), tags));
+            runs.extend(paging::show(&mut bottom, &paging(tab, info, lost, edit_blocked), tags));
         }
     }
     for (command, params) in runs {
+        if command == "row.add" {
+            add_row(app);
+            continue;
+        }
         // A page that fails to load says so in the card above the grid.
         let origin = if PAGE_LOADS.contains(&command) { Origin::Page } else { Origin::Menu };
         app.start(command, params, origin);
+    }
+    // A double-click opens the cell's editor (it shows from the next frame), or says why not.
+    if let Some((row, col)) = edit {
+        let ctx = ui.ctx().clone();
+        editors::open(app, &ctx, row, col);
     }
 }
 
@@ -311,6 +375,7 @@ mod tests {
         assert_eq!(c(GridAct::DeleteRows(vec![0, 2])), Some(("row.delete", json!({ "rows": [0, 2] }))));
         assert_eq!(c(GridAct::SetNull { row: 1, col: 0 }), Some(("cell.setNull", json!({ "row": 1, "column": 0 }))));
         assert_eq!(c(GridAct::Follow { row: 0, col: 1 }), Some(("table.followForeignKey", json!({ "row": 0, "column": 1 }))));
+        assert_eq!(c(GridAct::Edit { row: 0, col: 1 }), None, "the editor opens without a command");
     }
 
     #[test]

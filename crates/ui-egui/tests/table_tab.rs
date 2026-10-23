@@ -767,6 +767,7 @@ fn grid_frame_within_budget() {
                 editable: false,
                 links: false,
                 first_number: 1,
+                editing: None,
             };
             let _ = grid.show(ui, &mut s.grid, &mut s.tags);
         },

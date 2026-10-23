@@ -10,6 +10,7 @@ pub mod connections;
 pub mod control;
 pub mod control_server;
 pub mod dialogs;
+pub mod editors;
 pub mod filter_bar;
 pub mod grid;
 pub mod icons;

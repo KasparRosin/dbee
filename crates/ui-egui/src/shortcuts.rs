@@ -9,13 +9,18 @@
 //! field has keyboard focus, the keys a text field uses itself ([`TEXT_KEYS`]: copy, select all,
 //! undo, redo) are left to it; the others always fire. The keyboard's Ctrl+C reaches egui as a
 //! copy event, not a key, so that is matched too, with Shift held for Ctrl+Shift+C.
+//!
+//! An open cell editor ([`crate::editors`]) counts as a focused text field, and its Enter keys
+//! ([`EDITOR_KEYS`]) are its own: the editor takes Ctrl+Enter as commit before this step, and
+//! Ctrl+Shift+Enter does nothing there. Any other shortcut commits the editor before it runs, so
+//! Ctrl+S writes the value being typed.
 
 use std::sync::LazyLock;
 
 use egui::{Event, Key, Modifiers};
 use serde_json::{Value as Json, json};
 
-use crate::DbeeApp;
+use crate::{DbeeApp, editors};
 
 /// `(keys, command id, params)`.
 pub static SHORTCUTS: LazyLock<Vec<(&'static str, &'static str, Json)>> = LazyLock::new(|| {
@@ -39,9 +44,17 @@ pub static SHORTCUTS: LazyLock<Vec<(&'static str, &'static str, Json)>> = LazyLo
 /// The shortcuts a focused text field keeps for itself.
 pub const TEXT_KEYS: &[&str] = &["Ctrl+C", "Ctrl+Shift+C", "Ctrl+A", "Ctrl+Z", "Ctrl+Shift+Z"];
 
+/// The shortcuts an open cell editor keeps from running: Enter is the editor's.
+pub const EDITOR_KEYS: &[&str] = &["Ctrl+Enter", "Ctrl+Shift+Enter"];
+
 /// Whether the shortcut `keys` runs its command, given that a text field has keyboard focus.
 pub fn fires(keys: &str, text_focused: bool) -> bool {
     !(text_focused && TEXT_KEYS.contains(&keys))
+}
+
+/// [`fires`], with whether a cell editor is open (which counts as a focused text field).
+pub fn fires_while(keys: &str, text_focused: bool, editing: bool) -> bool {
+    fires(keys, text_focused || editing) && !(editing && EDITOR_KEYS.contains(&keys))
 }
 
 /// `Ctrl+Shift+Enter` → the modifiers and the key; `None` for text that names no key.
@@ -81,11 +94,12 @@ pub(crate) fn take(events: &mut Vec<Event>, pattern: Modifiers, key: Key, held: 
 /// Runs the commands of this frame's shortcut presses (step 4 of the frame).
 pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context) {
     let text_focused = ctx.text_edit_focused();
+    let editing = editors::is_open(app);
     let mut fired: Vec<(&'static str, Json)> = Vec::new();
     ctx.input_mut(|i| {
         let held = i.modifiers;
         for (keys, id, params) in SHORTCUTS.iter() {
-            if !fires(keys, text_focused) {
+            if !fires_while(keys, text_focused, editing) {
                 continue;
             }
             let Some((pattern, key)) = parse(keys) else { continue };
@@ -94,6 +108,9 @@ pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context) {
             }
         }
     });
+    if !fired.is_empty() {
+        editors::commit(app, ctx);
+    }
     for (id, params) in fired {
         app.run_shortcut(id, params);
     }
@@ -142,6 +159,17 @@ mod tests {
         }
         for keys in ["Ctrl+Enter", "Ctrl+Shift+Enter", "Ctrl+S", "Ctrl+P", "Ctrl+T", "Ctrl+W", "Ctrl+Shift+Q"] {
             assert!(fires(keys, false) && fires(keys, true), "{keys} always fires");
+        }
+    }
+
+    #[test]
+    fn an_open_cell_editor_keeps_enter_and_the_text_keys() {
+        for keys in ["Ctrl+Enter", "Ctrl+Shift+Enter", "Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+A", "Ctrl+C"] {
+            assert!(!fires_while(keys, false, true), "{keys} is the editor's");
+            assert!(fires_while(keys, false, false), "{keys} fires with no editor");
+        }
+        for keys in ["Ctrl+S", "Ctrl+P", "Ctrl+T", "Ctrl+W"] {
+            assert!(fires_while(keys, true, true), "{keys} still fires (after committing the editor)");
         }
     }
 

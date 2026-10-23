@@ -1,6 +1,6 @@
 //! The table tab's paging bar ([`show`]), along its bottom: first · prev · the page · next · last,
-//! the row count, refresh, a note when the page was cut by the size limit, and the staged
-//! changes with Reset and Apply.
+//! the row count, refresh, a note when the page was cut by the size limit, then at the right
+//! "+ Row" and the staged changes with Reset and Apply.
 //!
 //! The row count ([`count_text`]) shows the planner's estimate as `~100,000 rows` while that is
 //! all there is: the engine's, or the catalog's for an unfiltered table, materialized view or
@@ -9,11 +9,12 @@
 //! count then reads `100,000 rows`. With an exact count the page reads `Page 3 of 10`.
 //!
 //! Paging and refresh wait while changes are staged (the engine's rule) and while the connection
-//! is lost; the buttons say why when hovered.
+//! is lost; the buttons say why when hovered. "+ Row" (`row.add`) is enabled as the engine's
+//! edit commands are, and says why not when hovered.
 //!
 //! Automation ids: `page-first`, `page-prev`, `page-number` (value: `Page 3` or `Page 3 of 10`),
 //! `page-next`, `page-last`, `page-count` (value: what it shows), `table-refresh`, `page-cut`
-//! (value: the note), `edits-count` (value: `2 changes`), `edit-reset`, `edit-apply`.
+//! (value: the note), `row-add`, `edits-count` (value: `2 changes`), `edit-reset`, `edit-apply`.
 
 use dbee_engine::{Json, Total};
 use dbee_sql::select::PAGE_SIZE;
@@ -50,6 +51,8 @@ pub(crate) struct Paging {
     pub count_blocked: Option<&'static str>,
     /// Why Apply cannot run now.
     pub apply_blocked: Option<&'static str>,
+    /// Why no row can be added now (the engine's reason).
+    pub add_blocked: Option<String>,
 }
 
 /// A command the bar asks for.
@@ -171,8 +174,8 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
         let r = ui.add(egui::Label::new(RichText::new(note.as_str()).size(12.0).color(t.text_muted)).truncate());
         tags.tag_value("page-cut", &r, note.as_str());
     }
-    if p.edits > 0 {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        if p.edits > 0 {
             let apply_enabled = p.apply_blocked.is_none();
             let b = Button::new(RichText::new("Apply").color(t.accent_text)).fill(t.accent).min_size(vec2(64.0, 26.0));
             let r = ui.add_enabled(apply_enabled, b);
@@ -192,8 +195,19 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
             let text = edits_text(p.edits);
             let r = ui.label(RichText::new(text.as_str()).size(12.5).color(t.text_muted));
             tags.tag_value("edits-count", &r, text.as_str());
-        });
-    }
+            ui.add_space(10.0);
+        }
+        let enabled = p.add_blocked.is_none();
+        let r = ui.add_enabled(enabled, Button::new(RichText::new("+ Row").size(12.5)).min_size(vec2(0.0, 26.0)));
+        let r = match &p.add_blocked {
+            Some(why) => r.on_disabled_hover_text(format!("Cannot add a row now: {why}")),
+            None => r.on_hover_text("Add a row, written with the other changes on Apply"),
+        };
+        tags.tag_value_as("row-add", &r, "+ Row", enabled);
+        if r.clicked() {
+            runs.push(("row.add", json!({})));
+        }
+    });
     runs
 }
 
