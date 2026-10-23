@@ -29,6 +29,16 @@ pub struct Tokens {
     pub danger: Color32,
     /// Things that went well (a connection test that passed).
     pub success: Color32,
+    /// The schema tree's icons, one colour per kind, and the query tab's.
+    pub icon_schema: Color32,
+    pub icon_table: Color32,
+    pub icon_view: Color32,
+    pub icon_matview: Color32,
+    pub icon_column: Color32,
+    pub icon_query: Color32,
+    /// Primary and foreign key icons.
+    pub key_primary: Color32,
+    pub key_foreign: Color32,
 }
 
 /// The light theme: a warm grey ground with a slate-teal accent.
@@ -45,6 +55,14 @@ pub const TOKENS: Tokens = Tokens {
     hover: Color32::from_rgb(0xE4, 0xE7, 0xE1),
     danger: Color32::from_rgb(0xA8, 0x23, 0x1C),
     success: Color32::from_rgb(0x2D, 0x6A, 0x3A),
+    icon_schema: Color32::from_rgb(0x8A, 0x7A, 0x5C),
+    icon_table: Color32::from_rgb(0x2B, 0x7A, 0x6E),
+    icon_view: Color32::from_rgb(0x3A, 0x6E, 0xB0),
+    icon_matview: Color32::from_rgb(0x7A, 0x52, 0xA6),
+    icon_column: Color32::from_rgb(0x7B, 0x83, 0x7E),
+    icon_query: Color32::from_rgb(0xB0, 0x5A, 0x2E),
+    key_primary: Color32::from_rgb(0xB8, 0x86, 0x14),
+    key_foreign: Color32::from_rgb(0x4A, 0x7F, 0xA8),
 };
 
 /// The colour a connection is tagged with (its card, the form's strip); `None` for no colour.

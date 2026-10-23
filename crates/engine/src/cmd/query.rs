@@ -76,7 +76,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
         id: RUN,
         label: "Run",
-        menu: &[],
+        menu: &["Query"],
         shortcut: Some("Ctrl+Enter"),
         params: "{current? = false, cursor?: byte offset into the text, needed with current}",
         enabled: can_run,
@@ -87,7 +87,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
         id: CANCEL,
         label: "Cancel Query",
-        menu: &[],
+        menu: &["Query"],
         shortcut: None,
         params: "{}",
         enabled: active_query,

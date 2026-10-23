@@ -70,7 +70,19 @@ impl Tags {
         let seen = r.interact_rect;
         let visible = seen.is_finite() && seen.width() > 0.0 && seen.height() > 0.0;
         let rect = if visible { seen } else { r.rect };
-        let entry = Entry { id: id.to_string(), rect, visible, shows, enabled };
+        self.insert(Entry { id: id.to_string(), rect, visible, shows, enabled });
+    }
+
+    /// Lists `id` as drawn but out of view at `rect`: a row of a long list that is laid out but
+    /// not drawn (so it has no response). The list itself scrolls to it when it is the widget
+    /// waiting to be scrolled into view ([`Tags::scroll_pending`]); once drawn in view, it is
+    /// tagged as usual.
+    pub fn tag_out_of_view(&mut self, id: &str, rect: Rect) {
+        self.insert(Entry { id: id.to_string(), rect, visible: false, shows: Shows::Nothing, enabled: true });
+    }
+
+    fn insert(&mut self, entry: Entry) {
+        let id = entry.id.as_str();
         match self.index.get(id).and_then(|&i| self.entries.get_mut(i)) {
             Some(slot) => *slot = entry,
             None => {
@@ -256,6 +268,27 @@ mod tests {
         let b19 = tags.rect("b19").expect("scrolled into view");
         assert!(b19.max.y <= below.min.y, "{b19:?} {below:?}");
         assert!(!tags.hidden("b19"));
+    }
+
+    #[test]
+    fn rows_laid_out_but_not_drawn_are_listed_out_of_view() {
+        let mut tags = Tags::default();
+        tags.begin_frame();
+        let at = Rect::from_min_size(egui::pos2(0.0, 900.0), egui::vec2(200.0, 22.0));
+        tags.tag_out_of_view("tree-table-s.t", at);
+        assert!(tags.hidden("tree-table-s.t"));
+        assert_eq!(tags.rect("tree-table-s.t"), None, "a click must not go there");
+        let json = tags.to_json();
+        assert_eq!((json[0]["visible"].clone(), json[0]["rect"][1].clone()), (json!(false), json!(900.0)), "{json}");
+        // Drawn in view later in the frame: the drawn one wins.
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let r = ui.button("t");
+            tags.tag("tree-table-s.t", &r);
+        })
+        .drop_without_applying_deltas();
+        assert!(tags.rect("tree-table-s.t").is_some() && !tags.hidden("tree-table-s.t"));
+        assert_eq!(tags.ids(), vec!["tree-table-s.t"]);
     }
 
     #[test]

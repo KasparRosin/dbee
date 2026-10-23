@@ -1,0 +1,125 @@
+//! The menu bar, built from the commands' `menu` paths ([`DbeeApp::commands`]: the engine's and
+//! the UI-only ones): File, Edit, View and Query in that order, then any other top menu a command
+//! names, each listing its commands in registry order, a deeper path as a submenu.
+//!
+//! An entry shows its label and its shortcut text, and is enabled as the command is now; hovering
+//! a disabled entry shows why. Clicking an entry runs the command through [`DbeeApp::start`], as
+//! a button would, so a `needs…` answer opens its dialog and an error shows as a notice. It runs
+//! with the params of its shortcut's row ([`SHORTCUTS`]), so an entry does what its keys do (Copy
+//! copies as tab-separated values); without a shortcut, with `{}`.
+//!
+//! Automation ids: `menu-<Top>` for the top menus (`menu-File`) and `menu-<command id>` for the
+//! entries (`menu-tab.newQuery`), with the value `{label, shortcut, why?}`. Entries are drawn
+//! (and tagged) only while their menu is open.
+
+use dbee_engine::{CommandInfo, Json};
+use egui::Button;
+use egui::containers::menu::{MenuBar, MenuButton};
+use serde_json::json;
+
+use crate::DbeeApp;
+use crate::app::Origin;
+use crate::automation::Tags;
+use crate::shortcuts::SHORTCUTS;
+
+/// The top menus that come first, in this order.
+pub const MENUS: &[&str] = &["File", "Edit", "View", "Query"];
+
+/// The params a menu entry runs with: those of its shortcut's row, else `{}`.
+pub fn params_for(shortcut: Option<&str>) -> Json {
+    shortcut.and_then(|keys| SHORTCUTS.iter().find(|(k, ..)| *k == keys)).map_or_else(|| json!({}), |(_, _, params)| params.clone())
+}
+
+/// The top menus `commands` name: [`MENUS`] first, then the others as they come.
+fn tops(commands: &[CommandInfo]) -> Vec<&str> {
+    let mut tops: Vec<&str> = MENUS.iter().copied().filter(|m| commands.iter().any(|c| c.menu.first() == Some(m))).collect();
+    for c in commands {
+        if let Some(top) = c.menu.first()
+            && !tops.contains(top)
+        {
+            tops.push(top);
+        }
+    }
+    tops
+}
+
+/// Draws the menu bar into `ui` and runs the entry clicked, if any.
+pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
+    let commands = app.commands();
+    let mut chosen: Option<&'static str> = None;
+    let tags = &mut app.tags;
+    MenuBar::new().ui(ui, |ui| {
+        for top in tops(&commands) {
+            let (r, _) = MenuButton::new(top).ui(ui, |ui| {
+                ui.set_min_width(260.0);
+                entries(ui, &commands, &[top], tags, &mut chosen);
+            });
+            tags.tag(&format!("menu-{top}"), &r);
+        }
+    });
+    if let Some(id) = chosen {
+        let shortcut = commands.iter().find(|c| c.id == id).and_then(|c| c.shortcut);
+        app.start(id, params_for(shortcut), Origin::Menu);
+    }
+}
+
+/// The entries under menu `path`: the commands whose menu is exactly `path`, and a submenu for
+/// each deeper path, in registry order.
+fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], tags: &mut Tags, chosen: &mut Option<&'static str>) {
+    let mut subs: Vec<&str> = Vec::new();
+    for c in commands {
+        if c.menu.len() > path.len() && c.menu.starts_with(path) {
+            if let Some(sub) = c.menu.get(path.len())
+                && !subs.contains(sub)
+            {
+                subs.push(sub);
+                let deeper: Vec<&str> = path.iter().copied().chain(std::iter::once(*sub)).collect();
+                ui.menu_button(*sub, |ui| entries(ui, commands, &deeper, tags, chosen));
+            }
+            continue;
+        }
+        if c.menu != path {
+            continue;
+        }
+        let mut button = Button::new(c.label);
+        if let Some(keys) = c.shortcut {
+            button = button.shortcut_text(keys);
+        }
+        let mut r = ui.add_enabled(c.enabled, button);
+        let mut value = json!({ "label": c.label, "shortcut": c.shortcut });
+        if let Some(why) = &c.disabled_reason {
+            r = r.on_disabled_hover_text(why.as_str());
+            value["why"] = json!(why);
+        }
+        // A menu's first frame is a sizing pass, which reads every widget as disabled.
+        tags.tag_value_as(&format!("menu-{}", c.id), &r, value, c.enabled);
+        if r.clicked() {
+            *chosen = Some(c.id);
+            ui.close();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(id: &'static str, menu: &'static [&'static str]) -> CommandInfo {
+        CommandInfo { id, label: id, menu, shortcut: None, params: "{}", enabled: true, disabled_reason: None }
+    }
+
+    #[test]
+    fn known_menus_come_first_then_the_others() {
+        let commands = vec![info("a", &["Tools"]), info("b", &["Query"]), info("c", &["File"]), info("d", &[]), info("e", &["Help"])];
+        assert_eq!(tops(&commands), ["File", "Query", "Tools", "Help"]);
+    }
+
+    #[test]
+    fn an_entry_runs_with_its_shortcut_params() {
+        assert_eq!(params_for(Some("Ctrl+C")), json!({ "format": "tsv" }));
+        assert_eq!(params_for(Some("Ctrl+Shift+Enter")), json!({ "current": true }));
+        assert_eq!(params_for(Some("Ctrl+T")), json!({}));
+        assert_eq!(params_for(None), json!({}));
+        assert_eq!(params_for(Some("Hyper+Q")), json!({}));
+    }
+}

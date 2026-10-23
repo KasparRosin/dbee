@@ -128,7 +128,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
         id: APPLY,
         label: "Apply",
-        menu: &[],
+        menu: &["Edit"],
         shortcut: Some("Ctrl+S"),
         params: "{force?}",
         enabled: can_apply,
@@ -139,7 +139,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
         id: RESET,
         label: "Reset",
-        menu: &[],
+        menu: &["Edit"],
         shortcut: None,
         params: "{}",
         enabled: can_reset,
@@ -150,7 +150,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
         id: UNDO,
         label: "Undo",
-        menu: &[],
+        menu: &["Edit"],
         shortcut: Some("Ctrl+Z"),
         params: "{}",
         enabled: can_undo,
@@ -161,7 +161,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
         id: REDO,
         label: "Redo",
-        menu: &[],
+        menu: &["Edit"],
         shortcut: Some("Ctrl+Shift+Z"),
         params: "{}",
         enabled: can_redo,

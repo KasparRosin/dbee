@@ -11,10 +11,14 @@ pub mod control;
 pub mod control_server;
 pub mod dialogs;
 pub mod icons;
+pub mod menu;
 pub mod picker;
+pub mod quick_search;
 pub mod shortcuts;
 pub mod theme;
+pub mod tree;
 pub mod ui_commands;
+pub mod workspace;
 
 pub use app::DbeeApp;
 pub use control::ControlRequest;

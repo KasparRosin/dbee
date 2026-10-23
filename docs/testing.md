@@ -1,6 +1,6 @@
 # Testing
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (§4 isolated runs connect only to the test servers)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (§4 the workspace's scripted tests; §6 the tree's timing test)
 
 ```sh
 cargo test --workspace                              # everything; oracle tests skip without their tool
@@ -68,7 +68,7 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
 
 ## 4. UI: control channel and screenshots
 
-- **Scripted tests** (`crates/ui-egui/tests/control.rs`, `crates/ui-egui/tests/connections.rs`) run `DbeeApp::ui` in an egui_kittest harness, frame by frame, and drive it only through control requests and automation ids, asserting on `ui.inspect` and `document.inspect`. Each frame first feeds the app's synthetic input (`DbeeApp::feed_input`), as eframe's raw-input hook does.
+- **Scripted tests** (`crates/ui-egui/tests/control.rs`, `crates/ui-egui/tests/connections.rs`, `crates/ui-egui/tests/workspace.rs`) run `DbeeApp::ui` in an egui_kittest harness, frame by frame, and drive it only through control requests and automation ids, asserting on `ui.inspect` and `document.inspect`. Each frame first feeds the app's synthetic input (`DbeeApp::feed_input`), as eframe's raw-input hook does.
 - **Golden images (planned)** are procedural: a fixed in-code database, a fixed window size, one state per image. Update a golden image only after looking at the new picture.
 - **Interactive checks** run the real app with `cargo xtask run-isolated`, drive it and take `ui.screenshot`. Such a run connects only to the Docker test servers (and `127.0.0.1:1`); `connection.test`, `connection.open` and `connection.reconnect` refuse any other target with a `config` error before any network I/O (`DBEE_ALLOW_TARGETS`, [`agents.md`](agents.md) §4). The launch time check (`cargo test -p xtask -- --ignored`) starts the release build that way and prints how long the connection screen takes. Do this for every UI change (see [`agents.md`](agents.md) §4).
 - **A hidden window runs no frames on Wayland.** The control channel is served in the window's frames. On Wayland, winit holds the next redraw until the compositor answers the last frame's frame callback (egui-wgpu asks for one before every present), and KWin sends none to a window it does not show. So while the isolated window is minimised (reproduced on KDE Plasma 6, Mesa 25 RADV), and presumably while KWin paints nothing for it at all (another virtual desktop, displays asleep), every request times out with "the app did not answer in time (is the window hidden?)", and requests are answered again within one frame once the window is shown. The UI thread meanwhile idles in winit's event loop, not in wgpu's present.
@@ -90,6 +90,8 @@ Follow [never crash](standards/never-crash.md). Beyond a regression test per fix
 ## 6. Performance
 
 Performance tests are `#[ignore]` so `cargo test` stays fast; run them with `-- --ignored`. Each states its budget (for example time to first row, rows per second, peak memory) and prints the machine, the load average and the measured value. A claim of improvement needs before/after numbers on the same build.
+
+Today: `tree_filter_1000_tables_within_a_frame` (`crates/ui-egui/tests/workspace.rs`) draws the schema tree over a synthetic catalog of 1,000 tables and prints the median frame time with a new filter each frame and with the filter unchanged (budget 16 ms each); the launch time check is in §4.
 
 ## 7. Corpora
 

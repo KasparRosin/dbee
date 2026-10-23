@@ -2,7 +2,7 @@
 //! other vendor's artwork) is involved. Each takes the painter, the square to draw in and a
 //! colour; a rect that is empty or not finite draws nothing.
 
-use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
+use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2};
 
 /// The square inside `rect` an icon draws in, or `None` when there is nothing to draw on.
 fn square(rect: Rect) -> Option<Rect> {
@@ -55,6 +55,160 @@ pub fn database(p: &Painter, rect: Rect, color: Color32) {
     }
 }
 
+/// `(x, y)` as fractions of the square `r`.
+fn at(r: Rect, x: f32, y: f32) -> Pos2 {
+    pos2(r.left() + r.width() * x, r.top() + r.height() * y)
+}
+
+/// The rect from `(x0, y0)` to `(x1, y1)`, as fractions of the square `r`.
+fn part(r: Rect, x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
+    Rect::from_min_max(at(r, x0, y0), at(r, x1, y1))
+}
+
+/// A schema: a folder, a box with a tab on its top left edge.
+pub fn schema(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.rect_stroke(part(r, 0.1, 0.32, 0.9, 0.84), CornerRadius::same(2), s, StrokeKind::Middle);
+    p.add(Shape::line(vec![at(r, 0.1, 0.32), at(r, 0.1, 0.18), at(r, 0.4, 0.18), at(r, 0.5, 0.32)], s));
+}
+
+/// A table: a box with a filled header band and a two-by-two grid of cells below it.
+pub fn table(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    let outer = part(r, 0.12, 0.16, 0.88, 0.84);
+    p.rect_filled(part(r, 0.12, 0.16, 0.88, 0.38), CornerRadius::same(2), color.gamma_multiply(0.45));
+    p.rect_stroke(outer, CornerRadius::same(2), s, StrokeKind::Middle);
+    p.line_segment([at(r, 0.12, 0.38), at(r, 0.88, 0.38)], s);
+    p.line_segment([at(r, 0.12, 0.61), at(r, 0.88, 0.61)], s);
+    p.line_segment([at(r, 0.5, 0.38), at(r, 0.5, 0.84)], s);
+}
+
+/// The outline of an eye, a lens between `x0` and `x1` at height `cy` and `half` high, with a
+/// round pupil.
+fn eye(p: &Painter, r: Rect, cy: f32, half: f32, s: Stroke, color: Color32) {
+    const STEPS: usize = 10;
+    let lens = |sign: f32| -> Vec<Pos2> {
+        (0..=STEPS)
+            .map(|i| {
+                let t = (i as f32) / (STEPS as f32);
+                at(r, 0.08 + 0.84 * t, cy + sign * half * (std::f32::consts::PI * t).sin())
+            })
+            .collect()
+    };
+    p.add(Shape::line(lens(-1.0), s));
+    p.add(Shape::line(lens(1.0), s));
+    p.circle_filled(at(r, 0.5, cy), r.width() * 0.13, color);
+}
+
+/// A view: an eye.
+pub fn view(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    eye(p, r, 0.5, 0.26, stroke(r.width(), color), color);
+}
+
+/// A materialized view: an eye standing on a solid bar (the rows it keeps).
+pub fn materialized_view(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    eye(p, r, 0.4, 0.22, s, color);
+    p.rect_filled(part(r, 0.18, 0.74, 0.82, 0.86), CornerRadius::same(1), color);
+}
+
+/// A column: one tall cell stack.
+pub fn column(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.rect_stroke(part(r, 0.32, 0.14, 0.68, 0.86), CornerRadius::same(1), s, StrokeKind::Middle);
+    p.line_segment([at(r, 0.32, 0.38), at(r, 0.68, 0.38)], s);
+    p.line_segment([at(r, 0.32, 0.62), at(r, 0.68, 0.62)], s);
+}
+
+/// A primary key: a ring and a shaft with two teeth.
+pub fn key_primary(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.circle_stroke(at(r, 0.3, 0.5), r.width() * 0.19, s);
+    p.line_segment([at(r, 0.49, 0.5), at(r, 0.92, 0.5)], s);
+    p.line_segment([at(r, 0.86, 0.5), at(r, 0.86, 0.7)], s);
+    p.line_segment([at(r, 0.72, 0.5), at(r, 0.72, 0.66)], s);
+}
+
+/// A foreign key: a smaller ring whose shaft ends in an arrow head, pointing at the other table.
+pub fn key_foreign(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.circle_stroke(at(r, 0.24, 0.5), r.width() * 0.15, s);
+    p.line_segment([at(r, 0.39, 0.5), at(r, 0.9, 0.5)], s);
+    p.add(Shape::line(vec![at(r, 0.72, 0.32), at(r, 0.9, 0.5), at(r, 0.72, 0.68)], s));
+}
+
+/// A query: a prompt, a chevron and a cursor line.
+pub fn query(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.add(Shape::line(vec![at(r, 0.14, 0.26), at(r, 0.44, 0.5), at(r, 0.14, 0.74)], s));
+    p.line_segment([at(r, 0.52, 0.76), at(r, 0.88, 0.76)], s);
+}
+
+/// A cross: "close".
+pub fn close(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.line_segment([at(r, 0.25, 0.25), at(r, 0.75, 0.75)], s);
+    p.line_segment([at(r, 0.75, 0.25), at(r, 0.25, 0.75)], s);
+}
+
+/// Two arrows chasing each other round a circle: "reload".
+pub fn refresh(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    let c = r.center();
+    let radius = r.width() * 0.3;
+    let arc = |from: f32, to: f32| -> Vec<Pos2> {
+        const STEPS: usize = 10;
+        (0..=STEPS)
+            .map(|i| {
+                let a = from + (to - from) * (i as f32) / (STEPS as f32);
+                pos2(c.x + radius * a.cos(), c.y + radius * a.sin())
+            })
+            .collect()
+    };
+    let pi = std::f32::consts::PI;
+    for (from, to) in [(-0.35 * pi, 0.55 * pi), (0.65 * pi, 1.55 * pi)] {
+        let points = arc(from, to);
+        if let Some(&end) = points.last() {
+            // The arrow head at the arc's end, along the circle's tangent.
+            let dir = vec2(-to.sin(), to.cos());
+            let normal = vec2(to.cos(), to.sin());
+            let head = r.width() * 0.16;
+            p.add(Shape::line(vec![end - dir * head + normal * head * 0.7, end, end - dir * head - normal * head * 0.7], s));
+        }
+        p.add(Shape::line(points, s));
+    }
+}
+
+/// A chevron pointing right (`open: false`) or down (`open: true`): a tree row's expander.
+pub fn chevron(p: &Painter, rect: Rect, color: Color32, open: bool) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    let points = if open {
+        vec![at(r, 0.28, 0.38), at(r, 0.5, 0.62), at(r, 0.72, 0.38)]
+    } else {
+        vec![at(r, 0.38, 0.28), at(r, 0.62, 0.5), at(r, 0.38, 0.72)]
+    };
+    p.add(Shape::line(points, s));
+}
+
+/// A magnifying glass: "search".
+pub fn search(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.circle_stroke(at(r, 0.42, 0.42), r.width() * 0.24, s);
+    p.line_segment([at(r, 0.6, 0.6), at(r, 0.84, 0.84)], s);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,8 +224,14 @@ mod tests {
                 egui::Rect::EVERYTHING,
                 egui::Rect::from_min_max(egui::pos2(f32::NAN, 0.0), egui::pos2(1.0, f32::INFINITY)),
             ] {
-                plus(p, r, egui::Color32::BLACK);
-                database(p, r, egui::Color32::BLACK);
+                let c = egui::Color32::BLACK;
+                plus(p, r, c);
+                database(p, r, c);
+                for icon in [schema, table, view, materialized_view, column, key_primary, key_foreign, query, close, refresh, search] {
+                    icon(p, r, c);
+                }
+                chevron(p, r, c, true);
+                chevron(p, r, c, false);
             }
         })
         .drop_without_applying_deltas();

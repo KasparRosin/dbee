@@ -1,6 +1,6 @@
 # dbee control protocol
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (what `ui.inspect` tells about a widget; clicks scroll widgets into view; the connection screen's ids)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (the workspace's ids)
 
 The desktop app takes a control port, so agents and tests can drive the real window:
 
@@ -49,6 +49,11 @@ Widgets agents drive have kebab-case ids, listed by `ui.inspect` and clicked wit
 - its SSH tunnel: `conn-ssh-on`, `conn-ssh-host`, `conn-ssh-port`, `conn-ssh-user`, `conn-ssh-auth` (and `conn-ssh-auth-key`, `-agent`, `-password`), `conn-ssh-key` (what the login will use), `conn-ssh-change`, `conn-ssh-auto`;
 - its buttons and their message: `conn-save`, `conn-test`, `conn-connect`, then `conn-error` (something failed), `conn-result` (a test passed, a save) or `conn-note` (anything else, such as a note about a file picker);
 - dialogs: `dialog-ok`, `dialog-cancel`, `dialog-text`, `dialog-url`, `dialog-error`, `dialog-fingerprint`, `dialog-secret`, `dialog-save`;
+- the workspace's menu bar: `menu-File`, `menu-Edit`, `menu-View`, `menu-Query` (one per top menu the commands name) and, while a menu is open, `menu-<command id>` (`menu-tab.newQuery`) with the value `{label, shortcut, why?}`, `why` saying why a disabled entry cannot run now. An entry runs its command as a button does, with its shortcut's params;
+- its schema tree: `tree-filter`, `tree-refresh`, `tree-system` (the system schemas' group), `tree-schema-<schema>`, `tree-table-<schema>.<table>` (value: its kind; a double-click opens it), `tree-expand-<schema>.<table>` (shows its columns) and `tree-column-<schema>.<table>.<column>` (value `{type, key}`, `key` being `primary`, `foreign` or null). Schema and table rows out of view are listed with `visible: false`, and a click scrolls them into view first;
+- its tabs: `tab-<id>` (value: the title as shown, `orders [2]` when 2 filters are applied; a middle click closes it), `tab-close-<id>`, `tab-dirty-<id>` (the dot of a tab whose query text or staged edits closing would lose), `tab-new`, and the active query tab's editor `query-editor`;
+- its status bar: `status-connection` (value: the connection's name, with `read-only` when the session is), `status-server`, `status-job` (value: what runs in the active tab, or a reconnect) with `status-cancel`, and `status-lost` with `status-reconnect` while the connection is lost;
+- the quick search (Ctrl+P): `qs-input` and `qs-item-<n>` (value `schema.table`, best first, `n` from 0). ArrowDown and ArrowUp move, Enter opens, Escape closes;
 - `notice` (the notice shown at the bottom right).
 
 The file pickers (`conn-ssh-change`, `conn-ca-choose`) open the desktop's picker, which agents cannot drive: save a connection with the path instead (`connection.save`) and click its card.

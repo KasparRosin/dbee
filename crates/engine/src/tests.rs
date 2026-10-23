@@ -210,6 +210,17 @@ fn no_marker_outlives_its_job() {
 }
 
 #[test]
+fn running_names_the_commands_whose_jobs_run() {
+    let mut s = session();
+    assert!(!s.running("test.sleepJob"));
+    let job = started(s.execute("test.sleepJob", json!({ "ms": 50 })).unwrap());
+    assert!(s.running("test.sleepJob"));
+    assert!(!s.running("connection.reconnect") && !s.running(""));
+    s.wait(job, Duration::from_secs(5)).unwrap();
+    assert!(!s.running("test.sleepJob"), "applied: no longer running");
+}
+
+#[test]
 fn every_command_survives_empty_params() {
     let mut s = session();
     for c in s.commands() {

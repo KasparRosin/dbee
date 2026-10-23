@@ -494,7 +494,8 @@ fn ago(used_at: u64) -> String {
 }
 
 /// One line of text cut to `width` with an ellipsis.
-fn line_galley(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+/// `text` on one line in `font` and `color`, cut with "…" to `width`.
+pub(crate) fn line_galley(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
     let mut job = LayoutJob::single_section(text.to_string(), TextFormat::simple(font, color));
     job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
     ui.painter().layout_job(job)

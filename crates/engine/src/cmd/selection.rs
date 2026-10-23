@@ -57,7 +57,8 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
         id: COPY,
         label: "Copy Selection",
-        menu: &["Edit"],
+        // The menu's Copy is the UI's `clipboard.copy`, which puts this text on the clipboard.
+        menu: &[],
         shortcut: None,
         params: "{format: \"tsv\" | \"tsvHeader\" | \"csv\" | \"json\" | \"markdown\"} -> {text, rows, columns}",
         enabled: has_selection,

@@ -385,6 +385,13 @@ impl Session {
         self.jobs.busy()
     }
 
+    /// A job that command `command` started is running (a job is labelled with its command's
+    /// id), e.g. `connection.reconnect`. Its result may still be ignored when it arrives (see
+    /// [`cmd`]); a tab's own jobs are named by the tab's markers instead.
+    pub fn running(&self, command: &str) -> bool {
+        self.jobs.is_running_label(command)
+    }
+
     /// Every registered command with whether it can run now. A panicking `enabled` check shows
     /// as disabled.
     pub fn commands(&self) -> Vec<CommandInfo> {

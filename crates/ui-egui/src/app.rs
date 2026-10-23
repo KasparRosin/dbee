@@ -5,7 +5,7 @@
 //! 2. the control replies that waited (for a job, idleness, input or a picture) are answered;
 //! 3. the control requests that arrived are handled ([`crate::control`]);
 //! 4. the keyboard shortcuts run ([`crate::shortcuts`]), before any widget sees the keys (not
-//!    while a dialog is open);
+//!    while a dialog or the quick search is open: the quick search handles its own keys);
 //! 5. the screen is drawn, tagging its widgets ([`crate::automation`]), then the dialog, if any
 //!    ([`crate::dialogs`]);
 //! 6. the session's UI requests (dialogs, notices) are taken, to show from the next frame.
@@ -18,8 +18,8 @@
 //! errors show as a notice, or under the connection form's buttons; a command that is disabled
 //! right now does nothing. Logs name command ids and error codes only.
 //!
-//! The connection screen is [`crate::connections`]; the workspace (a placeholder) shows the
-//! connection and its tabs.
+//! The connection screen is [`crate::connections`]; the workspace (menu bar, tree, tabs, status
+//! bar, quick search) is [`crate::workspace`].
 
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
@@ -33,7 +33,8 @@ use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
 use crate::dialogs::{self, Dialog, Rerun};
 use crate::theme::{RADIUS, TOKENS};
-use crate::{shortcuts, theme, ui_commands};
+use crate::workspace::Workspace;
+use crate::{shortcuts, theme, ui_commands, workspace};
 
 /// How often a busy session repaints.
 const BUSY_REPAINT: Duration = Duration::from_millis(100);
@@ -96,7 +97,8 @@ impl std::fmt::Debug for UiJob {
 #[derive(Debug)]
 pub(crate) struct View {
     pub value_panel: bool,
-    pub quick_search: bool,
+    /// The workspace's tree and quick search.
+    pub work: Workspace,
     /// The dialog on screen ([`crate::dialogs`]).
     pub dialog: Option<Dialog>,
     /// Notices with the time they were first shown (`None` until then).
@@ -111,7 +113,14 @@ pub(crate) struct View {
 impl View {
     /// The window's own state; `has_store` says whether the session keeps secrets.
     fn new(has_store: bool) -> View {
-        View { value_panel: true, quick_search: false, dialog: None, notices: VecDeque::new(), conn: ConnScreen::new(has_store), query_cursor: None }
+        View {
+            value_panel: true,
+            work: Workspace::default(),
+            dialog: None,
+            notices: VecDeque::new(),
+            conn: ConnScreen::new(has_store),
+            query_cursor: None,
+        }
     }
 }
 
@@ -282,8 +291,8 @@ impl DbeeApp {
             }
             self.control = Some(rx);
         }
-        // 4. Shortcuts, unless a dialog is open.
-        if self.view.dialog.is_none() {
+        // 4. Shortcuts, unless a dialog or the quick search is open.
+        if self.view.dialog.is_none() && !self.view.work.quick.open {
             shortcuts::handle(self, &ctx);
         }
         // 5. Draw.
@@ -314,31 +323,17 @@ impl DbeeApp {
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         match self.session.state().screen {
-            Screen::Connections => connections::screen(self, ui),
-            Screen::Workspace => self.workspace(ui),
+            Screen::Connections => {
+                self.view.work.leave();
+                connections::screen(self, ui);
+            }
+            Screen::Workspace => workspace::screen(self, ui),
         }
         dialogs::show(self, ui.ctx());
         self.notices(ui);
     }
 
-    /// The workspace (a placeholder): the connection and its tabs.
-    fn workspace(&mut self, ui: &mut egui::Ui) {
-        let t = TOKENS;
-        let st = self.session.state();
-        let name = st.connected.as_ref().map(|c| c.config.display_name()).unwrap_or_default();
-        let server = st.connected.as_ref().map(|c| c.info.version.clone()).unwrap_or_default();
-        let tabs: Vec<String> = st.tabs.iter().map(|tab| tab.title()).collect();
-        egui::CentralPanel::default().frame(Frame::new().fill(t.bg).inner_margin(Margin::same(24))).show(ui, |ui| {
-            ui.label(RichText::new(name).size(20.0).strong());
-            ui.label(RichText::new(server).color(t.text_muted));
-            ui.add_space(12.0);
-            for title in tabs {
-                ui.label(title);
-            }
-        });
-    }
-
-    /// The newest notice, bottom right, for [`NOTICE_SECS`].
+    /// The newest notice, bottom right (above the workspace's status bar), for [`NOTICE_SECS`].
     fn notices(&mut self, ui: &mut egui::Ui) {
         let now = ui.ctx().input(|i| i.time);
         while let Some((_, Some(shown))) = self.view.notices.front() {
@@ -350,8 +345,9 @@ impl DbeeApp {
         let Some((text, shown)) = self.view.notices.front_mut() else { return };
         let since = *shown.get_or_insert(now);
         let t = TOKENS;
+        let lift = if self.session.state().screen == Screen::Workspace { workspace::STATUS_H } else { 0.0 };
         let area = egui::Area::new(egui::Id::new("dbee-notice"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-16.0, -16.0))
+            .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-16.0, -16.0 - lift))
             .order(egui::Order::Foreground)
             .movable(false)
             .fade_in(false);

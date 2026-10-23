@@ -171,7 +171,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
         id: REFRESH,
         label: "Refresh Schema",
-        menu: &[],
+        menu: &["View"],
         shortcut: None,
         params: "{}",
         enabled: needs_db,
