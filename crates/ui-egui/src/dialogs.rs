@@ -21,6 +21,7 @@
 //! says whether they are filled in, never what they hold, and neither `Debug` nor the logs show
 //! them.
 
+use dbee_config::ConnectionConfig;
 use dbee_engine::{EngineError, Json, Need, Outcome};
 use egui::{Align, Align2, Button, Checkbox, CornerRadius, Frame, Key, Layout, Margin, RichText, Stroke, TextEdit, vec2};
 use serde_json::json;
@@ -91,8 +92,8 @@ pub(crate) enum Dialog {
     FillFromUrl { url: String, error: Option<String>, focused: bool },
     /// An SSH server not in `known_hosts`.
     HostKey { host: String, key_type: String, fingerprint: String, rerun: Rerun },
-    /// A password or passphrase.
-    Secret { ask: SecretAsk, value: String, keep: Keep, save: bool, focused: bool, rerun: Rerun },
+    /// A password or passphrase; `line` says whose.
+    Secret { ask: SecretAsk, line: String, value: String, keep: Keep, save: bool, focused: bool, rerun: Rerun },
     /// Something will be lost.
     Confirm { message: String, rerun: Rerun },
     /// Deleting a saved connection (and its secrets).
@@ -133,7 +134,8 @@ impl Dialog {
 /// for any other error.
 pub(crate) fn ask(app: &mut DbeeApp, e: &EngineError, rerun: Rerun) -> bool {
     let EngineError::Needs { need, message } = e else { return false };
-    let secret = |ask: SecretAsk, keep: Keep, rerun: Rerun| Dialog::Secret {
+    let secret = |ask: SecretAsk, keep: Keep, rerun: Rerun, app: &DbeeApp| Dialog::Secret {
+        line: secret_line(app, &ask, &rerun),
         ask,
         value: String::new(),
         keep,
@@ -147,15 +149,15 @@ pub(crate) fn ask(app: &mut DbeeApp, e: &EngineError, rerun: Rerun) -> bool {
         }
         Need::Passphrase { key } => {
             let keep = keep_of(app, &rerun);
-            secret(SecretAsk::Passphrase { key: key.clone() }, keep, rerun)
+            secret(SecretAsk::Passphrase { key: key.clone() }, keep, rerun, app)
         }
         Need::Password => {
             let keep = keep_of(app, &rerun);
-            secret(SecretAsk::Password, keep, rerun)
+            secret(SecretAsk::Password, keep, rerun, app)
         }
         Need::SshPassword => {
             let keep = keep_of(app, &rerun);
-            secret(SecretAsk::SshPassword, keep, rerun)
+            secret(SecretAsk::SshPassword, keep, rerun, app)
         }
         Need::Confirm { .. } => Dialog::Confirm { message: message.clone(), rerun },
     };
@@ -163,9 +165,38 @@ pub(crate) fn ask(app: &mut DbeeApp, e: &EngineError, rerun: Rerun) -> bool {
     true
 }
 
+/// The connection `rerun`'s command is about: its `config`, or the saved or recent connection
+/// its `id` names.
+fn config_of(app: &DbeeApp, rerun: &Rerun) -> Option<ConnectionConfig> {
+    if let Some(c) = rerun.params.get("config").filter(|c| c.is_object()) {
+        return serde_json::from_value::<ConnectionConfig>(c.clone()).ok();
+    }
+    let id = rerun.params.get("id").and_then(Json::as_str)?;
+    app.session.state().store.get(id).cloned()
+}
+
+/// What the secret dialog says it asks for: whose password, or plain wording when the command
+/// names no connection dbee knows (never blanks).
+fn secret_line(app: &DbeeApp, ask: &SecretAsk, rerun: &Rerun) -> String {
+    let config = config_of(app, rerun);
+    let named = |user: &str, host: &str| !user.trim().is_empty() && !host.trim().is_empty();
+    match ask {
+        SecretAsk::Passphrase { key } => format!("The key {} is protected by a passphrase.", tilde(key)),
+        SecretAsk::Password => match config.filter(|c| named(&c.user, &c.host)) {
+            Some(c) => format!("Enter the password of {} on {}.", c.user, c.host),
+            None => "Enter the database password.".into(),
+        },
+        SecretAsk::SshPassword => match config.and_then(|c| c.ssh).filter(|s| named(&s.user, &s.host)) {
+            Some(s) => format!("Enter the SSH password of {} on {}.", s.user, s.host),
+            None => "Enter the SSH password.".into(),
+        },
+    }
+}
+
 /// "Save in keyring" for a secret `rerun` asks for: offered for `connection.open`, and possible
 /// only with a secret store and for a saved connection (the engine keeps nothing for an unsaved
-/// one), checked when that connection saves its secrets.
+/// one). Checked as the form says ("Save passwords") when the form asked, else as the saved
+/// connection says.
 fn keep_of(app: &DbeeApp, rerun: &Rerun) -> Keep {
     if rerun.command != connections::OPEN {
         return Keep::NotOffered;
@@ -174,8 +205,12 @@ fn keep_of(app: &DbeeApp, rerun: &Rerun) -> Keep {
         return Keep::No("There is no keyring, so dbee asks each time.");
     }
     let id = rerun.params.get("config").and_then(|c| c.get("id")).or_else(|| rerun.params.get("id")).and_then(Json::as_str).unwrap_or_default();
+    let form_says = match rerun.origin {
+        Origin::Form(_) => rerun.params.get("config").and_then(|c| c.get("saveSecrets")).and_then(Json::as_bool),
+        Origin::Menu | Origin::KeyLine => None,
+    };
     match app.session.state().store.saved.iter().find(|c| !id.is_empty() && c.id == id) {
-        Some(saved) => Keep::Yes { checked: saved.save_secrets },
+        Some(saved) => Keep::Yes { checked: form_says.unwrap_or(saved.save_secrets) },
         None => Keep::No("Save the connection to keep its passwords."),
     }
 }
@@ -241,7 +276,8 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
     // The sizing pass lays the content out in the default size: all the height below the corner,
     // so no row gets less room than in the frames after it.
     let below = (screen.height() - offset.y).max(1.0);
-    let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, offset).default_size(vec2(outer, below));
+    // No fade-in: a screenshot right after a dialog opens shows it as it is.
+    let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, offset).default_size(vec2(outer, below)).fade_in(false);
     let frame = Frame::new()
         .fill(t.card)
         .stroke(Stroke::new(1.0, t.border))
@@ -264,7 +300,7 @@ fn title(ui: &mut egui::Ui, text: &str) {
 
 fn text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, text: &str) {
     let r = ui.add(egui::Label::new(text).wrap());
-    tags.tag_value(id, &r, text);
+    tags.tag_value_as(id, &r, text, true);
 }
 
 fn muted(ui: &mut egui::Ui, text: &str) {
@@ -282,10 +318,10 @@ fn buttons(ui: &mut egui::Ui, tags: &mut Tags, ok: &str, ok_enabled: bool, dange
         let fill = if danger { t.danger } else { t.accent };
         let button = Button::new(RichText::new(ok).color(t.accent_text)).fill(fill).min_size(vec2(96.0, 30.0));
         let ok_r = ui.add_enabled(ok_enabled, button);
-        tags.tag_value("dialog-ok", &ok_r, ok);
+        tags.tag_value_as("dialog-ok", &ok_r, ok, ok_enabled);
         let cancelled = if cancel {
             let r = ui.add(Button::new("Cancel").min_size(vec2(80.0, 30.0)));
-            tags.tag_value("dialog-cancel", &r, "Cancel");
+            tags.tag_value_as("dialog-cancel", &r, "Cancel", true);
             r.clicked()
         } else {
             false
@@ -318,7 +354,7 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                     .margin(Margin::symmetric(6, 5)),
             );
             // The URL can carry a password.
-            tags.tag_secret("dialog-url", &r, !url.is_empty());
+            tags.tag_secret_as("dialog-url", &r, !url.is_empty(), true);
             focus(&r, focused);
             let entered = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
             // A reserved line for the reason a URL did not parse.
@@ -328,7 +364,7 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 job.wrap = egui::text::TextWrapping::truncate_at_width(WIDTH);
                 let galley = ui.painter().layout_job(job);
                 ui.painter().galley(egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.danger);
-                tags.tag_value("dialog-error", &line, e.as_str());
+                tags.tag_value_as("dialog-error", &line, e.as_str(), true);
             }
             let (ok, cancel) = buttons(ui, tags, "Fill", !url.trim().is_empty(), false, true);
             if cancel {
@@ -344,7 +380,7 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             text(ui, tags, "dialog-text", &format!("dbee has not connected to {host} before. Its {key_type} host key has this fingerprint:"));
             ui.add_space(6.0);
             let r = ui.add(egui::Label::new(RichText::new(fingerprint.as_str()).monospace()).selectable(true));
-            tags.tag_value("dialog-fingerprint", &r, fingerprint.as_str());
+            tags.tag_value_as("dialog-fingerprint", &r, fingerprint.as_str(), true);
             ui.add_space(6.0);
             muted(ui, "Trust it only if it is the fingerprint the server's administrator gave you. dbee then adds it to ~/.ssh/known_hosts.");
             let (ok, cancel) = buttons(ui, tags, "Trust and connect", true, false, true);
@@ -357,22 +393,19 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 Act::None
             }
         }
-        Dialog::Secret { ask, value, keep, save, focused, rerun } => {
-            let config = rerun.params.get("config").cloned().unwrap_or(Json::Null);
-            let field = |k: &str| config.get(k).and_then(Json::as_str).unwrap_or_default().to_string();
-            let ssh = |k: &str| config.get("ssh").and_then(|s| s.get(k)).and_then(Json::as_str).unwrap_or_default().to_string();
-            let (heading, line) = match ask {
-                SecretAsk::Passphrase { key } => ("Key passphrase", format!("The key {} is protected by a passphrase.", tilde(key))),
-                SecretAsk::Password => ("Database password", format!("Enter the password of {} on {}.", field("user"), field("host"))),
-                SecretAsk::SshPassword => ("SSH password", format!("Enter the SSH password of {} on {}.", ssh("user"), ssh("host"))),
+        Dialog::Secret { ask, line, value, keep, save, focused, rerun } => {
+            let heading = match ask {
+                SecretAsk::Passphrase { .. } => "Key passphrase",
+                SecretAsk::Password => "Database password",
+                SecretAsk::SshPassword => "SSH password",
             };
             title(ui, heading);
-            text(ui, tags, "dialog-text", &line);
+            text(ui, tags, "dialog-text", line);
             ui.add_space(8.0);
             let r = ui.add(
                 TextEdit::singleline(value).id(egui::Id::new("dialog-secret")).password(true).desired_width(WIDTH).margin(Margin::symmetric(6, 5)),
             );
-            tags.tag_secret("dialog-secret", &r, !value.is_empty());
+            tags.tag_secret_as("dialog-secret", &r, !value.is_empty(), true);
             focus(&r, focused);
             let entered = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
             ui.add_space(4.0);
@@ -380,13 +413,13 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 Keep::NotOffered => {}
                 Keep::Yes { .. } => {
                     let r = ui.checkbox(save, "Save in keyring");
-                    tags.tag_value("dialog-save", &r, *save);
+                    tags.tag_value_as("dialog-save", &r, *save, true);
                 }
                 Keep::No(why) => {
                     let mut off = false;
                     ui.horizontal_top(|ui| {
                         let r = ui.add_enabled(false, Checkbox::new(&mut off, "Save in keyring"));
-                        tags.tag_value("dialog-save", &r, false);
+                        tags.tag_value_as("dialog-save", &r, false, false);
                         ui.label(RichText::new(*why).size(12.0).color(t.text_muted));
                     });
                 }
@@ -436,5 +469,48 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             let (ok, _) = buttons(ui, tags, "Close", true, false, false);
             if ok { Act::Cancel } else { Act::None }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dbee_config::MemoryStore;
+    use dbee_engine::{Session, SessionOptions};
+    use dbee_testkit::temp_home;
+    use serde_json::json;
+
+    use super::*;
+
+    fn line_of(app: &DbeeApp) -> String {
+        match &app.view.dialog {
+            Some(Dialog::Secret { line, .. }) => line.clone(),
+            other => panic!("not a secret dialog: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_secret_dialog_names_the_connection_its_command_names_by_id() {
+        let home = temp_home(None, None);
+        let session = Session::new(SessionOptions {
+            config_dir: Some(home.home.join("config")),
+            secrets: Some(Arc::new(MemoryStore::default())),
+            ..SessionOptions::default()
+        })
+        .unwrap();
+        let mut app = DbeeApp::new(session, None);
+        let saved = app.run("connection.save", json!({ "config": { "host": "db.example", "user": "ann", "database": "shop" } })).unwrap();
+        let Outcome::Done(saved) = saved else { panic!("connection.save ran as a job") };
+        let id = saved["id"].as_str().unwrap().to_string();
+        let needs = |need: Need| EngineError::Needs { need, message: "asked".into() };
+        let rerun = |params: Json| Rerun { command: connections::OPEN, params, origin: Origin::Menu };
+        assert!(ask(&mut app, &needs(Need::Password), rerun(json!({ "id": id }))));
+        assert_eq!(line_of(&app), "Enter the password of ann on db.example.");
+        // An id nothing has, or a connection without a tunnel: no blanks, plain wording.
+        assert!(ask(&mut app, &needs(Need::Password), rerun(json!({ "id": "nope" }))));
+        assert_eq!(line_of(&app), "Enter the database password.");
+        assert!(ask(&mut app, &needs(Need::SshPassword), rerun(json!({ "id": id }))));
+        assert_eq!(line_of(&app), "Enter the SSH password.");
     }
 }

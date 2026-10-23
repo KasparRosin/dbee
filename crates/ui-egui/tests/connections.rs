@@ -289,6 +289,11 @@ fn dialog_widgets_are_in_place_from_their_first_frame() {
         }
         assert!(start.elapsed() < WAIT, "the dialog never showed");
     };
+    // egui draws everything disabled in that frame; the tags say what the widgets are.
+    let json = ui.harness.state().tags().to_json();
+    let entry = |id: &str| json.as_array().unwrap().iter().find(|e| e["id"] == id).cloned().unwrap();
+    assert!(entry("dialog-cancel").get("enabled").is_none(), "{json}");
+    assert_eq!(entry("dialog-ok")["enabled"], false, "no URL typed yet: {json}");
     ui.frame();
     let tags = ui.harness.state().tags();
     assert_eq!((tags.rect("dialog-ok").unwrap(), tags.rect("dialog-url").unwrap()), first);
@@ -636,6 +641,29 @@ fn password_dialog_for_an_unsaved_connection_keeps_nothing() {
     assert_eq!(store.get(&id, SecretKind::DbPassword).unwrap(), None);
     let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
     assert!(!everything.contains(&db.password), "{everything}");
+}
+
+#[test]
+fn save_in_keyring_follows_the_form() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ui();
+    // Saved without a password, with "Save passwords" on.
+    let card = ui.save(&pg14(db), None);
+    ui.click(&card);
+    // Turned off in the form (not saved): the dialog's "Save in keyring" starts off.
+    ui.click("conn-save-secrets");
+    assert_eq!(ui.value("conn-save-secrets"), false);
+    ui.click("conn-connect");
+    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+    let save = ui.tag("dialog-save").unwrap();
+    assert_eq!(save["value"], false, "{save}");
+    assert!(save.get("enabled").is_none(), "the connection is saved, so it can be kept: {save}");
+    ui.click("dialog-cancel");
+    // On again: it starts on.
+    ui.click("conn-save-secrets");
+    ui.click("conn-connect");
+    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+    assert_eq!(ui.value("dialog-save"), true);
 }
 
 #[test]

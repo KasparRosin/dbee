@@ -638,6 +638,8 @@ pub(crate) fn answer_deferred(
             }
             *frames = frames.saturating_add(1);
             if !app.tags.hidden(id) || *frames > IN_VIEW_FRAMES {
+                // Gave up: a later frame must not scroll to it any more.
+                app.tags.cancel_scroll(id);
                 let shown_id = shown(id);
                 let _ = d.reply.send(error(
                     "notFound",
@@ -793,6 +795,36 @@ mod tests {
         assert_eq!(timeout_of(&json!({ "timeoutMs": u64::MAX })).unwrap(), MAX_TIMEOUT);
         assert!(timeout_of(&json!({ "timeoutMs": -1 })).is_err());
         assert!(timeout_of(&json!({ "timeoutMs": "1" })).is_err());
+    }
+
+    #[test]
+    fn a_click_that_cannot_scroll_into_view_gives_up_and_forgets_the_scroll() {
+        let (mut app, _home) = app();
+        let ctx = egui::Context::default();
+        // One frame where `far` is drawn scrolled out of view.
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.tags.begin_frame();
+            egui::ScrollArea::vertical().max_height(40.0).show(ui, |ui| {
+                for i in 0..30 {
+                    let r = ui.button(format!("button {i}"));
+                    app.tags.tag(&format!("b{i}"), &r);
+                }
+                let r = ui.button("far");
+                app.tags.tag("far", &r);
+            });
+        })
+        .drop_without_applying_deltas();
+        assert!(app.tags.hidden("far"));
+        let (req, rx) = ControlRequest::new("ui.click", json!({ "id": "far" }));
+        handle(&mut app, &ctx, req);
+        assert_eq!(app.tags.scroll_pending(), Some("far"));
+        // No frame draws it again, so it never comes into view: the click gives up.
+        for _ in 0..=IN_VIEW_FRAMES {
+            answer_deferred(&mut app, &ctx, Vec::new());
+        }
+        let r = rx.try_recv().unwrap();
+        assert_eq!(r["code"], "notFound", "{r}");
+        assert_eq!(app.tags.scroll_pending(), None, "a later frame must not scroll to it");
     }
 
     #[test]

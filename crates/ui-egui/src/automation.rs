@@ -14,7 +14,9 @@
 //! A tag can carry what the widget shows ([`Tags::tag_value`]): a text field's text, a check
 //! box's state, the choice of a selector, a message's text. A secret field (a password, a
 //! passphrase, a URL that can hold one) is tagged with [`Tags::tag_secret`]: only whether it is
-//! filled in, never its text. A disabled widget says so.
+//! filled in, never its text. A disabled widget says so. In the first frame of a dialog or a
+//! menu (egui's sizing pass) every widget reads as disabled, so those are tagged with the state
+//! their code knows ([`Tags::tag_value_as`]).
 
 use std::collections::HashMap;
 
@@ -57,6 +59,10 @@ impl Tags {
     }
 
     fn put(&mut self, id: &str, r: &Response, shows: Shows) {
+        self.put_as(id, r, shows, r.enabled());
+    }
+
+    fn put_as(&mut self, id: &str, r: &Response, shows: Shows, enabled: bool) {
         if self.scroll_to.as_deref() == Some(id) {
             self.scroll_to = None;
             r.scroll_to_me_animation(Some(egui::Align::Center), egui::style::ScrollAnimation::none());
@@ -64,7 +70,7 @@ impl Tags {
         let seen = r.interact_rect;
         let visible = seen.is_finite() && seen.width() > 0.0 && seen.height() > 0.0;
         let rect = if visible { seen } else { r.rect };
-        let entry = Entry { id: id.to_string(), rect, visible, shows, enabled: r.enabled() };
+        let entry = Entry { id: id.to_string(), rect, visible, shows, enabled };
         match self.index.get(id).and_then(|&i| self.entries.get_mut(i)) {
             Some(slot) => *slot = entry,
             None => {
@@ -90,6 +96,17 @@ impl Tags {
         self.put(id, r, Shows::Secret(set));
     }
 
+    /// [`Tags::tag_value`] for a widget whose code knows whether it is `enabled`: one in a
+    /// dialog or a menu, which egui draws disabled in their first frame (the sizing pass).
+    pub fn tag_value_as(&mut self, id: &str, r: &Response, value: impl Into<Json>, enabled: bool) {
+        self.put_as(id, r, Shows::Value(value.into()), enabled);
+    }
+
+    /// [`Tags::tag_secret`] for a widget whose code knows whether it is `enabled`.
+    pub fn tag_secret_as(&mut self, id: &str, r: &Response, set: bool, enabled: bool) {
+        self.put_as(id, r, Shows::Secret(set), enabled);
+    }
+
     /// Where `id` can be clicked: the part of it in view; `None` when it was not drawn or is
     /// scrolled out of view.
     pub fn rect(&self, id: &str) -> Option<Rect> {
@@ -104,6 +121,18 @@ impl Tags {
     /// Scrolls `id` into view in the next frame that tags it.
     pub fn scroll_to(&mut self, id: &str) {
         self.scroll_to = Some(id.to_string());
+    }
+
+    /// The widget waiting to be scrolled into view, if any.
+    pub fn scroll_pending(&self) -> Option<&str> {
+        self.scroll_to.as_deref()
+    }
+
+    /// Forgets the request to scroll `id` into view (a click that gave up waiting for it).
+    pub fn cancel_scroll(&mut self, id: &str) {
+        if self.scroll_to.as_deref() == Some(id) {
+            self.scroll_to = None;
+        }
     }
 
     /// What `id` showed (`None` for a tag without a value, and for secrets).

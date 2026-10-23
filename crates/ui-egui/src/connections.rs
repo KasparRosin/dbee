@@ -43,7 +43,7 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::conn_form::{Auth, Form};
 use crate::dialogs::{self, Dialog};
-use crate::picker::{self, Notes, Pick, Picker};
+use crate::picker::{self, Pick, Picker};
 use crate::theme::{RADIUS, TOKENS, connection_color};
 use crate::{DbeeApp, icons};
 
@@ -75,10 +75,21 @@ pub(crate) enum Running {
     Connect,
 }
 
+/// What a message under the buttons is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// Something failed (`conn-error`).
+    Error,
+    /// A test passed, the connection was saved (`conn-result`).
+    Result,
+    /// Something to know that is neither (`conn-note`), e.g. about a file picker.
+    Note,
+}
+
 /// What the slot under the buttons shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Message {
-    pub error: bool,
+    pub kind: Kind,
     pub text: String,
 }
 
@@ -106,7 +117,6 @@ pub(crate) struct ConnScreen {
     pub message: Option<Message>,
     pub key: KeyLine,
     pub picker: Option<Picker>,
-    pub notes: Notes,
     /// The session has a secret store (`document.inspect`'s `secretStore`).
     pub has_store: bool,
 }
@@ -121,7 +131,6 @@ impl ConnScreen {
             message: None,
             key: KeyLine::default(),
             picker: None,
-            notes: Notes::default(),
             has_store,
         }
     }
@@ -132,11 +141,10 @@ impl ConnScreen {
         self.forget_shown();
     }
 
-    /// The form shows another connection: its message, notes and key line are gone.
+    /// The form shows another connection: its message and key line are gone.
     fn forget_shown(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.message = None;
-        self.notes = Notes::default();
         self.key.for_auth = None;
     }
 
@@ -220,9 +228,9 @@ pub(crate) fn form_done(
                 if let Some(id) = v.get("id").and_then(Json::as_str) {
                     conn.form.id = id.to_string();
                 }
-                conn.message = Some(Message { error: false, text: "Saved.".into() });
+                conn.message = Some(Message { kind: Kind::Result, text: "Saved.".into() });
             }
-            TEST => conn.message = Some(Message { error: false, text: test_text(&v) }),
+            TEST => conn.message = Some(Message { kind: Kind::Result, text: test_text(&v) }),
             OPEN => {
                 conn.message = None;
                 if let Some(note) = v.get("secretsNote").and_then(Json::as_str) {
@@ -234,7 +242,7 @@ pub(crate) fn form_done(
         Err(e) => {
             let rerun = dialogs::Rerun { command, params, origin: Origin::Form(generation) };
             if !dialogs::ask(app, &e, rerun) {
-                app.view.conn.message = Some(Message { error: true, text: error_text(&e) });
+                app.view.conn.message = Some(Message { kind: Kind::Error, text: error_text(&e) });
             }
         }
     }
@@ -421,15 +429,9 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
         Act::Save => run_form(app, SAVE),
         Act::FillFromUrl => app.view.dialog = Some(Dialog::fill_from_url()),
         Act::Pick(target) => picker::start(&mut app.view.conn, target, ctx),
-        Act::StopPicking => app.view.conn.picker = None,
-        Act::ClearCa => {
-            app.view.conn.form.ca_file = None;
-            app.view.conn.notes.ca = None;
-        }
-        Act::AutoKey => {
-            app.view.conn.form.ssh_key = None;
-            app.view.conn.notes.key = None;
-        }
+        Act::StopPicking => picker::stop(&mut app.view.conn),
+        Act::ClearCa => app.view.conn.form.ca_file = None,
+        Act::AutoKey => app.view.conn.form.ssh_key = None,
     }
 }
 
@@ -441,7 +443,7 @@ fn run_form(app: &mut DbeeApp, command: &'static str) {
     let config = match conn.form.to_config() {
         Ok(c) => c,
         Err(why) => {
-            conn.message = Some(Message { error: true, text: why });
+            conn.message = Some(Message { kind: Kind::Error, text: why });
             return;
         }
     };
@@ -622,8 +624,10 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
         let items =
             [("Connect", "conn-menu-connect"), ("Edit", "conn-menu-edit"), ("Duplicate", "conn-menu-duplicate"), ("Delete", "conn-menu-delete")];
         for (label, item) in items {
-            let b = ui.add_enabled(!(busy && item == "conn-menu-connect"), Button::new(label));
-            tags.tag(item, &b);
+            let enabled = !(busy && item == "conn-menu-connect");
+            let b = ui.add_enabled(enabled, Button::new(label));
+            // The menu's first frame is a sizing pass, which reads every widget as disabled.
+            tags.tag_value_as(item, &b, label, enabled);
             if b.clicked() {
                 acts.push(match item {
                     "conn-menu-connect" => Act::Connect(c.clone()),
@@ -732,8 +736,8 @@ fn segments<T: Copy + PartialEq>(ui: &mut egui::Ui, tags: &mut Tags, id: &str, v
     tags.tag_value(id, &row.response, chosen);
 }
 
-/// A read-only path box (`id`) with what it shows, or a note in its place.
-fn path_box(ui: &mut egui::Ui, tags: &mut Tags, id: &str, width: f32, path: Option<&Path>, note: Option<&str>, waiting: bool) {
+/// A read-only path box (`id`) with the path it shows.
+fn path_box(ui: &mut egui::Ui, tags: &mut Tags, id: &str, width: f32, path: Option<&Path>, waiting: bool) {
     let t = TOKENS;
     let (rect, r) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
     let p = ui.painter();
@@ -741,8 +745,6 @@ fn path_box(ui: &mut egui::Ui, tags: &mut Tags, id: &str, width: f32, path: Opti
     let shown = path.map(|p| tilde(&p.display().to_string()));
     let (text, color) = if waiting {
         ("Waiting for the file picker…".to_string(), t.text_muted)
-    } else if let Some(n) = note {
-        (n.to_string(), t.danger)
     } else {
         match &shown {
             Some(s) => (s.clone(), t.text),
@@ -761,7 +763,8 @@ fn form(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Ve
     let t = TOKENS;
     let gap = 12.0;
     let running = conn.running.map(|(_, kind)| kind);
-    let picking = conn.picker.as_ref().map(|p| p.target);
+    // The picker the form waits for (not one the user stopped waiting for).
+    let picking = conn.picker.as_ref().filter(|p| !p.stopped).map(|p| p.target);
     let has_store = conn.has_store;
     let in_field = ui.ctx().memory(|m| m.focused()).is_some_and(|focused| FORM_FIELDS.iter().any(|id| field_id(id) == focused));
     if in_field && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -906,7 +909,7 @@ fn form(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Ve
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let button_w = 84.0;
                 let waiting = picking == Some(Pick::Ca);
-                path_box(ui, tags, "conn-ca", w - 2.0 * (button_w + 6.0), f.ca_file.as_deref(), conn.notes.ca.as_deref(), waiting);
+                path_box(ui, tags, "conn-ca", w - 2.0 * (button_w + 6.0), f.ca_file.as_deref(), waiting);
                 let choose = ui.add_enabled(
                     picking.is_none() || waiting,
                     Button::new(if waiting { "Stop" } else { "Choose…" }).min_size(vec2(button_w, FIELD_H)),
@@ -962,8 +965,6 @@ fn form(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Ve
                 let wanted = f.ssh_auth();
                 let (text, color) = if waiting {
                     ("Waiting for the file picker…".to_string(), t.text_muted)
-                } else if let (Some(note), Auth::Key) = (&conn.notes.key, f.ssh_auth) {
-                    (note.clone(), t.danger)
                 } else if conn.key.for_auth.as_ref() == Some(&wanted) {
                     (conn.key.text.clone(), t.text)
                 } else {
@@ -1023,15 +1024,102 @@ fn form(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Ve
     });
     ui.add_space(6.0);
 
-    // The reserved slot for an error or a result.
+    // The reserved slot for an error, a result or a note.
     let (rect, slot) = ui.allocate_exact_size(vec2(w, MESSAGE_H), Sense::hover());
     if let Some(m) = &conn.message {
-        let color = if m.error { t.danger } else { t.success };
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), color.gamma_multiply(0.08));
+        let (color, tint, id) = match m.kind {
+            Kind::Error => (t.danger, t.danger.gamma_multiply(0.08), "conn-error"),
+            Kind::Result => (t.success, t.success.gamma_multiply(0.08), "conn-result"),
+            Kind::Note => (t.text_muted, t.panel, "conn-note"),
+        };
+        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), tint);
         let mut inner = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 6.0))).layout(Layout::top_down(Align::Min)));
         ScrollArea::vertical().id_salt("conn-message").max_height(MESSAGE_H - 12.0).auto_shrink([false, true]).show(&mut inner, |ui| {
             ui.add(Label::new(RichText::new(m.text.as_str()).color(color)).wrap().selectable(true));
         });
-        tags.tag_value(if m.error { "conn-error" } else { "conn-result" }, &slot, m.text.as_str());
+        tags.tag_value(id, &slot, m.text.as_str());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use dbee_config::MemoryStore;
+    use dbee_engine::{Session, SessionOptions};
+    use dbee_testkit::{TempHome, temp_home};
+
+    use super::*;
+
+    fn app() -> (DbeeApp, TempHome) {
+        let home = temp_home(None, None);
+        let session = Session::new(SessionOptions {
+            config_dir: Some(home.home.join("config")),
+            secrets: Some(Arc::new(MemoryStore::default())),
+            ..SessionOptions::default()
+        })
+        .unwrap();
+        (DbeeApp::new(session, None), home)
+    }
+
+    fn frame(app: &mut DbeeApp, ctx: &egui::Context) {
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 900.0))), ..egui::RawInput::default() };
+        ctx.run_ui(raw, |ui| app.ui(ui)).drop_without_applying_deltas();
+    }
+
+    /// The form with the SSH tunnel on and a key line that says which key it uses.
+    fn with_key_line(app: &mut DbeeApp) {
+        let conn = &mut app.view.conn;
+        conn.form.ssh_on = true;
+        conn.key = KeyLine { for_auth: Some(conn.form.ssh_auth()), text: "Uses /k/id_ed25519".into(), path: None, pending: None };
+    }
+
+    #[test]
+    fn a_quick_empty_answer_keeps_the_key_line_and_says_so_neutrally() {
+        let (mut app, _home) = app();
+        let ctx = egui::Context::default();
+        with_key_line(&mut app);
+        let (tx, picker) = Picker::for_test(Pick::Key, app.view.conn.generation);
+        app.view.conn.picker = Some(picker);
+        tx.send(None).unwrap();
+        frame(&mut app, &ctx);
+        frame(&mut app, &ctx);
+        assert!(app.view.conn.picker.is_none());
+        assert_eq!(app.tags().value("conn-ssh-key"), Some(&Json::from("Uses /k/id_ed25519")));
+        assert_eq!(app.tags().value("conn-error"), None, "nothing failed");
+        if cfg!(not(any(target_os = "macos", target_os = "windows"))) {
+            let note = app.tags().value("conn-note").and_then(Json::as_str).unwrap_or_default().to_string();
+            assert!(note.starts_with("No file chosen.") && note.contains("xdg-desktop-portal"), "{note}");
+        }
+    }
+
+    #[test]
+    fn a_stopped_picker_still_lands_its_choice_and_only_one_opens() {
+        let (mut app, _home) = app();
+        let ctx = egui::Context::default();
+        with_key_line(&mut app);
+        let (tx, picker) = Picker::for_test(Pick::Key, app.view.conn.generation);
+        app.view.conn.picker = Some(picker);
+        apply(&mut app, Act::StopPicking, &ctx);
+        assert!(app.view.conn.picker.as_ref().is_some_and(|p| p.stopped), "Stop keeps the picker's answer coming");
+        // While it is open, another picker does not start.
+        apply(&mut app, Act::Pick(Pick::Ca), &ctx);
+        assert_eq!(app.view.conn.picker.as_ref().map(|p| p.target), Some(Pick::Key));
+        let note = app.view.conn.message.clone().unwrap();
+        assert!(note.kind == Kind::Note && note.text.contains("already open"), "{note:?}");
+        // A late choice still lands.
+        tx.send(Some(PathBuf::from("/k/other"))).unwrap();
+        frame(&mut app, &ctx);
+        assert_eq!(app.view.conn.form.ssh_key, Some(PathBuf::from("/k/other")));
+        assert!(app.view.conn.picker.is_none());
+        // A choice for a connection the form no longer shows is dropped.
+        let (tx, picker) = Picker::for_test(Pick::Ca, app.view.conn.generation);
+        app.view.conn.picker = Some(picker);
+        apply(&mut app, Act::New, &ctx);
+        tx.send(Some(PathBuf::from("/k/ca.pem"))).unwrap();
+        frame(&mut app, &ctx);
+        assert_eq!(app.view.conn.form.ca_file, None);
+        assert!(app.view.conn.picker.is_none());
     }
 }
