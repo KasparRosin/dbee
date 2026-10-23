@@ -115,6 +115,15 @@ mod tests {
     }
 
     #[test]
+    fn the_edit_menu_lists_history_then_changes_then_the_selection() {
+        let home = dbee_testkit::temp_home(None, None);
+        let options = dbee_engine::SessionOptions { config_dir: Some(home.home.join("config")), ..dbee_engine::SessionOptions::default() };
+        let app = DbeeApp::new(dbee_engine::Session::new(options).unwrap(), None);
+        let edit: Vec<&str> = app.commands().iter().filter(|c| c.menu == ["Edit"]).map(|c| c.id).collect();
+        assert_eq!(edit, ["edit.undo", "edit.redo", "edit.apply", "edit.reset", "selection.all", "clipboard.copy"]);
+    }
+
+    #[test]
     fn an_entry_runs_with_its_shortcut_params() {
         assert_eq!(params_for(Some("Ctrl+C")), json!({ "format": "tsv" }));
         assert_eq!(params_for(Some("Ctrl+Shift+Enter")), json!({ "current": true }));

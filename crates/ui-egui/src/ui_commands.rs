@@ -33,7 +33,10 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         menu: &["File"],
         shortcut: Some("Ctrl+P"),
         params: "{} -> {open}",
-        enabled: |app| cmd::needs_db(app.session()),
+        enabled: |app| match &app.view.dialog {
+            Some(_) => Err("a dialog is open; close it first".into()),
+            None => cmd::needs_db(app.session()),
+        },
         run: quick_search,
     },
     UiCommand {

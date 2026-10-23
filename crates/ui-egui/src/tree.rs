@@ -1,7 +1,8 @@
 //! The schema tree, on the workspace's left ([`show`]): a filter box and a refresh button, then
 //! the catalog as rows.
 //!
-//! - User schemas first, open; each lists its tables, views and materialized views, each kind
+//! - User schemas first: `public` first and open, or without `public` the first user schema
+//!   open, the others closed. Each lists its tables, views and materialized views, each kind
 //!   with its own icon ([`crate::icons`]). A table's chevron shows its columns with their types,
 //!   and a key icon on primary and foreign key columns.
 //! - The system schemas (`pg_catalog`, `information_schema`, `pg_toast…`) sit in one group at the
@@ -19,11 +20,11 @@
 //! scrolls to one when a click waits for it.
 //!
 //! Automation ids: `tree-filter`, `tree-refresh`, `tree-system`, `tree-schema-<schema>`,
-//! `tree-table-<schema>.<table>` (value: its kind), `tree-expand-<schema>.<table>` (its chevron,
-//! drawn rows only) and `tree-column-<schema>.<table>.<column>` (value: `{type, key}`, `key` being
-//! `primary`, `foreign` or null; drawn rows only).
+//! `tree-table-<schema>.<table>` (value: its kind), `tree-expand-<schema>.<table>` (its chevron;
+//! out of view too, like the table rows) and `tree-column-<schema>.<table>.<column>` (value:
+//! `{type, key}`, `key` being `primary`, `foreign` or null; drawn rows only).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
@@ -70,8 +71,9 @@ pub struct Tree {
     pub filter: String,
     /// Set by the workspace before each frame.
     pub refresh: Refresh,
-    /// User schemas the user closed (they start open).
-    closed: HashSet<String>,
+    /// User schemas the user opened or closed, and how they are now ([`default_open`] for the
+    /// others).
+    user_open: HashMap<String, bool>,
     /// System schemas the user opened (they start closed).
     opened: HashSet<String>,
     system_open: bool,
@@ -145,6 +147,22 @@ pub fn is_system(s: &SchemaInfo) -> bool {
     s.system || s.name.starts_with("pg_toast")
 }
 
+/// The user schemas of `catalog` in the order the tree lists them: `public` first, then the
+/// others in catalog order.
+fn user_schemas(catalog: &Catalog) -> impl Iterator<Item = usize> + '_ {
+    let users = || catalog.schemas.iter().enumerate().filter(|(_, x)| !is_system(x));
+    let public = users().filter(|(_, x)| x.name == PUBLIC).map(|(s, _)| s);
+    public.chain(users().filter(|(_, x)| x.name != PUBLIC).map(|(s, _)| s))
+}
+
+/// The user schema that starts open: `public`, else the first user schema listed.
+fn default_open(catalog: &Catalog) -> Option<&str> {
+    user_schemas(catalog).next().and_then(|s| catalog.schemas.get(s)).map(|x| x.name.as_str())
+}
+
+/// The schema Postgres creates in every database.
+const PUBLIC: &str = "public";
+
 /// The row estimate the tree shows for `t`: none for a view or a foreign table, where the
 /// planner's number means nothing (it would read `~0`).
 pub fn row_estimate(t: &TableInfo) -> Option<u64> {
@@ -190,13 +208,22 @@ pub fn thousands(n: u64) -> String {
 }
 
 impl Tree {
-    /// Opens or closes `schema`.
-    fn toggle_schema(&mut self, name: &str, system: bool) {
-        let set = if system { &mut self.opened } else { &mut self.closed };
-        if !set.remove(name) {
-            set.insert(name.to_string());
+    /// Opens or closes schema `name` of `catalog`.
+    fn toggle_schema(&mut self, catalog: &Catalog, name: &str, system: bool) {
+        if system {
+            if !self.opened.remove(name) {
+                self.opened.insert(name.to_string());
+            }
+        } else {
+            let open = self.user_open(catalog, name);
+            self.user_open.insert(name.to_string(), !open);
         }
         self.shape = self.shape.wrapping_add(1);
+    }
+
+    /// User schema `name` is open (when no filter is typed).
+    fn user_open(&self, catalog: &Catalog, name: &str) -> bool {
+        self.user_open.get(name).copied().unwrap_or_else(|| default_open(catalog) == Some(name))
     }
 
     fn toggle_table(&mut self, t: &TableRef) {
@@ -273,9 +300,10 @@ impl Tree {
             total: catalog.table_count(),
         };
         let visible = |s: usize| !filtering || shown.get(s).is_some_and(|t| !t.is_empty());
-        for (s, schema) in catalog.schemas.iter().enumerate().filter(|(_, x)| !is_system(x)) {
+        for s in user_schemas(catalog) {
+            let Some(schema) = catalog.schemas.get(s) else { continue };
             if visible(s) {
-                let open = filtering || !self.closed.contains(&schema.name);
+                let open = filtering || self.user_open(catalog, &schema.name);
                 self.schema_rows(&mut rows, catalog, &shown, s, false, open);
             }
         }
@@ -426,7 +454,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, tree: &mut Tree, tags: &m
         Click::ToggleSystem => tree.toggle_system(),
         Click::ToggleSchema(s, system) => {
             if let Some(name) = catalog.schemas.get(s).map(|x| x.name.clone()) {
-                tree.toggle_schema(&name, system);
+                tree.toggle_schema(catalog, &name, system);
             }
         }
         Click::ToggleTable(s, t) => {
@@ -631,24 +659,42 @@ mod tests {
     fn system_schemas_sit_closed_in_one_group_at_the_bottom() {
         let c = catalog();
         let mut tree = Tree::default();
+        // Without `public`, the first user schema starts open and the others closed.
         assert_eq!(
             ids(&mut tree, &c),
-            [
-                "tree-schema-shop",
-                "tree-table-shop.orders",
-                "tree-table-shop.order_totals",
-                "tree-schema-audit",
-                "tree-table-audit.log",
-                "tree-system"
-            ]
+            ["tree-schema-shop", "tree-table-shop.orders", "tree-table-shop.order_totals", "tree-schema-audit", "tree-system"]
         );
         tree.toggle_system();
         let rows = ids(&mut tree, &c);
-        assert_eq!(&rows[5..], ["tree-system", "tree-schema-information_schema", "tree-schema-pg_catalog", "tree-schema-pg_toast_temp"]);
-        tree.toggle_schema("pg_catalog", true);
+        assert_eq!(&rows[4..], ["tree-system", "tree-schema-information_schema", "tree-schema-pg_catalog", "tree-schema-pg_toast_temp"]);
+        tree.toggle_schema(&c, "pg_catalog", true);
         assert!(ids(&mut tree, &c).contains(&"tree-table-pg_catalog.pg_class".to_string()));
-        tree.toggle_schema("shop", false);
+        tree.toggle_schema(&c, "shop", false);
         assert!(!ids(&mut tree, &c).contains(&"tree-table-shop.orders".to_string()), "a closed user schema hides its tables");
+        tree.toggle_schema(&c, "audit", false);
+        assert!(ids(&mut tree, &c).contains(&"tree-table-audit.log".to_string()), "a closed user schema opens on a click");
+    }
+
+    #[test]
+    fn public_is_listed_first_and_starts_open() {
+        let mut c = (*catalog()).clone();
+        c.schemas.insert(1, SchemaInfo { name: "public".into(), system: false, tables: vec![table("public", "notes", RelKind::Table)] });
+        let c = Arc::new(c);
+        let mut tree = Tree::default();
+        assert_eq!(
+            ids(&mut tree, &c),
+            ["tree-schema-public", "tree-table-public.notes", "tree-schema-shop", "tree-schema-audit", "tree-system"],
+            "public first and open, the other user schemas closed"
+        );
+        // A typed filter opens every schema with a match.
+        tree.filter = "o".into();
+        let rows = ids(&mut tree, &c);
+        for id in ["tree-table-public.notes", "tree-table-shop.orders", "tree-table-audit.log"] {
+            assert!(rows.contains(&id.to_string()), "{id}: {rows:?}");
+        }
+        tree.filter.clear();
+        tree.toggle_schema(&c, "public", false);
+        assert_eq!(ids(&mut tree, &c), ["tree-schema-public", "tree-schema-shop", "tree-schema-audit", "tree-system"]);
     }
 
     #[test]

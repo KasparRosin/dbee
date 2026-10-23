@@ -53,6 +53,9 @@ const TITLE_MAX: f32 = 200.0;
 pub(crate) struct Workspace {
     pub tree: Tree,
     pub quick: QuickSearch,
+    /// The widget to give the keyboard back to in the next frame, once the quick search has
+    /// closed (see `quick_search`).
+    pub refocus: Option<egui::Id>,
     /// The connection this state belongs to; another one starts afresh.
     connection: Option<String>,
 }

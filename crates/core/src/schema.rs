@@ -128,10 +128,11 @@ impl Catalog {
         self.schemas.iter().find(|s| s.name == t.schema)?.tables.iter().find(|x| x.table.name == t.name)
     }
 
-    /// Case-insensitive substring match on `name` or `schema.name`. User schemas first (catalog
-    /// order), then system schemas. An empty needle gives every table.
+    /// Case-insensitive substring match on `name` or `schema.name`, the needle trimmed. User
+    /// schemas first (catalog order), then system schemas. An empty (or blank) needle gives every
+    /// table.
     pub fn filter_tables(&self, needle: &str) -> Vec<&TableInfo> {
-        let needle = needle.to_lowercase();
+        let needle = needle.trim().to_lowercase();
         let mut out = Vec::new();
         for system in [false, true] {
             for schema in self.schemas.iter().filter(|s| s.system == system) {
@@ -240,6 +241,9 @@ mod tests {
         assert_eq!(r("SHOP.it"), ["shop.items"]);
         assert_eq!(r(""), ["shop.orders", "shop.items", "pg_catalog.pg_class"]);
         assert_eq!(r("zzz"), Vec::<String>::new());
+        // The tree's rule: the filter is trimmed, so blanks around it match as nothing.
+        assert_eq!(r("  ord\t"), ["shop.orders"]);
+        assert_eq!(r("   "), ["shop.orders", "shop.items", "pg_catalog.pg_class"]);
         assert_eq!(c.table_count(), 3);
         assert!(c.table(&TableRef { schema: "shop".into(), name: "items".into() }).is_some());
         assert!(c.table(&TableRef { schema: "shop".into(), name: "nope".into() }).is_none());

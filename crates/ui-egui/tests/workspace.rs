@@ -254,6 +254,69 @@ fn quick_search_arrows_escape_and_its_own_keys() {
 }
 
 #[test]
+fn closing_the_quick_search_gives_the_focus_back() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.key("T", json!({ "cmd": true }));
+    ui.click("query-editor");
+    ui.text("select");
+    ui.key("P", json!({ "cmd": true }));
+    assert!(ui.tag("qs-input").is_some());
+    ui.text("ord");
+    ui.key("Escape", json!({}));
+    assert!(ui.tag("qs-input").is_none());
+    // The editor has the keyboard again: typing goes on there, and Ctrl+A is its own.
+    ui.text(" 1");
+    ui.frame();
+    assert_eq!(ui.document()["query"]["text"], "select 1");
+    ui.key("A", json!({ "cmd": true }));
+    ui.text("select 2");
+    ui.frame();
+    assert_eq!(ui.document()["query"]["text"], "select 2", "Ctrl+A selected the editor's text");
+}
+
+#[test]
+fn enter_opens_the_hit_for_the_text_typed_in_the_same_frame() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.key("P", json!({ "cmd": true }));
+    ui.frame();
+    // A paste and Enter in one frame: Enter acts on the hits for the pasted text.
+    let input = ui.harness.input_mut();
+    input.events.push(egui::Event::Paste("customers".into()));
+    input.events.push(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    ui.frame();
+    ui.until("the customers tab", |ui| ui.document()["table"]["name"] == "customers");
+    assert_eq!(ui.document()["table"]["schema"], "shop");
+}
+
+#[test]
+fn a_single_click_in_the_tree_opens_no_tab() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.click("tree-schema-shop");
+    ui.click("tree-table-shop.customers");
+    for _ in 0..5 {
+        ui.frame();
+    }
+    assert_eq!(ui.document()["tabs"], json!([]), "a single click only selects");
+    assert!(!ui.document()["jobs"].as_array().is_some_and(|j| j.iter().any(|j| j["label"] == "table.open")));
+}
+
+#[test]
+fn ctrl_w_on_a_dirty_tab_asks_first() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.key("T", json!({ "cmd": true }));
+    ui.execute("query.setText", json!({ "text": "select 1" }));
+    ui.key("W", json!({ "cmd": true }));
+    assert_eq!(ui.inspect()["dialog"], "confirm", "the query text would be lost");
+    assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1));
+    ui.click("dialog-ok");
+    assert_eq!(ui.document()["tabs"], json!([]), "Close anyway closes it");
+}
+
+#[test]
 fn the_quick_search_does_not_outlive_the_workspace() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
@@ -278,11 +341,22 @@ fn tree_filter_narrows_to_matches() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
     let i = ui.inspect();
-    // User schemas show open (`shop` sorts after `many`'s 300 tables, so it is out of view).
-    assert!(tag_in(&i, "tree-table-shop.orders").is_some(), "shop is a user schema, shown open");
-    assert!(tag_in(&i, "tree-table-shop.customers").is_some());
+    // `public` (empty in the seed) comes first and open; the other user schemas start closed.
+    let first = i["automation"].as_array().unwrap().iter().find(|a| a["id"].as_str().is_some_and(|id| id.starts_with("tree-schema-"))).cloned();
+    assert_eq!(first.as_ref().map(|a| a["id"].clone()), Some(json!("tree-schema-public")), "public is listed first");
+    assert_eq!(tag_in(&i, "tree-schema-public").unwrap()["value"]["open"], true);
+    for closed in ["many", "odd", "shop"] {
+        let row = tag_in(&i, &format!("tree-schema-{closed}")).unwrap();
+        assert!(visible(&Some(row.clone())) && row["value"]["open"] == false, "{row}");
+    }
+    assert!(tag_in(&i, "tree-table-shop.orders").is_none(), "a closed schema lists no tables");
     assert!(tag_in(&i, "tree-table-pg_catalog.pg_class").is_none(), "system schemas start collapsed");
     assert!(tag_in(&i, "tree-system").is_some(), "the system schemas' group is listed");
+    // Open `shop`: its tables show in view.
+    ui.click("tree-schema-shop");
+    let i = ui.inspect();
+    assert!(visible(&tag_in(&i, "tree-table-shop.orders")), "{:?}", ids(&i));
+    assert!(visible(&tag_in(&i, "tree-table-shop.customers")));
     ui.click("tree-filter");
     ui.text("order");
     ui.frame();
@@ -302,6 +376,7 @@ fn tree_filter_narrows_to_matches() {
 fn tree_double_click_opens_and_expands_columns() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
+    ui.click("tree-schema-shop");
     ui.click("tree-expand-shop.orders");
     let i = ui.inspect();
     let id = tag_in(&i, "tree-column-shop.orders.id").expect("the columns show under an expanded table");
@@ -323,7 +398,8 @@ fn tree_double_click_opens_and_expands_columns() {
 fn tree_rows_out_of_view_scroll_in_when_clicked() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
-    // `many` holds 300 tables: most are out of view, listed as such.
+    // `many` holds 300 tables: once it is open most are out of view, listed as such.
+    ui.click("tree-schema-many");
     let i = ui.inspect();
     let far = tag_in(&i, "tree-table-many.t_290").expect("rows out of view are listed");
     assert_eq!(far["visible"], false, "{far}");
@@ -339,7 +415,7 @@ fn tree_refresh_reloads_the_catalog() {
     ui.click("tree-refresh");
     ui.ok("engine.wait", json!({}));
     ui.frame();
-    assert!(ui.tag("tree-table-shop.orders").is_some());
+    assert!(ui.tag("tree-schema-shop").is_some());
     assert_eq!(ui.document()["connection"]["lost"], false);
 }
 
@@ -491,6 +567,21 @@ fn lost_connection_offers_reconnect() {
     assert!(ui.tag("status-lost").is_none());
 }
 
+/// The machine and its load average, which a timing test prints with its numbers
+/// (docs/testing.md §6).
+fn machine() -> String {
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("model name")).and_then(|l| l.split(':').nth(1)).map(|m| m.trim().to_string()))
+        .unwrap_or_else(|| "an unknown CPU".into());
+    let threads = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|| "unknown".into());
+    format!("{} {}, {cpu}, {threads} threads, load average {load}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
 /// A catalog of `n` tables of 10 columns each in 10 schemas, plus the system schemas.
 fn synthetic(n: usize) -> Arc<Catalog> {
     let column = |i: usize| ColumnInfo {
@@ -564,10 +655,11 @@ fn tree_filter_1000_tables_within_a_frame() {
     let median = |v: &[Duration]| v[v.len() / 2];
     let shown = h.state().tags.ids().iter().filter(|id| id.starts_with("tree-table-")).count();
     println!(
-        "1,000 tables: frame with a new filter median {:?} (max {:?}), frame with the filter unchanged median {:?}; {shown} table rows listed",
+        "1,000 tables: frame with a new filter median {:?} (max {:?}), frame with the filter unchanged median {:?}; {shown} table rows listed; on {}",
         median(&typing),
         typing.last().unwrap(),
-        median(&steady)
+        median(&steady),
+        machine()
     );
     assert!(median(&typing) < Duration::from_millis(16), "{:?}", median(&typing));
     assert!(median(&steady) < Duration::from_millis(16), "{:?}", median(&steady));
