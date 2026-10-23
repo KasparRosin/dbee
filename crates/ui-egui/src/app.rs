@@ -6,8 +6,8 @@
 //! 3. the control requests that arrived are handled ([`crate::control`]);
 //! 4. the open cell editor takes its keys and commits on a press outside it, or Enter over a
 //!    selection opens one ([`crate::editors`]); then the keyboard shortcuts run
-//!    ([`crate::shortcuts`]), before any widget sees the keys (not while a dialog or the quick
-//!    search is open: the quick search handles its own keys);
+//!    ([`crate::shortcuts`]; the value panel's copy first), before any widget sees the keys (not
+//!    while a dialog or the quick search is open: the quick search handles its own keys);
 //! 5. the screen is drawn, tagging its widgets ([`crate::automation`]), then the dialog, if any
 //!    ([`crate::dialogs`]); then the cell editor's key acts, on the text it has now;
 //! 6. the session's UI requests (dialogs, notices) are taken, to show from the next frame.
@@ -109,7 +109,10 @@ impl std::fmt::Debug for UiJob {
 /// What only the window keeps.
 #[derive(Debug)]
 pub(crate) struct View {
+    /// The value panel shows ([`crate::value_panel`]).
     pub value_panel: bool,
+    /// The value panel's value, its rows and the selection in it.
+    pub panel: crate::value_panel::PanelState,
     /// The workspace's tree and quick search.
     pub work: Workspace,
     /// The dialog on screen ([`crate::dialogs`]).
@@ -128,6 +131,7 @@ impl View {
     fn new(has_store: bool) -> View {
         View {
             value_panel: true,
+            panel: crate::value_panel::PanelState::default(),
             work: Workspace::default(),
             dialog: None,
             notices: VecDeque::new(),
@@ -353,6 +357,7 @@ impl DbeeApp {
         match self.session.state().screen {
             Screen::Connections => {
                 self.view.work.leave();
+                self.view.panel.clear();
                 connections::screen(self, ui);
             }
             Screen::Workspace => workspace::screen(self, ui),

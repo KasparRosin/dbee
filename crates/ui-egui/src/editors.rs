@@ -349,7 +349,7 @@ impl CellEditor {
 }
 
 /// `n` bytes for a notice: `19.5 MiB`, `300 KiB`.
-fn size_text(n: usize) -> String {
+pub(crate) fn size_text(n: usize) -> String {
     const MIB: usize = 1024 * 1024;
     if n >= MIB { format!("{:.1} MiB", n as f64 / MIB as f64) } else { format!("{} KiB", n.div_ceil(1024)) }
 }

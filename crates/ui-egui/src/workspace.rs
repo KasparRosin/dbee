@@ -5,6 +5,8 @@
 //!   session is), the server version, and the active tab's running job with a Cancel button.
 //!   When the connection is lost it says so, with a Reconnect button;
 //! - the schema tree on the left ([`crate::tree`]);
+//! - the value panel on the right, while it shows ([`crate::value_panel`]), with its toggle at the
+//!   right end of the status bar;
 //! - the tabs strip, then the active tab;
 //! - the quick search over everything while it is open ([`crate::quick_search`]).
 //!
@@ -24,8 +26,8 @@
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
 //! `tab-new`; `status-connection` (value: the name, and `read-only`), `status-server`,
-//! `status-job` (value: what runs), `status-cancel`, `status-lost`, `status-reconnect`;
-//! `query-editor`.
+//! `status-job` (value: what runs), `status-cancel`, `status-lost`, `status-reconnect`,
+//! `value-toggle`; `query-editor`.
 
 use std::sync::Arc;
 
@@ -41,7 +43,7 @@ use crate::quick_search::{self, QuickSearch};
 use crate::table_tab::{self, Grids};
 use crate::theme::{RADIUS, TOKENS, connection_color};
 use crate::tree::{self, Refresh, Tree, TreeAct};
-use crate::{DbeeApp, icons, menu};
+use crate::{DbeeApp, icons, menu, value_panel};
 
 /// The tabs strip's height.
 const STRIP_H: f32 = 34.0;
@@ -179,12 +181,23 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     app.view.work.grids.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     egui::Panel::top("dbee-menubar").frame(Frame::new().fill(t.panel).inner_margin(Margin::symmetric(8, 3))).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();
-    status_bar(app, ui, &mut acts);
+    if status_bar(app, ui, &mut acts) {
+        // At once, so the panel goes or comes in this frame.
+        app.start("ui.toggleValuePanel", json!({}), Origin::Menu);
+    }
     side(app, ui);
+    let panel = value_panel::reserve(app, ui);
+    if panel.is_none() {
+        app.view.panel.clear();
+    }
     egui::CentralPanel::default().frame(Frame::new().fill(t.bg)).show(ui, |ui| {
         strip(app, ui, &mut acts);
         body(app, ui, &mut acts);
     });
+    // After the tab's body, so a cell selected in this frame shows its value now.
+    if let Some(rect) = panel {
+        value_panel::fill(app, ui, rect);
+    }
     for act in acts {
         match act {
             Act::Activate(tab) => {
@@ -212,10 +225,10 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     quick_search::show(app, &ctx);
 }
 
-/// The status bar.
-fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+/// The status bar; true when the value panel's toggle was clicked.
+fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool {
     let t = TOKENS;
-    let Some(c) = app.session.state().connected.as_ref() else { return };
+    let Some(c) = app.session.state().connected.as_ref() else { return false };
     let name = c.config.display_name();
     let label = if c.info.read_only { format!("{name} · read-only") } else { name };
     let colour = connection_color(c.config.color);
@@ -223,6 +236,8 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     let lost = c.lost;
     let job = live_job(&app.session);
     let reconnecting = app.session.running("connection.reconnect");
+    let panel_open = app.view.value_panel;
+    let mut toggled = false;
     let tags = &mut app.tags;
     let frame = Frame::new().fill(t.panel).inner_margin(Margin::symmetric(8, 3)).stroke(Stroke::new(1.0, t.border));
     egui::Panel::bottom("dbee-status").exact_size(STATUS_H).frame(frame).show(ui, |ui| {
@@ -252,6 +267,8 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // The value panel's toggle at the right end, as the panel is the window's.
+                toggled = value_panel::toggle(ui, panel_open, tags);
                 let Some(job) = &job else { return };
                 if let Some(command) = job.cancel {
                     let r = ui.add(egui::Button::new(RichText::new("Cancel").size(12.0)).min_size(vec2(0.0, 20.0)));
@@ -266,6 +283,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             });
         });
     });
+    toggled
 }
 
 /// Dark or light text, whichever reads better on `fill`.

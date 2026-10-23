@@ -557,8 +557,9 @@ fn an_editor_scrolled_out_of_view_sideways_commits() {
     ui.double_click("grid-cell-0-1");
     ui.text("abc");
     assert_eq!(ui.editor_text(), "abc");
-    // Sideways, until c1 is out of view to the left.
-    ui.wheel("grid-cell-3-3", egui::vec2(-2000.0, 0.0));
+    // Sideways, until c1 is out of view to the left (the wheel over c2, in view beside the value
+    // panel).
+    ui.wheel("grid-cell-3-2", egui::vec2(-2000.0, 0.0));
     let cell = ui.tag("grid-cell-0-1").unwrap();
     assert_eq!(cell["visible"], false, "c1 is out of view: {cell}");
     assert!(ui.editor().is_none(), "the editor left with its cell");

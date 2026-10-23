@@ -277,6 +277,19 @@ pub fn search(p: &Painter, rect: Rect, color: Color32) {
     p.line_segment([at(r, 0.6, 0.6), at(r, 0.84, 0.84)], s);
 }
 
+/// A window with a pane at its right side: the value panel, its pane filled while it shows.
+pub fn side_panel(p: &Painter, rect: Rect, color: Color32, open: bool) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    let outer = Rect::from_min_max(at(r, 0.1, 0.2), at(r, 0.9, 0.8));
+    let split = outer.left() + outer.width() * 0.6;
+    if open {
+        p.rect_filled(Rect::from_min_max(pos2(split, outer.top()), outer.max), CornerRadius::same(1), color.gamma_multiply(0.5));
+    }
+    p.rect_stroke(outer, CornerRadius::same(2), s, StrokeKind::Middle);
+    p.line_segment([pos2(split, outer.top()), pos2(split, outer.bottom())], s);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +321,8 @@ mod tests {
                 }
                 sort(p, r, c, true);
                 sort(p, r, c, false);
+                side_panel(p, r, c, true);
+                side_panel(p, r, c, false);
             }
         })
         .drop_without_applying_deltas();

@@ -1,6 +1,7 @@
 //! dbee's colours and spacing: original tokens, a light theme only in M1 (a dark theme is a
 //! non-goal). Screens take colours from [`TOKENS`], never from literals, so a theme stays one
-//! table.
+//! table. The value panel's JSON colours ([`Syntax`]) come in a light and a dark set already;
+//! [`syntax`] picks the one for the visuals in use.
 
 use egui::{Color32, CornerRadius, Stroke};
 
@@ -80,6 +81,51 @@ pub const TOKENS: Tokens = Tokens {
     deleted: Color32::from_rgb(0xE6, 0xDF, 0xF2),
     failed: Color32::from_rgb(0xF7, 0xD0, 0xCA),
 };
+
+/// Syntax colours for JSON in the value panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Syntax {
+    /// Object keys.
+    pub key: Color32,
+    /// String values.
+    pub string: Color32,
+    pub number: Color32,
+    /// `true`, `false` and `null`.
+    pub literal: Color32,
+    /// Brackets, braces, colons and commas.
+    pub punct: Color32,
+}
+
+impl Syntax {
+    /// Each colour with its name.
+    pub fn parts(&self) -> [(&'static str, Color32); 5] {
+        [("key", self.key), ("string", self.string), ("number", self.number), ("literal", self.literal), ("punct", self.punct)]
+    }
+}
+
+/// JSON on a light ground (a card, the selection): steel blue keys, moss green strings, rust
+/// numbers, plum literals and slate punctuation.
+pub const SYNTAX_LIGHT: Syntax = Syntax {
+    key: Color32::from_rgb(0x1C, 0x5A, 0x85),
+    string: Color32::from_rgb(0x2F, 0x6B, 0x1F),
+    number: Color32::from_rgb(0x96, 0x44, 0x0E),
+    literal: Color32::from_rgb(0x7A, 0x3B, 0xA0),
+    punct: Color32::from_rgb(0x54, 0x5D, 0x58),
+};
+
+/// The same hues lightened for a dark ground.
+pub const SYNTAX_DARK: Syntax = Syntax {
+    key: Color32::from_rgb(0x8C, 0xC2, 0xEE),
+    string: Color32::from_rgb(0xA9, 0xD6, 0x8A),
+    number: Color32::from_rgb(0xED, 0xB0, 0x7A),
+    literal: Color32::from_rgb(0xD1, 0xA6, 0xF0),
+    punct: Color32::from_rgb(0xA3, 0xAB, 0xA6),
+};
+
+/// The JSON colours for a dark ground when `dark`, else for a light one.
+pub fn syntax(dark: bool) -> Syntax {
+    if dark { SYNTAX_DARK } else { SYNTAX_LIGHT }
+}
 
 /// The colour a connection is tagged with (its card, the form's strip); `None` for no colour.
 pub fn connection_color(c: dbee_config::ConnectionColor) -> Option<Color32> {
@@ -182,6 +228,30 @@ mod tests {
                 assert!(d >= 15.0, "{a} and {b} look alike (ΔE {d:.1})");
             }
         }
+    }
+
+    #[test]
+    fn json_colours_read_on_their_ground_and_differ() {
+        let dark = egui::Visuals::dark();
+        for (theme, s, grounds) in [
+            ("light", SYNTAX_LIGHT, [("card", TOKENS.card), ("selection", TOKENS.selection)]),
+            ("dark", SYNTAX_DARK, [("field", dark.extreme_bg_color), ("panel", dark.panel_fill)]),
+        ] {
+            let parts = s.parts();
+            for (part, colour) in parts {
+                for (ground, fill) in grounds {
+                    let c = contrast(colour, fill);
+                    assert!(c >= 4.5, "{theme} {part} on {ground}: {c:.2}");
+                }
+            }
+            for (i, (a, x)) in parts.iter().enumerate() {
+                for (b, y) in &parts[i + 1..] {
+                    let d = delta_e(*x, *y);
+                    assert!(d >= 15.0, "{theme}: {a} and {b} look alike (ΔE {d:.1})");
+                }
+            }
+        }
+        assert_eq!((syntax(false), syntax(true)), (SYNTAX_LIGHT, SYNTAX_DARK));
     }
 
     /// CIE76 ΔE between two sRGB colours (D65).

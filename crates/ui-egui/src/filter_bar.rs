@@ -10,7 +10,9 @@
 //! the 13 of `dbee_sql::filter::Op`, each with its symbol; `is null` and `is not null` take no
 //! value, so choosing one clears the value and hides its field. While changes are staged typing
 //! goes on but Apply waits (its hover says why; Enter asks anyway, and the command says why); while
-//! the connection is lost the bar is disabled.
+//! the connection is lost the bar is disabled. In a narrow tab (the value panel open in a small
+//! window) the column and operator choices narrow ([`choice_widths`]), so a row's buttons stay in
+//! view.
 //!
 //! Automation ids: `filter-<n>-column` (value: the column; while open its choices
 //! `filter-<n>-column-<column>`), `filter-<n>-op` (value: the operator's id; its choices
@@ -30,6 +32,23 @@ use crate::theme::{RADIUS, TOKENS};
 const ROW_H: f32 = 28.0;
 /// Room for the toggle (or `AND`) at a row's left.
 const LEAD_W: f32 = 40.0;
+/// The widest the column and operator choices get, and the narrowest.
+const COLUMN_W: (f32, f32) = (90.0, 180.0);
+const OP_W: (f32, f32) = (110.0, 190.0);
+/// The narrowest a value field gets.
+const VALUE_MIN_W: f32 = 80.0;
+
+/// The widths of the column and operator choices in a filter row `available` wide, with
+/// `spacing` between its parts: their widest when there is room, narrower in a narrow window (the
+/// value panel open beside it), so the row's buttons stay in view.
+pub fn choice_widths(available: f32, spacing: f32) -> (f32, f32) {
+    // The lead, the value field at its narrowest, remove, add and Apply, and the gaps between.
+    let fixed = LEAD_W + VALUE_MIN_W + 26.0 + 26.0 + 64.0 + 6.0 * spacing;
+    let room = (available - fixed).max(0.0);
+    let op = (room * 0.52).clamp(OP_W.0, OP_W.1);
+    let column = (room - op).clamp(COLUMN_W.0, COLUMN_W.1);
+    (column, op)
+}
 
 /// What the bar shows.
 pub(crate) struct Bar<'a> {
@@ -156,6 +175,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
     let t = TOKENS;
     let blank = || Filter { column: bar.columns.first().map_or_else(String::new, |(name, _)| (*name).to_string()), op: Op::Eq, value: String::new() };
     let rows: Vec<Filter> = if bar.filters.is_empty() { vec![blank()] } else { bar.filters.to_vec() };
+    let (column_w, op_w) = choice_widths(ui.available_width(), ui.spacing().item_spacing.x);
     for (n, row) in rows.iter().enumerate() {
         ui.allocate_ui_with_layout(vec2(ui.available_width(), ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             if n == 0 {
@@ -169,7 +189,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             let mut column = None;
             let combo = ComboBox::from_id_salt(("dbee-filter-column", bar.tab.0, n))
                 .selected_text(row.column.as_str())
-                .width(180.0)
+                .width(column_w)
                 .height(360.0)
                 .show_ui(ui, |ui| {
                     for (name, ty) in &bar.columns {
@@ -186,9 +206,8 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             }
             // The operator.
             let mut op = None;
-            let combo = ComboBox::from_id_salt(("dbee-filter-op", bar.tab.0, n)).selected_text(op_text(row.op)).width(190.0).height(400.0).show_ui(
-                ui,
-                |ui| {
+            let combo =
+                ComboBox::from_id_salt(("dbee-filter-op", bar.tab.0, n)).selected_text(op_text(row.op)).width(op_w).height(400.0).show_ui(ui, |ui| {
                     for o in Op::ALL {
                         let r = ui.selectable_label(o == row.op, op_text(o));
                         tags.tag_value_as(&format!("filter-{n}-op-{}", o.id()), &r, o.label(), true);
@@ -196,8 +215,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                             op = Some(o);
                         }
                     }
-                },
-            );
+                });
             tags.tag_value(&format!("filter-{n}-op"), &combo.response, row.op.id());
             if let Some(o) = op.filter(|o| *o != row.op) {
                 // An operator without a value drops the one typed.
@@ -206,7 +224,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                 changed = Some(Filter { op: o, value, ..base });
             }
             // The value: as wide on every row, so the rows line up under the first one's buttons.
-            let width = (ui.available_width() - (26.0 + 26.0 + 64.0) - 4.0 * ui.spacing().item_spacing.x).max(80.0);
+            let width = (ui.available_width() - (26.0 + 26.0 + 64.0) - 4.0 * ui.spacing().item_spacing.x).max(VALUE_MIN_W);
             let mut enter = false;
             if row.op.takes_value() {
                 let mut text = row.value.clone();
@@ -273,6 +291,21 @@ mod tests {
         assert_eq!(texts.len(), 13);
         assert_eq!(texts[0], "equals   =");
         assert_eq!(texts[12], "is not null   IS NOT NULL");
+    }
+
+    #[test]
+    fn the_choices_give_way_in_a_narrow_tab() {
+        // Wide: as wide as they get.
+        assert_eq!(choice_widths(1000.0, 8.0), (COLUMN_W.1, OP_W.1));
+        // The default window with the value panel open: everything in a row fits.
+        let fixed = LEAD_W + VALUE_MIN_W + 26.0 + 26.0 + 64.0 + 6.0 * 8.0;
+        for available in [484.0, 500.0, 560.0, 640.0] {
+            let (column, op) = choice_widths(available, 8.0);
+            assert!(fixed + column + op <= available + 0.5, "{available}: {column} + {op}");
+            assert!(column >= COLUMN_W.0 && op >= OP_W.0);
+        }
+        // Too narrow for anything: no narrower than readable.
+        assert_eq!(choice_widths(100.0, 8.0), (COLUMN_W.0, OP_W.0));
     }
 
     #[test]

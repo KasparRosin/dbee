@@ -23,6 +23,7 @@ pub mod table_tab;
 pub mod theme;
 pub mod tree;
 pub mod ui_commands;
+pub mod value_panel;
 pub mod workspace;
 
 pub use app::DbeeApp;

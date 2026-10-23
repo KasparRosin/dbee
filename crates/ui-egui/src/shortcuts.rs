@@ -15,13 +15,18 @@
 //! ([`EDITOR_KEYS`]) are the editor's own: it takes Ctrl+Enter as commit before this step, and
 //! Ctrl+Shift+Enter does nothing there. Any shortcut that runs commits the editor first, so
 //! Ctrl+S writes the value being typed.
+//!
+//! The value panel ([`crate::value_panel`]) comes before them, unless a text field or a text
+//! editor has the keyboard: with text selected in it, the copy is its own (Ctrl+C copies that
+//! text and `clipboard.copy` does not run), and while it has the keyboard Ctrl+A selects its
+//! text, not the grid's cells.
 
 use std::sync::LazyLock;
 
 use egui::{Event, Key, Modifiers};
 use serde_json::{Value as Json, json};
 
-use crate::{DbeeApp, editors};
+use crate::{DbeeApp, editors, value_panel};
 
 /// `(keys, command id, params)`.
 pub static SHORTCUTS: LazyLock<Vec<(&'static str, &'static str, Json)>> = LazyLock::new(|| {
@@ -98,6 +103,9 @@ pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context) {
     let text_focused = ctx.text_edit_focused();
     let editor = editors::open_kind(app);
     let (editing, editing_text) = (editor.is_some(), editor.is_some_and(|k| k != editors::Kind::Bool));
+    if !text_focused && !editing_text {
+        value_panel::take_keys(app, ctx);
+    }
     let mut fired: Vec<(&'static str, Json)> = Vec::new();
     ctx.input_mut(|i| {
         let held = i.modifiers;

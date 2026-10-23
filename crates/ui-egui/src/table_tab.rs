@@ -277,7 +277,11 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),
                 };
                 let state = view.work.grids.entry(id).or_default();
-                for act in grid.show(&mut top, state, tags) {
+                // Within the tab's width, even when a row above it is wider (the filter bar in a
+                // narrow window), so every column can be scrolled into view.
+                let area = top.available_rect_before_wrap().intersect(Rect::from_min_max(full.min, pos2(full.right(), split)));
+                let mut grid_ui = top.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
+                for act in grid.show(&mut grid_ui, state, tags) {
                     if let GridAct::Edit { row, col } = act {
                         edit = Some((row, col));
                     }
