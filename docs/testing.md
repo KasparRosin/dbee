@@ -1,6 +1,6 @@
 # Testing
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (§4 scripted UI tests and isolated runs exist)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (§4 the connection screen's scripted tests)
 
 ```sh
 cargo test --workspace                              # everything; oracle tests skip without their tool
@@ -68,7 +68,7 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
 
 ## 4. UI: control channel and screenshots
 
-- **Scripted tests** (`crates/ui-egui/tests/control.rs`) run `DbeeApp::ui` in an egui_kittest harness, frame by frame, and drive it only through control requests and automation ids, asserting on `ui.inspect` and `document.inspect`. Each frame first feeds the app's synthetic input (`DbeeApp::feed_input`), as eframe's raw-input hook does.
+- **Scripted tests** (`crates/ui-egui/tests/control.rs`, `crates/ui-egui/tests/connections.rs`) run `DbeeApp::ui` in an egui_kittest harness, frame by frame, and drive it only through control requests and automation ids, asserting on `ui.inspect` and `document.inspect`. Each frame first feeds the app's synthetic input (`DbeeApp::feed_input`), as eframe's raw-input hook does.
 - **Golden images (planned)** are procedural: a fixed in-code database, a fixed window size, one state per image. Update a golden image only after looking at the new picture.
 - **Interactive checks** run the real app with `cargo xtask run-isolated`, drive it and take `ui.screenshot`. The launch time check (`cargo test -p xtask -- --ignored`) starts the release build that way and prints how long the connection screen takes. Do this for every UI change (see [`agents.md`](agents.md) §4).
 

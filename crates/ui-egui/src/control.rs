@@ -9,7 +9,9 @@
 //! - `engine.execute` of a command that starts a job (unless `wait: false`): until the job's
 //!   result is applied;
 //! - `engine.wait`: until no job runs;
-//! - `ui.click`, `ui.key`, `ui.text`: until the frame that received the input has run;
+//! - `ui.click`, `ui.key`, `ui.text`: until the frame that received the input has run (a click
+//!   on a widget scrolled out of view first waits, a few frames at most, for it to be scrolled
+//!   into view);
 //! - `ui.screenshot`: until the picture of the window arrives.
 //!
 //! `app.quit` is answered at once and closes the window a frame later (at least
@@ -37,6 +39,9 @@ pub const MAX_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// How long after its reply `app.quit` closes the window (at the earliest, the next frame).
 const QUIT_DELAY: Duration = Duration::from_millis(100);
+
+/// How many frames `ui.click` waits for a widget to be scrolled into view.
+const IN_VIEW_FRAMES: u32 = 30;
 
 /// Most synthetic input batches waiting for frames; past it input requests are `busy`.
 const MAX_QUEUED_BATCHES: usize = 10_000;
@@ -193,6 +198,13 @@ pub(crate) enum Wait {
         path: Option<String>,
         asked: bool,
     },
+    /// `ui.click` (its `params`) on widget `id`, which is being scrolled into view; `frames`
+    /// counts the frames waited.
+    InView {
+        id: String,
+        params: Json,
+        frames: u32,
+    },
 }
 
 /// A reply that waits ([`Wait`]) until `deadline`.
@@ -304,13 +316,14 @@ fn commands(app: &DbeeApp, params: &Json) -> Json {
     ok(Json::Array(list))
 }
 
-/// `{screen, dialog, window: [width, height], frame, automation: [{id, rect}]}`; `frame` counts
-/// the frames drawn so far, `automation` is the last drawn frame's tags.
+/// `{screen, dialog, window: [width, height], frame, automation: [{id, rect, …}]}`; `frame`
+/// counts the frames drawn so far, `automation` is the last drawn frame's tags
+/// ([`crate::automation::Tags::to_json`]).
 fn ui_inspect(app: &DbeeApp, ctx: &egui::Context) -> Json {
     let r = ctx.content_rect();
     json!({
         "screen": app.session().state().screen,
-        "dialog": app.view.dialog.as_ref().map(|d| d.name),
+        "dialog": app.view.dialog.as_ref().map(|d| d.name()),
         "window": [r.width(), r.height()],
         "frame": app.frames(),
         "automation": app.tags.to_json(),
@@ -426,6 +439,11 @@ fn click(app: &mut DbeeApp, p: &Json) -> Handled {
     let pos = match p.get("id") {
         Some(Json::String(id)) => match app.tags.rect(id) {
             Some(r) => r.center(),
+            // Drawn but scrolled out of view: another widget is where it would be.
+            None if app.tags.hidden(id) => {
+                app.tags.scroll_to(id);
+                return Handled::Later(Wait::InView { id: id.clone(), params: p.clone(), frames: 0 });
+            }
             None => {
                 return Handled::Now(error(
                     "notFound",
@@ -603,6 +621,32 @@ pub(crate) fn answer_deferred(
     }
     let mut waiting = Vec::new();
     for mut d in std::mem::take(&mut app.deferred) {
+        if let Wait::InView { id, params, frames } = &mut d.wait {
+            if app.tags.rect(id).is_some() {
+                // In view now: click it as if it had been all along.
+                let params = params.clone();
+                match click(app, &params) {
+                    Handled::Now(reply) => {
+                        let _ = d.reply.send(reply);
+                    }
+                    Handled::Later(wait) => {
+                        d.wait = wait;
+                        waiting.push(d);
+                    }
+                }
+                continue;
+            }
+            *frames = frames.saturating_add(1);
+            if !app.tags.hidden(id) || *frames > IN_VIEW_FRAMES {
+                let shown_id = shown(id);
+                let _ = d.reply.send(error(
+                    "notFound",
+                    format!("the widget `{shown_id}` could not be scrolled into view (see ui.inspect)"),
+                    json!({ "id": shown_id }),
+                ));
+                continue;
+            }
+        }
         let done = match &mut d.wait {
             Wait::Job(job) => {
                 finished.iter_mut().find(|f| f.as_ref().is_some_and(|(j, _)| j == job)).and_then(Option::take).map(|(_, result)| reply_of(result))
@@ -621,6 +665,7 @@ pub(crate) fn answer_deferred(
                     None
                 }
             }
+            Wait::InView { .. } => None,
         };
         match done {
             Some(reply) => {
@@ -642,7 +687,9 @@ pub(crate) fn answer_deferred(
 
 /// A waiting reply needs frames to come (input to feed, a picture to take), not only a job.
 pub(crate) fn needs_frames(app: &DbeeApp) -> bool {
-    app.input.pending() || app.quit.is_some() || app.deferred.iter().any(|d| matches!(d.wait, Wait::Input { .. } | Wait::Shot { .. }))
+    app.input.pending()
+        || app.quit.is_some()
+        || app.deferred.iter().any(|d| matches!(d.wait, Wait::Input { .. } | Wait::Shot { .. } | Wait::InView { .. }))
 }
 
 #[cfg(test)]

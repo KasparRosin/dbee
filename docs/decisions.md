@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (egui_extras, egui_kittest)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (rfd for file pickers)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -83,3 +83,8 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** `crates/ui-egui` takes `egui_extras` 0.36 (default features off: no image loaders, no syntax highlighting) for its table layout, and `egui_kittest` 0.36 as a dev-dependency, which runs `DbeeApp::ui` frame by frame without a window. Both are from the egui project, versioned with egui, MIT OR Apache-2.0.
 - **Why:** The result grid needs virtual scrolling over thousands of rows with resizable columns, which `egui_extras`' table gives; writing our own would be a second grid to maintain. kittest drives the real UI code in tests (frames, input, accessibility queries) with no display, so the UI tasks get tests that run in `cargo xtask ci`.
+
+## 2026-10-23: rfd file pickers through the XDG desktop portal, no GTK
+
+- **Decision:** `crates/ui-egui` opens file pickers (the SSH key's "Change…", the CA file's "Choose…") with `rfd` 0.17, default features off and `xdg-portal` and `wayland` on (MIT). On Linux and the BSDs that asks the XDG desktop portal over D-Bus, through the system's `libdbus-1` loaded at run time (no `libdbus-sys` crate), and falls back to `zenity` when there is no portal; macOS and Windows use their native pickers. The picker runs on a thread of its own and sends the chosen path back to the UI thread; when no picker can open, the form says so in the field's row instead of waiting. Tests and agents never open it: they set a key path by saving a connection.
+- **Why:** rfd's `gtk3` backend would bring GTK, which the build rules forbid, and a picker written for egui would be a second file browser to maintain. The portal gives the desktop's own picker, also inside sandboxes such as Flatpak.

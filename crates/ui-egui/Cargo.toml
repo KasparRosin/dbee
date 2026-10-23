@@ -21,7 +21,9 @@ egui_extras = { workspace = true }
 image = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+rfd = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }
 dbee-testkit = { workspace = true }
+dbee-ssh = { workspace = true }

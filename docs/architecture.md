@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (app shell and control channel)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (the connection screen)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -17,7 +17,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `crates/ssh` | exists | L2. The SSH tunnel (russh with ring): host key check against `known_hosts` (unknown hosts ask once and can be learned, changed keys are refused), key, agent and password login, and a direct-tcpip channel per connection. Everything it reads from the machine comes in through `SshEnv`. |
 | `crates/pg` | exists | L3. The Postgres connection (tokio-postgres): TCP or a channel through the SSH tunnel, TLS with rustls (ring) and the OS certificate verifier, `application_name=dbee`, `standard_conforming_strings = on`, read-only mode, cancel requests, and a simple-query runner that returns values as text exactly as Postgres prints them. |
 | `crates/engine` | exists | L5. `Session`: the session state, the command registry (`cmd/*`, so far the tab and connection commands), background jobs on a tokio runtime, the panic guard and the journal. |
-| `crates/ui-egui` | exists | L6. The egui UI and the control channel: the app shell (`DbeeApp`), theme, code-drawn icons, automation ids, shortcuts, UI-only commands; the connection screen is a stub. |
+| `crates/ui-egui` | exists | L6. The egui UI and the control channel: the app shell (`DbeeApp`), theme, code-drawn icons, automation ids, shortcuts, UI-only commands, the connection screen (saved and recent lists, the connection form) and the dialogs a command's `needs…` answer opens. |
 | `crates/mcp` | exists, empty | L6. MCP server over stdio. |
 | `apps/dbee` | exists | L7. Desktop binary: reads `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE` and `DBEE_NO_PREFS`, builds the session's options and runs `DbeeApp`. |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
@@ -62,12 +62,13 @@ Desktop only: macOS, Windows, Linux and FreeBSD. There is no web build and no wa
 
 ## Known gaps
 
-Most of M1's UI. The domain crates and the engine with its commands exist, and the UI has its shell and control channel; the connection form, the workspace, the query editor, the result grid and the schema browser do not exist yet. The ranked work list is [`gaps.md`](gaps.md).
+Most of M1's UI. The domain crates and the engine with its commands exist, and the UI has its shell, control channel and connection screen; the workspace, the query editor, the result grid and the schema browser do not exist yet. The ranked work list is [`gaps.md`](gaps.md).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-23 | minor | `crates/ui-egui`: the connection screen and its dialogs |
 | 2026-10-20 | minor | `crates/ui-egui` (L6): app shell, shortcuts, UI-only commands, control channel; `apps/dbee` runs it; `cargo xtask run-isolated` |
 | 2026-10-20 | minor | `crates/engine`: connection commands (save, list, test, open, reconnect, close, schema refresh), secret resolution, prompts, lost connections |
 | 2026-10-20 | minor | `crates/engine` (L5): session, command registry, jobs, panic guard, journal; data flow describes what exists |

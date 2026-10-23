@@ -5,8 +5,10 @@
 
 pub mod app;
 pub mod automation;
+pub mod connections;
 pub mod control;
 pub mod control_server;
+pub mod dialogs;
 pub mod icons;
 pub mod shortcuts;
 pub mod theme;

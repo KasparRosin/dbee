@@ -45,6 +45,8 @@ egui = "0.36"
 eframe = { version = "0.36", default-features = false }
 egui_extras = { version = "0.36", default-features = false }
 egui_kittest = "0.36"
+# The file picker: the XDG desktop portal on Linux and the BSDs (no GTK), native elsewhere.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "wayland"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

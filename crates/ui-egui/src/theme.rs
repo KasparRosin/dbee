@@ -27,6 +27,8 @@ pub struct Tokens {
     pub hover: Color32,
     /// Errors.
     pub danger: Color32,
+    /// Things that went well (a connection test that passed).
+    pub success: Color32,
 }
 
 /// The light theme: a warm grey ground with a slate-teal accent.
@@ -42,7 +44,23 @@ pub const TOKENS: Tokens = Tokens {
     selection: Color32::from_rgb(0xCD, 0xE2, 0xDC),
     hover: Color32::from_rgb(0xE4, 0xE7, 0xE1),
     danger: Color32::from_rgb(0xA8, 0x23, 0x1C),
+    success: Color32::from_rgb(0x2D, 0x6A, 0x3A),
 };
+
+/// The colour a connection is tagged with (its card, the form's strip); `None` for no colour.
+pub fn connection_color(c: dbee_config::ConnectionColor) -> Option<Color32> {
+    use dbee_config::ConnectionColor as C;
+    match c {
+        C::None => None,
+        C::Red => Some(Color32::from_rgb(0xC4, 0x3B, 0x31)),
+        C::Orange => Some(Color32::from_rgb(0xD4, 0x7A, 0x24)),
+        C::Yellow => Some(Color32::from_rgb(0xC7, 0xA3, 0x1E)),
+        C::Green => Some(Color32::from_rgb(0x3B, 0x8C, 0x4F)),
+        C::Blue => Some(Color32::from_rgb(0x2F, 0x6D, 0xB5)),
+        C::Purple => Some(Color32::from_rgb(0x7C, 0x4D, 0xA8)),
+        C::Gray => Some(Color32::from_rgb(0x7B, 0x80, 0x7C)),
+    }
+}
 
 /// Corner radius of buttons, fields and cards.
 pub const RADIUS: u8 = 4;
@@ -111,5 +129,7 @@ mod tests {
         }
         assert!(contrast(t.accent_text, t.accent) >= 4.5, "button text on the accent");
         assert!(contrast(t.danger, t.bg) >= 4.5, "errors on the background");
+        assert!(contrast(t.success, t.card) >= 4.5, "success text on a card");
+        assert!(contrast(t.danger, t.card) >= 4.5, "errors on a card");
     }
 }

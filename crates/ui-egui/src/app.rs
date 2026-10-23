@@ -4,29 +4,36 @@
 //! 1. `session.pump()`: the results of finished jobs are applied;
 //! 2. the control replies that waited (for a job, idleness, input or a picture) are answered;
 //! 3. the control requests that arrived are handled ([`crate::control`]);
-//! 4. the keyboard shortcuts run ([`crate::shortcuts`]), before any widget sees the keys;
-//! 5. the screen is drawn, tagging its widgets ([`crate::automation`]);
+//! 4. the keyboard shortcuts run ([`crate::shortcuts`]), before any widget sees the keys (not
+//!    while a dialog is open);
+//! 5. the screen is drawn, tagging its widgets ([`crate::automation`]), then the dialog, if any
+//!    ([`crate::dialogs`]);
 //! 6. the session's UI requests (dialogs, notices) are taken, to show from the next frame.
 //!
 //! While a job runs the window repaints every 100 ms, so waits time out and progress shows even
 //! without input. The UI is thin: screens read `session.state()` and act through
-//! [`DbeeApp::run`]. Errors of commands the user started (a shortcut, a button) show as a notice;
-//! a command that is disabled right now does nothing. Logs name command ids and error codes only.
+//! [`DbeeApp::run`]. A command the user started (a shortcut, a button, a dialog) goes through
+//! [`DbeeApp::start`], which hands its outcome back to where it came from ([`Origin`]), at once
+//! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; other
+//! errors show as a notice, or under the connection form's buttons; a command that is disabled
+//! right now does nothing. Logs name command ids and error codes only.
 //!
-//! The connection screen is a stub for now (a "New connection" button and an empty list); the
-//! workspace shows the connection and its tabs.
+//! The connection screen is [`crate::connections`]; the workspace (a placeholder) shows the
+//! connection and its tabs.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use dbee_engine::{CommandInfo, EngineError, JobId, Json, Outcome, Screen, Session};
-use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, vec2};
+use egui::{CornerRadius, Frame, Margin, RichText, vec2};
 
 use crate::automation::Tags;
+use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
+use crate::dialogs::{self, Dialog, Rerun};
 use crate::theme::{RADIUS, TOKENS};
-use crate::{icons, shortcuts, theme, ui_commands};
+use crate::{shortcuts, theme, ui_commands};
 
 /// How often a busy session repaints.
 const BUSY_REPAINT: Duration = Duration::from_millis(100);
@@ -51,10 +58,38 @@ pub struct DbeeApp {
     /// frame, from this instant on.
     pub(crate) quit: Option<(u64, std::time::Instant)>,
     frames: u64,
-    /// Jobs started by the user's own actions, whose errors show as notices.
-    ui_jobs: Vec<(JobId, &'static str)>,
+    /// Jobs started by the user's own actions ([`DbeeApp::start`]), whose outcome goes back to
+    /// where they came from.
+    ui_jobs: Vec<UiJob>,
     clipboard: Vec<String>,
     themed: bool,
+}
+
+/// Where a command the user started came from, so its outcome goes back there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// A shortcut or a menu: errors show as notices.
+    Menu,
+    /// The connection form while it showed this generation ([`ConnScreen::generation`]):
+    /// results and errors show under its buttons.
+    Form(u64),
+    /// The connection form's SSH login line (`connection.sshKey`).
+    KeyLine,
+}
+
+/// A job [`DbeeApp::start`] started, with the params it ran with (for running it again after a
+/// dialog). The params can hold secrets: `Debug` leaves them out.
+struct UiJob {
+    job: JobId,
+    command: &'static str,
+    params: Json,
+    origin: Origin,
+}
+
+impl std::fmt::Debug for UiJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UiJob").field("job", &self.job).field("command", &self.command).field("origin", &self.origin).finish_non_exhaustive()
+    }
 }
 
 /// What only the window keeps.
@@ -62,27 +97,21 @@ pub struct DbeeApp {
 pub(crate) struct View {
     pub value_panel: bool,
     pub quick_search: bool,
-    /// The dialog a command asked for (`UiRequest::Dialog`).
+    /// The dialog on screen ([`crate::dialogs`]).
     pub dialog: Option<Dialog>,
     /// Notices with the time they were first shown (`None` until then).
     pub notices: VecDeque<(String, Option<f64>)>,
-    /// The connection screen shows a new, empty connection.
-    pub new_connection: bool,
+    /// The connection screen's form, lists and jobs.
+    pub conn: ConnScreen,
     /// The query editor's cursor, a byte offset into the active query tab's text, for
     /// Ctrl+Shift+Enter (run the statement under the cursor).
     pub query_cursor: Option<usize>,
 }
 
-#[derive(Debug)]
-pub(crate) struct Dialog {
-    pub name: &'static str,
-    #[allow(dead_code, reason = "the dialogs that read it come with the connection form")]
-    pub data: Json,
-}
-
-impl Default for View {
-    fn default() -> Self {
-        View { value_panel: true, quick_search: false, dialog: None, notices: VecDeque::new(), new_connection: false, query_cursor: None }
+impl View {
+    /// The window's own state; `has_store` says whether the session keeps secrets.
+    fn new(has_store: bool) -> View {
+        View { value_panel: true, quick_search: false, dialog: None, notices: VecDeque::new(), conn: ConnScreen::new(has_store), query_cursor: None }
     }
 }
 
@@ -99,11 +128,12 @@ impl DbeeApp {
     /// The app over `session`; `control` brings the control channel's requests
     /// ([`crate::control_server::start`]).
     pub fn new(session: Session, control: Option<Receiver<ControlRequest>>) -> DbeeApp {
+        let has_store = !session.inspect()["secretStore"].is_null();
         DbeeApp {
             session,
             control,
             tags: Tags::default(),
-            view: View::default(),
+            view: View::new(has_store),
             input: Input::default(),
             deferred: Vec::new(),
             shots: 0,
@@ -175,20 +205,52 @@ impl DbeeApp {
         self.run_from_ui(id, params);
     }
 
-    /// Runs command `id` because the user asked (a shortcut, a button): its error shows as a
-    /// notice, a job's error too once it ends; a disabled command does nothing.
+    /// Runs command `id` because the user asked (a shortcut, a menu): a `needs…` error opens a
+    /// dialog, other errors show as a notice, a job's too once it ends; a disabled command does
+    /// nothing.
     pub(crate) fn run_from_ui(&mut self, id: &'static str, params: Json) {
-        match self.run(id, params) {
-            Ok(Outcome::Done(_)) => {}
-            Ok(Outcome::Started(job)) => self.ui_jobs.push((job, id)),
-            Err(e) => self.ui_error(id, &e),
+        self.start(id, params, Origin::Menu);
+    }
+
+    /// Runs `command` because the user asked, and hands its outcome to `origin`: now, or when
+    /// its job ends (then the job is returned).
+    pub(crate) fn start(&mut self, command: &'static str, params: Json, origin: Origin) -> Option<JobId> {
+        // The params are kept to run the command again after a dialog.
+        match self.run(command, params.clone()) {
+            Ok(Outcome::Started(job)) => {
+                self.ui_jobs.push(UiJob { job, command, params, origin });
+                if let Origin::Form(_) = origin {
+                    connections::started(self, job, command);
+                }
+                Some(job)
+            }
+            Ok(Outcome::Done(v)) => {
+                self.outcome(command, params, origin, None, Ok(v));
+                None
+            }
+            Err(e) => {
+                self.outcome(command, params, origin, None, Err(e));
+                None
+            }
         }
     }
 
-    fn ui_error(&mut self, id: &str, e: &EngineError) {
-        log::debug!("command {id} from the UI: {}", e.code());
-        if !matches!(e, EngineError::Disabled { .. }) {
-            self.notice(e.to_string());
+    /// The outcome of a command [`DbeeApp::start`] ran (`job` when it ran as one).
+    fn outcome(&mut self, command: &'static str, params: Json, origin: Origin, job: Option<JobId>, result: Result<Json, EngineError>) {
+        if let Err(e) = &result {
+            log::debug!("command {command} from the UI: {}", e.code());
+        }
+        match origin {
+            Origin::KeyLine => connections::key_line_done(self, job, result),
+            Origin::Form(generation) => connections::form_done(self, command, params, generation, job, result),
+            Origin::Menu => {
+                if let Err(e) = result
+                    && !dialogs::ask(self, &e, Rerun { command, params, origin })
+                    && !matches!(e, EngineError::Disabled { .. })
+                {
+                    self.notice(e.to_string());
+                }
+            }
         }
     }
 
@@ -207,11 +269,9 @@ impl DbeeApp {
         // 2. Waiting replies.
         let unclaimed = control::answer_deferred(self, &ctx, finished);
         for (job, result) in unclaimed {
-            if let Some(i) = self.ui_jobs.iter().position(|(j, _)| *j == job) {
-                let (_, id) = self.ui_jobs.swap_remove(i);
-                if let Err(e) = result {
-                    self.ui_error(id, &e);
-                }
+            if let Some(i) = self.ui_jobs.iter().position(|j| j.job == job) {
+                let UiJob { job, command, params, origin } = self.ui_jobs.swap_remove(i);
+                self.outcome(command, params, origin, Some(job), result);
             }
         }
         // 3. Control requests.
@@ -222,8 +282,10 @@ impl DbeeApp {
             }
             self.control = Some(rx);
         }
-        // 4. Shortcuts.
-        shortcuts::handle(self, &ctx);
+        // 4. Shortcuts, unless a dialog is open.
+        if self.view.dialog.is_none() {
+            shortcuts::handle(self, &ctx);
+        }
         // 5. Draw.
         self.tags.begin_frame();
         self.draw(ui);
@@ -234,7 +296,7 @@ impl DbeeApp {
         }
         for r in requests {
             match r {
-                dbee_engine::UiRequest::Dialog { name, data } => self.view.dialog = Some(Dialog { name, data }),
+                dbee_engine::UiRequest::Dialog { name, .. } => self.view.dialog = Some(Dialog::Requested { name }),
                 dbee_engine::UiRequest::Notice(text) => self.notice(text),
             }
         }
@@ -252,68 +314,11 @@ impl DbeeApp {
 
     fn draw(&mut self, ui: &mut egui::Ui) {
         match self.session.state().screen {
-            Screen::Connections => self.connections(ui),
+            Screen::Connections => connections::screen(self, ui),
             Screen::Workspace => self.workspace(ui),
         }
+        dialogs::show(self, ui.ctx());
         self.notices(ui);
-    }
-
-    /// The connection screen (a stub): the saved and recent lists on the left, empty for now, and
-    /// a card in the middle.
-    fn connections(&mut self, ui: &mut egui::Ui) {
-        let t = TOKENS;
-        egui::Panel::left("connections-side")
-            .resizable(false)
-            .exact_size(300.0)
-            .frame(Frame::new().fill(t.panel).inner_margin(Margin::same(14)))
-            .show(ui, |ui| {
-                let new = icon_button(ui, "New connection", icons::plus);
-                self.tags.tag("conn-new", &new);
-                if new.clicked() {
-                    self.view.new_connection = true;
-                }
-                if let Some(w) = &self.session.state().store_warning {
-                    ui.add_space(8.0);
-                    ui.label(RichText::new(w).color(t.danger).small());
-                }
-                ui.add_space(18.0);
-                section(ui, "SAVED");
-                ui.label(RichText::new("No saved connections yet.").color(t.text_muted));
-                ui.add_space(18.0);
-                section(ui, "RECENT");
-                ui.label(RichText::new("Connections you open show here.").color(t.text_muted));
-            });
-        egui::CentralPanel::default().frame(Frame::new().fill(t.bg).inner_margin(Margin::same(24))).show(ui, |ui| {
-            let (title, body) = if self.view.new_connection {
-                ("New connection", "The connection form opens here.")
-            } else {
-                ("Connect to Postgres", "Start a new connection, or pick a saved one on the left.")
-            };
-            let height = ui.available_height();
-            ui.add_space((height * 0.28).max(0.0));
-            ui.vertical_centered(|ui| {
-                Frame::new()
-                    .fill(t.card)
-                    .stroke(Stroke::new(1.0, t.border))
-                    .corner_radius(CornerRadius::same(RADIUS.saturating_mul(2)))
-                    .inner_margin(Margin::same(24))
-                    .show(ui, |ui| {
-                        ui.set_width(460.0_f32.min(ui.available_width()));
-                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                            ui.horizontal(|ui| {
-                                let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-                                icons::database(ui.painter(), rect, t.accent);
-                                ui.label(RichText::new(title).size(20.0).strong());
-                            });
-                            ui.add_space(6.0);
-                            ui.label(RichText::new(body).color(t.text_muted));
-                        });
-                    });
-            });
-            ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
-                ui.label(RichText::new(format!("dbee {}", env!("CARGO_PKG_VERSION"))).small().color(t.text_muted));
-            });
-        });
     }
 
     /// The workspace (a placeholder): the connection and its tabs.
@@ -364,33 +369,6 @@ impl DbeeApp {
     }
 }
 
-/// A full-width button with a code-drawn icon left of its label.
-fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, egui::Rect, Color32)) -> egui::Response {
-    let t = TOKENS;
-    let size = vec2(ui.available_width(), 36.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let fill = if response.is_pointer_button_down_on() {
-        t.selection
-    } else if response.hovered() {
-        t.hover
-    } else {
-        t.card
-    };
-    let p = ui.painter();
-    p.rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0));
-    icon(p, icon_rect, t.accent);
-    p.text(egui::pos2(rect.left() + 36.0, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), t.text);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response
-}
-
-/// A small, muted section heading.
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).small().strong().color(TOKENS.text_muted));
-    ui.add_space(2.0);
-}
-
 impl eframe::App for DbeeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         DbeeApp::ui(self, ui);
@@ -439,7 +417,8 @@ mod tests {
             h.step();
         };
         frame(&mut h);
-        assert!(!h.state().view.new_connection);
+        h.state_mut().view.conn.form.name = "typed".into();
+        let generation = h.state().view.conn.generation;
         let (req, reply) = ControlRequest::new("ui.click", json!({ "id": "conn-new" }));
         tx.send(req).unwrap();
         let mut answer = None;
@@ -453,7 +432,8 @@ mod tests {
         let answer = answer.expect("ui.click replies once the click was delivered");
         assert_eq!(answer["ok"], true, "{answer}");
         assert!(answer["result"]["x"].as_f64().is_some(), "{answer}");
-        assert!(h.state().view.new_connection, "the click reached the button");
+        let conn = &h.state().view.conn;
+        assert!(conn.form.name.is_empty() && conn.generation != generation, "the click reached the button");
         assert!(h.state().frames() >= 3);
     }
 

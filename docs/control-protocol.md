@@ -1,6 +1,6 @@
 # dbee control protocol
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** major (the channel exists: M1.20)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (what `ui.inspect` tells about a widget; clicks scroll widgets into view; the connection screen's ids)
 
 The desktop app takes a control port, so agents and tests can drive the real window:
 
@@ -31,8 +31,8 @@ Errors look like `{"id":…,"ok":false,"error":"…","code":"…","data":{…}}`
 | `engine.journal` | | `[{command, params}]`: the commands run so far (replayable), without secret params. |
 | `engine.wait` | | `{}` once no job runs. |
 | `document.inspect` | | The session summary (`Session::inspect`): screen, connection, tabs, the active tab, selection, value view, running jobs. Never a secret. |
-| `ui.inspect` | | `{screen, dialog, window: [width, height], frame, automation: [{id, rect: [x, y, width, height]}]}`. `frame` counts the frames drawn; `automation` lists the widgets of the last drawn frame, in window points. |
-| `ui.click` | `{id}` or `{x, y}`, then `button?` (`left`, `right`, `middle`), `count?` (1–3), `modifiers?` (`{shift?, cmd?, alt?, ctrl?}`) | `{x, y}`, once the frame that got the click has run. `{id}` clicks the centre of that automation id. |
+| `ui.inspect` | | `{screen, dialog, window: [width, height], frame, automation: [{id, rect: [x, y, width, height], visible?, value?, masked?, set?, enabled?}]}`. `frame` counts the frames drawn; `dialog` names the open dialog (`fillFromUrl`, `hostKey`, `passphrase`, `password`, `sshPassword`, `confirm`, `deleteConnection`) or is `null`; `automation` lists the widgets of the last drawn frame, in window points. `rect` is the part of the widget in view; a widget scrolled out of view has `visible: false` and its whole rect. `value` is what a widget shows (a field's text, a check box's state, a choice, a message); a password, passphrase or URL field has `masked: true` and `set` (whether it is filled in) instead, never its text. A disabled widget has `enabled: false`. |
+| `ui.click` | `{id}` or `{x, y}`, then `button?` (`left`, `right`, `middle`), `count?` (1–3), `modifiers?` (`{shift?, cmd?, alt?, ctrl?}`) | `{x, y}`, once the frame that got the click has run. `{id}` clicks the centre of that automation id; a widget scrolled out of view is scrolled into view first (`notFound` when that fails within 30 frames). |
 | `ui.key` | `{key, shift?, cmd?, alt?, ctrl?}` | `{}`, once the key was handled. `key` is egui's name (`Enter`, `Escape`, `ArrowDown`, `A`, `F2`; `esc`, `down` and the like work too). `cmd` is Cmd on macOS and Ctrl elsewhere; with it, `C` and `X` arrive as copy and cut, as from the keyboard. Type text with `ui.text`. |
 | `ui.text` | `{text}` | `{}`: the text typed into the focused field. |
 | `ui.screenshot` | `{path?}` | A PNG of the window: written to `path` (relative to the app's working directory, folders created) as `{path, width, height}`, or `{base64, width, height}`. |
@@ -42,7 +42,16 @@ Planned: `ui.dialog.*` (open, fill in, confirm and cancel dialogs) and `app.open
 
 ## Automation ids
 
-Widgets agents drive have kebab-case ids, listed by `ui.inspect` and clicked with `ui.click {id}`. Each UI task lists its ids; today: `conn-new` (the connection screen's New connection button) and `notice` (the notice shown at the bottom right).
+Widgets agents drive have kebab-case ids, listed by `ui.inspect` and clicked with `ui.click {id}`. Each UI task lists its ids; today:
+
+- the connection screen's lists: `conn-new`, `conn-filter`, `conn-store-warning`, `conn-saved-<id>` and `conn-recent-<n>` (cards; right-click for `conn-menu-connect`, `conn-menu-edit`, `conn-menu-duplicate`, `conn-menu-delete`);
+- its form: `conn-title`, `conn-url`, `conn-name`, `conn-color` (and `conn-color-<colour>`), `conn-host`, `conn-port`, `conn-user`, `conn-password`, `conn-password-show`, `conn-save-secrets`, `conn-no-keyring`, `conn-database`, `conn-ssl` (and `conn-ssl-<mode>`), `conn-ca`, `conn-ca-choose`, `conn-ca-clear`, `conn-readonly`;
+- its SSH tunnel: `conn-ssh-on`, `conn-ssh-host`, `conn-ssh-port`, `conn-ssh-user`, `conn-ssh-auth` (and `conn-ssh-auth-key`, `-agent`, `-password`), `conn-ssh-key` (what the login will use), `conn-ssh-change`, `conn-ssh-auto`;
+- its buttons and their message: `conn-save`, `conn-test`, `conn-connect`, `conn-error`, `conn-result`;
+- dialogs: `dialog-ok`, `dialog-cancel`, `dialog-text`, `dialog-url`, `dialog-error`, `dialog-fingerprint`, `dialog-secret`, `dialog-save`;
+- `notice` (the notice shown at the bottom right).
+
+The file pickers (`conn-ssh-change`, `conn-ca-choose`) open the desktop's picker, which agents cannot drive: save a connection with the path instead (`connection.save`) and click its card.
 
 ## Rules
 
