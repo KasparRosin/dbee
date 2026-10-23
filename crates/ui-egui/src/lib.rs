@@ -5,11 +5,13 @@
 
 pub mod app;
 pub mod automation;
+pub mod conn_form;
 pub mod connections;
 pub mod control;
 pub mod control_server;
 pub mod dialogs;
 pub mod icons;
+pub mod picker;
 pub mod shortcuts;
 pub mod theme;
 pub mod ui_commands;

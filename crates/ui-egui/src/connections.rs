@@ -17,15 +17,18 @@
 //!   answer opens a dialog ([`crate::dialogs`]) that runs the command again; other errors show
 //!   under the buttons with the server's message.
 //! - The file pickers ("Change…" for the key, "Choose…" for the CA file) run rfd on a thread of
-//!   their own and send the path back; a picker that cannot open leaves a note in its row.
+//!   their own and send the path back; a picker that cannot open leaves a note in its row
+//!   ([`crate::picker`]).
+//!
+//! The form's fields and their validation are [`crate::conn_form`]; this module draws the screen
+//! and acts on it.
 //!
 //! Secrets: the typed password lives only in the form (and in the params of the command it goes
 //! to). `ui.inspect` reports the field as masked with whether it is set; `Debug` and the logs
 //! never show it.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use dbee_config::{ConnectionColor, ConnectionConfig, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, JobId, Json, State};
@@ -38,7 +41,9 @@ use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::conn_form::{Auth, Form};
 use crate::dialogs::{self, Dialog};
+use crate::picker::{self, Notes, Pick, Picker};
 use crate::theme::{RADIUS, TOKENS, connection_color};
 use crate::{DbeeApp, icons};
 
@@ -62,148 +67,6 @@ const ROW_H: f32 = LABEL_H + FIELD_H;
 const MESSAGE_H: f32 = 52.0;
 /// A card in the lists.
 const CARD_H: f32 = 46.0;
-/// A picker that answers "nothing" faster than this did not show (no portal, no zenity).
-const PICKER_GAVE_UP: Duration = Duration::from_millis(800);
-
-/// The SSH login choices of the form.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Auth {
-    Key,
-    Agent,
-    Password,
-}
-
-/// The connection form's fields, as typed.
-#[derive(Clone, PartialEq)]
-pub(crate) struct Form {
-    /// The saved connection this is, or empty for a new one.
-    pub id: String,
-    pub name: String,
-    pub color: ConnectionColor,
-    pub host: String,
-    pub port: String,
-    pub user: String,
-    /// Typed by the user; never loaded from the keyring.
-    pub password: String,
-    pub show_password: bool,
-    pub database: String,
-    pub ssl_mode: SslMode,
-    pub ca_file: Option<PathBuf>,
-    pub read_only: bool,
-    pub save_secrets: bool,
-    pub ssh_on: bool,
-    pub ssh_host: String,
-    pub ssh_port: String,
-    pub ssh_user: String,
-    pub ssh_auth: Auth,
-    /// The key file chosen with "Change…"; `None` picks automatically.
-    pub ssh_key: Option<PathBuf>,
-}
-
-impl std::fmt::Debug for Form {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Form")
-            .field("id", &self.id)
-            .field("name", &self.name)
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("user", &self.user)
-            .field("password", &if self.password.is_empty() { "" } else { "<redacted>" })
-            .field("database", &self.database)
-            .field("ssh_on", &self.ssh_on)
-            .finish_non_exhaustive()
-    }
-}
-
-/// A port as typed: a number from 1 to 65535.
-fn parse_port(text: &str) -> Option<u16> {
-    text.trim().parse::<u16>().ok().filter(|p| *p > 0)
-}
-
-impl Form {
-    /// An empty form for a new connection.
-    pub(crate) fn new(save_secrets: bool) -> Form {
-        Form::from_config(&ConnectionConfig { save_secrets, ..ConnectionConfig::default() })
-    }
-
-    /// The form showing `c` (no password: stored ones stay in the keyring).
-    pub(crate) fn from_config(c: &ConnectionConfig) -> Form {
-        let ssh = c.ssh.clone().unwrap_or_default();
-        let (ssh_auth, ssh_key) = match &ssh.auth {
-            SshAuth::Key { path } => (Auth::Key, path.clone()),
-            SshAuth::Agent => (Auth::Agent, None),
-            SshAuth::Password => (Auth::Password, None),
-        };
-        Form {
-            id: c.id.clone(),
-            name: c.name.clone(),
-            color: c.color,
-            host: c.host.clone(),
-            port: c.port.to_string(),
-            user: c.user.clone(),
-            password: String::new(),
-            show_password: false,
-            database: c.database.clone(),
-            ssl_mode: c.ssl_mode,
-            ca_file: c.ca_file.clone(),
-            read_only: c.read_only,
-            save_secrets: c.save_secrets,
-            ssh_on: c.ssh.is_some(),
-            ssh_host: ssh.host,
-            ssh_port: ssh.port.to_string(),
-            ssh_user: ssh.user,
-            ssh_auth,
-            ssh_key,
-        }
-    }
-
-    /// The SSH login as a config stores it.
-    pub(crate) fn ssh_auth(&self) -> SshAuth {
-        match self.ssh_auth {
-            Auth::Key => SshAuth::Key { path: self.ssh_key.clone() },
-            Auth::Agent => SshAuth::Agent,
-            Auth::Password => SshAuth::Password,
-        }
-    }
-
-    /// The connection the form describes, or why it is not usable yet.
-    pub(crate) fn to_config(&self) -> Result<ConnectionConfig, String> {
-        let port = parse_port(&self.port).ok_or("The port must be a number from 1 to 65535.")?;
-        let ssh = if self.ssh_on {
-            let port = parse_port(&self.ssh_port).ok_or("The SSH port must be a number from 1 to 65535.")?;
-            Some(SshConfig { host: self.ssh_host.trim().into(), port, user: self.ssh_user.trim().into(), auth: self.ssh_auth() })
-        } else {
-            None
-        };
-        let config = ConnectionConfig {
-            id: self.id.clone(),
-            name: self.name.trim().into(),
-            color: self.color,
-            host: self.host.trim().into(),
-            port,
-            user: self.user.trim().into(),
-            database: self.database.trim().into(),
-            ssl_mode: self.ssl_mode,
-            ca_file: self.ca_file.clone(),
-            ssh,
-            read_only: self.read_only,
-            save_secrets: self.save_secrets,
-        };
-        config.validate().map_err(|e| e.to_string())?;
-        Ok(config)
-    }
-
-    /// What the title line says.
-    fn title(&self) -> String {
-        if !self.name.trim().is_empty() {
-            self.name.trim().to_string()
-        } else if self.id.is_empty() {
-            "New connection".into()
-        } else {
-            format!("{}@{}/{}", self.user, self.host, self.database)
-        }
-    }
-}
 
 /// Which form job runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,28 +92,6 @@ pub(crate) struct KeyLine {
     pub path: Option<PathBuf>,
     /// The `connection.sshKey` job running, and the login it is about.
     pub pending: Option<(JobId, SshAuth)>,
-}
-
-/// Which field a file picker fills.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Pick {
-    Key,
-    Ca,
-}
-
-/// A file picker running on its own thread.
-#[derive(Debug)]
-pub(crate) struct Picker {
-    pub target: Pick,
-    rx: Receiver<Option<PathBuf>>,
-    started: Instant,
-}
-
-/// Notes the file pickers leave in their rows.
-#[derive(Debug, Default)]
-pub(crate) struct Notes {
-    pub key: Option<String>,
-    pub ca: Option<String>,
 }
 
 /// What only the connection screen keeps.
@@ -529,7 +370,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
 
 /// Before drawing: the picker's answer, and the key line's question when the login changed.
 fn tick(app: &mut DbeeApp, ctx: &egui::Context) {
-    poll_picker(&mut app.view.conn, ctx);
+    picker::poll(&mut app.view.conn, ctx);
     let conn = &mut app.view.conn;
     if !conn.form.ssh_on {
         return;
@@ -548,79 +389,6 @@ fn tick(app: &mut DbeeApp, ctx: &egui::Context) {
         Some(job) => app.view.conn.key.pending = Some((job, want)),
         // Failed at once; the line says why, and it is not asked again until the login changes.
         None => app.view.conn.key.for_auth = Some(want),
-    }
-}
-
-fn poll_picker(conn: &mut ConnScreen, ctx: &egui::Context) {
-    let Some(p) = &conn.picker else { return };
-    let target = p.target;
-    let answer = p.rx.try_recv();
-    let quick = p.started.elapsed() < PICKER_GAVE_UP;
-    let note = match answer {
-        Err(TryRecvError::Empty) => {
-            ctx.request_repaint_after(Duration::from_millis(250));
-            return;
-        }
-        Ok(Some(path)) => {
-            match target {
-                Pick::Key => {
-                    conn.form.ssh_key = Some(path);
-                    conn.form.ssh_auth = Auth::Key;
-                }
-                Pick::Ca => conn.form.ca_file = Some(path),
-            }
-            None
-        }
-        // Linux: rfd answers "nothing" at once when neither the desktop portal nor zenity could
-        // show a picker; a person takes longer than that to cancel one.
-        Ok(None) if quick && cfg!(not(any(target_os = "macos", target_os = "windows"))) => {
-            Some("No file picker opened: it needs the desktop portal (xdg-desktop-portal) or zenity.".to_string())
-        }
-        Ok(None) => None,
-        Err(TryRecvError::Disconnected) => Some("The file picker stopped without an answer.".to_string()),
-    };
-    conn.picker = None;
-    match target {
-        Pick::Key => conn.notes.key = note,
-        Pick::Ca => conn.notes.ca = note,
-    }
-}
-
-/// Starts a file picker for `target` on its own thread; it never runs on the UI thread.
-fn start_picker(conn: &mut ConnScreen, target: Pick, ctx: &egui::Context) {
-    if conn.picker.is_some() {
-        return;
-    }
-    let ssh_dir = dbee_config::home_dir().map(|h| h.join(".ssh"));
-    let (title, dir) = match target {
-        // ~/.ssh, or the folder of the key the login uses when there is no ~/.ssh.
-        Pick::Key => {
-            ("Choose an SSH key", ssh_dir.filter(|d| d.is_dir()).or_else(|| conn.key.path.as_deref().and_then(Path::parent).map(Path::to_path_buf)))
-        }
-        Pick::Ca => {
-            ("Choose a CA certificate", conn.form.ca_file.as_deref().and_then(Path::parent).map(Path::to_path_buf).or_else(dbee_config::home_dir))
-        }
-    };
-    let (tx, rx) = std::sync::mpsc::channel();
-    let repaint = ctx.clone();
-    let spawned = std::thread::Builder::new().name("dbee-file-picker".into()).spawn(move || {
-        let mut dialog = rfd::FileDialog::new().set_title(title);
-        if let Some(dir) = dir.filter(|d| d.is_dir()) {
-            dialog = dialog.set_directory(dir);
-        }
-        let _ = tx.send(dialog.pick_file());
-        repaint.request_repaint();
-    });
-    let note = match spawned {
-        Ok(_) => {
-            conn.picker = Some(Picker { target, rx, started: Instant::now() });
-            None
-        }
-        Err(e) => Some(format!("The file picker could not be started: {e}")),
-    };
-    match target {
-        Pick::Key => conn.notes.key = note,
-        Pick::Ca => conn.notes.ca = note,
     }
 }
 
@@ -652,7 +420,7 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
         Act::Test | Act::ConnectForm => {}
         Act::Save => run_form(app, SAVE),
         Act::FillFromUrl => app.view.dialog = Some(Dialog::fill_from_url()),
-        Act::Pick(target) => start_picker(&mut app.view.conn, target, ctx),
+        Act::Pick(target) => picker::start(&mut app.view.conn, target, ctx),
         Act::StopPicking => app.view.conn.picker = None,
         Act::ClearCa => {
             app.view.conn.form.ca_file = None;
