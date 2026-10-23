@@ -1,6 +1,6 @@
 # Testing
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (§4 the connection screen's scripted tests)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (§4 the connection screen's scripted tests; hidden windows run no frames on Wayland)
 
 ```sh
 cargo test --workspace                              # everything; oracle tests skip without their tool
@@ -71,6 +71,7 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
 - **Scripted tests** (`crates/ui-egui/tests/control.rs`, `crates/ui-egui/tests/connections.rs`) run `DbeeApp::ui` in an egui_kittest harness, frame by frame, and drive it only through control requests and automation ids, asserting on `ui.inspect` and `document.inspect`. Each frame first feeds the app's synthetic input (`DbeeApp::feed_input`), as eframe's raw-input hook does.
 - **Golden images (planned)** are procedural: a fixed in-code database, a fixed window size, one state per image. Update a golden image only after looking at the new picture.
 - **Interactive checks** run the real app with `cargo xtask run-isolated`, drive it and take `ui.screenshot`. The launch time check (`cargo test -p xtask -- --ignored`) starts the release build that way and prints how long the connection screen takes. Do this for every UI change (see [`agents.md`](agents.md) §4).
+- **A hidden window runs no frames on Wayland.** The control channel is served in the window's frames. On Wayland, winit holds the next redraw until the compositor answers the last frame's frame callback (egui-wgpu asks for one before every present), and KWin sends none to a window it does not show. So while the isolated window is minimised (reproduced on KDE Plasma 6, Mesa 25 RADV), and presumably while KWin paints nothing for it at all (another virtual desktop, displays asleep), every request times out with "the app did not answer in time (is the window hidden?)", and requests are answered again within one frame once the window is shown. The UI thread meanwhile idles in winit's event loop, not in wgpu's present.
 
 ## 5. Robustness and fuzz
 
