@@ -268,18 +268,53 @@ fn raw_where_through_the_toggle() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
     ui.open("shop", "customers");
+    // A filter row first.
+    ui.click("filter-0-column");
+    ui.click("filter-0-column-name");
+    ui.click("filter-0-value");
+    ui.text("Customer 2");
+    ui.frame();
+    // To the raw field, applied there.
     ui.click("filter-raw-toggle");
     assert!(ui.tag("filter-0-column").is_none(), "one raw field instead of the rows");
     ui.click("filter-raw");
     ui.text("id <= 3");
     ui.key("Enter", json!({}));
-    ui.until("the raw filter", |ui| ui.table()["applied"] == json!({ "raw": "id <= 3" }));
+    ui.until("the raw filter", |ui| ui.table()["applied"] == json!({ "raw": "id <= 3" }) && ui.table()["loading"].is_null());
     let t = ui.table();
     assert_eq!((t["rawMode"].clone(), t["rows"].clone()), (json!(true), json!(3)), "{t}");
-    // The toggle goes back to the rows.
+    // And back: the row is as it was left, and applies.
     ui.click("filter-raw-toggle");
-    assert!(ui.tag("filter-0-column").is_some());
     assert_eq!(ui.table()["rawMode"], false);
+    assert_eq!((ui.value("filter-0-column"), ui.value("filter-0-op"), ui.value("filter-0-value")), (json!("name"), json!("eq"), json!("Customer 2")));
+    ui.click("filter-apply");
+    ui.until("the row filter", |ui| ui.table()["applied"]["filters"][0]["value"] == "Customer 2" && ui.table()["loading"].is_null());
+    assert_eq!(ui.table()["rows"], 1);
+    // The raw field kept its text too.
+    ui.click("filter-raw-toggle");
+    assert_eq!(ui.value("filter-raw"), "id <= 3");
+}
+
+#[test]
+fn null_operators_take_no_value() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.open("shop", "customers");
+    ui.click("filter-0-column");
+    ui.click("filter-0-column-note");
+    ui.click("filter-0-value");
+    ui.text("abc");
+    ui.frame();
+    ui.click("filter-0-op");
+    ui.click("filter-0-op-isNull");
+    assert!(ui.tag("filter-0-value").is_none(), "is null takes no value: no field");
+    assert_eq!(ui.table()["filters"], json!([{ "column": "note", "op": "isNull", "value": "" }]), "and the old value goes");
+    ui.click("filter-apply");
+    ui.until("the NULL notes", |ui| ui.table()["applied"]["filters"][0]["op"] == "isNull" && ui.table()["loading"].is_null());
+    assert_eq!(ui.table()["rows"], 100, "every fifth customer has no note");
+    ui.click("filter-0-op");
+    ui.click("filter-0-op-eq");
+    assert_eq!(ui.value("filter-0-value"), "", "the field is back, empty");
 }
 
 #[test]
@@ -372,6 +407,68 @@ fn context_menu_set_as_null() {
     assert_eq!(ui.value("grid-cell-0-0")["state"], "deleted");
     ui.click("edit-reset");
     assert_eq!(ui.table()["edits"]["count"], 0);
+}
+
+#[test]
+fn staged_edits_block_sorting_and_applying_filters_and_say_why() {
+    let db = dbee_testkit::require_testdb!();
+    let table = null_and_empty(db);
+    let mut ui = connected(db);
+    ui.open("scratch", &table.0);
+    ui.click_with("grid-cell-1-1", json!({ "button": "right" }));
+    ui.click("grid-menu-null");
+    assert_eq!(ui.table()["edits"]["count"], 1);
+    ui.frame();
+    assert_eq!(ui.tag("filter-apply").unwrap()["enabled"], false, "Apply waits for the staged change");
+    let why = "apply or reset your changes first";
+    // A header click sorts nothing, and says why.
+    ui.click("grid-header-0");
+    ui.frame();
+    assert_eq!(ui.document()["jobs"], json!([]));
+    assert!(ui.table()["sort"].is_null());
+    let notice = ui.value("notice");
+    assert!(notice.as_str().is_some_and(|n| n.contains(why)), "{notice}");
+    // It sits above the paging bar, so Reset and Apply stay in reach.
+    let (n, apply) = (ui.tag("notice").unwrap(), ui.tag("edit-apply").unwrap());
+    let bottom = n["rect"][1].as_f64().unwrap() + n["rect"][3].as_f64().unwrap();
+    assert!(bottom <= apply["rect"][1].as_f64().unwrap(), "{n} {apply}");
+    ui.until("the notice to go", |ui| ui.tag("notice").is_none());
+    // Typing still works; Enter applies nothing, and says why.
+    ui.click("filter-0-value");
+    ui.text("2");
+    ui.key("Enter", json!({}));
+    ui.frame();
+    assert_eq!(ui.document()["jobs"], json!([]));
+    let t = ui.table();
+    assert_eq!((t["applied"].clone(), t["filters"][0]["value"].clone()), (json!("none"), json!("2")), "{t}");
+    let notice = ui.value("notice");
+    assert!(notice.as_str().is_some_and(|n| n.contains(why)), "{notice}");
+}
+
+#[test]
+fn a_failed_delete_stays_struck_through() {
+    let db = dbee_testkit::require_testdb!();
+    let child = unique("t_child");
+    let parent = Scratch::new(db, "t_parent", |t| {
+        format!(
+            "CREATE TABLE scratch.{t} (id int PRIMARY KEY); INSERT INTO scratch.{t} VALUES (1), (2);
+             CREATE TABLE scratch.{child} (id int PRIMARY KEY, parent_id int REFERENCES scratch.{t}); INSERT INTO scratch.{child} VALUES (1, 1);"
+        )
+    });
+    let _child = Scratch(child);
+    let mut ui = connected(db);
+    ui.open("scratch", &parent.0);
+    ui.click_with("grid-cell-0-0", json!({ "button": "right" }));
+    ui.click("grid-menu-delete");
+    ui.frame();
+    assert_eq!(ui.value("grid-cell-0-0")["state"], "deleted");
+    // Row 1 is still referenced: the Apply fails on it.
+    ui.click("edit-apply");
+    ui.until("the failed Apply", |ui| ui.table()["failed"].is_object());
+    ui.frame();
+    let cell = ui.value("grid-cell-0-0");
+    assert_eq!((cell["state"].clone(), cell["deleted"].clone()), (json!("failed"), json!(true)), "failed, and still struck through: {cell}");
+    assert_eq!(ui.value("grid-cell-1-0").get("deleted"), None);
 }
 
 #[test]
@@ -486,7 +583,11 @@ fn paging_and_counting_big_rows() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
     ui.open("shop", "big_rows");
-    // The planner's estimate shows until the rows are counted.
+    // The planner's estimate shows until the rows are counted; filter rows with no value do not
+    // filter (the engine's rule), so it shows with them applied too.
+    ui.click("filter-add");
+    ui.click("filter-apply");
+    ui.until("the empty filters", |ui| ui.table()["applied"]["filters"].as_array().map(Vec::len) == Some(2) && ui.table()["loading"].is_null());
     let count = ui.value("page-count");
     let text = count.as_str().unwrap().to_string();
     assert!(text.starts_with('~') && text.contains(','), "{count}");
@@ -577,7 +678,7 @@ fn odd_identifiers_filter_sort_and_follow() {
 }
 
 #[test]
-fn twenty_megabyte_cells_cost_a_normal_frame() {
+fn twenty_megabyte_cells_keep_frames_under_250_ms() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
     ui.open("shop", "big_cell");
@@ -662,6 +763,7 @@ fn grid_frame_within_budget() {
                 selection: s.selection,
                 sort: None,
                 sortable: false,
+                blocked: None,
                 editable: false,
                 links: false,
                 first_number: 1,

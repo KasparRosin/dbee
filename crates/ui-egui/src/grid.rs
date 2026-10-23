@@ -19,15 +19,17 @@
 //! the pointer. A right-click selects the cell unless it is already selected, and opens the menu:
 //! Set as NULL, Copy, Copy with header, Copy as CSV / JSON / Markdown, Delete row(s).
 //!
-//! **Marks.** A staged cell, a new row, a row to delete (struck through) and the row whose change
-//! the last Apply failed on each have their own colour ([`crate::theme::Tokens`]).
+//! **Marks.** A staged cell, a new row, a row to delete and the row whose change the last Apply
+//! failed on each have their own colour ([`crate::theme::Tokens`]); a row to delete is also
+//! struck through, failed or not.
 //!
 //! **Foreign keys.** With [`Grid::links`], each non-NULL foreign key cell of the selected row
 //! (the focus cell's) shows a link that follows it.
 //!
 //! Automation ids: `grid-header-<col>` (value `{name, type, key, sort}`), `grid-cell-<row>-<col>`
-//! (value `{text, null, state?}`: the text as shown, `NULL` for NULL, `state` one of `staged`,
-//! `new`, `deleted`, `failed`), `fk-link-<row>-<col>`, and while the menu is open `grid-menu-null`,
+//! (value `{text, null, state?, deleted?}`: the text as shown, `NULL` for NULL, `state` one of
+//! `staged`, `new`, `deleted`, `failed`, and `deleted: true` on a row to delete, also when it is
+//! the failed one), `fk-link-<row>-<col>`, and while the menu is open `grid-menu-null`,
 //! `grid-menu-copy`, `grid-menu-copy-header`, `grid-menu-copy-csv`, `grid-menu-copy-json`,
 //! `grid-menu-copy-markdown`, `grid-menu-delete`. Cells of rows out of view are listed with
 //! `visible: false` ([`CellBlock`]); a click on one scrolls its row into view first.
@@ -122,6 +124,10 @@ pub trait GridSource {
     fn mark(&self, _row: usize, _col: usize) -> Mark {
         Mark::Plain
     }
+    /// Row `row` is to be deleted: its text is struck through, whatever its mark.
+    fn deleted(&self, _row: usize) -> bool {
+        false
+    }
     /// The column holds numbers, which sit right.
     fn right_aligned(&self, _col: usize) -> bool {
         false
@@ -208,6 +214,9 @@ pub struct Grid<'a> {
     pub sort: Option<(usize, SortDir)>,
     /// A header click asks for the next sort ([`GridAct::Sort`]).
     pub sortable: bool,
+    /// Why sorting cannot run now (staged changes, a lost connection), shown on a header's hover;
+    /// a click still asks, and the command says why.
+    pub blocked: Option<&'a str>,
     /// Set as NULL and Delete row are offered.
     pub editable: bool,
     /// Foreign key cells of the selected row show the link that follows them.
@@ -377,7 +386,11 @@ impl Grid<'_> {
                     header.col(|ui| resp = Some(self.draw_head(ui, col)));
                     let Some(r) = resp else { continue };
                     *head = (r.rect.left(), r.rect.right());
-                    let r = if self.sortable { r.on_hover_text("Sort by this column") } else { r };
+                    let r = match (self.sortable, self.blocked) {
+                        (true, None) => r.on_hover_text("Sort by this column"),
+                        (true, Some(why)) => r.on_hover_text(format!("Sort by this column: not now, {why}")),
+                        (false, _) => r,
+                    };
                     tags.tag_value(&format!("grid-header-{col}"), &r, self.head_value(col));
                     if self.sortable && r.clicked() {
                         acts.push(GridAct::Sort(col));
@@ -408,6 +421,9 @@ impl Grid<'_> {
                         value.insert("null".into(), json!(drawn.null));
                         if let Some(state) = src.mark(r, c).id() {
                             value.insert("state".into(), json!(state));
+                        }
+                        if src.deleted(r) {
+                            value.insert("deleted".into(), json!(true));
                         }
                         tags.tag_value(&format!("{CELL}{r}-{c}"), resp, serde_json::Value::Object(value));
                         let here = (r, c);
@@ -558,8 +574,9 @@ impl Grid<'_> {
             None => ("NULL".to_string(), true),
             Some(v) => (grid_text(v).into_owned(), false),
         };
+        let deleted = self.source.deleted(row);
         if !text.is_empty() {
-            let color = if null || mark == Mark::Deleted { t.text_muted } else { t.text };
+            let color = if null || deleted { t.text_muted } else { t.text };
             let y = rect.center().y;
             let x = if !null && self.source.right_aligned(col) && !text.contains(BREAK) {
                 // Numbers sit right: measure first.
@@ -568,7 +585,7 @@ impl Grid<'_> {
                 rect.left() + PAD
             };
             let drawn = paint_text(ui, &p, &text, (x, y, right), color, null);
-            if mark == Mark::Deleted {
+            if deleted {
                 p.line_segment([pos2(x, y), pos2(x + drawn, y)], Stroke::new(1.0, t.text_muted));
             }
         }
@@ -598,7 +615,7 @@ impl Grid<'_> {
                 ui.close();
             }
         };
-        let deleted = self.source.mark(row, col) == Mark::Deleted;
+        let deleted = self.source.deleted(row);
         item(ui, "grid-menu-null", "Set as NULL", None, self.editable && !deleted, GridAct::SetNull { row, col });
         ui.separator();
         item(ui, "grid-menu-copy", "Copy", Some("Ctrl+C"), true, GridAct::Copy("tsv"));

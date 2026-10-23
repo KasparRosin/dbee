@@ -285,9 +285,10 @@ fn opt_bool(params: &Json, key: &str) -> Result<Option<bool>, EngineError> {
     }
 }
 
-/// The planner's estimate for `cond` on `info`, when there is one to show at once: only with no
-/// condition, and only for relations that keep one (not views or foreign tables).
-fn quick_estimate(info: &TableInfo, cond: &Condition) -> Option<u64> {
+/// The planner's estimate for `cond` on `info`, when there is one to show at once: only when the
+/// condition restricts nothing (none, or only filter rows without a value), and only for
+/// relations that keep one (not views or foreign tables). The UI shows it by the same rule.
+pub fn quick_estimate(info: &TableInfo, cond: &Condition) -> Option<u64> {
     let kept = matches!(info.kind, RelKind::Table | RelKind::PartitionedTable | RelKind::MaterializedView);
     let unfiltered = matches!(where_sql(cond, info), Ok(None));
     if kept && unfiltered { info.estimated_rows } else { None }

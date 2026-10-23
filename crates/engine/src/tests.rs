@@ -315,6 +315,24 @@ fn typing_collapses_into_one_journal_entry() {
 }
 
 #[test]
+fn draft_filters_collapse_into_one_journal_entry() {
+    let entry = |id: &str, p: Json| (id.to_string(), p);
+    let draft = |filters: Json| json!({ "filters": filters, "apply": false });
+    let f = "table.setFilters";
+    // Typed, not applied, with the same keys: the newer sets everything the older did.
+    assert!(crate::journal_coalesces(&entry(f, draft(json!([1]))), f, &draft(json!([2]))));
+    assert!(crate::journal_coalesces(&entry("query.setText", json!({ "text": "a" })), "query.setText", &json!({ "text": "ab" })));
+    // Other keys, an apply, a missing `apply` (true) or another command each keep their entry.
+    assert!(!crate::journal_coalesces(&entry(f, draft(json!([1]))), f, &json!({ "raw": "x", "apply": false })));
+    assert!(!crate::journal_coalesces(&entry(f, draft(json!([1]))), f, &json!({ "filters": [1], "apply": true })));
+    assert!(!crate::journal_coalesces(&entry(f, json!({ "apply": true })), f, &json!({ "apply": true })));
+    assert!(!crate::journal_coalesces(&entry(f, json!({ "filters": [1] })), f, &json!({ "filters": [2] })));
+    assert!(!crate::journal_coalesces(&entry(f, json!({ "filters": [1], "apply": true })), f, &draft(json!([2]))));
+    assert!(!crate::journal_coalesces(&entry("table.open", draft(json!([1]))), f, &draft(json!([2]))));
+    assert!(!crate::journal_coalesces(&entry(f, json!(null)), f, &json!(null)));
+}
+
+#[test]
 fn journal_keeps_the_newest_entries() {
     let mut s = session();
     let t = new_query(&mut s, "");

@@ -121,6 +121,26 @@ fn day_scenario_filters() {
 }
 
 #[test]
+fn typing_in_the_filter_bar_journals_one_entry() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    open_table(&mut s, "shop", "customers");
+    for value in ["C", "Cu", "Customer 7"] {
+        run(&mut s, "table.setFilters", json!({ "filters": [{ "column": "name", "op": "eq", "value": value }], "apply": false }));
+    }
+    run(&mut s, "table.setFilters", json!({ "raw": "id < 3", "apply": false }));
+    run(&mut s, "table.setFilters", json!({ "apply": true }));
+    let tail: Vec<(String, Json)> = s.journal().iter().rev().take(4).rev().cloned().collect();
+    let expected = vec![
+        ("table.open".to_string(), json!({ "schema": "shop", "table": "customers" })),
+        ("table.setFilters".to_string(), json!({ "filters": [{ "column": "name", "op": "eq", "value": "Customer 7" }], "apply": false })),
+        ("table.setFilters".to_string(), json!({ "raw": "id < 3", "apply": false })),
+        ("table.setFilters".to_string(), json!({ "apply": true })),
+    ];
+    assert_eq!(tail, expected);
+}
+
+#[test]
 fn hostile_filter_value_is_just_a_value() {
     let _db = require_testdb!();
     let mut s = connected();

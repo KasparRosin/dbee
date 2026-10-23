@@ -42,8 +42,9 @@ pub struct Tokens {
     /// The grid's header row, and the fill of every other row.
     pub grid_header: Color32,
     pub stripe: Color32,
-    /// Grid cells with staged changes: a changed cell, a new row, a row to delete (its text also
-    /// struck through), and the row whose change the last Apply failed on.
+    /// Grid cells with staged changes: a changed cell (amber), a new row (green), a row to delete
+    /// (lavender grey, its text also struck through), and the row whose change the last Apply
+    /// failed on (rose). Clearly apart from each other and from the selection.
     pub staged: Color32,
     pub new_row: Color32,
     pub deleted: Color32,
@@ -74,10 +75,10 @@ pub const TOKENS: Tokens = Tokens {
     key_foreign: Color32::from_rgb(0x4A, 0x7F, 0xA8),
     grid_header: Color32::from_rgb(0xF2, 0xF3, 0xEF),
     stripe: Color32::from_rgb(0xF8, 0xF9, 0xF6),
-    staged: Color32::from_rgb(0xF5, 0xEB, 0xCB),
-    new_row: Color32::from_rgb(0xDE, 0xEF, 0xE3),
-    deleted: Color32::from_rgb(0xF3, 0xE0, 0xDD),
-    failed: Color32::from_rgb(0xF0, 0xCF, 0xCA),
+    staged: Color32::from_rgb(0xF8, 0xE4, 0xA8),
+    new_row: Color32::from_rgb(0xE0, 0xF2, 0xC8),
+    deleted: Color32::from_rgb(0xE6, 0xDF, 0xF2),
+    failed: Color32::from_rgb(0xF7, 0xD0, 0xCA),
 };
 
 /// The colour a connection is tagged with (its card, the form's strip); `None` for no colour.
@@ -174,10 +175,30 @@ mod tests {
             assert!(contrast(t.text, fill) >= 7.0, "text on {name}");
             assert!(contrast(t.text_muted, fill) >= 4.5, "muted text (NULL) on {name}");
         }
+        // Clearly apart: a CIE76 colour difference of 15 or more between any two.
         for (i, (a, x)) in marks.iter().enumerate() {
             for (b, y) in &marks[i + 1..] {
-                assert_ne!(x, y, "{a} and {b} share a colour");
+                let d = delta_e(*x, *y);
+                assert!(d >= 15.0, "{a} and {b} look alike (ΔE {d:.1})");
             }
         }
+    }
+
+    /// CIE76 ΔE between two sRGB colours (D65).
+    fn delta_e(a: egui::Color32, b: egui::Color32) -> f64 {
+        let lab = |c: egui::Color32| {
+            let lin = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            let (r, g, b) = (lin(c.r()), lin(c.g()), lin(c.b()));
+            let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+            let f = |t: f64| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
+            (116.0 * f(y) - 16.0, 500.0 * (f(x) - f(y)), 200.0 * (f(y) - f(z)))
+        };
+        let ((l1, a1, b1), (l2, a2, b2)) = (lab(a), lab(b));
+        ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
     }
 }

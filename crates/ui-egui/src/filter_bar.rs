@@ -7,8 +7,10 @@
 //! first column, `equals`), which becomes a filter when it is changed. Apply, or Enter in a value
 //! field, applies the bar (`table.setFilters {apply: true}`). The `<>` toggle switches between the
 //! rows and the raw field without applying. The columns come from the schema; the operators are
-//! the 13 of `dbee_sql::filter::Op`, each with its symbol. While the connection is lost the bar
-//! is disabled.
+//! the 13 of `dbee_sql::filter::Op`, each with its symbol; `is null` and `is not null` take no
+//! value, so choosing one clears the value and hides its field. While changes are staged typing
+//! goes on but Apply waits (its hover says why; Enter asks anyway, and the command says why); while
+//! the connection is lost the bar is disabled.
 //!
 //! Automation ids: `filter-<n>-column` (value: the column; while open its choices
 //! `filter-<n>-column-<column>`), `filter-<n>-op` (value: the operator's id; its choices
@@ -39,6 +41,8 @@ pub(crate) struct Bar<'a> {
     pub raw_mode: bool,
     /// Why the bar cannot be used now, if it cannot.
     pub disabled: Option<&'static str>,
+    /// Why the filters cannot be applied now (staged changes), if they cannot.
+    pub blocked: Option<&'static str>,
 }
 
 /// A command the bar asks for: its id and params.
@@ -96,13 +100,26 @@ fn toggle(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>
     ui.add_space(LEAD_W - 26.0 - ui.spacing().item_spacing.x);
 }
 
-fn apply_button(ui: &mut egui::Ui, tags: &mut Tags, runs: &mut Vec<Run>) {
+fn apply_button(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
     let t = TOKENS;
+    let enabled = bar.blocked.is_none();
     let b = Button::new(RichText::new("Apply").color(t.accent_text)).fill(t.accent).min_size(vec2(64.0, 26.0));
-    let r = ui.add(b).on_hover_text("Apply the filters (Enter)");
+    let r = ui.add_enabled(enabled, b);
+    let r = match bar.blocked {
+        Some(why) => r.on_disabled_hover_text(format!("Apply the filters: not now, {why}")),
+        None => r.on_hover_text("Apply the filters (Enter)"),
+    };
     tags.tag_value("filter-apply", &r, "Apply");
     if r.clicked() {
         runs.push(apply());
+    }
+}
+
+/// The hover text of a field where Enter applies the bar.
+fn enter_hover(bar: &Bar<'_>) -> String {
+    match bar.blocked {
+        Some(why) => format!("Enter applies the filters: not now, {why}"),
+        None => "Enter applies the filters".into(),
     }
 }
 
@@ -123,6 +140,7 @@ fn raw_row(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run
                 .code_editor()
                 .desired_width(width),
         );
+        let r = r.on_hover_text(enter_hover(bar));
         tags.tag_value("filter-raw", &r, text.as_str());
         if r.changed() {
             runs.push(("table.setFilters", json!({ "raw": text, "apply": false })));
@@ -130,7 +148,7 @@ fn raw_row(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run
         if entered(ui, &r) {
             runs.push(apply());
         }
-        apply_button(ui, tags, runs);
+        apply_button(ui, bar, tags, runs);
     });
 }
 
@@ -182,31 +200,38 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             );
             tags.tag_value(&format!("filter-{n}-op"), &combo.response, row.op.id());
             if let Some(o) = op.filter(|o| *o != row.op) {
-                changed = Some(Filter { op: o, ..changed.clone().unwrap_or_else(|| row.clone()) });
+                // An operator without a value drops the one typed.
+                let base = changed.clone().unwrap_or_else(|| row.clone());
+                let value = if o.takes_value() { base.value.clone() } else { String::new() };
+                changed = Some(Filter { op: o, value, ..base });
             }
             // The value: as wide on every row, so the rows line up under the first one's buttons.
             let width = (ui.available_width() - (26.0 + 26.0 + 64.0) - 4.0 * ui.spacing().item_spacing.x).max(80.0);
-            let mut text = row.value.clone();
-            let hint = match row.op {
-                Op::In => "Values, separated by commas",
-                Op::Like | Op::NotLike | Op::ILike | Op::NotILike => "A pattern: % for any text, _ for one character",
-                o if o.takes_value() => "Value",
-                _ => "No value needed",
-            };
-            let r = ui.add_enabled(
-                row.op.takes_value(),
-                TextEdit::singleline(&mut text).id(egui::Id::new(("dbee-filter-value", bar.tab.0, n))).hint_text(hint).desired_width(width),
-            );
-            tags.tag_value(&format!("filter-{n}-value"), &r, text.as_str());
-            if r.changed() {
-                changed = Some(Filter { value: text, ..changed.clone().unwrap_or_else(|| row.clone()) });
+            let mut enter = false;
+            if row.op.takes_value() {
+                let mut text = row.value.clone();
+                let hint = match row.op {
+                    Op::In => "Values, separated by commas",
+                    Op::Like | Op::NotLike | Op::ILike | Op::NotILike => "A pattern: % for any text, _ for one character",
+                    _ => "Value",
+                };
+                let r = ui
+                    .add(TextEdit::singleline(&mut text).id(egui::Id::new(("dbee-filter-value", bar.tab.0, n))).hint_text(hint).desired_width(width));
+                let r = r.on_hover_text(enter_hover(bar));
+                tags.tag_value(&format!("filter-{n}-value"), &r, text.as_str());
+                if r.changed() {
+                    changed = Some(Filter { value: text, ..changed.clone().unwrap_or_else(|| row.clone()) });
+                }
+                enter = entered(ui, &r);
+            } else {
+                // No value to give: the field's room stays, so the rows keep lining up.
+                ui.allocate_exact_size(vec2(width, ROW_H - 6.0), Sense::hover());
             }
-            let enter = entered(ui, &r);
             // Remove, then (first row) add and apply.
             let removed = icon_button(ui, tags, &format!("filter-{n}-remove"), "Remove this filter", false, |p, r| icons::minus(p, r, t.text_muted));
             let added = n == 0 && icon_button(ui, tags, "filter-add", "Add a filter (AND)", false, |p, r| icons::plus(p, r, t.text_muted));
             if n == 0 {
-                apply_button(ui, tags, runs);
+                apply_button(ui, bar, tags, runs);
             }
             if changed.is_some() || removed || added {
                 let mut next = rows.clone();

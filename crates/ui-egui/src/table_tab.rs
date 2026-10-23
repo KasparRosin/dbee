@@ -16,9 +16,9 @@
 use std::collections::HashMap;
 
 use dbee_core::{ResultSet, TableInfo};
-use dbee_engine::cmd::{LOST, edit::APPLYING, table::STAGED};
+use dbee_engine::cmd::table::{STAGED, quick_estimate};
+use dbee_engine::cmd::{LOST, edit::APPLYING};
 use dbee_engine::{Edits, Json, Tab, TabId, TableTab};
-use dbee_sql::filter::Condition;
 use dbee_sql::select::PAGE_SIZE;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, RichText, Stroke, UiBuilder, pos2};
 use serde_json::json;
@@ -30,7 +30,6 @@ use crate::filter_bar::{self, Bar};
 use crate::grid::{Grid, GridAct, GridSource, GridState, Key, Mark};
 use crate::paging::{self, BAR_H, Paging};
 use crate::theme::{RADIUS, TOKENS};
-use crate::tree::row_estimate;
 
 /// The commands that load a page, whose database errors the tab's card shows.
 const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "table.refresh"];
@@ -81,6 +80,9 @@ impl GridSource for Source<'_> {
     fn right_aligned(&self, col: usize) -> bool {
         self.data.right_aligned(col)
     }
+    fn deleted(&self, row: usize) -> bool {
+        self.edits.deleted.contains(&row)
+    }
 }
 
 /// The key of each column of `data` in `info`.
@@ -107,26 +109,30 @@ fn command(act: GridAct, data: Option<&ResultSet>) -> Option<(&'static str, Json
     })
 }
 
-/// What the paging bar shows for `t`.
-fn paging(t: &TableTab, info: Option<&TableInfo>, lost: bool) -> Paging {
-    let unfiltered = matches!(&t.applied, Condition::None);
-    let blocked = if lost {
+/// Why the tab cannot load another page now (paging, sort, applying filters, refresh): a lost
+/// connection or staged changes, as the engine's checks say.
+fn blocked(t: &TableTab, lost: bool) -> Option<&'static str> {
+    if lost {
         Some(LOST)
     } else if t.has_staged_edits() {
         Some(STAGED)
     } else {
         None
-    };
+    }
+}
+
+/// What the paging bar shows for `t`.
+fn paging(t: &TableTab, info: Option<&TableInfo>, lost: bool) -> Paging {
     Paging {
         page: t.shown.page,
         at_end: t.view() == t.shown && !t.has_next,
         total: t.total,
-        estimate: info.filter(|_| unfiltered).and_then(row_estimate),
+        estimate: info.and_then(|i| quick_estimate(i, &t.applied)),
         rows: t.data.as_ref().map_or(0, |d| d.rows.len()),
         complete: t.page_complete,
         loading: t.loading.is_some(),
         edits: t.edits.count(),
-        blocked,
+        blocked: blocked(t, lost),
         count_blocked: lost.then_some(LOST),
         apply_blocked: if lost {
             Some(LOST)
@@ -191,7 +197,15 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             (None, Some(d)) => d.columns.iter().map(|c| (c.name.as_str(), c.type_label.as_str())).collect(),
             (None, None) => Vec::new(),
         };
-        let bar = Bar { tab: id, columns, filters: &tab.filters, raw: &tab.raw, raw_mode: tab.raw_mode, disabled: lost.then_some(LOST) };
+        let bar = Bar {
+            tab: id,
+            columns,
+            filters: &tab.filters,
+            raw: &tab.raw,
+            raw_mode: tab.raw_mode,
+            disabled: lost.then_some(LOST),
+            blocked: blocked(tab, lost),
+        };
         runs.extend(filter_bar::show(&mut top, &bar, tags));
         top.add_space(6.0);
         if let Some(e) = &tab.error {
@@ -209,7 +223,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     keys: &keys,
                     selection: tab.selection,
                     sort,
-                    sortable: !lost,
+                    sortable: true,
+                    blocked: blocked(tab, lost),
                     // As the engine's edit commands allow: rows that can be edited, a connection
                     // that is not lost, no page on its way and no Apply running.
                     editable: read_only.is_none() && !lost && tab.loading.is_none() && tab.applying.is_none(),
@@ -278,6 +293,11 @@ mod tests {
             [Mark::Staged, Mark::Plain, Mark::Failed, Mark::Deleted, Mark::New]
         );
         assert!(s.right_aligned(0) && !s.right_aligned(1));
+        assert!(s.deleted(2) && !s.deleted(1) && !s.deleted(3));
+        // A row to delete whose delete failed shows as failed, and stays struck through.
+        edits.failed = Some((2, None, "still referenced".into()));
+        let s = Source { data: &data, edits: &edits };
+        assert_eq!((s.mark(2, 0), s.deleted(2)), (Mark::Failed, true));
     }
 
     #[test]

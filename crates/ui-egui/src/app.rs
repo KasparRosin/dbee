@@ -15,8 +15,8 @@
 //! [`DbeeApp::run`]. A command the user started (a shortcut, a button, a dialog) goes through
 //! [`DbeeApp::start`], which hands its outcome back to where it came from ([`Origin`]), at once
 //! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; other
-//! errors show as a notice, or under the connection form's buttons; a command that is disabled
-//! right now does nothing. Logs name command ids and error codes only.
+//! errors show as a notice (a command that cannot run now says why), or under the connection
+//! form's buttons. Logs name command ids and error codes only.
 //!
 //! The connection screen is [`crate::connections`]; the workspace (menu bar, tree, tabs, status
 //! bar, quick search) is [`crate::workspace`].
@@ -72,7 +72,8 @@ pub(crate) enum Origin {
     /// A shortcut or a menu: errors show as notices.
     Menu,
     /// A table tab's page load (filters, paging, sort, refresh): as [`Origin::Menu`], except that
-    /// a database error shows only in the tab's own card (`TableTab::error`).
+    /// a database error of the load's job shows only in the tab's own card (`TableTab::error`).
+    /// An error before any job started (a lost connection found at once) still shows as a notice.
     Page,
     /// The connection form while it showed this generation ([`ConnScreen::generation`]):
     /// results and errors show under its buttons.
@@ -200,6 +201,10 @@ impl DbeeApp {
 
     /// Shows `text` as a notice for a few seconds.
     pub(crate) fn notice(&mut self, text: String) {
+        // The same text waiting or showing already (a button clicked twice): once is enough.
+        if self.view.notices.iter().any(|(t, _)| *t == text) {
+            return;
+        }
         if self.view.notices.len() >= MAX_NOTICES {
             self.view.notices.pop_front();
         }
@@ -218,8 +223,8 @@ impl DbeeApp {
     }
 
     /// Runs command `id` because the user asked (a shortcut, a menu): a `needs…` error opens a
-    /// dialog, other errors show as a notice, a job's too once it ends; a disabled command does
-    /// nothing.
+    /// dialog, other errors show as a notice, a job's too once it ends; a command that cannot run
+    /// now says why in a notice (buttons that show the reason themselves are disabled instead).
     pub(crate) fn run_from_ui(&mut self, id: &'static str, params: Json) {
         self.start(id, params, Origin::Menu);
     }
@@ -256,10 +261,11 @@ impl DbeeApp {
             Origin::KeyLine => connections::key_line_done(self, job, result),
             Origin::Form(generation) => connections::form_done(self, command, params, generation, job, result),
             Origin::Menu | Origin::Page => {
+                // The card above the grid shows a page load's job error (`TableTab::error`).
+                let in_card = origin == Origin::Page && job.is_some() && matches!(result, Err(EngineError::Db { .. }));
                 if let Err(e) = result
                     && !dialogs::ask(self, &e, Rerun { command, params, origin })
-                    && !matches!(e, EngineError::Disabled { .. })
-                    && !(origin == Origin::Page && matches!(e, EngineError::Db { .. }))
+                    && !in_card
                 {
                     self.notice(e.to_string());
                 }
@@ -337,7 +343,8 @@ impl DbeeApp {
         self.notices(ui);
     }
 
-    /// The newest notice, bottom right (above the workspace's status bar), for [`NOTICE_SECS`].
+    /// The newest notice, bottom right (above the workspace's status bar and a table tab's paging
+    /// bar), for [`NOTICE_SECS`].
     fn notices(&mut self, ui: &mut egui::Ui) {
         let now = ui.ctx().input(|i| i.time);
         while let Some((_, Some(shown))) = self.view.notices.front() {
@@ -349,7 +356,12 @@ impl DbeeApp {
         let Some((text, shown)) = self.view.notices.front_mut() else { return };
         let since = *shown.get_or_insert(now);
         let t = TOKENS;
-        let lift = if self.session.state().screen == Screen::Workspace { workspace::STATUS_H } else { 0.0 };
+        // Above the status bar, and above a table tab's paging bar (its Apply and Reset).
+        let lift = match (self.session.state().screen, self.session.state().active_tab()) {
+            (Screen::Workspace, Some(dbee_engine::Tab::Table(_))) => workspace::STATUS_H + crate::paging::BAR_H,
+            (Screen::Workspace, _) => workspace::STATUS_H,
+            _ => 0.0,
+        };
         let area = egui::Area::new(egui::Id::new("dbee-notice"))
             .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-16.0, -16.0 - lift))
             .order(egui::Order::Foreground)
@@ -363,7 +375,7 @@ impl DbeeApp {
                 })
             })
             .response;
-        self.tags.tag("notice", &r);
+        self.tags.tag_value("notice", &r, text.as_str());
         let left = Duration::try_from_secs_f64((NOTICE_SECS - (now - since)).clamp(0.05, NOTICE_SECS)).unwrap_or(Duration::from_millis(50));
         ui.ctx().request_repaint_after(left);
     }
@@ -460,6 +472,33 @@ mod tests {
             closed = closes(&h);
         }
         assert!(closed, "a later frame closes the window");
+    }
+
+    #[test]
+    fn a_disabled_action_says_why_and_only_job_errors_of_a_page_load_stay_in_its_card() {
+        let home = temp_home(None, None);
+        let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
+        let mut app = DbeeApp::new(session, None);
+        let shown = |app: &DbeeApp| app.view.notices.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>();
+        // A user's click on something that cannot run now says why.
+        let disabled = EngineError::Disabled { id: "table.sort".into(), why: "apply or reset your changes first".into() };
+        app.outcome("table.sort", json!({}), Origin::Page, None, Err(disabled));
+        assert!(shown(&app).last().is_some_and(|n| n.contains("apply or reset your changes first")), "{:?}", shown(&app));
+        // A page load's job error is the card's; the same error before any job started is not.
+        let lost = || EngineError::Db { code: "connectionLost", message: "connection lost".into(), data: json!({}) };
+        let before = shown(&app).len();
+        app.outcome("table.page", json!({}), Origin::Page, Some(JobId(7)), Err(lost()));
+        assert_eq!(shown(&app).len(), before, "the card shows it");
+        app.outcome("table.page", json!({}), Origin::Page, None, Err(lost()));
+        assert_eq!(shown(&app).last().map(String::as_str), Some("connection lost"));
+        // From a menu or a shortcut, job errors show as before.
+        let failed = EngineError::Db { code: "server", message: "the count failed".into(), data: json!({}) };
+        app.outcome("table.count", json!({}), Origin::Menu, Some(JobId(8)), Err(failed));
+        assert_eq!(shown(&app).last().map(String::as_str), Some("the count failed"));
+        // The same text twice (a button clicked again) shows once.
+        let n = shown(&app).len();
+        app.notice("the count failed".into());
+        assert_eq!(shown(&app).len(), n);
     }
 
     #[test]

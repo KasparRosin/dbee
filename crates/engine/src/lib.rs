@@ -205,6 +205,25 @@ const JOURNAL_DROP: usize = 5_000;
 /// only the last of a run matters for a replay (an editor sends one per keystroke).
 const JOURNAL_COALESCED: &[&str] = &["query.setText"];
 
+/// The filter bar's command, whose typing (`apply: false`) is coalesced too.
+const SET_FILTERS: &str = "table.setFilters";
+
+/// Whether the journal entry for `id` with `params` replaces `last` instead of following it: a
+/// [`JOURNAL_COALESCED`] command after itself, or `table.setFilters` with `apply: false` after the
+/// same with the same keys (typing in the filter bar: the newer sets everything the older did,
+/// and neither loads a page).
+pub(crate) fn journal_coalesces(last: &(String, Json), id: &str, params: &Json) -> bool {
+    if last.0 != id {
+        return false;
+    }
+    if JOURNAL_COALESCED.contains(&id) {
+        return true;
+    }
+    let draft = |p: &Json| p.get("apply") == Some(&Json::Bool(false));
+    let keys = |p: &Json| p.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>());
+    id == SET_FILTERS && draft(&last.1) && draft(params) && keys(&last.1) == keys(params)
+}
+
 /// One window's engine: the state, the command registry, the job runtime and the journal.
 pub struct Session {
     pub(crate) state: State,
@@ -313,7 +332,7 @@ impl Session {
     fn record(&mut self, id: &str, params: &Json) {
         let entry = (id.to_string(), cmd::journal_params(params));
         match self.journal.last_mut() {
-            Some(last) if last.0 == id && JOURNAL_COALESCED.contains(&id) => *last = entry,
+            Some(last) if journal_coalesces(last, id, &entry.1) => *last = entry,
             _ => self.journal.push(entry),
         }
         if self.journal.len() > JOURNAL_MAX {
