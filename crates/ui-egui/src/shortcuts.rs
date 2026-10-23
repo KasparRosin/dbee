@@ -10,9 +10,10 @@
 //! undo, redo) are left to it; the others always fire. The keyboard's Ctrl+C reaches egui as a
 //! copy event, not a key, so that is matched too, with Shift held for Ctrl+Shift+C.
 //!
-//! An open cell editor ([`crate::editors`]) counts as a focused text field, and its Enter keys
-//! ([`EDITOR_KEYS`]) are its own: the editor takes Ctrl+Enter as commit before this step, and
-//! Ctrl+Shift+Enter does nothing there. Any other shortcut commits the editor before it runs, so
+//! An open cell editor ([`crate::editors`]) of text counts as a focused text field; the boolean
+//! choice has no text, so the text keys run there (after committing it). Its Enter keys
+//! ([`EDITOR_KEYS`]) are the editor's own: it takes Ctrl+Enter as commit before this step, and
+//! Ctrl+Shift+Enter does nothing there. Any shortcut that runs commits the editor first, so
 //! Ctrl+S writes the value being typed.
 
 use std::sync::LazyLock;
@@ -52,9 +53,10 @@ pub fn fires(keys: &str, text_focused: bool) -> bool {
     !(text_focused && TEXT_KEYS.contains(&keys))
 }
 
-/// [`fires`], with whether a cell editor is open (which counts as a focused text field).
-pub fn fires_while(keys: &str, text_focused: bool, editing: bool) -> bool {
-    fires(keys, text_focused || editing) && !(editing && EDITOR_KEYS.contains(&keys))
+/// [`fires`], with whether a cell editor is open, and whether it edits text (which counts as a
+/// focused text field).
+pub fn fires_while(keys: &str, text_focused: bool, editing: bool, editing_text: bool) -> bool {
+    fires(keys, text_focused || editing_text) && !(editing && EDITOR_KEYS.contains(&keys))
 }
 
 /// `Ctrl+Shift+Enter` → the modifiers and the key; `None` for text that names no key.
@@ -94,12 +96,13 @@ pub(crate) fn take(events: &mut Vec<Event>, pattern: Modifiers, key: Key, held: 
 /// Runs the commands of this frame's shortcut presses (step 4 of the frame).
 pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context) {
     let text_focused = ctx.text_edit_focused();
-    let editing = editors::is_open(app);
+    let editor = editors::open_kind(app);
+    let (editing, editing_text) = (editor.is_some(), editor.is_some_and(|k| k != editors::Kind::Bool));
     let mut fired: Vec<(&'static str, Json)> = Vec::new();
     ctx.input_mut(|i| {
         let held = i.modifiers;
         for (keys, id, params) in SHORTCUTS.iter() {
-            if !fires_while(keys, text_focused, editing) {
+            if !fires_while(keys, text_focused, editing, editing_text) {
                 continue;
             }
             let Some((pattern, key)) = parse(keys) else { continue };
@@ -165,11 +168,18 @@ mod tests {
     #[test]
     fn an_open_cell_editor_keeps_enter_and_the_text_keys() {
         for keys in ["Ctrl+Enter", "Ctrl+Shift+Enter", "Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+A", "Ctrl+C"] {
-            assert!(!fires_while(keys, false, true), "{keys} is the editor's");
-            assert!(fires_while(keys, false, false), "{keys} fires with no editor");
+            assert!(!fires_while(keys, false, true, true), "{keys} is the text editor's");
+            assert!(fires_while(keys, false, false, false), "{keys} fires with no editor");
         }
         for keys in ["Ctrl+S", "Ctrl+P", "Ctrl+T", "Ctrl+W"] {
-            assert!(fires_while(keys, true, true), "{keys} still fires (after committing the editor)");
+            assert!(fires_while(keys, true, true, true), "{keys} still fires (after committing the editor)");
+        }
+        // The boolean choice has no text: the text keys run (after committing it), Enter stays.
+        for keys in ["Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+C", "Ctrl+A"] {
+            assert!(fires_while(keys, false, true, false), "{keys} runs over the boolean choice");
+        }
+        for keys in ["Ctrl+Enter", "Ctrl+Shift+Enter"] {
+            assert!(!fires_while(keys, false, true, false), "{keys} is the choice's");
         }
     }
 

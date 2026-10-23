@@ -20,10 +20,10 @@
 //! Set as NULL, Copy, Copy with header, Copy as CSV / JSON / Markdown, Delete row(s).
 //!
 //! **Editing.** A double-click (or a triple one) asks to edit the cell ([`GridAct::Edit`]); the
-//! caller decides
-//! whether it can. While a cell is being edited ([`Grid::editing`]) the grid keeps where that
-//! cell was drawn and which part of the rows was in view ([`GridState::editing_rect`]), for the
-//! editor to sit over it ([`crate::editors`]).
+//! caller decides whether it can. While a cell is being edited ([`Grid::editing`]), the grid
+//! keeps where that cell was drawn and which part of the rows was in view
+//! ([`GridState::editing_rect`]), for the editor to sit over it ([`crate::editors`]). Every
+//! column of a row in view is laid out, so the cell can be drawn scrolled away to the side.
 //!
 //! **Marks.** A staged cell, a new row, a row to delete and the row whose change the last Apply
 //! failed on each have their own colour ([`crate::theme::Tokens`]); a row to delete is also

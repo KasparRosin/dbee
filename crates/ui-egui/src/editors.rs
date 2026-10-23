@@ -8,8 +8,9 @@
 //! (`cmd::edit::can_edit`: not read-only, a table with a row key, a connection that is not lost,
 //! no page or Apply on its way); when it cannot, no editor opens and a notice says why. Two more:
 //! a row marked for deletion takes no edits (as its menu's Set as NULL is disabled), and a value
-//! longer than [`MAX_INLINE_BYTES`] does not open inline (a notice says so); nor does a paste
-//! longer than that go in.
+//! longer than [`MAX_INLINE_BYTES`] does not open inline (a notice says so). Nor does a paste go
+//! in that would make the value longer than that, counting the selection it replaces
+//! ([`paste_fits`]); typing is not limited.
 //!
 //! **The cap.** egui lays out a paragraph (text between line breaks) whole on every change, at
 //! about 0.4 µs a byte in a release build, so a keystroke in one long line or one long JSON
@@ -29,15 +30,19 @@
 //! global Ctrl+Enter does not run too, and act once the editor has drawn ([`after_draw`]): text
 //! typed earlier in the same frame is in the value, and keys typed after one wait for the next
 //! frame (`DbeeApp::feed_input`). Ctrl+Z and Ctrl+Shift+Z are the editor's own undo and redo (see
-//! [`crate::shortcuts`]); any other shortcut commits the editor before it runs, so Ctrl+S writes
-//! the value being typed.
+//! [`crate::shortcuts`]) while text is edited; the boolean choice has no text, so there they and
+//! Ctrl+C commit it and run. Any other shortcut commits the editor before it runs, so Ctrl+S
+//! writes the value being typed.
 //!
 //! **Committing** ([`CellEditor::command`]): an unchanged value (the text it opened with, or the
 //! same choice) sends nothing; empty text sends `cell.clear` (`''` for string types, NULL for
 //! the others); other text sends `cell.edit`; true and false send `cell.edit`, NULL
 //! `cell.setNull`. A press anywhere outside the editor commits it before anything else sees the
 //! press, so clicking another cell commits and selects that cell. An editor whose tab, page or
-//! cell is gone, or that can no longer stage, closes without committing.
+//! cell is gone, or that can no longer stage, closes without committing; so does one whose tab's
+//! staged edits changed under it (`Edits::revision`: an agent's `row.delete` can move the row
+//! it points at), with a notice that the edit was discarded. When its cell leaves the rows and
+//! columns in view (scrolled away either way), it commits, as a click elsewhere would.
 //!
 //! Automation id: `cell-editor` (value `{text, multiline}` for text, the text cut to
 //! [`TAG_CHARS`] characters; `{choice}` for a boolean, `true`, `false` or `null`), and the
@@ -254,8 +259,10 @@ pub struct CellEditor {
     /// choice now.
     opened_choice: Option<Choice>,
     pub choice: Choice,
-    /// The page it opened on: another page closes it.
+    /// The page it opened on, and the tab's staged edits then (`Edits::revision`): another page,
+    /// or other edits, close it.
     page: Weak<ResultSet>,
+    revision: u64,
     /// Where it was drawn in the last frame that drew it: a press outside commits it.
     rect: Option<Rect>,
     /// Not drawn yet: it takes the keyboard and selects its text when first drawn.
@@ -280,7 +287,7 @@ impl std::fmt::Debug for CellEditor {
 impl CellEditor {
     /// An editor of `kind` on cell `(row, col)` of tab `tab`, holding `value` (`None`: NULL), on
     /// `page`.
-    pub fn new(tab: TabId, (row, col): (usize, usize), kind: Kind, value: Option<&str>, page: &Arc<ResultSet>) -> CellEditor {
+    pub fn new(tab: TabId, (row, col): (usize, usize), kind: Kind, value: Option<&str>, page: &Arc<ResultSet>, revision: u64) -> CellEditor {
         let text = value.unwrap_or_default().to_string();
         let opened_choice = Choice::of(value);
         CellEditor {
@@ -293,6 +300,7 @@ impl CellEditor {
             opened_choice,
             choice: opened_choice.unwrap_or(Choice::True),
             page: Arc::downgrade(page),
+            revision,
             rect: None,
             fresh: true,
             pending: None,
@@ -365,15 +373,21 @@ pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>
         return Err(format!("This value is too large to edit inline ({}; at most {}).", size_text(v.len()), size_text(MAX_INLINE_BYTES)));
     }
     let info = s.state().connected.as_ref().and_then(|c| c.catalog.table(&t.table)).and_then(|i| i.column(data.column_name(col)));
-    Ok(Some(CellEditor::new(t.id, (row, col), Kind::of(info), value, data)))
+    Ok(Some(CellEditor::new(t.id, (row, col), Kind::of(info), value, data, t.edits.revision())))
 }
 
 /// Opens an editor on cell `(row, col)` of the active tab, or says why it cannot.
 pub(crate) fn open(app: &mut DbeeApp, ctx: &egui::Context, row: usize, col: usize) {
+    // One open already is committed first (and then the new one sees its edit).
+    commit(app, ctx);
     match opening(&app.session, row, col) {
         Ok(Some(editor)) => {
-            take(app, ctx);
             app.view.work.editor = Some(editor);
+            // A selection scrolled away: bring its cell into view, where the editor shows.
+            let id = format!("{CELL}{row}-{col}");
+            if app.tags.hidden(&id) {
+                app.tags.scroll_to(&id);
+            }
             ctx.request_repaint();
         }
         Ok(None) => {}
@@ -381,25 +395,41 @@ pub(crate) fn open(app: &mut DbeeApp, ctx: &egui::Context, row: usize, col: usiz
     }
 }
 
-/// The open editor still fits the session: its tab is the active one and shows the same page,
-/// its cell is there and not marked for deletion, and the tab takes edits.
-fn still_fits(app: &DbeeApp) -> bool {
-    let Some(ed) = &app.view.work.editor else { return false };
+/// Why an open editor no longer fits the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unfit {
+    /// Its tab is not the active one, shows another page, lost its cell or takes no edits.
+    Gone,
+    /// The tab's staged edits changed under it: the row it points at may be another one.
+    EditsChanged,
+}
+
+/// Whether the open editor still fits the session: its tab is the active one and shows the same
+/// page with the same staged edits, its cell is there and not marked for deletion, and the tab
+/// takes edits.
+fn still_fits(app: &DbeeApp) -> Result<(), Unfit> {
+    let Some(ed) = &app.view.work.editor else { return Err(Unfit::Gone) };
     let s = &app.session;
     if s.state().screen != Screen::Workspace || can_edit(s).is_err() {
-        return false;
+        return Err(Unfit::Gone);
     }
-    match s.state().active_tab() {
-        Some(Tab::Table(t)) if t.id == ed.tab => match &t.data {
-            Some(data) => {
-                std::ptr::eq(ed.page.as_ptr(), Arc::as_ptr(data))
-                    && ed.row < t.edits.grid_rows(data)
-                    && ed.col < data.columns()
-                    && !t.edits.deleted.contains(&ed.row)
-            }
-            None => false,
-        },
-        _ => false,
+    let Some(Tab::Table(t)) = s.state().active_tab() else { return Err(Unfit::Gone) };
+    let Some(data) = t.data.as_ref().filter(|d| t.id == ed.tab && std::ptr::eq(ed.page.as_ptr(), Arc::as_ptr(d))) else {
+        return Err(Unfit::Gone);
+    };
+    if t.edits.revision() != ed.revision {
+        return Err(Unfit::EditsChanged);
+    }
+    if ed.row < t.edits.grid_rows(data) && ed.col < data.columns() && !t.edits.deleted.contains(&ed.row) { Ok(()) } else { Err(Unfit::Gone) }
+}
+
+/// The notice when an editor closes without committing because of `why`: always when its
+/// edits changed under it, else only when it held a change.
+fn discarded(ed: &CellEditor, why: Unfit) -> Option<&'static str> {
+    match why {
+        Unfit::EditsChanged => Some("The cell edit was discarded: the staged changes changed while it was open."),
+        Unfit::Gone if ed.command().is_some() => Some("The cell edit was discarded: its cell can no longer be edited here."),
+        Unfit::Gone => None,
     }
 }
 
@@ -414,9 +444,9 @@ fn take(app: &mut DbeeApp, ctx: &egui::Context) -> Option<CellEditor> {
     Some(ed)
 }
 
-/// An editor is open: it has the keyboard.
-pub(crate) fn is_open(app: &DbeeApp) -> bool {
-    app.view.work.editor.is_some()
+/// The open editor's kind, if one is open: it has the keyboard.
+pub(crate) fn open_kind(app: &DbeeApp) -> Option<Kind> {
+    app.view.work.editor.as_ref().map(|e| e.kind)
 }
 
 /// Commits the open editor, if any, and closes it.
@@ -441,8 +471,12 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
         open_on_enter(app, ctx);
         return;
     }
-    if !still_fits(app) {
-        take(app, ctx);
+    if let Err(why) = still_fits(app) {
+        if let Some(ed) = take(app, ctx)
+            && let Some(text) = discarded(&ed, why)
+        {
+            app.notice(text.to_string());
+        }
         return;
     }
     if app.view.dialog.is_some() || app.view.work.quick.open {
@@ -456,28 +490,63 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
         commit(app, ctx);
         return;
     }
-    let Some(kind) = app.view.work.editor.as_ref().map(|e| e.kind) else { return };
-    let (key, wait, too_large) = ctx.input_mut(|i| {
+    let Some(ed) = app.view.work.editor.as_ref() else { return };
+    let kind = ed.kind;
+    // The bytes the next paste replaces: the selection (all of the text until it is drawn).
+    let selected = if ed.fresh {
+        ed.text.len()
+    } else {
+        let range = TextEditState::load(ctx, text_id()).and_then(|s| s.cursor.char_range()).map(|r| r.as_sorted_char_range());
+        range.map_or(0, |r| selected_bytes(&ed.text, r.start.0..r.end.0))
+    };
+    let length = ed.text.len();
+    let (key, wait, dropped) = ctx.input_mut(|i| {
         let (key, wait) = split_at_key(&mut i.events, kind);
-        (key, wait, take_large_pastes(&mut i.events))
+        (key, wait, take_large_pastes(&mut i.events, length, selected))
     });
     if let Some(ed) = app.view.work.editor.as_mut() {
         ed.pending = key;
     }
     app.carry.extend(wait);
-    if let Some(n) = too_large {
-        app.notice(format!("The pasted text is too large to edit inline ({}; at most {}).", size_text(n), size_text(MAX_INLINE_BYTES)));
+    if let Some(n) = dropped {
+        app.notice(format!(
+            "The pasted text is too large to edit inline: the value would be {} (at most {}).",
+            size_text(n),
+            size_text(MAX_INLINE_BYTES)
+        ));
     }
 }
 
-/// Takes out of `events` each paste longer than [`MAX_INLINE_BYTES`], which would make every
-/// keystroke after it slow; returns the length of the longest.
-pub fn take_large_pastes(events: &mut Vec<Event>) -> Option<usize> {
+/// The bytes of `text` the characters `chars` (a range of character indices) take.
+pub fn selected_bytes(text: &str, chars: std::ops::Range<usize>) -> usize {
+    if chars.start >= chars.end {
+        return 0;
+    }
+    let byte = |c: usize| text.char_indices().nth(c).map_or(text.len(), |(b, _)| b);
+    byte(chars.end).saturating_sub(byte(chars.start))
+}
+
+/// A paste of `paste` bytes over `selected` of a value of `length` bytes fits the cap.
+pub fn paste_fits(length: usize, selected: usize, paste: usize) -> bool {
+    length.saturating_sub(selected).saturating_add(paste) <= MAX_INLINE_BYTES
+}
+
+/// Takes out of `events` each paste that would make the value (`length` bytes, `selected` of
+/// them selected) longer than [`MAX_INLINE_BYTES`], which would make every keystroke after it
+/// slow; returns the longest value one would have made. A paste that goes in replaces the
+/// selection, so the ones after it count from the value it leaves.
+pub fn take_large_pastes(events: &mut Vec<Event>, length: usize, selected: usize) -> Option<usize> {
+    let (mut length, mut selected) = (length, selected);
     let mut longest = None;
     events.retain(|e| match e {
-        Event::Paste(text) if text.len() > MAX_INLINE_BYTES => {
-            longest = longest.max(Some(text.len()));
+        Event::Paste(text) if !paste_fits(length, selected, text.len()) => {
+            longest = longest.max(Some(length.saturating_sub(selected).saturating_add(text.len())));
             false
+        }
+        Event::Paste(text) => {
+            length = length.saturating_sub(selected).saturating_add(text.len());
+            selected = 0;
+            true
         }
         _ => true,
     });
@@ -581,9 +650,19 @@ pub fn place(at: egui::Pos2, size: egui::Vec2, view: Rect) -> egui::Pos2 {
     pos2(x, y)
 }
 
-/// Its cell is out of view this frame: it is not drawn, and a press anywhere commits it.
-pub(crate) fn hide(ed: &mut CellEditor) {
+/// Whether `cell` still shows among the rows and columns in view, `view`.
+pub fn in_view(cell: Rect, view: Rect) -> bool {
+    let both = cell.intersect(view);
+    both.width() > 0.0 && both.height() > 0.0
+}
+
+/// Its cell left the rows and columns in view: it is not drawn, and commits once this frame is
+/// drawn, as a click elsewhere would. One not drawn yet waits for its cell to scroll in.
+pub(crate) fn left_view(ed: &mut CellEditor) {
     ed.rect = None;
+    if !ed.fresh && ed.pending.is_none() {
+        ed.pending = Some(EditorKey::Commit);
+    }
 }
 
 /// The text editor, at least `size`.
@@ -675,7 +754,7 @@ mod tests {
     }
 
     fn editor(kind: Kind, value: Option<&str>) -> CellEditor {
-        CellEditor::new(TabId(1), (2, 3), kind, value, &page())
+        CellEditor::new(TabId(1), (2, 3), kind, value, &page(), 0)
     }
 
     #[test]
@@ -778,12 +857,34 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_past_the_cap_does_not_go_in() {
-        let big = "x".repeat(MAX_INLINE_BYTES + 1);
-        let mut events = vec![Event::Paste("small".into()), Event::Paste(big), Event::Text("a".into())];
-        assert_eq!(take_large_pastes(&mut events), Some(MAX_INLINE_BYTES + 1));
-        assert_eq!(events, vec![Event::Paste("small".into()), Event::Text("a".into())]);
-        assert_eq!(take_large_pastes(&mut events), None);
+    fn a_paste_counts_what_it_replaces_and_what_came_before() {
+        let cap = MAX_INLINE_BYTES;
+        assert!(paste_fits(cap - 10, 0, 10) && !paste_fits(cap - 10, 0, 11));
+        assert!(paste_fits(cap, cap, cap), "a paste over everything replaces it");
+        assert!(paste_fits(cap, 5, 5) && !paste_fits(cap, 5, 6));
+        // Two pastes into a half-full value: the first fits, the second then does not.
+        let half = cap / 2;
+        let mut events = vec![Event::Paste("a".repeat(half - 100)), Event::Text("x".into()), Event::Paste("b".repeat(200))];
+        assert_eq!(take_large_pastes(&mut events, half, 0), Some(cap + 100));
+        assert_eq!(events.len(), 2, "the second paste went");
+        // The selection the first paste replaces counts once.
+        let mut events = vec![Event::Paste("c".repeat(cap)), Event::Paste("d".into())];
+        assert_eq!(take_large_pastes(&mut events, cap, cap), Some(cap + 1));
+        assert_eq!(events, vec![Event::Paste("c".repeat(cap))]);
+        // Bytes, not characters: `é` is two.
+        assert_eq!(selected_bytes("aébc", 1..3), 3);
+        assert_eq!((selected_bytes("abc", 2..2), selected_bytes("abc", 1..9), selected_bytes("", 0..1)), (0, 2, 0));
+    }
+
+    #[test]
+    fn a_cell_is_in_view_while_any_of_it_shows() {
+        let view = Rect::from_min_max(pos2(100.0, 50.0), pos2(500.0, 400.0));
+        let cell = |x: f32, y: f32| Rect::from_min_size(pos2(x, y), vec2(80.0, 24.0));
+        assert!(in_view(cell(200.0, 100.0), view));
+        assert!(in_view(cell(40.0, 100.0), view), "partly, at the left");
+        assert!(!in_view(cell(10.0, 100.0), view), "scrolled away to the left");
+        assert!(!in_view(cell(500.0, 100.0), view), "touching is not showing");
+        assert!(!in_view(cell(200.0, 26.0), view), "under the header");
     }
 
     #[test]

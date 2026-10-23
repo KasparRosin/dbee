@@ -164,6 +164,34 @@ impl Ui {
         self.ok("ui.text", json!({ "text": text }));
     }
 
+    /// A paste from the clipboard, as the keyboard's Ctrl+V reaches egui (the control channel
+    /// has no paste), then a frame more for the frame that took it to be listed.
+    fn paste(&mut self, text: &str) {
+        self.harness.input_mut().events.push(egui::Event::Paste(text.to_string()));
+        self.frame();
+        self.frame();
+    }
+
+    /// Scrolls the grid by `delta` points with the wheel over the centre of cell `over`.
+    fn wheel(&mut self, over: &str, delta: egui::Vec2) {
+        let tag = self.tag(over).unwrap_or_else(|| panic!("no widget `{over}`"));
+        let r = &tag["rect"];
+        let f = |i: usize| r[i].as_f64().unwrap() as f32;
+        let at = egui::pos2(f(0) + f(2) / 2.0, f(1) + f(3) / 2.0);
+        self.harness.input_mut().events.push(egui::Event::PointerMoved(at));
+        self.frame();
+        self.harness.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        // egui eases the scroll over a few frames.
+        for _ in 0..12 {
+            self.frame();
+        }
+    }
+
     /// Runs frames until `done` holds.
     fn until(&mut self, what: &str, mut done: impl FnMut(&mut Ui) -> bool) {
         let start = Instant::now();
@@ -234,11 +262,16 @@ fn q(db: &TestDb, sql: &str) -> String {
     dbee_testkit::psql(pg14_server(db), sql).unwrap().trim().to_owned()
 }
 
-/// A window with the scratch table `t` open.
+/// A window with the scratch table `t` open (the orders table: 3 rows).
 fn opened(db: &TestDb, t: &Scratch) -> Ui {
+    opened_rows(db, t, 3)
+}
+
+/// A window with the scratch table `t` open, once its `rows` rows show.
+fn opened_rows(db: &TestDb, t: &Scratch, rows: u64) -> Ui {
     let mut ui = connected(db);
     ui.open("scratch", &t.0);
-    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.until("the page", |ui| ui.table()["rows"] == rows);
     ui
 }
 
@@ -504,6 +537,163 @@ fn an_editor_opens_over_its_own_cell_after_a_wider_one() {
 }
 
 #[test]
+fn an_editor_scrolled_out_of_view_sideways_commits() {
+    let db = dbee_testkit::require_testdb!();
+    // Ten wide columns: far wider than the window.
+    let name = unique("t_edit_wide");
+    let columns: Vec<String> = (1..=10).map(|c| format!("c{c} text")).collect();
+    let values: Vec<String> = (1..=10).map(|c| format!("repeat('{c}', 60)")).collect();
+    dbee_testkit::psql(
+        pg14_server(db),
+        &format!(
+            "CREATE TABLE scratch.{name} (id int PRIMARY KEY, {}); INSERT INTO scratch.{name} SELECT g, {} FROM generate_series(1, 5) AS g;",
+            columns.join(", "),
+            values.join(", ")
+        ),
+    )
+    .unwrap();
+    let t = Scratch(name);
+    let mut ui = opened_rows(db, &t, 5);
+    ui.double_click("grid-cell-0-1");
+    ui.text("abc");
+    assert_eq!(ui.editor_text(), "abc");
+    // Sideways, until c1 is out of view to the left.
+    ui.wheel("grid-cell-3-3", egui::vec2(-2000.0, 0.0));
+    let cell = ui.tag("grid-cell-0-1").unwrap();
+    assert_eq!(cell["visible"], false, "c1 is out of view: {cell}");
+    assert!(ui.editor().is_none(), "the editor left with its cell");
+    assert_eq!(ui.staged(0, 1), Some(json!("abc")), "and committed into c1");
+    assert_eq!(ui.edits()["count"], 1, "and nowhere else");
+}
+
+#[test]
+fn a_paste_that_would_pass_the_cap_is_dropped_and_says_so() {
+    let db = dbee_testkit::require_testdb!();
+    let cap = dbee_ui_egui::editors::MAX_INLINE_BYTES;
+    let name = unique("t_edit_paste");
+    dbee_testkit::psql(
+        pg14_server(db),
+        &format!("CREATE TABLE scratch.{name} (id int PRIMARY KEY, v text); INSERT INTO scratch.{name} VALUES (1, repeat('p', 20000));"),
+    )
+    .unwrap();
+    let t = Scratch(name);
+    let mut ui = opened_rows(db, &t, 1);
+    ui.double_click("grid-cell-0-1");
+    // At the end of the 20,000 bytes: 16,000 more would pass the cap, 8,000 would not.
+    ui.ctrl("End");
+    assert!((20_000 + 8_000..20_000 + 16_000).contains(&cap), "the cap lies between the two");
+    ui.paste(&"a".repeat(16_000));
+    let notice = ui.notice();
+    assert!(notice.contains("too large to edit inline"), "{notice}");
+    ui.paste(&"b".repeat(8_000));
+    ui.ctrl("Enter");
+    let staged = ui.staged(0, 1).and_then(|v| v.as_str().map(str::len));
+    assert_eq!(staged, Some(28_000), "the first paste was dropped, the second went in");
+    // What a paste replaces counts too: over all 28,000 bytes, 30,000 fit.
+    ui.double_click("grid-cell-0-1");
+    ui.paste(&"c".repeat(30_000));
+    ui.ctrl("Enter");
+    let staged = ui.staged(0, 1).and_then(|v| v.as_str().map(str::len));
+    assert_eq!(staged, Some(30_000));
+}
+
+#[test]
+fn edits_changing_under_an_open_editor_discard_it() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened(db, &t);
+    for _ in 0..3 {
+        ui.execute("row.add", json!({}));
+    }
+    ui.double_click("grid-cell-4-1");
+    ui.text("Zed");
+    // An agent deletes the new row before it: the editor's row would now be another one.
+    ui.execute("row.delete", json!({ "rows": [3] }));
+    ui.frame();
+    assert!(ui.editor().is_none(), "the editor closed");
+    let notice = ui.notice();
+    assert!(notice.contains("discarded"), "{notice}");
+    let edits = ui.edits();
+    assert_eq!(edits["newRows"], json!([{ "row": 3, "values": [] }, { "row": 4, "values": [] }]), "nothing was written anywhere: {edits}");
+}
+
+#[test]
+fn the_boolean_choice_lets_undo_and_redo_through_after_committing() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened(db, &t);
+    ui.double_click("grid-cell-0-1");
+    ui.text("Ann");
+    ui.ctrl("Enter");
+    assert_eq!(ui.edits()["count"], 1);
+    // With the choice open there is no text to undo in: Ctrl+Z commits it and undoes.
+    ui.double_click("grid-cell-1-4");
+    assert!(ui.editor().is_some());
+    ui.ctrl("Z");
+    assert!(ui.editor().is_none(), "the choice was committed");
+    assert_eq!(ui.edits()["count"], 0, "and the staged name undone");
+    ui.double_click("grid-cell-1-4");
+    ui.ctrl_shift("Z");
+    assert!(ui.editor().is_none());
+    assert_eq!(ui.staged(0, 1), Some(json!("Ann")), "Ctrl+Shift+Z redid it");
+}
+
+#[test]
+fn ctrl_w_commits_the_editor_before_closing() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened(db, &t);
+    ui.double_click("grid-cell-0-1");
+    ui.text("Ann");
+    ui.ctrl("W");
+    assert!(ui.editor().is_none());
+    assert_eq!(ui.staged(0, 1), Some(json!("Ann")), "the typed value was staged first");
+    let dialog = ui.ok("ui.inspect", json!({}))["dialog"].clone();
+    assert!(dialog.is_string(), "closing a tab with staged changes asks: {dialog}");
+    ui.click("dialog-cancel");
+}
+
+#[test]
+fn a_paging_button_commits_the_editor_first() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened(db, &t);
+    ui.double_click("grid-cell-0-1");
+    ui.text("Ann");
+    ui.click("page-count");
+    assert!(ui.editor().is_none());
+    assert_eq!(ui.staged(0, 1), Some(json!("Ann")));
+    ui.until("the count", |ui| ui.table()["total"] == json!({ "exact": 3 }));
+}
+
+#[test]
+fn a_row_marked_for_deletion_opens_no_editor() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened(db, &t);
+    ui.ok("ui.click", json!({ "id": "grid-cell-1-0", "button": "right" }));
+    ui.click("grid-menu-delete");
+    assert_eq!(ui.edits()["deleted"], json!([1]));
+    ui.double_click("grid-cell-1-1");
+    assert!(ui.editor().is_none());
+    let notice = ui.notice();
+    assert!(notice.contains("marked for deletion"), "{notice}");
+}
+
+#[test]
+fn shift_tab_commits_and_moves_left() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened(db, &t);
+    ui.double_click("grid-cell-1-0");
+    ui.text("20");
+    ui.ok("ui.key", json!({ "key": "Tab", "shift": true }));
+    assert!(ui.editor().is_none());
+    assert_eq!(ui.staged(1, 0), Some(json!("20")));
+    assert_eq!(ui.selection(), json!({ "anchor": [0, 5], "focus": [0, 5] }), "to the end of the row before");
+}
+
+#[test]
 fn booleans_choose_true_false_or_null() {
     let db = dbee_testkit::require_testdb!();
     let t = orders(db);
@@ -578,8 +768,10 @@ fn ctrl_z_and_ctrl_shift_z_undo_and_redo_outside_the_editor() {
     // In the editor they are the editor's own.
     ui.double_click("grid-cell-1-2");
     ui.text("3");
+    assert_eq!(ui.editor_text(), "3");
     ui.ctrl("Z");
     assert!(ui.editor().is_some(), "the editor is still open");
+    assert_eq!(ui.editor_text(), "20.00", "Ctrl+Z undid the typing in the editor");
     assert_eq!(ui.edits()["count"], 1, "the staged change stays");
     ui.key("Escape");
 }

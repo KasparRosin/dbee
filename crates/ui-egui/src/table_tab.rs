@@ -284,10 +284,12 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     runs.extend(command(act, Some(data)));
                 }
                 if let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id) {
-                    match state.editing_rect() {
+                    // egui lays out every column of a row in view, also those scrolled away to the
+                    // side: whether the cell shows is whether it meets the rows in view.
+                    match state.editing_rect().filter(|(cell, rows)| editors::in_view(*cell, *rows)) {
                         Some((cell, rows)) => editors::show(top.ctx(), editor, cell, rows, tags),
-                        // Scrolled out of view: it stays open, and shows again with its cell.
-                        None => editors::hide(editor),
+                        // Scrolled out of view, either way: it commits.
+                        None => editors::left_view(editor),
                     }
                 }
             }
