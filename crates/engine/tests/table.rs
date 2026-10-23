@@ -531,6 +531,29 @@ fn twenty_megabyte_cell_loads() {
 }
 
 #[test]
+fn a_page_cut_by_the_byte_cap_says_so() {
+    let _db = require_testdb!();
+    let t = unique("t_page_cap");
+    let _drop = Scratch(vec![t.clone()]);
+    // 14 values of 20,000,000 characters: 280 MB, past a page's 256 MiB of cell text.
+    dbee_testkit::psql(
+        pg14(),
+        &format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, v text); INSERT INTO scratch.{t} SELECT g, repeat('x', 20000000) FROM generate_series(1, 14) AS g;"),
+    )
+    .unwrap();
+    let mut s = connected();
+    // 13 values fit (260 MB); the 14th is read but not kept.
+    assert_eq!(open_table(&mut s, "scratch", &t)["rows"], 13);
+    assert_eq!(s.inspect()["table"]["pageComplete"], false, "the page was cut");
+    let d = run(&mut s, "table.read", json!({ "limit": 0 }));
+    assert_eq!((d["pageComplete"].as_bool(), d["hasNext"].as_bool()), (Some(false), Some(false)));
+    // A page under the cap is whole, and so is a full page followed by more rows.
+    open_table(&mut s, "shop", "orders");
+    assert_eq!(s.inspect()["table"]["pageComplete"], true);
+    assert_eq!(run(&mut s, "table.read", json!({ "limit": 0 }))["pageComplete"], true);
+}
+
+#[test]
 fn cancel_stops_a_slow_page() {
     let _db = require_testdb!();
     let mut s = connected();

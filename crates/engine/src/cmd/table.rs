@@ -11,7 +11,9 @@
 //! (SQL that cannot be built, like an unknown column or a `;` in the raw condition, is
 //! `BadParams` and changes nothing), then sets the tab's `applied`, `sort` and `page` to what it
 //! asked for, bumps the tab's `seq` and starts the job. The page statement asks for 101 rows:
-//! 100 are kept, and the 101st sets `has_next`. Columns are typed from the catalog. A load that
+//! 100 are kept, and the 101st sets `has_next`. When the page's cell text passes the byte cap
+//! (`PAGE_LIMITS`, 256 MiB) fewer rows are kept and `page_complete` says so (`pageComplete` in
+//! `table.read` and `inspect()`). Columns are typed from the catalog. A load that
 //! fails sets `error` (the server's text) and puts `applied`, `sort` and `page` back to what the
 //! rows still shown were loaded with; the job's result is the error. `table.page {to: "last"}`
 //! counts first, in the same job. `table.read` and `inspect()` give the rows with the page they
@@ -296,8 +298,8 @@ fn last_page(rows: u64) -> u64 {
     rows.saturating_sub(1) / PAGE_SIZE
 }
 
-/// Why the tab's rows cannot be edited, or `None` when they can.
-pub(crate) fn not_editable(s: &Session, t: &TableTab) -> Option<&'static str> {
+/// Why the tab's rows cannot be edited, or `None` when they can (`notEditableReason`).
+pub fn not_editable(s: &Session, t: &TableTab) -> Option<&'static str> {
     let Some(c) = s.state.connected.as_ref() else { return Some(NOT_CONNECTED) };
     if c.info.read_only || c.config.read_only {
         return Some("read-only connection");
@@ -329,6 +331,7 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "requestedPage": t.page,
         "rows": t.data.as_ref().map_or(0, |d| d.rows.len()),
         "hasNext": t.has_next,
+        "pageComplete": t.page_complete,
         "total": t.total,
         "loading": t.loading,
         "counting": t.counting,
@@ -432,17 +435,19 @@ async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool
     Loaded { counted, page: rows.map(|rs| (page, rs)) }
 }
 
-/// The page as the tab keeps it: at most 100 rows, the catalog's columns. `true` when more rows
-/// follow.
-fn page_data(mut rs: ResultSet, columns: Vec<Column>) -> (ResultSet, bool) {
+/// The page as the tab keeps it: at most 100 rows, the catalog's columns. Then whether more rows
+/// follow, and whether every row of the page was kept (the byte cap can stop short of it; the
+/// 101st row only says that more follow, so missing it is no loss).
+fn page_data(mut rs: ResultSet, columns: Vec<Column>) -> (ResultSet, bool, bool) {
     let has_next = rs.rows_seen > PAGE_SIZE;
+    let complete = rs.rows.len() as u64 >= rs.rows_seen.min(PAGE_SIZE);
     rs.rows.truncate(PAGE_ROWS);
     rs.rows_seen = rs.rows_seen.min(PAGE_SIZE);
     // The statement names the catalog's columns, so the counts match.
     if rs.columns.len() == columns.len() {
         rs.columns = columns;
     }
-    (rs, has_next)
+    (rs, has_next, complete)
 }
 
 fn apply_load(
@@ -490,12 +495,13 @@ fn apply_load(
             // Nothing is staged; what could be undone or redone named the rows of the old page.
             t.edits = Arc::default();
             view.page = page;
-            let (data, has_next) = page_data(rs, columns);
+            let (data, has_next, complete) = page_data(rs, columns);
             let (rows, width) = (data.rows.len(), data.columns.len());
             let fits = |(r, c): (usize, usize)| r < rows && c < width;
             t.selection = t.selection.filter(|sel| fits(sel.anchor) && fits(sel.focus));
             t.data = Some(Arc::new(data));
             t.has_next = has_next;
+            t.page_complete = complete;
             t.error = None;
             t.applied = view.applied.clone();
             t.sort = view.sort.clone();
@@ -789,10 +795,11 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 }
 
 /// `{offset? = 0, limit? = 100}` → `{tab, columns, rows, offset, page, requestedPage, hasNext,
-/// total, editable, notEditableReason, outcomeUnknown, loading, error}`: the loaded rows from
-/// `offset`, at most `limit`, each a list of text or `null`, and the 0-based page they are
-/// (`requestedPage` is the one asked for, which differs while a load runs). Before the first
-/// page arrives, the catalog's columns and no rows.
+/// pageComplete, total, editable, notEditableReason, outcomeUnknown, loading, error}`: the loaded
+/// rows from `offset`, at most `limit`, each a list of text or `null`, and the 0-based page they
+/// are (`requestedPage` is the one asked for, which differs while a load runs). `pageComplete` is
+/// false when the byte cap kept fewer rows than the page has. Before the first page arrives, the
+/// catalog's columns and no rows.
 fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let offset = p::opt_usize(params, "offset")?.unwrap_or(0);
     let limit = p::opt_usize(params, "limit")?.unwrap_or(READ_LIMIT);
@@ -814,6 +821,7 @@ fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         "page": t.shown.page,
         "requestedPage": t.page,
         "hasNext": t.has_next,
+        "pageComplete": t.page_complete,
         "total": t.total,
         "editable": reason.is_none(),
         "notEditableReason": reason,
@@ -932,12 +940,19 @@ mod tests {
             rows_affected: Some(101),
         };
         let typed = vec![Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into() }];
-        let (page, more) = page_data(rs.clone(), typed.clone());
-        assert!(more);
+        let (page, more, complete) = page_data(rs.clone(), typed.clone());
+        assert!(more && complete);
         assert_eq!((page.rows.len(), page.rows_seen, &page.columns), (100, 100, &typed));
-        let short = ResultSet { rows: rs.rows[..3].to_vec(), rows_seen: 3, ..rs };
-        let (page, more) = page_data(short, vec![]);
-        assert!(!more);
+        let short = ResultSet { rows: rs.rows[..3].to_vec(), rows_seen: 3, ..rs.clone() };
+        let (page, more, complete) = page_data(short, vec![]);
+        assert!(!more && complete);
         assert_eq!((page.rows.len(), page.columns[0].base_type.as_str()), (3, ""), "a column count that differs keeps the result's");
+        // The byte cap kept 40 of 101 rows: cut. Kept all 100 but not the 101st: whole.
+        let cut = ResultSet { rows: rs.rows[..40].to_vec(), complete: false, ..rs.clone() };
+        let (page, more, complete) = page_data(cut, vec![]);
+        assert!(more && !complete, "40 of 100 rows kept, more rows follow");
+        assert_eq!(page.rows.len(), 40);
+        let probe_lost = ResultSet { rows: rs.rows[..100].to_vec(), complete: false, ..rs };
+        assert!(page_data(probe_lost, vec![]).2, "only the 101st row was not kept");
     }
 }

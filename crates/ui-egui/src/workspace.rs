@@ -18,9 +18,9 @@
 //! (a page load, a count, an Apply, a query run) and a reconnect. A tab that closed, or whose
 //! markers a reconnect cleared, shows none, even while the engine lets its job run to its end.
 //!
-//! **Tab bodies (interim).** Until the table tab and the query tab have their own screens, a table
-//! tab shows what it holds in a line or two and a query tab a plain editor (`query-editor`) that
-//! sends its text with `query.setText` and keeps its cursor for Ctrl+Shift+Enter.
+//! **Tab bodies.** A table tab shows its page ([`crate::table_tab`]). Until the query tab has its
+//! own screen, a query tab shows a plain editor (`query-editor`) that sends its text with
+//! `query.setText` and keeps its cursor for Ctrl+Shift+Enter.
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
 //! `tab-new`; `status-connection` (value: the name, and `read-only`), `status-server`,
@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use dbee_engine::{Session, State, Tab, TabId, Total};
+use dbee_engine::{Session, State, Tab, TabId};
 use dbee_sql::filter::Condition;
 use egui::{Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
@@ -37,8 +37,9 @@ use serde_json::json;
 use crate::app::Origin;
 use crate::connections::line_galley;
 use crate::quick_search::{self, QuickSearch};
+use crate::table_tab::{self, Grids};
 use crate::theme::{RADIUS, TOKENS, connection_color};
-use crate::tree::{self, Refresh, Tree, TreeAct, thousands};
+use crate::tree::{self, Refresh, Tree, TreeAct};
 use crate::{DbeeApp, icons, menu};
 
 /// The tabs strip's height.
@@ -56,6 +57,8 @@ pub(crate) struct Workspace {
     /// The widget to give the keyboard back to in the next frame, once the quick search has
     /// closed (see `quick_search`).
     pub refocus: Option<egui::Id>,
+    /// Each table tab's grid (its column widths), dropped with the tab.
+    pub grids: Grids,
     /// The connection this state belongs to; another one starts afresh.
     connection: Option<String>,
 }
@@ -169,6 +172,8 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     if app.view.work.connection != id {
         app.view.work = Workspace { connection: id, ..Workspace::default() };
     }
+    let tabs = &app.session.state().tabs;
+    app.view.work.grids.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     egui::Panel::top("dbee-menubar").frame(Frame::new().fill(t.panel).inner_margin(Margin::symmetric(8, 3))).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();
     status_bar(app, ui, &mut acts);
@@ -398,9 +403,16 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     }
 }
 
-/// The active tab's body (interim, see the module docs), or a hint when no tab is open.
+/// The active tab's body (see the module docs), or a hint when no tab is open.
 fn body(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     let t = TOKENS;
+    if let Some(Tab::Table(tab)) = app.session.state().active_tab() {
+        let id = tab.id;
+        let content = ui.available_rect_before_wrap().shrink2(egui::vec2(8.0, 0.0));
+        let mut ui = ui.new_child(egui::UiBuilder::new().id_salt("dbee-tab-body").max_rect(content).layout(Layout::top_down(Align::Min)));
+        table_tab::show(app, &mut ui, id);
+        return;
+    }
     let content = ui.available_rect_before_wrap().shrink(16.0);
     let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
     match app.session.state().active_tab() {
@@ -412,27 +424,8 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
                 ui.label(RichText::new("Double-click a table in the tree, find one with Ctrl+P, or start a query with Ctrl+T.").color(t.text_muted));
             });
         }
-        Some(Tab::Table(tab)) => {
-            let info = app.session.state().connected.as_ref().and_then(|c| c.catalog.table(&tab.table).map(|i| tree::kind_name(i.kind)));
-            ui.label(RichText::new(tab.table.display()).size(18.0).strong());
-            ui.label(RichText::new(info.unwrap_or("table")).color(t.text_muted));
-            ui.add_space(8.0);
-            let rows = tab.data.as_ref().map_or(0, |d| d.rows.len());
-            let mut line = if tab.loading.is_some() {
-                "Loading…".to_string()
-            } else if tab.data.is_some() {
-                format!("{rows} rows on page {}", tab.shown.page.saturating_add(1))
-            } else {
-                "Not loaded".to_string()
-            };
-            if let Some(total) = total_text(tab.total) {
-                line.push_str(&format!(" · {total} in all"));
-            }
-            ui.label(line);
-            if let Some(e) = &tab.error {
-                ui.label(RichText::new(e.as_str()).color(t.danger));
-            }
-        }
+        // Drawn above.
+        Some(Tab::Table(_)) => {}
         Some(Tab::Query(q)) => {
             let mut text = q.text.clone();
             let out = TextEdit::multiline(&mut text)
@@ -454,15 +447,6 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     }
 }
 
-/// The row total as the table tab shows it: `~1,000` for an estimate, the number once counted.
-pub fn total_text(total: Total) -> Option<String> {
-    match total {
-        Total::Unknown | Total::Counting { estimate: None } => None,
-        Total::Estimate(n) | Total::Counting { estimate: Some(n) } => Some(format!("~{}", thousands(n))),
-        Total::Exact(n) => Some(thousands(n)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use dbee_sql::filter::{Filter, Op};
@@ -477,15 +461,6 @@ mod tests {
         assert_eq!(applied_filters(&f(2)), 2);
         assert_eq!(applied_filters(&Condition::Raw("id > 1".into())), 1);
         assert_eq!(applied_filters(&Condition::Raw("  ".into())), 0);
-    }
-
-    #[test]
-    fn totals_read_as_estimates_or_counts() {
-        assert_eq!(total_text(Total::Unknown), None);
-        assert_eq!(total_text(Total::Counting { estimate: None }), None);
-        assert_eq!(total_text(Total::Estimate(100_000)).as_deref(), Some("~100,000"));
-        assert_eq!(total_text(Total::Counting { estimate: Some(5) }).as_deref(), Some("~5"));
-        assert_eq!(total_text(Total::Exact(1234)).as_deref(), Some("1,234"));
     }
 
     #[test]

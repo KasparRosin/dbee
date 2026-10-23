@@ -71,6 +71,9 @@ pub struct DbeeApp {
 pub(crate) enum Origin {
     /// A shortcut or a menu: errors show as notices.
     Menu,
+    /// A table tab's page load (filters, paging, sort, refresh): as [`Origin::Menu`], except that
+    /// a database error shows only in the tab's own card (`TableTab::error`).
+    Page,
     /// The connection form while it showed this generation ([`ConnScreen::generation`]):
     /// results and errors show under its buttons.
     Form(u64),
@@ -252,10 +255,11 @@ impl DbeeApp {
         match origin {
             Origin::KeyLine => connections::key_line_done(self, job, result),
             Origin::Form(generation) => connections::form_done(self, command, params, generation, job, result),
-            Origin::Menu => {
+            Origin::Menu | Origin::Page => {
                 if let Err(e) = result
                     && !dialogs::ask(self, &e, Rerun { command, params, origin })
                     && !matches!(e, EngineError::Disabled { .. })
+                    && !(origin == Origin::Page && matches!(e, EngineError::Db { .. }))
                 {
                     self.notice(e.to_string());
                 }

@@ -201,6 +201,74 @@ pub fn chevron(p: &Painter, rect: Rect, color: Color32, open: bool) {
     p.add(Shape::line(points, s));
 }
 
+/// A minus sign: "remove".
+pub fn minus(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.line_segment([at(r, 0.2, 0.5), at(r, 0.8, 0.5)], s);
+}
+
+/// Which way an arrow of the paging bar points, and whether it stops at a bar (to the first or
+/// the last page).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    First,
+    Prev,
+    Next,
+    Last,
+}
+
+/// A paging arrow: a chevron, with a bar at its tip for the first and last page.
+pub fn step(p: &Painter, rect: Rect, color: Color32, step: Step) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    let left = matches!(step, Step::First | Step::Prev);
+    let (tip, tail) = if left { (0.36, 0.62) } else { (0.64, 0.38) };
+    p.add(Shape::line(vec![at(r, tail, 0.26), at(r, tip, 0.5), at(r, tail, 0.74)], s));
+    let bar = match step {
+        Step::First => Some(0.26),
+        Step::Last => Some(0.74),
+        Step::Prev | Step::Next => None,
+    };
+    if let Some(x) = bar {
+        p.line_segment([at(r, x, 0.26), at(r, x, 0.74)], s);
+    }
+}
+
+/// Angle brackets: the filter bar's switch to a raw `WHERE` condition.
+pub fn brackets(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.add(Shape::line(vec![at(r, 0.4, 0.26), at(r, 0.16, 0.5), at(r, 0.4, 0.74)], s));
+    p.add(Shape::line(vec![at(r, 0.6, 0.26), at(r, 0.84, 0.5), at(r, 0.6, 0.74)], s));
+}
+
+/// A filled triangle pointing up (`up`) or down: a column's sort.
+pub fn sort(p: &Painter, rect: Rect, color: Color32, up: bool) {
+    let Some(r) = square(rect) else { return };
+    let points =
+        if up { vec![at(r, 0.5, 0.3), at(r, 0.78, 0.7), at(r, 0.22, 0.7)] } else { vec![at(r, 0.22, 0.3), at(r, 0.78, 0.3), at(r, 0.5, 0.7)] };
+    p.add(Shape::convex_polygon(points, color, Stroke::NONE));
+}
+
+/// A circle with an arrow through it, pointing right: "follow this reference".
+pub fn follow(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = stroke(r.width(), color);
+    p.circle_stroke(r.center(), r.width() * 0.4, s);
+    p.line_segment([at(r, 0.28, 0.5), at(r, 0.7, 0.5)], s);
+    p.add(Shape::line(vec![at(r, 0.52, 0.33), at(r, 0.7, 0.5), at(r, 0.52, 0.67)], s));
+}
+
+/// A line break as the grid shows it inside a cell's one line: a short drop, then an arrow back
+/// to the left.
+pub fn line_break(p: &Painter, rect: Rect, color: Color32) {
+    let Some(r) = square(rect) else { return };
+    let s = Stroke::new((r.width() / 10.0).clamp(1.0, 1.5), color);
+    p.add(Shape::line(vec![at(r, 0.8, 0.15), at(r, 0.8, 0.65), at(r, 0.2, 0.65)], s));
+    p.add(Shape::line(vec![at(r, 0.42, 0.42), at(r, 0.2, 0.65), at(r, 0.42, 0.88)], s));
+}
+
 /// A magnifying glass: "search".
 pub fn search(p: &Painter, rect: Rect, color: Color32) {
     let Some(r) = square(rect) else { return };
@@ -232,6 +300,14 @@ mod tests {
                 }
                 chevron(p, r, c, true);
                 chevron(p, r, c, false);
+                for icon in [minus, brackets, follow, line_break] {
+                    icon(p, r, c);
+                }
+                for s in [Step::First, Step::Prev, Step::Next, Step::Last] {
+                    step(p, r, c, s);
+                }
+                sort(p, r, c, true);
+                sort(p, r, c, false);
             }
         })
         .drop_without_applying_deltas();

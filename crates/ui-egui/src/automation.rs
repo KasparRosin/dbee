@@ -11,6 +11,11 @@
 //! click must not go there (another widget is drawn in that place), so `ui.click` first asks for
 //! it to be scrolled into view ([`Tags::scroll_to`]): the next frame that tags it scrolls to it.
 //!
+//! A grid's rows out of view are not drawn at all. Rather than a tag per cell per frame, the grid
+//! names them as one block ([`CellBlock`], [`Tags::tag_cells_out_of_view`]): its cells are found
+//! by id ([`Tags::hidden`]), scrolled to by the grid itself ([`Tags::scroll_pending`]), and
+//! listed only when `ui.inspect` asks ([`Tags::to_json`], at most [`MAX_LISTED_CELLS`]).
+//!
 //! A tag can carry what the widget shows ([`Tags::tag_value`]): a text field's text, a check
 //! box's state, the choice of a selector, a message's text. A secret field (a password, a
 //! passphrase, a URL that can hold one) is tagged with [`Tags::tag_secret`]: only whether it is
@@ -42,11 +47,46 @@ struct Entry {
     enabled: bool,
 }
 
+/// The most out-of-view cells [`Tags::to_json`] lists; the others can still be clicked by id.
+pub const MAX_LISTED_CELLS: usize = 20_000;
+
+/// The cells of a grid's rows that are laid out but not drawn, named `<prefix><row>-<column>`:
+/// rows `0..rows`, row `r` at `top + r * row_height` (window points, where it would be drawn),
+/// column `c` between `columns[c]`. Cells drawn in the same frame are tagged one by one, and those
+/// tags win.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellBlock {
+    pub prefix: String,
+    pub rows: usize,
+    pub top: f32,
+    pub row_height: f32,
+    /// Each column's left and right edge.
+    pub columns: Vec<(f32, f32)>,
+}
+
+impl CellBlock {
+    /// The row and column `id` names in this block.
+    pub fn cell_of(&self, id: &str) -> Option<(usize, usize)> {
+        let (row, col) = id.strip_prefix(self.prefix.as_str())?.split_once('-')?;
+        let (row, col) = (row.parse::<usize>().ok()?, col.parse::<usize>().ok()?);
+        (row < self.rows && col < self.columns.len()).then_some((row, col))
+    }
+
+    /// Where cell `(row, col)` would be drawn.
+    fn rect(&self, row: usize, col: usize) -> Option<Rect> {
+        let &(left, right) = self.columns.get(col)?;
+        let top = self.top + self.row_height * row as f32;
+        Some(Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, top + self.row_height)))
+    }
+}
+
 /// The tagged widgets of the last drawn frame, in drawing order.
 #[derive(Debug, Default)]
 pub struct Tags {
     entries: Vec<Entry>,
     index: HashMap<String, usize>,
+    /// Grids' cells out of view ([`CellBlock`]).
+    blocks: Vec<CellBlock>,
     /// The widget to scroll into view when it is next tagged.
     scroll_to: Option<String>,
 }
@@ -56,6 +96,22 @@ impl Tags {
     pub fn begin_frame(&mut self) {
         self.entries.clear();
         self.index.clear();
+        self.blocks.clear();
+    }
+
+    /// Lists the cells of `block` as out of view, except those tagged one by one (see
+    /// [`CellBlock`]). The grid scrolls to one of them when it is the widget waiting to be
+    /// scrolled into view ([`Tags::scroll_pending`]).
+    pub fn tag_cells_out_of_view(&mut self, block: CellBlock) {
+        self.blocks.push(block);
+    }
+
+    /// The block cell `id` names and where it would be drawn, when no widget is tagged `id`.
+    fn block_cell(&self, id: &str) -> Option<Rect> {
+        if self.index.contains_key(id) {
+            return None;
+        }
+        self.blocks.iter().find_map(|b| b.cell_of(id).and_then(|(row, col)| b.rect(row, col)))
     }
 
     fn put(&mut self, id: &str, r: &Response, shows: Shows) {
@@ -125,9 +181,12 @@ impl Tags {
         self.entry(id).filter(|e| e.visible).map(|e| e.rect)
     }
 
-    /// `id` was drawn, but scrolled out of view.
+    /// `id` was drawn, but scrolled out of view (or is a grid cell of a row out of view).
     pub fn hidden(&self, id: &str) -> bool {
-        self.entry(id).is_some_and(|e| !e.visible)
+        match self.entry(id) {
+            Some(e) => !e.visible,
+            None => self.block_cell(id).is_some(),
+        }
     }
 
     /// Scrolls `id` into view in the next frame that tags it.
@@ -159,7 +218,7 @@ impl Tags {
         self.index.get(id).and_then(|&i| self.entries.get(i))
     }
 
-    /// The tagged ids, in drawing order.
+    /// The tagged ids, in drawing order (not the cells of [`CellBlock`]s).
     pub fn ids(&self) -> Vec<&str> {
         self.entries.iter().map(|e| e.id.as_str()).collect()
     }
@@ -167,36 +226,55 @@ impl Tags {
     /// `[{id, rect: [x, y, width, height], visible?, value?, masked?, set?, enabled?}]`, as
     /// `ui.inspect` lists them: `visible: false` for a widget scrolled out of view, `value` for a
     /// widget that shows one, `masked: true` and `set` for a secret field, `enabled: false` for a
-    /// disabled widget.
+    /// disabled widget. The cells of [`CellBlock`]s not tagged one by one come last, at most
+    /// [`MAX_LISTED_CELLS`] of them.
     pub fn to_json(&self) -> Json {
-        Json::Array(
-            self.entries
-                .iter()
-                .map(|e| {
-                    let r = e.rect;
-                    let mut m = Map::new();
-                    m.insert("id".into(), json!(e.id));
-                    m.insert("rect".into(), json!([r.min.x, r.min.y, r.width(), r.height()]));
-                    if !e.visible {
-                        m.insert("visible".into(), json!(false));
+        let rect = |r: Rect| json!([r.min.x, r.min.y, r.width(), r.height()]);
+        let mut out: Vec<Json> = self
+            .entries
+            .iter()
+            .map(|e| {
+                let mut m = Map::new();
+                m.insert("id".into(), json!(e.id));
+                m.insert("rect".into(), rect(e.rect));
+                if !e.visible {
+                    m.insert("visible".into(), json!(false));
+                }
+                match &e.shows {
+                    Shows::Nothing => {}
+                    Shows::Value(v) => {
+                        m.insert("value".into(), v.clone());
                     }
-                    match &e.shows {
-                        Shows::Nothing => {}
-                        Shows::Value(v) => {
-                            m.insert("value".into(), v.clone());
-                        }
-                        Shows::Secret(set) => {
-                            m.insert("masked".into(), json!(true));
-                            m.insert("set".into(), json!(set));
-                        }
+                    Shows::Secret(set) => {
+                        m.insert("masked".into(), json!(true));
+                        m.insert("set".into(), json!(set));
                     }
-                    if !e.enabled {
-                        m.insert("enabled".into(), json!(false));
+                }
+                if !e.enabled {
+                    m.insert("enabled".into(), json!(false));
+                }
+                Json::Object(m)
+            })
+            .collect();
+        let mut listed = 0usize;
+        'blocks: for b in &self.blocks {
+            for row in 0..b.rows {
+                for col in 0..b.columns.len() {
+                    if listed >= MAX_LISTED_CELLS {
+                        break 'blocks;
                     }
-                    Json::Object(m)
-                })
-                .collect(),
-        )
+                    let id = format!("{}{row}-{col}", b.prefix);
+                    if self.index.contains_key(&id) {
+                        continue;
+                    }
+                    if let Some(r) = b.rect(row, col) {
+                        out.push(json!({ "id": id, "rect": rect(r), "visible": false }));
+                        listed += 1;
+                    }
+                }
+            }
+        }
+        Json::Array(out)
     }
 }
 
@@ -289,6 +367,40 @@ mod tests {
         .drop_without_applying_deltas();
         assert!(tags.rect("tree-table-s.t").is_some() && !tags.hidden("tree-table-s.t"));
         assert_eq!(tags.ids(), vec!["tree-table-s.t"]);
+    }
+
+    #[test]
+    fn grid_cells_out_of_view_are_found_and_listed_without_a_tag_each() {
+        let mut tags = Tags::default();
+        tags.begin_frame();
+        let block = CellBlock { prefix: "grid-cell-".into(), rows: 100, top: 50.0, row_height: 24.0, columns: vec![(0.0, 80.0), (80.0, 200.0)] };
+        tags.tag_cells_out_of_view(block);
+        // Row 3 is drawn: its tags win.
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let r = ui.button("cell");
+            tags.tag("grid-cell-3-1", &r);
+        })
+        .drop_without_applying_deltas();
+        assert!(tags.hidden("grid-cell-90-1") && tags.rect("grid-cell-90-1").is_none(), "out of view: a click scrolls first");
+        assert!(!tags.hidden("grid-cell-3-1") && tags.rect("grid-cell-3-1").is_some());
+        for nothing in ["grid-cell-100-0", "grid-cell-1-2", "grid-cell-x-1", "grid-cell-1", "grid-cell--1-0", "other-1-1"] {
+            assert!(!tags.hidden(nothing), "{nothing}");
+        }
+        let json = tags.to_json();
+        let all = json.as_array().unwrap();
+        assert_eq!(all.len(), 200, "199 listed out of view, one drawn");
+        let far = all.iter().find(|e| e["id"] == "grid-cell-90-1").unwrap();
+        assert_eq!(far["rect"], json!([80.0, 50.0 + 24.0 * 90.0, 120.0, 24.0]));
+        assert_eq!(far["visible"], false);
+        assert_eq!(all.iter().filter(|e| e["id"] == "grid-cell-3-1").count(), 1);
+        // A frame forgets the blocks with the tags.
+        tags.begin_frame();
+        assert!(!tags.hidden("grid-cell-90-1"));
+        // Listing stops at the cap.
+        tags.tag_cells_out_of_view(CellBlock { prefix: "g-".into(), rows: 1_000_000, top: 0.0, row_height: 1.0, columns: vec![(0.0, 1.0); 3] });
+        assert_eq!(tags.to_json().as_array().map(Vec::len), Some(MAX_LISTED_CELLS));
+        assert!(tags.hidden("g-999999-2"), "but found by id");
     }
 
     #[test]

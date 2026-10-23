@@ -262,6 +262,10 @@ pub struct TableTab {
     pub data: Option<Arc<ResultSet>>,
     /// More rows follow this page (the page statement got 101).
     pub has_next: bool,
+    /// `data` holds every row of its page: false when the page's cell text passed the byte cap
+    /// (256 MiB), so fewer rows were kept than the page has (the rest are not shown, and the
+    /// next page starts after them all the same).
+    pub page_complete: bool,
     pub total: Total,
     /// The job loading a page.
     pub loading: Option<JobId>,
@@ -294,6 +298,7 @@ impl TableTab {
             page: view.page,
             data: None,
             has_next: false,
+            page_complete: true,
             total: Total::Unknown,
             loading: None,
             counting: None,

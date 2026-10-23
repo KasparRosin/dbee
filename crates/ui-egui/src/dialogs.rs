@@ -207,7 +207,7 @@ fn keep_of(app: &DbeeApp, rerun: &Rerun) -> Keep {
     let id = rerun.params.get("config").and_then(|c| c.get("id")).or_else(|| rerun.params.get("id")).and_then(Json::as_str).unwrap_or_default();
     let form_says = match rerun.origin {
         Origin::Form(_) => rerun.params.get("config").and_then(|c| c.get("saveSecrets")).and_then(Json::as_bool),
-        Origin::Menu | Origin::KeyLine => None,
+        Origin::Menu | Origin::Page | Origin::KeyLine => None,
     };
     match app.session.state().store.saved.iter().find(|c| !id.is_empty() && c.id == id) {
         Some(saved) => Keep::Yes { checked: form_says.unwrap_or(saved.save_secrets) },

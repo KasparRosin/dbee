@@ -39,6 +39,15 @@ pub struct Tokens {
     /// Primary and foreign key icons.
     pub key_primary: Color32,
     pub key_foreign: Color32,
+    /// The grid's header row, and the fill of every other row.
+    pub grid_header: Color32,
+    pub stripe: Color32,
+    /// Grid cells with staged changes: a changed cell, a new row, a row to delete (its text also
+    /// struck through), and the row whose change the last Apply failed on.
+    pub staged: Color32,
+    pub new_row: Color32,
+    pub deleted: Color32,
+    pub failed: Color32,
 }
 
 /// The light theme: a warm grey ground with a slate-teal accent.
@@ -63,6 +72,12 @@ pub const TOKENS: Tokens = Tokens {
     icon_query: Color32::from_rgb(0xB0, 0x5A, 0x2E),
     key_primary: Color32::from_rgb(0xB8, 0x86, 0x14),
     key_foreign: Color32::from_rgb(0x4A, 0x7F, 0xA8),
+    grid_header: Color32::from_rgb(0xF2, 0xF3, 0xEF),
+    stripe: Color32::from_rgb(0xF8, 0xF9, 0xF6),
+    staged: Color32::from_rgb(0xF5, 0xEB, 0xCB),
+    new_row: Color32::from_rgb(0xDE, 0xEF, 0xE3),
+    deleted: Color32::from_rgb(0xF3, 0xE0, 0xDD),
+    failed: Color32::from_rgb(0xF0, 0xCF, 0xCA),
 };
 
 /// The colour a connection is tagged with (its card, the form's strip); `None` for no colour.
@@ -149,5 +164,20 @@ mod tests {
         assert!(contrast(t.danger, t.bg) >= 4.5, "errors on the background");
         assert!(contrast(t.success, t.card) >= 4.5, "success text on a card");
         assert!(contrast(t.danger, t.card) >= 4.5, "errors on a card");
+    }
+
+    #[test]
+    fn grid_marks_differ_and_keep_text_readable() {
+        let t = TOKENS;
+        let marks = [("staged", t.staged), ("new row", t.new_row), ("deleted", t.deleted), ("failed", t.failed), ("selection", t.selection)];
+        for (name, fill) in marks.iter().copied().chain([("header", t.grid_header), ("stripe", t.stripe)]) {
+            assert!(contrast(t.text, fill) >= 7.0, "text on {name}");
+            assert!(contrast(t.text_muted, fill) >= 4.5, "muted text (NULL) on {name}");
+        }
+        for (i, (a, x)) in marks.iter().enumerate() {
+            for (b, y) in &marks[i + 1..] {
+                assert_ne!(x, y, "{a} and {b} share a colour");
+            }
+        }
     }
 }
