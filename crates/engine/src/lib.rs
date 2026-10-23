@@ -11,6 +11,7 @@
 //! cell values or SQL text.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod allowed;
 pub mod cmd;
 pub mod edits;
 pub mod fuzzy;
@@ -178,6 +179,10 @@ pub struct SessionOptions {
     pub ssh: SshEnv,
     /// Called from a worker thread after each job result, so the UI can wake up and pump.
     pub notify: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// The only `(host, port)` targets `connection.test`, `connection.open` and
+    /// `connection.reconnect` may reach (an isolated run's test servers); `None` is no limit.
+    /// See [`allowed`].
+    pub allowed_targets: Option<Vec<(String, u16)>>,
 }
 
 impl std::fmt::Debug for SessionOptions {
@@ -187,6 +192,7 @@ impl std::fmt::Debug for SessionOptions {
             .field("secrets", &self.secrets.as_ref().map(|s| s.name()))
             .field("ssh", &self.ssh)
             .field("notify", &self.notify.is_some())
+            .field("allowed_targets", &self.allowed_targets)
             .finish()
     }
 }
@@ -206,6 +212,7 @@ pub struct Session {
     pub(crate) ui_requests: Vec<UiRequest>,
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) ssh: SshEnv,
+    pub(crate) allowed_targets: Option<Vec<(String, u16)>>,
     journal: Vec<(String, Json)>,
     value_cache: view::Cache,
 }
@@ -232,6 +239,7 @@ impl Session {
             ui_requests: Vec::new(),
             secrets: o.secrets,
             ssh: o.ssh,
+            allowed_targets: o.allowed_targets,
             journal: Vec::new(),
             value_cache: view::Cache::default(),
         })

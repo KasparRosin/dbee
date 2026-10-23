@@ -145,7 +145,7 @@ fn run_sleep_job(s: &mut Session, params: &Json) -> Result<Outcome, EngineError>
 }
 
 fn options() -> SessionOptions {
-    SessionOptions { config_dir: None, secrets: Some(Arc::new(MemoryStore::default())), ssh: SshEnv::default(), notify: None }
+    SessionOptions { config_dir: None, secrets: Some(Arc::new(MemoryStore::default())), ssh: SshEnv::default(), notify: None, allowed_targets: None }
 }
 
 fn session() -> Session {

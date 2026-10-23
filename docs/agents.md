@@ -1,6 +1,6 @@
 # Agents
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (the control channel and isolated runs exist)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (isolated runs connect only to the test servers)
 
 dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
 
@@ -34,7 +34,7 @@ Every command is one shell call away: `dbee-cli exec <id> k=v…`, `run <script.
 
 For any UI change, look at the result:
 
-1. `cargo xtask run-isolated --port 7979` (add `--release` for a release build). It builds dbee and runs it on a throwaway home, `target/isolated/<port>/home`, with the control channel on that port, in-memory secrets and no SSH agent on Linux and macOS (on Windows the OpenSSH agent pipe is still reachable); with the Docker test servers up, that home's `.ssh` holds their test key and host key.
+1. `cargo xtask run-isolated --port 7979` (add `--release` for a release build). It builds dbee and runs it on a throwaway home, `target/isolated/<port>/home`, with the control channel on that port, in-memory secrets and no SSH agent on Linux and macOS (on Windows the OpenSSH agent pipe is still reachable); with the Docker test servers up, that home's `.ssh` holds their test key and host key. The run may connect only to the test servers: each server's port and the sshd's, on `127.0.0.1` and `localhost`, plus `127.0.0.1:1` for error demos (`DBEE_ALLOW_TARGETS` on the child). Without `target/testdb/env.json` only `127.0.0.1:1` is allowed, and run-isolated warns. Test, open and reconnect refuse any other target before any network I/O, with an error saying this isolated run may only connect to the test servers; through an SSH tunnel the SSH server's host and port are what count.
 2. Drive the feature through the control channel (the MCP bridge is planned): commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
 3. Assert on `ui.inspect` and `document.inspect`.
 4. Take `ui.screenshot` (the whole window) and open the PNG; `app.quit` ends the run.

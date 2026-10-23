@@ -553,7 +553,7 @@ mod tests {
         let db = dbee_testkit::require_testdb!();
         let home = dbee_testkit::temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
         let ssh = SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None };
-        let mut s = Session::new(SessionOptions { config_dir: None, secrets: None, ssh, notify: None }).unwrap();
+        let mut s = Session::new(SessionOptions { config_dir: None, secrets: None, ssh, notify: None, allowed_targets: None }).unwrap();
         let config = ConnectionConfig {
             host: db.sshd.pg_host.clone(),
             port: db.sshd.pg_port,

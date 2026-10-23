@@ -45,6 +45,7 @@ fn ui_in(home: TempHome, with_secrets: bool) -> Ui {
         secrets: secrets.clone().map(|s| s as Arc<dyn SecretStore>),
         ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
         notify: None,
+        allowed_targets: None,
     })
     .unwrap();
     let (tx, rx) = mpsc::channel();

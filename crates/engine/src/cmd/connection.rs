@@ -22,6 +22,9 @@
 //! UI thread; writes (`connection.save`, `savePassword`) run on the caller's thread with the
 //! saved-connection change they belong to.
 //!
+//! An isolated run's list of allowed targets ([`crate::allowed`]) is checked by test, open and
+//! reconnect before anything else touches the network.
+//!
 //! Connecting is a job: the tunnel, the browse connection and, for open and reconnect, the
 //! catalog, whose load is bounded ([`CATALOG_TIMEOUT`]: past it, it is cancelled, the connection
 //! is discarded and the job fails with `timeout`). The prompts come back as
@@ -48,6 +51,7 @@ use serde::Deserialize as _;
 use serde_json::json;
 
 use super::{CommandSpec, LOST, NOT_CONNECTED, always, connected, ignored, needs_db, not_connected, p};
+use crate::allowed::check_target;
 use crate::state::{Connected, Credentials};
 use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
 
@@ -754,6 +758,7 @@ fn ssh_key(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 /// screen and the lists stay as they are. A trusted unknown host key is learned.
 fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = target_config(s, params)?;
+    check_target(s.allowed_targets.as_deref(), &config)?;
     let creds = given(params)?;
     let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
@@ -789,6 +794,7 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         return Err(EngineError::Busy("a connection is being opened".into()));
     }
     let mut config = target_config(s, params)?;
+    check_target(s.allowed_targets.as_deref(), &config)?;
     let typed = given(params)?;
     let keep = p::bool_or(params, "savePassword", false)?;
     if config.id.is_empty() {
@@ -896,6 +902,7 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     creds.ssh.passphrase = answers.ssh.passphrase.or(creds.ssh.passphrase);
     creds.trust = answers.trust.or(creds.trust);
     let config = c.config.clone();
+    check_target(s.allowed_targets.as_deref(), &config)?;
     let old = Arc::clone(&c.browse);
     let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());

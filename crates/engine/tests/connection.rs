@@ -192,6 +192,33 @@ fn test_command_reports_server() {
 }
 
 #[test]
+fn an_isolated_run_connects_only_to_the_allowed_targets() {
+    let _db = require_testdb!();
+    let params = json!({ "config": pg14_config(), "password": pw() });
+    // One session at a time (see `common`): each is dropped before the next is made.
+    {
+        // pg14 is not on this list: refused before any job, so before any network I/O.
+        let mut s = session_adjusted(|o| o.allowed_targets = Some(vec![("127.0.0.1".into(), 1)]));
+        for id in ["connection.test", "connection.open"] {
+            let e = s.execute(id, params.clone()).unwrap_err();
+            assert_eq!(e.code(), "config", "{id}: {e}");
+            assert!(e.to_string().contains("this isolated run may only connect to the test servers"), "{id}: {e}");
+            assert!(!s.busy(), "{id} started a job");
+        }
+        assert_eq!(s.inspect()["screen"], "connections");
+    }
+    {
+        // On the list: it connects.
+        let mut s = session_adjusted(|o| o.allowed_targets = Some(vec![("127.0.0.1".into(), pg14().port)]));
+        s.run_blocking("connection.test", params.clone(), T).unwrap();
+        open(&mut s, params.clone());
+    }
+    // No list: no limit.
+    let mut s = session();
+    s.run_blocking("connection.test", params, T).unwrap();
+}
+
+#[test]
 fn open_saved_with_stored_password() {
     let _db = require_testdb!();
     let mut s = session();

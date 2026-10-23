@@ -358,7 +358,13 @@ fn params(r: &mut Rng, id: &str, s: &Session) -> Json {
 const MAX_TABS: usize = 40;
 
 fn session() -> Session {
-    let options = SessionOptions { config_dir: None, secrets: Some(Arc::new(MemoryStore::default())), ssh: SshEnv::default(), notify: None };
+    let options = SessionOptions {
+        config_dir: None,
+        secrets: Some(Arc::new(MemoryStore::default())),
+        ssh: SshEnv::default(),
+        notify: None,
+        allowed_targets: None,
+    };
     Session::new(options).unwrap()
 }
 

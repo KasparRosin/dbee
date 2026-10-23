@@ -15,6 +15,11 @@
 //! never reads or writes the real home, `~/.ssh` or the keyring, and on Linux and macOS never
 //! reaches the SSH agent. On Windows the OpenSSH agent pipe is still reachable: dbee finds it
 //! without `SSH_AUTH_SOCK`.
+//!
+//! [`ALLOW_VAR`] lists the only targets the run may connect to ([`allowed_targets`]): each test
+//! server's port and the sshd's, on `127.0.0.1` and on `localhost`, and `127.0.0.1:1` for error
+//! demos. Without a readable `env.json` it is `127.0.0.1:1` alone, and a warning says so. dbee
+//! refuses every other target of a test, an open or a reconnect before any network I/O.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -51,6 +56,33 @@ pub fn parse_args(args: &[&str]) -> Result<Options, String> {
         }
     }
     Ok(o)
+}
+
+/// The child's variable with the allowed targets, `host:port,host:port` (read by dbee's
+/// `main.rs`).
+pub const ALLOW_VAR: &str = "DBEE_ALLOW_TARGETS";
+
+/// Port 1, where nothing listens: a connection error to show, always allowed.
+const ERROR_DEMO: (&str, u16) = ("127.0.0.1", 1);
+
+/// The targets an isolated run may connect to: every server's port and the sshd's, each on
+/// `127.0.0.1` and `localhost`, then [`ERROR_DEMO`]. Without the env file, [`ERROR_DEMO`] alone.
+pub fn allowed_targets(env: Option<&testdb::Env>) -> Vec<(String, u16)> {
+    let mut list = Vec::new();
+    if let Some(env) = env {
+        for port in env.servers.iter().map(|s| s.port).chain(std::iter::once(env.sshd.port)) {
+            for host in ["127.0.0.1", "localhost"] {
+                list.push((host.to_string(), port));
+            }
+        }
+    }
+    list.push((ERROR_DEMO.0.to_string(), ERROR_DEMO.1));
+    list
+}
+
+/// `targets` as [`ALLOW_VAR`] holds them.
+pub fn allow_list(targets: &[(String, u16)]) -> String {
+    targets.iter().map(|(h, p)| format!("{h}:{p}")).collect::<Vec<_>>().join(",")
 }
 
 /// `<repo>/target/isolated/<port>/home`.
@@ -120,8 +152,8 @@ pub fn build(root: &Path, release: bool) -> Result<PathBuf, String> {
 }
 
 /// The app's command: the binary with `--control <port>` and `rest`, run from `root` with the
-/// throwaway home's environment (see the module docs).
-pub fn command(root: &Path, port: u16, exe: &Path, rest: &[String]) -> Command {
+/// throwaway home's environment and the `allowed` targets (see the module docs).
+pub fn command(root: &Path, port: u16, exe: &Path, rest: &[String], allowed: &[(String, u16)]) -> Command {
     let home = home_dir(root, port);
     let mut c = Command::new(exe);
     c.current_dir(root)
@@ -137,6 +169,7 @@ pub fn command(root: &Path, port: u16, exe: &Path, rest: &[String]) -> Command {
         .env("APPDATA", home.join("AppData").join("Roaming"))
         .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("DBEE_SECRET_STORE", "memory")
+        .env(ALLOW_VAR, allow_list(allowed))
         .env_remove("SSH_AUTH_SOCK")
         .env_remove("DBEE_CONTROL_PORT");
     c
@@ -148,13 +181,23 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), String> {
     let env = testdb::read_env(&testdb::state_dir(root).join("env.json"));
     let testdb = env.as_ref().map(|e| (e.keys.plain.as_path(), e.sshd.known_hosts_line.as_str()));
     let home = prepare_home(root, o.port, testdb)?;
+    let allowed = allowed_targets(env.as_ref());
+    if env.is_none() {
+        eprintln!(
+            "warning: {} is missing or unreadable, so this run may connect only to {}:{} (run `cargo xtask testdb up` for the test servers)",
+            testdb::state_dir(root).join("env.json").display(),
+            ERROR_DEMO.0,
+            ERROR_DEMO.1
+        );
+    }
     eprintln!(
-        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{}",
+        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{}, connections only to {}",
         home.display(),
         if testdb.is_some() { "with the test servers' SSH key and host" } else { "no test servers" },
-        o.port
+        o.port,
+        allow_list(&allowed)
     );
-    let status = command(root, o.port, &exe, &o.rest).status().map_err(|e| format!("{}: {e}", exe.display()))?;
+    let status = command(root, o.port, &exe, &o.rest, &allowed).status().map_err(|e| format!("{}: {e}", exe.display()))?;
     if status.success() { Ok(()) } else { Err(format!("dbee exited with {status}")) }
 }
 
@@ -171,10 +214,58 @@ mod tests {
         c.get_envs().find(|(k, _)| *k == OsStr::new(key)).map(|(_, v)| v)
     }
 
+    fn test_env(ports: &[u16], sshd: u16) -> testdb::Env {
+        testdb::Env {
+            password: "pw".into(),
+            servers: ports.iter().map(|&port| testdb::Server { name: format!("pg{port}"), major: 14, port }).collect(),
+            sshd: testdb::Sshd {
+                port: sshd,
+                user: "dbee".into(),
+                password_user: "dbeepw".into(),
+                known_hosts_line: "[127.0.0.1]:2222 ssh-ed25519 AAAA".into(),
+                pg_host: "pg14".into(),
+                pg_port: 5432,
+            },
+            keys: testdb::Keys { plain: "k".into(), encrypted: "e".into(), passphrase: "p".into(), rsa: "r".into() },
+            ca_file: "ca".into(),
+        }
+    }
+
+    #[test]
+    fn allowed_targets_are_the_test_servers_on_both_host_spellings() {
+        let list = allowed_targets(Some(&test_env(&[32780, 32776], 32779)));
+        for port in [32780, 32776, 32779] {
+            for host in ["127.0.0.1", "localhost"] {
+                assert!(list.contains(&(host.to_string(), port)), "{host}:{port} missing from {list:?}");
+            }
+        }
+        assert!(list.contains(&("127.0.0.1".to_string(), 1)), "port 1 stays for error demos");
+        assert_eq!(list.len(), 7, "{list:?}");
+        assert!(!list.iter().any(|(_, p)| *p == 5432), "the database port behind the tunnel is not a local target");
+        assert_eq!(allow_list(&list), "127.0.0.1:32780,localhost:32780,127.0.0.1:32776,localhost:32776,127.0.0.1:32779,localhost:32779,127.0.0.1:1");
+    }
+
+    #[test]
+    fn allowed_targets_fail_closed_without_the_env_file() {
+        assert_eq!(allowed_targets(None), vec![("127.0.0.1".to_string(), 1)]);
+        let dir = std::env::temp_dir().join(format!("dbee-allow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.json");
+        let garbage = dir.join("env.json");
+        std::fs::write(&garbage, "{ not json").unwrap();
+        for path in [&missing, &garbage] {
+            assert_eq!(allowed_targets(testdb::read_env(path).as_ref()), vec![("127.0.0.1".to_string(), 1)], "{}", path.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn isolated_env_hides_real_home_and_agent() {
         let root = Path::new("/repo");
-        let c = command(root, 7979, Path::new("/repo/target/debug/dbee"), &["--x".to_string()]);
+        let allowed = vec![("127.0.0.1".to_string(), 1)];
+        let c = command(root, 7979, Path::new("/repo/target/debug/dbee"), &["--x".to_string()], &allowed);
+        assert_eq!(env_of(&c, ALLOW_VAR), Some(Some(OsStr::new("127.0.0.1:1"))), "the child gets the allowed targets");
+        assert_eq!(ALLOW_VAR, "DBEE_ALLOW_TARGETS");
         let home = root.join("target").join("isolated").join("7979").join("home");
         assert_eq!(home_dir(root, 7979), home);
         assert_eq!(env_of(&c, "HOME"), Some(Some(home.as_os_str())));
@@ -253,7 +344,7 @@ mod tests {
         let exe = build(&root, true).unwrap();
         let port = free_port();
         prepare_home(&root, port, None).unwrap();
-        let mut cmd = command(&root, port, &exe, &[]);
+        let mut cmd = command(&root, port, &exe, &[], &allowed_targets(None));
         let started = Instant::now();
         let mut child = cmd.spawn().unwrap();
         let took = loop {

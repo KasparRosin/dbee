@@ -75,6 +75,7 @@ fn session_with(home: TempHome, exclusive: bool, adjust: impl FnOnce(&mut Sessio
         secrets: Some(secrets.clone()),
         ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
         notify: None,
+        allowed_targets: None,
     };
     adjust(&mut options);
     TestSession { session: Session::new(options).unwrap(), secrets, home, hold }

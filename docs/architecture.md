@@ -19,7 +19,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `crates/engine` | exists | L5. `Session`: the session state, the command registry (`cmd/*`, so far the tab and connection commands), background jobs on a tokio runtime, the panic guard and the journal. |
 | `crates/ui-egui` | exists | L6. The egui UI and the control channel: the app shell (`DbeeApp`), theme, code-drawn icons, automation ids, shortcuts, UI-only commands, the connection screen (saved and recent lists, the connection form) and the dialogs a command's `needs…` answer opens. |
 | `crates/mcp` | exists, empty | L6. MCP server over stdio. |
-| `apps/dbee` | exists | L7. Desktop binary: reads `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE` and `DBEE_NO_PREFS`, builds the session's options and runs `DbeeApp`. |
+| `apps/dbee` | exists | L7. Desktop binary: reads `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE`, `DBEE_NO_PREFS` and `DBEE_ALLOW_TARGETS` (an isolated run's allowed connection targets), builds the session's options and runs `DbeeApp`. |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
 | `xtask` | exists | Exempt from layering. `ci`, `assets`, `layers`, `licenses`, `provenance`, `testdb`, `version`, `stats`, `ico`, `icns`, `contributors`. `xtask/testdb/` holds the test servers' compose file, tools image and seed. |
 | L1–L4 domain crates | **(planned)** | Named when the first features land, for example `sql`, `drivers`, `model`. |

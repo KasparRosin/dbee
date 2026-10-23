@@ -8,6 +8,8 @@
 //! - `DBEE_SECRET_STORE=memory` keeps passwords in memory only; otherwise the OS keyring, and
 //!   without one none (a warning is logged and passwords are asked each time).
 //! - `DBEE_NO_PREFS` keeps no connections file and no log file.
+//! - `DBEE_ALLOW_TARGETS` (`host:port,…`, set by `cargo xtask run-isolated`) limits connections
+//!   to those targets ([`SessionOptions::allowed_targets`]).
 //! - SSH uses `~/.ssh` and the OS agent ([`SshEnv::from_os`]).
 //!
 //! The logger (`logging.rs`) and the Windows graphics start-up (`graphics.rs`) are set up first.
@@ -103,8 +105,31 @@ fn secret_store() -> Option<Arc<dyn SecretStore>> {
     }
 }
 
+/// `DBEE_ALLOW_TARGETS` (`host:port,host:port`, set by `cargo xtask run-isolated`): the only
+/// targets this run may connect to. Unset is no limit. Set, it fails closed: an empty value or a
+/// malformed entry allows nothing. Hosts are lowercased.
+fn allowed_targets(env: Option<OsString>) -> Option<Vec<(String, u16)>> {
+    let text = env?.to_string_lossy().into_owned();
+    let entry = |e: &str| {
+        let (host, port) = e.trim().rsplit_once(':')?;
+        let port = port.parse::<u16>().ok().filter(|p| *p > 0)?;
+        (!host.is_empty()).then(|| (host.to_lowercase(), port))
+    };
+    Some(text.split(',').filter_map(entry).collect())
+}
+
 fn session_options(notify: Arc<dyn Fn() + Send + Sync>) -> SessionOptions {
-    SessionOptions { config_dir: config_dir().filter(|_| prefs_enabled()), secrets: secret_store(), ssh: SshEnv::from_os(), notify: Some(notify) }
+    let allowed_targets = allowed_targets(std::env::var_os("DBEE_ALLOW_TARGETS"));
+    if let Some(list) = &allowed_targets {
+        log::info!("this run may connect only to {} allowed target(s) (DBEE_ALLOW_TARGETS)", list.len());
+    }
+    SessionOptions {
+        config_dir: config_dir().filter(|_| prefs_enabled()),
+        secrets: secret_store(),
+        ssh: SshEnv::from_os(),
+        notify: Some(notify),
+        allowed_targets,
+    }
 }
 
 /// What the panic hook logs: where, not the message, which can quote cell values or SQL (the
@@ -259,6 +284,18 @@ mod start_tests {
             assert!(control_port(&args(bad), None).is_err(), "{bad:?}");
         }
         assert!(control_port(&args(&[]), Some("seven".into())).is_err());
+    }
+
+    #[test]
+    fn allowed_targets_come_from_the_environment_and_fail_closed() {
+        let t = |h: &str, p: u16| (h.to_string(), p);
+        assert_eq!(allowed_targets(None), None, "a normal run has no limit");
+        assert_eq!(allowed_targets(Some("127.0.0.1:1,localhost:32780".into())), Some(vec![t("127.0.0.1", 1), t("localhost", 32780)]));
+        // Hosts are compared lowercased; spaces around entries are ignored.
+        assert_eq!(allowed_targets(Some(" LocalHost:5 , 127.0.0.1:6 ".into())), Some(vec![t("localhost", 5), t("127.0.0.1", 6)]));
+        // Set but empty or malformed: nothing is allowed, never everything.
+        assert_eq!(allowed_targets(Some("".into())), Some(vec![]));
+        assert_eq!(allowed_targets(Some("x,h:0,h:99999,:5,h:p,127.0.0.1:1".into())), Some(vec![t("127.0.0.1", 1)]));
     }
 
     #[test]
