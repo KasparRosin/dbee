@@ -61,8 +61,9 @@ fn kind_id<S: Serializer>(kind: &JsonKind, s: S) -> Result<S::Ok, S::Error> {
     })
 }
 
-/// The longest start of `text` of at most `max` bytes that ends on a character boundary.
-pub(crate) fn cut(text: &str, max: usize) -> &str {
+/// The longest start of `text` of at most `max` bytes that ends on a character boundary (the
+/// value panel cuts its automation tag with it too).
+pub fn cut(text: &str, max: usize) -> &str {
     let mut end = max.min(text.len());
     while !text.is_char_boundary(end) {
         end = end.saturating_sub(1);

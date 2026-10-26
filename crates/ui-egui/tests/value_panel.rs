@@ -25,6 +25,10 @@ use serde_json::{Value as Json, json};
 /// The longest a test waits for anything.
 const WAIT: Duration = Duration::from_secs(60);
 
+/// How far left of the text box's right edge a click goes to land past a row's end but not on
+/// the scroll bar.
+const BESIDE_BAR: f32 = 30.0;
+
 /// The slowest frame the 20 MB cell may cost (spec Review Focus 3).
 const FRAME_BOUND: Duration = Duration::from_millis(250);
 
@@ -422,6 +426,113 @@ fn a_twenty_megabyte_cell_shows_a_truncation_note_without_a_slow_frame() {
     }
 }
 
+/// `scratch.<u> (id int PK, note text, other text)`: one row whose `note` is 300 numbered lines.
+fn long_note(db: &TestDb) -> Scratch {
+    let name = unique("t_value_long");
+    dbee_testkit::psql(
+        pg14_server(db),
+        &format!(
+            "CREATE TABLE scratch.{name} (id int PRIMARY KEY, note text, other text);
+             INSERT INTO scratch.{name} SELECT 1, string_agg('line ' || g, E'\\n' ORDER BY g), 'x' FROM generate_series(1, 300) AS g;"
+        ),
+    )
+    .unwrap();
+    Scratch(name)
+}
+
+#[test]
+fn a_hidden_panel_builds_no_value_view() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.open("shop", "orders", 100);
+    assert_eq!(ui.execute("ui.toggleValuePanel", json!({})), json!({ "visible": false }));
+    let built = |ui: &Ui| ui.harness.state().session().value_view_computations();
+    let before = built(&ui);
+    ui.click("grid-cell-0-5");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(built(&ui), before, "no view of 10 MiB is worked out for a panel nobody sees");
+    assert!(ui.copied().is_some_and(|c| c.starts_with("{\"name\": \"Customer 1\"")), "Ctrl+C copied the grid's cell: {:?}", ui.copied());
+    ui.click("value-toggle");
+    assert!(built(&ui) > before, "shown again: it shows the cell");
+    assert!(ui.panel_text().starts_with("{\n"));
+}
+
+#[test]
+fn dragging_the_edge_wraps_again_once_released() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.open("shop", "big_cell", 1);
+    ui.click("grid-cell-0-1");
+    let rows = ui.value("value-text")["rows"].as_u64().unwrap();
+    let edge = ui.rect("value-panel");
+    let (from, to) = (pos2(edge.left(), edge.center().y), pos2(edge.left() - 120.0, edge.center().y));
+    let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    ui.frame_with(vec![Event::PointerMoved(from)]);
+    ui.frame_with(vec![press(from, true)]);
+    for i in 1..=8 {
+        ui.frame_with(vec![Event::PointerMoved(from + (to - from) * (i as f32 / 8.0))]);
+    }
+    assert!(ui.rect("value-panel").width() > edge.width() + 100.0, "the panel follows the drag");
+    assert_eq!(ui.value("value-text")["rows"].as_u64(), Some(rows), "the text keeps its rows while the edge moves");
+    ui.frame_with(vec![press(to, false)]);
+    ui.frame();
+    let after = ui.value("value-text")["rows"].as_u64().unwrap();
+    assert!(after < rows, "wrapped again at the new width once released: {rows} → {after}");
+}
+
+#[test]
+fn a_staged_edit_elsewhere_keeps_the_panel_where_it_was() {
+    let db = dbee_testkit::require_testdb!();
+    let t = long_note(db);
+    let mut ui = connected(db);
+    ui.open("scratch", &t.0, 1);
+    ui.click("grid-cell-0-1");
+    let r = ui.rect("value-text");
+    ui.wheel(r.center(), vec2(0.0, -1_000.0));
+    let first = ui.value("value-text")["firstRow"].as_u64().unwrap();
+    assert!(first > 10, "scrolled down: row {first}");
+    ui.click_at(pos2(r.left() + 1.0, r.top() + LINE_H * 0.5), false);
+    ui.click_at(pos2(r.right() - BESIDE_BAR, r.top() + LINE_H * 2.5), true);
+    let selection = ui.value("value-text")["selection"].clone();
+    assert!(selection.is_array(), "{selection}");
+    // An edit of another cell, then its undo: the engine shows a new view of the same text.
+    ui.execute("cell.edit", json!({ "row": 0, "column": 2, "value": "y" }));
+    ui.frame();
+    let v = ui.value("value-text");
+    assert_eq!((v["firstRow"].as_u64(), v["selection"].clone()), (Some(first), selection.clone()), "kept after the edit: {v}");
+    ui.execute("edit.undo", json!({}));
+    ui.frame();
+    let v = ui.value("value-text");
+    assert_eq!((v["firstRow"].as_u64(), v["selection"].clone()), (Some(first), selection), "kept after the undo: {v}");
+}
+
+#[test]
+fn a_selection_whose_start_scrolled_away_extends_and_copies_whole() {
+    let db = dbee_testkit::require_testdb!();
+    let t = long_note(db);
+    let mut ui = connected(db);
+    ui.open("scratch", &t.0, 1);
+    ui.click("grid-cell-0-1");
+    let text = ui.document()["value"]["text"].as_str().unwrap().to_string();
+    let r = ui.rect("value-text");
+    // The start: the first line's first character.
+    ui.click_at(pos2(r.left() + 1.0, r.top() + LINE_H * 0.5), false);
+    // Scrolled until it is far out of view, then extended to the end of a row in view.
+    ui.wheel(r.center(), vec2(0.0, -2_000.0));
+    let first = ui.value("value-text")["firstRow"].as_u64().unwrap();
+    assert!(first > 50, "the start is out of view: row {first}");
+    ui.click_at(pos2(r.right() - BESIDE_BAR, r.top() + LINE_H * 3.5), true);
+    let selection = ui.value("value-text")["selection"].clone();
+    let end = selection[1].as_u64().unwrap() as usize;
+    assert_eq!(selection[0], 0, "from the start that scrolled away: {selection}");
+    // To the end of a line in view, far below the start.
+    let last: u64 = text[..end].rsplit('\n').next().and_then(|l| l.strip_prefix("line ")).and_then(|n| n.parse().ok()).unwrap();
+    assert!(last > first && text[end..].starts_with('\n'), "to the end of a line in view: line {last}, first row {first}");
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some(&text[..end]), "the whole range, not the part in view");
+}
+
 /// The machine and its load average, which a timing test prints with its numbers
 /// (docs/testing.md §6).
 fn machine() -> String {
@@ -462,10 +573,12 @@ fn value_panel_frames_within_budget() {
     // Hostile shapes: nothing but line breaks, and one line of two-byte characters.
     let breaks = "\n".repeat(20_000_000);
     let wide = "õ".repeat(10_000_000);
+    let tabs = "\tkey\t🐝 value\n".repeat(1_100_000);
     let views = [
         ("20 MB text", Arc::new(ValueView::new(&column("t", "text"), Some(&text)))),
         ("20 MB of line breaks", Arc::new(ValueView::new(&column("t", "text"), Some(&breaks)))),
         ("20 MB of õ", Arc::new(ValueView::new(&column("t", "text"), Some(&wide)))),
+        ("20 MB of tabs and emoji", Arc::new(ValueView::new(&column("t", "text"), Some(&tabs)))),
         ("20 MB jsonb", Arc::new(ValueView::new(&column("j", "jsonb"), Some(&jsonb)))),
         ("9 MiB pretty jsonb", Arc::new(ValueView::new(&column("j", "jsonb"), Some(&under)))),
     ];
@@ -516,18 +629,31 @@ fn value_panel_frames_within_budget() {
             scroll.push(timed(&mut h));
         }
         let first = h.state().tags.value("value-text").unwrap()["firstRow"].as_u64().unwrap();
+        // The width changing each frame: wrapped again each time (a width that changes without
+        // the edge being dragged), then while the edge is dragged (rows held), then let go.
         let mut rewrap = Vec::new();
         for i in 0..30 {
             h.state_mut().width = 360.0 - (i % 2) as f32 * 40.0;
             rewrap.push(timed(&mut h));
         }
+        h.state_mut().panel.hold_rows(true);
+        let mut dragging = Vec::new();
+        for i in 0..30 {
+            h.state_mut().width = 360.0 - ((i + 1) % 2) as f32 * 40.0;
+            dragging.push(timed(&mut h));
+        }
+        h.state_mut().panel.hold_rows(false);
         h.state_mut().width = 360.0;
+        let released = timed(&mut h);
         let (scroll_max, steady_ms) = (*scroll.iter().max().unwrap(), steady);
         let scroll = median(scroll);
         let rewrap = median(rewrap);
+        let dragging_max = *dragging.iter().max().unwrap();
+        let dragging = median(dragging);
         report.push(format!(
-            "{name}: select {select:?}, {coloured} frames until coloured, steady median {steady_ms:?}, scrolling median {scroll:?} (max {scroll_max:?}, down to row {first}), width changing median {rewrap:?}"
+            "{name}: select {select:?}, {coloured} frames until coloured, steady median {steady_ms:?}, scrolling median {scroll:?} (max {scroll_max:?}, down to row {first}), width changing median {rewrap:?}, while the edge drags median {dragging:?} (max {dragging_max:?}), let go {released:?}"
         ));
+        assert!(dragging < Duration::from_millis(16), "{name}: a frame of an edge drag took {dragging:?}");
         assert!(select < FRAME_BOUND, "{name}: selecting took {select:?}");
         assert!(steady < Duration::from_millis(16) && scroll < Duration::from_millis(16), "{name}: {steady:?} {scroll:?}");
     }
