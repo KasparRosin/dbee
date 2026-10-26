@@ -1,0 +1,5 @@
+# Bumped by hand: a new compiler rebuilds every cached dependency (docs/decisions.md, 2026-10-26).
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

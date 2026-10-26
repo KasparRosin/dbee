@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-23 · **Change:** minor (rfd for file pickers)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-26 · **Change:** minor (toolchain pinned)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -88,3 +88,8 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** `crates/ui-egui` opens file pickers (the SSH key's "Change…", the CA file's "Choose…") with `rfd` 0.17, default features off and `xdg-portal` and `wayland` on (MIT). On Linux and the BSDs that asks the XDG desktop portal over D-Bus, through the system's `libdbus-1` loaded at run time (no `libdbus-sys` crate), and falls back to `zenity` when there is no portal; macOS and Windows use their native pickers. The picker runs on a thread of its own and sends the chosen path back to the UI thread, so the window keeps drawing while it is open on Linux, the BSDs and Windows; on macOS rfd shows the panel modally on the main thread, so the window waits while it is open, as it does for any macOS open panel. When no picker can open, the form says so under its buttons instead of waiting. Tests and agents never open it: they set a key path by saving a connection.
 - **Why:** rfd's `gtk3` backend would bring GTK, which the build rules forbid, and a picker written for egui would be a second file browser to maintain. The portal gives the desktop's own picker, also inside sandboxes such as Flatpak.
+
+## 2026-10-26: The toolchain is pinned in `rust-toolchain.toml`
+
+- **Decision:** `rust-toolchain.toml` names an exact release (`1.99.1`, the minimal profile with clippy and rustfmt), and it is bumped by hand. `rust-version = "1.99"` stays the minimum.
+- **Why:** A new compiler invalidates every cached build. With `stable`, an update of the machine's toolchain rebuilt the whole dependency tree in the middle of the work; a pinned release changes only when the repo says so, in a commit of its own.
