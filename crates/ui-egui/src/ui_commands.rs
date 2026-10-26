@@ -4,9 +4,12 @@
 //!
 //! - `ui.quickSearch` (Ctrl+P): opens the quick search over the workspace → `{open: true}`.
 //! - `ui.toggleValuePanel`: hides or shows the value panel → `{visible}`.
-//! - `clipboard.copy {format}` (Ctrl+C `tsv`, Ctrl+Shift+C `tsvHeader`): runs `copy.selection`
-//!   and puts its text on the clipboard → `{rows, columns}`. The text itself is not in the
-//!   result: it can be large, and it is cell values.
+//! - `clipboard.copy {format}` (Ctrl+C `tsv`, Ctrl+Shift+C `tsvHeader`, the grid's menu): runs
+//!   `copy.selection`, puts its text on the clipboard and shows "Copied n rows" →
+//!   `{rows, columns, bytes}` (`bytes`: the length of the text). The text itself is not in the
+//!   result: it can be large, and it is cell values. A selection over the copy cap
+//!   (`COPY_MAX_BYTES`) is `Disabled` with the engine's reason, which a shortcut or the menu shows
+//!   as a notice.
 
 use dbee_engine::{CommandInfo, EngineError, Json, Outcome, cmd};
 use serde_json::json;
@@ -53,7 +56,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         label: "Copy",
         menu: &["Edit"],
         shortcut: Some("Ctrl+C"),
-        params: "{format: \"tsv\" | \"tsvHeader\" | \"csv\" | \"json\" | \"markdown\"} -> {rows, columns}; the text goes to the clipboard",
+        params: "{format: \"tsv\" | \"tsvHeader\" | \"csv\" | \"json\" | \"markdown\"} -> {rows, columns, bytes}; the text goes to the clipboard",
         enabled: |_| Ok(()),
         run: copy,
     },
@@ -126,8 +129,34 @@ fn copy(app: &mut DbeeApp, params: Json) -> Result<Outcome, EngineError> {
     let Json::Object(mut done) = done else {
         return Err(EngineError::Internal { id: COPY.into(), msg: "copy.selection returned no object".into() });
     };
-    if let Some(Json::String(text)) = done.remove("text") {
-        app.copy_text(text);
+    let rows = done.remove("rows").unwrap_or(Json::Null);
+    let bytes = match done.remove("text") {
+        Some(Json::String(text)) => {
+            let n = text.len();
+            app.copy_text(text);
+            n
+        }
+        _ => 0,
+    };
+    app.notice_again(copied_notice(rows.as_u64().unwrap_or(0)));
+    Ok(Outcome::Done(json!({ "rows": rows, "columns": done.remove("columns").unwrap_or(Json::Null), "bytes": bytes })))
+}
+
+/// The notice after a grid copy: `Copied 1 row`, `Copied 1,250 rows`.
+fn copied_notice(rows: u64) -> String {
+    let unit = if rows == 1 { "row" } else { "rows" };
+    format!("Copied {} {unit}", crate::tree::thousands(rows))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_copy_notice_counts_rows() {
+        assert_eq!(copied_notice(1), "Copied 1 row");
+        assert_eq!(copied_notice(0), "Copied 0 rows");
+        assert_eq!(copied_notice(2), "Copied 2 rows");
+        assert_eq!(copied_notice(10_000), "Copied 10,000 rows");
     }
-    Ok(Outcome::Done(json!({ "rows": done.remove("rows").unwrap_or(Json::Null), "columns": done.remove("columns").unwrap_or(Json::Null) })))
 }

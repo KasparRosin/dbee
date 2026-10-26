@@ -30,6 +30,7 @@ use dbee_ssh::SshEnv;
 use serde::Serialize;
 use serde_json::{Map, json};
 
+pub use cmd::selection::COPY_MAX_BYTES;
 pub use cmd::{CommandInfo, CommandSpec};
 pub use edits::Edits;
 pub(crate) use jobs::Apply;

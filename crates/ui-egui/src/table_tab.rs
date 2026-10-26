@@ -33,7 +33,7 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::editors;
 use crate::filter_bar::{self, Bar};
-use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark};
+use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{self, BAR_H, Paging};
 use crate::theme::{RADIUS, TOKENS};
 
@@ -271,7 +271,10 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     sort,
                     sortable: true,
                     blocked: blocked(tab, lost),
-                    editable: edit_blocked.is_none(),
+                    edits: match edit_blocked.as_deref() {
+                        None => RowEdits::Allowed,
+                        Some(why) => RowEdits::Blocked(why),
+                    },
                     links: !lost,
                     first_number: tab.shown.page.saturating_mul(PAGE_SIZE).saturating_add(1),
                     editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),

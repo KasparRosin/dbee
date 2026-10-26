@@ -27,5 +27,5 @@ pub mod ui_commands;
 pub mod value_panel;
 pub mod workspace;
 
-pub use app::DbeeApp;
+pub use app::{Clipboard, DbeeApp};
 pub use control::ControlRequest;

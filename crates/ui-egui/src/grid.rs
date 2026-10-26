@@ -17,7 +17,13 @@
 //! **Selection** is the engine's (`selection.set`, `selection.all`): a click selects a cell,
 //! shift-click extends from the anchor, a drag selects from where it started to the cell under
 //! the pointer. A right-click selects the cell unless it is already selected, and opens the menu:
-//! Set as NULL, Copy, Copy with header, Copy as CSV / JSON / Markdown, Delete row(s).
+//! Set as NULL, Copy, Copy with header, Copy as CSV / JSON / Markdown, Delete row(s). Set as NULL
+//! and Delete row are left out where rows are never edited (a query's results, [`RowEdits::None`]),
+//! and listed disabled, with the reason on hover, where they cannot be now ([`RowEdits::Blocked`]).
+//!
+//! **The keyboard.** A click, a right-click or a drag on a cell takes the keyboard from any text
+//! field (the query editor, the filter bar's inputs), so Ctrl+A, Ctrl+C and Ctrl+Shift+C act on
+//! the grid from then on ([`crate::shortcuts`]: a focused text field keeps them).
 //!
 //! **Editing.** A double-click (or a triple one) asks to edit the cell ([`GridAct::Edit`]); the
 //! caller decides whether it can. While a cell is being edited ([`Grid::editing`]), the grid
@@ -37,7 +43,8 @@
 //! `staged`, `new`, `deleted`, `failed`, and `deleted: true` on a row to delete, also when it is
 //! the failed one), `fk-link-<row>-<col>`, and while the menu is open `grid-menu-null`,
 //! `grid-menu-copy`, `grid-menu-copy-header`, `grid-menu-copy-csv`, `grid-menu-copy-json`,
-//! `grid-menu-copy-markdown`, `grid-menu-delete`. Cells of rows out of view are listed with
+//! `grid-menu-copy-markdown`, `grid-menu-delete` (value `{label, shortcut, why?}`, `why` saying
+//! why a disabled entry cannot run now). Cells of rows out of view are listed with
 //! `visible: false` ([`CellBlock`]); a click on one scrolls its row into view first.
 
 use dbee_core::ResultSet;
@@ -167,6 +174,17 @@ impl GridSource for ResultSet {
     }
 }
 
+/// What the menu offers for editing rows: Set as NULL and Delete row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowEdits<'a> {
+    /// Not listed: these rows are never edited (a query's results).
+    None,
+    /// Offered.
+    Allowed,
+    /// Listed, disabled, with why on hover (a read-only table, a lost connection).
+    Blocked(&'a str),
+}
+
 /// What the user asked of the grid in a frame; the caller runs the commands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GridAct {
@@ -237,8 +255,8 @@ pub struct Grid<'a> {
     /// Why sorting cannot run now (staged changes, a lost connection), shown on a header's hover;
     /// a click still asks, and the command says why.
     pub blocked: Option<&'a str>,
-    /// Set as NULL and Delete row are offered.
-    pub editable: bool,
+    /// Whether the menu offers Set as NULL and Delete row.
+    pub edits: RowEdits<'a>,
     /// Foreign key cells of the selected row show the link that follows them.
     pub links: bool,
     /// The number the gutter shows for row 0 (a page's offset plus one).
@@ -471,6 +489,11 @@ impl Grid<'_> {
                         if resp.drag_started_by(egui::PointerButton::Primary) {
                             drag_start = Some(here);
                         }
+                        // The keyboard comes to the grid: a text field that had it lets it go.
+                        // egui does that itself for a click, not for a drag.
+                        if resp.clicked() || resp.secondary_clicked() || resp.drag_started() {
+                            resp.ctx.memory_mut(|m| m.stop_text_input());
+                        }
                         if primary_down && pointer.is_some_and(|p| resp.rect.contains(p)) {
                             drag_over = Some(here);
                         }
@@ -637,34 +660,50 @@ impl Grid<'_> {
     fn menu(&self, ui: &mut egui::Ui, here: (usize, usize), tags: &mut Tags, acts: &mut Vec<GridAct>) {
         ui.set_min_width(220.0);
         let (row, col) = here;
-        let mut item = |ui: &mut egui::Ui, id: &str, label: &str, keys: Option<&str>, enabled: bool, act: GridAct| {
+        // `blocked`: why the entry cannot run now, or `Some("")` when it is disabled without one.
+        let mut item = |ui: &mut egui::Ui, id: &str, label: &str, keys: Option<&str>, blocked: Option<&str>, act: GridAct| {
             let mut button = Button::new(label);
             if let Some(k) = keys {
                 button = button.shortcut_text(k);
             }
-            let r = ui.add_enabled(enabled, button);
+            let mut r = ui.add_enabled(blocked.is_none(), button);
+            let mut value = json!({ "label": label, "shortcut": keys });
+            if let Some(why) = blocked.filter(|w| !w.is_empty()) {
+                r = r.on_disabled_hover_text(why);
+                value["why"] = json!(why);
+            }
             // A menu's first frame reads every widget as disabled: tag what the code knows.
-            tags.tag_value_as(id, &r, label, enabled);
+            tags.tag_value_as(id, &r, value, blocked.is_none());
             if r.clicked() {
                 acts.push(act);
                 ui.close();
             }
         };
-        let deleted = self.source.deleted(row);
-        item(ui, "grid-menu-null", "Set as NULL", None, self.editable && !deleted, GridAct::SetNull { row, col });
-        ui.separator();
-        item(ui, "grid-menu-copy", "Copy", Some("Ctrl+C"), true, GridAct::Copy("tsv"));
-        item(ui, "grid-menu-copy-header", "Copy with header", Some("Ctrl+Shift+C"), true, GridAct::Copy("tsvHeader"));
-        item(ui, "grid-menu-copy-csv", "Copy as CSV", None, true, GridAct::Copy("csv"));
-        item(ui, "grid-menu-copy-json", "Copy as JSON", None, true, GridAct::Copy("json"));
-        item(ui, "grid-menu-copy-markdown", "Copy as Markdown", None, true, GridAct::Copy("markdown"));
-        ui.separator();
-        let rows: Vec<usize> = match self.selection.filter(|_| covers(self.selection, here)).map(bounds) {
-            Some(((r0, r1), _)) => (r0..=r1).collect(),
-            None => vec![row],
+        let edit = match self.edits {
+            RowEdits::None => None,
+            RowEdits::Allowed => Some(None),
+            RowEdits::Blocked(why) => Some(Some(why)),
         };
-        let label = if rows.len() == 1 { "Delete row".to_string() } else { format!("Delete {} rows", rows.len()) };
-        item(ui, "grid-menu-delete", &label, None, self.editable, GridAct::DeleteRows(rows));
+        if let Some(blocked) = edit {
+            // A row to delete takes no new values.
+            let null = blocked.or(self.source.deleted(row).then_some(""));
+            item(ui, "grid-menu-null", "Set as NULL", None, null, GridAct::SetNull { row, col });
+            ui.separator();
+        }
+        item(ui, "grid-menu-copy", "Copy", Some("Ctrl+C"), None, GridAct::Copy("tsv"));
+        item(ui, "grid-menu-copy-header", "Copy with header", Some("Ctrl+Shift+C"), None, GridAct::Copy("tsvHeader"));
+        item(ui, "grid-menu-copy-csv", "Copy as CSV", None, None, GridAct::Copy("csv"));
+        item(ui, "grid-menu-copy-json", "Copy as JSON", None, None, GridAct::Copy("json"));
+        item(ui, "grid-menu-copy-markdown", "Copy as Markdown", None, None, GridAct::Copy("markdown"));
+        if let Some(blocked) = edit {
+            ui.separator();
+            let rows: Vec<usize> = match self.selection.filter(|_| covers(self.selection, here)).map(bounds) {
+                Some(((r0, r1), _)) => (r0..=r1).collect(),
+                None => vec![row],
+            };
+            let label = if rows.len() == 1 { "Delete row".to_string() } else { format!("Delete {} rows", rows.len()) };
+            item(ui, "grid-menu-delete", &label, None, blocked, GridAct::DeleteRows(rows));
+        }
     }
 }
 

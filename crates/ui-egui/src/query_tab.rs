@@ -84,7 +84,7 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
-use crate::grid::{Grid, GridAct, GridState};
+use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{RADIUS, SqlSyntax, TOKENS, sql_syntax};
 use crate::tree::thousands;
 
@@ -1016,7 +1016,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     sort: None,
                     sortable: false,
                     blocked: None,
-                    editable: false,
+                    edits: RowEdits::None,
                     links: false,
                     first_number: 1,
                     editing: None,

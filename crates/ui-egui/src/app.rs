@@ -69,11 +69,30 @@ pub struct DbeeApp {
     /// Jobs started by the user's own actions ([`DbeeApp::start`]), whose outcome goes back to
     /// where they came from.
     ui_jobs: Vec<UiJob>,
-    clipboard: Vec<String>,
+    clipboard: Copied,
     themed: bool,
     /// Keyboard events held back for the next frame: those after a cell editor's key in the same
     /// frame ([`crate::editors::before_frame`]).
     pub(crate) carry: Vec<egui::Event>,
+}
+
+/// Where copied text goes ([`DbeeApp::with_clipboard`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Clipboard {
+    /// The system clipboard, through egui (`Context::copy_text`) at the end of the frame.
+    #[default]
+    System,
+    /// The app only (`DBEE_CLIPBOARD=memory`, which `cargo xtask run-isolated` sets): the system
+    /// clipboard is never touched, and `document.inspect` shows the last copied text as
+    /// `clipboard`.
+    Memory,
+}
+
+/// The copied text: waiting for the end of the frame, or kept in memory.
+#[derive(Debug)]
+enum Copied {
+    System(Vec<String>),
+    Memory(Option<String>),
 }
 
 /// Where a command the user started came from, so its outcome goes back there.
@@ -171,10 +190,19 @@ impl DbeeApp {
             quit: None,
             frames: 0,
             ui_jobs: Vec::new(),
-            clipboard: Vec::new(),
+            clipboard: Copied::System(Vec::new()),
             themed: false,
             carry: Vec::new(),
         }
+    }
+
+    /// This app with copied text going to `clipboard` (the system clipboard by default).
+    pub fn with_clipboard(mut self, clipboard: Clipboard) -> DbeeApp {
+        self.clipboard = match clipboard {
+            Clipboard::System => Copied::System(Vec::new()),
+            Clipboard::Memory => Copied::Memory(None),
+        };
+        self
     }
 
     pub fn session(&self) -> &Session {
@@ -217,9 +245,22 @@ impl DbeeApp {
         self.input.feed(raw, self.frames);
     }
 
-    /// Puts `text` on the clipboard at the end of this frame.
+    /// Puts `text` on the clipboard at the end of this frame; with [`Clipboard::Memory`], keeps it
+    /// instead, in place of the last.
     pub(crate) fn copy_text(&mut self, text: String) {
-        self.clipboard.push(text);
+        match &mut self.clipboard {
+            Copied::System(waiting) => waiting.push(text),
+            Copied::Memory(last) => *last = Some(text),
+        }
+    }
+
+    /// With [`Clipboard::Memory`], the last text copied (`Some(None)` before any copy); `None`
+    /// with the system clipboard.
+    pub(crate) fn kept_clipboard(&self) -> Option<Option<&str>> {
+        match &self.clipboard {
+            Copied::System(_) => None,
+            Copied::Memory(last) => Some(last.as_deref()),
+        }
     }
 
     /// Shows `text` as a notice for a few seconds.
@@ -232,6 +273,15 @@ impl DbeeApp {
             self.view.notices.pop_front();
         }
         self.view.notices.push_back((text, None));
+    }
+
+    /// [`DbeeApp::notice`], except that the same text waiting or showing already starts its time
+    /// again: a second copy of as many rows says so again.
+    pub(crate) fn notice_again(&mut self, text: String) {
+        match self.view.notices.iter_mut().find(|(t, _)| *t == text) {
+            Some((_, shown)) => *shown = None,
+            None => self.notice(text),
+        }
     }
 
     /// Runs command `id` for a shortcut; `query.run` with `current` gets the editor's cursor,
@@ -354,8 +404,10 @@ impl DbeeApp {
                 dbee_engine::UiRequest::Notice(text) => self.notice(text),
             }
         }
-        for text in self.clipboard.drain(..) {
-            ctx.copy_text(text);
+        if let Copied::System(waiting) = &mut self.clipboard {
+            for text in waiting.drain(..) {
+                ctx.copy_text(text);
+            }
         }
         if self.session.busy() {
             ctx.request_repaint_after(BUSY_REPAINT);
@@ -535,6 +587,21 @@ mod tests {
         let n = shown(&app).len();
         app.notice("the count failed".into());
         assert_eq!(shown(&app).len(), n);
+    }
+
+    #[test]
+    fn the_same_notice_again_starts_its_time_again() {
+        let home = temp_home(None, None);
+        let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
+        let mut app = DbeeApp::new(session, None);
+        app.notice_again("Copied 2 rows".into());
+        app.view.notices[0].1 = Some(10.0);
+        app.notice("Copied 2 rows".into());
+        assert_eq!(app.view.notices, [("Copied 2 rows".to_string(), Some(10.0))], "notice: once is enough");
+        app.notice_again("Copied 2 rows".into());
+        assert_eq!(app.view.notices, [("Copied 2 rows".to_string(), None)], "shown afresh, still once");
+        app.notice_again("Copied 1 row".into());
+        assert_eq!(app.view.notices.len(), 2);
     }
 
     #[test]

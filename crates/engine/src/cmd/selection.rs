@@ -10,7 +10,9 @@
 //!
 //! `copy.selection` renders the rectangle in grid order with the staged values, as text for the
 //! clipboard (the UI puts it there); it needs no connection, and none of these commands is
-//! journaled. The cell values never reach the log.
+//! journaled. The cell values never reach the log. It first adds up the bytes of the cells it
+//! would copy: above [`COPY_MAX_BYTES`] it renders nothing and is `Disabled`, saying how much is
+//! selected and asking for fewer rows.
 
 use dbee_core::Column;
 use dbee_core::copy::{CopyFormat, render};
@@ -30,6 +32,8 @@ const SHOW: &str = "value.show";
 pub const NO_GRID: &str = "no rows are shown";
 /// Why copy is disabled when nothing is selected.
 pub const NOTHING_SELECTED: &str = "nothing is selected";
+/// The most cell text one copy takes (the cells' bytes, before any quoting or separators).
+pub const COPY_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -163,8 +167,30 @@ fn copy(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let (c0, c1) = (sel.anchor.1.min(sel.focus.1), sel.anchor.1.max(sel.focus.1));
     let columns: &[Column] = g.data.columns.get(c0..=c1).unwrap_or_default();
     let rows: Vec<Vec<Option<&str>>> = (r0..=r1).map(|row| (c0..=c1).map(|col| g.cell(row, col)).collect()).collect();
+    let bytes = rows.iter().flatten().fold(0usize, |n, v| n.saturating_add(v.map_or(0, str::len)));
+    if bytes > COPY_MAX_BYTES {
+        return Err(disabled(&too_large(bytes)));
+    }
     let text = render(format, columns, &rows);
-    Ok(Outcome::Done(json!({ "text": text, "rows": rows.len(), "columns": columns.len() })))
+    let mut done = serde_json::Map::new();
+    // Moved in, not copied: the text can be tens of megabytes.
+    done.insert("text".into(), Json::String(text));
+    done.insert("rows".into(), json!(rows.len()));
+    done.insert("columns".into(), json!(columns.len()));
+    Ok(Outcome::Done(Json::Object(done)))
+}
+
+/// Why a selection of `bytes` of cell text is not copied. The size is rounded up, so it never
+/// reads as the cap itself.
+fn too_large(bytes: usize) -> String {
+    const MIB: usize = 1024 * 1024;
+    let tenths = bytes.saturating_mul(10).div_ceil(MIB);
+    format!(
+        "the selection holds {}.{} MiB of cell text, more than the {} MiB a copy can take; select fewer rows",
+        tenths / 10,
+        tenths % 10,
+        COPY_MAX_BYTES / MIB
+    )
 }
 
 /// `{}` → the focus cell's value view, or null.
@@ -173,4 +199,17 @@ fn show(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
         Some(v) => serde_json::to_value(&*v).unwrap_or(Json::Null),
         None => Json::Null,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_size_in_the_reason_never_reads_as_the_cap() {
+        let why = too_large(COPY_MAX_BYTES + 1);
+        assert_eq!(why, "the selection holds 32.1 MiB of cell text, more than the 32 MiB a copy can take; select fewer rows");
+        assert!(too_large(40_000_123).contains("holds 38.2 MiB"));
+        assert!(too_large(usize::MAX).contains("MiB"), "no overflow");
+    }
 }

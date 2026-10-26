@@ -540,8 +540,9 @@ fn the_result_grid_is_read_only() {
     assert!(ui.tag("cell-editor").is_none(), "a double-click edits nothing");
     assert!(ui.tag("notice").is_none(), "{:?}", ui.tag("notice"));
     ui.click_with("grid-cell-1-1", json!({ "button": "right" }));
-    for (id, enabled) in [("grid-menu-copy", true), ("grid-menu-null", false), ("grid-menu-delete", false)] {
-        assert_eq!(ui.tag(id).map(|t| t["enabled"] != false), Some(enabled), "{id}");
+    assert_eq!(ui.tag("grid-menu-copy").map(|t| t["enabled"] != false), Some(true));
+    for id in ["grid-menu-null", "grid-menu-delete"] {
+        assert!(ui.tag(id).is_none(), "a query's results list no {id}");
     }
     ui.click("grid-menu-copy");
     assert_eq!(ui.copied().as_deref(), Some("Customer 2"));

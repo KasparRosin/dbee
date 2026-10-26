@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use dbee_engine::{Json, Session, VALUE_VIEW_MAX_BYTES};
+use dbee_engine::{COPY_MAX_BYTES, Json, Session, VALUE_VIEW_MAX_BYTES};
 use dbee_testkit::{require_testdb, unique};
 use serde_json::json;
 
@@ -280,4 +280,33 @@ fn selection_follows_the_grid() {
     assert!(s.value_view().is_none());
     assert_eq!(s.inspect()["selection"], Json::Null);
     assert_eq!(s.execute("copy.selection", json!({ "format": "tsv" })).unwrap_err().code(), "disabled");
+}
+
+#[test]
+fn copy_takes_at_most_32_mib_of_cell_text() {
+    let _db = require_testdb!();
+    assert_eq!(COPY_MAX_BYTES, 32 * 1024 * 1024);
+    let mut s = connected();
+    // Two cells holding exactly the cap: copied, in every format.
+    let at_cap = format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES - 1);
+    run(&mut s, "tab.newQuery", json!({ "text": at_cap }));
+    run(&mut s, "query.run", json!({}));
+    run(&mut s, "selection.all", json!({}));
+    let r = copy(&mut s, "tsv");
+    assert_eq!((text(&r).len(), r["rows"].clone(), r["columns"].clone()), (COPY_MAX_BYTES + 2, json!(1), json!(3)));
+    assert!(text(&copy(&mut s, "json")).ends_with("\"b\": \"y\", \"c\": null}\n]"));
+    // One byte more: nothing is rendered, and the reason gives the size, the cap and what to do.
+    let over = format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES);
+    run(&mut s, "query.setText", json!({ "text": over }));
+    run(&mut s, "query.run", json!({}));
+    run(&mut s, "selection.all", json!({}));
+    for format in ["tsv", "tsvHeader", "csv", "json", "markdown"] {
+        let e = s.execute("copy.selection", json!({ "format": format })).unwrap_err();
+        assert_eq!(e.code(), "disabled", "{format}: {e}");
+        let why = e.data()["why"].as_str().unwrap_or_default().to_string();
+        assert_eq!(why, "the selection holds 32.1 MiB of cell text, more than the 32 MiB a copy can take; select fewer rows", "{format}");
+    }
+    // A smaller part of the same result copies.
+    run(&mut s, "selection.set", json!({ "anchor": [0, 1], "focus": [0, 2] }));
+    assert_eq!(text(&copy(&mut s, "tsv")), "y\t");
 }

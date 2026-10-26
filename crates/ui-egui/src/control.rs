@@ -256,7 +256,7 @@ fn dispatch(app: &mut DbeeApp, ctx: &egui::Context, method: &str, params: Json) 
         }
         "engine.wait" if app.session().busy() => Handled::Later(Wait::Idle),
         "engine.wait" => Handled::Now(ok(json!({}))),
-        "document.inspect" => Handled::Now(ok(app.session().inspect())),
+        "document.inspect" => Handled::Now(ok(document(app))),
         "ui.inspect" => Handled::Now(ok(ui_inspect(app, ctx))),
         "ui.click" => click(app, &params),
         "ui.key" => key(app, &params),
@@ -314,6 +314,16 @@ fn commands(app: &DbeeApp, params: &Json) -> Json {
         .map(|c| serde_json::to_value(c).unwrap_or(Json::Null))
         .collect();
     ok(Json::Array(list))
+}
+
+/// The session summary (`Session::inspect`), with `clipboard`, the last copied text or null,
+/// when the app keeps its clipboard in memory ([`crate::app::Clipboard::Memory`]).
+fn document(app: &DbeeApp) -> Json {
+    let mut d = app.session().inspect();
+    if let (Some(kept), Json::Object(fields)) = (app.kept_clipboard(), &mut d) {
+        fields.insert("clipboard".into(), kept.map_or(Json::Null, |t| Json::String(t.to_string())));
+    }
+    d
 }
 
 /// `{screen, dialog, window: [width, height], frame, automation: [{id, rect, …}]}`; `frame`

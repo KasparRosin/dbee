@@ -11,9 +11,10 @@
 //!
 //! Only the child's environment changes ([`command`]): `HOME` and `USERPROFILE` are the
 //! throwaway home, the XDG directories and `APPDATA`/`LOCALAPPDATA` lie inside it,
-//! `SSH_AUTH_SOCK` and `DBEE_CONTROL_PORT` are removed and `DBEE_SECRET_STORE=memory`. So the run
-//! never reads or writes the real home, `~/.ssh` or the keyring, and on Linux and macOS never
-//! reaches the SSH agent. On Windows the OpenSSH agent pipe is still reachable: dbee finds it
+//! `SSH_AUTH_SOCK` and `DBEE_CONTROL_PORT` are removed, and `DBEE_SECRET_STORE=memory` and
+//! `DBEE_CLIPBOARD=memory` are set. So the run never reads or writes the real home, `~/.ssh`, the
+//! keyring or the system clipboard (a copy shows in `document.inspect` as `clipboard`), and on
+//! Linux and macOS never reaches the SSH agent. On Windows the OpenSSH agent pipe is still reachable: dbee finds it
 //! without `SSH_AUTH_SOCK`.
 //!
 //! [`ALLOW_VAR`] lists the only targets the run may connect to ([`allowed_targets`]): each test
@@ -169,6 +170,7 @@ pub fn command(root: &Path, port: u16, exe: &Path, rest: &[String], allowed: &[(
         .env("APPDATA", home.join("AppData").join("Roaming"))
         .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("DBEE_SECRET_STORE", "memory")
+        .env("DBEE_CLIPBOARD", "memory")
         .env(ALLOW_VAR, allow_list(allowed))
         .env_remove("SSH_AUTH_SOCK")
         .env_remove("DBEE_CONTROL_PORT");
@@ -277,6 +279,12 @@ mod tests {
         let args: Vec<&OsStr> = c.get_args().collect();
         assert_eq!(args, vec![OsStr::new("--control"), OsStr::new("7979"), OsStr::new("--x")]);
         assert_eq!(c.get_current_dir(), Some(root));
+    }
+
+    #[test]
+    fn isolated_runs_keep_the_clipboard_in_memory() {
+        let c = command(Path::new("/repo"), 7979, Path::new("/repo/target/debug/dbee"), &[], &[]);
+        assert_eq!(env_of(&c, "DBEE_CLIPBOARD"), Some(Some(OsStr::new("memory"))), "a copy never reaches the system clipboard");
     }
 
     #[test]

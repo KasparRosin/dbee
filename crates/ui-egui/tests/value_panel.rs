@@ -344,11 +344,13 @@ fn ctrl_c_copies_the_panel_selection_not_the_grid() {
     assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5] }), "the grid's selection stays");
     ui.ctrl("C");
     assert_eq!(ui.copied().as_deref(), Some(text.as_str()));
+    assert!(ui.tag("notice").is_none(), "the panel's copy is a text field's: no notice");
     // A click on the grid ends the panel's selection: Ctrl+C copies the grid's again.
     ui.click("grid-cell-0-0");
     assert_eq!(ui.value("value-text")["selection"], Json::Null);
     ui.ctrl("C");
     assert_eq!(ui.copied().as_deref(), Some("1"), "the grid's cell (order 1)");
+    assert_eq!(ui.value("notice"), "Copied 1 row");
 }
 
 #[test]

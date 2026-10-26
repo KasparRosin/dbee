@@ -735,7 +735,7 @@ fn grid_frame_within_budget() {
     use dbee_core::{Column, ResultSet};
     use dbee_engine::Selection;
     use dbee_ui_egui::automation::Tags;
-    use dbee_ui_egui::grid::{Grid, GridState};
+    use dbee_ui_egui::grid::{Grid, GridState, RowEdits};
 
     struct State {
         rows: ResultSet,
@@ -764,7 +764,7 @@ fn grid_frame_within_budget() {
                 sort: None,
                 sortable: false,
                 blocked: None,
-                editable: false,
+                edits: RowEdits::None,
                 links: false,
                 first_number: 1,
                 editing: None,

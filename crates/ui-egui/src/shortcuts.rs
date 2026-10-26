@@ -8,7 +8,9 @@
 //! also reaches a widget. Matching is exact: Ctrl+Z does not fire on Ctrl+Shift+Z. While a text
 //! field has keyboard focus, the keys a text field uses itself ([`TEXT_KEYS`]: copy, select all,
 //! undo, redo) are left to it; the others always fire. The keyboard's Ctrl+C reaches egui as a
-//! copy event, not a key, so that is matched too, with Shift held for Ctrl+Shift+C.
+//! copy event, not a key, so that is matched too, with Shift held for Ctrl+Shift+C. A click or a
+//! drag on a grid cell takes the keyboard from a text field ([`crate::grid`]), so the grid gets
+//! those keys from then on.
 //!
 //! An open cell editor ([`crate::editors`]) of text counts as a focused text field; the boolean
 //! choice has no text, so the text keys run there (after committing it). Its Enter keys
