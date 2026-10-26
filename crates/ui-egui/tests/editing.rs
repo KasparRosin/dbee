@@ -53,6 +53,11 @@ fn connected(db: &TestDb) -> Ui {
 /// [`connected`] with frames `step` seconds apart (egui's clock in the harness), in a window
 /// `width` wide.
 fn connected_at(db: &TestDb, step: f32, width: f32) -> Ui {
+    connected_in(db, step, egui::vec2(width, 900.0))
+}
+
+/// [`connected`] with frames `step` seconds apart, in a window of `size`.
+fn connected_in(db: &TestDb, step: f32, size: egui::Vec2) -> Ui {
     let home = temp_home(None, None);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
     let session = Session::new(SessionOptions {
@@ -65,7 +70,7 @@ fn connected_at(db: &TestDb, step: f32, width: f32) -> Ui {
     .unwrap();
     let (tx, rx) = mpsc::channel();
     let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(egui::vec2(width, 900.0)).with_step_dt(step).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
+    let harness = Harness::builder().with_size(size).with_step_dt(step).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
     let mut ui = Ui { harness, tx, _home: home };
     ui.frame();
     let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
@@ -775,6 +780,173 @@ fn ctrl_z_and_ctrl_shift_z_undo_and_redo_outside_the_editor() {
     assert_eq!(ui.editor_text(), "20.00", "Ctrl+Z undid the typing in the editor");
     assert_eq!(ui.edits()["count"], 1, "the staged change stays");
     ui.key("Escape");
+}
+
+/// The paging bar's widgets, in their order along it.
+const BAR: [&str; 12] = [
+    "page-first",
+    "page-prev",
+    "page-number",
+    "page-next",
+    "page-last",
+    "page-count",
+    "table-refresh",
+    "page-cut",
+    "row-add",
+    "edits-count",
+    "edit-reset",
+    "edit-apply",
+];
+
+/// A widget of the paging bar as the last frame drew it: the part a click can reach, or its
+/// whole rect when none can.
+#[derive(Debug, Clone)]
+struct Drawn {
+    id: &'static str,
+    rect: egui::Rect,
+    visible: bool,
+}
+
+impl Ui {
+    /// The paging bar's widgets drawn in the last frame, in [`BAR`] order.
+    fn bar(&mut self) -> Vec<Drawn> {
+        let i = self.ok("ui.inspect", json!({}));
+        let all = i["automation"].as_array().unwrap();
+        BAR.iter()
+            .filter_map(|&id| {
+                let a = all.iter().find(|a| a["id"] == id)?;
+                let r: Vec<f32> = a["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+                let rect = egui::Rect::from_min_size(egui::pos2(r[0], r[1]), egui::vec2(r[2], r[3]));
+                Some(Drawn { id, rect, visible: a.get("visible") != Some(&json!(false)) })
+            })
+            .collect()
+    }
+
+    /// Where the value panel starts: the paging bar ends left of it.
+    fn panel_left(&mut self) -> f32 {
+        let panel = self.tag("value-panel").expect("the value panel shows");
+        panel["rect"][0].as_f64().unwrap() as f32
+    }
+}
+
+/// No two visible widgets of the bar overlap (sharing an edge is fine).
+fn assert_apart(bar: &[Drawn], at: &str) {
+    for (i, a) in bar.iter().enumerate().filter(|(_, d)| d.visible) {
+        for b in bar.iter().skip(i + 1).filter(|d| d.visible) {
+            let o = a.rect.intersect(b.rect);
+            assert!(o.width() <= 0.5 || o.height() <= 0.5, "{at}: `{}` {:?} overlaps `{}` {:?}", a.id, a.rect, b.id, b.rect);
+        }
+    }
+}
+
+/// How the bar fits, from what it shows: 0 everything; 1 the row count as an icon; 2 that and
+/// no "n changes" text; 3 the right group cut at the bar's edge (Apply not whole). Checks the
+/// order on the way: the changes' text goes only after the count's, and the cut comes last.
+fn fit_of(bar: &[Drawn], at: &str) -> u8 {
+    let get = |id: &str| bar.iter().find(|d| d.id == id);
+    let icon = get("page-count").is_some_and(|d| d.rect.width() <= 27.0);
+    let text = get("edits-count").is_some_and(|d| d.visible);
+    let cut = get("edit-apply").is_none_or(|d| !d.visible || d.rect.width() < 63.5);
+    // Once the right group is cut the left one may be cut too, so the count's form shows only
+    // before.
+    assert!(cut || text || icon, "{at}: the changes' text went before the count's: {bar:?}");
+    assert!(!cut || !text, "{at}: the right group is cut while the changes' text could give room up: {bar:?}");
+    if cut {
+        3
+    } else if !text {
+        2
+    } else {
+        u8::from(icon)
+    }
+}
+
+#[test]
+fn the_paging_bar_draws_nothing_over_anything_at_the_default_size() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    // The app's window (apps/dbee: 1100 × 720) with the value panel open, its default.
+    let mut ui = connected_in(db, 0.25, egui::vec2(1100.0, 720.0));
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.double_click("grid-cell-0-1");
+    ui.text("Ann");
+    ui.ctrl("Enter");
+    assert_eq!(ui.edits()["count"], 1);
+    ui.frame();
+    let bar = ui.bar();
+    assert_apart(&bar, "1100 × 720");
+    let fit = fit_of(&bar, "1100 × 720");
+    let at = |id: &str| bar.iter().find(|d| d.id == id).map(|d| d.rect);
+    let between = at("row-add").zip(at("table-refresh")).map(|(add, refresh)| add.left() - refresh.right());
+    println!(
+        "the paging bar at 1100 × 720 with a change staged: form {fit} (0 all, 1 count icon, 2 no changes text), {between:?} points between the groups, the bar {:?} to the value panel at {}",
+        at("page-first").map(|r| r.left()),
+        ui.panel_left()
+    );
+    assert!(fit <= 2, "nothing is cut at the default size: {bar:?}");
+    let right = ui.panel_left();
+    for id in ["page-first", "page-prev", "page-next", "page-last", "page-count", "table-refresh", "row-add", "edit-reset", "edit-apply"] {
+        let d = bar.iter().find(|d| d.id == id).unwrap_or_else(|| panic!("`{id}` is drawn: {bar:?}"));
+        assert!(d.visible && d.rect.right() <= right, "`{id}` shows, left of the value panel at {right}: {d:?}");
+    }
+    for id in ["page-first", "page-prev", "page-next", "page-last", "table-refresh"] {
+        let d = bar.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(d.rect.size(), egui::vec2(26.0, 26.0), "`{id}` shows whole");
+    }
+    // They take their clicks: + Row adds a row, Reset drops both changes, Apply writes one.
+    ui.click("row-add");
+    assert_eq!(ui.edits()["count"], 2, "+ Row added a row");
+    ui.click("edit-reset");
+    assert_eq!(ui.edits()["count"], 0, "Reset dropped the changes");
+    ui.double_click("grid-cell-1-1");
+    ui.text("Bea");
+    ui.ctrl("Enter");
+    ui.frame();
+    assert_apart(&ui.bar(), "1100 × 720, staged again");
+    ui.click("edit-apply");
+    ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
+    assert_eq!(q(db, &format!("SELECT name FROM scratch.{} WHERE id = 2", t.0)), "Bea");
+    // With nothing staged, refresh runs again on a click.
+    ui.click("table-refresh");
+    ui.until("the refreshed page", |ui| ui.table()["loading"].is_null());
+    assert_eq!(ui.table()["rows"], 3);
+}
+
+#[test]
+fn a_narrowing_paging_bar_gives_room_up_in_order_and_never_overlaps() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = connected_in(db, 0.25, egui::vec2(1400.0, 720.0));
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.double_click("grid-cell-0-1");
+    ui.text("Ann");
+    ui.ctrl("Enter");
+    assert_eq!(ui.edits()["count"], 1);
+    // The window narrows 20 points at a time; the panels keep their widths, so the bar loses it all.
+    let mut seen = Vec::new();
+    for width in (760..=1400).rev().step_by(20) {
+        ui.harness.set_size(egui::vec2(width as f32, 720.0));
+        ui.frame();
+        ui.frame();
+        let at = format!("{width} × 720");
+        let bar = ui.bar();
+        assert_apart(&bar, &at);
+        let fit = fit_of(&bar, &at);
+        assert!(seen.last().is_none_or(|&(_, last)| fit >= last), "{at}: the bar took room back while narrowing: {seen:?} then {fit}");
+        if fit == 3 {
+            // Cut at the bar's edge, never over the left group (`assert_apart`).
+            let right = ui.panel_left();
+            for d in bar.iter().filter(|d| d.visible) {
+                assert!(d.rect.right() <= right + 0.5, "{at}: `{}` runs past the bar into the value panel at {right}: {:?}", d.id, d.rect);
+            }
+        }
+        seen.push((width, fit));
+    }
+    println!("the paging bar's form by window width (0 all, 1 count icon, 2 no changes text, 3 cut): {seen:?}");
+    for fit in 0..=3 {
+        assert!(seen.iter().any(|&(_, f)| f == fit), "the sweep shows fit {fit}: {seen:?}");
+    }
 }
 
 /// The machine and its load average, which a timing test prints with its numbers
