@@ -20,25 +20,25 @@
 //! (a page load, a count, an Apply, a query run) and a reconnect. A tab that closed, or whose
 //! markers a reconnect cleared, shows none, even while the engine lets its job run to its end.
 //!
-//! **Tab bodies.** A table tab shows its page ([`crate::table_tab`]). Until the query tab has its
-//! own screen, a query tab shows a plain editor (`query-editor`) that sends its text with
-//! `query.setText` and keeps its cursor for Ctrl+Shift+Enter.
+//! **Tab bodies.** A table tab shows its page ([`crate::table_tab`]), a query tab its editor and
+//! results ([`crate::query_tab`]).
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
 //! `tab-new`; `status-connection` (value: the name, and `read-only`), `status-server`,
 //! `status-job` (value: what runs), `status-cancel`, `status-lost`, `status-reconnect`,
-//! `value-toggle`; `query-editor`.
+//! `value-toggle`.
 
 use std::sync::Arc;
 
 use dbee_engine::{Session, State, Tab, TabId};
 use dbee_sql::filter::Condition;
-use egui::{Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 
 use crate::app::Origin;
 use crate::connections::line_galley;
 use crate::editors::CellEditor;
+use crate::query_tab::{self, Queries};
 use crate::quick_search::{self, QuickSearch};
 use crate::table_tab::{self, Grids};
 use crate::theme::{RADIUS, TOKENS, connection_color};
@@ -64,6 +64,11 @@ pub(crate) struct Workspace {
     pub grids: Grids,
     /// The cell editor, while one is open ([`crate::editors`]).
     pub editor: Option<CellEditor>,
+    /// Each query tab's editor text and result grids, dropped with the tab.
+    pub queries: Queries,
+    /// The query tab whose editor was given the keyboard when it became the active one; `None`
+    /// while no query tab is active.
+    pub focused_query: Option<TabId>,
     /// The connection this state belongs to; another one starts afresh.
     connection: Option<String>,
 }
@@ -165,7 +170,6 @@ enum Act {
     NewQuery,
     Cancel(&'static str),
     Reconnect,
-    SetText(String),
 }
 
 /// Draws the workspace and acts on it.
@@ -179,6 +183,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
     let tabs = &app.session.state().tabs;
     app.view.work.grids.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
+    app.view.work.queries.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     egui::Panel::top("dbee-menubar").frame(Frame::new().fill(t.panel).inner_margin(Margin::symmetric(8, 3))).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();
     if status_bar(app, ui, &mut acts) {
@@ -192,7 +197,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
     egui::CentralPanel::default().frame(Frame::new().fill(t.bg)).show(ui, |ui| {
         strip(app, ui, &mut acts);
-        body(app, ui, &mut acts);
+        body(app, ui);
     });
     // After the tab's body, so a cell selected in this frame shows its value now.
     if let Some(rect) = panel {
@@ -214,11 +219,6 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
             }
             Act::Reconnect => {
                 app.start("connection.reconnect", json!({}), Origin::Menu);
-            }
-            Act::SetText(text) => {
-                if let Err(e) = app.run("query.setText", json!({ "text": text })) {
-                    app.notice(e.to_string());
-                }
             }
         }
     }
@@ -425,46 +425,31 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
 }
 
 /// The active tab's body (see the module docs), or a hint when no tab is open.
-fn body(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+fn body(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let t = TOKENS;
-    if let Some(Tab::Table(tab)) = app.session.state().active_tab() {
-        let id = tab.id;
-        let content = ui.available_rect_before_wrap().shrink2(egui::vec2(8.0, 0.0));
-        let mut ui = ui.new_child(egui::UiBuilder::new().id_salt("dbee-tab-body").max_rect(content).layout(Layout::top_down(Align::Min)));
-        table_tab::show(app, &mut ui, id);
-        return;
+    let active = app.session.state().active_tab().map(|tab| (tab.id(), matches!(tab, Tab::Query(_))));
+    if active.is_none_or(|(_, query)| !query) {
+        // The next query tab to become the active one takes the keyboard.
+        app.view.work.focused_query = None;
+        app.view.query_cursor = None;
     }
-    let content = ui.available_rect_before_wrap().shrink(16.0);
-    let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
-    match app.session.state().active_tab() {
-        None => {
-            ui.add_space(content.height() * 0.3);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("No tab is open").size(16.0).color(t.text_muted));
-                ui.add_space(6.0);
-                ui.label(RichText::new("Double-click a table in the tree, find one with Ctrl+P, or start a query with Ctrl+T.").color(t.text_muted));
-            });
-        }
-        // Drawn above.
-        Some(Tab::Table(_)) => {}
-        Some(Tab::Query(q)) => {
-            let mut text = q.text.clone();
-            let out = TextEdit::multiline(&mut text)
-                .id(egui::Id::new(("query-editor", q.id.0)))
-                .code_editor()
-                .hint_text("Write SQL here; Ctrl+Enter runs it.")
-                .desired_width(f32::INFINITY)
-                .desired_rows(16)
-                .show(&mut ui);
-            app.tags.tag("query-editor", &out.response);
-            if let Some(range) = out.cursor_range {
-                let chars: usize = range.primary.index.into();
-                app.view.query_cursor = Some(text.char_indices().nth(chars).map_or(text.len(), |(b, _)| b));
-            }
-            if out.response.changed() {
-                acts.push(Act::SetText(text));
-            }
-        }
+    let Some((id, query)) = active else {
+        let content = ui.available_rect_before_wrap().shrink(16.0);
+        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
+        ui.add_space(content.height() * 0.3);
+        ui.vertical_centered(|ui| {
+            ui.label(RichText::new("No tab is open").size(16.0).color(t.text_muted));
+            ui.add_space(6.0);
+            ui.label(RichText::new("Double-click a table in the tree, find one with Ctrl+P, or start a query with Ctrl+T.").color(t.text_muted));
+        });
+        return;
+    };
+    let content = ui.available_rect_before_wrap().shrink2(egui::vec2(8.0, 0.0));
+    let mut ui = ui.new_child(egui::UiBuilder::new().id_salt("dbee-tab-body").max_rect(content).layout(Layout::top_down(Align::Min)));
+    if query {
+        query_tab::show(app, &mut ui, id);
+    } else {
+        table_tab::show(app, &mut ui, id);
     }
 }
 

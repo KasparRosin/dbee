@@ -19,7 +19,8 @@
 //! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; other
 //! errors show as a notice (a command that cannot run now says why), or under the connection
 //! form's buttons; the database error of a page load's job or an Apply's shows only in the table
-//! tab's card. Logs name command ids and error codes only.
+//! tab's card, and a query run's error that the engine recorded on its tab only in the query
+//! tab's card ([`crate::query_tab`]). Logs name command ids and error codes only.
 //!
 //! The connection screen is [`crate::connections`]; the workspace (menu bar, tree, tabs, status
 //! bar, quick search) is [`crate::workspace`].
@@ -124,6 +125,9 @@ pub(crate) struct View {
     /// The query editor's cursor, a byte offset into the active query tab's text, for
     /// Ctrl+Shift+Enter (run the statement under the cursor).
     pub query_cursor: Option<usize>,
+    /// The query editor's share of a query tab's height: the split between it and the results,
+    /// the same for every query tab, for the window's run ([`crate::query_tab`]).
+    pub query_split: f32,
 }
 
 impl View {
@@ -137,6 +141,7 @@ impl View {
             notices: VecDeque::new(),
             conn: ConnScreen::new(has_store),
             query_cursor: None,
+            query_split: crate::query_tab::DEFAULT_SPLIT,
         }
     }
 }
@@ -229,13 +234,20 @@ impl DbeeApp {
         self.view.notices.push_back((text, None));
     }
 
-    /// Runs command `id` for a shortcut; `query.run` with `current` gets the editor's cursor.
+    /// Runs command `id` for a shortcut; `query.run` with `current` gets the editor's cursor,
+    /// within the active query tab's text.
     pub(crate) fn run_shortcut(&mut self, id: &'static str, mut params: Json) {
         if id == "query.run"
             && params.get("current") == Some(&Json::Bool(true))
-            && let (Some(cursor), Some(p)) = (self.view.query_cursor, params.as_object_mut())
+            && let Some(cursor) = self.view.query_cursor
+            && let Some(dbee_engine::Tab::Query(q)) = self.session.state().active_tab()
+            && let Some(p) = params.as_object_mut()
         {
-            p.entry("cursor").or_insert(Json::from(cursor));
+            let mut at = cursor.min(q.text.len());
+            while !q.text.is_char_boundary(at) {
+                at = at.saturating_sub(1);
+            }
+            p.entry("cursor").or_insert(Json::from(at));
         }
         self.run_from_ui(id, params);
     }
@@ -282,7 +294,8 @@ impl DbeeApp {
                 // The card above the grid shows a page load's job error (`TableTab::error`), and
                 // an Apply's however it was started (`Edits::failed`).
                 let carded = origin == Origin::Page || command == APPLY;
-                let in_card = carded && job.is_some() && matches!(result, Err(EngineError::Db { .. }));
+                let in_card =
+                    (carded && job.is_some() && matches!(result, Err(EngineError::Db { .. }))) || crate::query_tab::in_card(command, &result);
                 if let Err(e) = result
                     && !dialogs::ask(self, &e, Rerun { command, params, origin })
                     && !in_card
@@ -522,6 +535,36 @@ mod tests {
         let n = shown(&app).len();
         app.notice("the count failed".into());
         assert_eq!(shown(&app).len(), n);
+    }
+
+    #[test]
+    fn a_query_runs_errors_on_its_tab_show_in_the_card_only() {
+        let home = temp_home(None, None);
+        let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
+        let mut app = DbeeApp::new(session, None);
+        let shown = |app: &DbeeApp| app.view.notices.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>();
+        let db = |code, message: &str, data| EngineError::Db { code, message: message.into(), data };
+        // The engine records these on the tab (their data names the statement): the card shows them.
+        let server = db("server", "column \"nope\" does not exist", json!({ "sqlstate": "42703", "position": 7, "statement": 0 }));
+        app.outcome("query.run", json!({}), Origin::Menu, Some(JobId(3)), Err(server));
+        let cancelled = db("cancelled", "the statement was cancelled", json!({ "position": null, "statement": 1 }));
+        app.outcome("query.run", json!({}), Origin::Menu, Some(JobId(4)), Err(cancelled));
+        let gone = db("connectionLost", "the query connection was lost", json!({ "position": null, "statement": 0 }));
+        app.outcome("query.run", json!({}), Origin::Menu, None, Err(gone));
+        assert_eq!(shown(&app), Vec::<String>::new());
+        // Not on the tab: a lost browse connection, nothing to run.
+        app.outcome(
+            "query.run",
+            json!({}),
+            Origin::Menu,
+            None,
+            Err(db("connectionLost", "connection lost", json!({ "action": "connection.reconnect" }))),
+        );
+        let nothing = EngineError::Disabled { id: "query.run".into(), why: "there is no statement to run".into() };
+        app.outcome("query.run", json!({}), Origin::Menu, None, Err(nothing));
+        let notices = shown(&app);
+        assert_eq!(notices.len(), 2, "{notices:?}");
+        assert!(notices[0] == "connection lost" && notices[1].contains("no statement to run"), "{notices:?}");
     }
 
     #[test]

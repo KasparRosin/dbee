@@ -244,7 +244,9 @@ fn clipboard_copy_puts_the_selection_on_the_clipboard() {
     assert_eq!((r["rows"].clone(), r["columns"].clone()), (json!(1), json!(2)), "{r}");
     ui.frame();
     assert_eq!(ui.copied.last().map(String::as_str), Some("a\tb\n1\tx"), "{:?}", ui.copied);
-    // Ctrl+C with no text field focused copies the values only.
+    // Ctrl+C with no text field focused copies the values only (the new tab's editor took the
+    // keyboard: Escape takes it away).
+    ui.call("ui.key", json!({ "key": "Escape" }));
     ui.call("ui.key", json!({ "key": "C", "cmd": true }));
     ui.frame();
     assert_eq!(ui.copied.last().map(String::as_str), Some("1\tx"), "{:?}", ui.copied);

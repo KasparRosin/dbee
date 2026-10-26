@@ -1,7 +1,8 @@
 //! dbee's colours and spacing: original tokens, a light theme only in M1 (a dark theme is a
 //! non-goal). Screens take colours from [`TOKENS`], never from literals, so a theme stays one
-//! table. The value panel's JSON colours ([`Syntax`]) come in a light and a dark set already;
-//! [`syntax`] picks the one for the visuals in use.
+//! table. The value panel's JSON colours ([`Syntax`]) and the query editor's SQL colours
+//! ([`SqlSyntax`]) come in a light and a dark set already; [`syntax`] and [`sql_syntax`] pick the
+//! one for the visuals in use.
 
 use egui::{Color32, CornerRadius, Stroke};
 
@@ -125,6 +126,52 @@ pub const SYNTAX_DARK: Syntax = Syntax {
 /// The JSON colours for a dark ground when `dark`, else for a light one.
 pub fn syntax(dark: bool) -> Syntax {
     if dark { SYNTAX_DARK } else { SYNTAX_LIGHT }
+}
+
+/// Syntax colours for SQL in the query editor; other tokens (names, operators, punctuation) take
+/// the text colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SqlSyntax {
+    pub keyword: Color32,
+    /// String literals, dollar-quoted ones included.
+    pub string: Color32,
+    /// Numbers and `$1` parameters.
+    pub number: Color32,
+    /// Comments, shown in italics too.
+    pub comment: Color32,
+    /// Quoted identifiers (`"Odd Name"`).
+    pub quoted: Color32,
+}
+
+impl SqlSyntax {
+    /// Each colour with its name.
+    pub fn parts(&self) -> [(&'static str, Color32); 5] {
+        [("keyword", self.keyword), ("string", self.string), ("number", self.number), ("comment", self.comment), ("quoted", self.quoted)]
+    }
+}
+
+/// SQL on a light ground (the editor's card, the selection): steel blue keywords, moss green
+/// strings, rust numbers, slate grey comments and plum quoted names.
+pub const SQL_LIGHT: SqlSyntax = SqlSyntax {
+    keyword: Color32::from_rgb(0x1C, 0x5A, 0x85),
+    string: Color32::from_rgb(0x2F, 0x6B, 0x1F),
+    number: Color32::from_rgb(0x96, 0x44, 0x0E),
+    comment: Color32::from_rgb(0x59, 0x61, 0x5C),
+    quoted: Color32::from_rgb(0x7A, 0x3B, 0xA0),
+};
+
+/// The same hues lightened for a dark ground.
+pub const SQL_DARK: SqlSyntax = SqlSyntax {
+    keyword: Color32::from_rgb(0x8C, 0xC2, 0xEE),
+    string: Color32::from_rgb(0xA9, 0xD6, 0x8A),
+    number: Color32::from_rgb(0xED, 0xB0, 0x7A),
+    comment: Color32::from_rgb(0x8F, 0xB0, 0x9B),
+    quoted: Color32::from_rgb(0xD1, 0xA6, 0xF0),
+};
+
+/// The SQL colours for a dark ground when `dark`, else for a light one.
+pub fn sql_syntax(dark: bool) -> SqlSyntax {
+    if dark { SQL_DARK } else { SQL_LIGHT }
 }
 
 /// The colour a connection is tagged with (its card, the form's strip); `None` for no colour.
@@ -252,6 +299,31 @@ mod tests {
             }
         }
         assert_eq!((syntax(false), syntax(true)), (SYNTAX_LIGHT, SYNTAX_DARK));
+    }
+
+    #[test]
+    fn sql_colours_read_on_their_ground_and_differ_from_each_other_and_the_text() {
+        let dark = egui::Visuals::dark();
+        for (theme, s, text, grounds) in [
+            ("light", SQL_LIGHT, TOKENS.text, [("card", TOKENS.card), ("selection", TOKENS.selection)]),
+            ("dark", SQL_DARK, dark.text_color(), [("field", dark.extreme_bg_color), ("panel", dark.panel_fill)]),
+        ] {
+            let parts = s.parts();
+            for (part, colour) in parts {
+                for (ground, fill) in grounds {
+                    let c = contrast(colour, fill);
+                    assert!(c >= 4.5, "{theme} {part} on {ground}: {c:.2}");
+                }
+            }
+            let with_text: Vec<_> = parts.iter().copied().chain([("text", text)]).collect();
+            for (i, (a, x)) in with_text.iter().enumerate() {
+                for (b, y) in &with_text[i + 1..] {
+                    let d = delta_e(*x, *y);
+                    assert!(d >= 15.0, "{theme}: {a} and {b} look alike (ΔE {d:.1})");
+                }
+            }
+        }
+        assert_eq!((sql_syntax(false), sql_syntax(true)), (SQL_LIGHT, SQL_DARK));
     }
 
     /// CIE76 ΔE between two sRGB colours (D65).
