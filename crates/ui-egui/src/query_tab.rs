@@ -14,7 +14,7 @@
 //!   statement without rows how many it affected ([`affected_text`]). With no result yet, a line
 //!   saying how to run.
 //!
-//! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` ([`highlight`], colours
+//! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` ([`Tokens::job`], colours
 //! [`crate::theme::SqlSyntax`]), with no soft wrap: a long line scrolls sideways, so each row of
 //! the layout is a line and the gutter's numbers are line numbers. The text lives in the window, a
 //! buffer per tab ([`EditorState`]), so a frame does not copy it: the frame compares it with the
@@ -47,6 +47,11 @@
 //! and can be picked in the selector. The card says the error, so it shows as no notice too
 //! (`DbeeApp::start`).
 //!
+//! **Run buttons** follow the engine's own enabled check for `query.run` (`cmd::query::can_run`:
+//! connected, the connection not lost), with its reason on hover. What the run itself refuses (a
+//! text with no statement, another run going) it says when clicked, in a notice, as the keyboard
+//! gets it.
+//!
 //! It reads the tab from the engine each frame and acts only through commands, run after drawing.
 //! The window keeps a [`QueryState`] per tab, dropped with the tab.
 //!
@@ -65,8 +70,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use dbee_core::ResultSet;
-use dbee_engine::cmd::LOST;
-use dbee_engine::{Json, QueryError, QueryTab, StatementOutcome, Tab, TabId};
+use dbee_engine::cmd::query::can_run;
+use dbee_engine::{Json, QueryError, StatementOutcome, Tab, TabId};
 use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
 use egui::text_edit::TextEditState;
@@ -97,12 +102,12 @@ pub const ERROR: &str = "query-error";
 pub const HINT: &str = "query-hint";
 
 /// The editor's text size, in the monospace font, and the height of a line.
-pub const FONT_SIZE: f32 = 13.0;
-pub const LINE_H: f32 = 18.0;
+const FONT_SIZE: f32 = 13.0;
+const LINE_H: f32 = 18.0;
 /// What Tab inserts.
-pub const INDENT: &str = "    ";
+const INDENT: &str = "    ";
 /// The editor's share of the tab's height until the split is dragged.
-pub const DEFAULT_SPLIT: f32 = 0.45;
+pub(crate) const DEFAULT_SPLIT: f32 = 0.45;
 
 /// The run command, whose job errors the card shows.
 const QUERY_RUN: &str = "query.run";
@@ -127,7 +132,7 @@ pub fn editor_id(tab: TabId) -> Id {
 
 /// The character index of byte offset `byte` in `text`: clamped to its end, and a byte inside a
 /// character counts as that character's start.
-pub fn char_index(text: &str, byte: usize) -> usize {
+fn char_index(text: &str, byte: usize) -> usize {
     let mut end = byte.min(text.len());
     while !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
@@ -136,12 +141,12 @@ pub fn char_index(text: &str, byte: usize) -> usize {
 }
 
 /// The byte offset of character `chars` of `text`, clamped to its end.
-pub fn byte_offset(text: &str, chars: usize) -> usize {
+fn byte_offset(text: &str, chars: usize) -> usize {
     text.char_indices().nth(chars).map_or(text.len(), |(at, _)| at)
 }
 
 /// The 1-based line and column (in characters) of byte offset `byte` in `text`, clamped to it.
-pub fn line_column(text: &str, byte: usize) -> (usize, usize) {
+fn line_column(text: &str, byte: usize) -> (usize, usize) {
     let chars = char_index(text, byte);
     let before = text.get(..byte_offset(text, chars)).unwrap_or_default();
     let line = before.bytes().filter(|b| *b == b'\n').count().saturating_add(1);
@@ -156,13 +161,13 @@ fn rows_word(n: u64) -> String {
 
 /// The cap notice of a result cut short: `First 10,000 of 25,000 rows`, from the rows kept and
 /// the rows the server sent.
-pub fn cut_notice(kept: usize, seen: u64) -> String {
+fn cut_notice(kept: usize, seen: u64) -> String {
     let total = rows_word(seen);
     format!("First {} of {total}", thousands(kept as u64))
 }
 
 /// What a result with rows holds: `3 rows`, or the cap notice when a cap cut it.
-pub fn rows_text(result: &ResultSet) -> String {
+fn rows_text(result: &ResultSet) -> String {
     if result.complete { rows_word(result.rows.len() as u64) } else { cut_notice(result.rows.len(), result.rows_seen) }
 }
 
@@ -178,7 +183,7 @@ fn cap_hover() -> String {
 
 /// The line for a statement without rows: `1 row affected`, `2 rows affected`, or a line of its
 /// own when the server gave no count.
-pub fn affected_text(rows: Option<u64>) -> String {
+fn affected_text(rows: Option<u64>) -> String {
     match rows {
         Some(n) => format!("{} affected", rows_word(n)),
         None => "The statement ran; the server gave no row count.".into(),
@@ -187,18 +192,22 @@ pub fn affected_text(rows: Option<u64>) -> String {
 
 // ---- highlighting ------------------------------------------------------------------------------
 
-/// The bytes past a token's end that `lexer::tokenize` may look at to end it (a number's exponent
-/// looks three ahead), with one to spare: a change this far after a token cannot change it.
+/// How far past a token's end `lexer::tokenize` may read to decide it, for every token but a lone
+/// `$` (see [`reach`]), with one byte to spare. The rules read at most: a number three bytes (`1e+`
+/// followed by no digit ends the number before the `e`); an operator two (it stops before `--` and
+/// `/*`); a `U` two (`U&'` or `U&"` starts a Unicode string); whitespace, comments, identifiers,
+/// `$1`, `.`, quoted strings and names one (a doubled quote goes on). A dollar-quoted string ends
+/// at its closing tag, and anything unterminated runs to the end of the text.
 const LOOKAHEAD: usize = 4;
 /// How far past a change the lexer first looks for the old tokens to fit again.
 const RESYNC_BYTES: usize = 1024;
 /// The editor colours the lines in view and [`MARGIN`] more each side, in whole chunks of
 /// [`CHUNK`] lines, so scrolling changes what is coloured only now and then.
-pub const CHUNK: usize = 128;
-pub const MARGIN: usize = 64;
+const CHUNK: usize = 128;
+const MARGIN: usize = 64;
 
 /// The lines coloured when lines `view` are in view (see [`CHUNK`]).
-pub fn colour_window(view: Range<usize>) -> Range<usize> {
+fn colour_window(view: Range<usize>) -> Range<usize> {
     let start = view.start.saturating_sub(MARGIN) / CHUNK * CHUNK;
     let end = (view.end.saturating_add(MARGIN) / CHUNK).saturating_add(1).saturating_mul(CHUNK);
     start..end
@@ -252,6 +261,22 @@ fn ceil_boundary(text: &str, at: usize) -> usize {
     at
 }
 
+/// `list[k]` is a lone `$`: one that starts no dollar quote and stands as a 1-byte `Other` token.
+fn lone_dollar(list: &[Token], k: usize, text: &str) -> bool {
+    list.get(k).is_some_and(|t| t.kind == TokenKind::Other && text.get(t.range.clone()) == Some("$"))
+}
+
+/// The byte up to which the text decides `list[k]` (exclusive). [`LOOKAHEAD`] past its end, but a
+/// lone `$` reads the whole word after it (a dollar quote's tag: letters, digits, characters past
+/// ASCII), and the byte after that, to find no closing `$`. That word is the token after it (an
+/// identifier, or the `E` or `U` that starts a string), so the `$` reaches as far as that token
+/// does.
+fn reach(list: &[Token], k: usize, text: &str) -> usize {
+    let end = list.get(k).map_or(0, |t| t.range.end);
+    let end = if lone_dollar(list, k, text) { list.get(k.saturating_add(1)).map_or(end, |next| next.range.end.max(end)) } else { end };
+    end.saturating_add(LOOKAHEAD)
+}
+
 /// `tokenize(slice)`, its ranges moved to start at `offset`.
 fn lex(slice: &str, offset: usize) -> Vec<Token> {
     lexer::tokenize(slice)
@@ -262,14 +287,17 @@ fn lex(slice: &str, offset: usize) -> Vec<Token> {
 
 /// The lexer's tokens of a text, and where its lines start, kept across edits.
 ///
-/// `lexer::tokenize` starts every token afresh, looking only forward (at most [`LOOKAHEAD`] past
-/// its end), so tokens from a token boundary on depend only on the text from there. An edit keeps
-/// the tokens that end well before its first changed byte, and lexes again from there until a new
-/// token starts where an old one did in the unchanged rest of the text: from there on the old
-/// tokens hold, moved by the change in length. The result is what lexing the whole text gives
-/// (`incremental_tokens_match_a_full_lex`).
+/// `lexer::tokenize` starts every token afresh and reads only forward, so tokens from a token
+/// boundary on depend only on the text from there; each token is decided by the text up to its
+/// [`reach`]: [`LOOKAHEAD`] past its end, or for a lone `$` the end of the word after it. An edit
+/// keeps the tokens whose reach ends at or before its first changed byte, and lexes again from
+/// there (a bounded slice first) until a new token starts where an old one did in the unchanged
+/// rest of the text, the token before it decided within the slice: from there on the old tokens
+/// hold, moved by the change in length. The result is what lexing the whole text gives
+/// (`incremental_tokens_match_a_full_lex`, and key by key for dollar quotes in
+/// `typing_and_deleting_dollar_quotes_key_by_key_match_a_full_lex`).
 #[derive(Default)]
-pub struct Tokens {
+struct Tokens {
     text: String,
     list: Vec<Token>,
     line_starts: Vec<usize>,
@@ -280,17 +308,18 @@ pub struct Tokens {
 
 impl Tokens {
     /// The tokens of `text` in order, covering it.
-    pub fn list(&self) -> &[Token] {
+    #[cfg(test)]
+    fn list(&self) -> &[Token] {
         &self.list
     }
 
     /// How many texts were tokenized, and how many bytes were lexed for them.
-    pub fn work(&self) -> (usize, usize) {
+    fn work(&self) -> (usize, usize) {
         (self.updates, self.lexed)
     }
 
     /// Tokenizes `new`, lexing again only what the change from the last text needs.
-    pub fn update(&mut self, new: &str) {
+    fn update(&mut self, new: &str) {
         if self.updates > 0 && self.text == new {
             return;
         }
@@ -298,7 +327,12 @@ impl Tokens {
         let prefix = floor_boundary(new, common_prefix(old.as_bytes(), new.as_bytes()));
         let most = old.len().min(new.len()).saturating_sub(prefix);
         let changed_end = ceil_boundary(new, new.len().saturating_sub(common_suffix(old.as_bytes(), new.as_bytes(), most)));
-        let keep = if self.updates == 0 { 0 } else { self.list.partition_point(|t| t.range.end.saturating_add(LOOKAHEAD) <= prefix) };
+        // Reach never decreases along the list (a lone `$` reaches as far as the token after it,
+        // which is never another lone `$`), so the tokens kept are a prefix of it.
+        let mut keep = if self.updates == 0 { 0 } else { self.list.partition_point(|t| t.range.end.saturating_add(LOOKAHEAD) <= prefix) };
+        while keep > 0 && reach(&self.list, keep - 1, &old) > prefix {
+            keep -= 1;
+        }
         let restart = keep.checked_sub(1).and_then(|k| self.list.get(k)).map_or(0, |t| t.range.end);
         let mut cut = floor_boundary(new, changed_end.saturating_add(RESYNC_BYTES)).max(changed_end);
         let tail = loop {
@@ -308,11 +342,15 @@ impl Tokens {
             if cut >= new.len() {
                 break fresh;
             }
-            // A token starting after the change, whose start (and the one before it) the cut
-            // cannot have moved, where an old one started too.
+            // A token starting after the change where an old one started too, the token before it
+            // decided within the slice (its reach not past the cut).
             let fits = fresh.iter().enumerate().find_map(|(k, t)| {
                 let at = t.range.start;
-                if at < changed_end || at.saturating_add(LOOKAHEAD) > cut {
+                let decided = match k.checked_sub(1) {
+                    Some(before) => reach(&fresh, before, new) <= cut,
+                    None => at.saturating_add(LOOKAHEAD) <= cut,
+                };
+                if at < changed_end || !decided {
                     return None;
                 }
                 let then = at.saturating_add(old.len()).checked_sub(new.len())?;
@@ -343,7 +381,7 @@ impl Tokens {
     /// section per run of the same colour (whitespace joins the run before it), the rest of the
     /// text plain; monospace and unwrapped. Sections that would not cover the text exactly (which
     /// the tokens never make) give one plain section rather than a job egui could not lay out.
-    pub fn job(&self, lines: Range<usize>, syntax: SqlSyntax, plain: Color32) -> LayoutJob {
+    fn job(&self, lines: Range<usize>, syntax: SqlSyntax, plain: Color32) -> LayoutJob {
         let text = self.text.as_str();
         let font = FontId::monospace(FONT_SIZE);
         let section = |start: usize, end: usize, color: Color32, italics: bool| LayoutSection {
@@ -401,7 +439,8 @@ impl Tokens {
 }
 
 /// `text` as a layout job for the editor, every token coloured (see [`Tokens::job`]).
-pub fn highlight(text: &str, syntax: SqlSyntax, plain: Color32) -> LayoutJob {
+#[cfg(test)]
+fn highlight(text: &str, syntax: SqlSyntax, plain: Color32) -> LayoutJob {
     let mut tokens = Tokens::default();
     tokens.update(text);
     tokens.job(0..usize::MAX, syntax, plain)
@@ -458,6 +497,8 @@ pub struct EditorState {
     lines: usize,
     /// The lines in view in the last frame, around which the text is coloured.
     view: Range<usize>,
+    /// The line and column of a byte offset (the error card's), for text `version`.
+    place: Option<(u64, usize, (usize, usize))>,
 }
 
 /// Leaves out the text: query text never reaches the logs.
@@ -479,12 +520,12 @@ impl EditorState {
     }
 
     /// From the next frame drawn: the cursor at byte offset `at` (clamped), with the keyboard.
-    pub fn jump_to(&mut self, at: usize) {
+    fn jump_to(&mut self, at: usize) {
         self.jump = Some(at);
     }
 
     /// The editor takes the keyboard in the next frame drawn.
-    pub fn focus(&mut self) {
+    fn focus(&mut self) {
         self.focus = true;
     }
 
@@ -494,8 +535,21 @@ impl EditorState {
     }
 
     /// Some token of the text is coloured.
-    pub fn highlighted(&self) -> bool {
+    fn highlighted(&self) -> bool {
         self.highlight.coloured
+    }
+
+    /// The 1-based line and column of byte offset `at` ([`line_column`]), worked out again only
+    /// when the text or `at` changed.
+    fn line_column_of(&mut self, at: usize) -> (usize, usize) {
+        match self.place {
+            Some((version, of, place)) if version == self.version && of == at => place,
+            _ => {
+                let place = line_column(&self.text, at);
+                self.place = Some((self.version, at, place));
+                place
+            }
+        }
     }
 
     /// The byte offset of character `chars`, worked out again only when either changed.
@@ -677,21 +731,6 @@ pub(crate) struct QueryState {
 /// The query tabs' states, by tab.
 pub(crate) type Queries = HashMap<TabId, QueryState>;
 
-/// Why `query.run` cannot run now, as the buttons say: a lost connection, a run going, or no text.
-fn run_blocked(q: &QueryTab, lost: bool, other_running: bool, text: &str) -> Option<&'static str> {
-    if lost {
-        Some(LOST)
-    } else if q.running.is_some() {
-        Some("its query is running")
-    } else if other_running {
-        Some("another query is running")
-    } else if text.trim().is_empty() {
-        Some("write a statement first")
-    } else {
-        None
-    }
-}
-
 /// A button for the toolbar; true when clicked.
 fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover, why_not): (&str, Option<&str>), main: bool) -> bool {
     let t = TOKENS;
@@ -721,13 +760,12 @@ fn heading(e: &QueryError, kept: usize) -> String {
     }
 }
 
-/// The error card of `e`, a run that kept `kept` results, over `text` (the editor's); true when a
-/// click on it asks to go to the error's position.
-fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: usize, text: &str) -> bool {
+/// The error card of `e`, a run that kept `kept` results; `at` is the line and column of its
+/// position in the editor's text. True when a click on it asks to go to the error's position.
+fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: usize, at: Option<(usize, usize)>) -> bool {
     let t = TOKENS;
     let cancelled = e.code == "cancelled";
     let (stroke, ink) = if cancelled { (t.border, t.text) } else { (t.danger, t.danger) };
-    let at = e.position.map(|p| line_column(text, p));
     let jump = at.is_some();
     let title = heading(e, kept);
     let frame =
@@ -778,7 +816,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: us
 /// The room a result's button takes in the selector, with the dot before it, when there are
 /// `results` of them: its number's digits (about 7.5 points each at the selector's size, plus the
 /// button's padding, at least 22 points), and 12 for the dot and the spacing.
-pub fn result_width(results: usize) -> f32 {
+fn result_width(results: usize) -> f32 {
     let digits = results.max(1).ilog10().saturating_add(1) as f32;
     (7.5 * digits + 20.0).max(22.0) + 12.0
 }
@@ -788,7 +826,7 @@ const SELECTOR_LABELS_W: f32 = 90.0;
 
 /// The results the selector shows in `room` points: all of them when they fit, else as many as
 /// fit around the shown one. Returns the first and the end of that range.
-pub fn selector_range(results: usize, shown: usize, room: f32) -> (usize, usize) {
+fn selector_range(results: usize, shown: usize, room: f32) -> (usize, usize) {
     let per = result_width(results);
     let fit = if room.is_finite() { (room / per).floor().max(1.0) as usize } else { 1 };
     if results <= fit {
@@ -844,8 +882,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     {
         let DbeeApp { session, view, tags, .. } = app;
         let Some(Tab::Query(q)) = session.state().tab(id) else { return };
-        let lost = session.state().connected.as_ref().is_none_or(|c| c.lost);
-        let other_running = q.running.is_none() && session.running(QUERY_RUN);
+        // The engine's own rule for the Run buttons; what the run refuses it says when clicked.
+        let run_blocked = can_run(session).err();
         let modal = view.dialog.is_some() || view.work.quick.open;
         let focus_now = view.work.focused_query != Some(id) && !modal;
         if focus_now {
@@ -899,7 +937,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let mut bar =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-bar", id.0)).max_rect(bar_rect).layout(Layout::left_to_right(Align::Center)));
         bar.spacing_mut().item_spacing.x = 6.0;
-        let why_not = run_blocked(q, lost, other_running, &state.editor.text);
+        let why_not = run_blocked.as_deref();
         if tool_button(&mut bar, tags, RUN, "Run", ("Run every statement (Ctrl+Enter)", why_not), true) {
             runs.push((QUERY_RUN, json!({})));
         }
@@ -957,7 +995,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let rest = Rect::from_min_max(pos2(full.left(), bar_rect.bottom() + 6.0), full.max);
         let mut rest_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-results", id.0)).max_rect(rest).layout(Layout::top_down(Align::Min)));
         if let Some(e) = &q.error {
-            if card(&mut rest_ui, tags, id, e, q.results.len(), &state.editor.text)
+            let at = e.position.map(|p| state.editor.line_column_of(p));
+            if card(&mut rest_ui, tags, id, e, q.results.len(), at)
                 && let Some(at) = e.position
             {
                 state.editor.jump_to(at);
@@ -1079,6 +1118,17 @@ mod tests {
     }
 
     #[test]
+    fn the_cards_line_and_column_follow_the_text_and_the_position() {
+        let mut ed = EditorState::new("select 1;\nselect nope".into());
+        assert_eq!(ed.line_column_of(17), (2, 8));
+        assert_eq!(ed.line_column_of(17), (2, 8), "the same again, from the cache");
+        assert_eq!(ed.line_column_of(3), (1, 4), "another position");
+        ed.set_text("-- note\nselect 1;\nselect nope".into());
+        assert_eq!(ed.line_column_of(3), (1, 4));
+        assert_eq!(ed.line_column_of(25), (3, 8), "another text");
+    }
+
+    #[test]
     fn positions_read_as_line_and_column() {
         let text = "select 1;\nselect 'é', nope";
         assert_eq!(line_column(text, 0), (1, 1));
@@ -1105,32 +1155,113 @@ mod tests {
         }
     }
 
+    /// `tokens` after updating to `text` equals a full lex of `text`.
+    fn same_as_full(tokens: &mut Tokens, text: &str, what: &str) {
+        tokens.update(text);
+        assert_eq!(tokens.list(), lexer::tokenize(text).as_slice(), "{what}: {text:?}");
+    }
+
+    #[test]
+    fn typing_and_deleting_dollar_quotes_key_by_key_match_a_full_lex() {
+        // A lone `$` reads its whole tag word, and the byte after it, before it settles.
+        for text in [
+            "select $body$ select 1; $body$ as x",
+            "create function f() returns int language sql as $function$ select 1 $function$;",
+            "select $tagé$ é $tagé$, $1",
+            "do $$ begin perform 1; end $$; select $x1$a$x1$",
+        ] {
+            let mut tokens = Tokens::default();
+            let ends: Vec<usize> = text.char_indices().map(|(at, _)| at).skip(1).chain([text.len()]).collect();
+            for &end in &ends {
+                same_as_full(&mut tokens, &text[..end], "typed");
+            }
+            for &end in ends.iter().rev() {
+                same_as_full(&mut tokens, &text[..end], "deleted from the end");
+            }
+        }
+        // A tag typed in the middle, its closing `$` last; then that `$` taken away again.
+        let mut tokens = Tokens::default();
+        for text in ["as $ select 1", "as $b select 1", "as $bo select 1", "as $bod select 1", "as $body select 1", "as $body$ select 1"] {
+            same_as_full(&mut tokens, text, "typed in the middle");
+        }
+        let mut tokens = Tokens::default();
+        for text in ["as $body", "as $body$ select 1; $body$", "as $body select 1; $body$", "$tagé", "$tagé$$"] {
+            same_as_full(&mut tokens, text, "pasted and cut");
+        }
+    }
+
     #[test]
     fn incremental_tokens_match_a_full_lex() {
-        // Pieces that end tokens late (exponents, `--`, `/*`), open strings, comments and dollar
-        // quotes that run on, and characters of several bytes.
+        // Pieces that end tokens late: exponents, `--` and `/*` after an operator, `U&` and `E'`,
+        // a lone `$` before a tag word of any length (its tag read to the end), dollar quotes,
+        // quotes that open strings running on, and characters of several bytes (in tags too).
         let pieces = [
-            "select ", "1e", "+5", "1.5e-3 ", "'", "''", "' ", "\"", "\"Odd\" ", "--", " note\n", "/*", "*/", "$$", "$tag$", "$1", "E'\\'", "U&'x'",
-            ";", "\n", " ", "é", "🐝", "-", "/", "*", "a", "from t", "<>", "::", "\r\n",
+            "select ",
+            "1e",
+            "+5",
+            "1.5e-3 ",
+            "e",
+            "E",
+            "5",
+            ".",
+            "'",
+            "''",
+            "' ",
+            "\"",
+            "\"Odd\" ",
+            "--",
+            " note\n",
+            "/*",
+            "*/",
+            "-",
+            "/",
+            "*",
+            "U",
+            "u",
+            "&",
+            "U&'x'",
+            "E'\\'",
+            "$",
+            "$$",
+            "$1",
+            "$tag$",
+            "$body$",
+            "$function$",
+            "$tagé",
+            "tagé",
+            "body",
+            "function",
+            "x1",
+            "a",
+            ";",
+            "\n",
+            "\r\n",
+            " ",
+            "é",
+            "🐝",
+            "from t",
+            "<>",
+            "::",
         ];
-        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        for round in 0..40 {
-            let mut text: String = (0..rng.next(40)).map(|_| pieces[rng.next(pieces.len())]).collect();
-            let mut tokens = Tokens::default();
-            tokens.update(&text);
-            for step in 0..60 {
-                // Two character boundaries, a few characters apart at most.
-                let bounds: Vec<usize> = text.char_indices().map(|(at, _)| at).chain([text.len()]).collect();
-                let i = rng.next(bounds.len());
-                let j = (i + rng.next(8)).min(bounds.len() - 1);
-                let (a, b) = (bounds[i], bounds[j]);
-                match rng.next(3) {
-                    0 => text.insert_str(a, pieces[rng.next(pieces.len())]),
-                    1 => text.replace_range(a..b, ""),
-                    _ => text.replace_range(a..b, pieces[rng.next(pieces.len())]),
-                }
+        for seed in [0x9E37_79B9_7F4A_7C15, 12_345, 777, 42, 0xDEAD_BEEF] {
+            let mut rng = Rng(seed);
+            for round in 0..300 {
+                let mut text: String = (0..rng.next(40)).map(|_| pieces[rng.next(pieces.len())]).collect();
+                let mut tokens = Tokens::default();
                 tokens.update(&text);
-                assert_eq!(tokens.list(), lexer::tokenize(&text).as_slice(), "round {round}, step {step}: {text:?}");
+                for step in 0..60 {
+                    // Two character boundaries, a few characters apart at most.
+                    let bounds: Vec<usize> = text.char_indices().map(|(at, _)| at).chain([text.len()]).collect();
+                    let i = rng.next(bounds.len());
+                    let j = (i + rng.next(8)).min(bounds.len() - 1);
+                    let (a, b) = (bounds[i], bounds[j]);
+                    match rng.next(3) {
+                        0 => text.insert_str(a, pieces[rng.next(pieces.len())]),
+                        1 => text.replace_range(a..b, ""),
+                        _ => text.replace_range(a..b, pieces[rng.next(pieces.len())]),
+                    }
+                    same_as_full(&mut tokens, &text, &format!("seed {seed}, round {round}, step {step}"));
+                }
             }
         }
     }

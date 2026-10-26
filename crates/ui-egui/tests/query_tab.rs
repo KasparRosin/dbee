@@ -350,7 +350,7 @@ fn cancel_button_stops_pg_sleep() {
     ui.until("the run to start", |ui| !ui.query()["running"].is_null());
     ui.frame();
     assert!(ui.enabled("query-cancel"), "Cancel is enabled while the run goes");
-    assert!(!ui.enabled("query-run") && !ui.enabled("query-run-current"), "one run at a time");
+    assert!(ui.enabled("query-run"), "Run follows the engine's enabled check; a run going is its Busy answer");
     let start = Instant::now();
     ui.click("query-cancel");
     ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
@@ -361,6 +361,23 @@ fn cancel_button_stops_pg_sleep() {
     assert_eq!(card["code"], "cancelled", "{card}");
     assert!(!ui.enabled("query-cancel"));
     assert!(ui.tag("notice").is_none(), "the card says it: {:?}", ui.tag("notice"));
+}
+
+#[test]
+fn ctrl_enter_while_a_run_goes_says_the_engine_is_busy() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text("select pg_sleep(30)");
+    ui.key("Enter", json!({ "cmd": true }));
+    ui.until("the run to start", |ui| !ui.query()["running"].is_null());
+    let running = ui.query()["running"].clone();
+    ui.key("Enter", json!({ "cmd": true }));
+    ui.frame();
+    let notice = ui.value("notice");
+    assert!(notice.as_str().is_some_and(|n| n.contains("busy") && n.contains("a query is running in Query 1")), "{notice}");
+    assert_eq!(ui.query()["running"], running, "the run goes on, and no second one started");
+    ui.click("query-cancel");
+    ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
 }
 
 #[test]
@@ -560,15 +577,9 @@ fn run_buttons_say_why_they_cannot_run() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     assert!(ui.tag("query-hint").is_some(), "an empty results area says how to run");
-    assert!(!ui.enabled("query-run") && !ui.enabled("query-run-current"), "no text, nothing to run");
-    ui.text("  ");
-    ui.frame();
-    assert!(!ui.enabled("query-run"));
-    ui.text("select 1");
-    ui.frame();
+    // The buttons follow the engine's own enabled check for `query.run`: connected, a query tab
+    // active. Whatever the run itself refuses (no statement, a run going) it says in a notice.
     assert!(ui.enabled("query-run") && ui.enabled("query-run-current"));
-    // Comments only: Run is enabled, and says why nothing ran.
-    ui.key("A", json!({ "cmd": true }));
     ui.text("-- nothing here");
     ui.click("query-run");
     ui.frame();

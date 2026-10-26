@@ -108,8 +108,10 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     },
 ];
 
-/// A query tab is active, on a connection that is not lost.
-fn can_run(s: &Session) -> Result<(), String> {
+/// `query.run`'s enabled check: a query tab is active, on a connection that is not lost. The UI's
+/// Run buttons follow it; what the run itself refuses (no statement, a run going) it says when
+/// asked to run.
+pub fn can_run(s: &Session) -> Result<(), String> {
     needs_db(s)?;
     active_query(s)
 }
