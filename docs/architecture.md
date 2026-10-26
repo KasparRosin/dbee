@@ -19,7 +19,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `crates/engine` | exists | L5. `Session`: the session state, the command registry (`cmd/*`, so far the tab and connection commands), background jobs on a tokio runtime, the panic guard and the journal. |
 | `crates/ui-egui` | exists | L6. The egui UI and the control channel: the app shell (`DbeeApp`), theme, code-drawn icons, automation ids, shortcuts, UI-only commands, the connection screen (saved and recent lists, the connection form), the workspace (a menu bar built from the commands' menu paths, the schema tree, the tabs strip, the status bar, the quick search), the table tab (the data grid with its inline cell editors, the filter bar, the paging bar), the value panel (the selected cell's whole value, JSON pretty-printed and coloured), the query tab (an SQL editor with line numbers and syntax colours, run and cancel, read-only result sets with a selector and the cap notice, error cards), copying grid cells (Ctrl+C, Ctrl+Shift+C and the grid menu's formats, through `clipboard.copy`, with a "Copied n rows" notice; the system clipboard, or an in-memory one for isolated runs) and the dialogs a command's `needs…` answer opens. |
 | `crates/mcp` | exists, empty | L6. MCP server over stdio. |
-| `apps/dbee` | exists | L7. Desktop binary: reads `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE`, `DBEE_CLIPBOARD` (`memory`: copies stay in the app, for isolated runs), `DBEE_NO_PREFS` and `DBEE_ALLOW_TARGETS` (an isolated run's allowed connection targets), builds the session's options and runs `DbeeApp`. |
+| `apps/dbee` | exists | L7. Desktop binary: reads `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE`, `DBEE_CLIPBOARD` (`memory`: copies and cuts stay in the app, for isolated runs), `DBEE_NO_PREFS` and `DBEE_ALLOW_TARGETS` (an isolated run's allowed connection targets), builds the session's options and runs `DbeeApp`. |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
 | `xtask` | exists | Exempt from layering. `ci`, `assets`, `layers`, `licenses`, `provenance`, `testdb`, `version`, `stats`, `ico`, `icns`, `contributors`. `xtask/testdb/` holds the test servers' compose file, tools image and seed. |
 | L1–L4 domain crates | **(planned)** | Named when the first features land, for example `sql`, `drivers`, `model`. |
@@ -68,7 +68,7 @@ Parts of M1's UI. The domain crates and the engine with its commands exist, and 
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-26 | minor | `crates/ui-egui`: copying to the clipboard ("Copied n rows", grid clicks take the keyboard, the in-memory clipboard of isolated runs); `copy.selection` takes at most 32 MiB of cell text |
+| 2026-10-26 | minor | `crates/ui-egui`: copying to the clipboard ("Copied n rows", grid clicks take the keyboard, the in-memory clipboard of isolated runs); `copy.selection` copies at most 8 MiB of text, everything counted |
 | 2026-10-26 | minor | `crates/ui-egui`: the query tab |
 | 2026-10-23 | minor | `crates/ui-egui`: the value panel |
 | 2026-10-23 | minor | `crates/ui-egui`: inline cell editors, "+ Row", the failed Apply's card |

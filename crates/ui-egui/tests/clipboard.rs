@@ -415,26 +415,35 @@ fn result_grids_offer_no_edits_and_read_only_tables_say_why() {
 fn a_copy_over_the_cap_copies_nothing_and_says_why() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
-    // Its two big cells hold about 40 MB of text together, more than a copy takes.
+    // Its big cells hold 20,000,000 bytes of text each, more than a copy takes.
     ui.open("shop", "big_cell");
     ui.until("the big row", |ui| ui.document()["table"]["rows"] == 1);
     ui.execute("selection.set", json!({ "anchor": [0, 1], "focus": [0, 2] }));
     let r = ui.call("engine.execute", json!({ "command": "clipboard.copy", "params": { "format": "tsv" } }));
     assert_eq!(r["code"], "disabled", "{r}");
     let why = r["data"]["why"].as_str().unwrap_or_default().to_string();
-    assert!(why.contains("32 MiB") && why.contains("select fewer rows"), "{why}");
+    assert!(why.contains(&cap()) && why.contains("select fewer rows"), "{why}");
     ui.click("grid-cell-0-1");
-    ui.key("A", json!({ "cmd": true }));
     ui.key("C", json!({ "cmd": true }));
     ui.frame();
     assert_eq!(ui.copied(), None, "nothing went to the clipboard");
     let notice = ui.notice().unwrap_or_default();
-    assert!(notice.contains(&why), "the shortcut shows the reason: {notice}");
-    // One of them fits.
-    ui.click("grid-cell-0-1");
+    assert!(notice.contains("the selection holds 19.1 MiB of cell text") && notice.contains(&cap()), "the shortcut shows the reason: {notice}");
+    // The row's key fits.
+    ui.click("grid-cell-0-0");
     ui.key("C", json!({ "cmd": true }));
     ui.frame();
-    assert_eq!(ui.copied().map(|t| t.len()), Some(20_000_000));
+    assert_eq!(ui.copied().as_deref(), Some("1"));
+}
+
+/// The cap as the reasons give it: `8 MiB`.
+fn cap() -> String {
+    format!("{} MiB", COPY_MAX_BYTES / (1024 * 1024))
+}
+
+/// [`connected_with`] the in-memory clipboard of isolated runs.
+fn connected_in_memory(db: &TestDb) -> Ui {
+    connected_with(db, |session, rx| DbeeApp::new(session, Some(rx)).with_clipboard(Clipboard::Memory))
 }
 
 #[test]
@@ -442,9 +451,11 @@ fn the_memory_clipboard_keeps_the_copy_in_the_app() {
     let db = dbee_testkit::require_testdb!();
     // By default nothing is kept, and inspect has no clipboard.
     let mut ui = connected(db);
-    assert_eq!(ui.document().get("clipboard"), None);
-    let mut ui = connected_with(db, |session, rx| DbeeApp::new(session, Some(rx)).with_clipboard(Clipboard::Memory));
-    assert_eq!(ui.document()["clipboard"], Json::Null, "nothing copied yet");
+    let d = ui.document();
+    assert_eq!((d.get("clipboard"), d.get("clipboardBytes")), (None, None));
+    let mut ui = connected_in_memory(db);
+    let d = ui.document();
+    assert_eq!((d["clipboard"].clone(), d["clipboardBytes"].clone()), (Json::Null, Json::Null), "nothing copied yet");
     ui.key("T", json!({ "cmd": true }));
     ui.execute("query.setText", json!({ "text": CUSTOMERS }));
     ui.execute("query.run", json!({}));
@@ -456,44 +467,187 @@ fn the_memory_clipboard_keeps_the_copy_in_the_app() {
     ui.frame();
     let r = ui.execute("clipboard.copy", json!({ "format": "csv" }));
     assert_eq!((r["rows"].clone(), r["columns"].clone()), (json!(5), json!(2)), "{r}");
-    let kept = ui.document()["clipboard"].clone();
+    let d = ui.document();
+    let kept = d["clipboard"].clone();
     assert!(kept.as_str().is_some_and(|t| t.starts_with("id,name\n1,Customer 1\n")), "the last copy: {kept}");
     assert_eq!(r["bytes"].as_u64(), kept.as_str().map(|t| t.len() as u64), "{r}");
+    assert_eq!(d["clipboardBytes"], r["bytes"]);
     assert_eq!(ui.notice().as_deref(), Some("Copied 5 rows"));
     assert!(ui.copied.is_empty(), "no copy reached egui: {:?}", ui.copied.iter().map(String::len).collect::<Vec<_>>());
+    // A long copy shows its first 4 KiB, cut on a character boundary, and its whole length.
+    ui.execute("query.setText", json!({ "text": "select 'a' || repeat('é', 3000) as e" }));
+    ui.execute("query.run", json!({}));
+    ui.until("the long value", |ui| ui.document()["query"]["results"][0]["columns"][0]["name"] == "e");
+    ui.execute("selection.all", json!({}));
+    let r = ui.execute("clipboard.copy", json!({ "format": "tsv" }));
+    let d = ui.document();
+    assert_eq!((r["bytes"].clone(), d["clipboardBytes"].clone()), (json!(6_001), json!(6_001)));
+    assert_eq!(d["clipboard"].as_str(), Some(format!("a{}", "é".repeat(2_047)).as_str()), "4,095 bytes: the next 'é' would split");
+    assert!(ui.copied.is_empty());
 }
 
-/// How long a large copy takes, from the key press through to the clipboard (the frame that runs
-/// `clipboard.copy` and hands the text to egui): a full 10,000-row result, and 10,000 rows
-/// holding one byte less than the cap. Prints each format's slowest frame.
 #[test]
-fn large_copies_stay_under_the_frame_bound() {
+fn the_memory_clipboard_catches_text_field_copies_and_cuts() {
     let db = dbee_testkit::require_testdb!();
-    let full = "select o.*, i.line_no, i.product, i.qty from shop.order_items i join shop.orders o on o.id = i.order_id order by i.order_id, i.line_no limit 10000";
-    let pad = COPY_MAX_BYTES / 10_000;
-    let rest = COPY_MAX_BYTES - pad * 10_000 - 1;
-    let under = format!("select repeat('x', {pad}) || case when n = 1 then repeat('y', {rest}) else '' end as pad from generate_series(1, 10000) n");
-    for (what, sql) in [("10,000 rows", full.to_string()), ("1 byte under the cap", under)] {
-        let mut ui = ran(db, &sql);
-        assert_eq!(ui.document()["query"]["results"][0]["rows"], 10_000);
-        ui.click("grid-cell-0-0");
-        ui.key("A", json!({ "cmd": true }));
-        for format in ["tsv", "tsvHeader", "csv", "json", "markdown"] {
-            ui.copied.clear();
-            ui.time_frames();
-            let r = if format == "tsv" {
-                ui.key("C", json!({ "cmd": true }));
-                ui.frame();
-                Json::Null
-            } else {
-                ui.execute("clipboard.copy", json!({ "format": format }))
-            };
-            let slowest = ui.slowest;
-            let bytes = ui.copied().map(|t| t.len()).unwrap_or_else(|| panic!("{what} {format}: nothing copied {r}"));
-            eprintln!("copy {what} as {format}: {bytes} bytes, slowest frame {slowest:?}");
-            assert!(slowest < FRAME_BOUND, "copying {what} as {format} took a {slowest:?} frame");
+    let mut ui = connected_in_memory(db);
+    // The query editor's own copy (Ctrl+A, Ctrl+C) is egui's TextEdit's, not the grid's.
+    ui.key("T", json!({ "cmd": true }));
+    ui.text(CUSTOMERS);
+    ui.key("A", json!({ "cmd": true }));
+    ui.key("C", json!({ "cmd": true }));
+    ui.frame();
+    assert!(ui.copied.is_empty(), "no copy reached egui: {:?}", ui.copied);
+    let d = ui.document();
+    assert_eq!((d["clipboard"].as_str(), d["clipboardBytes"].as_u64()), (Some(CUSTOMERS), Some(CUSTOMERS.len() as u64)));
+    // A filter input's cut.
+    ui.open("shop", "customers");
+    ui.click("filter-0-value");
+    ui.text("Ann");
+    ui.key("A", json!({ "cmd": true }));
+    ui.key("X", json!({ "cmd": true }));
+    ui.frame();
+    assert!(ui.copied.is_empty(), "no cut reached egui: {:?}", ui.copied);
+    assert_eq!(ui.document()["clipboard"], "Ann");
+    assert_eq!(ui.value("filter-0-value"), "", "the cut took the text out");
+}
+
+/// Copies `sql`'s whole result in `format` with `clipboard.copy`, in a frame of its own, and
+/// checks the outcome: how many bytes it copied (`None`: refused), and how long the frame took.
+fn copy_in_a_frame(ui: &mut Ui, format: &str) -> (Option<usize>, Duration) {
+    ui.copied.clear();
+    ui.time_frames();
+    let r = ui.call("engine.execute", json!({ "command": "clipboard.copy", "params": { "format": format } }));
+    let frame = ui.slowest;
+    let copied = ui.copied().map(|t| t.len());
+    match r["ok"].as_bool() {
+        Some(true) => assert_eq!(copied, r["result"]["bytes"].as_u64().map(|n| n as usize), "{format}: {r}"),
+        _ => {
+            assert_eq!((r["code"].as_str(), copied), (Some("disabled"), None), "{format}: {r}");
+            let why = r["data"]["why"].as_str().unwrap_or_default();
+            assert!(why.contains(&cap()) && why.ends_with("select fewer rows"), "{why}");
         }
     }
+    (copied, frame)
+}
+
+const FORMATS: [&str; 5] = ["tsv", "tsvHeader", "csv", "json", "markdown"];
+
+/// The middle one of `times`.
+fn median(mut times: Vec<Duration>) -> Duration {
+    times.sort();
+    times.get(times.len() / 2).copied().unwrap_or_default()
+}
+
+/// The full 10,000-row result of a join (12 columns, two of them JSON).
+const FULL: &str = "select o.*, i.line_no, i.product, i.qty from shop.order_items i join shop.orders o on o.id = i.order_id order by i.order_id, i.line_no limit 10000";
+
+/// One row whose cells fit the cap, but whose JSON (`\u0001`, six bytes each) and Markdown
+/// (`<br>`) do not, nor its TSV and CSV by one byte (the line breaks are quoted).
+fn escaped() -> String {
+    let half = COPY_MAX_BYTES / 2 - 1;
+    format!("select repeat(chr(1), {half}) as a, repeat(E'\\n', {half}) as b")
+}
+
+/// A guard against a frozen window, not a measurement (`copy_frames_within_budget` measures): no
+/// copy of a large result, copied or refused, takes a frame of a second.
+#[test]
+fn no_copy_freezes_the_window() {
+    let db = dbee_testkit::require_testdb!();
+    for (what, sql) in [("10,000 rows", FULL.to_string()), ("escaped", escaped())] {
+        let mut ui = ran(db, &sql);
+        ui.click("grid-cell-0-0");
+        ui.key("A", json!({ "cmd": true }));
+        for format in FORMATS {
+            let (copied, frame) = copy_in_a_frame(&mut ui, format);
+            assert!(frame < Duration::from_secs(1), "copying {what} as {format} took a {frame:?} frame");
+            assert_eq!(copied.is_some(), what == "10,000 rows", "{what} as {format}: {copied:?}");
+        }
+    }
+}
+
+/// How long a copy takes, from the request through to the clipboard (the frame that runs
+/// `clipboard.copy` and hands the text to egui), copied or refused, in each format: the full
+/// 10,000-row result; 10,000 rows whose TSV is one byte under the cap; one row of control
+/// characters (JSON escapes each as six bytes); one row of line breaks (`<br>` in Markdown); and
+/// 10,000 rows of 1,664 NULLs. Budget: 250 ms per frame.
+#[test]
+#[ignore = "a timing test: cargo test --workspace --test clipboard -- --ignored --nocapture"]
+fn copy_frames_within_budget() {
+    let db = dbee_testkit::require_testdb!();
+    // TSV of one column is the cells and 9,999 line breaks.
+    let cells = COPY_MAX_BYTES - 1 - 9_999;
+    let (pad, rest) = (cells / 10_000, cells % 10_000);
+    let under = format!("select repeat('x', {pad}) || case when n = 1 then repeat('y', {rest}) else '' end as pad from generate_series(1, 10000) n");
+    let control = format!("select repeat(chr(1), {}) as a", COPY_MAX_BYTES - 1);
+    let breaks = format!("select repeat(E'\\n', {}) as a", COPY_MAX_BYTES - 1);
+    let nulls: Vec<String> = (1..=1_664).map(|i| format!("null as c{i:04}")).collect();
+    let wide = format!("select {} from generate_series(1, 10000)", nulls.join(", "));
+    println!("copy frames on {}", machine());
+    // Medians, as this machine's load comes and goes. Frames count where a frame without a copy
+    // is within the bound: a grid of 1,664 columns is not (its frames vary by hundreds of
+    // milliseconds with or without a copy), so there the copy is judged alone.
+    let (mut slowest_copy, mut slowest_frame) = (Duration::ZERO, Duration::ZERO);
+    for (what, sql) in [
+        ("10,000 rows", FULL.to_string()),
+        ("TSV 1 byte under the cap", under),
+        ("control characters", control),
+        ("line breaks", breaks),
+        ("10,000 × 1,664 NULLs", wide),
+    ] {
+        let mut ui = ran(db, &sql);
+        ui.click("grid-cell-0-0");
+        ui.key("A", json!({ "cmd": true }));
+        let idle = median(
+            (0..5)
+                .map(|_| {
+                    ui.time_frames();
+                    ui.frame();
+                    ui.slowest
+                })
+                .collect(),
+        );
+        println!("  {what} (a frame without a copy: {idle:?}):");
+        for format in FORMATS {
+            // `clipboard.copy` on its own, outside a frame.
+            let alone: Vec<Duration> = (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    let _ = ui.harness.state_mut().run("clipboard.copy", json!({ "format": format }));
+                    let took = start.elapsed();
+                    ui.frame();
+                    took
+                })
+                .collect();
+            let worst = alone.iter().max().copied().unwrap_or_default();
+            let alone = median(alone);
+            let runs: Vec<(Option<usize>, Duration)> = (0..3).map(|_| copy_in_a_frame(&mut ui, format)).collect();
+            let outcome = runs.first().and_then(|r| r.0).map_or_else(|| "refused".to_string(), |n| format!("{n} bytes"));
+            let frame = median(runs.iter().map(|r| r.1).collect());
+            println!("    {format}: {outcome}; clipboard.copy alone {alone:?} (slowest {worst:?}), its frame {frame:?}");
+            slowest_copy = slowest_copy.max(alone);
+            if idle < FRAME_BOUND {
+                slowest_frame = slowest_frame.max(frame);
+            }
+        }
+    }
+    println!("slowest median: clipboard.copy alone {slowest_copy:?}; a frame with a copy {slowest_frame:?}");
+    assert!(slowest_copy < FRAME_BOUND, "the slowest copy took {slowest_copy:?}");
+    assert!(slowest_frame < FRAME_BOUND, "the slowest frame with a copy took {slowest_frame:?}");
+}
+
+/// The machine and its load average, which a timing test prints with its numbers
+/// (docs/testing.md §6).
+fn machine() -> String {
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("model name")).and_then(|l| l.split(':').nth(1)).map(|m| m.trim().to_string()))
+        .unwrap_or_else(|| "an unknown CPU".into());
+    let threads = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .map(|s| s.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
+        .unwrap_or_else(|| "unknown".into());
+    format!("{} {}, {cpu}, {threads} threads, load average {load}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 impl Ui {

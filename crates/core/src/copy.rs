@@ -1,4 +1,10 @@
 //! Clipboard formats: TSV, CSV, JSON, Markdown.
+//!
+//! [`render_within`] renders cells it reads one at a time ([`Cells`]) into at most a budget of
+//! bytes, counting everything it writes (separators, quotes, escapes, `NULL`, column names), and
+//! gives up as soon as the next write would pass it.
+
+use std::convert::Infallible;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,56 +43,214 @@ impl CopyFormat {
             CopyFormat::Markdown => "markdown",
         }
     }
+
+    /// The format's name for people: `TSV`, `TSV with header`, `CSV`, `JSON`, `Markdown`.
+    pub fn label(self) -> &'static str {
+        match self {
+            CopyFormat::Tsv => "TSV",
+            CopyFormat::TsvWithHeader => "TSV with header",
+            CopyFormat::Csv => "CSV",
+            CopyFormat::Json => "JSON",
+            CopyFormat::Markdown => "Markdown",
+        }
+    }
+}
+
+/// The cells [`render_within`] copies, read one at a time, so a large selection is never gathered
+/// first.
+pub trait Cells {
+    fn rows(&self) -> usize;
+    /// How many cells row `row` has: the columns, for a grid. A shorter row renders shorter in
+    /// TSV, CSV and Markdown, and with nulls in JSON.
+    fn width(&self, row: usize) -> usize;
+    /// Cell `(row, col)`; `None` is NULL, as is a cell past the row's end.
+    fn cell(&self, row: usize, col: usize) -> Option<&str>;
+
+    /// Calls `f` with each of row `row`'s cells in turn (`width(row)` of them), stopping at its
+    /// first error. Reading a whole row at once can cost far less than [`Cells::cell`] for each.
+    fn each<E>(&self, row: usize, mut f: impl FnMut(Option<&str>) -> Result<(), E>) -> Result<(), E> {
+        for col in 0..self.width(row) {
+            f(self.cell(row, col))?;
+        }
+        Ok(())
+    }
+}
+
+impl Cells for [Vec<Option<&str>>] {
+    fn rows(&self) -> usize {
+        self.len()
+    }
+    fn width(&self, row: usize) -> usize {
+        self.get(row).map_or(0, Vec::len)
+    }
+    fn cell(&self, row: usize, col: usize) -> Option<&str> {
+        self.get(row)?.get(col).copied().flatten()
+    }
+    fn each<E>(&self, row: usize, mut f: impl FnMut(Option<&str>) -> Result<(), E>) -> Result<(), E> {
+        if let Some(cells) = self.get(row) {
+            for &v in cells {
+                f(v)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Why [`render_within`] rendered nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TooLarge {
+    /// The cells alone hold `bytes`, more than the budget: rendering never started.
+    Cells { bytes: usize },
+    /// The text would have passed the budget, after `rows` whole rows.
+    Text { rows: usize },
 }
 
 /// Renders rows in `format`. Lines are joined with `\n`, with no trailing newline.
-///
-/// Everything is written into one string, sized up front from the cells, so a large selection is
-/// copied about once: each field is searched for the characters that need quoting or escaping and
-/// appended, never built as a string of its own.
 pub fn render(format: CopyFormat, columns: &[Column], rows: &[Vec<Option<&str>>]) -> String {
-    let mut out = String::with_capacity(capacity(columns, rows));
-    match format {
-        CopyFormat::Tsv => delimited(&mut out, columns, rows, false, push_tsv, '\t'),
-        CopyFormat::TsvWithHeader => delimited(&mut out, columns, rows, true, push_tsv, '\t'),
-        CopyFormat::Csv => delimited(&mut out, columns, rows, true, push_csv, ','),
-        CopyFormat::Json => json(&mut out, columns, rows),
-        CopyFormat::Markdown => markdown(&mut out, columns, rows),
-    }
-    out
+    // No budget: nothing to give up on.
+    render_within(format, columns, rows, usize::MAX).unwrap_or_default()
 }
 
-/// The most [`render`] reserves up front; a larger copy grows as it goes.
+/// [`render`] of `cells`, in at most `budget` bytes.
+///
+/// First, for a selection of up to [`PRESUM_MAX_CELLS`] cells, their bytes are added up: more than
+/// the budget is refused before anything is written ([`TooLarge::Cells`]), since every format
+/// writes each cell's text at least once. A larger selection skips this: reading its cells twice
+/// would cost more than writing up to the budget, where the text stops anyway.
+///
+/// Then the text is written into one string, sized up front from the cells and never past the
+/// budget: each field is searched for the characters that need quoting or escaping and appended,
+/// never built as a string of its own. A write that would pass the budget ends it
+/// ([`TooLarge::Text`]).
+pub fn render_within<C: Cells + ?Sized>(format: CopyFormat, columns: &[Column], cells: &C, budget: usize) -> Result<String, TooLarge> {
+    let count = (0..cells.rows()).fold(0usize, |n, row| n.saturating_add(cells.width(row)));
+    let mut bytes = 0usize;
+    if count <= PRESUM_MAX_CELLS {
+        for row in 0..cells.rows() {
+            let Ok(()) = cells.each::<Infallible>(row, |v| {
+                bytes = bytes.saturating_add(v.map_or(0, str::len));
+                Ok(())
+            });
+        }
+        if bytes > budget {
+            return Err(TooLarge::Cells { bytes });
+        }
+    }
+    let names = columns.iter().fold(0usize, |n, c| n.saturating_add(c.name.len()).saturating_add(3));
+    let guess = bytes.saturating_add(count.saturating_mul(3)).saturating_add(names);
+    let mut out = Out { text: String::with_capacity(guess.min(budget).min(MAX_RESERVE)), budget, rows: 0 };
+    let done = match format {
+        CopyFormat::Tsv => delimited(&mut out, columns, cells, false, push_tsv, b'\t'),
+        CopyFormat::TsvWithHeader => delimited(&mut out, columns, cells, true, push_tsv, b'\t'),
+        CopyFormat::Csv => delimited(&mut out, columns, cells, true, push_csv, b','),
+        CopyFormat::Json => json(&mut out, columns, cells),
+        CopyFormat::Markdown => markdown(&mut out, columns, cells),
+    };
+    match done {
+        Ok(()) => Ok(out.text),
+        Err(Over) => Err(TooLarge::Text { rows: out.rows }),
+    }
+}
+
+/// The most cells [`render_within`] adds up before rendering.
+pub const PRESUM_MAX_CELLS: usize = 1_000_000;
+
+/// The most [`render_within`] reserves up front; a larger copy grows as it goes.
 const MAX_RESERVE: usize = 64 * 1024 * 1024;
 
-/// A guess at the rendered length: the cells, and room for separators and quotes.
-fn capacity(columns: &[Column], rows: &[Vec<Option<&str>>]) -> usize {
-    let names = columns.iter().fold(0usize, |n, c| n.saturating_add(c.name.len()).saturating_add(3));
-    let cells = rows.iter().flatten().fold(0usize, |n, v| n.saturating_add(v.map_or(4, str::len)).saturating_add(3));
-    names.saturating_add(cells).min(MAX_RESERVE)
+/// The text being rendered, which never grows past its budget.
+struct Out {
+    text: String,
+    budget: usize,
+    /// The rows written whole so far, and with room left for the text's end.
+    rows: usize,
 }
 
-fn delimited(out: &mut String, columns: &[Column], rows: &[Vec<Option<&str>>], header: bool, field: fn(&mut String, &str), sep: char) {
-    let mut first = true;
-    let mut line = |out: &mut String, fields: &mut dyn Iterator<Item = Option<&str>>| {
-        if !std::mem::take(&mut first) {
-            out.push('\n');
+/// A write would have passed the budget; nothing of it was written.
+struct Over;
+
+impl Out {
+    fn push_str(&mut self, s: &str) -> Result<(), Over> {
+        if s.len() > self.budget.saturating_sub(self.text.len()) {
+            return Err(Over);
         }
-        for (i, v) in fields.enumerate() {
-            if i > 0 {
-                out.push(sep);
-            }
-            if let Some(v) = v {
-                field(out, v);
-            }
+        self.text.push_str(s);
+        Ok(())
+    }
+
+    /// An ASCII byte.
+    fn push_byte(&mut self, b: u8) -> Result<(), Over> {
+        if self.text.len() >= self.budget {
+            return Err(Over);
         }
-    };
+        self.text.push(char::from(b));
+        Ok(())
+    }
+
+    /// The ASCII byte `b`, `n` times.
+    fn push_repeated(&mut self, b: u8, n: usize) -> Result<(), Over> {
+        if n > self.budget.saturating_sub(self.text.len()) {
+            return Err(Over);
+        }
+        // In pieces of a run of 64, which costs far less than a character at a time.
+        let run = [b; 64];
+        match std::str::from_utf8(&run) {
+            Ok(run) => {
+                let mut left = n;
+                while left > 0 {
+                    let k = left.min(run.len());
+                    self.text.push_str(run.get(..k).unwrap_or_default());
+                    left -= k;
+                }
+            }
+            Err(_) => self.text.extend(std::iter::repeat_n(char::from(b), n)),
+        }
+        Ok(())
+    }
+
+    /// A row was written whole: it counts as fitting when the text's last `trailer` bytes (JSON's
+    /// closing `\n]`) would still fit after it.
+    fn row_done(&mut self, trailer: usize) {
+        if self.text.len().saturating_add(trailer) <= self.budget {
+            self.rows += 1;
+        }
+    }
+}
+
+type Field = fn(&mut Out, &str) -> Result<(), Over>;
+
+fn delimited<C: Cells + ?Sized>(out: &mut Out, columns: &[Column], cells: &C, header: bool, field: Field, sep: u8) -> Result<(), Over> {
     if header {
-        line(out, &mut columns.iter().map(|c| Some(c.name.as_str())));
+        for (i, c) in columns.iter().enumerate() {
+            if i > 0 {
+                out.push_byte(sep)?;
+            }
+            field(out, &c.name)?;
+        }
     }
-    for row in rows {
-        line(out, &mut row.iter().copied());
+    for row in 0..cells.rows() {
+        if header || row > 0 {
+            out.push_byte(b'\n')?;
+        }
+        // A NULL is no text: the separators before a value are written together, so a row of
+        // many NULLs costs little more than counting them.
+        let (mut first, mut owed) = (true, 0usize);
+        cells.each(row, |v| {
+            if !std::mem::take(&mut first) {
+                owed += 1;
+            }
+            match v {
+                Some(v) => {
+                    out.push_repeated(sep, std::mem::take(&mut owed))?;
+                    field(out, v)
+                }
+                None => Ok(()),
+            }
+        })?;
+        out.push_repeated(sep, owed)?;
+        out.row_done(0);
     }
+    Ok(())
 }
 
 /// Whether `s` holds any of `chars`. One fast search per character beats one pass that compares
@@ -95,105 +259,142 @@ fn has_any(s: &str, chars: &[char]) -> bool {
     chars.iter().any(|&c| s.contains(c))
 }
 
-fn push_tsv(out: &mut String, s: &str) {
+fn push_tsv(out: &mut Out, s: &str) -> Result<(), Over> {
     if s.starts_with('"') || has_any(s, &['\t', '\n', '\r']) { push_quoted(out, s) } else { out.push_str(s) }
 }
 
-fn push_csv(out: &mut String, s: &str) {
+fn push_csv(out: &mut Out, s: &str) -> Result<(), Over> {
     if has_any(s, &[',', '"', '\n', '\r']) { push_quoted(out, s) } else { out.push_str(s) }
 }
 
 /// `s` in double quotes, each `"` in it doubled.
-fn push_quoted(out: &mut String, s: &str) {
-    out.push('"');
+fn push_quoted(out: &mut Out, s: &str) -> Result<(), Over> {
+    out.push_byte(b'"')?;
     for (i, part) in s.split('"').enumerate() {
         if i > 0 {
-            out.push_str("\"\"");
+            out.push_str("\"\"")?;
         }
-        out.push_str(part);
+        out.push_str(part)?;
     }
-    out.push('"');
+    out.push_byte(b'"')
 }
 
-fn json(out: &mut String, columns: &[Column], rows: &[Vec<Option<&str>>]) {
-    if rows.is_empty() {
-        out.push_str("[]");
-        return;
+fn json<C: Cells + ?Sized>(out: &mut Out, columns: &[Column], cells: &C) -> Result<(), Over> {
+    if cells.rows() == 0 {
+        return out.push_str("[]");
     }
     // Each name as a JSON string, once.
     let names: Vec<String> = columns.iter().map(|c| json_string(&c.name)).collect();
-    out.push_str("[\n");
-    for (r, row) in rows.iter().enumerate() {
-        if r > 0 {
-            out.push_str(",\n");
+    out.push_str("[\n")?;
+    for row in 0..cells.rows() {
+        if row > 0 {
+            out.push_str(",\n")?;
         }
-        out.push_str("  {");
-        for (i, (c, name)) in columns.iter().zip(&names).enumerate() {
-            if i > 0 {
-                out.push_str(", ");
+        out.push_str("  {")?;
+        // Every column: the row's cells, then NULL for those a short row lacks.
+        let mut fields = columns.iter().zip(&names);
+        let field = |out: &mut Out, first: bool, (c, name): (&Column, &String), v: Option<&str>| {
+            if !first {
+                out.push_str(", ")?;
             }
-            out.push_str(name);
-            out.push_str(": ");
-            push_json_value(out, &c.base_type, row.get(i).copied().flatten());
+            out.push_str(name)?;
+            out.push_str(": ")?;
+            push_json_value(out, &c.base_type, v)
+        };
+        let mut i = 0usize;
+        cells.each(row, |v| {
+            if let Some(f) = fields.next() {
+                field(out, i == 0, f, v)?;
+                i += 1;
+            }
+            Ok(())
+        })?;
+        for f in fields {
+            field(out, i == 0, f, None)?;
+            i += 1;
         }
-        out.push('}');
+        out.push_byte(b'}')?;
+        out.row_done(2);
     }
-    out.push_str("\n]");
+    out.push_str("\n]")
 }
 
 fn json_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-fn push_json_value(out: &mut String, base_type: &str, v: Option<&str>) {
-    let Some(text) = v else {
-        out.push_str("null");
-        return;
-    };
+fn push_json_value(out: &mut Out, base_type: &str, v: Option<&str>) -> Result<(), Over> {
+    let Some(text) = v else { return out.push_str("null") };
     match base_type {
         "int2" | "int4" | "int8" | "float4" | "float8" | "numeric" | "oid" if is_json_number(text) => out.push_str(text),
         "bool" if text == "t" => out.push_str("true"),
         "bool" if text == "f" => out.push_str("false"),
         "json" | "jsonb" if json::is_valid(text) => out.push_str(text),
-        _ => out.push_str(&json_string(text)),
+        _ => push_json_string(out, text),
     }
+}
+
+/// The most of a string escaped at once.
+const ESCAPE_CHUNK: usize = 64 * 1024;
+
+/// `s` as a JSON string, escaped a piece at a time (escaping is the same piece by piece), so a long
+/// string grows by at most one piece's escapes past what the budget takes.
+fn push_json_string(out: &mut Out, s: &str) -> Result<(), Over> {
+    out.push_byte(b'"')?;
+    let mut rest = s;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(ESCAPE_CHUNK);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (piece, tail) = rest.split_at_checked(end).filter(|(p, _)| !p.is_empty()).unwrap_or((rest, ""));
+        let escaped = json_string(piece);
+        // Without its quotes.
+        out.push_str(escaped.get(1..escaped.len().saturating_sub(1)).unwrap_or_default())?;
+        rest = tail;
+    }
+    out.push_byte(b'"')
 }
 
 fn is_json_number(s: &str) -> bool {
     s.trim() == s && matches!(serde_json::from_str::<Value>(s), Ok(Value::Number(_)))
 }
 
-fn markdown(out: &mut String, columns: &[Column], rows: &[Vec<Option<&str>>]) {
-    let line = |out: &mut String, cells: &mut dyn Iterator<Item = Option<&str>>| {
-        out.push_str("| ");
-        for (i, v) in cells.enumerate() {
-            if i > 0 {
-                out.push_str(" | ");
+fn markdown<C: Cells + ?Sized>(out: &mut Out, columns: &[Column], cells: &C) -> Result<(), Over> {
+    out.push_str("| ")?;
+    for (i, c) in columns.iter().enumerate() {
+        if i > 0 {
+            out.push_str(" | ")?;
+        }
+        push_md(out, &c.name)?;
+    }
+    out.push_str(" |\n|")?;
+    for _ in columns {
+        out.push_str("---|")?;
+    }
+    for row in 0..cells.rows() {
+        out.push_str("\n| ")?;
+        let mut first = true;
+        cells.each(row, |v| {
+            if !std::mem::take(&mut first) {
+                out.push_str(" | ")?;
             }
             match v {
                 Some(v) => push_md(out, v),
                 None => out.push_str("NULL"),
             }
-        }
-        out.push_str(" |");
-    };
-    line(out, &mut columns.iter().map(|c| Some(c.name.as_str())));
-    out.push_str("\n|");
-    for _ in columns {
-        out.push_str("---|");
+        })?;
+        out.push_str(" |")?;
+        out.row_done(0);
     }
-    for row in rows {
-        out.push('\n');
-        line(out, &mut row.iter().copied());
-    }
+    Ok(())
 }
 
 /// `s` for a Markdown table cell: `|` escaped, and each line break (`\r\n`, `\n` or `\r`) as
 /// `<br>`.
-fn push_md(out: &mut String, s: &str) {
+fn push_md(out: &mut Out, s: &str) -> Result<(), Over> {
     if !has_any(s, &['|', '\n', '\r']) {
-        out.push_str(s);
-        return;
+        return out.push_str(s);
     }
     let bytes = s.as_bytes();
     let mut start = 0;
@@ -209,12 +410,14 @@ fn push_md(out: &mut String, s: &str) {
             }
         };
         // `start` and `i` sit on ASCII bytes: character boundaries.
-        out.push_str(s.get(start..i).unwrap_or_default());
-        out.push_str(with);
+        if start < i {
+            out.push_str(s.get(start..i).unwrap_or_default())?;
+        }
+        out.push_str(with)?;
         i += len;
         start = i;
     }
-    out.push_str(s.get(start..).unwrap_or_default());
+    out.push_str(s.get(start..).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -380,16 +583,117 @@ mod tests {
                 .map(|_| (0..if next(5) == 0 { next(5) } else { ncols }).map(|_| (next(4) != 0).then(|| word(&mut next))).collect())
                 .collect();
             let rows: Vec<Vec<Option<&str>>> = owned.iter().map(|r| r.iter().map(|v| v.as_deref()).collect()).collect();
-            let cases = [
-                (CopyFormat::Tsv, reference::delimited(&columns, &rows, false, false)),
-                (CopyFormat::TsvWithHeader, reference::delimited(&columns, &rows, true, false)),
-                (CopyFormat::Csv, reference::delimited(&columns, &rows, true, true)),
-                (CopyFormat::Json, reference::json_text(&columns, &rows)),
-                (CopyFormat::Markdown, reference::markdown(&columns, &rows)),
-            ];
-            for (format, expected) in cases {
+            let reference = |format: CopyFormat, rows: &[Vec<Option<&str>>]| match format {
+                CopyFormat::Tsv => reference::delimited(&columns, rows, false, false),
+                CopyFormat::TsvWithHeader => reference::delimited(&columns, rows, true, false),
+                CopyFormat::Csv => reference::delimited(&columns, rows, true, true),
+                CopyFormat::Json => reference::json_text(&columns, rows),
+                CopyFormat::Markdown => reference::markdown(&columns, rows),
+            };
+            let formats = [CopyFormat::Tsv, CopyFormat::TsvWithHeader, CopyFormat::Csv, CopyFormat::Json, CopyFormat::Markdown];
+            let cell_bytes: usize = rows.iter().flatten().map(|v| v.map_or(0, str::len)).sum();
+            for format in formats {
+                let expected = reference(format, &rows);
                 assert_eq!(render(format, &columns, &rows), expected, "round {round}, {format:?}: {columns:?} {rows:?}");
+                // Within a budget: the whole text when it fits, else nothing, and never past it.
+                let budget = next(expected.len() + 4);
+                let what = format!("round {round}, {format:?}, budget {budget} for {}: {columns:?} {rows:?}", expected.len());
+                match render_within(format, &columns, rows.as_slice(), budget) {
+                    Ok(text) => assert!(text.len() <= budget && text == expected, "{what}"),
+                    Err(TooLarge::Cells { bytes }) => assert!(bytes == cell_bytes && bytes > budget, "{what}"),
+                    Err(TooLarge::Text { rows: fit }) => {
+                        // With no rows, only the header can be too long.
+                        assert!(expected.len() > budget && cell_bytes <= budget && (fit < rows.len() || rows.is_empty()), "{what}: {fit} rows fit");
+                        // Exactly that many: the first `fit` rows fit, one more does not.
+                        let first = rows.get(..fit).unwrap_or_default();
+                        assert!(reference(format, first).len() <= budget || fit == 0, "{what}: {fit} rows fit");
+                        if let Some(one_more) = rows.get(..fit + 1) {
+                            assert!(reference(format, one_more).len() > budget, "{what}: {fit} rows fit, and one more too");
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    /// Cells read one at a time: a grid too large to gather, all NULL.
+    struct Nulls {
+        rows: usize,
+        columns: usize,
+    }
+
+    impl Cells for Nulls {
+        fn rows(&self) -> usize {
+            self.rows
+        }
+        fn width(&self, _: usize) -> usize {
+            self.columns
+        }
+        fn cell(&self, _: usize, _: usize) -> Option<&str> {
+            None
+        }
+    }
+
+    #[test]
+    fn nulls_and_names_count_toward_the_budget() {
+        let columns: Vec<Column> = (0..1_664).map(|i| Column::untyped(&format!("column_{i}"))).collect();
+        let nulls = Nulls { rows: 10_000, columns: 1_664 };
+        let budget = 1024 * 1024;
+        // No cell holds a byte, yet every format but TSV renders far more than the budget.
+        for format in [CopyFormat::TsvWithHeader, CopyFormat::Csv, CopyFormat::Json, CopyFormat::Markdown] {
+            let r = render_within(format, &columns, &nulls, budget);
+            assert!(matches!(r, Err(TooLarge::Text { rows }) if rows < 1_000), "{format:?}: {:?}", r.map(|t| t.len()));
+        }
+        // TSV of one row is its 1,663 tabs.
+        let one = Nulls { rows: 1, columns: 1_664 };
+        assert_eq!(render_within(CopyFormat::Tsv, &columns, &one, budget).map(|t| t.len()), Ok(1_663));
+        // Escaping counts: 1,000 control characters are 6,000 bytes of JSON.
+        let control = "\u{1}".repeat(1_000);
+        let row = [vec![Some(control.as_str())]];
+        let a = [Column::untyped("a")];
+        assert!(matches!(render_within(CopyFormat::Json, &a, row.as_slice(), 6_000), Err(TooLarge::Text { rows: 0 })));
+        assert_eq!(render_within(CopyFormat::Json, &a, row.as_slice(), 6_015).map(|t| t.len()), Ok(6_015));
+    }
+
+    /// `rows` × `columns` cells holding `x`.
+    struct Xs {
+        rows: usize,
+        columns: usize,
+    }
+
+    impl Cells for Xs {
+        fn rows(&self) -> usize {
+            self.rows
+        }
+        fn width(&self, _: usize) -> usize {
+            self.columns
+        }
+        fn cell(&self, _: usize, _: usize) -> Option<&str> {
+            Some("x")
+        }
+    }
+
+    #[test]
+    fn only_a_small_selection_is_added_up_first() {
+        let columns: Vec<Column> = (0..1_000).map(|i| Column::untyped(&format!("c{i}"))).collect();
+        // A million cells holding a byte each, against a budget of one byte less: refused before
+        // any rendering, with the cells' size.
+        let small = Xs { rows: PRESUM_MAX_CELLS / 1_000, columns: 1_000 };
+        assert_eq!(render_within(CopyFormat::Tsv, &columns, &small, PRESUM_MAX_CELLS - 1), Err(TooLarge::Cells { bytes: PRESUM_MAX_CELLS }));
+        // One row more: rendered up to the budget instead, and refused there.
+        let large = Xs { rows: PRESUM_MAX_CELLS / 1_000 + 1, columns: 1_000 };
+        let r = render_within(CopyFormat::Tsv, &columns, &large, PRESUM_MAX_CELLS - 1);
+        // n rows of TSV are 1,999 bytes each and n - 1 line breaks: 2,000 n - 1 bytes.
+        assert_eq!(r, Err(TooLarge::Text { rows: PRESUM_MAX_CELLS / 2_000 }));
+    }
+
+    #[test]
+    fn long_strings_escape_in_pieces_as_a_whole() {
+        // Pieces end where a character does, wherever a two-byte one falls.
+        for text in [format!("a{}", "é".repeat(40_000)), format!("{}\u{1}\"x\n", "é\\".repeat(30_000)), "\u{1}".repeat(ESCAPE_CHUNK + 3)] {
+            let mut out = Out { text: String::new(), budget: usize::MAX, rows: 0 };
+            assert!(push_json_string(&mut out, &text).is_ok());
+            assert_eq!(out.text, json_string(&text));
         }
     }
 

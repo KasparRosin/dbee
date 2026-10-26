@@ -12,9 +12,9 @@
 //! Only the child's environment changes ([`command`]): `HOME` and `USERPROFILE` are the
 //! throwaway home, the XDG directories and `APPDATA`/`LOCALAPPDATA` lie inside it,
 //! `SSH_AUTH_SOCK` and `DBEE_CONTROL_PORT` are removed, and `DBEE_SECRET_STORE=memory` and
-//! `DBEE_CLIPBOARD=memory` are set. So the run never reads or writes the real home, `~/.ssh`, the
-//! keyring or the system clipboard (a copy shows in `document.inspect` as `clipboard`), and on
-//! Linux and macOS never reaches the SSH agent. On Windows the OpenSSH agent pipe is still reachable: dbee finds it
+//! `DBEE_CLIPBOARD=memory` are set. So the run never reads or writes the real home, `~/.ssh` or
+//! the keyring, keeps every copy and cut in the app (text fields' too; `document.inspect` shows
+//! the last as `clipboard`), and on Linux and macOS never reaches the SSH agent. On Windows the OpenSSH agent pipe is still reachable: dbee finds it
 //! without `SSH_AUTH_SOCK`.
 //!
 //! [`ALLOW_VAR`] lists the only targets the run may connect to ([`allowed_targets`]): each test

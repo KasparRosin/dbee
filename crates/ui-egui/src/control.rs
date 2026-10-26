@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
+use dbee_engine::view::{INSPECT_TEXT_BYTES, cut};
 use dbee_engine::{EngineError, JobId, Json, Outcome};
 use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use serde_json::{Map, json};
@@ -316,12 +317,16 @@ fn commands(app: &DbeeApp, params: &Json) -> Json {
     ok(Json::Array(list))
 }
 
-/// The session summary (`Session::inspect`), with `clipboard`, the last copied text or null,
-/// when the app keeps its clipboard in memory ([`crate::app::Clipboard::Memory`]).
+/// The session summary (`Session::inspect`). When the app keeps its clipboard in memory
+/// ([`crate::app::Clipboard::Memory`]) it adds `clipboard`, the first 4 KiB of the last copied
+/// text (cut on a character boundary), and `clipboardBytes`, its whole length; both null before
+/// any copy.
 fn document(app: &DbeeApp) -> Json {
     let mut d = app.session().inspect();
     if let (Some(kept), Json::Object(fields)) = (app.kept_clipboard(), &mut d) {
-        fields.insert("clipboard".into(), kept.map_or(Json::Null, |t| Json::String(t.to_string())));
+        let start = kept.map(|t| Json::String(cut(t, INSPECT_TEXT_BYTES).to_string()));
+        fields.insert("clipboard".into(), start.unwrap_or(Json::Null));
+        fields.insert("clipboardBytes".into(), kept.map_or(Json::Null, |t| json!(t.len())));
     }
     d
 }

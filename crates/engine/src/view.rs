@@ -210,8 +210,8 @@ impl Cache {
     }
 }
 
-/// How much of the text `inspect()` carries.
-pub(crate) const INSPECT_TEXT_BYTES: usize = 4 * 1024;
+/// How much of a long text `inspect()` carries.
+pub const INSPECT_TEXT_BYTES: usize = 4 * 1024;
 
 /// `inspect()`'s `value`: the metadata and at most the first 4 KiB of the text. Built field by
 /// field, so the whole text (up to [`VALUE_VIEW_MAX_BYTES`]) is never copied or escaped.

@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use dbee_engine::{COPY_MAX_BYTES, Json, Session, VALUE_VIEW_MAX_BYTES};
+use dbee_engine::{COPY_MAX_BYTES, Json, Outcome, Session, VALUE_VIEW_MAX_BYTES};
 use dbee_testkit::{require_testdb, unique};
 use serde_json::json;
 
@@ -282,31 +282,77 @@ fn selection_follows_the_grid() {
     assert_eq!(s.execute("copy.selection", json!({ "format": "tsv" })).unwrap_err().code(), "disabled");
 }
 
+/// Runs `sql` in the session's query tab (a new one the first time) and selects every cell.
+fn query_all(s: &mut Session, sql: &str) {
+    if s.inspect()["query"].is_null() {
+        run(s, "tab.newQuery", json!({ "text": sql }));
+    } else {
+        run(s, "query.setText", json!({ "text": sql }));
+    }
+    run(s, "query.run", json!({}));
+    run(s, "selection.all", json!({}));
+}
+
+/// The reason a copy is refused, for `format`.
+fn refused(s: &mut Session, format: &str) -> String {
+    match s.execute("copy.selection", json!({ "format": format })) {
+        // Not the text in the message: it can be tens of megabytes.
+        Ok(Outcome::Done(v)) => panic!("{format}: copied {} bytes", v["text"].as_str().map_or(0, str::len)),
+        Ok(other) => panic!("{format}: {other:?}"),
+        Err(e) => {
+            assert_eq!(e.code(), "disabled", "{format}: {e}");
+            e.data()["why"].as_str().unwrap_or_default().to_string()
+        }
+    }
+}
+
 #[test]
-fn copy_takes_at_most_32_mib_of_cell_text() {
+fn the_cap_bounds_the_copied_text() {
     let _db = require_testdb!();
-    assert_eq!(COPY_MAX_BYTES, 32 * 1024 * 1024);
+    assert_eq!(COPY_MAX_BYTES, 8 * 1024 * 1024);
     let mut s = connected();
-    // Two cells holding exactly the cap: copied, in every format.
-    let at_cap = format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES - 1);
-    run(&mut s, "tab.newQuery", json!({ "text": at_cap }));
-    run(&mut s, "query.run", json!({}));
-    run(&mut s, "selection.all", json!({}));
+    // TSV of `a`, `b`, `c` is `<a>\ty\t`: three bytes more than `a`.
+    query_all(&mut s, &format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES - 3));
     let r = copy(&mut s, "tsv");
-    assert_eq!((text(&r).len(), r["rows"].clone(), r["columns"].clone()), (COPY_MAX_BYTES + 2, json!(1), json!(3)));
-    assert!(text(&copy(&mut s, "json")).ends_with("\"b\": \"y\", \"c\": null}\n]"));
-    // One byte more: nothing is rendered, and the reason gives the size, the cap and what to do.
-    let over = format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES);
-    run(&mut s, "query.setText", json!({ "text": over }));
-    run(&mut s, "query.run", json!({}));
-    run(&mut s, "selection.all", json!({}));
+    assert_eq!((text(&r).len(), r["rows"].clone(), r["columns"].clone()), (COPY_MAX_BYTES, json!(1), json!(3)));
+    // One byte more of text: refused, though the cells alone fit.
+    query_all(&mut s, &format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES - 2));
+    assert_eq!(refused(&mut s, "tsv"), "the copy as TSV would pass the 8 MiB a copy can take (0 of the selected rows fit); select fewer rows");
+    // Cells over the cap are refused before anything is rendered, in every format.
+    query_all(&mut s, &format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES));
     for format in ["tsv", "tsvHeader", "csv", "json", "markdown"] {
-        let e = s.execute("copy.selection", json!({ "format": format })).unwrap_err();
-        assert_eq!(e.code(), "disabled", "{format}: {e}");
-        let why = e.data()["why"].as_str().unwrap_or_default().to_string();
-        assert_eq!(why, "the selection holds 32.1 MiB of cell text, more than the 32 MiB a copy can take; select fewer rows", "{format}");
+        assert_eq!(
+            refused(&mut s, format),
+            "the selection holds 8.1 MiB of cell text, more than the 8 MiB a copy can take; select fewer rows",
+            "{format}"
+        );
     }
     // A smaller part of the same result copies.
     run(&mut s, "selection.set", json!({ "anchor": [0, 1], "focus": [0, 2] }));
     assert_eq!(text(&copy(&mut s, "tsv")), "y\t");
+}
+
+#[test]
+fn escaping_nulls_and_names_count_toward_the_cap() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    // JSON writes a control character as six bytes: `[\n  {"a": "` + 6k + `"}\n]` is 6k + 15.
+    let k = (COPY_MAX_BYTES - 15) / 6;
+    query_all(&mut s, &format!("select repeat(chr(1), {k}) as a"));
+    assert_eq!(text(&copy(&mut s, "json")).len(), 6 * k + 15);
+    query_all(&mut s, &format!("select repeat(chr(1), {}) as a", k + 1));
+    assert_eq!(refused(&mut s, "json"), "the copy as JSON would pass the 8 MiB a copy can take (0 of the selected rows fit); select fewer rows");
+    // Markdown writes a line break as `<br>`: `| a |\n|---|\n| ` + 4k + ` |` is 4k + 16.
+    let k = (COPY_MAX_BYTES - 16) / 4;
+    query_all(&mut s, &format!("select repeat(E'\\n', {k}) as a"));
+    assert_eq!(text(&copy(&mut s, "markdown")).len(), COPY_MAX_BYTES);
+    query_all(&mut s, &format!("select repeat(E'\\n', {}) as a", k + 1));
+    assert!(refused(&mut s, "markdown").starts_with("the copy as Markdown would pass"));
+    // 10,000 rows of 300 NULLs hold no cell text, but as JSON every NULL names its column.
+    let nulls: Vec<String> = (1..=300).map(|i| format!("null as c{i:03}")).collect();
+    query_all(&mut s, &format!("select {} from generate_series(1, 10000)", nulls.join(", ")));
+    let why = refused(&mut s, "json");
+    assert!(why.starts_with("the copy as JSON would pass the 8 MiB a copy can take (") && why.contains(" of the selected rows fit)"), "{why}");
+    // As TSV they are tabs: 299 a row, and the line breaks between rows.
+    assert_eq!(text(&copy(&mut s, "tsv")).len(), 10_000 * 299 + 9_999);
 }

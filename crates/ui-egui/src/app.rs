@@ -69,7 +69,10 @@ pub struct DbeeApp {
     /// Jobs started by the user's own actions ([`DbeeApp::start`]), whose outcome goes back to
     /// where they came from.
     ui_jobs: Vec<UiJob>,
-    clipboard: Copied,
+    /// Texts the app copied this frame, for egui at its end.
+    clipboard: Vec<String>,
+    /// With [`Clipboard::Memory`], the last text copied (`Some(None)` before any copy).
+    memory: Option<Option<String>>,
     themed: bool,
     /// Keyboard events held back for the next frame: those after a cell editor's key in the same
     /// frame ([`crate::editors::before_frame`]).
@@ -82,17 +85,11 @@ pub enum Clipboard {
     /// The system clipboard, through egui (`Context::copy_text`) at the end of the frame.
     #[default]
     System,
-    /// The app only (`DBEE_CLIPBOARD=memory`, which `cargo xtask run-isolated` sets): the system
-    /// clipboard is never touched, and `document.inspect` shows the last copied text as
-    /// `clipboard`.
+    /// The app only (`DBEE_CLIPBOARD=memory`, which `cargo xtask run-isolated` sets): at the end of
+    /// each frame every copy and cut egui was asked for, the grid's and the text fields' alike, is
+    /// taken out of its output and the last one kept, so none reaches the system clipboard.
+    /// `document.inspect` shows the start of the last as `clipboard`, and its length.
     Memory,
-}
-
-/// The copied text: waiting for the end of the frame, or kept in memory.
-#[derive(Debug)]
-enum Copied {
-    System(Vec<String>),
-    Memory(Option<String>),
 }
 
 /// Where a command the user started came from, so its outcome goes back there.
@@ -190,7 +187,8 @@ impl DbeeApp {
             quit: None,
             frames: 0,
             ui_jobs: Vec::new(),
-            clipboard: Copied::System(Vec::new()),
+            clipboard: Vec::new(),
+            memory: None,
             themed: false,
             carry: Vec::new(),
         }
@@ -198,10 +196,7 @@ impl DbeeApp {
 
     /// This app with copied text going to `clipboard` (the system clipboard by default).
     pub fn with_clipboard(mut self, clipboard: Clipboard) -> DbeeApp {
-        self.clipboard = match clipboard {
-            Clipboard::System => Copied::System(Vec::new()),
-            Clipboard::Memory => Copied::Memory(None),
-        };
+        self.memory = (clipboard == Clipboard::Memory).then_some(None);
         self
     }
 
@@ -245,21 +240,38 @@ impl DbeeApp {
         self.input.feed(raw, self.frames);
     }
 
-    /// Puts `text` on the clipboard at the end of this frame; with [`Clipboard::Memory`], keeps it
-    /// instead, in place of the last.
+    /// Puts `text` on the clipboard at the end of this frame (with [`Clipboard::Memory`], in the
+    /// app's own).
     pub(crate) fn copy_text(&mut self, text: String) {
-        match &mut self.clipboard {
-            Copied::System(waiting) => waiting.push(text),
-            Copied::Memory(last) => *last = Some(text),
-        }
+        self.clipboard.push(text);
     }
 
     /// With [`Clipboard::Memory`], the last text copied (`Some(None)` before any copy); `None`
     /// with the system clipboard.
     pub(crate) fn kept_clipboard(&self) -> Option<Option<&str>> {
-        match &self.clipboard {
-            Copied::System(_) => None,
-            Copied::Memory(last) => Some(last.as_deref()),
+        self.memory.as_ref().map(Option::as_deref)
+    }
+
+    /// The end of the frame: the app's copies go to egui, and with [`Clipboard::Memory`] every
+    /// copy egui was asked for this frame (a text field's too) is taken back out, the last kept.
+    fn hand_over_copies(&mut self, ctx: &egui::Context) {
+        for text in self.clipboard.drain(..) {
+            ctx.copy_text(text);
+        }
+        let Some(kept) = &mut self.memory else { return };
+        let mut last = None;
+        ctx.output_mut(|o| {
+            o.commands.retain_mut(|c| match c {
+                egui::OutputCommand::CopyText(text) => {
+                    last = Some(std::mem::take(text));
+                    false
+                }
+                egui::OutputCommand::CopyImage(_) => false,
+                egui::OutputCommand::OpenUrl(_) => true,
+            });
+        });
+        if let Some(text) = last {
+            *kept = Some(text);
         }
     }
 
@@ -404,11 +416,7 @@ impl DbeeApp {
                 dbee_engine::UiRequest::Notice(text) => self.notice(text),
             }
         }
-        if let Copied::System(waiting) = &mut self.clipboard {
-            for text in waiting.drain(..) {
-                ctx.copy_text(text);
-            }
-        }
+        self.hand_over_copies(&ctx);
         if self.session.busy() {
             ctx.request_repaint_after(BUSY_REPAINT);
         }

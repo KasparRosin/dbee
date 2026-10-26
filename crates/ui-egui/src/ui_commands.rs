@@ -7,7 +7,7 @@
 //! - `clipboard.copy {format}` (Ctrl+C `tsv`, Ctrl+Shift+C `tsvHeader`, the grid's menu): runs
 //!   `copy.selection`, puts its text on the clipboard and shows "Copied n rows" →
 //!   `{rows, columns, bytes}` (`bytes`: the length of the text). The text itself is not in the
-//!   result: it can be large, and it is cell values. A selection over the copy cap
+//!   result: it can be large, and it is cell values. A copy whose text would pass the limit
 //!   (`COPY_MAX_BYTES`) is `Disabled` with the engine's reason, which a shortcut or the menu shows
 //!   as a notice.
 

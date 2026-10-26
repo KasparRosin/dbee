@@ -10,12 +10,16 @@
 //!
 //! `copy.selection` renders the rectangle in grid order with the staged values, as text for the
 //! clipboard (the UI puts it there); it needs no connection, and none of these commands is
-//! journaled. The cell values never reach the log. It first adds up the bytes of the cells it
-//! would copy: above [`COPY_MAX_BYTES`] it renders nothing and is `Disabled`, saying how much is
-//! selected and asking for fewer rows.
+//! journaled. The cell values never reach the log. The copied text is at most [`COPY_MAX_BYTES`],
+//! everything counted (quotes, escapes, `NULL`, column names): cells holding more are refused
+//! before anything is rendered (in a selection of up to a million cells, which are added up
+//! first), and a text that would pass it is given up as soon as it would. Either way the command
+//! is `Disabled`, saying how much is selected or how many rows fit, and asking for fewer rows.
+//! The cells are read from the grid as they are written, so nothing the size of the selection is
+//! built first.
 
 use dbee_core::Column;
-use dbee_core::copy::{CopyFormat, render};
+use dbee_core::copy::{Cells, CopyFormat, TooLarge, render_within};
 use serde_json::json;
 
 use super::{CommandSpec, always, p};
@@ -32,8 +36,10 @@ const SHOW: &str = "value.show";
 pub const NO_GRID: &str = "no rows are shown";
 /// Why copy is disabled when nothing is selected.
 pub const NOTHING_SELECTED: &str = "nothing is selected";
-/// The most cell text one copy takes (the cells' bytes, before any quoting or separators).
-pub const COPY_MAX_BYTES: usize = 32 * 1024 * 1024;
+/// The most text one copy puts on the clipboard, in bytes. Every copy measured, copied or
+/// refused, stays well under a 250 ms frame at 8 MiB in a dev build; at 16 MiB the slowest (JSON
+/// of a value of line breaks, and TSV of 10,000 rows of 1,664 NULLs) took up to 280 ms.
+pub const COPY_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -157,6 +163,52 @@ fn all(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Done(json!({ "rows": rows, "columns": columns })))
 }
 
+/// The selected rectangle of a grid, read cell by cell.
+struct Rect<'g, 'a> {
+    grid: &'g Grid<'a>,
+    top: usize,
+    left: usize,
+    rows: usize,
+    columns: usize,
+}
+
+impl Cells for Rect<'_, '_> {
+    fn rows(&self) -> usize {
+        self.rows
+    }
+    fn width(&self, _: usize) -> usize {
+        self.columns
+    }
+    fn cell(&self, row: usize, col: usize) -> Option<&str> {
+        if row >= self.rows || col >= self.columns {
+            return None;
+        }
+        self.grid.cell(self.top.saturating_add(row), self.left.saturating_add(col))
+    }
+    fn each<E>(&self, row: usize, mut f: impl FnMut(Option<&str>) -> Result<(), E>) -> Result<(), E> {
+        if row >= self.rows {
+            return Ok(());
+        }
+        if self.grid.edits.is_some() {
+            // A table tab's page: staged values come first, cell by cell.
+            for col in 0..self.columns {
+                f(self.cell(row, col))?;
+            }
+            return Ok(());
+        }
+        // A query's result: the row's cells straight from the data, NULL past a short row's end.
+        let cells = self.grid.data.rows.get(self.top.saturating_add(row)).and_then(|r| r.get(self.left..)).unwrap_or_default();
+        let cells = cells.get(..self.columns).unwrap_or(cells);
+        for v in cells {
+            f(v.as_deref())?;
+        }
+        for _ in cells.len()..self.columns {
+            f(None)?;
+        }
+        Ok(())
+    }
+}
+
 /// `{format}` → `{text, rows, columns}`.
 fn copy(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let id = p::str(params, "format")?;
@@ -166,24 +218,25 @@ fn copy(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let (r0, r1) = (sel.anchor.0.min(sel.focus.0), sel.anchor.0.max(sel.focus.0));
     let (c0, c1) = (sel.anchor.1.min(sel.focus.1), sel.anchor.1.max(sel.focus.1));
     let columns: &[Column] = g.data.columns.get(c0..=c1).unwrap_or_default();
-    let rows: Vec<Vec<Option<&str>>> = (r0..=r1).map(|row| (c0..=c1).map(|col| g.cell(row, col)).collect()).collect();
-    let bytes = rows.iter().flatten().fold(0usize, |n, v| n.saturating_add(v.map_or(0, str::len)));
-    if bytes > COPY_MAX_BYTES {
-        return Err(disabled(&too_large(bytes)));
-    }
-    let text = render(format, columns, &rows);
+    let rect = Rect { grid: &g, top: r0, left: c0, rows: (r1 - r0).saturating_add(1), columns: columns.len() };
+    let text = match render_within(format, columns, &rect, COPY_MAX_BYTES) {
+        Ok(text) => text,
+        Err(TooLarge::Cells { bytes }) => return Err(disabled(&too_large(bytes))),
+        Err(TooLarge::Text { rows }) => return Err(disabled(&too_long(format, rows))),
+    };
     let mut done = serde_json::Map::new();
     // Moved in, not copied: the text can be tens of megabytes.
     done.insert("text".into(), Json::String(text));
-    done.insert("rows".into(), json!(rows.len()));
+    done.insert("rows".into(), json!(rect.rows));
     done.insert("columns".into(), json!(columns.len()));
     Ok(Outcome::Done(Json::Object(done)))
 }
 
+const MIB: usize = 1024 * 1024;
+
 /// Why a selection of `bytes` of cell text is not copied. The size is rounded up, so it never
 /// reads as the cap itself.
 fn too_large(bytes: usize) -> String {
-    const MIB: usize = 1024 * 1024;
     let tenths = bytes.saturating_mul(10).div_ceil(MIB);
     format!(
         "the selection holds {}.{} MiB of cell text, more than the {} MiB a copy can take; select fewer rows",
@@ -191,6 +244,30 @@ fn too_large(bytes: usize) -> String {
         tenths % 10,
         COPY_MAX_BYTES / MIB
     )
+}
+
+/// Why a copy in `format` whose text passed the cap after `rows` whole rows is not copied.
+fn too_long(format: CopyFormat, rows: usize) -> String {
+    let verb = if rows == 1 { "fits" } else { "fit" };
+    format!(
+        "the copy as {} would pass the {} MiB a copy can take ({} of the selected rows {verb}); select fewer rows",
+        format.label(),
+        COPY_MAX_BYTES / MIB,
+        thousands(rows)
+    )
+}
+
+/// `12345` → `12,345`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// `{}` → the focus cell's value view, or null.
@@ -206,9 +283,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_text_too_long_says_how_many_rows_fit() {
+        assert_eq!(
+            too_long(CopyFormat::Json, 2_345),
+            "the copy as JSON would pass the 8 MiB a copy can take (2,345 of the selected rows fit); select fewer rows"
+        );
+        assert!(
+            too_long(CopyFormat::TsvWithHeader, 1).contains("as TSV with header would pass")
+                && too_long(CopyFormat::Csv, 1).contains("(1 of the selected rows fits)")
+        );
+        assert_eq!(
+            (thousands(0), thousands(999), thousands(1_000), thousands(1_234_567)),
+            ("0".into(), "999".into(), "1,000".into(), "1,234,567".into())
+        );
+    }
+
+    #[test]
     fn the_size_in_the_reason_never_reads_as_the_cap() {
         let why = too_large(COPY_MAX_BYTES + 1);
-        assert_eq!(why, "the selection holds 32.1 MiB of cell text, more than the 32 MiB a copy can take; select fewer rows");
+        assert_eq!(why, "the selection holds 8.1 MiB of cell text, more than the 8 MiB a copy can take; select fewer rows");
         assert!(too_large(40_000_123).contains("holds 38.2 MiB"));
         assert!(too_large(usize::MAX).contains("MiB"), "no overflow");
     }

@@ -7,9 +7,9 @@
 //!   port in use stops the start: an agent must never drive another dbee by mistake.
 //! - `DBEE_SECRET_STORE=memory` keeps passwords in memory only; otherwise the OS keyring, and
 //!   without one none (a warning is logged and passwords are asked each time).
-//! - `DBEE_CLIPBOARD=memory` keeps copied text in the app, never on the system clipboard; the
-//!   control channel's `document.inspect` shows the last copy as `clipboard`
-//!   ([`Clipboard::Memory`]; set by `cargo xtask run-isolated`).
+//! - `DBEE_CLIPBOARD=memory` keeps every copy and cut in the app (a text field's too), never on
+//!   the system clipboard; the control channel's `document.inspect` shows the start of the last
+//!   as `clipboard` ([`Clipboard::Memory`]; set by `cargo xtask run-isolated`).
 //! - `DBEE_NO_PREFS` keeps no connections file and no log file.
 //! - `DBEE_ALLOW_TARGETS` (`host:port,…`, set by `cargo xtask run-isolated`) limits connections
 //!   to those targets ([`SessionOptions::allowed_targets`]).
@@ -94,7 +94,7 @@ fn memory_secrets(env: Option<OsString>) -> bool {
     env.is_some_and(|v| v == "memory")
 }
 
-/// `DBEE_CLIPBOARD=memory`: copies stay in the app. Anything else is the system clipboard.
+/// `DBEE_CLIPBOARD=memory`: copies and cuts stay in the app. Anything else is the system clipboard.
 fn clipboard(env: Option<OsString>) -> Clipboard {
     if env.is_some_and(|v| v == "memory") { Clipboard::Memory } else { Clipboard::System }
 }
@@ -208,7 +208,7 @@ fn main() -> ExitCode {
     let control = std::cell::Cell::new(control);
     let clipboard = clipboard(std::env::var_os("DBEE_CLIPBOARD"));
     if clipboard == Clipboard::Memory {
-        log::info!("copied text stays in the app for this run (DBEE_CLIPBOARD=memory)");
+        log::info!("copies and cuts stay in the app for this run (DBEE_CLIPBOARD=memory)");
     }
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(format!("dbee {VERSION}"))
