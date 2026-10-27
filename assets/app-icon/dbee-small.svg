@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- dbee icon at 16 and 32 px: dbee.svg's letters, heavier and snapped to the 16 px grid.
+       Original work by Kaspar Rosin and the dbee contributors, MIT OR Apache-2.0. -->
+  <path d="M112 0 L400 0 C461.86 0 512 50.14 512 112 L512 400 C512 461.86 461.86 512 400 512 L112 512 C50.14 512 0 461.86 0 400 L0 112 C0 50.14 50.14 0 112 0 Z" fill="#111719"/>
+  <path d="M160 104 C160 99.58 163.58 96 168 96 L216 96 C220.42 96 224 99.58 224 104 L224 416 L112 416 C85.49 416 64 394.51 64 368 L64 272 C64 245.49 85.49 224 112 224 L160 224 Z M96 256 L96 384 L160 384 L160 256 Z" fill="#f6f8f7"/>
+  <path d="M320 104 C320 99.58 316.42 96 312 96 L264 96 C259.58 96 256 99.58 256 104 L256 416 L368 416 C394.51 416 416 394.51 416 368 L416 272 C416 245.49 394.51 224 368 224 L320 224 Z M320 256 L384 256 L384 384 L320 384 Z" fill="#4caf1e"/>
+</svg>

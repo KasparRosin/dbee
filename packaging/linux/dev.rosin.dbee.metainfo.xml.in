@@ -31,10 +31,10 @@
     <keyword>sql</keyword>
     <keyword>postgresql</keyword>
   </keywords>
-  <!-- App colours from the icon palette: amber #f5a524 / charcoal #1f2328 (assets/app-icon/README.md). -->
+  <!-- App colours from the icon palette: green #4caf1e / ink #111719 (assets/app-icon/README.md). -->
   <branding>
-    <color type="primary" scheme_preference="light">#f5a524</color>
-    <color type="primary" scheme_preference="dark">#1f2328</color>
+    <color type="primary" scheme_preference="light">#4caf1e</color>
+    <color type="primary" scheme_preference="dark">#111719</color>
   </branding>
   <requires>
     <display_length compare="ge">760</display_length>
