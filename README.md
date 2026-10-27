@@ -13,8 +13,8 @@
 </p>
 
 > [!NOTE]
-> **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.
-> Postgres is the only database so far, and file export and import come next (M2).
+> **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.\
+> Postgres is the only database so far, and file export and import come next (M2).\
 > Linux x86_64 is tested; the other platforms are defined, untested yet.
 
 <p align="center">
