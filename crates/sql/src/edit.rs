@@ -14,13 +14,17 @@ pub enum NewValue {
     Text(String),
 }
 
+/// A value for `SET` or `VALUES`, cast to [`ColumnInfo::write_type_sql`] so that the assignment
+/// to the column refuses a value longer than its length instead of the cast cutting it.
 fn value_sql(column: &ColumnInfo, value: &NewValue) -> Result<String, SqlError> {
     match value {
         NewValue::Null => Ok("NULL".to_string()),
-        NewValue::Text(text) => quote::typed(text, &column.type_sql),
+        NewValue::Text(text) => quote::typed(text, column.write_type_sql()),
     }
 }
 
+/// The row's key, each value cast to the column's own type: they are values the server sent, so
+/// they fit.
 fn key_sql(key: &[(&ColumnInfo, &str)]) -> Result<String, SqlError> {
     if key.is_empty() {
         return Err(SqlError::NoKey);

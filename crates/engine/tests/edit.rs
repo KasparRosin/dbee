@@ -563,3 +563,119 @@ fn edits_follow_the_tab_they_were_made_in() {
     assert_eq!(tab.edits.shown(&data, 1, 1), None);
     assert!(tab.has_staged_edits());
 }
+
+/// Drops the scratch objects it names on `server` when the test ends, also when it fails.
+struct ScratchOn(&'static dbee_testkit::PgServer, Vec<String>);
+
+impl Drop for ScratchOn {
+    fn drop(&mut self) {
+        for what in &self.1 {
+            let _ = dbee_testkit::psql(self.0, &format!("DROP {what} CASCADE"));
+        }
+    }
+}
+
+/// Values longer (or, for `bit(n)`, shorter) than a column's length are refused by the server
+/// and written nowhere, never cut to fit: on scalars, arrays and a domain, on every server. A
+/// filter with such a value matches nothing instead of the rows its cut prefix would match.
+#[test]
+fn values_that_do_not_fit_the_length_are_refused_not_cut() {
+    let db = require_testdb!();
+    for server in &db.servers {
+        let server: &'static dbee_testkit::PgServer = server;
+        let t = unique("t_len");
+        let domain = format!("{t}_d5");
+        let _drop = ScratchOn(server, vec![format!("TABLE IF EXISTS scratch.{t}"), format!("DOMAIN IF EXISTS scratch.{domain}")]);
+        let q = |sql: &str| dbee_testkit::psql(server, sql).unwrap().trim().to_owned();
+        q(&format!(
+            "CREATE DOMAIN scratch.{domain} AS varchar(5);
+             CREATE TABLE scratch.{t} (id int PRIMARY KEY, v varchar(10), c char(2), b bit(2), vb varbit(2), d scratch.{domain},
+                 va varchar(3)[], ca char(2)[], ba bit(2)[], vba varbit(2)[]);
+             INSERT INTO scratch.{t} VALUES (1, 'abcdefghij', 'ab', '10', '10', 'abcde', '{{abc}}', '{{ab}}', '{{10}}', '{{10}}');"
+        ));
+        let row = || q(&format!("SELECT (v, c, b, vb, d, va, ca, ba, vba)::text FROM scratch.{t} ORDER BY id"));
+        let before = row();
+        let mut s = session();
+        open(&mut s, json!({ "config": server_config(server), "password": pw() }));
+        assert_eq!(open_table(&mut s, "scratch", &t)["rows"], 1);
+        let at = |s: &mut Session, name: &str| col(&read(s), name);
+        let on = &server.name;
+
+        // Filters: a value that does not fit matches nothing; the value itself matches.
+        for (column, op, value, matches) in [
+            ("v", "eq", "abcdefghijkl", 0),
+            ("v", "eq", "abcdefghij", 1),
+            ("v", "in", "abcdefghijkl, zzz", 0),
+            ("c", "eq", "abc", 0),
+            ("c", "ge", "abc", 0),
+            ("c", "eq", "ab", 1),
+            ("c", "in", "abc", 0),
+            ("b", "eq", "101", 0),
+            ("b", "eq", "1", 0),
+            ("b", "eq", "10", 1),
+            ("b", "in", "101, 1", 0),
+            ("vb", "eq", "101", 0),
+            ("vb", "eq", "10", 1),
+            ("d", "eq", "abcdefg", 0),
+            ("d", "eq", "abcde", 1),
+            ("vba", "eq", "{101}", 0),
+            ("vba", "eq", "{10}", 1),
+            // These keep their own type (no operator takes them against text[]): the value itself matches.
+            ("va", "eq", "{abc}", 1),
+            ("ca", "eq", "{ab}", 1),
+            ("ba", "eq", "{10}", 1),
+        ] {
+            let r = run(&mut s, "table.setFilters", json!({ "filters": [{ "column": column, "op": op, "value": value }] }));
+            assert_eq!(r["rows"], matches, "{on}: {column} {op} {value:?}: {r}");
+        }
+        run(&mut s, "table.setFilters", json!({ "filters": [] }));
+
+        // Edits: each value that does not fit fails the Apply, which writes nothing and marks the cell.
+        for (column, value, sqlstate) in [
+            ("v", "abcdefghijkl", "22001"),
+            ("c", "abc", "22001"),
+            ("b", "101", "22026"),
+            ("b", "1", "22026"),
+            ("vb", "101", "22001"),
+            ("d", "abcdefg", "22001"),
+            ("va", "{abcd}", "22001"),
+            ("ca", "{abc}", "22001"),
+            ("ba", "{101}", "22026"),
+            ("vba", "{101}", "22001"),
+        ] {
+            run(&mut s, "cell.edit", json!({ "row": 0, "column": column, "value": value }));
+            let e = run_err(&mut s, "edit.apply", json!({}));
+            assert_eq!((e.code(), e.data()["sqlstate"].as_str()), ("server", Some(sqlstate)), "{on}: {column} = {value:?}: {e}");
+            assert!(e.to_string().contains("nothing was written"), "{on}: {e}");
+            assert_eq!(row(), before, "{on}: {column} = {value:?} wrote nothing");
+            let failed = s.inspect()["table"]["failed"].clone();
+            let index = at(&mut s, column);
+            assert_eq!((failed["row"].as_u64(), failed["column"].as_u64()), (Some(0), Some(index as u64)), "{on}: {column}: {failed}");
+            run(&mut s, "edit.reset", json!({}));
+        }
+        // A new row is an INSERT: the same.
+        let new = run(&mut s, "row.add", json!({}))["row"].clone();
+        run(&mut s, "cell.edit", json!({ "row": new, "column": "id", "value": "2" }));
+        run(&mut s, "cell.edit", json!({ "row": new, "column": "c", "value": "abc" }));
+        let e = run_err(&mut s, "edit.apply", json!({}));
+        assert_eq!((e.code(), e.data()["sqlstate"].as_str()), ("server", Some("22001")), "{on}: {e}");
+        assert_eq!(q(&format!("SELECT count(*) FROM scratch.{t}")), "1", "{on}: no row was added");
+        run(&mut s, "edit.reset", json!({}));
+
+        // Values that fit are written, and the page shows them.
+        for (column, value) in
+            [("v", "xyz"), ("c", "x"), ("b", "01"), ("vb", "0"), ("d", "xy"), ("va", "{x,yz}"), ("ca", "{x}"), ("ba", "{01,11}"), ("vba", "{0}")]
+        {
+            run(&mut s, "cell.edit", json!({ "row": 0, "column": column, "value": value }));
+        }
+        assert_eq!(run(&mut s, "edit.apply", json!({}))["written"], 1, "{on}");
+        assert_eq!(row(), "(xyz,\"x \",01,0,xy,\"{x,yz}\",\"{\"\"x \"\"}\",\"{01,11}\",{0})", "{on}");
+        let d = read(&mut s);
+        let shown: Vec<Option<&str>> = ["v", "c", "b", "vb", "d", "va", "ca", "ba", "vba"].iter().map(|c| cell(&d, 0, c)).collect();
+        assert_eq!(
+            shown,
+            [Some("xyz"), Some("x "), Some("01"), Some("0"), Some("xy"), Some("{x,yz}"), Some("{\"x \"}"), Some("{01,11}"), Some("{0}")],
+            "{on}"
+        );
+    }
+}

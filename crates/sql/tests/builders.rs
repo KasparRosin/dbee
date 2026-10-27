@@ -186,3 +186,93 @@ fn filter_serde_round_trip() {
     assert_eq!(serde_json::from_str::<NewValue>(&nv).unwrap(), NewValue::Text("a".into()));
     assert_eq!(serde_json::from_str::<NewValue>(&serde_json::to_string(&NewValue::Null).unwrap()).unwrap(), NewValue::Null);
 }
+
+/// A column of `type_sql` whose base type is `base` (a domain's type_sql is the domain's name).
+fn typed(name: &str, type_sql: &str, base: &str, category: char) -> ColumnInfo {
+    ColumnInfo { base_type: base.into(), ..ci(name, type_sql, category) }
+}
+
+/// `scratch.lengths`: a `varchar(10)` key and a column of each type whose explicit cast cuts or pads.
+fn lengths() -> TableInfo {
+    table_of(
+        "scratch",
+        "lengths",
+        vec![
+            typed("k", "character varying(10)", "varchar", 'S'),
+            typed("v", "character varying(10)", "varchar", 'S'),
+            typed("c", "character(2)", "bpchar", 'S'),
+            typed("b", "bit(2)", "bit", 'V'),
+            typed("vb", "bit varying(2)", "varbit", 'V'),
+            typed("d", "scratch.d5", "varchar", 'S'),
+            typed("va", "character varying(3)[]", "_varchar", 'A'),
+            typed("ca", "character(2)[]", "_bpchar", 'A'),
+            typed("ba", "bit(2)[]", "_bit", 'A'),
+            typed("vba", "bit varying(2)[]", "_varbit", 'A'),
+        ],
+        &["k"],
+    )
+}
+
+fn length_col(name: &str) -> &'static ColumnInfo {
+    use std::sync::OnceLock;
+    static T: OnceLock<TableInfo> = OnceLock::new();
+    T.get_or_init(lengths).column(name).unwrap()
+}
+
+#[test]
+fn writes_cast_to_the_type_without_its_length_so_the_column_refuses_a_long_value() {
+    let text = |v: &str| NewValue::Text(v.into());
+    let changes = [
+        (length_col("v"), &text("abcdefghijkl")),
+        (length_col("c"), &text("abc")),
+        (length_col("b"), &text("101")),
+        (length_col("vb"), &text("101")),
+        (length_col("d"), &text("abcdefg")),
+        (length_col("va"), &text("{abcd}")),
+        (length_col("ca"), &text("{abc}")),
+        (length_col("ba"), &text("{101}")),
+        (length_col("vba"), &text("{101}")),
+    ];
+    let changes: Vec<(&ColumnInfo, &NewValue)> = changes.iter().map(|&(c, v)| (c, v)).collect();
+    assert_eq!(
+        update_sql(&lengths(), &[(length_col("k"), "key")], &changes).unwrap(),
+        "UPDATE \"scratch\".\"lengths\" SET \"v\" = CAST('abcdefghijkl' AS text), \"c\" = CAST('abc' AS text), \"b\" = CAST('101' AS bit varying), \
+         \"vb\" = CAST('101' AS bit varying), \"d\" = CAST('abcdefg' AS text), \"va\" = CAST('{abcd}' AS text[]), \"ca\" = CAST('{abc}' AS text[]), \
+         \"ba\" = CAST('{101}' AS bit varying[]), \"vba\" = CAST('{101}' AS bit varying[]) WHERE \"k\" = CAST('key' AS character varying(10))",
+        "the key keeps its own type: it is a value the server sent"
+    );
+    assert_eq!(
+        insert_sql(&lengths(), &[(length_col("k"), &text("k1")), (length_col("b"), &text("1")), (length_col("v"), &NewValue::Null)]).unwrap(),
+        "INSERT INTO \"scratch\".\"lengths\" (\"k\", \"b\", \"v\") VALUES (CAST('k1' AS text), CAST('1' AS bit varying), NULL)"
+    );
+    assert_eq!(
+        delete_sql(&lengths(), &[(length_col("k"), "key")]).unwrap(),
+        "DELETE FROM \"scratch\".\"lengths\" WHERE \"k\" = CAST('key' AS character varying(10))"
+    );
+}
+
+#[test]
+fn filters_compare_with_the_type_without_its_length_so_a_long_value_matches_nothing() {
+    let w = |filter: Filter| where_sql(&Condition::Filters(vec![filter]), &lengths()).unwrap().unwrap();
+    assert_eq!(w(f("v", Op::Eq, "abcdefghijkl")), "\"v\" = CAST('abcdefghijkl' AS text)");
+    assert_eq!(w(f("c", Op::Ge, "abc")), "\"c\" >= CAST('abc' AS text)");
+    assert_eq!(w(f("b", Op::Ne, "1")), "\"b\" <> CAST('1' AS bit varying)");
+    assert_eq!(w(f("vb", Op::Lt, "101")), "\"vb\" < CAST('101' AS bit varying)");
+    assert_eq!(w(f("d", Op::Eq, "abcdefg")), "\"d\" = CAST('abcdefg' AS text)");
+    assert_eq!(w(f("vba", Op::Eq, "{101}")), "\"vba\" = CAST('{101}' AS bit varying[])");
+    // Each IN item too.
+    assert_eq!(w(f("v", Op::In, "abcdefghijkl, x")), "\"v\" IN (CAST('abcdefghijkl' AS text), CAST('x' AS text))");
+    assert_eq!(w(f("b", Op::In, "101,01")), "\"b\" IN (CAST('101' AS bit varying), CAST('01' AS bit varying))");
+    // Patterns compare the column's text, as before.
+    assert_eq!(w(f("c", Op::Like, "a%")), "CAST(\"c\" AS text) LIKE 'a%'");
+}
+
+#[test]
+fn array_filters_that_no_operator_takes_without_the_length_keep_their_type() {
+    // `varchar[] = text[]`, `char[] = text[]` and `bit[] = bit varying[]` have no operator on
+    // Postgres 14 or 18 (checked on both test servers), so these keep the column's own type.
+    let w = |filter: Filter| where_sql(&Condition::Filters(vec![filter]), &lengths()).unwrap().unwrap();
+    assert_eq!(w(f("va", Op::Eq, "{abcd}")), "\"va\" = CAST('{abcd}' AS character varying(3)[])");
+    assert_eq!(w(f("ca", Op::In, "{abc}")), "\"ca\" IN (CAST('{abc}' AS character(2)[]))");
+    assert_eq!(w(f("ba", Op::Gt, "{101}")), "\"ba\" > CAST('{101}' AS bit(2)[])");
+}

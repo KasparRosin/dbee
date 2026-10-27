@@ -2,7 +2,7 @@
 
 use crate::lexer::{TokenKind, has_top_level_semicolon, tokenize};
 use crate::{SqlError, quote};
-use dbee_core::TableInfo;
+use dbee_core::{ColumnInfo, TableInfo};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The 13 filter operators.
@@ -168,8 +168,21 @@ fn raw_sql(raw: &str) -> Result<Option<String>, SqlError> {
     Ok(Some(if line_comment { format!("({raw}\n)") } else { format!("({raw})") }))
 }
 
+/// The type a filter value is cast to: [`ColumnInfo::write_type_sql`], so that a value longer
+/// than the column's length matches nothing instead of the rows its cut prefix would match.
+/// Arrays of `varchar(n)`, `char(n)` and `bit(n)` keep the column's own type: Postgres has no
+/// operator for `varchar[] = text[]`, `char[] = text[]` or `bit[] = bit varying[]` (14 and 18
+/// alike), so an element longer than the length is still cut there.
+fn filter_type(column: &ColumnInfo) -> &str {
+    match column.base_type.as_str() {
+        "_varchar" | "_bpchar" | "_bit" => &column.type_sql,
+        _ => column.write_type_sql(),
+    }
+}
+
 fn filter_sql(filter: &Filter, table: &TableInfo) -> Result<Option<String>, SqlError> {
     let column = table.column(&filter.column).ok_or_else(|| SqlError::UnknownColumn(filter.column.clone()))?;
+    let type_sql = filter_type(column);
     let name = quote::ident(&column.name)?;
     if !filter.op.takes_value() {
         return Ok(Some(format!("{name} {}", filter.op.symbol())));
@@ -181,17 +194,12 @@ fn filter_sql(filter: &Filter, table: &TableInfo) -> Result<Option<String>, SqlE
         return Ok(Some(format!("CAST({name} AS text) {} {}", filter.op.symbol(), quote::literal(&filter.value)?)));
     }
     if filter.op == Op::In {
-        let items = filter
-            .value
-            .split(',')
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(|p| quote::typed(p, &column.type_sql))
-            .collect::<Result<Vec<_>, _>>()?;
+        let items =
+            filter.value.split(',').map(str::trim).filter(|p| !p.is_empty()).map(|p| quote::typed(p, type_sql)).collect::<Result<Vec<_>, _>>()?;
         if items.is_empty() {
             return Err(SqlError::EmptyIn);
         }
         return Ok(Some(format!("{name} IN ({})", items.join(", "))));
     }
-    Ok(Some(format!("{name} {} {}", filter.op.symbol(), quote::typed(&filter.value, &column.type_sql)?)))
+    Ok(Some(format!("{name} {} {}", filter.op.symbol(), quote::typed(&filter.value, type_sql)?)))
 }

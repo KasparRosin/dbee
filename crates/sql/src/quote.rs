@@ -45,7 +45,8 @@ pub fn literal(value: &str) -> Result<String, SqlError> {
     Ok(out)
 }
 
-/// `CAST('value' AS type_sql)`. `type_sql` comes from the server's `format_type` and is used verbatim.
+/// `CAST('value' AS type_sql)`. `type_sql` comes from the server's `format_type` (or is a
+/// type without its length, `ColumnInfo::write_type_sql`) and is used verbatim.
 pub fn typed(value: &str, type_sql: &str) -> Result<String, SqlError> {
     Ok(format!("CAST({} AS {type_sql})", literal(value)?))
 }

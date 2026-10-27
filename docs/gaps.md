@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (timings quoted from target-app-parity.md; SSH in the packages expected, not measured) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (entry 15: what is left after values that do not fit a column's length are refused) · **Target:** Beekeeper Studio 5.5.7
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -123,10 +123,18 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: few real values have a million short lines. In the far end of such a value, rows can sit several points off and a click can land one row away.
 - **Estimate:** 3–6 h (estimated): scroll by row, not by point.
 
+### 15. Filters on `char(n)` and `bit(n)` skip their index; array filters still cut (D, P)
+
+- **Limit:** a value written or filtered on is cast to the column's type without its length (`ColumnInfo::write_type_sql`, `crates/core/src/schema.rs`), because an explicit cast to `varchar(n)`, `char(n)` or `bit(n)` cuts (or pads) the value without an error. So an edit that does not fit fails at Apply (SQLSTATE 22001 or 22026) and a filter value that does not fit matches nothing. Two cases are left. A filter on a `char(n)` column compares as `text` and one on `bit(n)` as `bit varying`, which an index on the column does not serve, so such a filter reads the whole table. And a filter on an array of `varchar(n)`, `char(n)` or `bit(n)` keeps the column's own type, since Postgres has no operator for `varchar[] = text[]`, `char[] = text[]` or `bit[] = bit varying[]`, so an element longer than the length is still cut and can match the rows of its prefix.
+- **Evidence:** `values_that_do_not_fit_the_length_are_refused_not_cut` (`crates/engine/tests/edit.rs`, both test servers); `array_filters_that_no_operator_takes_without_the_length_keep_their_type` (`crates/sql/tests/builders.rs`). On pg14 and Postgres 18 (2026-10-27), `EXPLAIN` of `c = CAST('ab' AS text)` on an indexed `char(2)` column is a sequential scan, and `c = CAST('ab' AS bpchar)` an index scan; `CAST('…' AS bpchar[])`, `CAST('…' AS "bit"[])` and `CAST('…' AS character varying[])` (no length) compare with those arrays and cut nothing.
+- **Impact:** a filter on an indexed `char(n)` or `bit(n)` column of a large table is slow; a filter on an array with an over-long element can match rows it should not. Edits are not affected.
+- **Estimate:** 1–2 h (estimated): cast to the types without a length that keep the column's operators (`bpchar`, `"bit"`, `character varying[]`, `bpchar[]`, `"bit"[]`).
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Entry 15: values that do not fit a column's length are refused, not cut; what is left (filters on `char(n)` and `bit(n)` skip their index, array filters still cut). |
 | 2026-10-27 | minor | Timings quoted from target-app-parity.md, the one source; the next page 1.06–1.09 ms; a fifth wide-result run; the tarball's and AppImage's SSH key logins marked expected, not measured. |
 | 2026-10-26 | major | M1 built: 14 known limits with evidence, ranked; wide results and the long-line editor measured. |
 | 2026-10-15 | major | Template (scaffold). |

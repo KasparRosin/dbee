@@ -58,6 +58,17 @@ fn connected_at(db: &TestDb, step: f32, width: f32) -> Ui {
 
 /// [`connected`] with frames `step` seconds apart, in a window of `size`.
 fn connected_in(db: &TestDb, step: f32, size: egui::Vec2) -> Ui {
+    connected_with(db, pg14(db), step, size)
+}
+
+/// A window on a throwaway home, connected to `server`, on the workspace.
+fn connected_to(db: &TestDb, server: &dbee_testkit::PgServer) -> Ui {
+    let config = ConnectionConfig { name: server.name.clone(), port: server.port, ..pg14(db) };
+    connected_with(db, config, 0.25, egui::vec2(1400.0, 900.0))
+}
+
+/// A window connected with `config` (the test servers' password), frames `step` seconds apart.
+fn connected_with(db: &TestDb, config: ConnectionConfig, step: f32, size: egui::Vec2) -> Ui {
     let home = temp_home(None, None);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
     let session = Session::new(SessionOptions {
@@ -73,7 +84,7 @@ fn connected_in(db: &TestDb, step: f32, size: egui::Vec2) -> Ui {
     let harness = Harness::builder().with_size(size).with_step_dt(step).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
     let mut ui = Ui { harness, tx, _home: home };
     ui.frame();
-    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
+    let id = ui.execute("connection.save", json!({ "config": config, "password": db.password }))["id"].as_str().unwrap().to_string();
     ui.execute("connection.open", json!({ "id": id }));
     ui.frame();
     assert_eq!(ui.document()["screen"], "workspace");
@@ -242,6 +253,15 @@ impl Drop for Scratch {
         if let Some(db) = dbee_testkit::testdb() {
             let _ = dbee_testkit::psql(pg14_server(db), &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.0));
         }
+    }
+}
+
+/// Drops `scratch.<name>` on `server` when the test ends, also when it fails.
+struct ScratchOn<'a>(&'a dbee_testkit::PgServer, String);
+
+impl Drop for ScratchOn<'_> {
+    fn drop(&mut self) {
+        let _ = dbee_testkit::psql(self.0, &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.1));
     }
 }
 
@@ -414,6 +434,38 @@ fn ctrl_s_applies_all_or_nothing() {
     ui.click("edit-reset");
     ui.frame();
     assert!(ui.tag("table-error").is_none());
+}
+
+#[test]
+fn a_value_too_long_for_its_column_fails_the_apply_and_says_why() {
+    let db = dbee_testkit::require_testdb!();
+    for server in &db.servers {
+        let name = unique("t_len_ui");
+        let _drop = ScratchOn(server, name.clone());
+        dbee_testkit::psql(
+            server,
+            &format!("CREATE TABLE scratch.{name} (id int PRIMARY KEY, code varchar(5)); INSERT INTO scratch.{name} VALUES (1, 'abc');"),
+        )
+        .unwrap();
+        let mut ui = connected_to(db, server);
+        ui.open("scratch", &name);
+        ui.until("the page", |ui| ui.table()["rows"] == 1);
+        ui.double_click("grid-cell-0-1");
+        ui.text("abcdefgh");
+        ui.key("Enter");
+        ui.ctrl("S");
+        ui.until("the Apply's end", |ui| {
+            let t = ui.table();
+            t["applying"].is_null() && (t["failed"].is_object() || t["edits"]["count"] == 0)
+        });
+        let code = dbee_testkit::psql(server, &format!("SELECT code FROM scratch.{name}")).unwrap();
+        assert_eq!(code.trim(), "abc", "{}: nothing was written, not even the first five characters", server.name);
+        ui.frame();
+        let card = ui.value("table-error");
+        let card = card.as_str().unwrap_or_default();
+        assert!(card.contains("value too long for type character varying(5)") && card.contains("nothing was written"), "{}: {card}", server.name);
+        assert_eq!(ui.value("grid-cell-0-1")["state"], "failed", "{}", server.name);
+    }
 }
 
 #[test]
