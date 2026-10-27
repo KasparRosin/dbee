@@ -47,7 +47,6 @@ modules:
       - install -Dm755 target/release/dbee /app/bin/dbee
       - install -Dm755 target/release/dbee-cli /app/bin/dbee-cli
       - install -Dm644 packaging/linux/dev.rosin.dbee.desktop /app/share/applications/dev.rosin.dbee.desktop
-      - install -Dm644 packaging/linux/dev.rosin.dbee.mime.xml /app/share/mime/packages/dev.rosin.dbee.xml
       - mkdir -p /app/share/icons && cp -R assets/app-icon/hicolor /app/share/icons/
       - >-
         version=$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml);

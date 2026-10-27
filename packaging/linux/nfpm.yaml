@@ -18,7 +18,7 @@ homepage: https://dbee.rosin.dev
 license: MIT OR Apache-2.0
 description: |-
   Desktop database client.
-  Query and edit SQLite, PostgreSQL and MySQL databases.
+  Browse, filter and edit PostgreSQL databases.
 
 # The binaries link only glibc and libgcc_s directly. Windowing (X11/Wayland, xkbcommon) and the
 # GPU (Vulkan, EGL/GL) are loaded at runtime, so they are dependencies/recommendations here

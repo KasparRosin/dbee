@@ -4,10 +4,9 @@
 
     wix build dbee.wxs -arch x64 -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
 
-  Per-machine install into Program Files, a Start Menu shortcut, an optional desktop shortcut,
-  App Paths (Win+R `dbee`),
-  and dbee offered under "Open with" (and in Settings > Default apps) for .sqlite and
-  .sqlite3, without taking over the user's default app for them.
+  Per-machine install into Program Files, a Start Menu shortcut, an optional desktop shortcut
+  and App Paths (Win+R `dbee`). No file associations yet: dbee opens no files until its SQLite
+  engine lands (docs/roadmap.md).
 
   UpgradeCode is fixed for dbee (generated 2026-10-15): never change it, or upgrades
   install side by side instead of replacing the old version.
@@ -168,24 +167,6 @@
         </File>
 
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\dbee.exe" Value="[#DbeeExe]" Type="string" />
-
-        <!-- ProgIds: how Explorer opens a file with dbee. Nothing here sets HKCR\.<ext>'s
-             default value, so the user's current default app is left alone. -->
-        <RegistryValue Root="HKLM" Key="Software\Classes\dbee.sqlite" Value="SQLite database" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\dbee.sqlite\DefaultIcon" Value="&quot;[#DbeeExe]&quot;,0" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\dbee.sqlite\shell\open\command" Value="&quot;[#DbeeExe]&quot; &quot;%1&quot;" Type="string" />
-
-        <!-- "Open with": Windows reads only the value names under OpenWithProgids; the data is
-             ignored (WiX rejects an empty Value, so it repeats the ProgId). -->
-        <RegistryValue Root="HKLM" Key="Software\Classes\.sqlite\OpenWithProgids" Name="dbee.sqlite" Value="dbee.sqlite" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.sqlite3\OpenWithProgids" Name="dbee.sqlite" Value="dbee.sqlite" Type="string" />
-
-        <!-- Settings > Default apps: lets the user pick dbee for these types. -->
-        <RegistryValue Root="HKLM" Key="Software\dbee\Capabilities" Name="ApplicationName" Value="dbee" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\dbee\Capabilities" Name="ApplicationDescription" Value="Desktop database client for SQLite files" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\dbee\Capabilities\FileAssociations" Name=".sqlite" Value="dbee.sqlite" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\dbee\Capabilities\FileAssociations" Name=".sqlite3" Value="dbee.sqlite" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\RegisteredApplications" Name="dbee" Value="Software\dbee\Capabilities" Type="string" />
       </Component>
 
       <Component Id="DbeeCli">

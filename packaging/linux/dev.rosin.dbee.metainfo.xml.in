@@ -12,8 +12,9 @@
   </developer>
   <description>
     <p>
-      dbee is an open-source desktop database client built in Rust. This is an early
-      pre-release with no features yet.
+      dbee is an open-source desktop database client written in Rust. This pre-alpha
+      covers the daily PostgreSQL workflow: connect, also through an SSH tunnel; browse,
+      filter and edit tables; run queries; and copy results.
     </p>
   </description>
   <launchable type="desktop-id">dev.rosin.dbee.desktop</launchable>
@@ -28,7 +29,7 @@
   <keywords>
     <keyword>database</keyword>
     <keyword>sql</keyword>
-    <keyword>sqlite</keyword>
+    <keyword>postgresql</keyword>
   </keywords>
   <!-- App colours from the icon palette: amber #f5a524 / charcoal #1f2328 (assets/app-icon/README.md). -->
   <branding>
@@ -45,8 +46,6 @@
   <provides>
     <binary>dbee</binary>
     <binary>dbee-cli</binary>
-    <mediatype>application/vnd.sqlite3</mediatype>
-    <mediatype>application/x-sqlite3</mediatype>
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>

@@ -2,7 +2,7 @@
 # Build and package dbee for FreeBSD (<arch> is x86_64 or aarch64):
 #
 #   $DIST/dbee-<version>-freebsd-<arch>.tar.gz   bin/ + share/ (desktop entry, icons,
-#                                                      AppStream, MIME), extract under /usr/local
+#                                                      AppStream), extract under /usr/local
 #
 # Usage: packaging/freebsd/package.sh [--skip-build]
 #
@@ -42,12 +42,11 @@ WORK="$CARGO_TARGET_DIR/freebsd-package"
 TREE="$WORK/$BASENAME"
 rm -rf "$WORK"
 
-install -d "$TREE/bin" "$TREE/share/applications" "$TREE/share/metainfo" "$TREE/share/mime/packages" \
-  "$TREE/share/icons" "$TREE/share/doc/dbee"
+install -d "$TREE/bin" "$TREE/share/applications" "$TREE/share/metainfo" "$TREE/share/icons" \
+  "$TREE/share/doc/dbee"
 install -m 755 "$BIN/dbee" "$BIN/dbee-cli" "$TREE/bin/"
 strip "$TREE/bin/dbee" "$TREE/bin/dbee-cli" 2>/dev/null || true
 install -m 644 "$LINUX/$APP_ID.desktop" "$TREE/share/applications/$APP_ID.desktop"
-install -m 644 "$LINUX/$APP_ID.mime.xml" "$TREE/share/mime/packages/$APP_ID.xml"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$DBEE_BUILD_DATE/g" \
   "$LINUX/$APP_ID.metainfo.xml.in" >"$TREE/share/metainfo/$APP_ID.metainfo.xml"
 cp -R "$ROOT/assets/app-icon/hicolor" "$TREE/share/icons/"

@@ -58,7 +58,6 @@ install -Dm755 "$BIN/dbee" "$STAGE/usr/bin/dbee"
 install -Dm755 "$BIN/dbee-cli" "$STAGE/usr/bin/dbee-cli"
 "${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/dbee" "$STAGE/usr/bin/dbee-cli" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
-install -Dm644 "$HERE/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 mkdir -p "$STAGE/usr/share/metainfo"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$DBEE_BUILD_DATE/g" \
   "$HERE/$APP_ID.metainfo.xml.in" >"$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"

@@ -40,7 +40,6 @@ modules:
       # Headless CLI and MCP server: `flatpak run --command=dbee-cli dev.rosin.dbee`.
       - install -Dm755 bin/dbee-cli /app/bin/dbee-cli
       - install -Dm644 share/applications/dev.rosin.dbee.desktop /app/share/applications/dev.rosin.dbee.desktop
-      - install -Dm644 share/mime/packages/dev.rosin.dbee.xml /app/share/mime/packages/dev.rosin.dbee.xml
       # Already has the release's version and date substituted by package.sh.
       - install -Dm644 share/metainfo/dev.rosin.dbee.metainfo.xml /app/share/metainfo/dev.rosin.dbee.metainfo.xml
       - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/dbee /app/share/doc/

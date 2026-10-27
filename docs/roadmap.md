@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (the next page's timing quoted from target-app-parity.md) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (the `.sqlite` file associations wait for the SQLite engine) · **Target:** Beekeeper Studio 5.5.7
 
 ## Current focus
 
@@ -34,6 +34,8 @@ Not defined yet: they follow M2, from the ranked list in [gaps.md](gaps.md) and 
 | M1 | Daily Postgres workflow | built (2026-10-26); waits for Kaspar's day on his own databases |
 | M2 | Import and export | not started |
 
+The packages declare no file types for now: the `.sqlite` and `.sqlite3` associations (Linux desktop entry and AppStream data, macOS, Windows) come back with the SQLite engine.
+
 ## Measuring
 
 Percentages and hours come from [target-app-parity.md](target-app-parity.md) and follow [standards/progress-docs.md](standards/progress-docs.md): each number is marked measured or estimated, hours are agent wall-clock hours to about 95%, and a percentage is raised only with evidence a reviewer can rerun. Gaps are listed in [gaps.md](gaps.md).
@@ -42,6 +44,7 @@ Percentages and hours come from [target-app-parity.md](target-app-parity.md) and
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | The packages' `.sqlite` and `.sqlite3` file associations removed until the SQLite engine exists. |
 | 2026-10-27 | minor | The next page's timing quoted from target-app-parity.md (1.06–1.09 ms). |
 | 2026-10-26 | major | M1 built: five of six alpha gate rows pass with evidence (`m1_day` and the driver, engine and UI tests); M1 waits for Kaspar's day; next an architecture step, then M2. |
 | 2026-10-19 | minor | M1 "Daily Postgres workflow" defined and in progress; alpha gate rewritten for Postgres; M2 "Import and export" added. |

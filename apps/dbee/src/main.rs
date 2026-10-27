@@ -338,33 +338,17 @@ mod start_tests {
 
 #[cfg(test)]
 mod packaging_tests {
-    /// The text between `start` and `end` that follows each `marker` in `text`, sorted.
-    fn extensions(text: &str, marker: &str, start: &str, end: char) -> Vec<String> {
-        let mut v: Vec<String> = text.split(marker).skip(1).filter_map(|s| s.split_once(start)?.1.split(end).next()).map(str::to_string).collect();
-        v.sort();
-        v.dedup();
-        v
-    }
-
-    /// macOS Open With, Windows Open with and the Linux MIME globs offer dbee for the same files.
+    /// No platform offers dbee for files while no engine opens one. The `.sqlite` and `.sqlite3`
+    /// associations come back with the SQLite engine (docs/roadmap.md).
     #[test]
-    fn all_platforms_offer_the_same_file_types() {
+    fn no_platform_offers_dbee_for_files_yet() {
         let plist = include_str!("../../../packaging/macos/Info.plist.in");
         let wxs = include_str!("../../../packaging/windows/dbee.wxs");
-        let mime = include_str!("../../../packaging/linux/dev.rosin.dbee.mime.xml");
-        // One array holds both extensions, so read every <string> up to its closing tag.
-        let mut mac: Vec<String> = plist
-            .split("<key>CFBundleTypeExtensions</key>")
-            .skip(1)
-            .filter_map(|s| s.split("</array>").next())
-            .flat_map(|a| a.split("<string>").skip(1).filter_map(|x| x.split('<').next()).map(str::to_string))
-            .collect();
-        mac.sort();
-        mac.dedup();
-        let win = extensions(wxs, "Key=\"Software\\Classes\\.", "", '\\');
-        let linux = extensions(mime, "<glob pattern=\"*.", "", '"');
-        assert_eq!(mac, vec!["sqlite".to_string(), "sqlite3".into()]);
-        assert_eq!(win, mac);
-        assert_eq!(linux, mac);
+        let desktop = include_str!("../../../packaging/linux/dev.rosin.dbee.desktop");
+        let metainfo = include_str!("../../../packaging/linux/dev.rosin.dbee.metainfo.xml.in");
+        assert!(!plist.contains("CFBundleDocumentTypes"), "Info.plist.in declares document types");
+        assert!(!wxs.contains("OpenWithProgids") && !wxs.contains("FileAssociations"), "dbee.wxs declares file associations");
+        assert!(!desktop.lines().any(|l| l.starts_with("MimeType=")), "the desktop entry declares MIME types");
+        assert!(!metainfo.contains("<mediatype>"), "the AppStream metadata declares media types");
     }
 }
