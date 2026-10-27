@@ -5,81 +5,82 @@
 <h1 align="center">dbee</h1>
 
 <p align="center">
-  <b>A desktop database client: an open-source, clean-room take on Beekeeper Studio, built in pure Rust.</b>
+  <b>A cross-platform desktop database client, written in Rust.</b>
 </p>
 
 <p align="center">
-  <img alt="100% Rust" src="https://img.shields.io/badge/100%25-Rust-f5a524?style=flat-square&logo=rust&logoColor=white">
   <img alt="license MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-f5a524?style=flat-square">
 </p>
 
 > [!NOTE]
-> dbee is pre-alpha: this repository is its scaffold. The app opens an empty window; features start with the first milestone.
+> **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.
+> Postgres is the only database so far, and file export and import come next (M2).
+> Linux x86_64 is tested; the other platforms are defined, untested yet.
+
+<p align="center">
+  <img src="assets/readme/screenshot-filters.png" alt="dbee with a table of orders filtered by three conditions: the schema tree on the left, the grid under its filter bar in the middle, the value panel on the right">
+</p>
+
+## What works today
+
+- **Connecting:** saved and recent connections; a form with Fill from URL; TLS modes with a CA file; an SSH tunnel with a key (found on its own), the agent or a password, and host key checks; read-only mode; passwords in the OS keyring; reconnecting after a lost connection.
+- **Browsing:** a schema tree with a filter; quick search (Ctrl+P); table tabs with a filter bar (13 operators, any number of filters, raw `WHERE`), sorting, paging, estimated and exact counts, and foreign keys followed into a filtered tab.
+- **Editing:** staged edits (one-line, multi-line and boolean editors, set NULL, add and delete rows), undo and redo, and Apply (Ctrl+S) in one transaction, all or nothing.
+- **Values:** a value panel with the whole value of a cell, JSON pretty-printed and coloured.
+- **Queries:** query tabs with syntax colours; run all, or the statement under the cursor; cancel; several results; error cards that jump to the error's position.
+- **Copying:** values, with a header, or as CSV, JSON or Markdown.
+- **Agents:** a localhost control channel that runs every command and drives the window.
+
+Known gaps and limits are ranked in [docs/gaps.md](docs/gaps.md).
 
 ## Why dbee
 
-- **Native and fast.** One Rust codebase, no Electron and no browser engine. It runs natively on macOS, Windows, Linux and FreeBSD.
+- **Native and fast.** One Rust codebase, with no Electron and no browser engine.
 - **Open source.** Dual-licensed MIT or Apache-2.0, written clean-room from public specifications and black-box observation.
-- **Scriptable.** Every action is a command that can be run from the CLI, an MCP server or a JSON control channel (all planned, see below).
+- **Scriptable.** Every action is a command. The control channel reaches all of them today; a command-line tool and an MCP server are planned.
 
-## Quick start
+## Platforms
+
+dbee is built for Linux (x86_64, aarch64, riscv64), macOS (universal), Windows (x64, x86, arm64) and FreeBSD (x86_64). Linux x86_64 is tested. The other platforms are defined in the release pipeline but untested yet ([docs/hardware-parity.md](docs/hardware-parity.md)).
+
+## Download
+
+No releases yet: the release pipeline is written but has not run ([docs/releasing.md](docs/releasing.md)). Until the first release, build dbee from source.
+
+## Build from source
+
+You need:
+
+- Rust through [rustup](https://rustup.rs). `rust-toolchain.toml` picks the pinned toolchain.
+- A C compiler (Debian and Ubuntu: `build-essential`).
+- On Linux, no `-dev` packages: dbee loads the window and graphics libraries (Wayland or X11, xkbcommon, Vulkan or OpenGL) from the desktop at run time.
+- Optional: Docker, for the test servers that the Postgres and SSH tests run against. Without them those tests print `SKIPPED`.
 
 ```sh
 cargo run -p dbee                       # the desktop app
-cargo run -p dbee-cli -- --version      # the command-line tool
+cargo run -p dbee-cli -- --version      # the command-line tool (version and help so far)
+cargo xtask testdb up                   # optional: start the Docker test servers
 cargo xtask ci                          # fmt, clippy, tests, assets, layering, provenance
 ```
 
 The app writes its log to `<settings dir>/logs/dbee.log`, where the settings dir is `~/.config/dbee` on Linux and BSD, `~/Library/Application Support/dbee` on macOS and `%APPDATA%\dbee` on Windows.
 
-## For agents: MCP, CLI and the control channel
+## For agents
 
-Everything dbee does is meant to be a command that agents can reach through an MCP server, the CLI and a JSON control channel. None of these exist yet; they are planned and documented first. Start with [`AGENTS.md`](AGENTS.md), then see [`docs/mcp.md`](docs/mcp.md), [`docs/cli.md`](docs/cli.md) and [`docs/control-protocol.md`](docs/control-protocol.md) (all planned).
+`dbee --control <port>` serves a JSON-lines control channel on `127.0.0.1`. It runs every command and drives the window: clicks, keys, inspection and screenshots ([docs/control-protocol.md](docs/control-protocol.md)). `cargo xtask run-isolated` starts the app with it on a throwaway home. The MCP server and the command-line tool's commands are planned and documented first ([docs/mcp.md](docs/mcp.md), [docs/cli.md](docs/cli.md)). Agents working on dbee start with [AGENTS.md](AGENTS.md).
 
-## Architecture
+## Documentation
 
-dbee is an engine-first Cargo workspace with enforced layering (`cargo xtask layers`): domain crates (L0–L4) → `engine` (L5) → `ui-egui` / `mcp` (L6) → `apps/*` (L7). Nothing below L6 depends on the UI toolkit, so the UI crate can be swapped. See [`docs/architecture.md`](docs/architecture.md).
+- [ROADMAP.md](ROADMAP.md): stage, headline numbers and progress log.
+- [docs/gaps.md](docs/gaps.md): known gaps and limits, ranked.
+- [docs/architecture.md](docs/architecture.md): an engine-first Cargo workspace whose layering is enforced, so the UI crate can be swapped.
+- [docs/testing.md](docs/testing.md): the tests and the Docker test servers.
+- [docs/agents.md](docs/agents.md): driving dbee from an agent, and developing it as one.
+- [docs/README.md](docs/README.md): every doc.
 
-## Roadmap
+## Security
 
-dbee is **pre-alpha**. Stage, numbers and progress log are in [`ROADMAP.md`](ROADMAP.md).
-
-## Downloads
-
-Builds will appear at https://dbee.rosin.dev and on the [GitHub releases page](https://github.com/KasparRosin/dbee/releases). `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
-
-### Windows
-
-| Build | Installer | Portable |
-|---|---|---|
-| x64 (64-bit Intel/AMD) | `dbee-<ver>-windows-x64.msi` | `dbee-<ver>-windows-x64-portable.zip` |
-| arm64 (Snapdragon and other ARM PCs) | `dbee-<ver>-windows-arm64.msi` | `dbee-<ver>-windows-arm64-portable.zip` |
-| x86 (32-bit) | `dbee-<ver>-windows-x86.msi` | `dbee-<ver>-windows-x86-portable.zip` |
-
-The MSI installer offers an optional desktop shortcut (unchecked on a new installation).
-
-### macOS
-
-| Build | File |
-|---|---|
-| App, universal (Apple silicon + Intel) | `dbee-<ver>-macos-universal.dmg` |
-| Command-line tool, universal | `dbee-cli-<ver>-macos-universal.zip` |
-
-### Linux
-
-| Format | x86_64 | aarch64 (ARM64) | Notes |
-|---|---|---|---|
-| AppImage | `dbee-<ver>-linux-x86_64.AppImage` | `dbee-<ver>-linux-aarch64.AppImage` | Runs anywhere; updates itself with [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) (`.zsync` files) |
-| Flatpak | `dbee-<ver>-linux-x86_64.flatpak` | `dbee-<ver>-linux-aarch64.flatpak` | Sandboxed; `flatpak install --user <file>` |
-| Debian/Ubuntu | `dbee-<ver>-linux-x86_64.deb` | `dbee-<ver>-linux-aarch64.deb` | |
-| Fedora/RHEL/openSUSE | `dbee-<ver>-linux-x86_64.rpm` | `dbee-<ver>-linux-aarch64.rpm` | |
-| Tarball | `dbee-<ver>-linux-x86_64.tar.gz` | `dbee-<ver>-linux-aarch64.tar.gz` | Unpack anywhere |
-
-### FreeBSD
-
-| Build | File |
-|---|---|
-| x86_64 | `dbee-<ver>-freebsd-x86_64.tar.gz` |
+Please report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
 
 ## License and credits
 
@@ -87,5 +88,7 @@ dbee is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), 
 Copyright (c) 2026 Kaspar Rosin and the dbee contributors.
 
 Every asset in the repository is listed with its author, source and licence in [ATTRIBUTION.md](ATTRIBUTION.md). The repository holds no font files; the app embeds egui's default fonts (see ATTRIBUTION.md).
+
+dbee is inspired by Beekeeper Studio.
 
 <sub>Beekeeper Studio is a trademark of its owner. dbee is an independent project and is not affiliated with or endorsed by it.</sub>
