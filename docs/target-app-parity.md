@@ -108,7 +108,7 @@ Pre-alpha. M1 is built: five of the six alpha gate rows pass ([roadmap.md](roadm
 
 ## Effort and calibration
 
-M1 ran from 2026-10-19 to 2026-10-27 (measured, git): 28 planned tasks in 59 commits on branch `m1`: 54 for the first 27 tasks (each reviewed, then fixed where the review found problems), one toolchain pin and four for the last task. The M1 review fixes followed in five more. Agent hours were not logged, so per-area hours are not estimated yet. The first milestone that logs them gives the calibration.
+M1 ran from 2026-10-19 to 2026-10-27 (measured, git): 28 planned tasks in 59 commits: 54 for the first 27 tasks (each reviewed, then fixed where the review found problems), one toolchain pin and four for the last task. The M1 review fixes followed in seven more, 66 commits in all. Agent hours were not logged, so per-area hours are not estimated yet. The first milestone that logs them gives the calibration.
 
 ## What works today
 
