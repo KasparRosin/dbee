@@ -1,8 +1,8 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (gaps.md entries renumbered: generated columns are no longer offered for editing) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (the observation notes are cited as kept outside the repository) · **Target:** Beekeeper Studio 5.5.7
 
-Graded by behaviour against what was observed in Beekeeper Studio (`plan/beekeeper/01-observed-ui.md`, `02-ui-ux.md`), not by whether a control exists. Status: **done** (does what the observed element does, for Postgres), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `crates/ui-egui/tests/`).
+Graded by behaviour against what was observed in Beekeeper Studio, not by whether a control exists. The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). Status: **done** (does what the observed element does, for Postgres), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `crates/ui-egui/tests/`).
 
 | Element | Beekeeper Studio | dbee | Status |
 |---|---|---|---|
@@ -39,6 +39,7 @@ From [gaps.md](gaps.md): wide results first (5), then the editing limits (9, 10)
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
 | 2026-10-27 | minor | gaps.md references renumbered (the generated-columns entry is fixed and gone): the editing limits are 9 and 10. |
 | 2026-10-27 | minor | Connection lists (no Copy URL) and the paging bar (no page box) regraded partial: 3 done, 15 partial, 48 % by count; ~45 % stands. |
 | 2026-10-26 | major | M1 built: 22 elements graded against the observed app; ~45 % (estimated). |

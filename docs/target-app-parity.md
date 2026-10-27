@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (Effort: 59 commits for M1, then five for the final review's fixes; gaps.md entries renumbered) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (the observation notes are cited as kept outside the repository) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -18,7 +18,7 @@ Overall parity with Beekeeper Studio: **~25 % (estimated)**, from the weights an
 
 ## What we measured against and how
 
-Beekeeper Studio 5.5.7, observed black-box through `plan/beekeeper/observe.sh`, using synthetic databases only (`plan/beekeeper/01`–`05`; screenshots 0002–0105). Feature breadth grades each row of the observed feature catalog (`05-feature-catalog.md`): **1** done, **0.5** partial, **0** missing. A row is done only when it behaves as observed, for Postgres. Engine rows are graded in [driver-parity.md](driver-parity.md), not here. dbee's side was measured with the test suites against the Docker test servers (Postgres 14 and 18, an sshd) and the real window (`m1_day`).
+Beekeeper Studio 5.5.7, observed black-box in a sandbox, using synthetic databases only. The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). Feature breadth grades each row of the feature catalog in those notes: **1** done, **0.5** partial, **0** missing. A row is done only when it behaves as observed, for Postgres. Engine rows are graded in [driver-parity.md](driver-parity.md), not here. dbee's side was measured with the test suites against the Docker test servers (Postgres 14 and 18, an sshd) and the real window (`m1_day`).
 
 ## Weights
 
@@ -128,6 +128,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
 | 2026-10-27 | minor | Effort counts 59 commits for M1 (four for M1.28) and the final review's five fix commits; gaps.md 13 is now 12. |
 | 2026-10-27 | minor | Performance is the one source for the timings gaps.md and roadmap.md quote: wide results scrolling and in kittest, keystrokes in 256 KiB and 32 KiB on one line, M1.26's 1 MiB figure added; a fifth wide-result run. |
 | 2026-10-26 | major | M1 built: first assessment. Feature areas graded against the observed catalog; dimension scores; ~25 % overall (estimated); performance measured with machine and load; readiness by audience. |
