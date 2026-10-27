@@ -114,7 +114,7 @@ if has appimage; then
     fi
   fi
   # Absolute, because appimagetool runs in $DIST below (CARGO_TARGET_DIR or APPIMAGETOOL may be
-  # relative, e.g. target/agent-<name>).
+  # relative, e.g. target/local).
   OUT="$(cd "$DIST" && pwd)/$BASENAME.AppImage"
   APPDIR="$(cd "$APPDIR" && pwd)"
   TOOL="$(cd "$(dirname "$TOOL")" && pwd)/$(basename "$TOOL")"

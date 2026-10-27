@@ -1,7 +1,7 @@
 //! The data grid ([`Grid`]): rows of cells under a header that stays in place, shared by the
-//! table tab and (from M1.26) query results. It reads its rows through [`GridSource`], so it
-//! knows nothing of where they come from, and it changes nothing itself: it returns what the user
-//! asked for ([`GridAct`]) and the caller runs the commands.
+//! table tab and query results. It reads its rows through [`GridSource`], so it knows nothing of
+//! where they come from, and it changes nothing itself: it returns what the user asked for
+//! ([`GridAct`]) and the caller runs the commands.
 //!
 //! **Drawing.** An `egui_extras` table in a horizontal scroll area: only the rows in view are
 //! laid out, so a page of 100 rows or a result of 10,000 costs the same per frame. A cell shows

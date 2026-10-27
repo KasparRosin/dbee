@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (filters compare `char(n)`, `bit(n)` and arrays of length types without cutting and with their indexes: old entry 14 dropped, 15–17 now 14–16) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: no personal names or task ids) · **Target:** Beekeeper Studio 5.5.7
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -12,7 +12,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Missing:** exporting a table or a query result to a file (CSV, JSON, SQL) and importing one. The alpha gate's last row ([`roadmap.md`](roadmap.md)).
 - **Evidence:** `engine.commands` lists no export or import command; the way out today is the clipboard, at most 8 MiB of text (entry 8).
-- **Impact:** results larger than a copy, or meant for a file, cannot leave dbee. Kaspar switches fully once this lands (M2).
+- **Impact:** results larger than a copy, or meant for a file, cannot leave dbee. The maintainer switches to dbee fully once this lands (M2).
 - **Estimate:** M2 "Import and export"; not estimated yet.
 
 ## After alpha
@@ -21,7 +21,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Missing:** an SSH jump host (bastion), reading `Host` aliases, `ProxyJump` and identity settings from `~/.ssh/config`, and keyboard-interactive login (one-time codes).
 - **Evidence:** `SshConfig` (`crates/config/src/connection.rs`) holds one host. `crates/ssh/src/lib.rs` logs in only with a key, the agent or a password (`authenticate_publickey`, `authenticate_publickey_with`, `authenticate_password`). Nothing reads `~/.ssh/config`.
-- **Impact:** a server behind a bastion, or one that asks for a code, cannot be reached; aliases must be typed out by hand. Kaspar's own setup (one hop, his key) works.
+- **Impact:** a server behind a bastion, or one that asks for a code, cannot be reached; aliases must be typed out by hand. One hop with a key works.
 - **Estimate:** 6–10 h (estimated).
 
 ### 3. No TLS client certificates (D)
@@ -49,7 +49,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
   | 300 | 38–67 ms | 50–97 ms |
   | 1,664 (Postgres's most) | 231–897 ms | 357–778 ms |
 
-  kittest, which always builds an AccessKit tree, measured 1,664 columns at 376–792 ms a frame (340–890 ms in M1.27).
+  kittest, which always builds an AccessKit tree, measured 1,664 columns at 376–792 ms a frame (340–890 ms in earlier runs).
 - **Impact:** at about 100 columns a frame no longer fits 60 Hz (in four of the five runs). At 300 columns scrolling stutters, and at 1,664 the window draws one to four frames a second. `select *` over a wide join is a common case.
 - **Estimate:** 4–8 h (estimated): lay out and draw only the columns in view.
 
@@ -102,7 +102,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
   | Text | Keystroke frame |
   |---|---|
-  | 1 MiB on one line | 582–673 ms (slowest 2.0 s); 0.6–1.6 s in M1.26's runs |
+  | 1 MiB on one line | 582–673 ms (slowest 2.0 s); 0.6–1.6 s in earlier runs |
   | 256 KiB on one line | 143–144 ms |
   | 32 KiB on one line | 18.3–32.6 ms |
   | 1 MiB of short lines, the whole window | 28.7–46.4 ms |
@@ -141,8 +141,9 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Wording: no personal names or task ids. |
 | 2026-10-27 | minor | Entry 14 fixed and dropped: filters compare `char(n)` as `bpchar`, `bit(n)` as `"bit"` and arrays of `varchar(n)`, `char(n)` and `bit(n)` as `character varying[]`, `bpchar[]` and `"bit"[]`, so they use the column's index and an over-long element matches nothing; 15–17 are now 14–16. |
-| 2026-10-27 | minor | The final review's fixes: generated and identity `GENERATED ALWAYS` columns refused (old entry 8 dropped, 9–15 now 8–14); entries 15 (a failed transaction in a query tab), 16 (keyless paging), 17 (empty filter values). |
+| 2026-10-27 | minor | M1 review fixes: generated and identity `GENERATED ALWAYS` columns refused (old entry 8 dropped, 9–15 now 8–14); entries 15 (a failed transaction in a query tab), 16 (keyless paging), 17 (empty filter values). |
 | 2026-10-27 | minor | Entry 15 (now 14): values that do not fit a column's length are refused, not cut; what is left (filters on `char(n)` and `bit(n)` skip their index, array filters still cut). |
 | 2026-10-27 | minor | Timings quoted from target-app-parity.md, the one source; the next page 1.06–1.09 ms; a fifth wide-result run; the tarball's and AppImage's SSH key logins marked expected, not measured. |
 | 2026-10-26 | major | M1 built: 14 known limits with evidence, ranked; wide results and the long-line editor measured. |

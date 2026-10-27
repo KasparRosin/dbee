@@ -1,10 +1,10 @@
 # Roadmap
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (the `.sqlite` file associations wait for the SQLite engine) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: the day of real use on the maintainer's own databases) · **Target:** Beekeeper Studio 5.5.7
 
 ## Current focus
 
-M1 "Daily Postgres workflow" is built. Every task of its plan is done, and the M1 day runs end to end in the real window. It waits for its last check: Kaspar uses a Linux release build on his own databases for a day. Only Kaspar does that; agents never connect to his databases.
+M1 "Daily Postgres workflow" is built. Every task of its plan is done, and the M1 day runs end to end in the real window. It waits for its last check: a day of real use of a Linux release build on the maintainer's own databases. Only the maintainer does that; agents never connect to those databases.
 
 Next: an architecture step, a database driver interface so the engine no longer names Postgres types; then M2 "Import and export".
 
@@ -31,7 +31,7 @@ Not defined yet: they follow M2, from the ranked list in [gaps.md](gaps.md) and 
 | # | Milestone | Status |
 |---|---|---|
 | M0 | Scaffold | done (2026-10-16) |
-| M1 | Daily Postgres workflow | built (2026-10-26); waits for Kaspar's day on his own databases |
+| M1 | Daily Postgres workflow | built (2026-10-26); waits for a day of real use on the maintainer's own databases |
 | M2 | Import and export | not started |
 
 The packages declare no file types for now: the `.sqlite` and `.sqlite3` associations (Linux desktop entry and AppStream data, macOS, Windows) come back with the SQLite engine.
@@ -44,8 +44,9 @@ Percentages and hours come from [target-app-parity.md](target-app-parity.md) and
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Wording: M1's last check is a day of real use on the maintainer's own databases. |
 | 2026-10-27 | minor | The packages' `.sqlite` and `.sqlite3` file associations removed until the SQLite engine exists. |
 | 2026-10-27 | minor | The next page's timing quoted from target-app-parity.md (1.06–1.09 ms). |
-| 2026-10-26 | major | M1 built: five of six alpha gate rows pass with evidence (`m1_day` and the driver, engine and UI tests); M1 waits for Kaspar's day; next an architecture step, then M2. |
+| 2026-10-26 | major | M1 built: five of six alpha gate rows pass with evidence (`m1_day` and the driver, engine and UI tests); M1 waits for a day of real use; next an architecture step, then M2. |
 | 2026-10-19 | minor | M1 "Daily Postgres workflow" defined and in progress; alpha gate rewritten for Postgres; M2 "Import and export" added. |
 | 2026-10-15 | major | Template (scaffold). |

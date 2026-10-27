@@ -1,6 +1,6 @@
 # The AGENTS.md quality gate (`cargo xtask ci`: fmt, clippy -D warnings, test, assets, layers,
 # provenance) on every pull request and every push to main, so a merge burst can't land
-# a red tree that only the next agent session discovers.
+# a red tree that nobody notices until the next change.
 name: CI
 
 on:

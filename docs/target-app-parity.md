@@ -1,12 +1,12 @@
 # Target app parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (the observation notes are cited as kept outside the repository) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: no personal names or task ids) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
-dbee covers Kaspar's daily Postgres workflow: connect (also through an SSH tunnel), find a table, filter it, read its JSON, follow a foreign key, edit rows, run queries and copy results. It works end to end in the real window (`apps/dbee/tests/m1_day.rs`, measured). Postgres is the only engine, and there is no file export or import yet (M2).
+dbee covers the daily Postgres workflow: connect (also through an SSH tunnel), find a table, filter it, read its JSON, follow a foreign key, edit rows, run queries and copy results. It works end to end in the real window (`apps/dbee/tests/m1_day.rs`, measured). Postgres is the only engine, and there is no file export or import yet (M2).
 
-Overall parity with Beekeeper Studio: **~25 % (estimated)**, from the weights and dimension scores below. Breadth comes from grading Beekeeper's observed feature list row by row. Readiness stays low until dbee has been used on real databases (Kaspar's day, M1's last check).
+Overall parity with Beekeeper Studio: **~25 % (estimated)**, from the weights and dimension scores below. Breadth comes from grading Beekeeper's observed feature list row by row. Readiness stays low until dbee has been used on real databases (a day of real use on the maintainer's own databases, M1's last check).
 
 ## Readiness by audience
 
@@ -82,12 +82,12 @@ All measured on 2026-10-26 on Linux x86_64, AMD Ryzen 7 PRO 5850U (16 threads), 
 | Keystroke in a cell editor holding 32 KiB on one line | 33 ms | 18.8–24.9 ms single-line, 26.1–29.5 ms multi-line | 30.60 / 25.29 / 18.23, and 4.16 / 11.71 / 14.89 | `keystroke_frame_with_a_value_at_the_cap` |
 | Keystroke in a 32 KiB script, the editor alone and the whole window | 33 ms | 1.9–2.6 ms and 2.0–5.5 ms | as above | `keystroke_frames_in_big_scripts` |
 | Keystroke in a 1 MiB script of short lines, the whole window | — | 28.7–46.4 ms | as above | as above |
-| Keystroke in 1 MiB on one line, the editor alone | — | 582–673 ms (slowest 2.0 s; 0.6–1.6 s in M1.26's runs; [gaps.md](gaps.md) 12) | as above | as above |
+| Keystroke in 1 MiB on one line, the editor alone | — | 582–673 ms (slowest 2.0 s; 0.6–1.6 s in earlier runs; [gaps.md](gaps.md) 12) | as above | as above |
 | Keystroke in 256 KiB and in 32 KiB on one line, the editor alone | — | 143–144 ms and 18.3–32.6 ms | as above | as above |
 | Value panel, 20 MB values: first frame showing them | 250 ms | 9–173 ms | 5.67 / 16.70 / 16.03 | `value_panel_frames_within_budget` |
 | Value panel, 20 MB values: frames unchanged and scrolling | 16 ms | 0.08–0.12 ms unchanged, 0.09–0.94 ms scrolling | as above | as above |
 | Copying 10,000 rows (3–4.6 MB) in each format | 250 ms | `clipboard.copy` 13–59 ms; its frame 16–58 ms | 53.35 / 28.18 / 18.85, and 3.00 / 12.56 / 15.29 | `copy_frames_within_budget` |
-| A frame with a wide result, 50 / 100 / 300 / 1,664 columns, the whole window without an AccessKit tree | none (a 60 Hz frame is 16.7 ms) | nothing changing 6.5–13.9 / 10.7–27.1 / 38–67 / 231–897 ms; scrolling 8.2–17.3 / 15.4–39.8 / 50–97 / 357–778 ms; in kittest, with an AccessKit tree, 376–792 ms at 1,664 columns (340–890 ms in M1.27). Medians of NULL and short-text cells ([gaps.md](gaps.md) 5) | five runs, 7.5, 14.9, 18.3, 6.2 and 4.4 at their start (the fifth on 2026-10-27) | `wide_result_frames` |
+| A frame with a wide result, 50 / 100 / 300 / 1,664 columns, the whole window without an AccessKit tree | none (a 60 Hz frame is 16.7 ms) | nothing changing 6.5–13.9 / 10.7–27.1 / 38–67 / 231–897 ms; scrolling 8.2–17.3 / 15.4–39.8 / 50–97 / 357–778 ms; in kittest, with an AccessKit tree, 376–792 ms at 1,664 columns (340–890 ms in earlier runs). Medians of NULL and short-text cells ([gaps.md](gaps.md) 5) | five runs, 7.5, 14.9, 18.3, 6.2 and 4.4 at their start (the fifth on 2026-10-27) | `wide_result_frames` |
 | The whole M1 day in the real window, through the SSH tunnel | — | 10.5–12.4 s for the test; from the SSH connect to the open Postgres session 0.14–0.33 s | about 2.5–5 for the 12.4 s run; about 50 for the other | `m1_day_end_to_end` |
 
 Every target above is met in every run, at every load. The wide-result row has none: at 100 columns its frame passed 60 Hz's 16.7 ms in four of the five runs, and at 300 in all ([gaps.md](gaps.md) 5).
@@ -104,11 +104,11 @@ The control channel (`dbee --control <port>`) reaches every command and drives t
 
 ## Stage
 
-Pre-alpha. M1 is built: five of the six alpha gate rows pass ([roadmap.md](roadmap.md)), and file export (M2) is the sixth. M1 waits for Kaspar's day on his own databases.
+Pre-alpha. M1 is built: five of the six alpha gate rows pass ([roadmap.md](roadmap.md)), and file export (M2) is the sixth. M1 waits for a day of real use on the maintainer's own databases.
 
 ## Effort and calibration
 
-M1 ran from 2026-10-19 to 2026-10-27 (measured, git): 28 planned tasks in 59 commits on branch `m1`: 54 for M1.1–M1.27 (each task reviewed, with fix rounds), one toolchain pin and four for M1.28. The final review's fixes followed in five more. Agent hours were not logged, so per-area hours are not estimated yet. The first milestone that logs them gives the calibration.
+M1 ran from 2026-10-19 to 2026-10-27 (measured, git): 28 planned tasks in 59 commits on branch `m1`: 54 for the first 27 tasks (each reviewed, then fixed where the review found problems), one toolchain pin and four for the last task. The M1 review fixes followed in five more. Agent hours were not logged, so per-area hours are not estimated yet. The first milestone that logs them gives the calibration.
 
 ## What works today
 
@@ -128,8 +128,9 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases, M1 review fixes, earlier runs instead of task ids. |
 | 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
-| 2026-10-27 | minor | Effort counts 59 commits for M1 (four for M1.28) and the final review's five fix commits; gaps.md 13 is now 12. |
-| 2026-10-27 | minor | Performance is the one source for the timings gaps.md and roadmap.md quote: wide results scrolling and in kittest, keystrokes in 256 KiB and 32 KiB on one line, M1.26's 1 MiB figure added; a fifth wide-result run. |
+| 2026-10-27 | minor | Effort counts 59 commits for M1 (four for its last task) and five for the M1 review fixes; gaps.md 13 is now 12. |
+| 2026-10-27 | minor | Performance is the one source for the timings gaps.md and roadmap.md quote: wide results scrolling and in kittest, keystrokes in 256 KiB and 32 KiB on one line, the earlier 1 MiB figure added; a fifth wide-result run. |
 | 2026-10-26 | major | M1 built: first assessment. Feature areas graded against the observed catalog; dimension scores; ~25 % overall (estimated); performance measured with machine and load; readiness by audience. |
 | 2026-10-15 | major | Template (scaffold). |

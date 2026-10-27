@@ -1,8 +1,8 @@
 # dbee roadmap
 
-**Stage: pre-alpha** · next: alpha, once file export lands (M2). M1 "Daily Postgres workflow" is built and waits for Kaspar's day on his own databases.
+**Stage: pre-alpha** · next: alpha, once file export lands (M2). M1 "Daily Postgres workflow" is built and waits for its last check: a day of real use on the maintainer's own databases.
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (progress log: the final review's fixes) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: the day of real use, M1 review fixes) · **Target:** Beekeeper Studio 5.5.7
 
 Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs`). They are connecting to Postgres (also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M2. Postgres is the only engine. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md), [`docs/gaps.md`](docs/gaps.md), [`docs/roadmap.md`](docs/roadmap.md).
 
@@ -53,7 +53,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 ## Upcoming
 
-1. Kaspar's day: a Linux release build on his own databases, M1's last check. Agents do not do this step.
+1. M1's last check: a day of real use of a Linux release build on the maintainer's own databases. Only the maintainer does this step; agents never connect to those databases.
 2. An architecture step: a database driver interface, so the engine no longer names Postgres types.
 3. M2 Import and export: file export and import, the last alpha gate row.
 
@@ -61,8 +61,8 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Entry |
 |---|---|
-| 2026-10-27 | M1's final review fixed: a value longer than a `varchar(n)`, `char(n)` or `bit(n)` column fails the Apply instead of being written cut; a running Apply can be cancelled until it commits; generated columns are refused; notices read as sentences; the UI tests share one harness, and ci fails a skipped driver test once the servers are up. |
-| 2026-10-26 | M1 "Daily Postgres workflow" built: connect (SSH tunnel, TLS, read-only), browse and filter, foreign keys, staged edits with all-or-nothing Apply, the value panel, query tabs, copying. The M1 day runs end to end in the real window. Linux tarball and AppImage built for Kaspar's day. |
+| 2026-10-27 | M1 review fixes: a value longer than a `varchar(n)`, `char(n)` or `bit(n)` column fails the Apply instead of being written cut; a running Apply can be cancelled until it commits; generated columns are refused; notices read as sentences; the UI tests share one harness, and ci fails a skipped driver test once the servers are up. |
+| 2026-10-26 | M1 "Daily Postgres workflow" built: connect (SSH tunnel, TLS, read-only), browse and filter, foreign keys, staged edits with all-or-nothing Apply, the value panel, query tabs, copying. The M1 day runs end to end in the real window. Linux tarball and AppImage built for the day of real use. |
 | 2026-10-19 | M1 "Daily Postgres workflow" started: licence check (`cargo xtask licenses`) and roadmap. |
 | 2026-10-15 | Scaffold: rules, docs, tooling, packaging and release pipeline in place; placeholder app. |
 
@@ -70,7 +70,8 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-27 | minor | Progress log: M1's final review fixes. |
+| 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases; M1 review fixes. |
+| 2026-10-27 | minor | Progress log: M1 review fixes. |
 | 2026-10-26 | major | M1 built: stage line, headline numbers, dimensions and feature areas assessed (measured and estimated marked), upcoming list, progress log. |
 | 2026-10-19 | minor | M1 started: next line, upcoming list and progress log. |
 | 2026-10-15 | major | First version (scaffold). |
