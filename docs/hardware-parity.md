@@ -1,10 +1,10 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** minor (Linux x86_64 verified locally) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (Linux x86_64: the M1 app built, packaged and run) · **Target:** Beekeeper Studio 5.5.7
 
 | Platform | Build | Installs | Runs | Notes |
 |---|---|---|---|---|
-| Linux x86_64 | AppImage, deb, rpm, tar.gz built locally | not tried (needs sudo) | placeholder window from the tarball | 2026-10-16, Debian 13 |
+| Linux x86_64 | tar.gz and AppImage of the M1 app built locally (2026-10-26); deb and rpm last built for M0 (2026-10-16), as nfpm is not installed here now | not tried (needs sudo) | `dbee --version` from the tarball; the release build's window (connection screen in 301 ms at load about 24.5, `connection_screen_within_one_second`); the dev build through the whole M1 day (`m1_day`) | 2026-10-26, Debian 13, KDE Plasma (Wayland) |
 | Linux aarch64 | defined, unverified | defined, unverified | defined, unverified | |
 | Linux riscv64 | defined, unverified | defined, unverified | defined, unverified | |
 | macOS universal | defined, unverified | defined, unverified | defined, unverified | |
@@ -21,5 +21,6 @@ Estimated after the first observation pass.
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-15 | major | Template (scaffold). |
+| 2026-10-26 | minor | Linux x86_64: the M1 app's tarball and AppImage built and run. History put newest first. |
 | 2026-10-16 | minor | Linux x86_64 verified locally. |
+| 2026-10-15 | major | Template (scaffold). |

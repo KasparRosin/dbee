@@ -1,8 +1,8 @@
 # dbee-cli
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** major (scaffold)
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (still planned after M1; the control channel meanwhile)
 
-The command-line tool for dbee: run commands, run queries and serve MCP without a window. Today only `version` and `help` exist; everything else is **(planned)** and documented first.
+The command-line tool for dbee: run commands, run queries and serve MCP without a window. Today only `version` and `help` exist; everything else is **(planned)** and documented first. M1 (the daily Postgres workflow) left the CLI's commands out on purpose. Until they land, agents and scripts drive dbee through the desktop app's control channel ([`control-protocol.md`](control-protocol.md)), which reaches every command.
 
 ```sh
 cargo run -p dbee-cli -- <subcommand>

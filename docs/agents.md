@@ -1,6 +1,6 @@
 # Agents
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-26 · **Change:** minor (isolated runs keep the clipboard in memory)
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (§4: the M1 day as a scripted check, with its command)
 
 dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
 
@@ -38,6 +38,8 @@ For any UI change, look at the result:
 2. Drive the feature through the control channel (the MCP bridge is planned): commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
 3. Assert on `ui.inspect` and `document.inspect`.
 4. Take `ui.screenshot` (the whole window) and open the PNG; `app.quit` ends the run.
+
+The whole M1 day is scripted the same way, in the real window with the isolated run's environment: `cargo test --workspace --test m1_day -- --ignored --nocapture` drives the M1 day (an SSH connection, Ctrl+P, filters, a JSON value, a foreign key, edits, a query copied with its header) and saves a screenshot of each step in `target/m1-day/` ([`testing.md`](testing.md) §4).
 
 Screenshots you commit follow the asset rule in [`AGENTS.md`](../AGENTS.md): synthetic data only, and a row in `ATTRIBUTION.md`. Screenshots of Beekeeper Studio are never committed.
 

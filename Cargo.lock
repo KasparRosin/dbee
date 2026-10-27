@@ -1068,12 +1068,14 @@ dependencies = [
  "dbee-config",
  "dbee-engine",
  "dbee-ssh",
+ "dbee-testkit",
  "dbee-ui-egui",
  "eframe",
  "egui",
  "image",
  "log",
  "pollster 1.0.1",
+ "serde_json",
  "winresource",
 ]
 

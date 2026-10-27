@@ -1,8 +1,8 @@
 # dbee MCP server
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** major (scaffold)
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (still planned after M1; the control channel meanwhile)
 
-**All of this is planned.** `dbee-cli mcp` will expose dbee to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io): newline-delimited JSON-RPC 2.0 on stdin/stdout. Logs go to stderr.
+**All of this is planned.** `dbee-cli mcp` will expose dbee to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io): newline-delimited JSON-RPC 2.0 on stdin/stdout. Logs go to stderr. M1 left the MCP server out on purpose, and the `dbee-mcp` crate is still empty. Until it lands, agents drive the desktop app through its control channel ([`control-protocol.md`](control-protocol.md)), which reaches every command and the window. The headless demo below names an SQLite database, which needs the SQLite engine first.
 
 ## Start it
 

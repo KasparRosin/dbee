@@ -20,6 +20,11 @@ egui = { workspace = true }
 log = { workspace = true }
 image = { workspace = true }
 
+[dev-dependencies]
+# tests/m1_day.rs: the test servers, the skip rule and psql; JSON lines on the control channel.
+dbee-testkit = { workspace = true }
+serde_json = { workspace = true }
+
 [build-dependencies]
 # Icon + VERSIONINFO for dbee.exe; build.rs only uses it when the target is Windows.
 winresource = "0.1"

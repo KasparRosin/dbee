@@ -814,3 +814,111 @@ fn keystroke_frames_in_big_scripts() {
     // A script of 32 KiB keeps a keystroke within two frames at 60 Hz.
     assert!(slow_32k < Duration::from_millis(33), "{slow_32k:?}");
 }
+
+/// `select` of `columns` columns over 10,000 rows: NULLs, or (`text`) short numbers as text.
+fn wide(columns: usize, text: bool) -> String {
+    let cells: Vec<String> = (1..=columns).map(|i| if text { format!("(g * {i})::text as c{i:04}") } else { format!("null as c{i:04}") }).collect();
+    format!("select {} from generate_series(1, 10000) g", cells.join(", "))
+}
+
+/// Frames (with their tessellation) of the whole window in a plain egui context, which has no
+/// AccessKit tree (as the app without a screen reader), showing the result of `sql` in a query
+/// tab: the median and slowest of `n` frames with nothing changing, then of `n` frames that each
+/// scroll the result grid down.
+fn result_frames(db: &TestDb, sql: &str, n: usize) -> ((Duration, Duration), (Duration, Duration)) {
+    use dbee_engine::{Outcome, Screen};
+    let home = temp_home(None, None);
+    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
+    let session = Session::new(SessionOptions {
+        config_dir: Some(home.home.join("config")),
+        secrets: Some(secrets),
+        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
+        notify: None,
+        allowed_targets: None,
+    })
+    .unwrap();
+    let mut app = DbeeApp::new(session, None);
+    let ctx = egui::Context::default();
+    let size = egui::vec2(1400.0, 900.0);
+    let frame = |app: &mut DbeeApp, events: Vec<Event>| {
+        let mut raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)), events, ..Default::default() };
+        app.feed_input(&mut raw);
+        let start = Instant::now();
+        let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
+        let (shapes, ppp) = (std::mem::take(&mut out.shapes), out.pixels_per_point);
+        out.drop_without_applying_deltas();
+        let _ = ctx.tessellate(shapes, ppp);
+        start.elapsed()
+    };
+    let Ok(Outcome::Done(saved)) = app.run("connection.save", json!({ "config": pg14(db), "password": db.password })) else { panic!("saved") };
+    app.run("connection.open", json!({ "id": saved["id"] })).unwrap();
+    let start = Instant::now();
+    while app.session().state().screen != Screen::Workspace {
+        assert!(start.elapsed() < WAIT, "connected");
+        frame(&mut app, Vec::new());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.run("tab.newQuery", json!({ "text": sql })).unwrap();
+    app.run("query.run", json!({})).unwrap();
+    let start = Instant::now();
+    loop {
+        frame(&mut app, Vec::new());
+        if let Some(dbee_engine::Tab::Query(q)) = app.session().state().active_tab()
+            && q.running.is_none()
+        {
+            break;
+        }
+        assert!(start.elapsed() < WAIT, "the run ended");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for _ in 0..3 {
+        frame(&mut app, Vec::new());
+    }
+    let idle = (0..n).map(|_| frame(&mut app, Vec::new())).collect();
+    // The wheel over the result grid (the window's lower half).
+    let over = Pos2::new(size.x * 0.6, size.y * 0.8);
+    let wheel = || Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -120.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+    };
+    frame(&mut app, vec![Event::PointerMoved(over)]);
+    let scrolling = (0..n).map(|_| frame(&mut app, vec![wheel()])).collect();
+    (median_max(idle), median_max(scrolling))
+}
+
+/// How long a frame takes with a wide result in view, by the number of columns (50, 100, 300 and
+/// 1,664, Postgres's most in a result), 10,000 rows of NULLs or of short texts: the whole window
+/// without an AccessKit tree (the app's case), unchanged and scrolling, and in kittest, which
+/// builds one. Reported, not bounded: a wide result's frame grows with its columns
+/// (`docs/gaps.md`).
+#[test]
+#[ignore = "a timing test: cargo test --workspace --test query_tab -- --ignored --nocapture"]
+fn wide_result_frames() {
+    let db = dbee_testkit::require_testdb!();
+    let frames = 15;
+    println!("frames with a wide result in view (median, max), on {}", machine());
+    for columns in [50, 100, 300, 1_664] {
+        for text in [false, true] {
+            let sql = wide(columns, text);
+            let ((idle, idle_max), (scroll, scroll_max)) = result_frames(db, &sql, frames);
+            let mut ui = connected(db);
+            ui.execute("tab.newQuery", json!({ "text": sql }));
+            ui.execute("query.run", json!({}));
+            ui.ran();
+            let kittest: Vec<Duration> = (0..frames)
+                .map(|_| {
+                    let start = Instant::now();
+                    ui.frame();
+                    start.elapsed()
+                })
+                .collect();
+            let (k, kx) = median_max(kittest);
+            let cells = if text { "texts" } else { "NULLs" };
+            println!(
+                "  {columns:>5} columns of {cells}: window unchanged {idle:?} ({idle_max:?}), scrolling {scroll:?} ({scroll_max:?}); kittest unchanged {k:?} ({kx:?})"
+            );
+        }
+    }
+}
