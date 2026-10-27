@@ -9,21 +9,17 @@
 //! only to the Docker test servers (`require_testdb!`). The seed is only read; the test that
 //! stages edits makes its own table in `scratch` and drops it.
 
-use std::sync::{Arc, mpsc};
+mod common;
+
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
-use dbee_engine::{Session, SessionOptions};
-use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{TempHome, TestDb, temp_home, unique};
+use common::*;
+use dbee_testkit::{TestDb, unique};
 use dbee_ui_egui::value_panel::{LINE_H, PAD};
-use dbee_ui_egui::{ControlRequest, DbeeApp};
 use egui::{Event, Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
 use egui_kittest::Harness;
 use serde_json::{Value as Json, json};
-
-/// The longest a test waits for anything.
-const WAIT: Duration = Duration::from_secs(60);
 
 /// How far left of the text box's right edge a click goes to land past a row's end but not on
 /// the scroll bar.
@@ -32,124 +28,7 @@ const BESIDE_BAR: f32 = 30.0;
 /// The slowest frame the 20 MB cell may cost (spec Review Focus 3).
 const FRAME_BOUND: Duration = Duration::from_millis(250);
 
-struct Ui {
-    harness: Harness<'static, DbeeApp>,
-    tx: mpsc::Sender<ControlRequest>,
-    /// Every text a frame put on the clipboard.
-    copied: Vec<String>,
-    /// The slowest frame since [`Ui::time_frames`].
-    slowest: Duration,
-    _home: TempHome,
-}
-
-fn pg14_server(db: &TestDb) -> &dbee_testkit::PgServer {
-    db.servers.iter().find(|s| s.major == 14).unwrap()
-}
-
-fn pg14(db: &TestDb) -> ConnectionConfig {
-    ConnectionConfig {
-        name: "pg14".into(),
-        host: "127.0.0.1".into(),
-        port: pg14_server(db).port,
-        user: "postgres".into(),
-        database: "dbee".into(),
-        ssl_mode: SslMode::Prefer,
-        ..ConnectionConfig::default()
-    }
-}
-
-/// A window on a throwaway home, connected to the pg14 test server, on the workspace.
-fn connected(db: &TestDb) -> Ui {
-    let home = temp_home(None, None);
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
-    let session = Session::new(SessionOptions {
-        config_dir: Some(home.home.join("config")),
-        secrets: Some(secrets),
-        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
-        notify: None,
-        allowed_targets: None,
-    })
-    .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(vec2(1400.0, 900.0)).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-    let mut ui = Ui { harness, tx, copied: Vec::new(), slowest: Duration::ZERO, _home: home };
-    ui.frame();
-    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
-    ui.execute("connection.open", json!({ "id": id }));
-    ui.frame();
-    assert_eq!(ui.document()["screen"], "workspace");
-    ui
-}
-
 impl Ui {
-    /// One frame, with the app's synthetic input fed in first.
-    fn frame(&mut self) {
-        let start = Instant::now();
-        let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
-        *self.harness.input_mut() = raw;
-        self.harness.step();
-        self.slowest = self.slowest.max(start.elapsed());
-        for c in &self.harness.output().platform_output.commands {
-            if let egui::OutputCommand::CopyText(t) = c {
-                self.copied.push(t.clone());
-            }
-        }
-    }
-
-    /// One frame with `events` in its input.
-    fn frame_with(&mut self, events: Vec<Event>) {
-        self.harness.input_mut().events.extend(events);
-        self.frame();
-    }
-
-    /// Starts timing frames afresh: [`Ui::slowest`] from now on.
-    fn time_frames(&mut self) {
-        self.slowest = Duration::ZERO;
-    }
-
-    fn call(&mut self, method: &str, params: Json) -> Json {
-        let (req, rx) = ControlRequest::new(method, params);
-        self.tx.send(req).unwrap();
-        let start = Instant::now();
-        loop {
-            self.frame();
-            if let Ok(r) = rx.try_recv() {
-                return r;
-            }
-            assert!(start.elapsed() < WAIT, "no reply to {method} after {WAIT:?}");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    fn ok(&mut self, method: &str, params: Json) -> Json {
-        let r = self.call(method, params);
-        assert_eq!(r["ok"], true, "{method}: {r}");
-        r["result"].clone()
-    }
-
-    fn execute(&mut self, command: &str, params: Json) -> Json {
-        self.ok("engine.execute", json!({ "command": command, "params": params }))
-    }
-
-    fn document(&mut self) -> Json {
-        self.ok("document.inspect", json!({}))
-    }
-
-    fn table(&mut self) -> Json {
-        self.document()["table"].clone()
-    }
-
-    fn tag(&mut self, id: &str) -> Option<Json> {
-        let i = self.ok("ui.inspect", json!({}));
-        i["automation"].as_array().unwrap().iter().find(|a| a["id"] == id).cloned()
-    }
-
-    fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
-    }
-
     /// Where `id` was drawn.
     fn rect(&mut self, id: &str) -> Rect {
         let tag = self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"));
@@ -158,17 +37,9 @@ impl Ui {
         Rect::from_min_size(pos2(f(0), f(1)), vec2(f(2), f(3)))
     }
 
-    fn click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id }));
-    }
-
     /// A click at window point `at`, with Shift held when `shift`.
     fn click_at(&mut self, at: Pos2, shift: bool) {
         self.ok("ui.click", json!({ "x": at.x, "y": at.y, "modifiers": { "shift": shift } }));
-    }
-
-    fn ctrl(&mut self, key: &str) {
-        self.ok("ui.key", json!({ "key": key, "cmd": true }));
     }
 
     /// A drag with the primary button from `from` to `to`, over several frames.
@@ -197,18 +68,8 @@ impl Ui {
         }
     }
 
-    /// Runs frames until `done` holds.
-    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Ui) -> bool) {
-        let start = Instant::now();
-        while !done(self) {
-            assert!(start.elapsed() < WAIT, "gave up waiting for {what}");
-            self.frame();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
     /// Opens `schema.table` and waits until `rows` rows show.
-    fn open(&mut self, schema: &str, table: &str, rows: u64) {
+    fn open_rows(&mut self, schema: &str, table: &str, rows: u64) {
         self.execute("table.open", json!({ "schema": schema, "table": table }));
         self.until("the page", |ui| ui.table()["rows"] == rows);
     }
@@ -218,22 +79,6 @@ impl Ui {
         let v = self.value("value-text");
         v["text"].as_str().unwrap_or_else(|| panic!("value-text shows no text: {v}")).to_string()
     }
-
-    /// The text a frame last put on the clipboard.
-    fn copied(&self) -> Option<String> {
-        self.copied.last().cloned()
-    }
-}
-
-/// Drops the scratch table when the test ends, also when it fails.
-struct Scratch(String);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Some(db) = dbee_testkit::testdb() {
-            let _ = dbee_testkit::psql(pg14_server(db), &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.0));
-        }
-    }
 }
 
 // shop.orders: id 0, customer_id 1, dealer_id 2, status 3, total 4, billing 5 (jsonb), meta 6
@@ -242,8 +87,8 @@ impl Drop for Scratch {
 #[test]
 fn jsonb_cell_shows_pretty_json_with_label() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
-    ui.open("shop", "orders", 100);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "orders", 100);
     // Nothing selected yet: the panel is there, empty, with a hint.
     assert_eq!(ui.value("value-panel"), Json::Null);
     assert!(ui.tag("value-text").is_none());
@@ -268,8 +113,8 @@ fn jsonb_cell_shows_pretty_json_with_label() {
 #[test]
 fn json_string_containing_json_is_labelled() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
-    ui.open("shop", "orders", 100);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "orders", 100);
     ui.click("grid-cell-0-6");
     let head = ui.value("value-panel");
     assert_eq!((head["type"].clone(), head["label"].clone()), (json!("json"), json!("JSON string containing JSON")), "{head}");
@@ -285,8 +130,8 @@ fn json_string_containing_json_is_labelled() {
 #[test]
 fn panel_hides_and_comes_back() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
-    ui.open("shop", "orders", 100);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "orders", 100);
     ui.click("grid-cell-0-5");
     let before = ui.rect("value-panel");
     // At the window's right edge (the harness keeps 8 points round the app).
@@ -315,8 +160,8 @@ fn panel_hides_and_comes_back() {
 #[test]
 fn ctrl_c_copies_the_panel_selection_not_the_grid() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
-    ui.open("shop", "orders", 100);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "orders", 100);
     ui.click("grid-cell-0-5");
     let text = ui.panel_text();
     let lines: Vec<&str> = text.split('\n').collect();
@@ -363,8 +208,8 @@ fn the_panel_follows_staged_values_and_null() {
     )
     .unwrap();
     let _t = Scratch(name.clone());
-    let mut ui = connected(db);
-    ui.open("scratch", &name, 2);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("scratch", &name, 2);
     ui.click("grid-cell-1-1");
     let head = ui.value("value-panel");
     assert_eq!((head["column"].clone(), head["type"].clone(), head["null"].clone()), (json!("note"), json!("text"), json!(true)), "{head}");
@@ -386,8 +231,8 @@ fn the_panel_follows_staged_values_and_null() {
 #[test]
 fn a_twenty_megabyte_cell_shows_a_truncation_note_without_a_slow_frame() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
-    ui.open("shop", "big_cell", 1);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "big_cell", 1);
     // The 20,000,000-character text: selecting it builds its view in the frame of the click.
     ui.time_frames();
     ui.click("grid-cell-0-1");
@@ -445,8 +290,8 @@ fn long_note(db: &TestDb) -> Scratch {
 #[test]
 fn a_hidden_panel_builds_no_value_view() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
-    ui.open("shop", "orders", 100);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "orders", 100);
     assert_eq!(ui.execute("ui.toggleValuePanel", json!({})), json!({ "visible": false }));
     let built = |ui: &Ui| ui.harness.state().session().value_view_computations();
     let before = built(&ui);
@@ -463,8 +308,8 @@ fn a_hidden_panel_builds_no_value_view() {
 #[test]
 fn dragging_the_edge_wraps_again_once_released() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
-    ui.open("shop", "big_cell", 1);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "big_cell", 1);
     ui.click("grid-cell-0-1");
     let rows = ui.value("value-text")["rows"].as_u64().unwrap();
     let edge = ui.rect("value-panel");
@@ -487,8 +332,8 @@ fn dragging_the_edge_wraps_again_once_released() {
 fn a_staged_edit_elsewhere_keeps_the_panel_where_it_was() {
     let db = dbee_testkit::require_testdb!();
     let t = long_note(db);
-    let mut ui = connected(db);
-    ui.open("scratch", &t.0, 1);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("scratch", &t.0, 1);
     ui.click("grid-cell-0-1");
     let r = ui.rect("value-text");
     ui.wheel(r.center(), vec2(0.0, -1_000.0));
@@ -513,8 +358,8 @@ fn a_staged_edit_elsewhere_keeps_the_panel_where_it_was() {
 fn a_selection_whose_start_scrolled_away_extends_and_copies_whole() {
     let db = dbee_testkit::require_testdb!();
     let t = long_note(db);
-    let mut ui = connected(db);
-    ui.open("scratch", &t.0, 1);
+    let mut ui = Ui::connected(db);
+    ui.open_rows("scratch", &t.0, 1);
     ui.click("grid-cell-0-1");
     let text = ui.document()["value"]["text"].as_str().unwrap().to_string();
     let r = ui.rect("value-text");

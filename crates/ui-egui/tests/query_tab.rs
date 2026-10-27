@@ -10,142 +10,33 @@
 //! only to the Docker test servers (`require_testdb!`). The seed is read-only: a test that writes
 //! makes its own table in `scratch` and drops it.
 
-use std::sync::{Arc, mpsc};
+mod common;
+
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
+use common::*;
+use dbee_config::{MemoryStore, SecretStore};
 use dbee_engine::{Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{TempHome, TestDb, temp_home, unique};
-use dbee_ui_egui::{ControlRequest, DbeeApp};
+use dbee_testkit::{TestDb, temp_home, unique};
+use dbee_ui_egui::DbeeApp;
 use egui::{Event, Modifiers, PointerButton, Pos2};
-use egui_kittest::Harness;
 use serde_json::{Value as Json, json};
 
-/// The longest a test waits for anything.
-const WAIT: Duration = Duration::from_secs(60);
-
-struct Ui {
-    harness: Harness<'static, DbeeApp>,
-    tx: mpsc::Sender<ControlRequest>,
-    /// Every text a frame put on the clipboard.
-    copied: Vec<String>,
-    _home: TempHome,
-}
-
-fn pg14_server(db: &TestDb) -> &dbee_testkit::PgServer {
-    db.servers.iter().find(|s| s.major == 14).unwrap()
-}
-
-fn pg14(db: &TestDb) -> ConnectionConfig {
-    ConnectionConfig {
-        name: "pg14".into(),
-        host: "127.0.0.1".into(),
-        port: pg14_server(db).port,
-        user: "postgres".into(),
-        database: "dbee".into(),
-        ssl_mode: SslMode::Prefer,
-        ..ConnectionConfig::default()
-    }
-}
-
-/// A window on a throwaway home, connected to the pg14 test server, on the workspace.
-fn connected(db: &TestDb) -> Ui {
-    let home = temp_home(None, None);
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
-    let session = Session::new(SessionOptions {
-        config_dir: Some(home.home.join("config")),
-        secrets: Some(secrets),
-        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
-        notify: None,
-        allowed_targets: None,
-    })
-    .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-    let mut ui = Ui { harness, tx, copied: Vec::new(), _home: home };
-    ui.frame();
-    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
-    ui.execute("connection.open", json!({ "id": id }));
-    ui.frame();
-    assert_eq!(ui.document()["screen"], "workspace");
-    ui
-}
-
-/// [`connected`], with a new query tab whose editor has the keyboard.
+/// [`Ui::connected`], with a new query tab whose editor has the keyboard.
 fn query_tab(db: &TestDb) -> Ui {
-    let mut ui = connected(db);
-    ui.key("T", json!({ "cmd": true }));
+    let mut ui = Ui::connected(db);
+    ui.ctrl("T");
     ui.frame();
     assert_eq!(ui.editor()["focused"], true, "a new query tab's editor has the keyboard: {}", ui.editor());
     ui
 }
 
 impl Ui {
-    /// One frame, with the app's synthetic input fed in first.
-    fn frame(&mut self) {
-        let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
-        *self.harness.input_mut() = raw;
-        self.harness.step();
-        for c in &self.harness.output().platform_output.commands {
-            if let egui::OutputCommand::CopyText(t) = c {
-                self.copied.push(t.clone());
-            }
-        }
-    }
-
-    /// One frame with `events` in its input.
-    fn frame_with(&mut self, events: Vec<Event>) {
-        self.harness.input_mut().events.extend(events);
-        self.frame();
-    }
-
-    fn call(&mut self, method: &str, params: Json) -> Json {
-        let (req, rx) = ControlRequest::new(method, params);
-        self.tx.send(req).unwrap();
-        let start = Instant::now();
-        loop {
-            self.frame();
-            if let Ok(r) = rx.try_recv() {
-                return r;
-            }
-            assert!(start.elapsed() < WAIT, "no reply to {method} after {WAIT:?}");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    fn ok(&mut self, method: &str, params: Json) -> Json {
-        let r = self.call(method, params);
-        assert_eq!(r["ok"], true, "{method}: {r}");
-        r["result"].clone()
-    }
-
-    fn execute(&mut self, command: &str, params: Json) -> Json {
-        self.ok("engine.execute", json!({ "command": command, "params": params }))
-    }
-
-    fn inspect(&mut self) -> Json {
-        self.ok("ui.inspect", json!({}))
-    }
-
-    fn document(&mut self) -> Json {
-        self.ok("document.inspect", json!({}))
-    }
-
     /// The `query` part of `document.inspect`: the active query tab.
     fn query(&mut self) -> Json {
         self.document()["query"].clone()
-    }
-
-    fn tag(&mut self, id: &str) -> Option<Json> {
-        let i = self.inspect();
-        tag_in(&i, id)
-    }
-
-    fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
     }
 
     /// The editor's tag value: `{cursor, focused, lines, length}`.
@@ -156,40 +47,6 @@ impl Ui {
     /// The tags list `enabled: false` for a disabled widget only.
     fn enabled(&mut self, id: &str) -> bool {
         self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["enabled"] != false
-    }
-
-    fn click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id }));
-    }
-
-    fn click_with(&mut self, id: &str, params: Json) {
-        let mut p = json!({ "id": id });
-        if let (Some(p), Json::Object(extra)) = (p.as_object_mut(), params) {
-            p.extend(extra);
-        }
-        self.ok("ui.click", p);
-    }
-
-    fn key(&mut self, key: &str, params: Json) {
-        let mut p = json!({ "key": key });
-        if let (Some(p), Json::Object(extra)) = (p.as_object_mut(), params) {
-            p.extend(extra);
-        }
-        self.ok("ui.key", p);
-    }
-
-    fn text(&mut self, text: &str) {
-        self.ok("ui.text", json!({ "text": text }));
-    }
-
-    /// Runs frames until `done` holds.
-    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Ui) -> bool) {
-        let start = Instant::now();
-        while !done(self) {
-            assert!(start.elapsed() < WAIT, "gave up waiting for {what}");
-            self.frame();
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     /// Runs frames until the active query tab's run has ended, then one more to draw it.
@@ -207,30 +64,6 @@ impl Ui {
         let f = |i: usize| tag["rect"][i].as_f64().unwrap() as f32;
         [f(0), f(1), f(2), f(3)]
     }
-
-    /// The text a frame last put on the clipboard, if any did.
-    fn copied(&self) -> Option<String> {
-        self.copied.last().cloned()
-    }
-}
-
-fn tag_in(inspect: &Json, id: &str) -> Option<Json> {
-    inspect["automation"].as_array().unwrap().iter().find(|a| a["id"] == id).cloned()
-}
-
-fn visible(entry: &Option<Json>) -> bool {
-    entry.as_ref().is_some_and(|e| e.get("visible") != Some(&json!(false)))
-}
-
-/// Drops the scratch table when the test ends, also when it fails.
-struct Scratch(String);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Some(db) = dbee_testkit::testdb() {
-            let _ = dbee_testkit::psql(pg14_server(db), &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.0));
-        }
-    }
 }
 
 const JOIN: &str = "select o.id, c.name, o.total\nfrom shop.orders o\njoin shop.customers c on c.id = o.customer_id\norder by o.id\nlimit 50";
@@ -243,7 +76,7 @@ fn ctrl_enter_runs_and_shows_results() {
     ui.text(JOIN);
     ui.frame();
     assert_eq!(ui.query()["text"], JOIN);
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     let q = ui.query();
     assert_eq!(q["text"], JOIN, "Ctrl+Enter ran the text and put no newline in it");
@@ -268,12 +101,12 @@ fn ctrl_shift_enter_runs_current_statement() {
     let sql = "select 1 as first;\nselect 2 as second, 3 as third;";
     ui.text(sql);
     // The cursor into the first statement.
-    ui.key("Home", json!({ "cmd": true }));
-    ui.key("ArrowRight", json!({}));
-    ui.key("ArrowRight", json!({}));
+    ui.ctrl("Home");
+    ui.key("ArrowRight");
+    ui.key("ArrowRight");
     ui.frame();
     assert_eq!(ui.editor()["cursor"], 2, "a byte offset into the text");
-    ui.key("Enter", json!({ "cmd": true, "shift": true }));
+    ui.ctrl_shift("Enter");
     ui.ran();
     let q = ui.query();
     assert_eq!(q["text"], sql, "Ctrl+Shift+Enter put no newline in");
@@ -281,7 +114,7 @@ fn ctrl_shift_enter_runs_current_statement() {
     assert_eq!(results.len(), 1, "only the statement under the cursor ran: {q}");
     assert_eq!(results[0]["columns"][0]["name"], "first");
     // Run current with the cursor at the end runs the last statement.
-    ui.key("End", json!({ "cmd": true }));
+    ui.ctrl("End");
     ui.frame();
     assert_eq!(ui.editor()["cursor"], sql.len());
     ui.click("query-run-current");
@@ -297,7 +130,7 @@ fn error_card_and_cursor_jump() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select nope");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     let card = ui.value("query-error");
     assert_eq!(card["code"], "server", "{card}");
@@ -305,8 +138,8 @@ fn error_card_and_cursor_jump() {
     assert_eq!((card["position"].clone(), card["line"].clone(), card["column"].clone()), (json!(7), json!(1), json!(8)), "{card}");
     assert!(ui.tag("notice").is_none(), "the card says it, not a notice too");
     // Elsewhere first: the cursor at the start, and the keyboard taken away.
-    ui.key("Home", json!({ "cmd": true }));
-    ui.key("Escape", json!({}));
+    ui.ctrl("Home");
+    ui.key("Escape");
     ui.frame();
     let ed = ui.editor();
     assert_eq!((ed["cursor"].clone(), ed["focused"].clone()), (json!(0), json!(false)), "{ed}");
@@ -325,13 +158,13 @@ fn an_error_without_a_position_offers_no_jump() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select 1/0");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     let card = ui.value("query-error");
     assert!(card["message"].as_str().is_some_and(|m| m.contains("division by zero")), "{card}");
     assert_eq!((card["position"].clone(), card["jump"].clone()), (Json::Null, json!(false)), "{card}");
-    ui.key("Home", json!({ "cmd": true }));
-    ui.key("Escape", json!({}));
+    ui.ctrl("Home");
+    ui.key("Escape");
     ui.click("query-error");
     ui.frame();
     let ed = ui.editor();
@@ -368,10 +201,10 @@ fn ctrl_enter_while_a_run_goes_says_the_engine_is_busy() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select pg_sleep(30)");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.until("the run to start", |ui| !ui.query()["running"].is_null());
     let running = ui.query()["running"].clone();
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.frame();
     let notice = ui.value("notice");
     assert!(notice.as_str().is_some_and(|n| n.contains("busy") && n.contains("a query is running in Query 1")), "{notice}");
@@ -385,7 +218,7 @@ fn several_results_have_a_selector() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select 1 as a;\nselect 'x' as b, 2 as c;\nselect 3 as d");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     assert_eq!(ui.query()["shown"], 2, "the last result shows");
     for n in 1..=3 {
@@ -411,7 +244,7 @@ fn many_results_fit_the_toolbar() {
     let mut ui = query_tab(db);
     let sql: String = (1..=1200).map(|n| format!("select {n} as n;\n")).collect();
     ui.text(&sql);
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     assert_eq!(ui.query()["results"].as_array().map(Vec::len), Some(1200));
     // Not all fit: those around the shown one (the last) do, clear of the row count.
@@ -431,15 +264,15 @@ fn a_result_cut_at_the_cap_says_so() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select generate_series(1, 25000) as n");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     let r = ui.query()["results"][0].clone();
     assert_eq!((r["rows"].clone(), r["rowsSeen"].clone(), r["complete"].clone()), (json!(10_000), json!(25_000), json!(false)), "{r}");
     assert_eq!(ui.value("query-rows"), "First 10,000 of 25,000 rows");
     // A whole result says how many rows it has.
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     ui.text("select generate_series(1, 3) as n");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.until("the small result", |ui| ui.query()["results"][0]["rows"] == 3);
     ui.frame();
     assert_eq!(ui.value("query-rows"), "3 rows");
@@ -452,7 +285,7 @@ fn statements_without_rows_show_rows_affected() {
     let t = &table.0;
     let mut ui = query_tab(db);
     ui.text(&format!("create table scratch.{t} (id int);\ninsert into scratch.{t} values (1), (2);\nupdate scratch.{t} set id = 3 where id = 1"));
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     assert_eq!(ui.query()["results"].as_array().map(Vec::len), Some(3), "{}", ui.query());
     assert_eq!(ui.value("query-affected"), "1 row affected");
@@ -468,7 +301,7 @@ fn a_failed_statement_keeps_the_results_before_it() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select 1 as a;\nselect 2 as b;\nselect nope");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     let q = ui.query();
     assert_eq!((q["error"]["statement"].clone(), q["results"].as_array().map(Vec::len)), (json!(2), Some(2)), "{q}");
@@ -490,16 +323,16 @@ fn tab_inserts_four_spaces_and_keeps_the_keyboard() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select");
-    ui.key("Tab", json!({}));
+    ui.key("Tab");
     ui.text("1");
     ui.frame();
     assert_eq!(ui.query()["text"], "select    1");
     assert_eq!(ui.editor()["focused"], true, "Tab kept the keyboard in the editor");
     // Shift+Tab (no outdent in M1) and Ctrl+Tab do nothing to the text, and keep the keyboard.
-    ui.key("Home", json!({}));
+    ui.key("Home");
     ui.text("    ");
-    ui.key("Tab", json!({ "shift": true }));
-    ui.key("Tab", json!({ "cmd": true }));
+    ui.key_with("Tab", json!({ "shift": true }));
+    ui.ctrl("Tab");
     ui.frame();
     assert_eq!(ui.query()["text"], "    select    1");
     assert_eq!(ui.editor()["focused"], true);
@@ -510,7 +343,7 @@ fn the_value_panel_follows_the_result_grid() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select 1 as id, '{\"a\": [1, 2]}'::jsonb as doc union all select 2, null");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     ui.click("grid-cell-0-1");
     assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 1], "focus": [0, 1] }));
@@ -521,7 +354,7 @@ fn the_value_panel_follows_the_result_grid() {
     ui.click("grid-cell-1-0");
     assert_eq!(ui.value("value-panel")["column"], "id");
     // The grid's cells copy, once the editor no longer has the keyboard.
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("C");
     assert_eq!(ui.copied().as_deref(), Some("2"));
 }
 
@@ -530,7 +363,7 @@ fn the_result_grid_is_read_only() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
     ui.text("select id, name from shop.customers order by id limit 5");
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.ran();
     ui.click("grid-header-0");
     ui.frame();
@@ -558,13 +391,13 @@ fn text_set_elsewhere_reaches_the_editor() {
     ui.execute("query.setText", json!({ "text": "select 2" }));
     ui.frame();
     assert_eq!(ui.editor()["length"], 8);
-    ui.key("End", json!({ "cmd": true }));
+    ui.ctrl("End");
     ui.text(" + 1");
     ui.frame();
     assert_eq!(ui.query()["text"], "select 2 + 1");
     // Each tab keeps its own text.
     let first = ui.document()["active"].as_u64().unwrap();
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     ui.text("select 'other'");
     ui.frame();
     ui.click(&format!("tab-{first}"));
@@ -607,7 +440,7 @@ fn the_split_between_editor_and_results_drags() {
     let after = ui.rect("query-editor")[3];
     assert!((after - before - 120.0).abs() < 2.0, "{before} → {after}");
     // It stays for the window's run: another query tab has the same split.
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     ui.frame();
     let other = ui.rect("query-editor")[3];
     assert!((other - after).abs() < 1.0, "{after} vs {other}");
@@ -788,14 +621,14 @@ fn keystroke_frames_in_big_scripts() {
         let (m, x) = window_keystrokes(db, &text, keys);
         println!("  {:>5} KiB, short lines: {m:?} ({x:?})", text.len() / 1024);
     }
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     println!("keystroke frames, whole window with AccessKit, kittest (median, max):");
     for size in [32 * 1024, 256 * 1024, 1024 * 1024] {
         let text = script(size, false);
         ui.execute("tab.newQuery", json!({ "text": text }));
         ui.frame();
         ui.click("query-editor");
-        ui.key("End", json!({ "cmd": true }));
+        ui.ctrl("End");
         let mut frames = Vec::new();
         for i in 0..keys {
             ui.harness.input_mut().events.push(Event::Text(if i % 2 == 0 { "a".into() } else { "b".into() }));
@@ -907,7 +740,7 @@ fn wide_result_frames() {
         for text in [false, true] {
             let sql = wide(columns, text);
             let ((idle, idle_max), (scroll, scroll_max)) = result_frames(db, &sql, columns, frames);
-            let mut ui = connected(db);
+            let mut ui = Ui::connected(db);
             ui.execute("tab.newQuery", json!({ "text": sql }));
             ui.execute("query.run", json!({}));
             ui.ran();

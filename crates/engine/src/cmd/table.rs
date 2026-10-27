@@ -54,7 +54,7 @@ use serde_json::json;
 
 use super::connection::cancel_statements;
 use super::edit;
-use super::{CommandSpec, NOT_CONNECTED, ignored, needs_db, p};
+use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needs_db, p};
 use crate::state::{PageView, TableTab, Total};
 use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
 
@@ -206,14 +206,6 @@ pub fn table_view(s: &Session) -> Result<(), String> {
 }
 
 // ---- helpers ---------------------------------------------------------------------------------
-
-fn bad(msg: impl Into<String>) -> EngineError {
-    EngineError::BadParams { id: String::new(), msg: msg.into() }
-}
-
-fn disabled(why: &str) -> EngineError {
-    EngineError::Disabled { id: String::new(), why: why.to_string() }
-}
 
 /// SQL dbee would not build from the params.
 fn sql_bad(e: SqlError) -> EngineError {

@@ -49,7 +49,7 @@ use dbee_ssh::Tunnel;
 use serde_json::json;
 
 use super::connection::db_error;
-use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, ignored, needs_db, p};
+use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, bad, disabled, ignored, needs_db, p};
 use crate::jobs::Stop;
 use crate::state::{QueryError, QueryRun, QueryTab, Selection, StatementOutcome};
 use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
@@ -114,14 +114,6 @@ pub(crate) const SPECS: &[CommandSpec] = &[
 pub fn can_run(s: &Session) -> Result<(), String> {
     needs_db(s)?;
     active_query(s)
-}
-
-fn bad(msg: impl Into<String>) -> EngineError {
-    EngineError::BadParams { id: String::new(), msg: msg.into() }
-}
-
-fn disabled(why: &str) -> EngineError {
-    EngineError::Disabled { id: String::new(), why: why.to_string() }
 }
 
 // ---- stopping a run --------------------------------------------------------------------------

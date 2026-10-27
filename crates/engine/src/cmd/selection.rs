@@ -22,7 +22,7 @@ use dbee_core::Column;
 use dbee_core::copy::{Cells, CopyFormat, TooLarge, render_within};
 use serde_json::json;
 
-use super::{CommandSpec, always, p};
+use super::{CommandSpec, always, bad, disabled, p};
 use crate::state::{Selection, Tab};
 use crate::view::Grid;
 use crate::{EngineError, Json, Outcome, Session, TabId};
@@ -88,14 +88,6 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         undoable: false,
     },
 ];
-
-fn bad(msg: impl Into<String>) -> EngineError {
-    EngineError::BadParams { id: String::new(), msg: msg.into() }
-}
-
-fn disabled(why: &str) -> EngineError {
-    EngineError::Disabled { id: String::new(), why: why.to_string() }
-}
 
 fn grid(s: &Session) -> Option<Grid<'_>> {
     s.state.active_tab().and_then(Grid::of)
@@ -221,8 +213,8 @@ fn copy(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let rect = Rect { grid: &g, top: r0, left: c0, rows: (r1 - r0).saturating_add(1), columns: columns.len() };
     let text = match render_within(format, columns, &rect, COPY_MAX_BYTES) {
         Ok(text) => text,
-        Err(TooLarge::Cells { bytes }) => return Err(disabled(&too_large(bytes))),
-        Err(TooLarge::Text { rows }) => return Err(disabled(&too_long(format, rows))),
+        Err(TooLarge::Cells { bytes }) => return Err(disabled(too_large(bytes))),
+        Err(TooLarge::Text { rows }) => return Err(disabled(too_long(format, rows))),
     };
     let mut done = serde_json::Map::new();
     // Moved in, not copied: the text can be tens of megabytes.

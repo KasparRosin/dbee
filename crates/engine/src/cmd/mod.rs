@@ -118,6 +118,16 @@ pub fn journal_params(params: &Json) -> Json {
     kept
 }
 
+/// A `BadParams` error; [`Session::execute`] fills in the command id.
+pub(crate) fn bad(msg: impl Into<String>) -> EngineError {
+    EngineError::BadParams { id: String::new(), msg: msg.into() }
+}
+
+/// A `Disabled` error saying why; [`Session::execute`] fills in the command id.
+pub(crate) fn disabled(why: impl Into<String>) -> EngineError {
+    EngineError::Disabled { id: String::new(), why: why.into() }
+}
+
 /// `enabled` for commands that can always run.
 pub fn always(_: &Session) -> Result<(), String> {
     Ok(())
@@ -174,7 +184,7 @@ pub fn active_query(s: &Session) -> Result<(), String> {
 pub mod p {
     use crate::{EngineError, Json, TabId};
 
-    fn bad(key: &str, what: &str) -> EngineError {
+    fn bad_key(key: &str, what: &str) -> EngineError {
         EngineError::BadParams { id: String::new(), msg: format!("`{key}` {what}") }
     }
 
@@ -183,44 +193,58 @@ pub mod p {
     }
 
     fn whole(v: &Json, key: &str) -> Result<u64, EngineError> {
-        v.as_u64().ok_or_else(|| bad(key, "must be a whole number, 0 or more"))
+        v.as_u64().ok_or_else(|| bad_key(key, "must be a whole number, 0 or more"))
     }
 
     /// A required string.
     pub fn str<'a>(p: &'a Json, key: &str) -> Result<&'a str, EngineError> {
-        opt_str(p, key)?.ok_or_else(|| bad(key, "is required (a string)"))
+        opt_str(p, key)?.ok_or_else(|| bad_key(key, "is required (a string)"))
     }
 
     pub fn opt_str<'a>(p: &'a Json, key: &str) -> Result<Option<&'a str>, EngineError> {
         match get(p, key) {
             None => Ok(None),
             Some(Json::String(s)) => Ok(Some(s)),
-            Some(_) => Err(bad(key, "must be a string")),
+            Some(_) => Err(bad_key(key, "must be a string")),
         }
     }
 
     /// A required whole number.
     pub fn usize(p: &Json, key: &str) -> Result<usize, EngineError> {
-        opt_usize(p, key)?.ok_or_else(|| bad(key, "is required (a whole number)"))
+        opt_usize(p, key)?.ok_or_else(|| bad_key(key, "is required (a whole number)"))
     }
 
     pub fn opt_usize(p: &Json, key: &str) -> Result<Option<usize>, EngineError> {
-        get(p, key).map(|v| whole(v, key).and_then(|n| usize::try_from(n).map_err(|_| bad(key, "is too large")))).transpose()
+        get(p, key).map(|v| whole(v, key).and_then(|n| usize::try_from(n).map_err(|_| bad_key(key, "is too large")))).transpose()
     }
 
     pub fn bool_or(p: &Json, key: &str, default: bool) -> Result<bool, EngineError> {
         match get(p, key) {
             None => Ok(default),
-            Some(v) => v.as_bool().ok_or_else(|| bad(key, "must be true or false")),
+            Some(v) => v.as_bool().ok_or_else(|| bad_key(key, "must be true or false")),
         }
     }
 
     /// A required tab id. Whether the tab exists is the command's check.
     pub fn tab_id(p: &Json, key: &str) -> Result<TabId, EngineError> {
-        opt_tab_id(p, key)?.ok_or_else(|| bad(key, "is required (a tab id)"))
+        opt_tab_id(p, key)?.ok_or_else(|| bad_key(key, "is required (a tab id)"))
     }
 
     pub fn opt_tab_id(p: &Json, key: &str) -> Result<Option<TabId>, EngineError> {
         get(p, key).map(|v| whole(v, key).map(TabId)).transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bad, disabled};
+    use crate::EngineError;
+
+    #[test]
+    fn bad_and_disabled_leave_the_id_for_execute() {
+        assert_eq!(bad("`x` is required"), EngineError::BadParams { id: String::new(), msg: "`x` is required".into() });
+        assert_eq!(bad(format!("no tab {}", 3)), EngineError::BadParams { id: String::new(), msg: "no tab 3".into() });
+        assert_eq!(disabled("not connected"), EngineError::Disabled { id: String::new(), why: "not connected".into() });
+        assert_eq!(disabled(String::from("busy")), EngineError::Disabled { id: String::new(), why: "busy".into() });
     }
 }

@@ -50,7 +50,7 @@ use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
 
-use super::{CommandSpec, LOST, NOT_CONNECTED, always, connected, ignored, needs_db, not_connected, p};
+use super::{CommandSpec, LOST, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
 use crate::allowed::check_target;
 use crate::state::{Connected, Credentials};
 use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
@@ -191,14 +191,6 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         undoable: false,
     },
 ];
-
-fn bad(msg: impl Into<String>) -> EngineError {
-    EngineError::BadParams { id: String::new(), msg: msg.into() }
-}
-
-fn disabled(why: &str) -> EngineError {
-    EngineError::Disabled { id: String::new(), why: why.to_string() }
-}
 
 /// The longest a catalog load may take inside a job (open, reconnect, refresh).
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(60);

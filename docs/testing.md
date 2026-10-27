@@ -1,11 +1,11 @@
 # Testing
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (§4: the M1 day removes the rows a killed run left)
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (§3: after `testdb up`, ci runs the tests with `DBEE_REQUIRE_ORACLES=1`; §4: the UI tests share one harness)
 
 ```sh
 cargo xtask testdb up                                         # start the Docker test servers (§3); ci does it when Docker answers
-cargo xtask ci                                                # all gates (fmt, clippy, testdb, test, assets, layers, provenance)
-DBEE_REQUIRE_ORACLES=1 cargo xtask ci                         # the same, with a skipped driver or oracle test failing instead
+cargo xtask ci                                                # all gates (fmt, clippy, testdb, test, assets, layers, provenance); after testdb up a skipped driver test fails
+DBEE_REQUIRE_ORACLES=1 cargo xtask ci                         # the same, and without Docker ci fails instead of skipping the driver tests
 cargo test --workspace                                        # every test; tests that need the servers print SKIPPED without them
 cargo test --workspace --test table_tab                       # one test file (of any crate)
 cargo test --workspace paging                                 # tests whose name contains `paging`
@@ -66,13 +66,14 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
   - Schema `scratch` is empty. The seed is read-only: a test that writes creates its own table in `scratch`, named with `dbee_testkit::unique(..)`, and drops it at the end.
 - **Skip rule.** A test that needs the servers starts with `let db = dbee_testkit::require_testdb!();`.
   - When the env file is missing or a server does not answer, it prints `SKIPPED: …` and returns. With `DBEE_REQUIRE_ORACLES=1` it fails instead.
-  - `cargo xtask ci` runs `testdb up` before `test` when `docker info` answers. Otherwise its summary says `skip  driver tests (no Docker)`, and with `DBEE_REQUIRE_ORACLES=1` ci fails.
+  - `cargo xtask ci` runs `testdb up` before `test` when `docker info` answers, and then runs the tests with `DBEE_REQUIRE_ORACLES=1` (it prints `$ DBEE_REQUIRE_ORACLES=1 cargo test --workspace`). So once the servers came up, a driver test that skips fails: a server that stopped answering, or an env file the tests read differently from how `testdb up` wrote it (the writer, `xtask/src/testdb.rs`, and the reader, `crates/testkit/src/lib.rs`, are kept apart on purpose).
+  - Without Docker its summary says `skip  driver tests (no Docker)`, and with `DBEE_REQUIRE_ORACLES=1` ci fails.
 - **Helpers.** `dbee_testkit::psql(server, sql)` runs `psql` inside a server's container, for set-up and for checking what dbee wrote. `dbee_testkit::temp_home(..)` gives SSH tests a throwaway home with a key and `known_hosts`.
 - **Never a real server**, and never a connection string from the environment that points elsewhere. Tests never touch the real `~/.ssh`, SSH agent or keyring.
 
 ## 4. UI: control channel and screenshots
 
-- **Scripted tests** (`crates/ui-egui/tests/control.rs`, `crates/ui-egui/tests/connections.rs`, `crates/ui-egui/tests/workspace.rs`, `crates/ui-egui/tests/table_tab.rs`, `crates/ui-egui/tests/editing.rs`, `crates/ui-egui/tests/value_panel.rs`, `crates/ui-egui/tests/query_tab.rs`, `crates/ui-egui/tests/clipboard.rs`) run `DbeeApp::ui` in an egui_kittest harness, frame by frame, and drive it only through control requests and automation ids, asserting on `ui.inspect` and `document.inspect`. Each frame first feeds the app's synthetic input (`DbeeApp::feed_input`), as eframe's raw-input hook does. Copied text is read from the frame's egui output (`OutputCommand::CopyText`), which kittest hands back and which never reaches the system clipboard.
+- **Scripted tests** (`crates/ui-egui/tests/control.rs`, `crates/ui-egui/tests/connections.rs`, `crates/ui-egui/tests/workspace.rs`, `crates/ui-egui/tests/table_tab.rs`, `crates/ui-egui/tests/editing.rs`, `crates/ui-egui/tests/value_panel.rs`, `crates/ui-egui/tests/query_tab.rs`, `crates/ui-egui/tests/clipboard.rs`) run `DbeeApp::ui` in an egui_kittest harness, frame by frame, and drive it only through control requests and automation ids, asserting on `ui.inspect` and `document.inspect`. They share one harness, `crates/ui-egui/tests/common/mod.rs` (`mod common;`, as the engine's tests share `crates/engine/tests/common/mod.rs`): a `Ui` window on a throwaway home (`Ui::fresh`, `Ui::connected`, `Ui::connected_in`, `Ui::connected_with` and a `Setup` for the size, frame step, home, secrets, connection and app), the request, click, key, text and inspect helpers, and a lock every window holds (exclusive for a test that kills dbee's backends). Each file keeps only its own helpers. Each frame first feeds the app's synthetic input (`DbeeApp::feed_input`), as eframe's raw-input hook does. Copied text is read from the frame's egui output (`OutputCommand::CopyText`), which kittest hands back and which never reaches the system clipboard.
 - **The M1 day in the real window** (`apps/dbee/tests/m1_day.rs`, `#[ignore]`: it opens a window on the desktop, so `cargo xtask ci` never runs it). It starts the built `dbee` with the environment `cargo xtask run-isolated` gives (a throwaway home holding the test key and the sshd's host key, in-memory secrets and clipboard, the test servers as the only targets) and drives the M1 day through the control channel. A saved connection "Shop live" through the test sshd, Ctrl+P, three filters, a jsonb value, a foreign key, two edits written with Ctrl+S, a join copied with its header. It checks `document.inspect` after each step and psql after the edits, and saves `target/m1-day/<n>-<step>.png` to look at. The seed stays read-only: the day edits a customer and an order the test inserts, and deletes them when it ends, also when it fails. A run that is killed (Ctrl+C, a tool's timeout) cannot delete them, so each run first removes the rows earlier runs left, found by the customers' note `the M1 day test row`: their orders, then the customers. After the day it checks that the counts of customers and orders are as before. Run it by hand, with the window shown (a hidden window runs no frames on Wayland; see the last point below):
 
   ```sh

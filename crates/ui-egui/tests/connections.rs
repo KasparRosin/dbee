@@ -9,141 +9,34 @@
 //! (`require_testdb!`); the others use port 1 or a silent listener of their own on 127.0.0.1.
 //! The file picker (rfd) is never opened: a key path comes from a saved connection.
 
+mod common;
+
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SecretKind, SecretStore, SshAuth, SshConfig, SslMode};
-use dbee_engine::{Session, SessionOptions};
-use dbee_ssh::{AgentSource, SshEnv};
+use common::*;
+use dbee_config::{ConnectionConfig, SecretKind, SecretStore, SshAuth, SshConfig};
 use dbee_testkit::{TempHome, TestDb, temp_home};
-use dbee_ui_egui::{ControlRequest, DbeeApp};
-use egui_kittest::Harness;
 use serde_json::{Value as Json, json};
 
-/// The longest a test waits for anything.
-const WAIT: Duration = Duration::from_secs(30);
-
-struct Ui {
-    harness: Harness<'static, DbeeApp>,
-    tx: mpsc::Sender<ControlRequest>,
-    secrets: Option<Arc<MemoryStore>>,
-    home: TempHome,
-}
-
-/// A window on a throwaway home with a memory secret store.
+/// A 1200 × 900 window on a throwaway home with a memory secret store.
 fn ui() -> Ui {
-    ui_in(temp_home(None, None), true)
+    Ui::fresh(egui::vec2(1200.0, 900.0))
 }
 
-/// A window on `home`, with a memory secret store or none.
+/// A 1200 × 900 window on `home`, with a memory secret store or none.
 fn ui_in(home: TempHome, with_secrets: bool) -> Ui {
-    let secrets = with_secrets.then(|| Arc::new(MemoryStore::default()));
-    let session = Session::new(SessionOptions {
-        config_dir: Some(home.home.join("config")),
-        secrets: secrets.clone().map(|s| s as Arc<dyn SecretStore>),
-        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
-        notify: None,
-        allowed_targets: None,
-    })
-    .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-    let mut ui = Ui { harness, tx, secrets, home };
-    ui.frame();
-    ui
+    Ui::window(Setup { size: egui::vec2(1200.0, 900.0), home: Some(home), secrets: with_secrets, ..Setup::default() })
 }
 
 impl Ui {
-    /// One frame, with the app's synthetic input fed in first.
-    fn frame(&mut self) {
-        let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
-        *self.harness.input_mut() = raw;
-        self.harness.step();
-    }
-
-    fn send(&mut self, method: &str, params: Json) -> mpsc::Receiver<Json> {
-        let (req, rx) = ControlRequest::new(method, params);
-        self.tx.send(req).unwrap();
-        rx
-    }
-
-    fn call(&mut self, method: &str, params: Json) -> Json {
-        let rx = self.send(method, params);
-        let start = Instant::now();
-        loop {
-            self.frame();
-            if let Ok(r) = rx.try_recv() {
-                return r;
-            }
-            assert!(start.elapsed() < WAIT, "no reply to {method} after {WAIT:?}");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    fn ok(&mut self, method: &str, params: Json) -> Json {
-        let r = self.call(method, params);
-        assert_eq!(r["ok"], true, "{method}: {r}");
-        r["result"].clone()
-    }
-
-    fn execute(&mut self, command: &str, params: Json) -> Json {
-        self.ok("engine.execute", json!({ "command": command, "params": params }))
-    }
-
-    fn inspect(&mut self) -> Json {
-        self.ok("ui.inspect", json!({}))
-    }
-
-    fn document(&mut self) -> Json {
-        self.ok("document.inspect", json!({}))
-    }
-
-    /// The automation entry `id` of the last drawn frame.
-    fn tag(&mut self, id: &str) -> Option<Json> {
-        let i = self.inspect();
-        tag_in(&i, id)
-    }
-
-    /// The `value` of automation entry `id`.
-    fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
-    }
-
-    fn click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id }));
-    }
-
-    fn right_click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id, "button": "right" }));
-    }
-
-    fn double_click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id, "count": 2 }));
-    }
-
-    fn text(&mut self, text: &str) {
-        self.ok("ui.text", json!({ "text": text }));
-    }
-
     /// Clicks the text field `id`, selects all of it and types `text` over it.
     fn replace(&mut self, id: &str, text: &str) {
         self.click(id);
         self.ok("ui.key", json!({ "key": "A", "cmd": true }));
         self.text(text);
-    }
-
-    /// Runs frames until `done` holds.
-    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Ui) -> bool) {
-        let start = Instant::now();
-        while !done(self) {
-            assert!(start.elapsed() < WAIT, "gave up waiting for {what}");
-            self.frame();
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     /// The id of the saved connection named `name`.
@@ -167,30 +60,9 @@ impl Ui {
     }
 }
 
-fn tag_in(inspect: &Json, id: &str) -> Option<Json> {
-    inspect["automation"].as_array().unwrap().iter().find(|a| a["id"] == id).cloned()
-}
-
-fn ids(inspect: &Json) -> Vec<String> {
-    inspect["automation"].as_array().unwrap().iter().filter_map(|a| a["id"].as_str().map(str::to_string)).collect()
-}
-
 fn rect(entry: &Json) -> [f64; 4] {
     let r: Vec<f64> = entry["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
     [r[0], r[1], r[2], r[3]]
-}
-
-fn pg14(db: &TestDb) -> ConnectionConfig {
-    let pg = db.servers.iter().find(|s| s.major == 14).unwrap();
-    ConnectionConfig {
-        name: "pg14".into(),
-        host: "127.0.0.1".into(),
-        port: pg.port,
-        user: "postgres".into(),
-        database: "dbee".into(),
-        ssl_mode: SslMode::Prefer,
-        ..ConnectionConfig::default()
-    }
 }
 
 /// pg14 through the test sshd, logging in with `auth`.

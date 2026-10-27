@@ -8,190 +8,18 @@
 //! only to the Docker test servers (`require_testdb!`). The seed is read-only: tests that stage
 //! edits or need odd rows make their own table in `scratch` and drop it.
 
-use std::sync::{Arc, mpsc};
+mod common;
+
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
-use dbee_engine::{Session, SessionOptions};
-use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{TempHome, TestDb, temp_home, unique};
-use dbee_ui_egui::{ControlRequest, DbeeApp};
+use common::*;
+use dbee_testkit::{TestDb, unique};
 use egui::{Event, Modifiers, PointerButton, Pos2};
 use egui_kittest::Harness;
 use serde_json::{Value as Json, json};
 
-/// The longest a test waits for anything.
-const WAIT: Duration = Duration::from_secs(60);
-
-struct Ui {
-    harness: Harness<'static, DbeeApp>,
-    tx: mpsc::Sender<ControlRequest>,
-    /// Every text a frame put on the clipboard.
-    copied: Vec<String>,
-    _home: TempHome,
-}
-
-fn pg14(db: &TestDb) -> ConnectionConfig {
-    let pg = db.servers.iter().find(|s| s.major == 14).unwrap();
-    ConnectionConfig {
-        name: "pg14".into(),
-        host: "127.0.0.1".into(),
-        port: pg.port,
-        user: "postgres".into(),
-        database: "dbee".into(),
-        ssl_mode: SslMode::Prefer,
-        ..ConnectionConfig::default()
-    }
-}
-
-/// A window on a throwaway home, connected to the pg14 test server, on the workspace.
-fn connected(db: &TestDb) -> Ui {
-    connected_in(db, egui::vec2(1400.0, 900.0))
-}
-
-/// [`connected`] in a window of `size`.
-fn connected_in(db: &TestDb, size: egui::Vec2) -> Ui {
-    let home = temp_home(None, None);
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
-    let session = Session::new(SessionOptions {
-        config_dir: Some(home.home.join("config")),
-        secrets: Some(secrets),
-        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
-        notify: None,
-        allowed_targets: None,
-    })
-    .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(size).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-    let mut ui = Ui { harness, tx, copied: Vec::new(), _home: home };
-    ui.frame();
-    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
-    ui.execute("connection.open", json!({ "id": id }));
-    ui.frame();
-    assert_eq!(ui.document()["screen"], "workspace");
-    ui
-}
-
 impl Ui {
-    /// One frame, with the app's synthetic input fed in first.
-    fn frame(&mut self) {
-        let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
-        *self.harness.input_mut() = raw;
-        self.harness.step();
-        for c in &self.harness.output().platform_output.commands {
-            if let egui::OutputCommand::CopyText(t) = c {
-                self.copied.push(t.clone());
-            }
-        }
-    }
-
-    /// One frame with `events` in its input.
-    fn frame_with(&mut self, events: Vec<Event>) {
-        self.harness.input_mut().events.extend(events);
-        self.frame();
-    }
-
-    fn call(&mut self, method: &str, params: Json) -> Json {
-        let (req, rx) = ControlRequest::new(method, params);
-        self.tx.send(req).unwrap();
-        let start = Instant::now();
-        loop {
-            self.frame();
-            if let Ok(r) = rx.try_recv() {
-                return r;
-            }
-            assert!(start.elapsed() < WAIT, "no reply to {method} after {WAIT:?}");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    fn ok(&mut self, method: &str, params: Json) -> Json {
-        let r = self.call(method, params);
-        assert_eq!(r["ok"], true, "{method}: {r}");
-        r["result"].clone()
-    }
-
-    fn execute(&mut self, command: &str, params: Json) -> Json {
-        self.ok("engine.execute", json!({ "command": command, "params": params }))
-    }
-
-    fn inspect(&mut self) -> Json {
-        self.ok("ui.inspect", json!({}))
-    }
-
-    fn document(&mut self) -> Json {
-        self.ok("document.inspect", json!({}))
-    }
-
-    /// The `table` part of `document.inspect`.
-    fn table(&mut self) -> Json {
-        self.document()["table"].clone()
-    }
-
-    fn tag(&mut self, id: &str) -> Option<Json> {
-        let i = self.inspect();
-        tag_in(&i, id)
-    }
-
-    fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
-    }
-
-    fn click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id }));
-    }
-
-    fn click_with(&mut self, id: &str, params: Json) {
-        let mut p = json!({ "id": id });
-        if let (Some(p), Json::Object(extra)) = (p.as_object_mut(), params) {
-            p.extend(extra);
-        }
-        self.ok("ui.click", p);
-    }
-
-    fn key(&mut self, key: &str, params: Json) {
-        let mut p = json!({ "key": key });
-        if let (Some(p), Json::Object(extra)) = (p.as_object_mut(), params) {
-            p.extend(extra);
-        }
-        self.ok("ui.key", p);
-    }
-
-    fn text(&mut self, text: &str) {
-        self.ok("ui.text", json!({ "text": text }));
-    }
-
-    /// Runs frames until `done` holds.
-    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Ui) -> bool) {
-        let start = Instant::now();
-        while !done(self) {
-            assert!(start.elapsed() < WAIT, "gave up waiting for {what}");
-            self.frame();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    /// Opens `schema.table` and waits for its first page.
-    fn open(&mut self, schema: &str, table: &str) {
-        self.execute("table.open", json!({ "schema": schema, "table": table }));
-        self.frame();
-    }
-
-    /// The centre of automation entry `id`.
-    fn centre(&mut self, id: &str) -> Pos2 {
-        let tag = self.tag(id).unwrap_or_else(|| panic!("no widget `{id}`"));
-        let r = &tag["rect"];
-        let f = |i: usize| r[i].as_f64().unwrap() as f32;
-        Pos2::new(f(0) + f(2) / 2.0, f(1) + f(3) / 2.0)
-    }
-
-    /// The text a frame last put on the clipboard, if any did.
-    fn copied(&self) -> Option<String> {
-        self.copied.last().cloned()
-    }
-
     /// Where `id` was drawn in the last frame, in view.
     fn rect(&self, id: &str) -> Option<egui::Rect> {
         self.harness.state().tags().rect(id)
@@ -235,37 +63,6 @@ impl Ui {
     }
 }
 
-fn tag_in(inspect: &Json, id: &str) -> Option<Json> {
-    inspect["automation"].as_array().unwrap().iter().find(|a| a["id"] == id).cloned()
-}
-
-fn visible(entry: &Option<Json>) -> bool {
-    entry.as_ref().is_some_and(|e| e.get("visible") != Some(&json!(false)))
-}
-
-/// Drops the scratch table when the test ends, also when it fails.
-struct Scratch(String);
-
-impl Scratch {
-    fn new(db: &TestDb, prefix: &str, sql: impl Fn(&str) -> String) -> Scratch {
-        let name = unique(prefix);
-        dbee_testkit::psql(pg14_server(db), &sql(&name)).unwrap();
-        Scratch(name)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Some(db) = dbee_testkit::testdb() {
-            let _ = dbee_testkit::psql(pg14_server(db), &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.0));
-        }
-    }
-}
-
-fn pg14_server(db: &TestDb) -> &dbee_testkit::PgServer {
-    db.servers.iter().find(|s| s.major == 14).unwrap()
-}
-
 /// A scratch table `(id, a text, b text)` with one row `(1, NULL, '')` and one `(2, 'x', 'y')`.
 fn null_and_empty(db: &TestDb) -> Scratch {
     Scratch::new(db, "t_grid", |t| {
@@ -276,7 +73,7 @@ fn null_and_empty(db: &TestDb) -> Scratch {
 #[test]
 fn day_filters_through_the_bar() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "orders");
     // The first row is there to edit; two more come with +.
     ui.click("filter-add");
@@ -306,14 +103,14 @@ fn day_filters_through_the_bar() {
     // − takes a row out of the bar; Enter in a value field applies.
     ui.click("filter-2-remove");
     ui.click("filter-1-value");
-    ui.key("Enter", json!({}));
+    ui.key("Enter");
     ui.until("the page with two filters", |ui| ui.table()["applied"]["filters"].as_array().map(Vec::len) == Some(2));
 }
 
 #[test]
 fn raw_where_through_the_toggle() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "customers");
     // A filter row first.
     ui.click("filter-0-column");
@@ -326,7 +123,7 @@ fn raw_where_through_the_toggle() {
     assert!(ui.tag("filter-0-column").is_none(), "one raw field instead of the rows");
     ui.click("filter-raw");
     ui.text("id <= 3");
-    ui.key("Enter", json!({}));
+    ui.key("Enter");
     ui.until("the raw filter", |ui| ui.table()["applied"] == json!({ "raw": "id <= 3" }) && ui.table()["loading"].is_null());
     let t = ui.table();
     assert_eq!((t["rawMode"].clone(), t["rows"].clone()), (json!(true), json!(3)), "{t}");
@@ -345,7 +142,7 @@ fn raw_where_through_the_toggle() {
 #[test]
 fn null_operators_take_no_value() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "customers");
     ui.click("filter-0-column");
     ui.click("filter-0-column-note");
@@ -367,11 +164,11 @@ fn null_operators_take_no_value() {
 #[test]
 fn a_focused_filter_value_keeps_its_own_ctrl_a() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "customers");
     ui.click("filter-0-value");
     ui.text("abc");
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     ui.text("Customer 7");
     ui.frame();
     assert_eq!(ui.value("filter-0-value"), "Customer 7", "Ctrl+A selected the field's text");
@@ -381,7 +178,7 @@ fn a_focused_filter_value_keeps_its_own_ctrl_a() {
 #[test]
 fn clicking_fk_link_opens_customer() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "orders");
     assert!(ui.tag("fk-link-0-1").is_none(), "the link shows on the selected row only");
     ui.click("grid-cell-0-1");
@@ -399,7 +196,7 @@ fn clicking_fk_link_opens_customer() {
 fn null_and_empty_look_different() {
     let db = dbee_testkit::require_testdb!();
     let table = null_and_empty(db);
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
     let null = ui.value("grid-cell-0-1");
     assert_eq!((null["text"].clone(), null["null"].clone()), (json!("NULL"), json!(true)), "NULL shows as a dim NULL: {null}");
@@ -412,7 +209,7 @@ fn null_and_empty_look_different() {
 #[test]
 fn header_click_sorts() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "customers");
     let head = ui.value("grid-header-0");
     assert_eq!((head["name"].clone(), head["key"].clone(), head["sort"].clone()), (json!("id"), json!("primary"), Json::Null), "{head}");
@@ -431,7 +228,7 @@ fn header_click_sorts() {
 fn context_menu_set_as_null() {
     let db = dbee_testkit::require_testdb!();
     let table = null_and_empty(db);
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
     ui.click_with("grid-cell-1-2", json!({ "button": "right" }));
     assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 2], "focus": [1, 2] }), "a right-click selects the cell");
@@ -460,7 +257,7 @@ fn context_menu_set_as_null() {
 fn staged_edits_block_sorting_and_applying_filters_and_say_why() {
     let db = dbee_testkit::require_testdb!();
     let table = null_and_empty(db);
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
     ui.click_with("grid-cell-1-1", json!({ "button": "right" }));
     ui.click("grid-menu-null");
@@ -483,7 +280,7 @@ fn staged_edits_block_sorting_and_applying_filters_and_say_why() {
     // Typing still works; Enter applies nothing, and says why.
     ui.click("filter-0-value");
     ui.text("2");
-    ui.key("Enter", json!({}));
+    ui.key("Enter");
     ui.frame();
     assert_eq!(ui.document()["jobs"], json!([]));
     let t = ui.table();
@@ -503,7 +300,7 @@ fn a_failed_delete_stays_struck_through() {
         )
     });
     let _child = Scratch(child);
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("scratch", &parent.0);
     ui.click_with("grid-cell-0-0", json!({ "button": "right" }));
     ui.click("grid-menu-delete");
@@ -522,7 +319,7 @@ fn a_failed_delete_stays_struck_through() {
 fn context_menu_copy_puts_the_selection_on_the_clipboard() {
     let db = dbee_testkit::require_testdb!();
     let table = null_and_empty(db);
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
     ui.click_with("grid-cell-1-1", json!({ "button": "right" }));
     ui.click("grid-menu-copy-json");
@@ -533,7 +330,7 @@ fn context_menu_copy_puts_the_selection_on_the_clipboard() {
 #[test]
 fn a_page_draws_in_the_frame_its_rows_arrive() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     // The reply goes out in the frame that applies the rows; `ui.inspect` reports that frame.
     ui.execute("table.open", json!({ "schema": "shop", "table": "big_rows" }));
     let i = ui.inspect();
@@ -552,7 +349,7 @@ fn a_page_draws_in_the_frame_its_rows_arrive() {
 #[test]
 fn rows_out_of_view_scroll_in_when_clicked() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "big_rows");
     ui.click("grid-cell-90-1");
     assert_eq!(ui.document()["selection"], json!({ "anchor": [90, 1], "focus": [90, 1] }));
@@ -570,7 +367,7 @@ fn rows_out_of_view_scroll_in_when_clicked() {
 #[test]
 fn shift_click_drag_and_ctrl_a_select() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "customers");
     ui.click("grid-cell-1-0");
     ui.click_with("grid-cell-3-2", json!({ "modifiers": { "shift": true } }));
@@ -587,7 +384,7 @@ fn shift_click_drag_and_ctrl_a_select() {
     ui.frame_with(vec![press(false)]);
     assert_eq!(ui.document()["selection"], json!({ "anchor": [4, 1], "focus": [6, 3] }));
     // Ctrl+A with no text field focused selects every cell.
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     let sel = ui.document()["selection"].clone();
     assert_eq!(sel["anchor"], json!([0, 0]));
     assert_eq!(sel["focus"][0], 99, "{sel}");
@@ -596,7 +393,7 @@ fn shift_click_drag_and_ctrl_a_select() {
 #[test]
 fn resized_columns_stay_resized_per_tab() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "customers");
     let customers = ui.document()["active"].as_u64().unwrap();
     let width = |ui: &mut Ui, id: &str| ui.tag(id).unwrap()["rect"][2].as_f64().unwrap() as f32;
@@ -628,7 +425,7 @@ fn resized_columns_stay_resized_per_tab() {
 #[test]
 fn paging_and_counting_big_rows() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "big_rows");
     // The planner's estimate shows until the rows are counted; filter rows with no value do not
     // filter (the engine's rule), so it shows with them applied too.
@@ -661,7 +458,7 @@ fn paging_and_counting_big_rows() {
 #[test]
 fn count_rows_on_a_view_and_its_read_only_note() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "order_totals");
     let note = ui.value("table-note");
     assert!(note.as_str().is_some_and(|n| n.contains("views are read-only")), "{note}");
@@ -679,11 +476,11 @@ fn count_rows_on_a_view_and_its_read_only_note() {
 #[test]
 fn a_bad_filter_value_shows_the_error_over_the_old_rows() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "customers");
     ui.click("filter-0-value");
     ui.text("not a number");
-    ui.key("Enter", json!({}));
+    ui.key("Enter");
     ui.until("the error", |ui| ui.table()["error"].is_string());
     ui.frame();
     let card = ui.value("table-error");
@@ -692,9 +489,9 @@ fn a_bad_filter_value_shows_the_error_over_the_old_rows() {
     assert!(ui.tag("notice").is_none(), "the card says it, not a notice too");
     // A good filter clears it.
     ui.click("filter-0-value");
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     ui.text("7");
-    ui.key("Enter", json!({}));
+    ui.key("Enter");
     ui.until("the filtered page", |ui| ui.table()["error"].is_null() && ui.table()["rows"] == 1);
     ui.frame();
     assert!(ui.tag("table-error").is_none());
@@ -703,7 +500,7 @@ fn a_bad_filter_value_shows_the_error_over_the_old_rows() {
 #[test]
 fn odd_identifiers_filter_sort_and_follow() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("odd", "Odd \"Name\" 🐝");
     assert_eq!(ui.value("grid-header-1")["name"], "Total $");
     assert_eq!(ui.value("grid-header-3")["key"], "foreign");
@@ -727,7 +524,7 @@ fn odd_identifiers_filter_sort_and_follow() {
 #[test]
 fn twenty_megabyte_cells_keep_frames_under_250_ms() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "big_cell");
     ui.until("the big row", |ui| ui.table()["rows"] == 1);
     let text = ui.value("grid-cell-0-1")["text"].as_str().unwrap().to_string();
@@ -752,7 +549,7 @@ fn a_page_cut_by_the_size_limit_says_so() {
             "CREATE TABLE scratch.{t} (id int PRIMARY KEY, v text); INSERT INTO scratch.{t} SELECT g, repeat('x', 20000000) FROM generate_series(1, 14) AS g;"
         )
     });
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
     ui.until("the page", |ui| ui.table()["rows"] == 13);
     let note = ui.value("page-cut");
@@ -880,7 +677,7 @@ fn the_filter_bar_controls_are_one_height() {
     let db = dbee_testkit::require_testdb!();
     for size in SIZES {
         let at = format!("{} × {}", size.x, size.y);
-        let mut ui = connected_in(db, size);
+        let mut ui = Ui::connected_in(db, size);
         ui.open("shop", "orders");
         ui.click("filter-add");
         ui.frame();
@@ -905,7 +702,7 @@ fn the_operator_choice_shows_each_label_whole() {
     let db = dbee_testkit::require_testdb!();
     for size in SIZES {
         let at = format!("{} × {}", size.x, size.y);
-        let mut ui = connected_in(db, size);
+        let mut ui = Ui::connected_in(db, size);
         ui.open("shop", "orders");
         ui.frame();
         // The open list: every operator, its label whole.
@@ -975,7 +772,7 @@ fn hovering_the_filter_choices_and_their_lists_moves_nothing() {
     let db = dbee_testkit::require_testdb!();
     for size in SIZES {
         let at = format!("{} × {}", size.x, size.y);
-        let mut ui = connected_in(db, size);
+        let mut ui = Ui::connected_in(db, size);
         ui.open("shop", "customers");
         ui.open("shop", "orders");
         ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0));

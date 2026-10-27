@@ -5,7 +5,7 @@
 
 use serde_json::json;
 
-use super::{CommandSpec, needs_db, p};
+use super::{CommandSpec, bad, needs_db, p};
 use crate::{EngineError, Json, Outcome, Session, fuzzy};
 
 const INSPECT: &str = "schema.inspect";
@@ -39,19 +39,15 @@ pub(crate) const SPECS: &[CommandSpec] = &[
     },
 ];
 
-fn bad(msg: String) -> EngineError {
-    EngineError::BadParams { id: String::new(), msg }
-}
-
 /// `{}` → the catalog; `{schema}` → that schema; `{schema, table}` → that `TableInfo`.
 fn inspect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let schema = p::opt_str(params, "schema")?;
     let table = p::opt_str(params, "table")?;
-    let Some(c) = s.state.connected.as_ref() else { return Err(bad("not connected".into())) };
+    let Some(c) = s.state.connected.as_ref() else { return Err(bad("not connected")) };
     let catalog = &c.catalog;
     let value = match (schema, table) {
         (None, None) => serde_json::to_value(&**catalog),
-        (None, Some(_)) => return Err(bad("`table` needs `schema`".into())),
+        (None, Some(_)) => return Err(bad("`table` needs `schema`")),
         (Some(sch), t) => {
             let info = catalog.schemas.iter().find(|x| x.name == sch).ok_or_else(|| bad(format!("no schema `{sch}`")))?;
             match t {
@@ -70,7 +66,7 @@ fn inspect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 fn quick_find(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let query = p::str(params, "query")?;
     let limit = p::opt_usize(params, "limit")?.unwrap_or(DEFAULT_LIMIT);
-    let Some(c) = s.state.connected.as_ref() else { return Err(bad("not connected".into())) };
+    let Some(c) = s.state.connected.as_ref() else { return Err(bad("not connected")) };
     let hits: Vec<Json> = fuzzy::find(&c.catalog, query, limit)
         .into_iter()
         .map(|h| json!({ "schema": h.table.schema, "table": h.table.name, "kind": h.kind }))

@@ -9,130 +9,36 @@
 //! only to the Docker test servers (`require_testdb!`). Tests that write make their own table in
 //! `scratch` and drop it; the seed is only read.
 
-use std::sync::{Arc, mpsc};
+mod common;
+
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
-use dbee_engine::{Session, SessionOptions};
-use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{TempHome, TestDb, temp_home, unique};
-use dbee_ui_egui::{ControlRequest, DbeeApp};
-use egui_kittest::Harness;
+use common::*;
+use dbee_testkit::{TestDb, unique};
 use serde_json::{Value as Json, json};
 
-/// The longest a test waits for anything.
-const WAIT: Duration = Duration::from_secs(60);
-
-struct Ui {
-    harness: Harness<'static, DbeeApp>,
-    tx: mpsc::Sender<ControlRequest>,
-    _home: TempHome,
-}
-
-fn pg14_server(db: &TestDb) -> &dbee_testkit::PgServer {
-    db.servers.iter().find(|s| s.major == 14).unwrap()
-}
-
-fn pg14(db: &TestDb) -> ConnectionConfig {
-    ConnectionConfig {
-        name: "pg14".into(),
-        host: "127.0.0.1".into(),
-        port: pg14_server(db).port,
-        user: "postgres".into(),
-        database: "dbee".into(),
-        ssl_mode: SslMode::Prefer,
-        ..ConnectionConfig::default()
-    }
-}
-
-/// A window on a throwaway home, connected to the pg14 test server, on the workspace.
+/// A 1400 × 900 window connected to the pg14 test server, on the workspace, its frames 0.25 s
+/// apart on egui's clock.
 fn connected(db: &TestDb) -> Ui {
     connected_at(db, 0.25, 1400.0)
 }
 
-/// [`connected`] with frames `step` seconds apart (egui's clock in the harness), in a window
-/// `width` wide.
+/// [`connected`] with frames `step` seconds apart, in a window `width` wide.
 fn connected_at(db: &TestDb, step: f32, width: f32) -> Ui {
-    connected_in(db, step, egui::vec2(width, 900.0))
+    connected_sized(db, step, egui::vec2(width, 900.0))
 }
 
 /// [`connected`] with frames `step` seconds apart, in a window of `size`.
-fn connected_in(db: &TestDb, step: f32, size: egui::Vec2) -> Ui {
-    connected_with(db, pg14(db), step, size)
+fn connected_sized(db: &TestDb, step: f32, size: egui::Vec2) -> Ui {
+    Ui::connected_with(db, Setup { size, step: Some(step), ..Setup::default() })
 }
 
-/// A window on a throwaway home, connected to `server`, on the workspace.
+/// [`connected`] to `server`.
 fn connected_to(db: &TestDb, server: &dbee_testkit::PgServer) -> Ui {
-    let config = ConnectionConfig { name: server.name.clone(), port: server.port, ..pg14(db) };
-    connected_with(db, config, 0.25, egui::vec2(1400.0, 900.0))
-}
-
-/// A window connected with `config` (the test servers' password), frames `step` seconds apart.
-fn connected_with(db: &TestDb, config: ConnectionConfig, step: f32, size: egui::Vec2) -> Ui {
-    let home = temp_home(None, None);
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
-    let session = Session::new(SessionOptions {
-        config_dir: Some(home.home.join("config")),
-        secrets: Some(secrets),
-        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
-        notify: None,
-        allowed_targets: None,
-    })
-    .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(size).with_step_dt(step).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-    let mut ui = Ui { harness, tx, _home: home };
-    ui.frame();
-    let id = ui.execute("connection.save", json!({ "config": config, "password": db.password }))["id"].as_str().unwrap().to_string();
-    ui.execute("connection.open", json!({ "id": id }));
-    ui.frame();
-    assert_eq!(ui.document()["screen"], "workspace");
-    ui
+    Ui::connected_with(db, Setup { step: Some(0.25), config: Some(server_config(server)), ..Setup::default() })
 }
 
 impl Ui {
-    /// One frame, with the app's synthetic input fed in first.
-    fn frame(&mut self) {
-        let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
-        *self.harness.input_mut() = raw;
-        self.harness.step();
-    }
-
-    fn call(&mut self, method: &str, params: Json) -> Json {
-        let (req, rx) = ControlRequest::new(method, params);
-        self.tx.send(req).unwrap();
-        let start = Instant::now();
-        loop {
-            self.frame();
-            if let Ok(r) = rx.try_recv() {
-                return r;
-            }
-            assert!(start.elapsed() < WAIT, "no reply to {method} after {WAIT:?}");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    fn ok(&mut self, method: &str, params: Json) -> Json {
-        let r = self.call(method, params);
-        assert_eq!(r["ok"], true, "{method}: {r}");
-        r["result"].clone()
-    }
-
-    fn execute(&mut self, command: &str, params: Json) -> Json {
-        self.ok("engine.execute", json!({ "command": command, "params": params }))
-    }
-
-    fn document(&mut self) -> Json {
-        self.ok("document.inspect", json!({}))
-    }
-
-    /// The `table` part of `document.inspect`.
-    fn table(&mut self) -> Json {
-        self.document()["table"].clone()
-    }
-
     fn edits(&mut self) -> Json {
         self.table()["edits"].clone()
     }
@@ -145,39 +51,6 @@ impl Ui {
 
     fn selection(&mut self) -> Json {
         self.document()["selection"].clone()
-    }
-
-    fn tag(&mut self, id: &str) -> Option<Json> {
-        let i = self.ok("ui.inspect", json!({}));
-        i["automation"].as_array().unwrap().iter().find(|a| a["id"] == id).cloned()
-    }
-
-    fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
-    }
-
-    fn click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id }));
-    }
-
-    fn double_click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id, "count": 2 }));
-    }
-
-    fn key(&mut self, key: &str) {
-        self.ok("ui.key", json!({ "key": key }));
-    }
-
-    fn ctrl(&mut self, key: &str) {
-        self.ok("ui.key", json!({ "key": key, "cmd": true }));
-    }
-
-    fn ctrl_shift(&mut self, key: &str) {
-        self.ok("ui.key", json!({ "key": key, "cmd": true, "shift": true }));
-    }
-
-    fn text(&mut self, text: &str) {
-        self.ok("ui.text", json!({ "text": text }));
     }
 
     /// A paste from the clipboard, as the keyboard's Ctrl+V reaches egui (the control channel
@@ -208,22 +81,6 @@ impl Ui {
         }
     }
 
-    /// Runs frames until `done` holds.
-    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Ui) -> bool) {
-        let start = Instant::now();
-        while !done(self) {
-            assert!(start.elapsed() < WAIT, "gave up waiting for {what}");
-            self.frame();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    /// Opens `schema.table` and waits for its first page.
-    fn open(&mut self, schema: &str, table: &str) {
-        self.execute("table.open", json!({ "schema": schema, "table": table }));
-        self.frame();
-    }
-
     /// The editor's value, when one is open.
     fn editor(&mut self) -> Option<Json> {
         self.tag("cell-editor").map(|t| t["value"].clone())
@@ -242,17 +99,6 @@ impl Ui {
 
     fn notice(&mut self) -> String {
         self.value("notice").as_str().unwrap_or_default().to_string()
-    }
-}
-
-/// Drops the scratch table when the test ends, also when it fails.
-struct Scratch(String);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Some(db) = dbee_testkit::testdb() {
-            let _ = dbee_testkit::psql(pg14_server(db), &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.0));
-        }
     }
 }
 
@@ -917,7 +763,7 @@ fn the_paging_bar_draws_nothing_over_anything_at_the_default_size() {
     let db = dbee_testkit::require_testdb!();
     let t = orders(db);
     // The app's window (apps/dbee: 1100 × 720) with the value panel open, its default.
-    let mut ui = connected_in(db, 0.25, egui::vec2(1100.0, 720.0));
+    let mut ui = connected_sized(db, 0.25, egui::vec2(1100.0, 720.0));
     ui.open("scratch", &t.0);
     ui.until("the page", |ui| ui.table()["rows"] == 3);
     ui.double_click("grid-cell-0-1");
@@ -968,7 +814,7 @@ fn the_paging_bar_draws_nothing_over_anything_at_the_default_size() {
 fn a_narrowing_paging_bar_gives_room_up_in_order_and_never_overlaps() {
     let db = dbee_testkit::require_testdb!();
     let t = orders(db);
-    let mut ui = connected_in(db, 0.25, egui::vec2(1400.0, 720.0));
+    let mut ui = connected_sized(db, 0.25, egui::vec2(1400.0, 720.0));
     ui.open("scratch", &t.0);
     ui.until("the page", |ui| ui.table()["rows"] == 3);
     ui.double_click("grid-cell-0-1");

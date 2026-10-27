@@ -41,7 +41,7 @@ use dbee_sql::filter::Condition;
 use serde_json::json;
 
 use super::table::{Loaded, NO_TABLE_TAB, Reload, active_table, catalog, lookup, not_editable, table_tab_mut};
-use super::{CommandSpec, ignored, p};
+use super::{CommandSpec, bad, disabled, ignored, p};
 use crate::edits::{Edits, UNKNOWN_OUTCOME};
 use crate::state::{TableTab, Total};
 use crate::{Apply, EngineError, Json, Need, Outcome, Session, Tab, TabId};
@@ -232,14 +232,6 @@ fn can_redo(s: &Session) -> Result<(), String> {
 }
 
 // ---- helpers ---------------------------------------------------------------------------------
-
-fn bad(msg: impl Into<String>) -> EngineError {
-    EngineError::BadParams { id: String::new(), msg: msg.into() }
-}
-
-fn disabled(why: &str) -> EngineError {
-    EngineError::Disabled { id: String::new(), why: why.to_string() }
-}
 
 /// The active table tab and its page.
 fn target(s: &Session) -> Result<(TabId, Arc<ResultSet>), EngineError> {

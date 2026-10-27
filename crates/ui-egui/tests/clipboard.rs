@@ -11,88 +11,29 @@
 //! only to the Docker test servers (`require_testdb!`). The seed is only read; a test that needs
 //! its own rows makes a table in `scratch` and drops it.
 
-use std::sync::{Arc, mpsc};
+mod common;
+
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
-use dbee_engine::{COPY_MAX_BYTES, Session, SessionOptions};
-use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{TempHome, TestDb, temp_home, unique};
+use common::*;
+use dbee_engine::COPY_MAX_BYTES;
+use dbee_testkit::TestDb;
+use dbee_ui_egui::DbeeApp;
 use dbee_ui_egui::app::Clipboard;
-use dbee_ui_egui::{ControlRequest, DbeeApp};
-use egui::{Event, Modifiers, PointerButton, Pos2};
-use egui_kittest::Harness;
+use egui::{Event, Modifiers, PointerButton};
 use serde_json::{Value as Json, json};
-
-/// The longest a test waits for anything.
-const WAIT: Duration = Duration::from_secs(60);
 
 /// The slowest frame a copy may cost (the bound the 20 MB cell tests use).
 const FRAME_BOUND: Duration = Duration::from_millis(250);
 
-struct Ui {
-    harness: Harness<'static, DbeeApp>,
-    tx: mpsc::Sender<ControlRequest>,
-    /// Every text a frame put on the clipboard (egui's `CopyText`), oldest first.
-    copied: Vec<String>,
-    /// The slowest frame since [`Ui::time_frames`].
-    slowest: Duration,
-    _home: TempHome,
-}
-
-fn pg14_server(db: &TestDb) -> &dbee_testkit::PgServer {
-    db.servers.iter().find(|s| s.major == 14).unwrap()
-}
-
-fn pg14(db: &TestDb) -> ConnectionConfig {
-    ConnectionConfig {
-        name: "pg14".into(),
-        host: "127.0.0.1".into(),
-        port: pg14_server(db).port,
-        user: "postgres".into(),
-        database: "dbee".into(),
-        ssl_mode: SslMode::Prefer,
-        ..ConnectionConfig::default()
-    }
-}
-
-/// A window on a throwaway home with `app` made from its session, connected to the pg14 test
-/// server, on the workspace.
-fn connected_with(db: &TestDb, app: impl FnOnce(Session, mpsc::Receiver<ControlRequest>) -> DbeeApp) -> Ui {
-    let home = temp_home(None, None);
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
-    let session = Session::new(SessionOptions {
-        config_dir: Some(home.home.join("config")),
-        secrets: Some(secrets),
-        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
-        notify: None,
-        allowed_targets: None,
-    })
-    .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let harness = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app(session, rx));
-    let mut ui = Ui { harness, tx, copied: Vec::new(), slowest: Duration::ZERO, _home: home };
-    ui.frame();
-    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
-    ui.execute("connection.open", json!({ "id": id }));
-    ui.frame();
-    assert_eq!(ui.document()["screen"], "workspace");
-    ui
-}
-
-/// [`connected_with`] the system clipboard (egui's `CopyText`).
-fn connected(db: &TestDb) -> Ui {
-    connected_with(db, |session, rx| DbeeApp::new(session, Some(rx)))
-}
-
-/// [`connected`], with a new query tab that ran `sql` and shows its results. The tab's editor
+/// [`Ui::connected`], with a new query tab that ran `sql` and shows its results. The tab's editor
 /// still has the keyboard, as after Ctrl+Enter.
 fn ran(db: &TestDb, sql: &str) -> Ui {
-    let mut ui = connected(db);
-    ui.key("T", json!({ "cmd": true }));
+    let mut ui = Ui::connected(db);
+    ui.ctrl("T");
     ui.frame();
     ui.text(sql);
-    ui.key("Enter", json!({ "cmd": true }));
+    ui.ctrl("Enter");
     ui.until("the run to end", |ui| {
         let q = ui.document()["query"].clone();
         q["running"].is_null() && (q["results"].as_array().is_some_and(|r| !r.is_empty()) || !q["error"].is_null())
@@ -104,73 +45,6 @@ fn ran(db: &TestDb, sql: &str) -> Ui {
 }
 
 impl Ui {
-    /// One frame, with the app's synthetic input fed in first.
-    fn frame(&mut self) {
-        let start = Instant::now();
-        let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
-        *self.harness.input_mut() = raw;
-        self.harness.step();
-        self.slowest = self.slowest.max(start.elapsed());
-        for c in &self.harness.output().platform_output.commands {
-            if let egui::OutputCommand::CopyText(t) = c {
-                self.copied.push(t.clone());
-            }
-        }
-    }
-
-    /// One frame with `events` in its input.
-    fn frame_with(&mut self, events: Vec<Event>) {
-        self.harness.input_mut().events.extend(events);
-        self.frame();
-    }
-
-    /// Starts timing frames afresh: [`Ui::slowest`] from now on.
-    fn time_frames(&mut self) {
-        self.slowest = Duration::ZERO;
-    }
-
-    fn call(&mut self, method: &str, params: Json) -> Json {
-        let (req, rx) = ControlRequest::new(method, params);
-        self.tx.send(req).unwrap();
-        let start = Instant::now();
-        loop {
-            self.frame();
-            if let Ok(r) = rx.try_recv() {
-                return r;
-            }
-            assert!(start.elapsed() < WAIT, "no reply to {method} after {WAIT:?}");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    fn ok(&mut self, method: &str, params: Json) -> Json {
-        let r = self.call(method, params);
-        assert_eq!(r["ok"], true, "{method}: {r}");
-        r["result"].clone()
-    }
-
-    fn execute(&mut self, command: &str, params: Json) -> Json {
-        self.ok("engine.execute", json!({ "command": command, "params": params }))
-    }
-
-    fn inspect(&mut self) -> Json {
-        self.ok("ui.inspect", json!({}))
-    }
-
-    fn document(&mut self) -> Json {
-        self.ok("document.inspect", json!({}))
-    }
-
-    fn tag(&mut self, id: &str) -> Option<Json> {
-        let i = self.inspect();
-        i["automation"].as_array().unwrap().iter().find(|a| a["id"] == id).cloned()
-    }
-
-    fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
-    }
-
     /// The query editor's tag value: `{cursor, focused, lines, length, highlighted}`.
     fn editor(&mut self) -> Json {
         self.value("query-editor")
@@ -179,43 +53,6 @@ impl Ui {
     /// The notice shown, if any.
     fn notice(&mut self) -> Option<String> {
         self.tag("notice").and_then(|t| t["value"].as_str().map(str::to_string))
-    }
-
-    fn click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id }));
-    }
-
-    fn right_click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id, "button": "right" }));
-    }
-
-    fn key(&mut self, key: &str, params: Json) {
-        let mut p = json!({ "key": key });
-        if let (Some(p), Json::Object(extra)) = (p.as_object_mut(), params) {
-            p.extend(extra);
-        }
-        self.ok("ui.key", p);
-    }
-
-    fn text(&mut self, text: &str) {
-        self.ok("ui.text", json!({ "text": text }));
-    }
-
-    /// Runs frames until `done` holds.
-    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Ui) -> bool) {
-        let start = Instant::now();
-        while !done(self) {
-            assert!(start.elapsed() < WAIT, "gave up waiting for {what}");
-            self.frame();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    /// The centre of automation entry `id`.
-    fn centre(&mut self, id: &str) -> Pos2 {
-        let tag = self.tag(id).unwrap_or_else(|| panic!("no widget `{id}`"));
-        let f = |i: usize| tag["rect"][i].as_f64().unwrap() as f32;
-        Pos2::new(f(0) + f(2) / 2.0, f(1) + f(3) / 2.0)
     }
 
     /// A primary-button drag from the centre of `from` to the centre of `to`, in small steps.
@@ -230,36 +67,6 @@ impl Ui {
         self.frame_with(vec![button(b, false)]);
         self.frame();
     }
-
-    /// The text a frame last put on the clipboard, if any did.
-    fn copied(&self) -> Option<String> {
-        self.copied.last().cloned()
-    }
-
-    fn open(&mut self, schema: &str, table: &str) {
-        self.execute("table.open", json!({ "schema": schema, "table": table }));
-        self.frame();
-    }
-}
-
-/// Drops the scratch table when the test ends, also when it fails.
-struct Scratch(String);
-
-impl Scratch {
-    fn new(db: &TestDb, prefix: &str, sql: impl FnOnce(&str) -> String) -> Scratch {
-        let name = unique(prefix);
-        let guard = Scratch(name.clone());
-        dbee_testkit::psql(pg14_server(db), &sql(&name)).unwrap();
-        guard
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Some(db) = dbee_testkit::testdb() {
-            let _ = dbee_testkit::psql(pg14_server(db), &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.0));
-        }
-    }
 }
 
 const CUSTOMERS: &str = "select id, name from shop.customers order by id limit 5";
@@ -270,11 +77,11 @@ fn ctrl_c_copies_values_only() {
     let table = Scratch::new(db, "t_clip", |t| {
         format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, a text, b text); INSERT INTO scratch.{t} VALUES (1, NULL, ''), (2, 'x', 'y');")
     });
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [1, 2] }), "Ctrl+A selects every cell");
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("C");
     ui.frame();
     let copied = ui.copied().expect("Ctrl+C put text on the clipboard");
     // NULL and the empty string are both empty in TSV; no header line.
@@ -291,9 +98,9 @@ fn ctrl_shift_c_copies_with_header() {
     // the grid's from then on.
     ui.click("grid-cell-1-1");
     assert_eq!(ui.editor()["focused"], false, "the grid took the keyboard");
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [4, 1] }));
-    ui.key("C", json!({ "cmd": true, "shift": true }));
+    ui.ctrl_shift("C");
     ui.frame();
     let copied = ui.copied().expect("Ctrl+Shift+C put text on the clipboard");
     assert!(copied.starts_with("id\tname\n1\tCustomer 1\n"), "{copied}");
@@ -322,9 +129,9 @@ fn every_menu_format_copies_from_a_table_tab() {
     let table = Scratch::new(db, "t_clip", |t| {
         format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, a text); INSERT INTO scratch.{t} VALUES (1, NULL), (2, 'x, \"y\"');")
     });
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     let expected = [
         ("grid-menu-copy", "1\t\n2\tx, \"y\""),
         ("grid-menu-copy-header", "id\ta\n1\t\n2\tx, \"y\""),
@@ -348,12 +155,12 @@ fn a_text_field_with_the_keyboard_keeps_ctrl_c_until_the_grid_is_clicked() {
     // The query editor has the keyboard after a run: Ctrl+A and Ctrl+C are its own.
     let mut ui = ran(db, CUSTOMERS);
     ui.execute("selection.set", json!({ "anchor": [0, 0], "focus": [1, 1] }));
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("C");
     ui.frame();
     assert_eq!(ui.copied(), None, "the editor has nothing selected, and the grid's copy did not run");
     assert_eq!(ui.notice(), None);
-    ui.key("A", json!({ "cmd": true }));
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("A");
+    ui.ctrl("C");
     ui.frame();
     assert_eq!(ui.copied().as_deref(), Some(CUSTOMERS), "Ctrl+A, Ctrl+C copy the editor's text");
     assert_eq!(ui.notice(), None, "no grid copy ran");
@@ -362,25 +169,25 @@ fn a_text_field_with_the_keyboard_keeps_ctrl_c_until_the_grid_is_clicked() {
     ui.drag("grid-cell-1-0", "grid-cell-2-1");
     assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 0], "focus": [2, 1] }));
     assert_eq!(ui.editor()["focused"], false, "the drag took the keyboard from the editor");
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("C");
     ui.frame();
     assert_eq!(ui.copied().as_deref(), Some("2\tCustomer 2\n3\tCustomer 3"));
     assert_eq!(ui.notice().as_deref(), Some("Copied 2 rows"));
 
     // A filter input with the keyboard keeps Ctrl+A and Ctrl+C too.
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "customers");
     ui.execute("selection.set", json!({ "anchor": [0, 0] }));
     ui.click("filter-0-value");
     ui.text("Ann");
-    ui.key("A", json!({ "cmd": true }));
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("A");
+    ui.ctrl("C");
     ui.frame();
     assert_eq!(ui.copied().as_deref(), Some("Ann"), "the input's own copy");
     assert_eq!(ui.notice(), None, "no grid copy ran");
     assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [0, 0] }));
     ui.click("grid-cell-2-1");
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("C");
     ui.frame();
     assert_eq!(ui.copied().as_deref(), Some("Customer 3"), "after a click on a cell, Ctrl+C is the grid's");
     assert_eq!(ui.notice().as_deref(), Some("Copied 1 row"));
@@ -398,7 +205,7 @@ fn result_grids_offer_no_edits_and_read_only_tables_say_why() {
         assert!(ui.tag(id).is_none(), "a query's results list no {id}");
     }
     // A view is read-only: the entries are listed, disabled, with the engine's reason.
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     ui.open("shop", "order_totals");
     ui.right_click("grid-cell-0-0");
     for (id, label) in [("grid-menu-null", "Set as NULL"), ("grid-menu-delete", "Delete row")] {
@@ -414,7 +221,7 @@ fn result_grids_offer_no_edits_and_read_only_tables_say_why() {
 #[test]
 fn a_copy_over_the_cap_copies_nothing_and_says_why() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     // Its big cells hold 20,000,000 bytes of text each, more than a copy takes.
     ui.open("shop", "big_cell");
     ui.until("the big row", |ui| ui.document()["table"]["rows"] == 1);
@@ -424,14 +231,14 @@ fn a_copy_over_the_cap_copies_nothing_and_says_why() {
     let why = r["data"]["why"].as_str().unwrap_or_default().to_string();
     assert!(why.contains(&cap()) && why.contains("select fewer rows"), "{why}");
     ui.click("grid-cell-0-1");
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("C");
     ui.frame();
     assert_eq!(ui.copied(), None, "nothing went to the clipboard");
     let notice = ui.notice().unwrap_or_default();
     assert!(notice.contains("the selection holds 19.1 MiB of cell text") && notice.contains(&cap()), "the shortcut shows the reason: {notice}");
     // The row's key fits.
     ui.click("grid-cell-0-0");
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("C");
     ui.frame();
     assert_eq!(ui.copied().as_deref(), Some("1"));
 }
@@ -441,29 +248,32 @@ fn cap() -> String {
     format!("{} MiB", COPY_MAX_BYTES / (1024 * 1024))
 }
 
-/// [`connected_with`] the in-memory clipboard of isolated runs.
+/// [`Ui::connected`] with the in-memory clipboard of isolated runs.
 fn connected_in_memory(db: &TestDb) -> Ui {
-    connected_with(db, |session, rx| DbeeApp::new(session, Some(rx)).with_clipboard(Clipboard::Memory))
+    Ui::connected_with(
+        db,
+        Setup { app: Some(Box::new(|session, rx| DbeeApp::new(session, Some(rx)).with_clipboard(Clipboard::Memory))), ..Setup::default() },
+    )
 }
 
 #[test]
 fn the_memory_clipboard_keeps_the_copy_in_the_app() {
     let db = dbee_testkit::require_testdb!();
     // By default nothing is kept, and inspect has no clipboard.
-    let mut ui = connected(db);
+    let mut ui = Ui::connected(db);
     let d = ui.document();
     assert_eq!((d.get("clipboard"), d.get("clipboardBytes")), (None, None));
     let mut ui = connected_in_memory(db);
     let d = ui.document();
     assert_eq!((d["clipboard"].clone(), d["clipboardBytes"].clone()), (Json::Null, Json::Null), "nothing copied yet");
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     ui.execute("query.setText", json!({ "text": CUSTOMERS }));
     ui.execute("query.run", json!({}));
     ui.until("the results", |ui| ui.document()["query"]["results"].as_array().is_some_and(|r| !r.is_empty()));
     ui.frame();
     ui.click("grid-cell-0-0");
-    ui.key("A", json!({ "cmd": true }));
-    ui.key("C", json!({ "cmd": true, "shift": true }));
+    ui.ctrl("A");
+    ui.ctrl_shift("C");
     ui.frame();
     let r = ui.execute("clipboard.copy", json!({ "format": "csv" }));
     assert_eq!((r["rows"].clone(), r["columns"].clone()), (json!(5), json!(2)), "{r}");
@@ -491,10 +301,10 @@ fn the_memory_clipboard_catches_text_field_copies_and_cuts() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected_in_memory(db);
     // The query editor's own copy (Ctrl+A, Ctrl+C) is egui's TextEdit's, not the grid's.
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     ui.text(CUSTOMERS);
-    ui.key("A", json!({ "cmd": true }));
-    ui.key("C", json!({ "cmd": true }));
+    ui.ctrl("A");
+    ui.ctrl("C");
     ui.frame();
     assert!(ui.copied.is_empty(), "no copy reached egui: {:?}", ui.copied);
     let d = ui.document();
@@ -503,8 +313,8 @@ fn the_memory_clipboard_catches_text_field_copies_and_cuts() {
     ui.open("shop", "customers");
     ui.click("filter-0-value");
     ui.text("Ann");
-    ui.key("A", json!({ "cmd": true }));
-    ui.key("X", json!({ "cmd": true }));
+    ui.ctrl("A");
+    ui.ctrl("X");
     ui.frame();
     assert!(ui.copied.is_empty(), "no cut reached egui: {:?}", ui.copied);
     assert_eq!(ui.document()["clipboard"], "Ann");
@@ -556,7 +366,7 @@ fn no_copy_freezes_the_window() {
     for (what, sql) in [("10,000 rows", FULL.to_string()), ("escaped", escaped())] {
         let mut ui = ran(db, &sql);
         ui.click("grid-cell-0-0");
-        ui.key("A", json!({ "cmd": true }));
+        ui.ctrl("A");
         for format in FORMATS {
             let (copied, frame) = copy_in_a_frame(&mut ui, format);
             assert!(frame < Duration::from_secs(1), "copying {what} as {format} took a {frame:?} frame");
@@ -596,7 +406,7 @@ fn copy_frames_within_budget() {
     ] {
         let mut ui = ran(db, &sql);
         ui.click("grid-cell-0-0");
-        ui.key("A", json!({ "cmd": true }));
+        ui.ctrl("A");
         let idle = median(
             (0..5)
                 .map(|_| {

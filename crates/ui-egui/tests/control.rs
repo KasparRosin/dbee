@@ -4,114 +4,28 @@
 //! eframe's `raw_input_hook` does.
 //!
 //! Safety: every session keeps its connections file in a throwaway home, its secrets in a
-//! `MemoryStore`, and has no SSH directory and no agent. Tests that need a database connect only
-//! to the Docker test servers (`require_testdb!`).
+//! `MemoryStore`, and reads SSH files from `<temp home>/.ssh` with no agent (the shared harness,
+//! `common`). Tests that need a database connect only to the Docker test servers
+//! (`require_testdb!`).
+
+mod common;
 
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SslMode};
-use dbee_engine::{Session, SessionOptions};
-use dbee_testkit::{TempHome, TestDb, temp_home};
+use common::*;
+use dbee_testkit::TestDb;
 use dbee_ui_egui::shortcuts::{self, SHORTCUTS};
-use dbee_ui_egui::{ControlRequest, DbeeApp};
-use egui_kittest::Harness;
 use serde_json::{Value as Json, json};
 
-/// The longest a test waits for a reply.
-const WAIT: Duration = Duration::from_secs(30);
-
-struct Ui {
-    harness: Harness<'static, DbeeApp>,
-    tx: mpsc::Sender<ControlRequest>,
-    /// Every text the app put on the clipboard, oldest first.
-    copied: Vec<String>,
-    _home: TempHome,
-}
-
+/// A 1100 × 720 window on a throwaway home with a memory secret store.
 fn ui() -> Ui {
-    let home = temp_home(None, None);
-    let session = Session::new(SessionOptions {
-        config_dir: Some(home.home.join("config")),
-        secrets: Some(Arc::new(MemoryStore::default())),
-        // No SSH directory and no agent.
-        ..SessionOptions::default()
-    })
-    .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(egui::vec2(1100.0, 720.0)).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-    Ui { harness, tx, copied: Vec::new(), _home: home }
+    Ui::fresh(egui::vec2(1100.0, 720.0))
 }
 
-impl Ui {
-    /// One frame, with the app's synthetic input fed in first.
-    fn frame(&mut self) {
-        let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
-        *self.harness.input_mut() = raw;
-        self.harness.step();
-        for c in &self.harness.output().platform_output.commands {
-            if let egui::OutputCommand::CopyText(t) = c {
-                self.copied.push(t.clone());
-            }
-        }
-    }
-
-    fn send(&mut self, method: &str, params: Json) -> mpsc::Receiver<Json> {
-        let (req, rx) = ControlRequest::new(method, params);
-        self.tx.send(req).unwrap();
-        rx
-    }
-
-    /// Runs frames until `rx` has the reply.
-    fn reply(&mut self, rx: &mpsc::Receiver<Json>, what: &str) -> Json {
-        let start = Instant::now();
-        loop {
-            self.frame();
-            if let Ok(r) = rx.try_recv() {
-                return r;
-            }
-            assert!(start.elapsed() < WAIT, "no reply to {what} after {WAIT:?}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    fn call(&mut self, method: &str, params: Json) -> Json {
-        let rx = self.send(method, params);
-        self.reply(&rx, method)
-    }
-
-    /// `call` that must succeed; its `result`.
-    fn ok(&mut self, method: &str, params: Json) -> Json {
-        let r = self.call(method, params);
-        assert_eq!(r["ok"], true, "{method}: {r}");
-        r["result"].clone()
-    }
-
-    fn execute(&mut self, command: &str, params: Json) -> Json {
-        self.ok("engine.execute", json!({ "command": command, "params": params }))
-    }
-}
-
+/// `connection.save`/`connection.open` params for the pg14 test server.
 fn pg14_config(db: &TestDb) -> Json {
-    let pg = db.servers.iter().find(|s| s.major == 14).unwrap();
-    let config = ConnectionConfig {
-        name: "pg14".into(),
-        host: "127.0.0.1".into(),
-        port: pg.port,
-        user: "postgres".into(),
-        database: "dbee".into(),
-        ssl_mode: SslMode::Prefer,
-        ..ConnectionConfig::default()
-    };
-    json!({ "config": config, "password": db.password })
-}
-
-fn automation_ids(inspect: &Json) -> Vec<String> {
-    inspect["automation"].as_array().unwrap().iter().filter_map(|a| a["id"].as_str().map(str::to_string)).collect()
+    json!({ "config": pg14(db), "password": db.password })
 }
 
 #[test]
@@ -123,7 +37,7 @@ fn starts_on_connection_screen() {
     assert_eq!(i["dialog"], Json::Null);
     assert!(i["frame"].as_u64().unwrap() >= 1, "{i}");
     assert_eq!(i["window"], json!([1100.0, 720.0]), "{i}");
-    let ids = automation_ids(&i);
+    let ids = ids(&i);
     assert!(ids.iter().any(|id| id == "conn-new"), "{ids:?}");
     let new = i["automation"].as_array().unwrap().iter().find(|a| a["id"] == "conn-new").unwrap();
     let rect: Vec<f64> = new["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();

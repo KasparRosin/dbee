@@ -9,208 +9,52 @@
 //!
 //! Killing backends: dbee connects with `application_name = 'dbee'`, so terminating its backends
 //! hits every dbee connection on the server, also those of the other tests in this binary. So each
-//! window holds a lock: shared, or exclusive for the test that kills backends.
+//! window holds the shared harness's lock (`common`): shared, or exclusive for the test that kills
+//! backends.
 
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc};
+mod common;
+
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionColor, ConnectionConfig, MemoryStore, SecretStore, SslMode};
+use common::*;
+use dbee_config::{ConnectionColor, ConnectionConfig};
 use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef};
-use dbee_engine::{Session, SessionOptions};
-use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{TempHome, TestDb, temp_home};
+use dbee_testkit::TestDb;
 use dbee_ui_egui::automation::Tags;
 use dbee_ui_egui::tree::{self, Tree};
-use dbee_ui_egui::{ControlRequest, DbeeApp};
 use egui_kittest::Harness;
 use serde_json::{Value as Json, json};
 
-/// The longest a test waits for anything.
-const WAIT: Duration = Duration::from_secs(30);
-
-/// Shared by every window; exclusive while a test kills backends.
-static DB_LOCK: RwLock<()> = RwLock::new(());
-
-enum Hold {
-    Shared(#[allow(dead_code, reason = "held for its drop")] RwLockReadGuard<'static, ()>),
-    Exclusive(#[allow(dead_code, reason = "held for its drop")] RwLockWriteGuard<'static, ()>),
-}
-
-struct Ui {
-    // Fields drop in order: the window (and its connections) before the lock goes.
-    harness: Harness<'static, DbeeApp>,
-    tx: mpsc::Sender<ControlRequest>,
-    _home: TempHome,
-    _hold: Hold,
-}
-
-/// A window on a throwaway home with a memory secret store.
-fn window(exclusive: bool) -> Ui {
-    let hold = if exclusive {
-        Hold::Exclusive(DB_LOCK.write().unwrap_or_else(PoisonError::into_inner))
-    } else {
-        Hold::Shared(DB_LOCK.read().unwrap_or_else(PoisonError::into_inner))
-    };
-    let home = temp_home(None, None);
-    let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
-    let session = Session::new(SessionOptions {
-        config_dir: Some(home.home.join("config")),
-        secrets: Some(secrets),
-        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
-        notify: None,
-        allowed_targets: None,
-    })
-    .unwrap();
-    let (tx, rx) = mpsc::channel();
-    let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-    let mut ui = Ui { harness, tx, _home: home, _hold: hold };
-    ui.frame();
-    ui
-}
-
-fn pg14(db: &TestDb) -> ConnectionConfig {
-    let pg = db.servers.iter().find(|s| s.major == 14).unwrap();
-    ConnectionConfig {
-        name: "pg14".into(),
-        host: "127.0.0.1".into(),
-        port: pg.port,
-        user: "postgres".into(),
-        database: "dbee".into(),
-        ssl_mode: SslMode::Prefer,
-        ..ConnectionConfig::default()
-    }
-}
-
-/// A window connected to `config` (saved with the test password), on the workspace.
+/// A 1200 × 800 window on a throwaway home connected with `config`, on the workspace;
+/// `exclusive` for the test that kills backends.
 fn connected_to(db: &TestDb, config: ConnectionConfig, exclusive: bool) -> Ui {
-    let mut ui = window(exclusive);
-    let id = ui.execute("connection.save", json!({ "config": config, "password": db.password }))["id"].as_str().unwrap().to_string();
-    ui.execute("connection.open", json!({ "id": id }));
-    ui.frame();
-    assert_eq!(ui.document()["screen"], "workspace");
-    ui
+    Ui::connected_with(db, Setup { size: egui::vec2(1200.0, 800.0), exclusive, config: Some(config), ..Setup::default() })
 }
 
+/// [`connected_to`] the pg14 test server.
 fn connected(db: &TestDb) -> Ui {
     connected_to(db, pg14(db), false)
 }
 
 impl Ui {
-    /// One frame, with the app's synthetic input fed in first.
-    fn frame(&mut self) {
-        let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
-        *self.harness.input_mut() = raw;
-        self.harness.step();
-    }
-
-    fn call(&mut self, method: &str, params: Json) -> Json {
-        let (req, rx) = ControlRequest::new(method, params);
-        self.tx.send(req).unwrap();
-        let start = Instant::now();
-        loop {
-            self.frame();
-            if let Ok(r) = rx.try_recv() {
-                return r;
-            }
-            assert!(start.elapsed() < WAIT, "no reply to {method} after {WAIT:?}");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-    }
-
-    fn ok(&mut self, method: &str, params: Json) -> Json {
-        let r = self.call(method, params);
-        assert_eq!(r["ok"], true, "{method}: {r}");
-        r["result"].clone()
-    }
-
-    fn execute(&mut self, command: &str, params: Json) -> Json {
-        self.ok("engine.execute", json!({ "command": command, "params": params }))
-    }
-
-    fn inspect(&mut self) -> Json {
-        self.ok("ui.inspect", json!({}))
-    }
-
-    fn document(&mut self) -> Json {
-        self.ok("document.inspect", json!({}))
-    }
-
-    /// The automation entry `id` of the last drawn frame.
-    fn tag(&mut self, id: &str) -> Option<Json> {
-        let i = self.inspect();
-        tag_in(&i, id)
-    }
-
-    /// The `value` of automation entry `id`.
-    fn value(&mut self, id: &str) -> Json {
-        self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
-    }
-
-    fn click(&mut self, id: &str) {
-        self.ok("ui.click", json!({ "id": id }));
-    }
-
-    fn click_with(&mut self, id: &str, params: Json) {
-        let mut p = json!({ "id": id });
-        if let (Some(p), Json::Object(extra)) = (p.as_object_mut(), params) {
-            p.extend(extra);
-        }
-        self.ok("ui.click", p);
-    }
-
-    fn key(&mut self, key: &str, params: Json) {
-        let mut p = json!({ "key": key });
-        if let (Some(p), Json::Object(extra)) = (p.as_object_mut(), params) {
-            p.extend(extra);
-        }
-        self.ok("ui.key", p);
-    }
-
-    fn text(&mut self, text: &str) {
-        self.ok("ui.text", json!({ "text": text }));
-    }
-
-    /// Runs frames until `done` holds.
-    fn until(&mut self, what: &str, mut done: impl FnMut(&mut Ui) -> bool) {
-        let start = Instant::now();
-        while !done(self) {
-            assert!(start.elapsed() < WAIT, "gave up waiting for {what}");
-            self.frame();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
     /// The id of the active tab.
     fn active(&mut self) -> u64 {
         self.document()["active"].as_u64().expect("a tab is active")
     }
 }
 
-fn tag_in(inspect: &Json, id: &str) -> Option<Json> {
-    inspect["automation"].as_array().unwrap().iter().find(|a| a["id"] == id).cloned()
-}
-
-fn ids(inspect: &Json) -> Vec<String> {
-    inspect["automation"].as_array().unwrap().iter().filter_map(|a| a["id"].as_str().map(str::to_string)).collect()
-}
-
-fn visible(entry: &Option<Json>) -> bool {
-    entry.as_ref().is_some_and(|e| e.get("visible") != Some(&json!(false)))
-}
-
 #[test]
 fn ctrl_p_opens_orders() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
-    ui.key("P", json!({ "cmd": true }));
+    ui.ctrl("P");
     assert!(visible(&ui.tag("qs-input")), "Ctrl+P opens the quick search");
     ui.text("ord");
     ui.frame();
     let first = ui.value("qs-item-0");
     assert_eq!(first, "shop.orders", "the best match comes first");
-    ui.key("Enter", json!({}));
+    ui.key("Enter");
     ui.until("the table tab", |ui| ui.document()["table"]["name"] == "orders");
     let doc = ui.document();
     assert_eq!(doc["table"]["schema"], "shop", "{doc}");
@@ -223,30 +67,30 @@ fn ctrl_p_opens_orders() {
 fn quick_search_arrows_escape_and_its_own_keys() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
-    ui.key("P", json!({ "cmd": true }));
+    ui.ctrl("P");
     ui.text("order");
     ui.frame();
     let second = ui.value("qs-item-1");
     assert!(second.is_string(), "two matches at least: {second}");
     // Ctrl+T counts as a dialog's key while the quick search is open: no tab.
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     assert_eq!(ui.document()["tabs"], json!([]));
-    ui.key("ArrowDown", json!({}));
-    ui.key("ArrowDown", json!({}));
-    ui.key("ArrowUp", json!({}));
-    ui.key("Enter", json!({}));
+    ui.key("ArrowDown");
+    ui.key("ArrowDown");
+    ui.key("ArrowUp");
+    ui.key("Enter");
     ui.until("the table tab", |ui| ui.document()["table"].is_object());
     let doc = ui.document();
     assert_eq!(json!(format!("{}.{}", doc["table"]["schema"].as_str().unwrap(), doc["table"]["name"].as_str().unwrap())), second, "{doc}");
     // Escape closes without opening anything.
-    ui.key("P", json!({ "cmd": true }));
+    ui.ctrl("P");
     assert!(ui.tag("qs-input").is_some());
     ui.text("customers");
-    ui.key("Escape", json!({}));
+    ui.key("Escape");
     assert!(ui.tag("qs-input").is_none(), "Escape closes the quick search");
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1));
     // Clicking a result opens it too.
-    ui.key("P", json!({ "cmd": true }));
+    ui.ctrl("P");
     ui.text("customers");
     ui.frame();
     ui.click("qs-item-0");
@@ -257,19 +101,19 @@ fn quick_search_arrows_escape_and_its_own_keys() {
 fn closing_the_quick_search_gives_the_focus_back() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     ui.click("query-editor");
     ui.text("select");
-    ui.key("P", json!({ "cmd": true }));
+    ui.ctrl("P");
     assert!(ui.tag("qs-input").is_some());
     ui.text("ord");
-    ui.key("Escape", json!({}));
+    ui.key("Escape");
     assert!(ui.tag("qs-input").is_none());
     // The editor has the keyboard again: typing goes on there, and Ctrl+A is its own.
     ui.text(" 1");
     ui.frame();
     assert_eq!(ui.document()["query"]["text"], "select 1");
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     ui.text("select 2");
     ui.frame();
     assert_eq!(ui.document()["query"]["text"], "select 2", "Ctrl+A selected the editor's text");
@@ -279,7 +123,7 @@ fn closing_the_quick_search_gives_the_focus_back() {
 fn enter_opens_the_hit_for_the_text_typed_in_the_same_frame() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
-    ui.key("P", json!({ "cmd": true }));
+    ui.ctrl("P");
     ui.frame();
     // A paste and Enter in one frame: Enter acts on the hits for the pasted text.
     let input = ui.harness.input_mut();
@@ -307,9 +151,9 @@ fn a_single_click_in_the_tree_opens_no_tab() {
 fn ctrl_w_on_a_dirty_tab_asks_first() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     ui.execute("query.setText", json!({ "text": "select 1" }));
-    ui.key("W", json!({ "cmd": true }));
+    ui.ctrl("W");
     assert_eq!(ui.inspect()["dialog"], "confirm", "the query text would be lost");
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1));
     ui.click("dialog-ok");
@@ -323,7 +167,7 @@ fn the_quick_search_does_not_outlive_the_workspace() {
     let id = ui.document()["connection"]["id"].as_str().unwrap().to_string();
     ui.click("tree-filter");
     ui.text("order");
-    ui.key("P", json!({ "cmd": true }));
+    ui.ctrl("P");
     assert!(ui.tag("qs-input").is_some());
     // A disconnect the search did not see (an agent's) leaves for the connection screen.
     ui.execute("connection.close", json!({ "force": true }));
@@ -332,7 +176,7 @@ fn the_quick_search_does_not_outlive_the_workspace() {
     ui.frame();
     assert!(ui.tag("qs-input").is_none(), "the search closed with the workspace");
     assert_eq!(ui.value("tree-filter"), "", "the tree starts afresh");
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1), "shortcuts work again");
 }
 
@@ -366,7 +210,7 @@ fn tree_filter_narrows_to_matches() {
     assert!(tag_in(&i, "tree-table-shop.customers").is_none(), "{:?}", ids(&i));
     assert_eq!(tag_in(&i, "tree-filter").unwrap()["value"], "order");
     // A system table matches too: its group opens while the filter is typed.
-    ui.key("A", json!({ "cmd": true }));
+    ui.ctrl("A");
     ui.text("pg_class");
     ui.frame();
     assert!(visible(&ui.tag("tree-table-pg_catalog.pg_class")));
@@ -423,14 +267,14 @@ fn tree_refresh_reloads_the_catalog() {
 fn disconnect_with_query_text_asks_first() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
     let tab = ui.active();
     assert_eq!(ui.value(&format!("tab-{tab}")), "Query 1");
     ui.click("query-editor");
     ui.text("select 1");
     ui.frame();
     assert_eq!(ui.document()["query"]["text"], "select 1", "the editor's text goes to the tab");
-    ui.key("Q", json!({ "cmd": true, "shift": true }));
+    ui.ctrl_shift("Q");
     assert_eq!(ui.inspect()["dialog"], "confirm", "Ctrl+Shift+Q asks first: the query text would be lost");
     ui.click("dialog-cancel");
     let i = ui.inspect();
@@ -448,10 +292,10 @@ fn tabs_open_close_and_mark_filters_and_text() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);
     // Ctrl+T, Ctrl+W.
-    ui.key("T", json!({ "cmd": true }));
-    ui.key("T", json!({ "cmd": true }));
+    ui.ctrl("T");
+    ui.ctrl("T");
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(2));
-    ui.key("W", json!({ "cmd": true }));
+    ui.ctrl("W");
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1));
     // A filtered table: the marker counts the applied filters.
     let filters = json!([{ "column": "id", "op": "gt", "value": "1" }, { "column": "id", "op": "lt", "value": "100" }]);

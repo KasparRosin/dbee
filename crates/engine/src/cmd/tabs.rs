@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use serde_json::json;
 
-use super::{CommandSpec, active_query, always, has_tabs, p};
+use super::{CommandSpec, active_query, always, bad, has_tabs, p};
 use crate::{EngineError, Json, Need, Outcome, QueryTab, Session, Tab, TabId};
 
 pub(crate) const SPECS: &[CommandSpec] = &[
@@ -126,7 +126,7 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         Some(id) => existing(s, id)?,
         None => s.state.active_tab().map(Tab::id).ok_or_else(|| bad("no tab is active; name one with `tab`"))?,
     };
-    let at = s.state.tabs.iter().position(|t| t.id() == id).ok_or_else(|| bad(&format!("no tab {}", id.0)))?;
+    let at = s.state.tabs.iter().position(|t| t.id() == id).ok_or_else(|| bad(format!("no tab {}", id.0)))?;
     if !force {
         match s.state.tabs.get(at) {
             Some(Tab::Query(q)) if !q.text.trim().is_empty() => {
@@ -160,11 +160,7 @@ pub(crate) fn staged_changes(n: usize) -> String {
     if n == 1 { "1 staged change".into() } else { format!("{n} staged changes") }
 }
 
-fn bad(msg: &str) -> EngineError {
-    EngineError::BadParams { id: String::new(), msg: msg.to_string() }
-}
-
 /// `id` when that tab is open, else `BadParams`.
 fn existing(s: &Session, id: TabId) -> Result<TabId, EngineError> {
-    s.state.tab(id).map(Tab::id).ok_or_else(|| bad(&format!("no tab {} is open", id.0)))
+    s.state.tab(id).map(Tab::id).ok_or_else(|| bad(format!("no tab {} is open", id.0)))
 }

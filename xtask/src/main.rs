@@ -25,7 +25,8 @@ usage: cargo xtask <command>
 
 commands:
   ci              fmt --check, clippy -D warnings, testdb up (when `docker info` answers), test, assets, layers,
-                  provenance (stops at the first failure)
+                  provenance (stops at the first failure); after testdb up the tests run with
+                  DBEE_REQUIRE_ORACLES=1, so a driver test that skips fails
   assets          check that every icon/image/font/sample file is attributed in ATTRIBUTION.md
   layers          enforce the crate dependency layering (AGENTS.md \"Layering\")
   licenses        list dependencies outside the licence allowlist (docs/standards/licensing.md); not a ci step
@@ -137,6 +138,21 @@ fn cmd_layers() -> Result<(), String> {
     }
 }
 
+/// The `cargo test` step and the command line it prints. With the test servers up (the testdb
+/// step ran) it sets `DBEE_REQUIRE_ORACLES=1`, so a driver test that skips fails instead: that
+/// catches a server that stopped answering, or an env file the tests read differently from how
+/// `testdb up` wrote it.
+fn test_step(servers_up: bool) -> (Command, String) {
+    let mut c = cargo();
+    c.args(["test", "--workspace"]);
+    if servers_up {
+        c.env("DBEE_REQUIRE_ORACLES", "1");
+        (c, "DBEE_REQUIRE_ORACLES=1 cargo test --workspace".into())
+    } else {
+        (c, "cargo test --workspace".into())
+    }
+}
+
 fn cmd_ci() -> Result<(), String> {
     type Step = (&'static str, Box<dyn Fn() -> Result<(), String>>);
     // Driver tests need the Docker test servers; without Docker they skip, which
@@ -149,6 +165,9 @@ fn cmd_ci() -> Result<(), String> {
         (false, false) => None,
     };
     let skipped: &[&str] = if testdb_step.is_none() { &["driver tests (no Docker)"] } else { &[] };
+    // The testdb step runs before `test` and ci stops when it fails, so once `test` runs with it the
+    // servers are up and a driver test that skips is a failure.
+    let servers_up = testdb_step.is_some();
     let mut steps: Vec<Step> = vec![
         (
             "fmt",
@@ -168,10 +187,9 @@ fn cmd_ci() -> Result<(), String> {
         ),
         (
             "test",
-            Box::new(|| {
-                let mut c = cargo();
-                c.args(["test", "--workspace"]);
-                run(c, "cargo test --workspace")
+            Box::new(move || {
+                let (c, what) = test_step(servers_up);
+                run(c, &what)
             }),
         ),
         ("assets", Box::new(|| assets::run(&root()))),
@@ -207,4 +225,23 @@ fn cmd_ci() -> Result<(), String> {
         println!("  skip  {s}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_step;
+
+    #[test]
+    fn the_test_step_requires_the_servers_once_the_testdb_step_brought_them_up() {
+        let env = |c: &std::process::Command| c.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect::<Vec<_>>();
+        let (c, what) = test_step(true);
+        assert_eq!(what, "DBEE_REQUIRE_ORACLES=1 cargo test --workspace");
+        assert_eq!(env(&c), [("DBEE_REQUIRE_ORACLES".into(), Some("1".into()))]);
+        assert_eq!(c.get_args().collect::<Vec<_>>(), ["test", "--workspace"]);
+        // Without Docker the driver tests skip (or, with DBEE_REQUIRE_ORACLES=1 set by the caller,
+        // the testdb step has already failed).
+        let (c, what) = test_step(false);
+        assert_eq!(what, "cargo test --workspace");
+        assert!(env(&c).is_empty(), "{:?}", env(&c));
+    }
 }
