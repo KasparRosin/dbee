@@ -45,6 +45,8 @@ Their licence texts ship with the binaries from the first release on ([docs/rele
 | `assets/app-icon/hicolor/scalable/apps/dev.rosin.dbee.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
 | `assets/app-icon/LICENSE.txt` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
 | `assets/app-icon/README.md` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
+| `assets/readme/banner-dark.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | The README banner for dark mode: the dbee wordmark as outlined shapes, no text or external references |
+| `assets/readme/banner-light.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | The README banner for light mode: the dbee wordmark as outlined shapes, no text or external references |
 | `assets/readme/screenshot-filters.png` | Kaspar Rosin and the dbee contributors | Original: a screenshot of dbee taken by apps/dbee/tests/m1_day.rs (step 3), synthetic test data, reduced to 256 colours | MIT OR Apache-2.0 | Its text is drawn in egui's default fonts (above) |
 | `packaging/macos/dmg/background.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
 | `packaging/macos/dmg/background.tiff` | Kaspar Rosin and the dbee contributors | Generated from packaging/macos/dmg/background.svg by packaging/macos/dmg/generate.py | MIT OR Apache-2.0 | |

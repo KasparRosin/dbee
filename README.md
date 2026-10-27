@@ -1,16 +1,13 @@
 <p align="center">
-  <img src="assets/app-icon/dbee.svg" width="96" alt="">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/banner-dark.svg">
+    <img src="assets/readme/banner-light.svg" alt="dbee">
+  </picture>
 </p>
 
-<h1 align="center">dbee</h1>
+<p align="center">A cross-platform desktop database client, written in Rust.</p>
 
-<p align="center">
-  <b>A cross-platform desktop database client, written in Rust.</b>
-</p>
-
-<p align="center">
-  <img alt="license MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-f5a524?style=flat-square">
-</p>
+<!-- Later, once CI runs on GitHub: one centred line of 2–3 badges here (CI, licence, latest release). -->
 
 > [!NOTE]
 > **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.\
