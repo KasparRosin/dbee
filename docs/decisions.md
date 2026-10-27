@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-26 · **Change:** minor (toolchain pinned)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-27 · **Change:** trivial (self-contained workflows reworded)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -26,7 +26,7 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 ## 2026-10-15: Self-contained workflows
 
-- **Decision:** There is no shared tooling; third-party actions are pinned to commit SHAs.
+- **Decision:** The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 - **Why:** The repository must build and release on its own, and it should be easy to audit.
 
 ## 2026-10-15: GitHub repository created when version 1 runs

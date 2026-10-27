@@ -1,8 +1,8 @@
 # Releasing dbee
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** major (scaffold)
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-27 · **Change:** trivial (self-contained workflows reworded)
 
-Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `dbee v<version>`. Nobody sees a draft until the owner publishes it. There is no shared tooling; third-party actions are pinned to commit SHAs.
+Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `dbee v<version>`. Nobody sees a draft until the owner publishes it. The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 
 **Status:** the pipeline is written but has never run. The GitHub repository does not exist yet (see "GitHub setup" below). User-facing names say **dbee**; files, binaries and ids stay lowercase (`dbee-<version>-<platform>-<arch>.<ext>`, app id `dev.rosin.dbee`).
 
