@@ -235,7 +235,8 @@ fn a_copy_over_the_cap_copies_nothing_and_says_why() {
     ui.frame();
     assert_eq!(ui.copied(), None, "nothing went to the clipboard");
     let notice = ui.notice().unwrap_or_default();
-    assert!(notice.contains("the selection holds 19.1 MiB of cell text") && notice.contains(&cap()), "the shortcut shows the reason: {notice}");
+    let reason = format!("The selection holds 19.1 MiB of cell text, more than the {} a copy can take; select fewer rows.", cap());
+    assert_eq!(notice, reason, "the shortcut shows the reason, as a sentence");
     // The row's key fits.
     ui.click("grid-cell-0-0");
     ui.ctrl("C");

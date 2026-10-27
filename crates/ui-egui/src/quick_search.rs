@@ -143,7 +143,7 @@ fn find(app: &mut DbeeApp) {
             }
         }
         Ok(_) => qs.error = Some("The search gave no list.".into()),
-        Err(e) => qs.error = Some(e.to_string()),
+        Err(e) => qs.error = Some(crate::app::notice_text(&e)),
     }
     qs.selected = qs.selected.min(qs.hits.len().saturating_sub(1));
 }

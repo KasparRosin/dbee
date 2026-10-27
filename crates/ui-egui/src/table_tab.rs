@@ -205,7 +205,7 @@ fn add_row(app: &mut DbeeApp) {
             }
         }
         Ok(_) => {}
-        Err(e) => app.notice(e.to_string()),
+        Err(e) => app.notice(crate::app::notice_text(&e)),
     }
 }
 

@@ -264,14 +264,13 @@ fn staged_edits_block_sorting_and_applying_filters_and_say_why() {
     assert_eq!(ui.table()["edits"]["count"], 1);
     ui.frame();
     assert_eq!(ui.tag("filter-apply").unwrap()["enabled"], false, "Apply waits for the staged change");
-    let why = "apply or reset your changes first";
     // A header click sorts nothing, and says why.
     ui.click("grid-header-0");
     ui.frame();
     assert_eq!(ui.document()["jobs"], json!([]));
     assert!(ui.table()["sort"].is_null());
     let notice = ui.value("notice");
-    assert!(notice.as_str().is_some_and(|n| n.contains(why)), "{notice}");
+    assert_eq!(notice, "Apply or reset your changes first.", "the reason alone, as a sentence");
     // It sits above the paging bar, so Reset and Apply stay in reach.
     let (n, apply) = (ui.tag("notice").unwrap(), ui.tag("edit-apply").unwrap());
     let bottom = n["rect"][1].as_f64().unwrap() + n["rect"][3].as_f64().unwrap();
@@ -286,7 +285,7 @@ fn staged_edits_block_sorting_and_applying_filters_and_say_why() {
     let t = ui.table();
     assert_eq!((t["applied"].clone(), t["filters"][0]["value"].clone()), (json!("none"), json!("2")), "{t}");
     let notice = ui.value("notice");
-    assert!(notice.as_str().is_some_and(|n| n.contains(why)), "{notice}");
+    assert_eq!(notice, "Apply or reset your changes first.", "the reason alone, as a sentence");
 }
 
 #[test]

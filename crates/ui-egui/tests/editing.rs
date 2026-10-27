@@ -322,7 +322,7 @@ fn cells_that_cannot_be_edited_say_why() {
     ui.double_click("grid-cell-0-1");
     assert!(ui.editor().is_none(), "no editor on a view");
     let notice = ui.notice();
-    assert!(notice.contains("views are read-only"), "{notice}");
+    assert_eq!(notice, "Views are read-only.");
     let add = ui.tag("row-add").unwrap();
     assert_eq!(add["enabled"], false, "no + Row on a view: {add}");
     ui.until("the notice to go", |ui| ui.tag("notice").is_none());
@@ -330,7 +330,7 @@ fn cells_that_cannot_be_edited_say_why() {
     ui.key("Enter");
     assert!(ui.editor().is_none());
     let notice = ui.notice();
-    assert!(notice.contains("views are read-only"), "{notice}");
+    assert_eq!(notice, "Views are read-only.");
 }
 
 #[test]

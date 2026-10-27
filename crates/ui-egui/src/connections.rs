@@ -334,7 +334,7 @@ pub(crate) fn delete(app: &mut DbeeApp, id: &str) {
                 app.view.conn.new_connection();
             }
         }
-        Err(e) => app.notice(e.to_string()),
+        Err(e) => app.notice(crate::app::notice_text(&e)),
     }
 }
 
@@ -420,7 +420,7 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
                 }
             }
             Ok(_) => {}
-            Err(e) => app.notice(e.to_string()),
+            Err(e) => app.notice(crate::app::notice_text(&e)),
         },
         Act::AskDelete { id, name } => app.view.dialog = Some(Dialog::DeleteConnection { id, name }),
         Act::Test if !busy => run_form(app, TEST),

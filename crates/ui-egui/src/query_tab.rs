@@ -1058,7 +1058,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     if let Some(text) = set_text
         && let Err(e) = app.run("query.setText", json!({ "text": text }))
     {
-        app.notice(e.to_string());
+        app.notice(crate::app::notice_text(&e));
     }
     for (command, params) in runs {
         app.start(command, params, Origin::Menu);

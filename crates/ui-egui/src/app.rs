@@ -17,10 +17,11 @@
 //! [`DbeeApp::run`]. A command the user started (a shortcut, a button, a dialog) goes through
 //! [`DbeeApp::start`], which hands its outcome back to where it came from ([`Origin`]), at once
 //! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; other
-//! errors show as a notice (a command that cannot run now says why), or under the connection
-//! form's buttons; the database error of a page load's job or an Apply's shows only in the table
-//! tab's card, and a query run's error that the engine recorded on its tab only in the query
-//! tab's card ([`crate::query_tab`]). Logs name command ids and error codes only.
+//! errors show as a notice (a command that cannot run now gives its reason alone, as a sentence:
+//! [`notice_text`]), or under the connection form's buttons; the database error of a page load's
+//! job or an Apply's shows only in the table tab's card, and a query run's error that the engine
+//! recorded on its tab only in the query tab's card ([`crate::query_tab`]). Logs name command ids
+//! and error codes only.
 //!
 //! The connection screen is [`crate::connections`]; the workspace (menu bar, tree, tabs, status
 //! bar, quick search) is [`crate::workspace`].
@@ -51,6 +52,30 @@ const NOTICE_SECS: f64 = 4.0;
 
 /// Most control requests handled in one frame; the rest wait for the next.
 const REQUESTS_PER_FRAME: usize = 64;
+
+/// What a notice says for `e`. A command that cannot run now (`Disabled`), is busy or got bad
+/// params gives its reason alone, as a sentence: `No staged changes.`, not "`edit.apply` cannot
+/// run now: no staged changes". Every other error reads as its own text. [`EngineError`]'s
+/// `Display`, which names the command, stays for the control channel and the logs.
+pub(crate) fn notice_text(e: &EngineError) -> String {
+    match e {
+        EngineError::Disabled { why: text, .. } | EngineError::BadParams { msg: text, .. } | EngineError::Busy(text) => sentence(text),
+        other => other.to_string(),
+    }
+}
+
+/// `text` trimmed, its first letter upper-cased, ending in a full stop (unless it ends in one
+/// already, or in `?`, `!` or `…`).
+fn sentence(text: &str) -> String {
+    let text = text.trim();
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else { return String::new() };
+    let mut out: String = first.to_uppercase().chain(chars).collect();
+    if !out.ends_with(['.', '?', '!', '…']) {
+        out.push('.');
+    }
+    out
+}
 
 /// The window over one session.
 pub struct DbeeApp {
@@ -362,7 +387,7 @@ impl DbeeApp {
                     && !dialogs::ask(self, &e, Rerun { command, params, origin })
                     && !in_card
                 {
-                    self.notice(e.to_string());
+                    self.notice(notice_text(&e));
                 }
             }
         }
@@ -579,7 +604,7 @@ mod tests {
         // A user's click on something that cannot run now says why.
         let disabled = EngineError::Disabled { id: "table.sort".into(), why: "apply or reset your changes first".into() };
         app.outcome("table.sort", json!({}), Origin::Page, None, Err(disabled));
-        assert!(shown(&app).last().is_some_and(|n| n.contains("apply or reset your changes first")), "{:?}", shown(&app));
+        assert_eq!(shown(&app).last().map(String::as_str), Some("Apply or reset your changes first."), "the reason alone, as a sentence");
         // A page load's job error is the card's; the same error before any job started is not.
         let lost = || EngineError::Db { code: "connectionLost", message: "connection lost".into(), data: json!({}) };
         let before = shown(&app).len();
@@ -638,8 +663,25 @@ mod tests {
         let nothing = EngineError::Disabled { id: "query.run".into(), why: "there is no statement to run".into() };
         app.outcome("query.run", json!({}), Origin::Menu, None, Err(nothing));
         let notices = shown(&app);
-        assert_eq!(notices.len(), 2, "{notices:?}");
-        assert!(notices[0] == "connection lost" && notices[1].contains("no statement to run"), "{notices:?}");
+        assert_eq!(notices, ["connection lost", "There is no statement to run."]);
+    }
+
+    #[test]
+    fn a_notice_gives_the_reason_alone_as_a_sentence() {
+        let disabled = |why: &str| EngineError::Disabled { id: "edit.apply".into(), why: why.into() };
+        assert_eq!(notice_text(&disabled("no staged changes")), "No staged changes.");
+        assert_eq!(notice_text(&disabled("connection lost — reconnect")), "Connection lost — reconnect.");
+        assert_eq!(notice_text(&disabled("This row is marked for deletion.")), "This row is marked for deletion.", "one period");
+        assert_eq!(notice_text(&disabled("éclair? ")), "Éclair?");
+        assert_eq!(notice_text(&disabled("")), "");
+        assert_eq!(notice_text(&EngineError::Busy("a query is running in Query 1".into())), "A query is running in Query 1.");
+        let bad = EngineError::BadParams { id: "cell.edit".into(), msg: "`value` must be text or null".into() };
+        assert_eq!(notice_text(&bad), "`value` must be text or null.");
+        // Every other error reads as its own text; Display keeps the command for the control channel.
+        let db = EngineError::Db { code: "server", message: "duplicate key (SQLSTATE 23505)".into(), data: json!({}) };
+        assert_eq!(notice_text(&db), "duplicate key (SQLSTATE 23505)");
+        assert_eq!(notice_text(&EngineError::Timeout), EngineError::Timeout.to_string());
+        assert_eq!(disabled("no staged changes").to_string(), "`edit.apply` cannot run now: no staged changes");
     }
 
     #[test]

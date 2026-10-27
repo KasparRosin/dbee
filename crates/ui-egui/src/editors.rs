@@ -358,7 +358,7 @@ pub(crate) fn size_text(n: usize) -> String {
 /// when there is no such cell.
 pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>, String> {
     if let Err(why) = can_edit(s) {
-        return Err(EngineError::Disabled { id: "cell.edit".into(), why }.to_string());
+        return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why }));
     }
     let Some(Tab::Table(t)) = s.state().active_tab() else { return Ok(None) };
     let Some(data) = &t.data else { return Ok(None) };

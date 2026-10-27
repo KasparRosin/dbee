@@ -207,7 +207,7 @@ fn ctrl_enter_while_a_run_goes_says_the_engine_is_busy() {
     ui.ctrl("Enter");
     ui.frame();
     let notice = ui.value("notice");
-    assert!(notice.as_str().is_some_and(|n| n.contains("busy") && n.contains("a query is running in Query 1")), "{notice}");
+    assert_eq!(notice, "A query is running in Query 1.");
     assert_eq!(ui.query()["running"], running, "the run goes on, and no second one started");
     ui.click("query-cancel");
     ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
@@ -418,7 +418,7 @@ fn run_buttons_say_why_they_cannot_run() {
     ui.click("query-run");
     ui.frame();
     let notice = ui.value("notice");
-    assert!(notice.as_str().is_some_and(|n| n.contains("no statement to run")), "{notice}");
+    assert_eq!(notice, "There is no statement to run.");
 }
 
 #[test]
