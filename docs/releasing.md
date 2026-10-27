@@ -1,6 +1,6 @@
 # Releasing dbee
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-27 · **Change:** trivial (self-contained workflows reworded)
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (GitHub setup: third-party licence texts before the first release)
 
 Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `dbee v<version>`. Nobody sees a draft until the owner publishes it. The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 
@@ -90,3 +90,4 @@ Then:
 3. Add a ruleset on `refs/heads/release` (creation, update, deletion, non-fast-forward) so only the owner can push to it.
 4. Add the signing secrets above to the `release` environment (all optional).
 5. Run the workflow from `release` with version `0.0.1-rc.1` as a test and check every artifact.
+6. Before the first release: ship the third-party licence texts (crates, egui's fonts) with the binaries.

@@ -84,8 +84,8 @@ The MSI installer offers an optional desktop shortcut (unchecked on a new instal
 ## License and credits
 
 dbee is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
-Copyright (c) 2026 Kaspar Rosin and the dbee contributors. Required notices are in [NOTICE](NOTICE).
+Copyright (c) 2026 Kaspar Rosin and the dbee contributors.
 
-Every bundled asset is listed with its author, source and licence in [ATTRIBUTION.md](ATTRIBUTION.md). dbee bundles no fonts.
+Every asset in the repository is listed with its author, source and licence in [ATTRIBUTION.md](ATTRIBUTION.md). The repository holds no font files; the app embeds egui's default fonts (see ATTRIBUTION.md).
 
 <sub>Beekeeper Studio is a trademark of its owner. dbee is an independent project and is not affiliated with or endorsed by it.</sub>

@@ -8,6 +8,19 @@ Every non-code asset in this repository (images, icons, fonts, example files, pr
 
 None yet.
 
+## Compiled in from dependencies
+
+The binaries embed egui's default fonts from the `epaint_default_fonts` crate. They are not files in this repository.
+
+| Font | Licence |
+|---|---|
+| Ubuntu Light | Ubuntu Font Licence 1.0 |
+| Hack Regular | MIT (Hack); Bitstream Vera Licence (the glyphs it builds on) |
+| Noto Emoji Regular | OFL-1.1 |
+| emoji-icon-font | MIT |
+
+Their licence texts ship with the binaries from the first release on ([docs/releasing.md](docs/releasing.md)).
+
 ## Files
 
 | Asset | Author | Source | Licence | Notes |

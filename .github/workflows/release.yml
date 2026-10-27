@@ -332,7 +332,7 @@ jobs:
               elif [ -f /var/tmp/dbee-target/release/dbee-cli ]; then
                 cp /var/tmp/dbee-target/release/dbee-cli "dist/release/$name/"
               fi
-              cp README.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md "dist/release/$name/" 2>/dev/null || true
+              cp README.md LICENSE-MIT LICENSE-APACHE ATTRIBUTION.md "dist/release/$name/" 2>/dev/null || true
               if [ -f packaging/linux/dev.rosin.dbee.desktop ]; then
                 cp packaging/linux/dev.rosin.dbee.desktop "dist/release/$name/"
               fi
