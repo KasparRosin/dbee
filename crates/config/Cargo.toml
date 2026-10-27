@@ -3,6 +3,9 @@ name = "dbee-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "dbee connection settings (L1): URL parsing, the saved and recent connections file, secret stores"
 

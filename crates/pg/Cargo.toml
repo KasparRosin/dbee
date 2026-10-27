@@ -3,6 +3,9 @@ name = "dbee-pg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "dbee Postgres connection (L3): TLS, SSH tunnel, read-only mode, cancel, simple-query runner"
 

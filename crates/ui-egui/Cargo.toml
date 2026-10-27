@@ -3,6 +3,9 @@ name = "dbee-ui-egui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "dbee user interface on egui (L6): the app shell, screens, shortcuts and the localhost control channel"
 

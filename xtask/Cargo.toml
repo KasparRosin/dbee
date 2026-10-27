@@ -3,6 +3,9 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "dbee workspace tooling: cargo xtask ci | assets | layers | licenses | provenance | version | stats | ico | icns | contributors | run-isolated"
 

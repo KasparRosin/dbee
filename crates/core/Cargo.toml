@@ -3,6 +3,9 @@ name = "dbee-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "dbee core values (L0): cells, result sets, schema model, grid text and copy formats"
 

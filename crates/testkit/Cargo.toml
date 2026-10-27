@@ -3,6 +3,9 @@ name = "dbee-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "dbee test kit (L0, dev-dependency only): finds the Docker test servers, skip rule, psql helper, temp homes"
 

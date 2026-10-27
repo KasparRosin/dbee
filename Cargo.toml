@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.99"
 repository = "https://github.com/KasparRosin/dbee"
 homepage = "https://dbee.rosin.dev"
+description = "A cross-platform desktop database client, written in Rust."
 
 [workspace.dependencies]
 # internal

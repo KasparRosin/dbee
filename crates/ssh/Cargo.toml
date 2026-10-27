@@ -3,6 +3,9 @@ name = "dbee-ssh"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 description = "dbee SSH tunnel (L2): host key check against known_hosts, key, agent and password login, direct-tcpip streams"
 

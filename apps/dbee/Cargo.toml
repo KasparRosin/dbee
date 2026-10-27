@@ -3,9 +3,12 @@ name = "dbee"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish = false
 default-run = "dbee"
-description = "dbee desktop app"
+description.workspace = true
 
 [lints]
 workspace = true
