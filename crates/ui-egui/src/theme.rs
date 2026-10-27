@@ -51,6 +51,10 @@ pub struct Tokens {
     pub new_row: Color32,
     pub deleted: Color32,
     pub failed: Color32,
+    /// The tabs strip's band, a surface of its own above the content, and a tab hovered on it.
+    /// The active tab takes [`Tokens::bg`] and opens into the content below it.
+    pub tab_band: Color32,
+    pub tab_hover: Color32,
 }
 
 /// The light theme: a warm grey ground with a slate-teal accent.
@@ -81,6 +85,8 @@ pub const TOKENS: Tokens = Tokens {
     new_row: Color32::from_rgb(0xE0, 0xF2, 0xC8),
     deleted: Color32::from_rgb(0xE6, 0xDF, 0xF2),
     failed: Color32::from_rgb(0xF7, 0xD0, 0xCA),
+    tab_band: Color32::from_rgb(0xE6, 0xE8, 0xE3),
+    tab_hover: Color32::from_rgb(0xF1, 0xF2, 0xEF),
 };
 
 /// Syntax colours for JSON in the value panel.
@@ -250,7 +256,7 @@ mod tests {
     #[test]
     fn text_is_readable_on_every_surface() {
         let t = TOKENS;
-        for (name, bg) in [("bg", t.bg), ("panel", t.panel), ("card", t.card)] {
+        for (name, bg) in [("bg", t.bg), ("panel", t.panel), ("card", t.card), ("tab band", t.tab_band), ("tab hover", t.tab_hover)] {
             assert!(contrast(t.text, bg) >= 7.0, "text on {name}");
             assert!(contrast(t.text_muted, bg) >= 4.5, "muted text on {name}");
         }
@@ -258,6 +264,17 @@ mod tests {
         assert!(contrast(t.danger, t.bg) >= 4.5, "errors on the background");
         assert!(contrast(t.success, t.card) >= 4.5, "success text on a card");
         assert!(contrast(t.danger, t.card) >= 4.5, "errors on a card");
+    }
+
+    #[test]
+    fn the_tab_band_stands_apart_from_the_content_and_its_hover_from_both() {
+        let t = TOKENS;
+        // The band reads as a surface of its own, a hovered tab apart from the band, and the
+        // band's bottom line shows on it.
+        assert!(delta_e(t.tab_band, t.bg) >= 5.0, "band and content: ΔE {:.1}", delta_e(t.tab_band, t.bg));
+        assert!(delta_e(t.tab_hover, t.tab_band) >= 2.5, "hover and band: ΔE {:.1}", delta_e(t.tab_hover, t.tab_band));
+        assert!(delta_e(t.tab_hover, t.bg) >= 2.5, "hover and the active tab: ΔE {:.1}", delta_e(t.tab_hover, t.bg));
+        assert!(delta_e(t.border, t.tab_band) >= 5.0, "the line on the band: ΔE {:.1}", delta_e(t.border, t.tab_band));
     }
 
     #[test]

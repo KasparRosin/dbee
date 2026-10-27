@@ -46,6 +46,11 @@ fn pg14(db: &TestDb) -> ConnectionConfig {
 
 /// A window on a throwaway home, connected to the pg14 test server, on the workspace.
 fn connected(db: &TestDb) -> Ui {
+    connected_in(db, egui::vec2(1400.0, 900.0))
+}
+
+/// [`connected`] in a window of `size`.
+fn connected_in(db: &TestDb, size: egui::Vec2) -> Ui {
     let home = temp_home(None, None);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
     let session = Session::new(SessionOptions {
@@ -58,7 +63,7 @@ fn connected(db: &TestDb) -> Ui {
     .unwrap();
     let (tx, rx) = mpsc::channel();
     let app = DbeeApp::new(session, Some(rx));
-    let harness = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
+    let harness = Harness::builder().with_size(size).build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
     let mut ui = Ui { harness, tx, copied: Vec::new(), _home: home };
     ui.frame();
     let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
@@ -185,6 +190,48 @@ impl Ui {
     /// The text a frame last put on the clipboard, if any did.
     fn copied(&self) -> Option<String> {
         self.copied.last().cloned()
+    }
+
+    /// Where `id` was drawn in the last frame, in view.
+    fn rect(&self, id: &str) -> Option<egui::Rect> {
+        self.harness.state().tags().rect(id)
+    }
+
+    /// Where each of `ids` was drawn in the last frame.
+    fn rects(&self, ids: &[String]) -> Vec<(String, Option<egui::Rect>)> {
+        ids.iter().map(|id| (id.clone(), self.rect(id))).collect()
+    }
+
+    /// The ids drawn in the last frame that start with `prefix`.
+    fn ids_with(&self, prefix: &str) -> Vec<String> {
+        self.harness.state().tags().ids().into_iter().filter(|id| id.starts_with(prefix)).map(str::to_string).collect()
+    }
+
+    /// The pointer moves to `at` and stays there for a frame.
+    fn hover(&mut self, at: Pos2) {
+        self.frame_with(vec![Event::PointerMoved(at)]);
+    }
+
+    /// The text shapes of the last frame: each galley where it was drawn.
+    fn texts(&self) -> Vec<(egui::Rect, Arc<egui::Galley>)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, Arc<egui::Galley>)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push((t.galley.rect.translate(t.pos.to_vec2()), Arc::clone(&t.galley))),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &self.harness.output().shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// The text drawn inside `within` that reads `text`: where it was drawn and whether it was cut
+    /// short (an ellipsis).
+    fn text_in(&self, within: egui::Rect, text: &str) -> Option<(egui::Rect, bool)> {
+        self.texts().into_iter().find(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).map(|(r, g)| (r, g.elided))
     }
 }
 
@@ -791,4 +838,197 @@ fn grid_frame_within_budget() {
         machine()
     );
     assert!(median < Duration::from_millis(16), "{median:?}");
+}
+
+/// The operators as the filter bar's choices read, in `Op::ALL` order with their ids: the symbol
+/// in brackets after the words, a word operator by its words alone.
+const OPS: [(&str, &str); 13] = [
+    ("eq", "equals (=)"),
+    ("ne", "does not equal (<>)"),
+    ("like", "like"),
+    ("notLike", "not like"),
+    ("ilike", "ilike"),
+    ("notIlike", "not ilike"),
+    ("lt", "less than (<)"),
+    ("le", "less than or equal (<=)"),
+    ("gt", "greater than (>)"),
+    ("ge", "greater than or equal (>=)"),
+    ("in", "in"),
+    ("isNull", "is null"),
+    ("isNotNull", "is not null"),
+];
+
+/// The app's window (apps/dbee: 1100 × 720, the value panel open, its default) and a wide one.
+const SIZES: [egui::Vec2; 2] = [egui::vec2(1100.0, 720.0), egui::vec2(1700.0, 720.0)];
+
+/// Every one of `ids` drawn, all as tall as `height` (the first one's when `None`) and level
+/// with each other; returns the height.
+fn assert_level(ui: &Ui, ids: &[&str], height: Option<f32>, at: &str) -> f32 {
+    let rects: Vec<(&str, egui::Rect)> =
+        ids.iter().map(|id| (*id, ui.rect(id).unwrap_or_else(|| panic!("{at}: `{id}` is drawn, in view")))).collect();
+    let (first, r0) = rects[0];
+    let h = height.unwrap_or(r0.height());
+    for (id, r) in &rects {
+        assert!((r.height() - h).abs() <= 0.5, "{at}: `{id}` is {} tall, not {h} like `{first}`: {rects:?}", r.height());
+        assert!((r.top() - r0.top()).abs() <= 0.5, "{at}: `{id}` {r:?} is not level with `{first}` {r0:?}");
+    }
+    h
+}
+
+#[test]
+fn the_filter_bar_controls_are_one_height() {
+    let db = dbee_testkit::require_testdb!();
+    for size in SIZES {
+        let at = format!("{} × {}", size.x, size.y);
+        let mut ui = connected_in(db, size);
+        ui.open("shop", "orders");
+        ui.click("filter-add");
+        ui.frame();
+        let first = ["filter-raw-toggle", "filter-0-column", "filter-0-op", "filter-0-value", "filter-0-remove", "filter-add", "filter-apply"];
+        let h = assert_level(&ui, &first, None, &format!("{at}, the first row"));
+        assert_level(&ui, &["filter-1-column", "filter-1-op", "filter-1-value", "filter-1-remove"], Some(h), &format!("{at}, the second row"));
+        // An operator without a value: the row keeps its height.
+        ui.click("filter-1-op");
+        ui.click("filter-1-op-isNull");
+        ui.frame();
+        assert!(ui.rect("filter-1-value").is_none(), "{at}: is null has no value field");
+        assert_level(&ui, &["filter-1-column", "filter-1-op", "filter-1-remove"], Some(h), &format!("{at}, the second row with is null"));
+        // The raw WHERE field.
+        ui.click("filter-raw-toggle");
+        ui.frame();
+        assert_level(&ui, &["filter-raw-toggle", "filter-raw", "filter-apply"], Some(h), &format!("{at}, the raw field"));
+    }
+}
+
+#[test]
+fn the_operator_choice_shows_each_label_whole() {
+    let db = dbee_testkit::require_testdb!();
+    for size in SIZES {
+        let at = format!("{} × {}", size.x, size.y);
+        let mut ui = connected_in(db, size);
+        ui.open("shop", "orders");
+        ui.frame();
+        // The open list: every operator, its label whole.
+        ui.click("filter-0-op");
+        ui.frame();
+        for (id, label) in OPS {
+            let item = format!("filter-0-op-{id}");
+            let rect = ui.rect(&item).unwrap_or_else(|| panic!("{at}: `{item}` shows in the open list"));
+            let (text, cut) = ui.text_in(rect, label).unwrap_or_else(|| {
+                panic!(
+                    "{at}: `{item}` reads `{label}`: {:?}",
+                    ui.texts().iter().filter(|(r, _)| rect.contains(r.center())).map(|(_, g)| g.text().to_string()).collect::<Vec<_>>()
+                )
+            });
+            assert!(!cut && rect.expand(0.5).contains_rect(text), "{at}: `{label}` is cut in its item: {text:?} in {rect:?}");
+        }
+        ui.click("filter-0-op");
+        // The closed choice shows the chosen operator's label whole, and the row still fits: left
+        // of the value panel, nothing over anything.
+        for (id, label) in OPS {
+            ui.click("filter-0-op");
+            ui.click(&format!("filter-0-op-{id}"));
+            ui.frame();
+            assert_eq!(ui.value("filter-0-op"), id, "{at}");
+            let rect = ui.rect("filter-0-op").unwrap();
+            let (text, cut) = ui.text_in(rect, label).unwrap_or_else(|| panic!("{at}: the closed choice reads `{label}`"));
+            assert!(!cut && rect.contains_rect(text), "{at}: `{label}` is cut in the closed choice: {text:?} in {rect:?}");
+            let mut row = vec!["filter-raw-toggle", "filter-0-column", "filter-0-op", "filter-0-remove", "filter-add", "filter-apply"];
+            if !matches!(id, "isNull" | "isNotNull") {
+                row.insert(3, "filter-0-value");
+            }
+            let panel = ui.rect("value-panel").map_or(size.x, |r| r.left());
+            let rects: Vec<(&str, egui::Rect)> =
+                row.iter().map(|w| (*w, ui.rect(w).unwrap_or_else(|| panic!("{at}, {label}: `{w}` shows")))).collect();
+            for (i, (a, ra)) in rects.iter().enumerate() {
+                assert!(ra.right() <= panel + 0.5, "{at}, {label}: `{a}` {ra:?} runs into the value panel at {panel}");
+                for (b, rb) in &rects[i + 1..] {
+                    assert!(ra.right() <= rb.left() + 0.5, "{at}, {label}: `{a}` {ra:?} runs over `{b}` {rb:?}");
+                }
+            }
+        }
+    }
+}
+
+/// The widgets that must stay where they are while the pointer moves over the filter row's
+/// choices and their lists: the tree, the tab strip, the filter row, the grid's paging bar and
+/// the value panel.
+const STILL: [&str; 14] = [
+    "tree-filter",
+    "tree-refresh",
+    "tree-schema-shop",
+    "tab-new",
+    "filter-raw-toggle",
+    "filter-0-column",
+    "filter-0-op",
+    "filter-0-value",
+    "filter-0-remove",
+    "filter-add",
+    "filter-apply",
+    "page-first",
+    "value-panel",
+    "value-toggle",
+];
+
+#[test]
+fn hovering_the_filter_choices_and_their_lists_moves_nothing() {
+    let db = dbee_testkit::require_testdb!();
+    for size in SIZES {
+        let at = format!("{} × {}", size.x, size.y);
+        let mut ui = connected_in(db, size);
+        ui.open("shop", "customers");
+        ui.open("shop", "orders");
+        ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+        let mut still: Vec<String> = STILL.iter().map(|s| (*s).to_string()).collect();
+        still.extend(ui.ids_with("tab-").into_iter().filter(|id| id.trim_start_matches("tab-").parse::<u64>().is_ok()));
+        // The pointer away from everything, then the place of each.
+        let away = egui::pos2(size.x / 2.0, size.y - 60.0);
+        ui.hover(away);
+        ui.frame();
+        let before = ui.rects(&still);
+        assert!(before.iter().all(|(_, r)| r.is_some()), "{at}: all drawn: {before:?}");
+        let check = |ui: &mut Ui, what: &str| {
+            let now = ui.rects(&still);
+            for ((id, was), (_, is)) in before.iter().zip(&now) {
+                let moved = match (was, is) {
+                    (Some(a), Some(b)) => (a.min - b.min).length() > 0.5 || (a.size() - b.size()).length() > 0.5,
+                    _ => true,
+                };
+                assert!(!moved, "{at}: `{id}` moved from {was:?} to {is:?} while the pointer was over {what}");
+            }
+        };
+        for list in ["column", "op"] {
+            let choice = format!("filter-0-{list}");
+            // The closed choice, hovered for longer than a tooltip waits (0.5 s; frames are 0.25 s
+            // apart in the harness).
+            let centre = ui.rect(&choice).unwrap().center();
+            for _ in 0..4 {
+                ui.hover(centre);
+                check(&mut ui, &choice);
+            }
+            ui.click(&choice);
+            ui.frame();
+            let items = ui.ids_with(&format!("{choice}-"));
+            assert!(!items.is_empty(), "{at}: the {list} list is open");
+            // The list itself keeps its items where they are too: none grows, none shifts, so no
+            // scroll bar comes and goes.
+            let listed = ui.rects(&items);
+            for item in &items {
+                let Some(r) = ui.rect(item) else { continue };
+                for _ in 0..4 {
+                    ui.hover(r.center());
+                    check(&mut ui, item);
+                    for ((id, was), (_, is)) in listed.iter().zip(&ui.rects(&items)) {
+                        assert_eq!(was, is, "{at}: the list's `{id}` moved while the pointer was over `{item}`");
+                    }
+                }
+            }
+            // Closed again: a click on the choice.
+            ui.click(&choice);
+            ui.hover(away);
+            ui.frame();
+            assert!(ui.ids_with(&format!("{choice}-")).is_empty(), "{at}: the {list} list closed");
+            check(&mut ui, "nothing");
+        }
+    }
 }

@@ -10,11 +10,14 @@
 //! - the tabs strip, then the active tab;
 //! - the quick search over everything while it is open ([`crate::quick_search`]).
 //!
-//! **Tabs strip.** A tab shows its kind's icon, its title (a table tab its table's name, with the
-//! number of applied filters as `orders [2]`), a dot when closing it would lose something (query
-//! text, staged edits), a spinner while one of its jobs runs, and × to close it; a middle click
-//! closes it too, and `+` opens a query tab. Closing goes through `tab.close`, so a tab that would
-//! lose something asks first.
+//! **Tabs strip.** The strip is a band of its own (`tab_band`) with a line along its bottom; the
+//! tabs stand on the band's bottom edge, and the active one takes the content's fill and opens
+//! into the content below it: no line under it, its sides and top drawn, the accent along its top.
+//! A tab shows its kind's icon, its title (a table tab its table's name, with the number of
+//! applied filters as `orders [2]`), a dot when closing it would lose something (query text,
+//! staged edits), a spinner while one of its jobs runs, and × to close it; a middle click closes
+//! it too, and `+` opens a query tab. More tabs than fit scroll sideways. Closing goes through
+//! `tab.close`, so a tab that would lose something asks first.
 //!
 //! **Running jobs.** The status bar and the tabs show only live jobs: those a tab's markers name
 //! (a page load, a count, an Apply, a query run) and a reconnect. A tab that closed, or whose
@@ -45,8 +48,10 @@ use crate::theme::{RADIUS, TOKENS, connection_color};
 use crate::tree::{self, Refresh, Tree, TreeAct};
 use crate::{DbeeApp, icons, menu, value_panel};
 
-/// The tabs strip's height.
-const STRIP_H: f32 = 34.0;
+/// The tabs strip's height: its band.
+const STRIP_H: f32 = 36.0;
+/// A tab's height; it stands on the band's bottom edge.
+const TAB_H: f32 = 30.0;
 /// The status bar's height.
 pub(crate) const STATUS_H: f32 = 30.0;
 /// The widest a tab's title gets before it is cut.
@@ -344,19 +349,23 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         .collect();
     let tags = &mut app.tags;
     let (strip, _) = ui.allocate_exact_size(vec2(ui.available_width(), STRIP_H), Sense::hover());
-    ui.painter().rect_filled(strip, CornerRadius::ZERO, t.panel);
-    ui.painter().line_segment([strip.left_bottom(), strip.right_bottom()], Stroke::new(1.0, t.border));
+    ui.painter().rect_filled(strip, CornerRadius::ZERO, t.tab_band);
     let mut strip_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip).layout(Layout::left_to_right(Align::Max)));
-    ScrollArea::horizontal().id_salt("tab-strip").auto_shrink([false, true]).show(&mut strip_ui, |ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        ui.horizontal(|ui| {
+    let mut active = None;
+    ScrollArea::horizontal().id_salt("tab-strip").auto_shrink([false, false]).show(&mut strip_ui, |ui| {
+        // Bottom-aligned in the band's height: every tab stands on the band's bottom edge.
+        ui.with_layout(Layout::left_to_right(Align::Max), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             ui.add_space(4.0);
             for tab in &tabs {
-                draw_tab(ui, tab, tags, acts);
+                if let Some(rect) = draw_tab(ui, tab, tags, acts) {
+                    active = Some(rect);
+                }
             }
-            let (rect, r) = ui.allocate_exact_size(vec2(28.0, STRIP_H - 6.0), Sense::click());
+            let (slot, r) = ui.allocate_exact_size(vec2(28.0, TAB_H), Sense::click());
+            let rect = Rect::from_center_size(slot.center(), vec2(24.0, 24.0));
             if r.hovered() {
-                ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), t.hover);
+                ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), t.tab_hover);
             }
             icons::plus(ui.painter(), Rect::from_center_size(rect.center(), vec2(14.0, 14.0)), t.text_muted);
             let r = r.on_hover_text("New query tab (Ctrl+T)");
@@ -366,26 +375,38 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             }
         });
     });
+    // The line along the band's bottom, but not under the active tab (the part of it in view),
+    // which opens into the content.
+    let y = strip.bottom() - 0.5;
+    let line = Stroke::new(1.0, t.border);
+    let open = active.map(|a| a.intersect(strip)).filter(|a| a.width() > 0.0);
+    let (left, right) = open.map_or((strip.right(), strip.right()), |a| (a.left(), a.right()));
+    if left > strip.left() {
+        ui.painter().line_segment([pos2(strip.left(), y), pos2(left, y)], line);
+    }
+    if right < strip.right() {
+        ui.painter().line_segment([pos2(right, y), pos2(strip.right(), y)], line);
+    }
 }
 
-fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags, acts: &mut Vec<Act>) {
+/// Draws `tab` on the band; returns its rect when it is the active one.
+fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags, acts: &mut Vec<Act>) -> Option<Rect> {
     let t = TOKENS;
     let font = FontId::proportional(13.0);
     let colour = if tab.active { t.text } else { t.text_muted };
     let galley = line_galley(ui, &tab.title, font, colour, TITLE_MAX);
     let width = 10.0 + 16.0 + 6.0 + galley.size().x + 6.0 + if tab.dirty { 10.0 } else { 0.0 } + 20.0 + 6.0;
-    let (rect, r) = ui.allocate_exact_size(vec2(width, STRIP_H - 4.0), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(vec2(width, TAB_H), Sense::click());
     let p = ui.painter().clone();
-    let fill = if tab.active {
-        t.bg
-    } else if r.hovered() {
-        t.hover
-    } else {
-        t.panel
-    };
-    p.rect_filled(rect, CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 }, fill);
+    let corners = CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 };
     if tab.active {
-        p.line_segment([rect.left_top() + vec2(2.0, 0.0), rect.right_top() - vec2(2.0, 0.0)], Stroke::new(2.0, t.accent));
+        // The content's fill, its sides and top in the border colour. The shape runs past the
+        // band's bottom, where the strip's clip cuts it off: no edge under the tab.
+        let open = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y + 2.0));
+        p.rect(open, corners, t.bg, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+        p.line_segment([rect.left_top() + vec2(2.0, 1.0), rect.right_top() + vec2(-2.0, 1.0)], Stroke::new(2.0, t.accent));
+    } else if r.hovered() {
+        p.rect_filled(rect, corners, t.tab_hover);
     }
     let icon_rect = Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 8.0), vec2(16.0, 16.0));
     if tab.busy {
@@ -422,6 +443,7 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     } else if r.clicked() && !tab.active {
         acts.push(Act::Activate(tab.id));
     }
+    tab.active.then_some(rect)
 }
 
 /// The active tab's body (see the module docs), or a hint when no tab is open.
