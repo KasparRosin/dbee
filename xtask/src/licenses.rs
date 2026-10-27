@@ -15,7 +15,7 @@ pub const TARGETS: &[&str] = &["x86_64-unknown-linux-gnu", "aarch64-apple-darwin
 
 /// Packages approved by the owner despite a licence outside the allowlist: (crate name, reason).
 pub const EXCEPTIONS: &[(&str, &str)] =
-    &[("epaint_default_fonts", "egui's built-in fonts (OFL-1.1, Ubuntu-font-1.0); AGENTS.md: the app uses system fonts and egui's defaults")];
+    &[("epaint_default_fonts", "egui's built-in fonts (OFL-1.1, Ubuntu-font-1.0); AGENTS.md: the app uses egui's default fonts")];
 
 /// Licence ids the project may depend on.
 const ALLOWED_IDS: &[&str] = &["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "CC0-1.0", "BSL-1.0", "MPL-2.0"];
