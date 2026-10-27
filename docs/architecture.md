@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (checked against the crates at the end of M1: the domain crates' and the engine's rows, run-isolated, tables, edits and queries in the data flow)
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (Platforms: only Linux x86_64 tested so far)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -59,7 +59,7 @@ A crate may depend only on lower layers. Register every new crate in `xtask/src/
 
 ## Platforms
 
-Desktop only: macOS, Windows, Linux and FreeBSD. There is no web build and no wasm target, because a browser cannot open database connections. See [`releasing.md`](releasing.md) for the platform matrix and [`decisions.md`](decisions.md).
+Desktop only: macOS, Windows, Linux and FreeBSD, of which only Linux x86_64 has been built and run so far ([`hardware-parity.md`](hardware-parity.md)). There is no web build and no wasm target, because a browser cannot open database connections. See [`releasing.md`](releasing.md) for the platform matrix and [`decisions.md`](decisions.md).
 
 ## Known gaps
 
@@ -69,6 +69,7 @@ M1's crates are all in place. Postgres is the only engine, and the engine calls 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | trivial | Platforms: only Linux x86_64 built and run so far |
 | 2026-10-26 | minor | Checked against the crates at the end of M1: `core` (JSON), `sql` (filters, page and edit statements), `pg` (catalog, caps, apply), the engine's modules, the UI's file pickers, the app's logger, `run-isolated`, `m1_day`; the data flow for tables, edits and queries; the planned driver interface |
 | 2026-10-26 | minor | `crates/ui-egui`: copying to the clipboard ("Copied n rows", grid clicks take the keyboard, the in-memory clipboard of isolated runs); `copy.selection` copies at most 8 MiB of text, everything counted |
 | 2026-10-26 | minor | `crates/ui-egui`: the query tab |
