@@ -1,9 +1,12 @@
 *~
-plan/
+/plan/
 /target
 /dist
 /corpus
 /log
 .DS_Store
 /.claude/
+/.superpowers/
+/build-flatpak/
+/.flatpak-builder/
 /target-*/
