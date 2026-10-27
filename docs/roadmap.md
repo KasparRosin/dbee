@@ -1,6 +1,8 @@
-# Roadmap
+# Roadmap: gates and milestones
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: the day of real use on the maintainer's own databases) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (title and role: the detail behind ROADMAP.md) · **Target:** Beekeeper Studio 5.5.7
+
+The one-page summary is [`ROADMAP.md`](../ROADMAP.md) at the repository root. This page holds the detail behind it: the current focus, the alpha and beta gates, and the milestones.
 
 ## Current focus
 
@@ -44,6 +46,7 @@ Percentages and hours come from [target-app-parity.md](target-app-parity.md) and
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | trivial | Titled "gates and milestones", with a line on its role next to ROADMAP.md. |
 | 2026-10-27 | minor | Wording: M1's last check is a day of real use on the maintainer's own databases. |
 | 2026-10-27 | minor | The packages' `.sqlite` and `.sqlite3` file associations removed until the SQLite engine exists. |
 | 2026-10-27 | minor | The next page's timing quoted from target-app-parity.md (1.06–1.09 ms). |

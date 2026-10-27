@@ -2,9 +2,9 @@
 
 **Stage: pre-alpha** · next: alpha, once file export lands (M2). M1 "Daily Postgres workflow" is built and waits for its last check: a day of real use on the maintainer's own databases.
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: the day of real use, M1 review fixes) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (what each detail doc holds; the docs index) · **Target:** Beekeeper Studio 5.5.7
 
-Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs`). They are connecting to Postgres (also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M2. Postgres is the only engine. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md), [`docs/gaps.md`](docs/gaps.md), [`docs/roadmap.md`](docs/roadmap.md).
+Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs`). They are connecting to Postgres (also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M2. Postgres is the only engine. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
 
 ## Headline numbers
 
@@ -70,6 +70,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | trivial | The detail docs say what they hold, and link the docs index. |
 | 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases; M1 review fixes. |
 | 2026-10-27 | minor | Progress log: M1 review fixes. |
 | 2026-10-26 | major | M1 built: stage line, headline numbers, dimensions and feature areas assessed (measured and estimated marked), upcoming list, progress log. |

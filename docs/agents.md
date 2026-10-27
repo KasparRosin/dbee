@@ -1,6 +1,6 @@
 # Agents
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (§4: the M1 day as a scripted check, with its command)
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (§7: undocumented behaviour is recorded in the module docs, not in crate READMEs)
 
 dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
 
@@ -67,7 +67,7 @@ For parallel agents see §9.
 
 ## 7. Decision rules
 
-Don't block on choices you can make yourself. Where Beekeeper Studio's behaviour is undocumented, choose what database clients most commonly do and record the choice in the crate README. Never inspect Beekeeper Studio's internals (clean-room rule in `AGENTS.md`).
+Don't block on choices you can make yourself. Where Beekeeper Studio's behaviour is undocumented, choose what database clients most commonly do and record the choice in the doc comment of the module that implements it (and in [`decisions.md`](decisions.md) if it is significant). Never inspect Beekeeper Studio's internals (clean-room rule in `AGENTS.md`).
 
 Ask a human only about:
 
