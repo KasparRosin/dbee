@@ -255,26 +255,29 @@ fn writes_cast_to_the_type_without_its_length_so_the_column_refuses_a_long_value
 
 #[test]
 fn filters_compare_with_the_type_without_its_length_so_a_long_value_matches_nothing() {
+    // The type without its length that keeps the column's own operators (and so its indexes):
+    // `varchar(n)` as `text` (its indexes are text_ops), `char(n)` as `bpchar` (trailing spaces
+    // do not count), `bit(n)` as `"bit"` (quoted: a bare `bit` is `bit(1)`).
     let w = |filter: Filter| where_sql(&Condition::Filters(vec![filter]), &lengths()).unwrap().unwrap();
     assert_eq!(w(f("v", Op::Eq, "abcdefghijkl")), "\"v\" = CAST('abcdefghijkl' AS text)");
-    assert_eq!(w(f("c", Op::Ge, "abc")), "\"c\" >= CAST('abc' AS text)");
-    assert_eq!(w(f("b", Op::Ne, "1")), "\"b\" <> CAST('1' AS bit varying)");
+    assert_eq!(w(f("c", Op::Ge, "abc")), "\"c\" >= CAST('abc' AS bpchar)");
+    assert_eq!(w(f("b", Op::Ne, "1")), "\"b\" <> CAST('1' AS \"bit\")");
     assert_eq!(w(f("vb", Op::Lt, "101")), "\"vb\" < CAST('101' AS bit varying)");
     assert_eq!(w(f("d", Op::Eq, "abcdefg")), "\"d\" = CAST('abcdefg' AS text)");
-    assert_eq!(w(f("vba", Op::Eq, "{101}")), "\"vba\" = CAST('{101}' AS bit varying[])");
     // Each IN item too.
     assert_eq!(w(f("v", Op::In, "abcdefghijkl, x")), "\"v\" IN (CAST('abcdefghijkl' AS text), CAST('x' AS text))");
-    assert_eq!(w(f("b", Op::In, "101,01")), "\"b\" IN (CAST('101' AS bit varying), CAST('01' AS bit varying))");
+    assert_eq!(w(f("b", Op::In, "101,01")), "\"b\" IN (CAST('101' AS \"bit\"), CAST('01' AS \"bit\"))");
+    assert_eq!(w(f("c", Op::In, "abc")), "\"c\" IN (CAST('abc' AS bpchar))");
     // Patterns compare the column's text, as before.
     assert_eq!(w(f("c", Op::Like, "a%")), "CAST(\"c\" AS text) LIKE 'a%'");
 }
 
 #[test]
-fn array_filters_that_no_operator_takes_without_the_length_keep_their_type() {
-    // `varchar[] = text[]`, `char[] = text[]` and `bit[] = bit varying[]` have no operator on
-    // Postgres 14 or 18 (checked on both test servers), so these keep the column's own type.
+fn array_filters_compare_as_arrays_of_the_type_without_its_length() {
     let w = |filter: Filter| where_sql(&Condition::Filters(vec![filter]), &lengths()).unwrap().unwrap();
-    assert_eq!(w(f("va", Op::Eq, "{abcd}")), "\"va\" = CAST('{abcd}' AS character varying(3)[])");
-    assert_eq!(w(f("ca", Op::In, "{abc}")), "\"ca\" IN (CAST('{abc}' AS character(2)[]))");
-    assert_eq!(w(f("ba", Op::Gt, "{101}")), "\"ba\" > CAST('{101}' AS bit(2)[])");
+    assert_eq!(w(f("va", Op::Eq, "{abcd}")), "\"va\" = CAST('{abcd}' AS character varying[])");
+    assert_eq!(w(f("va", Op::Lt, "{b}")), "\"va\" < CAST('{b}' AS character varying[])");
+    assert_eq!(w(f("ca", Op::In, "{abc}")), "\"ca\" IN (CAST('{abc}' AS bpchar[]))");
+    assert_eq!(w(f("ba", Op::Gt, "{101}")), "\"ba\" > CAST('{101}' AS \"bit\"[])");
+    assert_eq!(w(f("vba", Op::Eq, "{101}")), "\"vba\" = CAST('{101}' AS bit varying[])");
 }

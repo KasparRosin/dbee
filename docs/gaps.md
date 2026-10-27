@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (generated columns are no longer offered for editing: old entry 8 dropped, the rest renumbered; entries 15–17 for failed transactions, keyless paging and empty filter values) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (filters compare `char(n)`, `bit(n)` and arrays of length types without cutting and with their indexes: old entry 14 dropped, 15–17 now 14–16) · **Target:** Beekeeper Studio 5.5.7
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -116,28 +116,21 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: few real values have a million short lines. In the far end of such a value, rows can sit several points off and a click can land one row away.
 - **Estimate:** 3–6 h (estimated): scroll by row, not by point.
 
-### 14. Filters on `char(n)` and `bit(n)` skip their index; array filters still cut (D, P)
-
-- **Limit:** a value written or filtered on is cast to the column's type without its length (`ColumnInfo::write_type_sql`, `crates/core/src/schema.rs`), because an explicit cast to `varchar(n)`, `char(n)` or `bit(n)` cuts (or pads) the value without an error. So an edit that does not fit fails at Apply (SQLSTATE 22001 or 22026) and a filter value that does not fit matches nothing. Two cases are left. A filter on a `char(n)` column compares as `text` and one on `bit(n)` as `bit varying`, which an index on the column does not serve, so such a filter reads the whole table. And a filter on an array of `varchar(n)`, `char(n)` or `bit(n)` keeps the column's own type, since Postgres has no operator for `varchar[] = text[]`, `char[] = text[]` or `bit[] = bit varying[]`, so an element longer than the length is still cut and can match the rows of its prefix.
-- **Evidence:** `values_that_do_not_fit_the_length_are_refused_not_cut` (`crates/engine/tests/edit.rs`, both test servers); `array_filters_that_no_operator_takes_without_the_length_keep_their_type` (`crates/sql/tests/builders.rs`). On pg14 and Postgres 18 (2026-10-27), `EXPLAIN` of `c = CAST('ab' AS text)` on an indexed `char(2)` column is a sequential scan, and `c = CAST('ab' AS bpchar)` an index scan; `CAST('…' AS bpchar[])`, `CAST('…' AS "bit"[])` and `CAST('…' AS character varying[])` (no length) compare with those arrays and cut nothing.
-- **Impact:** a filter on an indexed `char(n)` or `bit(n)` column of a large table is slow; a filter on an array with an over-long element can match rows it should not. Edits are not affected.
-- **Estimate:** 1–2 h (estimated): cast to the types without a length that keep the column's operators (`bpchar`, `"bit"`, `character varying[]`, `bpchar[]`, `"bit"[]`).
-
-### 15. A failed statement leaves a query tab's transaction failed (D)
+### 14. A failed statement leaves a query tab's transaction failed (D)
 
 - **Limit:** a script that opens a transaction (`BEGIN`) and fails inside it leaves the query connection in that failed transaction: every later run fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead. The error card says so: under a 25P02 error it adds that a ROLLBACK ends the failed transaction.
 - **Evidence:** `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
 - **Impact:** one more run (`ROLLBACK`) after a failed transaction. A reconnect also ends it.
 - **Estimate:** 2–4 h (estimated): show the open or failed transaction in the query tab and offer Rollback.
 
-### 16. A table without a row key pages by OFFSET alone (D)
+### 15. A table without a row key pages by OFFSET alone (D)
 
 - **Limit:** a table with neither a primary key nor a NOT NULL unique key pages with `LIMIT 101 OFFSET n` and no `ORDER BY`, so Postgres may return its rows in another order from one page to the next. Under concurrent writes (or a plan change) a page can repeat rows of another or skip some. Ordering by `ctid` would fix the order, but it sorts the whole table for every page, which a large keyless table cannot afford.
 - **Evidence:** `page_sql` (`crates/sql/src/select.rs`) orders by the row key only; `page_details` (`crates/sql/tests/builders.rs`) checks that a keyless table's page has no `ORDER BY`.
 - **Impact:** browsing a keyless table that changes meanwhile can show a row twice or miss one; such tables are read-only in the grid (no row to name in an `UPDATE`).
 - **Estimate:** 3–5 h (estimated): page a keyless table by `ctid` ranges (a `tid` cursor), which needs no sort.
 
-### 17. A filter row cannot match an empty string (F)
+### 16. A filter row cannot match an empty string (F)
 
 - **Limit:** a filter row whose operator takes a value and that has none is left out of the condition, so `status = ''` cannot be written as a filter row. The bar mutes such a row, its field says `No value: left out`, and the tab title does not count it. A raw `WHERE` (`status = ''`) expresses it.
 - **Evidence:** `Filter::restricts` (`crates/sql/src/filter.rs`); `a_filter_without_a_value_is_muted_left_out_and_not_counted` (`crates/ui-egui/tests/table_tab.rs`).
@@ -148,6 +141,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Entry 14 fixed and dropped: filters compare `char(n)` as `bpchar`, `bit(n)` as `"bit"` and arrays of `varchar(n)`, `char(n)` and `bit(n)` as `character varying[]`, `bpchar[]` and `"bit"[]`, so they use the column's index and an over-long element matches nothing; 15–17 are now 14–16. |
 | 2026-10-27 | minor | The final review's fixes: generated and identity `GENERATED ALWAYS` columns refused (old entry 8 dropped, 9–15 now 8–14); entries 15 (a failed transaction in a query tab), 16 (keyless paging), 17 (empty filter values). |
 | 2026-10-27 | minor | Entry 15 (now 14): values that do not fit a column's length are refused, not cut; what is left (filters on `char(n)` and `bit(n)` skip their index, array filters still cut). |
 | 2026-10-27 | minor | Timings quoted from target-app-parity.md, the one source; the next page 1.06–1.09 ms; a fifth wide-result run; the tarball's and AppImage's SSH key logins marked expected, not measured. |

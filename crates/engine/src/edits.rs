@@ -15,8 +15,9 @@
 //! since snapshots name rows of the page they were made on. The history keeps at most
 //! [`UNDO_STEPS`] steps and about [`UNDO_BYTES`]; past either, the oldest steps go.
 //!
-//! **`failed`** is how the last Apply failed: the grid row of the change that failed, its column
-//! when that change wrote one column, and the message. It stays while the user fixes things,
+//! **`failed`** is how the last Apply failed ([`Failed`]): the grid row of the change that failed,
+//! its column when that change wrote one column, the message and the error's code (`cancelled`
+//! for an Apply cancelled before its commit). It stays while the user fixes things,
 //! moves up with the rows when a new row before it is deleted, and goes with Reset, with the next
 //! Apply and when nothing is staged any more.
 //!
@@ -55,6 +56,19 @@ pub const UNKNOWN_OUTCOME: &str =
 /// What a snapshot is counted for each value, new row and mark, beyond the text.
 const ENTRY_BYTES: usize = 64;
 
+/// How the last Apply failed (see the module docs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failed {
+    /// The grid row of the change that failed (or where a cancelled Apply stopped).
+    pub row: usize,
+    /// Its column, when that change wrote one column.
+    pub column: Option<usize>,
+    pub message: String,
+    /// The error's code: `server`, `rowNotFound`, `readOnly`, `cancelled`, `connectionLost` (the
+    /// outcome is unknown), ….
+    pub code: &'static str,
+}
+
 /// The staged edits of one table tab (see the module docs). Undo and redo stacks are private.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Edits {
@@ -64,8 +78,8 @@ pub struct Edits {
     pub new_rows: Vec<BTreeMap<usize, NewValue>>,
     /// Loaded rows to delete.
     pub deleted: BTreeSet<usize>,
-    /// The last Apply's failure: `(grid row, column if known, message)`.
-    pub failed: Option<(usize, Option<usize>, String)>,
+    /// The last Apply's failure.
+    pub failed: Option<Failed>,
     /// An Apply of these edits ended with an unknown outcome, and none went ahead since.
     unknown: bool,
     /// Changes whenever the staged values do (see [`Edits::revision`]).
@@ -241,7 +255,7 @@ impl Edits {
 
     /// [`Edits::mark_unknown`] at grid row `row`.
     pub(crate) fn unknown_at(&mut self, row: usize) {
-        self.failed = Some((row, None, UNKNOWN_OUTCOME.to_owned()));
+        self.failed = Some(Failed { row, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost" });
         self.unknown = true;
     }
 
@@ -340,11 +354,11 @@ impl Edits {
             }
         }
         // A failed new row that went takes its mark along; one after deleted rows moves up.
-        if let Some(new) = self.failed.as_ref().and_then(|f| f.0.checked_sub(loaded)) {
+        if let Some(new) = self.failed.as_ref().and_then(|f| f.row.checked_sub(loaded)) {
             if gone.contains(&new) {
                 self.failed = None;
             } else if let Some(f) = &mut self.failed {
-                f.0 = f.0.saturating_sub(gone.range(..new).count());
+                f.row = f.row.saturating_sub(gone.range(..new).count());
             }
         }
         self.settle();
@@ -623,7 +637,7 @@ mod tests {
         let mut e = Edits::default();
         e.stage(&d, 0, 1, text("1"), None).unwrap();
         e.stage(&d, 1, 1, text("2"), None).unwrap();
-        e.failed = Some((1, Some(1), "bad".into()));
+        e.failed = Some(Failed { row: 1, column: Some(1), message: "bad".into(), code: "server" });
         e.stage(&d, 0, 2, text("3"), None).unwrap();
         assert!(e.failed.is_some(), "fixing another cell keeps the mark");
         e.reset();
@@ -631,7 +645,7 @@ mod tests {
         // The unknown outcome marks the first change.
         e.undo();
         e.mark_unknown(d.rows.len());
-        assert_eq!(e.failed, Some((0, None, UNKNOWN_OUTCOME.to_owned())));
+        assert_eq!(e.failed, Some(Failed { row: 0, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost" }));
         while e.undo() {}
         assert_eq!(e.failed, None, "nothing staged, nothing failed");
         e.mark_unknown(d.rows.len());
@@ -639,9 +653,9 @@ mod tests {
         // A new row before the failed one moves it up when it goes.
         let mut e = Edits::default();
         let (a, b) = (e.add_row(&d), e.add_row(&d));
-        e.failed = Some((b, None, "bad".into()));
+        e.failed = Some(Failed { row: b, column: None, message: "bad".into(), code: "server" });
         e.delete_rows(&d, &[a]).unwrap();
-        assert_eq!(e.failed.as_ref().map(|f| f.0), Some(a));
+        assert_eq!(e.failed.as_ref().map(|f| f.row), Some(a));
         e.delete_rows(&d, &[a]).unwrap();
         assert_eq!(e.failed, None);
     }

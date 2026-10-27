@@ -32,7 +32,7 @@ use serde_json::{Map, json};
 
 pub use cmd::selection::COPY_MAX_BYTES;
 pub use cmd::{CommandInfo, CommandSpec};
-pub use edits::Edits;
+pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
 pub use state::{Connected, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total};
 pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};

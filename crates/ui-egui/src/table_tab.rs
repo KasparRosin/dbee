@@ -71,7 +71,7 @@ impl GridSource for Source<'_> {
     }
     fn mark(&self, row: usize, col: usize) -> Mark {
         let loaded = self.data.rows.len();
-        if self.edits.failed.as_ref().is_some_and(|(r, _, _)| *r == row) {
+        if self.edits.failed.as_ref().is_some_and(|f| f.row == row) {
             Mark::Failed
         } else if row >= loaded {
             Mark::New
@@ -160,18 +160,23 @@ fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str) {
     tags.tag_value("table-note", &r, text.as_str());
 }
 
-/// What the tab's card says: a failed Apply's heading, message and note, else a failed page
-/// load's; `None` when neither failed.
+/// The card's note under a failed Apply.
+const FAILED_NOTE: &str = "The changes are still staged, and the row the Apply failed on is marked: fix it and apply again, or reset.";
+
+/// The card's note under an Apply cancelled before its commit.
+const CANCELLED_NOTE: &str = "Cancelled before the commit: nothing was written, and the changes are still staged.";
+
+/// What the tab's card says: a failed (or cancelled) Apply's heading, message and note, else a
+/// failed page load's; `None` when neither failed.
 fn card_text(t: &TableTab) -> Option<(&'static str, &str, &'static str)> {
-    if let Some((_, _, message)) = &t.edits.failed {
+    if let Some(failed) = &t.edits.failed {
+        let message = failed.message.as_str();
         return Some(if t.edits.outcome_unknown() {
-            ("The connection was lost during Apply", message.as_str(), "")
+            ("The connection was lost during Apply", message, "")
+        } else if failed.code == "cancelled" {
+            ("The changes were not applied", message, CANCELLED_NOTE)
         } else {
-            (
-                "The changes were not applied",
-                message.as_str(),
-                "The changes are still staged, and the row the Apply failed on is marked: fix it and apply again, or reset.",
-            )
+            ("The changes were not applied", message, FAILED_NOTE)
         });
     }
     t.error.as_deref().map(|e| ("The page did not load", e, "The rows below are the ones from before."))
@@ -357,7 +362,7 @@ mod tests {
         edits.cells = BTreeMap::from([((0, 1), NewValue::Null)]);
         edits.new_rows = vec![BTreeMap::from([(1, NewValue::Text("new".into()))])];
         edits.deleted = BTreeSet::from([2]);
-        edits.failed = Some((1, None, "bad".into()));
+        edits.failed = Some(dbee_engine::Failed { row: 1, column: None, message: "bad".into(), code: "server" });
         let s = Source { data: &data, edits: &edits };
         assert_eq!(s.rows(), 4, "three loaded, one new");
         assert_eq!((s.cell(0, 1), s.cell(1, 1), s.cell(3, 1), s.cell(3, 0)), (None, None, Some("new"), None));
@@ -368,9 +373,21 @@ mod tests {
         assert!(s.right_aligned(0) && !s.right_aligned(1));
         assert!(s.deleted(2) && !s.deleted(1) && !s.deleted(3));
         // A row to delete whose delete failed shows as failed, and stays struck through.
-        edits.failed = Some((2, None, "still referenced".into()));
+        edits.failed = Some(dbee_engine::Failed { row: 2, column: None, message: "still referenced".into(), code: "server" });
         let s = Source { data: &data, edits: &edits };
         assert_eq!((s.mark(2, 0), s.deleted(2)), (Mark::Failed, true));
+    }
+
+    #[test]
+    fn a_cancelled_apply_has_a_note_of_its_own() {
+        let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
+        let mut t = TableTab::new(TabId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
+        let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "m".into(), code };
+        std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("server"));
+        assert_eq!(card_text(&t), Some(("The changes were not applied", "m", FAILED_NOTE)));
+        std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("cancelled"));
+        assert_eq!(card_text(&t), Some(("The changes were not applied", "m", CANCELLED_NOTE)));
+        assert_eq!(CANCELLED_NOTE, "Cancelled before the commit: nothing was written, and the changes are still staged.");
     }
 
     #[test]

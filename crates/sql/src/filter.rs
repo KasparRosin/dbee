@@ -176,14 +176,20 @@ fn raw_sql(raw: &str) -> Result<Option<String>, SqlError> {
     Ok(Some(if line_comment { format!("({raw}\n)") } else { format!("({raw})") }))
 }
 
-/// The type a filter value is cast to: [`ColumnInfo::write_type_sql`], so that a value longer
-/// than the column's length matches nothing instead of the rows its cut prefix would match.
-/// Arrays of `varchar(n)`, `char(n)` and `bit(n)` keep the column's own type: Postgres has no
-/// operator for `varchar[] = text[]`, `char[] = text[]` or `bit[] = bit varying[]` (14 and 18
-/// alike), so an element longer than the length is still cut there.
+/// The type a filter value is cast to: the column's type without its length, so that a value
+/// longer than the length matches nothing instead of the rows its cut prefix would match, chosen
+/// to keep the column's own operators, and so its indexes: `char(n)` compares as `bpchar`
+/// (trailing spaces do not count, as for the column), `bit(n)` as `"bit"` (quoted: a bare `bit`
+/// means `bit(1)`), and arrays of `varchar(n)`, `char(n)` and `bit(n)` as `character varying[]`,
+/// `bpchar[]` and `"bit"[]` (no operator compares them with `text[]` or `bit varying[]`). The
+/// others are [`ColumnInfo::write_type_sql`]: `varchar(n)` as `text`, whose indexes it uses.
 fn filter_type(column: &ColumnInfo) -> &str {
     match column.base_type.as_str() {
-        "_varchar" | "_bpchar" | "_bit" => &column.type_sql,
+        "bpchar" => "bpchar",
+        "bit" => "\"bit\"",
+        "_varchar" => "character varying[]",
+        "_bpchar" => "bpchar[]",
+        "_bit" => "\"bit\"[]",
         _ => column.write_type_sql(),
     }
 }

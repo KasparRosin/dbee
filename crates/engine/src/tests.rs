@@ -204,7 +204,7 @@ fn no_marker_outlives_its_job() {
         // As if the load failed, the count ended without a number and the outcome of the apply
         // is not known.
         assert_eq!((t.page, t.total), (0, Total::Estimate(5)), "{panic:?}");
-        assert_eq!(t.edits.failed, Some((0, None, UNKNOWN_OUTCOME.to_owned())), "{panic:?}");
+        assert_eq!(t.edits.failed.as_ref().map(|f| (f.row, f.message.as_str(), f.code)), Some((0, UNKNOWN_OUTCOME, "connectionLost")), "{panic:?}");
         assert_eq!(t.edits.count(), 1);
     }
 }

@@ -335,7 +335,7 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "editable": reason.is_none(),
         "notEditableReason": reason,
         "edits": super::edit::summary(&t.edits, t.data.as_ref().map_or(0, |d| d.rows.len())),
-        "failed": t.edits.failed.as_ref().map(|(row, column, message)| json!({ "row": row, "column": column, "message": message })),
+        "failed": t.edits.failed.as_ref().map(|f| json!({ "row": f.row, "column": f.column, "message": f.message, "code": f.code })),
         "outcomeUnknown": t.edits.outcome_unknown(),
         "applying": t.applying,
     })

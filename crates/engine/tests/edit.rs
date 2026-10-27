@@ -161,6 +161,7 @@ fn failed_apply_writes_nothing_and_marks_the_row() {
     let table = s.inspect()["table"].clone();
     assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["column"].as_u64()), (Some(1), Some(3)), "{table}");
     assert!(table["failed"]["message"].as_str().unwrap().contains("date"), "{table}");
+    assert_eq!(table["failed"]["code"], "server", "{table}");
     assert_eq!(count(&s), 2, "every edit is kept");
     assert_eq!(table["applying"], Json::Null);
     // Fixing the value and applying again writes both and clears the mark.
@@ -620,7 +621,6 @@ fn values_that_do_not_fit_the_length_are_refused_not_cut() {
             ("d", "eq", "abcde", 1),
             ("vba", "eq", "{101}", 0),
             ("vba", "eq", "{10}", 1),
-            // These keep their own type (no operator takes them against text[]): the value itself matches.
             ("va", "eq", "{abc}", 1),
             ("ca", "eq", "{ab}", 1),
             ("ba", "eq", "{10}", 1),
@@ -680,6 +680,11 @@ fn values_that_do_not_fit_the_length_are_refused_not_cut() {
     }
 }
 
+/// Ends a [`dbee_testkit::Held`] session (its locks go with it).
+fn drop_held(held: dbee_testkit::Held) {
+    std::mem::drop(held);
+}
+
 /// Polls `sql` on pg14 until it prints `want` (up to 20 s).
 fn until_psql(sql: &str, want: &str, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -709,6 +714,7 @@ fn table_cancel_stops_an_apply_that_waits_for_a_lock() {
     assert_eq!(e.to_string(), "the Apply was cancelled at change 1, so nothing was written");
     let table = s.inspect()["table"].clone();
     assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["message"].as_str()), (Some(0), Some(e.to_string().as_str())), "{table}");
+    assert_eq!(table["failed"]["code"], "cancelled", "{table}");
     assert_eq!((count(&s), &table["applying"], &table["outcomeUnknown"]), (2, &Json::Null, &json!(false)), "every edit is kept: {table}");
     assert_eq!(s.inspect()["connection"]["lost"], false);
     drop(lock);
@@ -722,24 +728,28 @@ fn table_cancel_stops_an_apply_that_waits_for_a_lock() {
 fn table_cancel_waits_for_an_apply_that_is_committing() {
     let _db = require_testdb!();
     let (t, mut drop) = make_table();
-    // A deferred trigger that runs in the COMMIT and takes 2 s: a cancel request meeting it would
-    // fail the COMMIT.
+    // A deferred trigger that runs in the COMMIT and waits there for an advisory lock another
+    // session holds until the test lets it go: a cancel request meeting it would fail the COMMIT.
     let f = format!("scratch.{t}_slow_commit()");
     q(&format!(
-        "CREATE FUNCTION {f} RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(2); RETURN NULL; END $$;
+        "CREATE FUNCTION {f} RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(hashtext('{t}')); RETURN NULL; END $$;
          CREATE CONSTRAINT TRIGGER slow_commit AFTER UPDATE ON scratch.{t} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {f};"
     ));
     drop.0.push(format!("FUNCTION IF EXISTS {f}"));
+    let gate = dbee_testkit::hold(pg14(), &format!("SELECT pg_advisory_lock(hashtext('{t}'))")).unwrap();
     let mut s = opened(&t);
     run(&mut s, "cell.edit", json!({ "row": 0, "column": "name", "value": "committed" }));
     let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
     let committing = format!(
-        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND query = 'COMMIT' AND state = 'active'
+        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND query = 'COMMIT' AND wait_event = 'advisory'
            AND pid IN (SELECT pid FROM pg_locks WHERE relation = 'scratch.{t}'::regclass)"
     );
     until_psql(&committing, "1", "the Apply's COMMIT");
     let e = refused(&mut s, "table.cancel", json!({}));
     assert_eq!((e.code(), e.to_string().as_str()), ("busy", "busy: the changes are being committed"));
+    // A cancel request sent now would reach the waiting COMMIT well within this.
+    std::thread::sleep(Duration::from_millis(500));
+    drop_held(gate);
     assert_eq!(s.wait(job, T).unwrap()["written"], 1, "no cancel request reached the COMMIT");
     assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 1")), "committed");
     assert_eq!(count(&s), 0);
@@ -815,4 +825,64 @@ fn columns_postgres_computes_cannot_be_edited() {
         q(&format!("SELECT string_agg(id || ':' || a || ':' || twice || ':' || d, ',' ORDER BY id) FROM scratch.{t}")),
         "1:7:14:1,2:2:4:40,3:5:10:3"
     );
+}
+
+/// Filters compare a `char(n)`, `bit(n)` or array value as the column's own type without its
+/// length: an over-long value or element matches nothing, trailing spaces count as Postgres's
+/// `bpchar` comparison counts them (not at all), and an index on the column serves the filter.
+#[test]
+fn filters_on_length_types_compare_as_postgres_does() {
+    let db = require_testdb!();
+    for server in &db.servers {
+        let server: &'static dbee_testkit::PgServer = server;
+        let t = unique("t_lenf");
+        let domain = format!("{t}_d5");
+        let _drop = ScratchOn(server, vec![format!("TABLE IF EXISTS scratch.{t}"), format!("DOMAIN IF EXISTS scratch.{domain}")]);
+        let q = |sql: &str| dbee_testkit::psql(server, sql).unwrap().trim().to_owned();
+        q(&format!(
+            "CREATE DOMAIN scratch.{domain} AS varchar(5);
+             CREATE TABLE scratch.{t} (id int PRIMARY KEY, c char(3), b bit(2), d scratch.{domain}, va varchar(3)[], ca char(2)[], ba bit(2)[]);
+             CREATE INDEX ON scratch.{t} (c);
+             CREATE INDEX ON scratch.{t} (b);
+             INSERT INTO scratch.{t} VALUES (1, 'ab', '10', 'abcde', '{{abc}}', '{{ab}}', '{{10}}'), (2, 'xyz', '01', 'x', '{{x}}', '{{y}}', '{{01}}');"
+        ));
+        let mut s = session();
+        open(&mut s, json!({ "config": server_config(server), "password": pw() }));
+        assert_eq!(open_table(&mut s, "scratch", &t)["rows"], 2);
+        let on = &server.name;
+        for (column, op, value, matches) in [
+            // char(3): 'ab' is stored as 'ab '; trailing spaces do not count either way.
+            ("c", "eq", "ab", 1),
+            ("c", "eq", "ab ", 1),
+            ("c", "eq", "abcd", 0),
+            ("c", "lt", "b", 1),
+            ("c", "in", "abcd, xyz", 1),
+            ("b", "eq", "100", 0),
+            ("b", "eq", "1", 0),
+            ("b", "eq", "10", 1),
+            ("d", "eq", "abcdefg", 0),
+            ("d", "eq", "abcde", 1),
+            // An array element longer than the length matches nothing; the value itself matches.
+            ("va", "eq", "{abcd}", 0),
+            ("va", "eq", "{abc}", 1),
+            ("va", "lt", "{b}", 1),
+            ("va", "in", "{abcd}", 0),
+            ("ca", "eq", "{abc}", 0),
+            ("ca", "eq", "{ab}", 1),
+            ("ba", "eq", "{101}", 0),
+            ("ba", "eq", "{10}", 1),
+        ] {
+            let r = run(&mut s, "table.setFilters", json!({ "filters": [{ "column": column, "op": op, "value": value }] }));
+            assert_eq!(r["rows"], matches, "{on}: {column} {op} {value:?}: {r}");
+        }
+        // The condition dbee builds lets Postgres use the column's index.
+        let info =
+            s.state().connected.as_ref().unwrap().catalog.table(&dbee_core::TableRef { schema: "scratch".into(), name: t.clone() }).cloned().unwrap();
+        for (column, value) in [("c", "ab"), ("b", "10")] {
+            let filter = dbee_sql::filter::Filter { column: column.into(), op: dbee_sql::filter::Op::Eq, value: value.into() };
+            let cond = dbee_sql::filter::where_sql(&dbee_sql::filter::Condition::Filters(vec![filter]), &info).unwrap().unwrap();
+            let plan = q(&format!("SET enable_seqscan = off; EXPLAIN (COSTS OFF) SELECT id FROM scratch.{t} WHERE {cond}"));
+            assert!(plan.contains("Index") && !plan.contains("Seq Scan"), "{on}: {cond}: {plan}");
+        }
+    }
 }

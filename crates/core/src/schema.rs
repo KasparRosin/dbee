@@ -67,13 +67,17 @@ impl ColumnInfo {
         self.category != 'S'
     }
 
-    /// The type a value to write or compare is cast to. Postgres defines an explicit cast to
+    /// The type a value to write is cast to. Postgres defines an explicit cast to
     /// `varchar(n)`, `char(n)` and `bit varying(n)` as cutting the value to the length, and to
     /// `bit(n)` as cutting or padding it, without an error; only the assignment to the column (or
     /// to a domain over such a type) refuses a value that does not fit. So these, their arrays
     /// and domains over them are cast to the type without its length: `text`, `bit varying`,
     /// `text[]` or `bit varying[]`. Every other type is cast to [`type_sql`](Self::type_sql)
     /// itself. A key value the server sent fits its column, so key comparisons keep `type_sql`.
+    /// Filters use these types too, except for `char(n)`, `bit(n)` and the arrays of
+    /// `varchar(n)`, `char(n)` and `bit(n)`, which they compare as `bpchar`, `"bit"`,
+    /// `character varying[]`, `bpchar[]` and `"bit"[]` to keep the column's operators and indexes
+    /// (`dbee_sql::filter`).
     pub fn write_type_sql(&self) -> &str {
         match self.base_type.as_str() {
             "varchar" | "bpchar" => "text",

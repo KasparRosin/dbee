@@ -16,7 +16,8 @@
 //! again in the same job. Then the edits and their history go (writes are not undone), the page
 //! shows what was written, and an exact total that the writes may have changed is forgotten. When
 //! the Apply fails nothing was written: every edit stays, and `failed` names the grid row of the
-//! change that failed (its column when that change wrote one) and the message. When the
+//! change that failed (its column when that change wrote one), the message and the error's code
+//! (`inspect()` shows `{row, column, message, code}`). When the
 //! connection is lost meanwhile, the outcome is unknown ([`UNKNOWN_OUTCOME`]): the edits stay,
 //! the session is marked lost, and nothing is tried again. Applying those edits again could write
 //! them twice, so it asks first (`Needs::Confirm { what: "applyAfterUnknownOutcome" }`) unless
@@ -45,7 +46,7 @@ use serde_json::json;
 
 use super::table::{Loaded, NO_TABLE_TAB, Reload, active_table, catalog, lookup, not_editable, table_tab_mut};
 use super::{CommandSpec, bad, disabled, ignored, p};
-use crate::edits::{Edits, UNKNOWN_OUTCOME};
+use crate::edits::{Edits, Failed, UNKNOWN_OUTCOME};
 use crate::state::{TableTab, Total};
 use crate::{Apply, EngineError, Json, Need, Outcome, Session, Tab, TabId};
 
@@ -511,7 +512,7 @@ fn applied(
                 UNKNOWN_OUTCOME.to_owned()
             } else {
                 let message = ApplyError { index, error: error.clone() }.to_string();
-                edits.failed = Some((row, column, message.clone()));
+                edits.failed = Some(Failed { row, column, message: message.clone(), code: error.code() });
                 message
             };
             let column = if lost { None } else { column };
