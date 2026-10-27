@@ -541,7 +541,12 @@ fn undoing_every_edit_then_redoing_restores_them() {
     ];
     let mut r = Rng::new(seed);
     let (mut ran, mut undos) = (0, 0);
-    for round in 0..6 {
+    // Six rounds, and more (up to 20) while too few edits ran: an Apply or a Reset near a round's
+    // end leaves little to undo, so some seeds need more rounds to test anything.
+    for round in 0..20 {
+        if round >= 6 && ran >= 30 && undos >= 6 {
+            break;
+        }
         for step in 0..30 {
             let id = *r.pick(&commands);
             let p = params(&mut r, id, &s);
