@@ -209,6 +209,47 @@ pub fn psql(server: &PgServer, sql: &str) -> Result<String, String> {
     }
 }
 
+/// A psql session of its own on a test server that ran `sql` in an open transaction and now
+/// sleeps, until dropped (at most 60 s): what a lock `sql` took (`SELECT … FOR UPDATE`) is held
+/// that long. Dropping it ends the session, which rolls the transaction back.
+#[derive(Debug)]
+pub struct Held {
+    server: PgServer,
+    marker: String,
+    child: std::process::Child,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let end = format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '{}'", self.marker);
+        let _ = psql(&self.server, &end);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Runs `sql` in a transaction of a psql session of its own on `server`, in the background, and
+/// returns once the session sleeps with the transaction open (see [`Held`]). `sql` must not end
+/// the transaction.
+pub fn hold(server: &PgServer, sql: &str) -> Result<Held, String> {
+    let marker = unique("dbee_test_hold");
+    let script = format!("SET application_name = '{marker}'; BEGIN; {sql}; SELECT pg_sleep(60); ROLLBACK;");
+    let mut c = compose();
+    c.args(["exec", "-T", &server.name, "psql", "-U", "postgres", "-d", "dbee", "-At", "-v", "ON_ERROR_STOP=1", "-c", &script]);
+    c.stdout(Stdio::null()).stderr(Stdio::null());
+    let child = c.spawn().map_err(|e| format!("docker compose exec {}: {e}", server.name))?;
+    let held = Held { server: server.clone(), marker, child };
+    let sleeping = format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = '{}' AND wait_event = 'PgSleep'", held.marker);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while psql(server, &sleeping)?.trim() != "1" {
+        if std::time::Instant::now() > deadline {
+            return Err(format!("the psql session on {} did not get to its sleep within 20 s", server.name));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(held)
+}
+
 /// A throwaway home directory with `.ssh/` (mode 0700), removed on drop.
 #[derive(Debug)]
 pub struct TempHome {

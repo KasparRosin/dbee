@@ -21,7 +21,10 @@
 //! the session is marked lost, and nothing is tried again. Applying those edits again could write
 //! them twice, so it asks first (`Needs::Confirm { what: "applyAfterUnknownOutcome" }`) unless
 //! `force` (see `Edits::outcome_unknown`). An Apply is never dropped: its job runs to its end. One
-//! runs at a time (`busy`).
+//! runs at a time (`busy`). `table.cancel` on its tab cancels it while its statements before
+//! `COMMIT` run (`dbee_pg::ApplyGate`): it then fails with code `cancelled`, writes nothing and
+//! keeps every edit, as a failed Apply does. Once it has decided to commit, `table.cancel` is
+//! `Busy` ([`COMMITTING`]) and the Apply runs to its end.
 //!
 //! **Stale results** (see [`super`]): an Apply whose tab closed, or whose connection was closed or
 //! replaced, is ignored. A reconnect while it runs marks its outcome unknown
@@ -59,6 +62,9 @@ const REDO: &str = "edit.redo";
 
 /// Why edits wait while the tab's Apply runs; also the `busy` text of a second Apply.
 pub const APPLYING: &str = "apply in progress";
+
+/// The `busy` text of `table.cancel` once the tab's Apply has decided to commit.
+pub const COMMITTING: &str = "the changes are being committed";
 
 /// Why edits wait while a page loads.
 pub const LOADING: &str = "wait for the page to load";
@@ -432,8 +438,10 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         Arc::make_mut(&mut t.edits).apply_started();
     }
     let job_conn = Arc::clone(&conn);
+    let gate = Arc::new(dbee_pg::ApplyGate::default());
+    let job_gate = Arc::clone(&gate);
     let job = s.spawn_job(APPLY, async move {
-        let written = dbee_pg::apply(&job_conn, &sql).await;
+        let written = dbee_pg::apply_gated(&job_conn, &sql, &job_gate).await;
         let page = match written {
             Ok(_) => Some(reload.run(&job_conn).await),
             Err(_) => None,
@@ -444,6 +452,7 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if let Some(t) = table_tab_mut(s, tab) {
         t.applying = Some(job);
     }
+    s.apply_gate = Some((job, gate));
     Ok(Outcome::Started(job))
 }
 
@@ -456,10 +465,13 @@ fn applied(
     written: Result<u64, ApplyError>,
     page: Option<Loaded>,
 ) -> Result<Json, EngineError> {
+    let me = s.applying_job();
+    if s.apply_gate.as_ref().is_some_and(|(job, _)| Some(*job) == me) {
+        s.apply_gate = None;
+    }
     if !s.is_current_browse(conn) {
         return Ok(ignored());
     }
-    let me = s.applying_job();
     let Some(t) = table_tab_mut(s, tab) else { return Ok(ignored()) };
     if me.is_none() || t.applying != me {
         return Ok(ignored());

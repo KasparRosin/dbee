@@ -315,6 +315,35 @@ fn a_value_too_long_for_its_column_fails_the_apply_and_says_why() {
 }
 
 #[test]
+fn the_status_bar_cancels_an_apply_that_waits_for_a_lock() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("SELECT id FROM scratch.{} WHERE id = 1 FOR UPDATE", t.0)).unwrap();
+    let mut ui = opened(db, &t);
+    ui.double_click("grid-cell-0-1");
+    ui.text("waited");
+    ui.ctrl("Enter");
+    ui.ctrl("S");
+    let waiting = format!(
+        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND wait_event_type = 'Lock' AND query LIKE 'UPDATE \"scratch\".\"{}\"%'",
+        t.0
+    );
+    ui.until("the Apply to wait for the lock", |_| q(db, &waiting) == "1");
+    ui.frame();
+    assert_eq!(ui.value("status-job"), format!("Applying the changes to {}…", t.0));
+    ui.click("status-cancel");
+    ui.until("the cancelled Apply", |ui| ui.table()["failed"].is_object());
+    ui.frame();
+    let card = ui.value("table-error");
+    assert_eq!(card, "the Apply was cancelled at change 1, so nothing was written");
+    ui.no_notice();
+    assert!(ui.tag("status-cancel").is_none(), "nothing runs any more");
+    assert_eq!(ui.edits()["count"], 1, "the edit stays");
+    drop(lock);
+    assert_eq!(q(db, &format!("SELECT name FROM scratch.{} WHERE id = 1", t.0)), "Alice");
+}
+
+#[test]
 fn cells_that_cannot_be_edited_say_why() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);

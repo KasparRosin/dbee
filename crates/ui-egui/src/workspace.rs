@@ -155,7 +155,7 @@ pub fn live_job(session: &Session) -> Option<LiveJob> {
         Tab::Table(t) => {
             let name = &t.table.name;
             if t.applying.is_some() {
-                Some(LiveJob { text: format!("Applying the changes to {name}…"), cancel: None })
+                Some(LiveJob { text: format!("Applying the changes to {name}…"), cancel: Some("table.cancel") })
             } else if t.loading.is_some() {
                 Some(LiveJob { text: format!("Loading {name}…"), cancel: Some("table.cancel") })
             } else if t.counting.is_some() {

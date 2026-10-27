@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, SslMode};
-use dbee_pg::apply::apply;
+use dbee_pg::apply::{ApplyGate, apply, apply_gated};
 use dbee_pg::query::{QUERY_LIMITS, run_untyped};
 use dbee_pg::{PgConnection, PgError, Target, connect};
 use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
@@ -177,6 +177,64 @@ async fn multi_statement_text_is_refused_before_sending() {
         }
         assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
         assert!(!w.is_closed());
+    })
+    .await;
+}
+
+/// The number in the first cell of `sql`'s first row, run through `c`.
+async fn number(c: &PgConnection, sql: &str) -> u64 {
+    let r = run_untyped(c, sql, QUERY_LIMITS).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+    r.rows
+        .first()
+        .and_then(|row| row.first())
+        .and_then(|cell| cell.as_deref())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("{sql}: no number"))
+}
+
+#[tokio::test]
+async fn a_gate_cancels_an_apply_until_it_commits() {
+    let db = require_testdb!();
+    with_table(db, |major, w, r, t| async move {
+        // Cancelled before it starts: nothing is sent past BEGIN, nothing is written.
+        let gate = ApplyGate::default();
+        assert!(gate.cancel() && gate.cancel(), "a second cancel is still before the commit");
+        let err = apply_gated(&w, &[format!("UPDATE {t} SET name = 'x' WHERE id = 1")], &gate).await.expect_err("cancelled");
+        assert_eq!((err.index, err.error.code()), (0, "cancelled"), "pg{major}");
+        assert_eq!(err.to_string(), "the Apply was cancelled at change 1, so nothing was written");
+        assert!(!gate.committing() && !w.is_closed(), "pg{major}: it rolled back and stays usable");
+        assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
+
+        // Cancelled while its second statement waits for a row the reader holds: the cancel
+        // request stops it, and the first one is rolled back too.
+        sql(&r, "BEGIN").await;
+        sql(&r, &format!("SELECT id FROM {t} WHERE id = 1 FOR UPDATE")).await;
+        let gate = ApplyGate::default();
+        let stmts = vec![format!("UPDATE {t} SET name = 'first' WHERE id = 2"), format!("UPDATE {t} SET name = 'waits' WHERE id = 1")];
+        let canceller = w.canceller();
+        let waiters = "SELECT count(*) FROM pg_locks WHERE locktype = 'transactionid' AND transactionid = pg_current_xact_id()::xid AND NOT granted";
+        let cancel = async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            while number(&r, waiters).await != 1 {
+                assert!(tokio::time::Instant::now() < deadline, "pg{major}: the apply never waited for the lock");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(gate.cancel(), "pg{major}: before the commit");
+            canceller.cancel().await.unwrap_or_else(|e| panic!("pg{major}: cancel: {e}"));
+        };
+        let (out, ()) = tokio::join!(apply_gated(&w, &stmts, &gate), cancel);
+        let err = out.expect_err("cancelled");
+        assert_eq!((err.index, err.error.code()), (1, "cancelled"), "pg{major}");
+        assert!(!w.is_closed(), "pg{major}");
+        sql(&r, "ROLLBACK").await;
+        assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
+
+        // Once it decided to commit, a cancel is refused.
+        let gate = ApplyGate::default();
+        let written = apply_gated(&w, &[format!("UPDATE {t} SET name = 'z' WHERE id = 2")], &gate).await.map_err(|e| e.to_string());
+        assert_eq!(written, Ok(1), "pg{major}");
+        assert!(gate.committing() && !gate.cancel(), "pg{major}");
+        assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:z:2.5"], "pg{major}");
     })
     .await;
 }

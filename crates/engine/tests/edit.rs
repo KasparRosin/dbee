@@ -4,7 +4,7 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::*;
 use dbee_engine::{EngineError, Json, Outcome, Session, Tab};
@@ -678,4 +678,69 @@ fn values_that_do_not_fit_the_length_are_refused_not_cut() {
             "{on}"
         );
     }
+}
+
+/// Polls `sql` on pg14 until it prints `want` (up to 20 s).
+fn until_psql(sql: &str, want: &str, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while q(sql) != want {
+        assert!(Instant::now() < deadline, "gave up waiting for {what}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn table_cancel_stops_an_apply_that_waits_for_a_lock() {
+    let _db = require_testdb!();
+    let (t, _drop) = make_table();
+    let mut s = opened(&t);
+    // Another session holds row 1, so the Apply's first UPDATE waits.
+    let lock = dbee_testkit::hold(pg14(), &format!("SELECT id FROM scratch.{t} WHERE id = 1 FOR UPDATE")).unwrap();
+    run(&mut s, "cell.edit", json!({ "row": 0, "column": "name", "value": "waited" }));
+    run(&mut s, "cell.edit", json!({ "row": 1, "column": "name", "value": "also" }));
+    let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
+    let waiting = format!(
+        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND wait_event_type = 'Lock' AND query LIKE 'UPDATE \"scratch\".\"{t}\"%'"
+    );
+    until_psql(&waiting, "1", "the Apply to wait for the lock");
+    assert_eq!(run(&mut s, "table.cancel", json!({})), json!({ "sent": true, "apply": true }));
+    let e = s.wait(job, T).unwrap_err();
+    assert_eq!(e.code(), "cancelled", "{e}");
+    assert_eq!(e.to_string(), "the Apply was cancelled at change 1, so nothing was written");
+    let table = s.inspect()["table"].clone();
+    assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["message"].as_str()), (Some(0), Some(e.to_string().as_str())), "{table}");
+    assert_eq!((count(&s), &table["applying"], &table["outcomeUnknown"]), (2, &Json::Null, &json!(false)), "every edit is kept: {table}");
+    assert_eq!(s.inspect()["connection"]["lost"], false);
+    drop(lock);
+    assert_eq!(q(&format!("SELECT string_agg(name, ',' ORDER BY id) FROM scratch.{t}")), "Alice,Bob,Cy", "nothing was written");
+    // With the lock gone, the same edits apply on the same connection.
+    assert_eq!(run(&mut s, "edit.apply", json!({}))["written"], 2);
+    assert_eq!(q(&format!("SELECT string_agg(name, ',' ORDER BY id) FROM scratch.{t}")), "waited,also,Cy");
+}
+
+#[test]
+fn table_cancel_waits_for_an_apply_that_is_committing() {
+    let _db = require_testdb!();
+    let (t, mut drop) = make_table();
+    // A deferred trigger that runs in the COMMIT and takes 2 s: a cancel request meeting it would
+    // fail the COMMIT.
+    let f = format!("scratch.{t}_slow_commit()");
+    q(&format!(
+        "CREATE FUNCTION {f} RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(2); RETURN NULL; END $$;
+         CREATE CONSTRAINT TRIGGER slow_commit AFTER UPDATE ON scratch.{t} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {f};"
+    ));
+    drop.0.push(format!("FUNCTION IF EXISTS {f}"));
+    let mut s = opened(&t);
+    run(&mut s, "cell.edit", json!({ "row": 0, "column": "name", "value": "committed" }));
+    let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
+    let committing = format!(
+        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND query = 'COMMIT' AND state = 'active'
+           AND pid IN (SELECT pid FROM pg_locks WHERE relation = 'scratch.{t}'::regclass)"
+    );
+    until_psql(&committing, "1", "the Apply's COMMIT");
+    let e = refused(&mut s, "table.cancel", json!({}));
+    assert_eq!((e.code(), e.to_string().as_str()), ("busy", "busy: the changes are being committed"));
+    assert_eq!(s.wait(job, T).unwrap()["written"], 1, "no cancel request reached the COMMIT");
+    assert_eq!(q(&format!("SELECT name FROM scratch.{t} WHERE id = 1")), "committed");
+    assert_eq!(count(&s), 0);
 }

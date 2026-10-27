@@ -233,6 +233,9 @@ pub struct Session {
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) ssh: SshEnv,
     pub(crate) allowed_targets: Option<Vec<(String, u16)>>,
+    /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
+    /// decides to commit (one Apply runs at a time).
+    pub(crate) apply_gate: Option<(JobId, Arc<dbee_pg::ApplyGate>)>,
     journal: Vec<(String, Json)>,
     value_cache: view::Cache,
 }
@@ -260,6 +263,7 @@ impl Session {
             secrets: o.secrets,
             ssh: o.ssh,
             allowed_targets: o.allowed_targets,
+            apply_gate: None,
             journal: Vec::new(),
             value_cache: view::Cache::default(),
         })

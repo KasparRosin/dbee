@@ -761,13 +761,29 @@ fn apply_count(
 /// running jobs on the current browse connection (see the module docs); a marker whose job is
 /// not running does not count, all the same.
 ///
+/// While the tab's own Apply runs, `{sent: true, apply: true}`: the Apply is cancelled (it writes
+/// nothing, and keeps its edits) and a cancel request stops the statement it waits on, as long as
+/// its statements before `COMMIT` run. Once the Apply has decided to commit, nothing is sent and
+/// the result is `Busy` ([`edit::COMMITTING`]): a cancel never meets the `COMMIT`, so the outcome
+/// stays known.
+///
 /// A cancel request cancels whatever statement runs on the connection at that moment, and every
-/// tab shares the browse connection. So while any `edit.apply` job runs (of any tab, or of one
+/// tab shares the browse connection. So while another tab's `edit.apply` job runs (or one of a tab
 /// closed meanwhile) nothing is sent and the result is `Busy`: the tab's load may still be
 /// waiting behind the Apply, and the request would roll the Apply back instead.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));
+    if let Some(job) = t.applying.filter(|&job| s.jobs.is_running(job)) {
+        let gate = s.apply_gate.as_ref().filter(|(of, _)| *of == job).map(|(_, gate)| Arc::clone(gate));
+        let Some(gate) = gate else { return Err(EngineError::Busy(edit::APPLYING.into())) };
+        let conn = s.browse()?;
+        if !gate.cancel() {
+            return Err(EngineError::Busy(edit::COMMITTING.into()));
+        }
+        cancel_statements(s, std::iter::once(conn));
+        return Ok(Outcome::Done(json!({ "sent": true, "apply": true })));
+    }
     let running = alive(t.loading) || alive(t.counting);
     if !running {
         return Ok(Outcome::Done(json!({ "sent": false })));

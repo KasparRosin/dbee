@@ -14,7 +14,7 @@ pub mod error;
 pub mod query;
 pub mod tls;
 
-pub use apply::{ApplyError, apply};
+pub use apply::{ApplyError, ApplyGate, apply, apply_gated};
 pub use connect::{CONNECT_TIMEOUT, Canceller, MIN_VERSION_NUM, PgConnection, ServerInfo, Target, connect, version_warning};
 pub use error::PgError;
 pub use query::{Limits, PAGE_LIMITS, QUERY_LIMITS};
