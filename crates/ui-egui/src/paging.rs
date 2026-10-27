@@ -294,6 +294,12 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
     let left_end = bar.min_rect().right();
     let right_w = if fit.edits_text { w.right_text } else { w.right_bare };
     let start = (inner.right() - right_w).max(left_end + GAP);
+    // The right group's child comes before the note's, which is not always drawn: a child's
+    // widget ids follow from the children made before it, so the buttons keep theirs.
+    let lane = Rect::from_min_size(pos2(start, inner.top()), vec2(right_w.max(0.0), inner.height()));
+    let cut = clip.intersect(Rect::from_min_max(pos2(start, inner.top()), inner.max));
+    let mut right = child(ui, "dbee-paging-right", lane, cut);
+    right_group(&mut right, p, tags, &parts, fit, &mut runs);
     if let Some(note) = cut_note(p.rows, p.complete) {
         let room = Rect::from_min_max(pos2(left_end + SPACE, inner.top()), pos2(start - GAP, inner.bottom()));
         if room.width() >= MIN_NOTE {
@@ -302,10 +308,6 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
             tags.tag_value("page-cut", &r, note.as_str());
         }
     }
-    let lane = Rect::from_min_size(pos2(start, inner.top()), vec2(right_w.max(0.0), inner.height()));
-    let cut = clip.intersect(Rect::from_min_max(pos2(start, inner.top()), inner.max));
-    let mut right = child(ui, "dbee-paging-right", lane, cut);
-    right_group(&mut right, p, tags, &parts, fit, &mut runs);
     runs
 }
 
@@ -389,6 +391,9 @@ fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fi
     if fit.edits_text {
         let r = ui.label(RichText::new(parts.edits.as_str()).size(TEXT).color(t.text_muted));
         tags.tag_value("edits-count", &r, parts.edits.as_str());
+    } else {
+        // The label's one widget id, so Reset and Apply keep theirs when it is left out.
+        ui.skip_ahead_auto_ids(1);
     }
     let r = ui.add(Button::new("Reset").min_size(vec2(parts.reset_w, SQUARE))).on_hover_text("Drop the staged changes");
     tags.tag_value("edit-reset", &r, "Reset");
@@ -542,6 +547,50 @@ mod tests {
                 assert!(seen.contains(&fit), "{what}: the sweep passes through form {fit}: {seen:?}");
             }
         }
+    }
+
+    /// The egui ids of the right group's buttons as a bar `width` wide draws `p`, each found
+    /// among the pass's widgets by the rect it was tagged with; with whether the changes' text
+    /// and a whole Apply show.
+    fn right_ids(p: Paging, width: f32) -> (Vec<(&'static str, Option<egui::Id>)>, bool, bool) {
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(width, BAR_H)).build_ui_state(
+            |ui, s: &mut (Paging, Tags)| {
+                s.1.begin_frame();
+                let _ = show(ui, &s.0, &mut s.1);
+            },
+            (p, Tags::default()),
+        );
+        h.run_steps(2);
+        let tags = &h.state().1;
+        let rects: Vec<(&'static str, Option<Rect>)> = ["row-add", "edit-reset", "edit-apply"].into_iter().map(|id| (id, tags.rect(id))).collect();
+        let text = tags.rect("edits-count").is_some();
+        let whole = tags.rect("edit-apply").is_some_and(|r| r.width() >= 63.5);
+        let ids = h.ctx.viewport(|vp| {
+            let widgets = &vp.prev_pass.widgets;
+            let find = |r: Rect| widgets.layers().flat_map(|(_, w)| w.iter()).find(|w| w.interact_rect == r && w.sense.senses_click()).map(|w| w.id);
+            rects.iter().map(|(id, r)| (*id, r.and_then(find))).collect()
+        });
+        (ids, text, whole)
+    }
+
+    #[test]
+    fn the_right_groups_ids_stay_when_the_note_or_the_changes_text_comes_and_goes() {
+        let staged = |complete: bool| Paging { rows: 13, complete, edits: 2, ..Paging::default() };
+        // A cut page's note, drawn between the groups, leaves the right group's ids alone.
+        let (plain, _, _) = right_ids(staged(true), 900.0);
+        let (noted, _, _) = right_ids(staged(false), 900.0);
+        assert!(plain.iter().all(|(_, id)| id.is_some()), "every button found: {plain:?}");
+        assert_eq!(noted, plain, "with the note");
+        // Nor does the changes' text, when the bar is short of room for it.
+        let (all, text, _) = right_ids(staged(true), 900.0);
+        assert!(text);
+        let (bare, _, _) = (300..900)
+            .rev()
+            .step_by(5)
+            .map(|w| right_ids(staged(true), w as f32))
+            .find(|(_, text, whole)| !text && *whole)
+            .expect("a width with Apply whole and no changes' text");
+        assert_eq!(bare, all, "without the changes' text");
     }
 
     #[test]

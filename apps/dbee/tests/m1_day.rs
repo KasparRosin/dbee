@@ -19,7 +19,10 @@
 //! clipboard (no copy reaches the system clipboard), no SSH agent, and the test servers as its
 //! only targets. The seed is read-only: the day edits a customer and an order of its own, which
 //! the test inserts with values the day's filters find and deletes when it ends, also when it
-//! fails; the seed's customers and orders are checked to be unchanged.
+//! fails; the seed's customers and orders are checked to be unchanged, and so are their counts
+//! once the day's rows are gone. A run that is killed (Ctrl+C, a tool's timeout, SIGKILL) cannot
+//! delete its rows, so every run first removes the rows of earlier runs by their marker ([`MARK`],
+//! the customers' `note`): their orders, then the customers.
 //!
 //! Step 6 is two Applies by design: the seed keeps `name` on `shop.customers` and `shipped_at` on
 //! `shop.orders`, and Apply writes one tab's staged changes. So the name is fixed and written in
@@ -40,6 +43,10 @@ use serde_json::{Value as Json, json};
 /// The longest the test waits for any one thing.
 const WAIT: Duration = Duration::from_secs(60);
 
+/// The `note` of the customers the day inserts: the marker by which a later run finds and
+/// removes the rows a killed run left.
+const MARK: &str = "the M1 day test row";
+
 /// Where the screenshots go, from the repository root (the app's working directory).
 const SHOTS: &str = "target/m1-day";
 
@@ -50,9 +57,20 @@ join shop.customers c on c.id = o.customer_id
 where o.dealer_id = 42 and o.status = 'completed' and o.total > 100
 order by o.id";
 
+/// The app's process, killed and waited for when dropped: also when [`App::start`] fails
+/// before there is an [`App`] to end it.
+struct Running(Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// The real app with its control channel, ended (`app.quit`, then killed) when dropped.
 struct App {
-    child: Child,
+    child: Running,
     reader: BufReader<TcpStream>,
     writer: TcpStream,
     next: u64,
@@ -96,6 +114,7 @@ impl App {
             .env_remove("DBEE_CONTROL_PORT")
             .spawn()
             .unwrap();
+        let child = Running(child);
         // The channel listens before the window opens.
         let start = Instant::now();
         let stream = loop {
@@ -251,11 +270,10 @@ impl Drop for App {
     fn drop(&mut self) {
         let _ = writeln!(self.writer, "{}", json!({ "id": 0, "method": "app.quit" }));
         let deadline = Instant::now() + Duration::from_secs(10);
-        while self.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+        while self.child.0.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // `Running` kills and waits for it if it has not ended.
     }
 }
 
@@ -274,6 +292,25 @@ struct DayRows {
     fixed: String,
 }
 
+/// Removes the rows earlier runs left (a killed run cannot delete its own): the orders of the
+/// customers marked [`MARK`], then those customers.
+fn sweep(server: &PgServer) {
+    let deleted = |sql: String| {
+        let out = psql(server, &format!("WITH d AS ({sql} RETURNING 1) SELECT count(*) FROM d")).unwrap();
+        out.trim().parse::<u64>().unwrap_or_else(|_| panic!("sweep: {out}"))
+    };
+    let orders = deleted(format!("DELETE FROM shop.orders WHERE customer_id IN (SELECT id FROM shop.customers WHERE note = '{MARK}')"));
+    let customers = deleted(format!("DELETE FROM shop.customers WHERE note = '{MARK}'"));
+    if customers > 0 || orders > 0 {
+        println!("m1_day: removed {customers} customer(s) and {orders} order(s) an earlier run left");
+    }
+}
+
+/// `<customers> <orders>`: the row counts of the tables the day writes to.
+fn counts(server: &PgServer) -> String {
+    psql(server, "SELECT (SELECT count(*) FROM shop.customers) || ' ' || (SELECT count(*) FROM shop.orders)").unwrap().trim().to_string()
+}
+
 impl DayRows {
     /// A customer, and an order of theirs that passes the day's three filters (dealer 42,
     /// completed, a total above 100), with a `billing` jsonb and a `shipped_at` date to clear.
@@ -282,7 +319,7 @@ impl DayRows {
         let typo = format!("Custmer {tag}");
         let sql = format!(
             "WITH c AS (
-                INSERT INTO shop.customers (name, email, note) VALUES ('{typo}', '{tag}@example.com', 'the M1 day test row') RETURNING id
+                INSERT INTO shop.customers (name, email, note) VALUES ('{typo}', '{tag}@example.com', '{MARK}') RETURNING id
              ), o AS (
                 INSERT INTO shop.orders (customer_id, dealer_id, status, total, billing, meta, shipped_at, raw_json_text)
                 SELECT c.id, 42, 'completed', 4242.42,
@@ -339,6 +376,8 @@ fn m1_day_end_to_end() {
     let _ = std::fs::remove_dir_all(root.join(SHOTS));
     // Dropped in reverse order: the app goes first, then the rows, then the home.
     let home = temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
+    sweep(pg14(db));
+    let before = counts(pg14(db));
     let day = DayRows::insert(db);
     let seed = day.seed_digest();
     let mut app = App::start(&root, &home.home, db);
@@ -517,6 +556,7 @@ fn m1_day_end_to_end() {
         (json!("NULL"), json!(true), json!("staged")),
         "a date clears to NULL: {cell}"
     );
+    assert_eq!(app.table()["edits"]["count"], 1, "the date is the orders tab's one change");
     app.shot(&root, "6b-date-staged");
     app.ctrl("S");
     app.until("the date's Apply", |app| app.table()["edits"]["count"] == 0);
@@ -557,10 +597,12 @@ fn m1_day_end_to_end() {
     app.ctrl("A");
     assert_eq!(app.document()["selection"], json!({ "anchor": [0, 0], "focus": [n - 1, 3] }));
     app.ctrl_shift("C");
-    app.until("the copy", |app| app.document()["clipboard"].is_string());
+    // The clipboard still holds step 4's line: wait for the new copy.
+    let header = "id\tcustomer\ttotal\tshipped_at\n";
+    app.until("the copy", |app| app.document()["clipboard"].as_str().is_some_and(|c| c.starts_with(header)));
     let d = app.document();
     let copied = d["clipboard"].as_str().unwrap().to_string();
-    assert!(copied.starts_with("id\tcustomer\ttotal\tshipped_at\n"), "the header row first: {copied}");
+    assert!(copied.starts_with(header), "the header row first: {copied}");
     assert!(copied.lines().any(|l| l == format!("{}\t{}\t4242.42\t", day.order, day.fixed)), "the day's order, its NULL date empty: {copied}");
     assert_eq!(copied.lines().count() as u64, n + 1, "the header and every row: {copied}");
     assert_eq!(d["clipboardBytes"].as_u64(), Some(copied.len() as u64), "all of it under 4 KiB");
@@ -569,7 +611,9 @@ fn m1_day_end_to_end() {
     assert_eq!(app.value("notice"), format!("Copied {n} rows"));
     app.shot(&root, "7b-copied");
 
-    // No seed row changed.
+    // No seed row changed, and once the app and the day's rows are gone the counts are as before.
     assert_eq!(day.seed_digest(), seed, "the seed's customers and orders are unchanged");
     drop(app);
+    drop(day);
+    assert_eq!(counts(pg14(db)), before, "the day's customer and order are gone");
 }

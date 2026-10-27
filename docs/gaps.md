@@ -1,10 +1,8 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** major (M1 built: known limits with evidence) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (timings quoted from target-app-parity.md; SSH in the packages expected, not measured) · **Target:** Beekeeper Studio 5.5.7
 
-Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2) unless said otherwise, with the machine and load average they were taken on (the machine below unless named).
-
-Machine for the timings: Linux x86_64, AMD Ryzen 7 PRO 5850U (16 threads), Debian 13, KDE Plasma (Wayland), 2026-10-26. It is shared with other work, so the load varies and runs differ.
+Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
 Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localization, P performance, S stability.
 
@@ -42,17 +40,17 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 5. Wide results are slow to draw (P)
 
-- **Limit:** a frame's cost grows with the number of columns in the result, not with the columns in view: roughly 0.2 ms a column in a dev build, up to 0.5 ms at 1,664 columns. The grid is shared by table and query tabs. Measured with `wide_result_frames` (`crates/ui-egui/tests/query_tab.rs`): the whole window without an AccessKit tree, as the app runs, over 10,000 rows. Four runs:
+- **Limit:** a frame's cost grows with the number of columns in the result, not with the columns in view: roughly 0.1–0.2 ms a column in a dev build, up to 0.5 ms at 1,664 columns. The grid is shared by table and query tabs. Measured with `wide_result_frames` (`crates/ui-egui/tests/query_tab.rs`): the whole window without an AccessKit tree, as the app runs, over 10,000 rows; medians of NULL and short-text cells over five runs ([`target-app-parity.md`](target-app-parity.md), "Performance", with the loads):
 
   | Columns | Frame, nothing changing | Frame while scrolling |
   |---|---|---|
   | 50 | 6.5–13.9 ms | 8.2–17.3 ms |
-  | 100 | 17.4–27.1 ms | 22.6–39.8 ms |
-  | 300 | 48–67 ms | 58–97 ms |
-  | 1,664 (Postgres's most) | 294–897 ms | 412–778 ms |
+  | 100 | 10.7–27.1 ms | 15.4–39.8 ms |
+  | 300 | 38–67 ms | 50–97 ms |
+  | 1,664 (Postgres's most) | 231–897 ms | 357–778 ms |
 
-  Each range is the medians of NULL and short-text cells over the four runs (load average 7.5, 14.9, 18.3 and 6.2 at their start; the runs differ by up to 2× at the same load). kittest, which always builds an AccessKit tree, measured 1,664 columns at 340–890 ms a frame in M1.27, and 407–792 ms in these runs.
-- **Impact:** at about 100 columns a frame no longer fits 60 Hz. At 300 columns scrolling stutters, and at 1,664 the window draws one to three frames a second. `select *` over a wide join is a common case.
+  kittest, which always builds an AccessKit tree, measured 1,664 columns at 376–792 ms a frame (340–890 ms in M1.27).
+- **Impact:** at about 100 columns a frame no longer fits 60 Hz (in four of the five runs). At 300 columns scrolling stutters, and at 1,664 the window draws one to four frames a second. `select *` over a wide join is a common case.
 - **Estimate:** 4–8 h (estimated): lay out and draw only the columns in view.
 
 ### 6. One connection per window (F)
@@ -66,7 +64,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Limit:** a query keeps at most 10,000 rows per result and 256 MiB of cell text per run, and says `First 10,000 of N rows`.
 - **Evidence:** `QUERY_LIMITS` (`crates/pg/src/query.rs`); `a_result_cut_at_the_cap_says_so` (`crates/ui-egui/tests/query_tab.rs`).
-- **Impact:** a larger result cannot be read through in the query tab. A table tab pages through any number of rows (100 a page, measured 1.7 ms a page on a million-row table), and file export comes in M2.
+- **Impact:** a larger result cannot be read through in the query tab. A table tab pages through any number of rows (100 a page; the next page of a million-row table loads in 1.06–1.09 ms, [`target-app-parity.md`](target-app-parity.md), "Performance"), and file export comes in M2.
 - **Estimate:** part of M2's export; paging query results is not estimated.
 
 ### 8. Generated columns are offered for editing (S)
@@ -93,7 +91,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 ### 11. Inline editing stops at 32 KiB (U)
 
 - **Limit:** a cell editor opens only for values up to 32 KiB, and a paste that would make a value longer is dropped; a notice says so. The value panel shows larger values read-only, so they are changed through SQL.
-- **Evidence:** `MAX_INLINE_BYTES` (`crates/ui-egui/src/editors.rs`); `a_value_too_large_to_edit_inline_says_so`, `a_paste_that_would_pass_the_cap_is_dropped_and_says_so` (`crates/ui-egui/tests/editing.rs`). Measured: a keystroke in an editor holding 32 KiB on one line takes an 18.8–29.5 ms frame, single-line and multi-line, within the 33 ms budget (`keystroke_frame_with_a_value_at_the_cap`, three runs at load average 24.5, 30.6 and 4.2).
+- **Evidence:** `MAX_INLINE_BYTES` (`crates/ui-egui/src/editors.rs`); `a_value_too_large_to_edit_inline_says_so`, `a_paste_that_would_pass_the_cap_is_dropped_and_says_so` (`crates/ui-egui/tests/editing.rs`). Measured: a keystroke in an editor holding 32 KiB on one line takes an 18.8–24.9 ms frame single-line and 26.1–29.5 ms multi-line, within the 33 ms budget (`keystroke_frame_with_a_value_at_the_cap`; [`target-app-parity.md`](target-app-parity.md), "Performance").
 - **Impact:** large JSON documents or long texts cannot be fixed in the grid.
 - **Estimate:** 6–10 h (estimated): an editor that lays out only the lines in view, as the value panel does.
 
@@ -101,18 +99,18 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Missing:** Flatpak permissions for the user's SSH keys and `known_hosts`, the agent socket and the secret service.
 - **Evidence:** `packaging/linux/flatpak/dev.rosin.dbee.yml` grants no home access, no `--socket=ssh-auth` and no secret-service bus name (left for later in M1).
-- **Impact:** in the Flatpak, SSH tunnels with the user's key and saved passwords do not work. The tarball, AppImage and deb do.
+- **Impact:** in the Flatpak, SSH tunnels with the user's key and saved passwords do not work. The tarball and the AppImage are expected to (not measured: key logins through the tunnel were exercised in the dev build only, by `m1_day` and `crates/ssh/tests/tunnel.rs`).
 - **Estimate:** 2–4 h (estimated), plus a check on a Flatpak host.
 
 ### 13. One very long line in the query editor is slow to type in (P)
 
 - **Limit:** egui lays out a paragraph (the text between line breaks) whole on every change, so typing in one long line costs time in proportion to its length.
-- **Evidence:** `keystroke_frames_in_big_scripts` (`crates/ui-egui/tests/query_tab.rs`), three runs (load average 24.5, 30.6 and 4.2). For the editor alone, medians:
+- **Evidence:** `keystroke_frames_in_big_scripts` (`crates/ui-egui/tests/query_tab.rs`), medians over two runs ([`target-app-parity.md`](target-app-parity.md), "Performance", with the loads). For the editor alone:
 
   | Text | Keystroke frame |
   |---|---|
-  | 1 MiB on one line | 532–673 ms (slowest 2.0 s); 0.6–1.6 s in M1.26's runs |
-  | 256 KiB on one line | 143–151 ms |
+  | 1 MiB on one line | 582–673 ms (slowest 2.0 s); 0.6–1.6 s in M1.26's runs |
+  | 256 KiB on one line | 143–144 ms |
   | 32 KiB on one line | 18.3–32.6 ms |
   | 1 MiB of short lines, the whole window | 28.7–46.4 ms |
 - **Impact:** pasting minified SQL or JSON of hundreds of kilobytes on one line makes typing lag. Ordinary scripts are not affected.
@@ -129,5 +127,6 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Timings quoted from target-app-parity.md, the one source; the next page 1.06–1.09 ms; a fifth wide-result run; the tarball's and AppImage's SSH key logins marked expected, not measured. |
 | 2026-10-26 | major | M1 built: 14 known limits with evidence, ranked; wide results and the long-line editor measured. |
 | 2026-10-15 | major | Template (scaffold). |

@@ -824,8 +824,8 @@ fn wide(columns: usize, text: bool) -> String {
 /// Frames (with their tessellation) of the whole window in a plain egui context, which has no
 /// AccessKit tree (as the app without a screen reader), showing the result of `sql` in a query
 /// tab: the median and slowest of `n` frames with nothing changing, then of `n` frames that each
-/// scroll the result grid down.
-fn result_frames(db: &TestDb, sql: &str, n: usize) -> ((Duration, Duration), (Duration, Duration)) {
+/// scroll the result grid down. The run must keep all of `columns` × 10,000 rows.
+fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration, Duration), (Duration, Duration)) {
     use dbee_engine::{Outcome, Screen};
     let home = temp_home(None, None);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
@@ -866,6 +866,10 @@ fn result_frames(db: &TestDb, sql: &str, n: usize) -> ((Duration, Duration), (Du
         if let Some(dbee_engine::Tab::Query(q)) = app.session().state().active_tab()
             && q.running.is_none()
         {
+            assert!(q.error.is_none(), "the run failed: {:?}", q.error);
+            let [outcome] = &q.results[..] else { panic!("one result, not {}", q.results.len()) };
+            let r = &outcome.result;
+            assert_eq!((r.columns.len(), r.rows.len(), r.complete), (columns, 10_000, true), "the whole result is kept");
             break;
         }
         assert!(start.elapsed() < WAIT, "the run ended");
@@ -902,11 +906,15 @@ fn wide_result_frames() {
     for columns in [50, 100, 300, 1_664] {
         for text in [false, true] {
             let sql = wide(columns, text);
-            let ((idle, idle_max), (scroll, scroll_max)) = result_frames(db, &sql, frames);
+            let ((idle, idle_max), (scroll, scroll_max)) = result_frames(db, &sql, columns, frames);
             let mut ui = connected(db);
             ui.execute("tab.newQuery", json!({ "text": sql }));
             ui.execute("query.run", json!({}));
             ui.ran();
+            let q = ui.query();
+            assert!(q["error"].is_null(), "{}", q["error"]);
+            let r = &q["results"][0];
+            assert_eq!((r["columns"].as_array().map(Vec::len), r["rows"].as_u64()), (Some(columns), Some(10_000)), "the whole result in kittest");
             let kittest: Vec<Duration> = (0..frames)
                 .map(|_| {
                     let start = Instant::now();

@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** major (M1 built: first assessment) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (Performance holds every measurement the other docs quote) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -57,7 +57,7 @@ Features, weighted by area: **39 %**, put at **~35 % (estimated)**.
 | Features | 40 | ~35 % | estimated | the feature areas above |
 | Database engines | 20 | 5 % | measured (1 of 20 engines) | [driver-parity.md](driver-parity.md) |
 | UI | 12 | ~45 % | estimated | [ui-parity.md](ui-parity.md): 22 elements graded |
-| Performance | 8 | ~30 % | estimated | dbee meets its own M1 targets (measured, below), but a frame passes 16 ms at about 100 columns. Beekeeper's timings were not measured, so there is no side-by-side. |
+| Performance | 8 | ~30 % | estimated | dbee meets its own M1 targets (measured, below), but a frame passes 16.7 ms at about 100 columns in most runs. Beekeeper's timings were not measured, so there is no side-by-side. |
 | Stability | 8 | ~25 % | estimated | Never-crash rules and the panic guard; the command-sequence fuzz at 20,000 steps and every command with empty params pass (measured). No use on real databases yet. |
 | File formats (import/export) | 4 | 0 % | measured | none ([file-format-parity.md](file-format-parity.md)) |
 | Localization | 4 | 0 % | measured | English only ([localization-parity.md](localization-parity.md)) |
@@ -82,14 +82,15 @@ All measured on 2026-10-26 on Linux x86_64, AMD Ryzen 7 PRO 5850U (16 threads), 
 | Keystroke in a cell editor holding 32 KiB on one line | 33 ms | 18.8–24.9 ms single-line, 26.1–29.5 ms multi-line | 30.60 / 25.29 / 18.23, and 4.16 / 11.71 / 14.89 | `keystroke_frame_with_a_value_at_the_cap` |
 | Keystroke in a 32 KiB script, the editor alone and the whole window | 33 ms | 1.9–2.6 ms and 2.0–5.5 ms | as above | `keystroke_frames_in_big_scripts` |
 | Keystroke in a 1 MiB script of short lines, the whole window | — | 28.7–46.4 ms | as above | as above |
-| Keystroke in 1 MiB on one line, the editor alone | — | 582–673 ms (slowest 2.0 s; [gaps.md](gaps.md) 13) | as above | as above |
+| Keystroke in 1 MiB on one line, the editor alone | — | 582–673 ms (slowest 2.0 s; 0.6–1.6 s in M1.26's runs; [gaps.md](gaps.md) 13) | as above | as above |
+| Keystroke in 256 KiB and in 32 KiB on one line, the editor alone | — | 143–144 ms and 18.3–32.6 ms | as above | as above |
 | Value panel, 20 MB values: first frame showing them | 250 ms | 9–173 ms | 5.67 / 16.70 / 16.03 | `value_panel_frames_within_budget` |
 | Value panel, 20 MB values: frames unchanged and scrolling | 16 ms | 0.08–0.12 ms unchanged, 0.09–0.94 ms scrolling | as above | as above |
 | Copying 10,000 rows (3–4.6 MB) in each format | 250 ms | `clipboard.copy` 13–59 ms; its frame 16–58 ms | 53.35 / 28.18 / 18.85, and 3.00 / 12.56 / 15.29 | `copy_frames_within_budget` |
-| A frame with a wide result, 50 / 100 / 300 / 1,664 columns, nothing changing | none (a 60 Hz frame is 16.7 ms) | 6.5–13.9 / 17.4–27.1 / 48–67 / 294–897 ms ([gaps.md](gaps.md) 5) | four runs, 6.2 to 18.3 at their start | `wide_result_frames` |
+| A frame with a wide result, 50 / 100 / 300 / 1,664 columns, the whole window without an AccessKit tree | none (a 60 Hz frame is 16.7 ms) | nothing changing 6.5–13.9 / 10.7–27.1 / 38–67 / 231–897 ms; scrolling 8.2–17.3 / 15.4–39.8 / 50–97 / 357–778 ms; in kittest, with an AccessKit tree, 376–792 ms at 1,664 columns (340–890 ms in M1.27). Medians of NULL and short-text cells ([gaps.md](gaps.md) 5) | five runs, 7.5, 14.9, 18.3, 6.2 and 4.4 at their start (the fifth on 2026-10-27) | `wide_result_frames` |
 | The whole M1 day in the real window, through the SSH tunnel | — | 10.5–12.4 s for the test; from the SSH connect to the open Postgres session 0.14–0.33 s | about 2.5–5 for the 12.4 s run; about 50 for the other | `m1_day_end_to_end` |
 
-Every target above is met in every run, at every load. The wide-result row has none: past about 100 columns its frame no longer fits 60 Hz ([gaps.md](gaps.md) 5).
+Every target above is met in every run, at every load. The wide-result row has none: at 100 columns its frame passed 60 Hz's 16.7 ms in four of the five runs, and at 300 in all ([gaps.md](gaps.md) 5).
 
 Beekeeper Studio's own timings were not measured.
 
@@ -127,5 +128,6 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Performance is the one source for the timings gaps.md and roadmap.md quote: wide results scrolling and in kittest, keystrokes in 256 KiB and 32 KiB on one line, M1.26's 1 MiB figure added; a fifth wide-result run. |
 | 2026-10-26 | major | M1 built: first assessment. Feature areas graded against the observed catalog; dimension scores; ~25 % overall (estimated); performance measured with machine and load; readiness by audience. |
 | 2026-10-15 | major | Template (scaffold). |

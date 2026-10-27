@@ -1,6 +1,6 @@
 # Roadmap
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** major (M1 built: alpha gate rows with evidence) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (the next page's timing quoted from target-app-parity.md) · **Target:** Beekeeper Studio 5.5.7
 
 ## Current focus
 
@@ -13,7 +13,7 @@ Next: an architecture step, a database driver interface so the engine no longer 
 | Core workflow | Works end to end? | Evidence | Hours to pass |
 |---|---|---|---|
 | Connect to Postgres (M1) | yes (measured) | `m1_day` step 1 (`apps/dbee/tests/m1_day.rs`): a double-click on a saved connection reaches the workspace through the test sshd with the key found on its own, no prompt. Driver and engine tests: TLS modes, the CA file, key, agent and password SSH logins, host keys, read-only mode, lost connections (`crates/pg/tests`, `crates/ssh/tests`, `crates/engine/tests/connection.rs`), on Postgres 14 and 18. | 0 |
-| Browse and filter tables (M1) | yes (measured) | `m1_day` steps 2, 3 and 5: Ctrl+P, three filters through the bar, a foreign key followed into a filtered tab. Paging, sort, count and odd identifiers in `crates/engine/tests/table.rs` and `crates/ui-egui/tests/table_tab.rs`; a page of a million-row table in 1.7 ms (`next_page_on_a_million_rows_is_fast`). | 0 |
+| Browse and filter tables (M1) | yes (measured) | `m1_day` steps 2, 3 and 5: Ctrl+P, three filters through the bar, a foreign key followed into a filtered tab. Paging, sort, count and odd identifiers in `crates/engine/tests/table.rs` and `crates/ui-egui/tests/table_tab.rs`; the next page of a million-row table in 1.06–1.09 ms (`next_page_on_a_million_rows_is_fast`; [target-app-parity.md](target-app-parity.md), "Performance"). | 0 |
 | Run a query (M1) | yes (measured) | `m1_day` step 7: a join pasted and run with Ctrl+Enter. Run current, cancel, several results, error cards and the row cap in `crates/engine/tests/query.rs` and `crates/ui-egui/tests/query_tab.rs`. | 0 |
 | Edit a row (M1) | yes (measured) | `m1_day` step 6: a name fixed and a date cleared to NULL, each written with Ctrl+S and checked with psql. All-or-nothing Apply with a failing change in `crates/pg/tests/apply.rs`, `crates/engine/tests/edit.rs` and `crates/ui-egui/tests/editing.rs`. | 0 |
 | Copy results (M1) | yes (measured) | `m1_day` steps 4 and 7: a JSON line copied from the value panel, and a result copied with its header row (Ctrl+A, Ctrl+Shift+C). The formats in `crates/core` and `crates/ui-egui/tests/clipboard.rs`. | 0 |
@@ -42,6 +42,7 @@ Percentages and hours come from [target-app-parity.md](target-app-parity.md) and
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | The next page's timing quoted from target-app-parity.md (1.06–1.09 ms). |
 | 2026-10-26 | major | M1 built: five of six alpha gate rows pass with evidence (`m1_day` and the driver, engine and UI tests); M1 waits for Kaspar's day; next an architecture step, then M2. |
 | 2026-10-19 | minor | M1 "Daily Postgres workflow" defined and in progress; alpha gate rewritten for Postgres; M2 "Import and export" added. |
 | 2026-10-15 | major | Template (scaffold). |
