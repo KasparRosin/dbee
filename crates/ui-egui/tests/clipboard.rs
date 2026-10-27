@@ -391,6 +391,8 @@ fn copy_frames_within_budget() {
     let under = format!("select repeat('x', {pad}) || case when n = 1 then repeat('y', {rest}) else '' end as pad from generate_series(1, 10000) n");
     let control = format!("select repeat(chr(1), {}) as a", COPY_MAX_BYTES - 1);
     let breaks = format!("select repeat(E'\\n', {}) as a", COPY_MAX_BYTES - 1);
+    // Every `"` is doubled in CSV (and escaped in JSON): half the cap, so CSV ends just under it.
+    let quotes = format!("select repeat('\"', {}) as a", COPY_MAX_BYTES / 2 - 2);
     let nulls: Vec<String> = (1..=1_664).map(|i| format!("null as c{i:04}")).collect();
     let wide = format!("select {} from generate_series(1, 10000)", nulls.join(", "));
     println!("copy frames on {}", machine());
@@ -403,6 +405,7 @@ fn copy_frames_within_budget() {
         ("TSV 1 byte under the cap", under),
         ("control characters", control),
         ("line breaks", breaks),
+        ("double quotes", quotes),
         ("10,000 × 1,664 NULLs", wide),
     ] {
         let mut ui = ran(db, &sql);

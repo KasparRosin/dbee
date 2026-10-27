@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (entry 15: what is left after values that do not fit a column's length are refused) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (generated columns are no longer offered for editing: old entry 8 dropped, the rest renumbered; entries 15–17 for failed transactions, keyless paging and empty filter values) · **Target:** Beekeeper Studio 5.5.7
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -11,7 +11,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 ### 1. No export or import of files (FF)
 
 - **Missing:** exporting a table or a query result to a file (CSV, JSON, SQL) and importing one. The alpha gate's last row ([`roadmap.md`](roadmap.md)).
-- **Evidence:** `engine.commands` lists no export or import command; the way out today is the clipboard, at most 8 MiB of text (entry 9).
+- **Evidence:** `engine.commands` lists no export or import command; the way out today is the clipboard, at most 8 MiB of text (entry 8).
 - **Impact:** results larger than a copy, or meant for a file, cannot leave dbee. Kaspar switches fully once this lands (M2).
 - **Estimate:** M2 "Import and export"; not estimated yet.
 
@@ -67,42 +67,35 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** a larger result cannot be read through in the query tab. A table tab pages through any number of rows (100 a page; the next page of a million-row table loads in 1.06–1.09 ms, [`target-app-parity.md`](target-app-parity.md), "Performance"), and file export comes in M2.
 - **Estimate:** part of M2's export; paging query results is not estimated.
 
-### 8. Generated columns are offered for editing (S)
-
-- **Problem:** a stored generated column, or an identity column `GENERATED ALWAYS`, can be edited in the grid. Postgres refuses the write at Apply ("column … can only be updated to DEFAULT"). Nothing is written, as Apply is all or nothing, and the error card names the column, but the edit should not be offered.
-- **Evidence:** the catalog query (`COLUMNS_SQL`, `crates/pg/src/catalog.rs`) does not read `attgenerated`, and only treats `attidentity` as "has a default". `cmd::edit::can_edit` has no per-column rule. On pg14 (2026-10-26), an `UPDATE` of a generated column and of an identity `GENERATED ALWAYS` column both fail with SQLSTATE 428C9.
-- **Impact:** a confusing failed Apply; no data is lost.
-- **Estimate:** 2–3 h (estimated): read `attgenerated` and `attidentity`, and refuse those cells with a reason, as read-only cells are.
-
-### 9. A copy is at most 8 MiB of text (F)
+### 8. A copy is at most 8 MiB of text (F)
 
 - **Limit:** one copy (Ctrl+C, Ctrl+Shift+C, the grid menu's formats) holds at most 8 MiB of text, counting everything (quotes, escapes, `NULL`, column names). A larger one copies nothing and says how many rows fit.
 - **Evidence:** `COPY_MAX_BYTES` (`crates/engine/src/cmd/selection.rs`); `a_copy_over_the_cap_copies_nothing_and_says_why` (`crates/ui-egui/tests/clipboard.rs`).
 - **Impact:** large selections need several copies until file export lands in M2 (entry 1).
 - **Estimate:** M2.
 
-### 10. Unique indexes without a constraint are not row keys (F)
+### 9. Unique indexes without a constraint are not row keys (F)
 
 - **Limit:** a table without a primary key can still be edited through a unique constraint on NOT NULL columns. A unique index made with `CREATE UNIQUE INDEX` is not seen, so such a table is read-only in the grid, and the note above it says why.
 - **Evidence:** keys come from `pg_constraint` only (`contype` `p`, `u`, `f`: `CONSTRAINTS_SQL`, `crates/pg/src/catalog.rs`; `TableInfo::row_key`, `crates/core/src/schema.rs`). On pg14 (2026-10-26), a unique index alone leaves `pg_constraint` empty for its table.
 - **Impact:** such tables are changed through SQL in a query tab.
 - **Estimate:** 2–3 h (estimated): read `pg_index` (`indisunique`, no expressions, no predicate).
 
-### 11. Inline editing stops at 32 KiB (U)
+### 10. Inline editing stops at 32 KiB (U)
 
 - **Limit:** a cell editor opens only for values up to 32 KiB, and a paste that would make a value longer is dropped; a notice says so. The value panel shows larger values read-only, so they are changed through SQL.
 - **Evidence:** `MAX_INLINE_BYTES` (`crates/ui-egui/src/editors.rs`); `a_value_too_large_to_edit_inline_says_so`, `a_paste_that_would_pass_the_cap_is_dropped_and_says_so` (`crates/ui-egui/tests/editing.rs`). Measured: a keystroke in an editor holding 32 KiB on one line takes an 18.8–24.9 ms frame single-line and 26.1–29.5 ms multi-line, within the 33 ms budget (`keystroke_frame_with_a_value_at_the_cap`; [`target-app-parity.md`](target-app-parity.md), "Performance").
 - **Impact:** large JSON documents or long texts cannot be fixed in the grid.
 - **Estimate:** 6–10 h (estimated): an editor that lays out only the lines in view, as the value panel does.
 
-### 12. The Flatpak cannot reach `~/.ssh`, the SSH agent or the keyring (H)
+### 11. The Flatpak cannot reach `~/.ssh`, the SSH agent or the keyring (H)
 
 - **Missing:** Flatpak permissions for the user's SSH keys and `known_hosts`, the agent socket and the secret service.
 - **Evidence:** `packaging/linux/flatpak/dev.rosin.dbee.yml` grants no home access, no `--socket=ssh-auth` and no secret-service bus name (left for later in M1).
 - **Impact:** in the Flatpak, SSH tunnels with the user's key and saved passwords do not work. The tarball and the AppImage are expected to (not measured: key logins through the tunnel were exercised in the dev build only, by `m1_day` and `crates/ssh/tests/tunnel.rs`).
 - **Estimate:** 2–4 h (estimated), plus a check on a Flatpak host.
 
-### 13. One very long line in the query editor is slow to type in (P)
+### 12. One very long line in the query editor is slow to type in (P)
 
 - **Limit:** egui lays out a paragraph (the text between line breaks) whole on every change, so typing in one long line costs time in proportion to its length.
 - **Evidence:** `keystroke_frames_in_big_scripts` (`crates/ui-egui/tests/query_tab.rs`), medians over two runs ([`target-app-parity.md`](target-app-parity.md), "Performance", with the loads). For the editor alone:
@@ -116,25 +109,47 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** pasting minified SQL or JSON of hundreds of kilobytes on one line makes typing lag. Ordinary scripts are not affected.
 - **Estimate:** 8–16 h (estimated): lay out a long line in pieces.
 
-### 14. The value panel's scroll position loses precision past about a million rows (U)
+### 13. The value panel's scroll position loses precision past about a million rows (U)
 
 - **Limit:** positions are f32, as egui's scrolling is, so past about 18 million points (a million rows of 18 points) a row's place is off by a point or more.
 - **Evidence:** the module docs of `crates/ui-egui/src/value_panel.rs`. A value gets there only with more than about a million rows (lines, and long lines wrapped) within the 10 MiB the panel shows, so lines of about 10 bytes or fewer on average. 10 MiB of line breaks is about 10 million rows (180 million points), where f32 steps by 16 points.
 - **Impact:** small: few real values have a million short lines. In the far end of such a value, rows can sit several points off and a click can land one row away.
 - **Estimate:** 3–6 h (estimated): scroll by row, not by point.
 
-### 15. Filters on `char(n)` and `bit(n)` skip their index; array filters still cut (D, P)
+### 14. Filters on `char(n)` and `bit(n)` skip their index; array filters still cut (D, P)
 
 - **Limit:** a value written or filtered on is cast to the column's type without its length (`ColumnInfo::write_type_sql`, `crates/core/src/schema.rs`), because an explicit cast to `varchar(n)`, `char(n)` or `bit(n)` cuts (or pads) the value without an error. So an edit that does not fit fails at Apply (SQLSTATE 22001 or 22026) and a filter value that does not fit matches nothing. Two cases are left. A filter on a `char(n)` column compares as `text` and one on `bit(n)` as `bit varying`, which an index on the column does not serve, so such a filter reads the whole table. And a filter on an array of `varchar(n)`, `char(n)` or `bit(n)` keeps the column's own type, since Postgres has no operator for `varchar[] = text[]`, `char[] = text[]` or `bit[] = bit varying[]`, so an element longer than the length is still cut and can match the rows of its prefix.
 - **Evidence:** `values_that_do_not_fit_the_length_are_refused_not_cut` (`crates/engine/tests/edit.rs`, both test servers); `array_filters_that_no_operator_takes_without_the_length_keep_their_type` (`crates/sql/tests/builders.rs`). On pg14 and Postgres 18 (2026-10-27), `EXPLAIN` of `c = CAST('ab' AS text)` on an indexed `char(2)` column is a sequential scan, and `c = CAST('ab' AS bpchar)` an index scan; `CAST('…' AS bpchar[])`, `CAST('…' AS "bit"[])` and `CAST('…' AS character varying[])` (no length) compare with those arrays and cut nothing.
 - **Impact:** a filter on an indexed `char(n)` or `bit(n)` column of a large table is slow; a filter on an array with an over-long element can match rows it should not. Edits are not affected.
 - **Estimate:** 1–2 h (estimated): cast to the types without a length that keep the column's operators (`bpchar`, `"bit"`, `character varying[]`, `bpchar[]`, `"bit"[]`).
 
+### 15. A failed statement leaves a query tab's transaction failed (D)
+
+- **Limit:** a script that opens a transaction (`BEGIN`) and fails inside it leaves the query connection in that failed transaction: every later run fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead. The error card says so: under a 25P02 error it adds that a ROLLBACK ends the failed transaction.
+- **Evidence:** `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
+- **Impact:** one more run (`ROLLBACK`) after a failed transaction. A reconnect also ends it.
+- **Estimate:** 2–4 h (estimated): show the open or failed transaction in the query tab and offer Rollback.
+
+### 16. A table without a row key pages by OFFSET alone (D)
+
+- **Limit:** a table with neither a primary key nor a NOT NULL unique key pages with `LIMIT 101 OFFSET n` and no `ORDER BY`, so Postgres may return its rows in another order from one page to the next. Under concurrent writes (or a plan change) a page can repeat rows of another or skip some. Ordering by `ctid` would fix the order, but it sorts the whole table for every page, which a large keyless table cannot afford.
+- **Evidence:** `page_sql` (`crates/sql/src/select.rs`) orders by the row key only; `page_details` (`crates/sql/tests/builders.rs`) checks that a keyless table's page has no `ORDER BY`.
+- **Impact:** browsing a keyless table that changes meanwhile can show a row twice or miss one; such tables are read-only in the grid (no row to name in an `UPDATE`).
+- **Estimate:** 3–5 h (estimated): page a keyless table by `ctid` ranges (a `tid` cursor), which needs no sort.
+
+### 17. A filter row cannot match an empty string (F)
+
+- **Limit:** a filter row whose operator takes a value and that has none is left out of the condition, so `status = ''` cannot be written as a filter row. The bar mutes such a row, its field says `No value: left out`, and the tab title does not count it. A raw `WHERE` (`status = ''`) expresses it.
+- **Evidence:** `Filter::restricts` (`crates/sql/src/filter.rs`); `a_filter_without_a_value_is_muted_left_out_and_not_counted` (`crates/ui-egui/tests/table_tab.rs`).
+- **Impact:** small: rows with an empty text are found through the raw condition.
+- **Estimate:** 1–2 h (estimated): an "is empty" operator, or a way to mark an empty value as meant.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-27 | minor | Entry 15: values that do not fit a column's length are refused, not cut; what is left (filters on `char(n)` and `bit(n)` skip their index, array filters still cut). |
+| 2026-10-27 | minor | The final review's fixes: generated and identity `GENERATED ALWAYS` columns refused (old entry 8 dropped, 9–15 now 8–14); entries 15 (a failed transaction in a query tab), 16 (keyless paging), 17 (empty filter values). |
+| 2026-10-27 | minor | Entry 15 (now 14): values that do not fit a column's length are refused, not cut; what is left (filters on `char(n)` and `bit(n)` skip their index, array filters still cut). |
 | 2026-10-27 | minor | Timings quoted from target-app-parity.md, the one source; the next page 1.06–1.09 ms; a fifth wide-result run; the tarball's and AppImage's SSH key logins marked expected, not measured. |
 | 2026-10-26 | major | M1 built: 14 known limits with evidence, ranked; wide results and the long-line editor measured. |
 | 2026-10-15 | major | Template (scaffold). |

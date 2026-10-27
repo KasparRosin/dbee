@@ -773,3 +773,50 @@ fn a_weaker_tls_mode_does_not_get_the_stored_password() {
     assert_eq!(e.code(), "needsPassword", "a downgrade must not get the stored password: {e}");
     s.run_blocking("connection.test", json!({ "config": strict }), T).unwrap();
 }
+
+/// The notices the session's UI requests hold, taken.
+fn notices(s: &mut dbee_engine::Session) -> Vec<String> {
+    s.take_ui_requests()
+        .into_iter()
+        .filter_map(|r| match r {
+            UiRequest::Notice(n) => Some(n),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn known_hosts_that_cannot_be_read_or_written_say_so() {
+    use std::os::unix::fs::PermissionsExt;
+    let db = require_testdb!();
+    let mut s = session_in(temp_home(Some(&db.keys.plain), None));
+    let file = s.home.ssh_dir().join("known_hosts");
+    let c = via_ssh(SshAuth::Key { path: None });
+    // Readable but not writable: the trusted key connects, and a notice says it was not saved.
+    std::fs::write(&file, "").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let e = run_err(&mut s, "connection.open", json!({ "config": c, "password": pw() }));
+    assert_eq!(e.code(), "needsHostKey", "{e}");
+    let fp = e.data()["fingerprint"].as_str().unwrap().to_owned();
+    notices(&mut s);
+    open(&mut s, json!({ "config": c, "password": pw(), "trustHostKey": fp }));
+    let told = notices(&mut s);
+    let host = sshd_entry();
+    assert!(
+        told.iter().any(|n| n.starts_with(&format!("The host key of {host} is trusted for this connection only: saving it to "))
+            && n.contains("known_hosts failed")),
+        "{told:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "", "nothing was written");
+    s.run_blocking("connection.close", json!({}), T).unwrap();
+    // Not readable: an error, not an empty file (a changed key would pass as unknown).
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&file).is_ok() {
+        dbee_testkit::skipped("known_hosts_that_cannot_be_read: root reads anything");
+        return;
+    }
+    let e = run_err(&mut s, "connection.open", json!({ "config": c, "password": pw(), "trustHostKey": fp }));
+    assert_eq!((e.code(), e.data()["reason"].as_str()), ("ssh", Some("knownHosts")), "{e}");
+    assert!(e.to_string().contains("known_hosts cannot be read"), "{e}");
+}

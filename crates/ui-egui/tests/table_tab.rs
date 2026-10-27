@@ -828,3 +828,30 @@ fn hovering_the_filter_choices_and_their_lists_moves_nothing() {
         }
     }
 }
+
+#[test]
+fn a_filter_without_a_value_is_muted_left_out_and_not_counted() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    let filters = json!([{ "column": "id", "op": "lt", "value": "3" }, { "column": "status", "op": "eq", "value": "" }]);
+    ui.execute("table.open", json!({ "schema": "shop", "table": "orders", "filters": filters }));
+    ui.until("the page", |ui| ui.table()["rows"] == 2);
+    ui.frame();
+    let tab = ui.document()["active"].as_u64().unwrap();
+    assert_eq!(ui.value(&format!("tab-{tab}")), "orders [1]", "the empty row is not counted");
+    assert!(ui.tag("filter-0-unapplied").is_none(), "a row with a value is applied");
+    assert_eq!(ui.value("filter-1-unapplied"), dbee_ui_egui::filter_bar::UNAPPLIED_HINT);
+    // A value makes it a filter like the others.
+    ui.click("filter-1-value");
+    ui.text("paid");
+    ui.key("Enter");
+    ui.until("the filtered page", |ui| ui.table()["applied"]["filters"][1]["value"] == "paid");
+    ui.frame();
+    assert!(ui.tag("filter-1-unapplied").is_none());
+    assert_eq!(ui.value(&format!("tab-{tab}")), "orders [2]");
+    // An operator that takes no value is never left out.
+    ui.execute("table.setFilters", json!({ "filters": [{ "column": "shipped_at", "op": "isNull", "value": "" }] }));
+    ui.frame();
+    assert!(ui.tag("filter-0-unapplied").is_none());
+    assert_eq!(ui.value(&format!("tab-{tab}")), "orders [1]");
+}

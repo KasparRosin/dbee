@@ -626,6 +626,7 @@ mod tests {
             category: 'N',
             not_null: true,
             has_default: false,
+            generated: Default::default(),
         };
         TableInfo {
             table: TableRef { schema: schema.into(), name: name.into() },

@@ -24,7 +24,10 @@ dbee-testkit = { path = "crates/testkit" }
 
 # foundation
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# `preserve_order` here, not in one crate: `-p dbee` (run-isolated, the app) then resolves the same
+# features as `--workspace` (ci, the tests), so the app runs what the tests run and egui and wgpu are
+# built once.
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 log = "0.4"
 proptest = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -408,7 +408,7 @@ fn views_and_keyless_tables_are_read_only() {
         let d = read(&mut s);
         assert_eq!((d["editable"].as_bool(), d["notEditableReason"].as_str()), (Some(false), Some("views are read-only")));
         open_table(&mut s, "shop", "customer_counts");
-        assert_eq!(read(&mut s)["notEditableReason"], "views are read-only");
+        assert_eq!(read(&mut s)["notEditableReason"], "materialized views are read-only");
         open_table(&mut s, "shop", "no_key");
         let d = read(&mut s);
         assert_eq!((d["editable"].as_bool(), d["notEditableReason"].as_str()), (Some(false), Some("no primary key or unique not-null key")));

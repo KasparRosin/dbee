@@ -61,8 +61,9 @@
 //! height), `query-run`, `query-run-current`, `query-cancel`, `result-<n>` (1-based, with several
 //! results; value `{shown, rows, rowsAffected}`), `query-rows` (value: what the shown result
 //! holds, e.g. `First 10,000 of 25,000 rows`), `query-affected` (value: `2 rows affected`),
-//! `query-error` (value `{code, heading, message, detail, hint, position, statement, line, column,
-//! jump}`, `jump` saying whether a click moves the cursor) and `query-hint`.
+//! `query-error` (value `{code, heading, message, detail, hint, note, position, statement, line,
+//! column, jump}`, `note` the card's line that a ROLLBACK ends a failed transaction (SQLSTATE
+//! 25P02) or null, `jump` saying whether a click moves the cursor) and `query-hint`.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -749,6 +750,12 @@ fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover
     r.clicked()
 }
 
+/// SQLSTATE 25P02: a statement failed earlier in the transaction, which stays open, failed.
+const IN_FAILED_TRANSACTION: &str = "25P02";
+
+/// The card's line under such an error.
+pub const ROLLBACK_NOTE: &str = "The transaction this connection is in failed earlier: run ROLLBACK to end it. Until then every statement fails.";
+
 /// The error card's heading for `e` of a run that kept `kept` results.
 fn heading(e: &QueryError, kept: usize) -> String {
     if e.code == "cancelled" {
@@ -768,6 +775,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: us
     let (stroke, ink) = if cancelled { (t.border, t.text) } else { (t.danger, t.danger) };
     let jump = at.is_some();
     let title = heading(e, kept);
+    let note = (e.sqlstate.as_deref() == Some(IN_FAILED_TRANSACTION)).then_some(ROLLBACK_NOTE);
     let frame =
         Frame::new().fill(t.card).stroke(Stroke::new(1.0, stroke)).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(12, 8));
     let label = |ui: &mut egui::Ui, text: RichText| ui.add(Label::new(text).wrap().selectable(!jump));
@@ -787,6 +795,9 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: us
             if let Some(hint) = &e.hint {
                 label(ui, RichText::new(format!("Hint: {hint}")).size(12.0).color(t.text));
             }
+            if note.is_some() {
+                label(ui, RichText::new(ROLLBACK_NOTE).size(12.0).color(t.text));
+            }
             if jump {
                 ui.add(Label::new(RichText::new("Click to put the cursor there.").size(11.5).color(t.text_muted)).selectable(false));
             }
@@ -803,6 +814,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: us
         "message": e.message,
         "detail": e.detail,
         "hint": e.hint,
+        "note": note,
         "position": e.position,
         "statement": e.statement,
         "line": line,

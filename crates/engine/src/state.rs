@@ -180,6 +180,8 @@ pub struct QueryError {
     /// The server's message with its SQLSTATE (`column "x" does not exist (SQLSTATE 42703)`), or
     /// dbee's text for errors that are not the server's.
     pub message: String,
+    /// The server's SQLSTATE, for a server error (`25P02`: the transaction failed earlier).
+    pub sqlstate: Option<String>,
     pub detail: Option<String>,
     pub hint: Option<String>,
     /// Where the server says the error is, as a byte offset into the tab text.

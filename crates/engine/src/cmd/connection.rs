@@ -760,12 +760,17 @@ fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             Ok(opened) => {
                 let info = opened.conn.info();
                 let r = json!({ "server": server_text(info), "via": opened.via(), "warnings": info.warnings });
+                let unsaved = unsaved_host_key(opened.tunnel.as_ref());
                 opened.close().await;
-                Ok(r)
+                Ok((r, unsaved))
             }
             Err(e) => Err(e),
         };
-        let apply: Apply = Box::new(move |_: &mut Session| result);
+        let apply: Apply = Box::new(move |s: &mut Session| {
+            let (r, unsaved) = result?;
+            tell(s, unsaved);
+            Ok(r)
+        });
         apply
     });
     Ok(Outcome::Started(job))
@@ -842,6 +847,7 @@ fn apply_open(
     for w in &c.info.warnings {
         s.ui_requests.push(UiRequest::Notice(w.clone()));
     }
+    tell(s, unsaved_host_key(c.tunnel.as_ref()));
     s.state.connected = Some(c);
     s.state.screen = Screen::Workspace;
     save_store_or_tell(s);
@@ -920,6 +926,7 @@ fn apply_reconnect(
     };
     let (opened, catalog) = result?;
     let Opened { conn, tunnel } = opened;
+    let unsaved = unsaved_host_key(tunnel.as_ref());
     c.info = conn.info().clone();
     c.catalog = Arc::new(catalog);
     let old_browse = std::mem::replace(&mut c.browse, Arc::new(conn));
@@ -946,7 +953,20 @@ fn apply_reconnect(
     if s.busy() {
         cancel_statements(s, std::iter::once(old_browse).chain(old_query));
     }
+    tell(s, unsaved);
     Ok(result)
+}
+
+/// Why the host key the user trusted was not saved to `known_hosts`, when that failed.
+fn unsaved_host_key(tunnel: Option<&Arc<Tunnel>>) -> Option<String> {
+    tunnel.and_then(|t| t.unsaved_host_key()).map(str::to_owned)
+}
+
+/// Shows `note` as a notice, when there is one.
+fn tell(s: &mut Session, note: Option<String>) {
+    if let Some(note) = note {
+        s.ui_requests.push(UiRequest::Notice(note));
+    }
 }
 
 /// `{}` → a job returning `{tables}`: reloads the catalog on the browse connection. Tabs keep

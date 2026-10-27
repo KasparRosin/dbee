@@ -298,8 +298,11 @@ pub fn not_editable(s: &Session, t: &TableTab) -> Option<&'static str> {
         return Some("read-only connection");
     }
     let Some(info) = c.catalog.table(&t.table) else { return Some("the table is no longer in the schema") };
-    if !matches!(info.kind, RelKind::Table | RelKind::PartitionedTable) {
-        return Some("views are read-only");
+    match info.kind {
+        RelKind::Table | RelKind::PartitionedTable => {}
+        RelKind::View => return Some("views are read-only"),
+        RelKind::MaterializedView => return Some("materialized views are read-only"),
+        RelKind::ForeignTable => return Some("foreign tables are read-only"),
     }
     if info.row_key().is_none() {
         return Some("no primary key or unique not-null key");

@@ -115,6 +115,14 @@ pub struct Filter {
     pub value: String,
 }
 
+impl Filter {
+    /// Whether the filter is part of the condition: an operator that takes a value needs one.
+    /// A row with an empty value is left out (so `= ''` cannot be expressed with a filter row).
+    pub fn restricts(&self) -> bool {
+        !self.op.takes_value() || !self.value.is_empty()
+    }
+}
+
 /// What restricts a table's rows.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,7 +195,7 @@ fn filter_sql(filter: &Filter, table: &TableInfo) -> Result<Option<String>, SqlE
     if !filter.op.takes_value() {
         return Ok(Some(format!("{name} {}", filter.op.symbol())));
     }
-    if filter.value.is_empty() {
+    if !filter.restricts() {
         return Ok(None);
     }
     if filter.op.is_pattern() {

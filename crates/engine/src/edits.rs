@@ -259,10 +259,14 @@ impl Edits {
 
     /// Stages `value` for grid cell `(row, col)`; `true` when that changed the edits. `Err` names
     /// what is wrong with the cell or the value (outside the grid, a row marked for deletion, a
-    /// NUL character).
-    pub(crate) fn stage(&mut self, data: &ResultSet, row: usize, col: usize, value: NewValue) -> Result<bool, String> {
+    /// column Postgres computes, a NUL character). `column` is the cell's column in the catalog,
+    /// when it is there.
+    pub(crate) fn stage(&mut self, data: &ResultSet, row: usize, col: usize, value: NewValue, column: Option<&ColumnInfo>) -> Result<bool, String> {
         if col >= data.columns.len() {
             return Err(format!("the page has no column {col}"));
+        }
+        if let Some(why) = column.and_then(ColumnInfo::not_editable) {
+            return Err(why.to_owned());
         }
         if matches!(&value, NewValue::Text(t) if t.contains('\0')) {
             return Err(SqlError::Nul.to_string());
@@ -436,6 +440,7 @@ mod tests {
             category,
             not_null: name == "id",
             has_default: false,
+            generated: Default::default(),
         }
     }
 
@@ -472,19 +477,19 @@ mod tests {
         let d = data();
         let mut e = Edits::default();
         assert!(e.is_empty() && !e.can_undo() && !e.can_redo());
-        assert_eq!(e.stage(&d, 0, 1, text("b")), Ok(true));
+        assert_eq!(e.stage(&d, 0, 1, text("b"), None), Ok(true));
         assert_eq!(e.count(), 1);
-        assert_eq!(e.stage(&d, 0, 1, text("b")), Ok(false), "the same value again changes nothing");
+        assert_eq!(e.stage(&d, 0, 1, text("b"), None), Ok(false), "the same value again changes nothing");
         // The loaded value unstages the cell: text for text, NULL for NULL.
-        assert_eq!(e.stage(&d, 0, 1, text("a")), Ok(true));
+        assert_eq!(e.stage(&d, 0, 1, text("a"), None), Ok(true));
         assert!(e.is_empty());
-        assert_eq!(e.stage(&d, 1, 1, NewValue::Null), Ok(false));
-        assert_eq!(e.stage(&d, 1, 1, text("")), Ok(true), "an empty string is not NULL");
+        assert_eq!(e.stage(&d, 1, 1, NewValue::Null, None), Ok(false));
+        assert_eq!(e.stage(&d, 1, 1, text(""), None), Ok(true), "an empty string is not NULL");
         assert_eq!(e.cells.get(&(1, 1)), Some(&text("")));
         // Out of the grid, or on a column the page does not have.
-        assert!(e.stage(&d, 2, 0, text("x")).is_err());
-        assert!(e.stage(&d, 0, 3, text("x")).is_err());
-        assert!(e.stage(&d, 0, 1, text("nul\0")).is_err());
+        assert!(e.stage(&d, 2, 0, text("x"), None).is_err());
+        assert!(e.stage(&d, 0, 3, text("x"), None).is_err());
+        assert!(e.stage(&d, 0, 1, text("nul\0"), None).is_err());
         assert_eq!(e.count(), 1);
     }
 
@@ -492,11 +497,11 @@ mod tests {
     fn shown_gives_staged_values_only() {
         let d = data();
         let mut e = Edits::default();
-        e.stage(&d, 0, 1, text("b")).unwrap();
-        e.stage(&d, 0, 2, NewValue::Null).unwrap();
+        e.stage(&d, 0, 1, text("b"), None).unwrap();
+        e.stage(&d, 0, 2, NewValue::Null, None).unwrap();
         let row = e.add_row(&d);
         assert_eq!(row, 2);
-        e.stage(&d, row, 1, text("new")).unwrap();
+        e.stage(&d, row, 1, text("new"), None).unwrap();
         assert_eq!(e.shown(&d, 0, 1), Some(Some("b")));
         assert_eq!(e.shown(&d, 0, 2), Some(None));
         assert_eq!(e.shown(&d, 0, 0), None);
@@ -511,13 +516,13 @@ mod tests {
         let (i, d) = (info(), data());
         let mut e = Edits::default();
         let new = e.add_row(&d);
-        e.stage(&d, new, 0, text("9")).unwrap();
-        e.stage(&d, new, 2, NewValue::Null).unwrap();
+        e.stage(&d, new, 0, text("9"), None).unwrap();
+        e.stage(&d, new, 2, NewValue::Null, None).unwrap();
         e.add_row(&d);
         e.delete_rows(&d, &[1]).unwrap();
         // Editing the key: the row is found by the key it was loaded with.
-        e.stage(&d, 0, 0, text("10")).unwrap();
-        e.stage(&d, 0, 1, text("it's")).unwrap();
+        e.stage(&d, 0, 0, text("10"), None).unwrap();
+        e.stage(&d, 0, 1, text("it's"), None).unwrap();
         assert_eq!(e.count(), 5);
         let s = e.statements(&i, &d).unwrap();
         assert_eq!(
@@ -534,7 +539,7 @@ mod tests {
         );
         assert_eq!((e.only_column(2, 0), e.only_column(2, 2), e.only_column(2, 3), e.only_column(2, 1)), (None, None, None, None));
         let mut one = Edits::default();
-        one.stage(&d, 1, 2, text("3")).unwrap();
+        one.stage(&d, 1, 2, text("3"), None).unwrap();
         assert_eq!(one.only_column(2, 1), Some(2));
         assert_eq!(Edits::default().statements(&i, &d), Ok(vec![]));
     }
@@ -543,7 +548,7 @@ mod tests {
     fn statements_need_a_key_from_the_loaded_row() {
         let d = data();
         let mut e = Edits::default();
-        e.stage(&d, 0, 1, text("b")).unwrap();
+        e.stage(&d, 0, 1, text("b"), None).unwrap();
         let mut keyless = info();
         keyless.primary_key.clear();
         assert_eq!(e.statements(&keyless, &d), Err(SqlError::NoKey));
@@ -562,8 +567,8 @@ mod tests {
         let d = data();
         let mut e = Edits::default();
         let (a, b) = (e.add_row(&d), e.add_row(&d));
-        e.stage(&d, b, 1, text("second")).unwrap();
-        e.stage(&d, 0, 1, text("x")).unwrap();
+        e.stage(&d, b, 1, text("second"), None).unwrap();
+        e.stage(&d, 0, 1, text("x"), None).unwrap();
         // A new row goes; the rows after it move up. A loaded row is marked, and its changes go.
         assert_eq!(e.delete_rows(&d, &[a, 0, 0]), Ok(true));
         assert_eq!(e.new_rows, vec![BTreeMap::from([(1, text("second"))])]);
@@ -572,14 +577,14 @@ mod tests {
         assert_eq!(e.deleted.iter().copied().collect::<Vec<_>>(), [0]);
         assert_eq!(e.count(), 2);
         assert_eq!(e.delete_rows(&d, &[0]), Ok(false), "already marked");
-        assert!(e.stage(&d, 0, 1, text("y")).is_err(), "a row marked for deletion is not edited");
+        assert!(e.stage(&d, 0, 1, text("y"), None).is_err(), "a row marked for deletion is not edited");
         assert!(e.delete_rows(&d, &[3]).is_err());
         // Several new rows at once, given in any order.
         let mut e = Edits::default();
         for _ in 0..4 {
             e.add_row(&d);
         }
-        e.stage(&d, 4, 1, text("kept")).unwrap();
+        e.stage(&d, 4, 1, text("kept"), None).unwrap();
         assert_eq!(e.delete_rows(&d, &[5, 2, 3]), Ok(true));
         assert_eq!(e.new_rows, vec![BTreeMap::from([(1, text("kept"))])]);
     }
@@ -588,7 +593,7 @@ mod tests {
     fn undo_redo_walk_the_snapshots() {
         let d = data();
         let mut e = Edits::default();
-        e.stage(&d, 0, 1, text("1")).unwrap();
+        e.stage(&d, 0, 1, text("1"), None).unwrap();
         e.add_row(&d);
         e.delete_rows(&d, &[1]).unwrap();
         assert_eq!(e.count(), 3);
@@ -600,7 +605,7 @@ mod tests {
         assert_eq!(e.count(), 3);
         // A change drops what could be redone; a reset can be undone.
         e.undo();
-        e.stage(&d, 1, 2, text("5")).unwrap();
+        e.stage(&d, 1, 2, text("5"), None).unwrap();
         assert!(!e.can_redo());
         assert!(e.reset());
         assert!(e.is_empty() && !e.reset());
@@ -608,7 +613,7 @@ mod tests {
         assert_eq!(e.count(), 3);
         // A change that changes nothing is no undo step.
         let mut e = Edits::default();
-        e.stage(&d, 0, 1, text("a")).unwrap();
+        e.stage(&d, 0, 1, text("a"), None).unwrap();
         assert!(!e.can_undo());
     }
 
@@ -616,10 +621,10 @@ mod tests {
     fn failed_is_kept_until_the_edits_are_gone() {
         let d = data();
         let mut e = Edits::default();
-        e.stage(&d, 0, 1, text("1")).unwrap();
-        e.stage(&d, 1, 1, text("2")).unwrap();
+        e.stage(&d, 0, 1, text("1"), None).unwrap();
+        e.stage(&d, 1, 1, text("2"), None).unwrap();
         e.failed = Some((1, Some(1), "bad".into()));
-        e.stage(&d, 0, 2, text("3")).unwrap();
+        e.stage(&d, 0, 2, text("3"), None).unwrap();
         assert!(e.failed.is_some(), "fixing another cell keeps the mark");
         e.reset();
         assert_eq!(e.failed, None);
@@ -647,7 +652,7 @@ mod tests {
         let mut e = Edits::default();
         e.mark_unknown(d.rows.len());
         assert!(!e.outcome_unknown(), "nothing staged, nothing was being written");
-        e.stage(&d, 0, 1, text("1")).unwrap();
+        e.stage(&d, 0, 1, text("1"), None).unwrap();
         e.mark_unknown(d.rows.len());
         assert!(e.outcome_unknown());
         // The mark goes with a reset; the doubt stays, also for the edits an undo brings back.
@@ -655,7 +660,7 @@ mod tests {
         assert_eq!((e.failed.clone(), e.outcome_unknown()), (None, true));
         e.undo();
         assert!(e.outcome_unknown());
-        e.stage(&d, 1, 1, text("2")).unwrap();
+        e.stage(&d, 1, 1, text("2"), None).unwrap();
         assert!(e.outcome_unknown());
         // An Apply that goes ahead clears it.
         e.apply_started();
@@ -669,7 +674,7 @@ mod tests {
         let d = data();
         let mut e = Edits::default();
         for i in 0..UNDO_STEPS + 10 {
-            e.stage(&d, 0, 1, text(&i.to_string())).unwrap();
+            e.stage(&d, 0, 1, text(&i.to_string()), None).unwrap();
         }
         let mut undos = 0;
         while e.undo() {
@@ -680,7 +685,7 @@ mod tests {
         let mut e = Edits::default();
         let big = "x".repeat(UNDO_BYTES / 4);
         for i in 0..8 {
-            e.stage(&d, 0, 1, text(&format!("{i}{big}"))).unwrap();
+            e.stage(&d, 0, 1, text(&format!("{i}{big}")), None).unwrap();
         }
         let mut undos = 0;
         while e.undo() {
@@ -695,7 +700,7 @@ mod tests {
         // `shown` works on any page, also one with columns of no known type.
         let d = ResultSet { columns: vec![Column::untyped("x")], rows: vec![vec![None]], ..ResultSet::default() };
         let mut e = Edits::default();
-        e.stage(&d, 0, 0, text("1")).unwrap();
+        e.stage(&d, 0, 0, text("1"), None).unwrap();
         assert_eq!(e.shown(&d, 0, 0), Some(Some("1")));
     }
 }

@@ -296,7 +296,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     match state.editing_rect().filter(|(cell, rows)| editors::in_view(*cell, *rows)) {
                         Some((cell, rows)) => editors::show(top.ctx(), editor, cell, rows, tags),
                         // Scrolled out of view, either way: it commits.
-                        None => editors::left_view(editor),
+                        None => editors::left_view(editor, top.ctx().input(|i| i.time)),
                     }
                 }
             }

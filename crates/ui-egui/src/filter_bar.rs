@@ -9,7 +9,9 @@
 //! rows and the raw field without applying. The columns come from the schema; the operators are
 //! the 13 of `dbee_sql::filter::Op`, each read as its words with its symbol in brackets (`equals
 //! (=)`), a word operator by its words alone (`like`, `is null`; [`op_text`]); `is null` and `is
-//! not null` take no value, so choosing one clears the value and hides its field. While changes
+//! not null` take no value, so choosing one clears the value and hides its field. A filter whose
+//! operator takes a value and that has none is left out of the condition: its row is muted, its
+//! field's hint and hover say so, and the tab title does not count it. While changes
 //! are staged typing goes on but Apply waits (its hover says why; Enter asks anyway, and the
 //! command says why); while the connection is lost the bar is disabled.
 //!
@@ -23,7 +25,8 @@
 //!
 //! Automation ids: `filter-<n>-column` (value: the column; while open its choices
 //! `filter-<n>-column-<column>`), `filter-<n>-op` (value: the operator's id; its choices
-//! `filter-<n>-op-<id>`), `filter-<n>-value`, `filter-<n>-remove`, `filter-add`,
+//! `filter-<n>-op-<id>`), `filter-<n>-value`, `filter-<n>-unapplied` (on the value field of a row
+//! left out; value: its hint), `filter-<n>-remove`, `filter-add`,
 //! `filter-raw-toggle` (value: whether the raw field shows), `filter-raw`, `filter-apply`.
 
 use dbee_engine::{Json, TabId};
@@ -58,6 +61,11 @@ const COLUMN_W: (f32, f32) = (80.0, 180.0);
 /// The narrowest the operator choice gets (its labels cut short), in a tab too narrow for its
 /// longest label.
 const OP_MIN_W: f32 = 90.0;
+/// The value field's hint on a row left out of the condition.
+pub const UNAPPLIED_HINT: &str = "No value: left out";
+/// Its hover.
+const UNAPPLIED_HOVER: &str = "This filter has no value, so it is left out of the condition. Type a value, or remove the row.";
+
 /// The narrowest a value field gets.
 const VALUE_MIN_W: f32 = 56.0;
 /// A choice's arrow, the gap before it, and the room left and right of its text.
@@ -239,7 +247,7 @@ fn choice<R>(
     salt: impl std::hash::Hash + std::fmt::Debug,
     width: f32,
     list_h: f32,
-    text: String,
+    text: impl Into<egui::WidgetText>,
     list: impl FnOnce(&mut egui::Ui) -> R,
 ) -> InnerResponse<Option<R>> {
     ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::left_to_right(Align::Center), |ui| {
@@ -292,6 +300,9 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
     for (n, row_filter) in rows.iter().enumerate() {
         row(ui, available, |ui| {
             let row = row_filter;
+            // A filter (not the bar's empty first row) left out of the condition: muted.
+            let unapplied = !bar.filters.is_empty() && !row.restricts();
+            let shown = |text: String| if unapplied { RichText::new(text).color(t.text_muted) } else { RichText::new(text) };
             if n == 0 {
                 toggle(ui, bar, tags, runs);
             } else {
@@ -301,7 +312,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             let mut changed: Option<Filter> = None;
             // The column.
             let mut column = None;
-            let combo = choice(ui, ("dbee-filter-column", bar.tab.0, n), column_w, 360.0, row.column.clone(), |ui| {
+            let combo = choice(ui, ("dbee-filter-column", bar.tab.0, n), column_w, 360.0, shown(row.column.clone()), |ui| {
                 for (name, ty) in &bar.columns {
                     let r = item(ui, *name == row.column, name).on_hover_text(*ty);
                     tags.tag_value_as(&format!("filter-{n}-column-{name}"), &r, *ty, true);
@@ -316,7 +327,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             }
             // The operator.
             let mut op = None;
-            let combo = choice(ui, ("dbee-filter-op", bar.tab.0, n), op_w, 400.0, op_text(row.op), |ui| {
+            let combo = choice(ui, ("dbee-filter-op", bar.tab.0, n), op_w, 400.0, shown(op_text(row.op)), |ui| {
                 for o in Op::ALL {
                     let r = item(ui, o == row.op, &op_text(o));
                     tags.tag_value_as(&format!("filter-{n}-op-{}", o.id()), &r, o.label(), true);
@@ -336,14 +347,18 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             if row.op.takes_value() {
                 let mut text = row.value.clone();
                 let hint = match row.op {
+                    _ if unapplied => UNAPPLIED_HINT,
                     Op::In => "Values, separated by commas",
                     Op::Like | Op::NotLike | Op::ILike | Op::NotILike => "A pattern: % for any text, _ for one character",
                     _ => "Value",
                 };
                 let r =
                     ui.add(field(TextEdit::singleline(&mut text).id(egui::Id::new(("dbee-filter-value", bar.tab.0, n))).hint_text(hint), value_w));
-                let r = r.on_hover_text(enter_hover(bar));
+                let r = if unapplied { r.on_hover_text(UNAPPLIED_HOVER) } else { r.on_hover_text(enter_hover(bar)) };
                 tags.tag_value(&format!("filter-{n}-value"), &r, text.as_str());
+                if unapplied {
+                    tags.tag_value(&format!("filter-{n}-unapplied"), &r, UNAPPLIED_HINT);
+                }
                 if r.changed() {
                     changed = Some(Filter { value: text, ..changed.clone().unwrap_or_else(|| row.clone()) });
                 }

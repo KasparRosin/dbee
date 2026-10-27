@@ -11,4 +11,4 @@ pub mod schema;
 
 pub use cell::{Cell, Column, ResultSet};
 pub use copy::CopyFormat;
-pub use schema::{Catalog, ColumnInfo, ForeignKey, RelKind, SchemaInfo, TableInfo, TableRef};
+pub use schema::{Catalog, ColumnInfo, ForeignKey, Generated, RelKind, SchemaInfo, TableInfo, TableRef};

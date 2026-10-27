@@ -320,22 +320,24 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
     let row = p::usize(params, "row")?;
     let (tab, data) = target(s)?;
     let col = column(params, &data)?;
+    let catalog = catalog(s)?;
+    let table = match s.state.tab(tab) {
+        Some(Tab::Table(t)) => t.table.clone(),
+        _ => return Err(disabled(NO_TABLE_TAB)),
+    };
+    let name = data.columns.get(col).map(|c| c.name.as_str()).unwrap_or_default();
+    // The cell's column in the catalog: what clearing stages, and whether Postgres computes it.
+    let info = lookup(&catalog, &table).ok().and_then(|t| t.column(name));
     let value = match what {
         Staging::Value => value(params)?,
         Staging::Null => NewValue::Null,
         Staging::Clear => {
-            let catalog = catalog(s)?;
-            let table = match s.state.tab(tab) {
-                Some(Tab::Table(t)) => t.table.clone(),
-                _ => return Err(disabled(NO_TABLE_TAB)),
-            };
-            let name = data.columns.get(col).map(|c| c.name.as_str()).unwrap_or_default();
-            let info = lookup(&catalog, &table)?.column(name).ok_or_else(|| bad("the column is no longer in the schema (refresh it)"))?;
+            let info = info.ok_or_else(|| bad("the column is no longer in the schema (refresh it)"))?;
             if info.clears_to_null() { NewValue::Null } else { NewValue::Text(String::new()) }
         }
     };
     let e = edits_mut(s, tab)?;
-    e.stage(&data, row, col, value).map_err(bad)?;
+    e.stage(&data, row, col, value, info).map_err(bad)?;
     let staged = e.shown(&data, row, col).is_some();
     Ok(Outcome::Done(json!({ "tab": tab, "row": row, "column": col, "staged": staged, "count": e.count() })))
 }
@@ -490,7 +492,14 @@ fn applied(
             };
             Ok(match shown {
                 Ok(r) => with_written(r, n),
-                Err(e) => json!({ "tab": tab, "written": n, "reloadError": e.to_string() }),
+                Err(e) => {
+                    // The changes are in the database, but the rows shown are from before them:
+                    // the tab's error (its card) says both.
+                    if let Some(t) = table_tab_mut(s, tab) {
+                        t.error = Some(written_not_shown(n, &e));
+                    }
+                    json!({ "tab": tab, "written": n, "reloadError": e.to_string() })
+                }
             })
         }
         Err(ApplyError { index, error }) => {
@@ -521,6 +530,12 @@ fn applied(
     }
 }
 
+/// The tab's error when the Apply wrote `n` rows and the page then did not load again with `e`.
+fn written_not_shown(n: u64, e: &EngineError) -> String {
+    let rows = if n == 1 { "1 row".to_owned() } else { format!("{n} rows") };
+    format!("The changes were written ({rows}), but the page did not load again: {e}")
+}
+
 /// `r` with `written: n` when it is an object (the page result always is).
 fn with_written(mut r: Json, n: u64) -> Json {
     if let Json::Object(map) = &mut r {
@@ -532,6 +547,13 @@ fn with_written(mut r: Json, n: u64) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_but_not_shown_says_both() {
+        let e = EngineError::Db { code: "server", message: "division by zero (SQLSTATE 22012)".into(), data: json!({}) };
+        assert_eq!(written_not_shown(1, &e), "The changes were written (1 row), but the page did not load again: division by zero (SQLSTATE 22012)");
+        assert!(written_not_shown(3, &e).starts_with("The changes were written (3 rows)"));
+    }
 
     #[test]
     fn written_goes_into_objects_only() {

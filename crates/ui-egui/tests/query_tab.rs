@@ -763,3 +763,26 @@ fn wide_result_frames() {
         }
     }
 }
+
+#[test]
+fn a_failed_transaction_says_a_rollback_ends_it() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    let run = |ui: &mut Ui, sql: &str| {
+        ui.ctrl("A");
+        ui.text(sql);
+        ui.ctrl("Enter");
+        ui.ran();
+    };
+    run(&mut ui, "BEGIN; SELECT 1 / 0;");
+    let card = ui.value("query-error");
+    assert!(card["message"].as_str().is_some_and(|m| m.contains("SQLSTATE 22012")) && card["note"].is_null(), "{card}");
+    // The transaction stays open and failed: the next run says how to end it.
+    run(&mut ui, "SELECT 1");
+    let card = ui.value("query-error");
+    assert!(card["message"].as_str().is_some_and(|m| m.contains("SQLSTATE 25P02")), "{card}");
+    assert_eq!(card["note"], dbee_ui_egui::query_tab::ROLLBACK_NOTE);
+    run(&mut ui, "ROLLBACK");
+    run(&mut ui, "SELECT 1");
+    assert!(ui.tag("query-error").is_none(), "after the ROLLBACK statements run again");
+}

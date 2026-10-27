@@ -354,11 +354,13 @@ fn failed(s: &mut Session, conn: Option<&Arc<PgConnection>>, f: &Failure) -> Eng
 /// What the tab shows of `f`, which the run failed with as `e`: a server error's own message,
 /// detail and hint, else the engine error's text.
 fn query_error(e: &EngineError, f: &Failure) -> QueryError {
-    let (message, detail, hint) = match &f.error {
-        PgError::Server { code, message, detail, hint, .. } => (format!("{message} (SQLSTATE {code})"), detail.clone(), hint.clone()),
-        _ => (e.to_string(), None, None),
+    let (message, sqlstate, detail, hint) = match &f.error {
+        PgError::Server { code, message, detail, hint, .. } => {
+            (format!("{message} (SQLSTATE {code})"), Some(code.clone()), detail.clone(), hint.clone())
+        }
+        _ => (e.to_string(), None, None, None),
     };
-    QueryError { code: e.code(), message, detail, hint, position: f.position, statement: f.statement }
+    QueryError { code: e.code(), message, sqlstate, detail, hint, position: f.position, statement: f.statement }
 }
 
 fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<PgConnection>, ran: Ran) -> Result<Json, EngineError> {

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use dbee_core::cell::{Cell, ResultSet};
-use dbee_core::schema::{Catalog, ColumnInfo, ForeignKey, RelKind, SchemaInfo, TableInfo, TableRef};
+use dbee_core::schema::{Catalog, ColumnInfo, ForeignKey, Generated, RelKind, SchemaInfo, TableInfo, TableRef};
 
 use crate::connect::PgConnection;
 use crate::error::PgError;
@@ -44,7 +44,7 @@ WITH RECURSIVE d(root, cur) AS (
 )
 SELECT c.oid::text, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.atttypid::text,
        bt.typname, bt.typcategory::text, a.attnotnull::text,
-       (a.atthasdef OR a.attidentity IN ('a', 'd'))::text
+       (a.atthasdef OR a.attidentity IN ('a', 'd'))::text, (a.attgenerated <> '')::text, (a.attidentity = 'a')::text
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
@@ -173,6 +173,11 @@ pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, PgError> {
             category,
             not_null: boolean(row, 6, "attnotnull")?,
             has_default: boolean(row, 7, "has default")?,
+            generated: match (boolean(row, 8, "attgenerated")?, boolean(row, 9, "attidentity")?) {
+                (true, _) => Generated::Expression,
+                (false, true) => Generated::Identity,
+                (false, false) => Generated::No,
+            },
         });
     }
 

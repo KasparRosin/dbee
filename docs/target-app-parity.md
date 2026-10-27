@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (Performance holds every measurement the other docs quote) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (Effort: 59 commits for M1, then five for the final review's fixes; gaps.md entries renumbered) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -82,7 +82,7 @@ All measured on 2026-10-26 on Linux x86_64, AMD Ryzen 7 PRO 5850U (16 threads), 
 | Keystroke in a cell editor holding 32 KiB on one line | 33 ms | 18.8–24.9 ms single-line, 26.1–29.5 ms multi-line | 30.60 / 25.29 / 18.23, and 4.16 / 11.71 / 14.89 | `keystroke_frame_with_a_value_at_the_cap` |
 | Keystroke in a 32 KiB script, the editor alone and the whole window | 33 ms | 1.9–2.6 ms and 2.0–5.5 ms | as above | `keystroke_frames_in_big_scripts` |
 | Keystroke in a 1 MiB script of short lines, the whole window | — | 28.7–46.4 ms | as above | as above |
-| Keystroke in 1 MiB on one line, the editor alone | — | 582–673 ms (slowest 2.0 s; 0.6–1.6 s in M1.26's runs; [gaps.md](gaps.md) 13) | as above | as above |
+| Keystroke in 1 MiB on one line, the editor alone | — | 582–673 ms (slowest 2.0 s; 0.6–1.6 s in M1.26's runs; [gaps.md](gaps.md) 12) | as above | as above |
 | Keystroke in 256 KiB and in 32 KiB on one line, the editor alone | — | 143–144 ms and 18.3–32.6 ms | as above | as above |
 | Value panel, 20 MB values: first frame showing them | 250 ms | 9–173 ms | 5.67 / 16.70 / 16.03 | `value_panel_frames_within_budget` |
 | Value panel, 20 MB values: frames unchanged and scrolling | 16 ms | 0.08–0.12 ms unchanged, 0.09–0.94 ms scrolling | as above | as above |
@@ -108,7 +108,7 @@ Pre-alpha. M1 is built: five of the six alpha gate rows pass ([roadmap.md](roadm
 
 ## Effort and calibration
 
-M1 ran from 2026-10-19 to 2026-10-26 (measured, git): 28 planned tasks in 57 commits on branch `m1`: 54 for M1.1–M1.27 (each task reviewed, with fix rounds), one toolchain pin and two for M1.28. Agent hours were not logged, so per-area hours are not estimated yet. The first milestone that logs them gives the calibration.
+M1 ran from 2026-10-19 to 2026-10-27 (measured, git): 28 planned tasks in 59 commits on branch `m1`: 54 for M1.1–M1.27 (each task reviewed, with fix rounds), one toolchain pin and four for M1.28. The final review's fixes followed in five more. Agent hours were not logged, so per-area hours are not estimated yet. The first milestone that logs them gives the calibration.
 
 ## What works today
 
@@ -128,6 +128,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Effort counts 59 commits for M1 (four for M1.28) and the final review's five fix commits; gaps.md 13 is now 12. |
 | 2026-10-27 | minor | Performance is the one source for the timings gaps.md and roadmap.md quote: wide results scrolling and in kittest, keystrokes in 256 KiB and 32 KiB on one line, M1.26's 1 MiB figure added; a fifth wide-result run. |
 | 2026-10-26 | major | M1 built: first assessment. Feature areas graded against the observed catalog; dimension scores; ~25 % overall (estimated); performance measured with machine and load; readiness by audience. |
 | 2026-10-15 | major | Template (scaffold). |

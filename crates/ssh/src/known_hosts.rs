@@ -30,13 +30,13 @@ pub(crate) enum Verdict {
     /// Not recorded, the user accepted its fingerprint, and it is now recorded.
     Learned,
     /// Not recorded and accepted for this connection only: there is no `.ssh` directory, or
-    /// writing `known_hosts` failed.
-    Trusted,
+    /// writing `known_hosts` failed (`unsaved` says why, for the user).
+    Trusted { unsaved: Option<String> },
     /// Not recorded and not (or not this key) accepted.
     Unknown { key_type: String, fingerprint: String },
     /// Another key of the same type is recorded at this 1-based line of the file.
     Changed { line: usize },
-    /// `known_hosts` could not be read, or a line for this host is malformed.
+    /// `known_hosts` exists but could not be read, or a line for this host is malformed.
     Failed(String),
     /// The server offered something this client does not check (a host certificate).
     Unsupported(String),
@@ -44,13 +44,21 @@ pub(crate) enum Verdict {
 
 impl Verdict {
     pub(crate) fn accepts(&self) -> bool {
-        matches!(self, Verdict::Known | Verdict::Learned | Verdict::Trusted)
+        matches!(self, Verdict::Known | Verdict::Learned | Verdict::Trusted { .. })
     }
 }
 
 /// Check `key` for `host:port` against `file`; with `trust` equal to the key's fingerprint an
 /// unknown key is learned. A changed key is refused whatever `trust` says.
 pub(crate) fn check(host: &str, port: u16, key: &PublicKey, file: Option<&Path>, trust: Option<&str>) -> Verdict {
+    // russh reads a file it cannot open as an empty one, which would let a changed key pass as an
+    // unknown one: a file that exists but cannot be read is a failure.
+    if let Some(f) = file
+        && let Err(e) = std::fs::File::open(f)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Verdict::Failed(format!("{} cannot be read ({e})", f.display()));
+    }
     let recorded = match file {
         Some(f) => check_known_hosts_path(host, port, key, f),
         None => Ok(false),
@@ -62,12 +70,18 @@ pub(crate) fn check(host: &str, port: u16, key: &PublicKey, file: Option<&Path>,
             if trust != Some(fingerprint.as_str()) {
                 return Verdict::Unknown { key_type: key_type(key), fingerprint };
             }
-            let Some(f) = file else { return Verdict::Trusted };
+            let Some(f) = file else { return Verdict::Trusted { unsaved: None } };
             match learn_known_hosts_path(host, port, key, f) {
                 Ok(()) => Verdict::Learned,
                 Err(e) => {
-                    log::warn!("ssh: could not save the host key of {} to known_hosts: {e}", host_port(host, port));
-                    Verdict::Trusted
+                    log::warn!("ssh: could not save the host key of {} to known_hosts", host_port(host, port));
+                    let entry = host_port(host, port);
+                    Verdict::Trusted {
+                        unsaved: Some(format!(
+                            "The host key of {entry} is trusted for this connection only: saving it to {} failed ({e}).",
+                            f.display()
+                        )),
+                    }
                 }
             }
         }
@@ -156,7 +170,7 @@ mod tests {
         assert!(!file.exists());
         // No ssh_dir at all: unknown; trusting it works for this session but nothing is written.
         assert_eq!(check("h", 2222, &k1, None, None), unknown);
-        assert_eq!(check("h", 2222, &k1, None, Some(K1_FP)), Verdict::Trusted);
+        assert_eq!(check("h", 2222, &k1, None, Some(K1_FP)), Verdict::Trusted { unsaved: None });
 
         // The accepted fingerprint is learned, then known.
         assert_eq!(check("h", 2222, &k1, Some(&file), Some(K1_FP)), Verdict::Learned);
@@ -182,6 +196,35 @@ mod tests {
         // A broken line for this host is a known_hosts problem.
         std::fs::write(&file, "[h]:2222 ssh-ed25519 !!!\n").unwrap();
         assert!(matches!(check("h", 2222, &k1, Some(&file), None), Verdict::Failed(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_fails_and_a_failed_save_says_why() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_home(None, None);
+        let file = home.ssh_dir().join("known_hosts");
+        let k1 = parse_public_key_base64(K1).unwrap();
+        // It records another key for the host: read as empty, that change would pass as unknown.
+        std::fs::write(&file, format!("[h]:2222 ssh-ed25519 {K2}\n")).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            return; // root reads anything
+        }
+        for trust in [None, Some(K1_FP)] {
+            let v = check("h", 2222, &k1, Some(&file), trust);
+            assert!(matches!(&v, Verdict::Failed(m) if m.contains("known_hosts cannot be read")), "{v:?}");
+        }
+        // Readable but not writable: trusted for this connection, and the verdict says why it was
+        // not saved.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let v = check("h", 22, &k1, Some(&file), Some(K1_FP));
+        let Verdict::Trusted { unsaved: Some(why) } = &v else { panic!("{v:?}") };
+        assert!(
+            why.starts_with("The host key of h is trusted for this connection only: saving it to ") && why.contains("known_hosts failed"),
+            "{why}"
+        );
+        assert!(v.accepts());
     }
 
     #[test]

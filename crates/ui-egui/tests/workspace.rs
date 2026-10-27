@@ -475,14 +475,14 @@ fn the_tabs_sit_on_their_own_band() {
     ui.harness.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 600.0)));
     ui.frame();
     assert_band(&ui, tabs[0], "three tabs, the first one active");
-    // More tabs than fit: the strip scrolls sideways. A tab out of view scrolls into view on a
-    // click and becomes the active one, and so does the first one again.
+    // More tabs than fit: the strip scrolls sideways, to the tab just opened. A tab out of view
+    // scrolls into view on a click and becomes the active one, and so does the first one again.
     for n in 1..=14 {
         ui.execute("table.open", json!({ "schema": "many", "table": format!("t_{n:03}") }));
     }
-    ui.frame();
     let last = ui.active();
-    assert!(!visible(&ui.tag(&format!("tab-{last}"))), "the last tab is out of view");
+    ui.until("the new tab in view", |ui| visible(&ui.tag(&format!("tab-{last}"))));
+    assert!(!visible(&ui.tag(&format!("tab-{}", tabs[0]))), "the first tab is out of view");
     ui.click(&format!("tab-{}", tabs[1]));
     ui.click(&format!("tab-{last}"));
     assert_eq!(ui.active(), last);
@@ -609,6 +609,7 @@ fn synthetic(n: usize) -> Arc<Catalog> {
         category: 'N',
         not_null: i == 0,
         has_default: false,
+        generated: Default::default(),
     };
     let table = |schema: &str, name: String| TableInfo {
         table: TableRef { schema: schema.into(), name },
@@ -680,4 +681,22 @@ fn tree_filter_1000_tables_within_a_frame() {
     );
     assert!(median(&typing) < Duration::from_millis(16), "{:?}", median(&typing));
     assert!(median(&steady) < Duration::from_millis(16), "{:?}", median(&steady));
+}
+
+#[test]
+fn a_new_tab_is_scrolled_into_view_when_the_strip_overflows() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    // More tabs than the 1200-point window has room for.
+    for _ in 0..14 {
+        ui.execute("table.open", json!({ "schema": "shop", "table": "customer_counts" }));
+    }
+    let tabs: Vec<u64> = ui.document()["tabs"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
+    let (first, last) = (tabs[0], tabs[tabs.len() - 1]);
+    assert_eq!(ui.active(), last);
+    ui.until("the new tab in view", |ui| visible(&ui.tag(&format!("tab-{last}"))));
+    assert!(!visible(&ui.tag(&format!("tab-{first}"))), "the strip is wider than the window, and scrolled");
+    // A tab made active elsewhere comes into view too.
+    ui.execute("tab.activate", json!({ "tab": first }));
+    ui.until("the first tab in view", |ui| visible(&ui.tag(&format!("tab-{first}"))));
 }

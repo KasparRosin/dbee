@@ -13,6 +13,7 @@ fn ci(name: &str, type_sql: &str, category: char) -> ColumnInfo {
         category,
         not_null: false,
         has_default: false,
+        generated: Default::default(),
     }
 }
 
@@ -86,6 +87,7 @@ fn hostile_value_stays_a_value() {
 }
 #[test]
 fn blank_value_rows_are_skipped() {
+    assert!(!f("id", Op::Eq, "").restricts() && f("id", Op::Eq, "0").restricts() && f("id", Op::IsNull, "").restricts());
     assert_eq!(where_sql(&Condition::Filters(vec![f("id", Op::Eq, "")]), &orders()).unwrap(), None);
     assert_eq!(where_sql(&Condition::None, &orders()).unwrap(), None);
     assert_eq!(w(f("shipped_at", Op::IsNull, "")), "\"shipped_at\" IS NULL");

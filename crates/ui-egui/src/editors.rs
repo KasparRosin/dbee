@@ -267,6 +267,8 @@ pub struct CellEditor {
     rect: Option<Rect>,
     /// Not drawn yet: it takes the keyboard and selects its text when first drawn.
     fresh: bool,
+    /// When (egui's clock) a fresh editor first found its cell out of view.
+    unseen_since: Option<f64>,
     /// What to do once it has drawn this frame.
     pending: Option<EditorKey>,
 }
@@ -303,8 +305,14 @@ impl CellEditor {
             revision,
             rect: None,
             fresh: true,
+            unseen_since: None,
             pending: None,
         }
+    }
+
+    /// The cell it edits, for `ui.inspect`: `{row, column}`.
+    pub(crate) fn tag_cell(&self) -> Json {
+        json!({ "row": self.row, "column": self.col })
     }
 
     /// The command that commits it, or `None` when nothing changed (see the module docs).
@@ -373,6 +381,9 @@ pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>
         return Err(format!("This value is too large to edit inline ({}; at most {}).", size_text(v.len()), size_text(MAX_INLINE_BYTES)));
     }
     let info = s.state().connected.as_ref().and_then(|c| c.catalog.table(&t.table)).and_then(|i| i.column(data.column_name(col)));
+    if let Some(why) = info.and_then(|i| i.not_editable()) {
+        return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why: why.into() }));
+    }
     Ok(Some(CellEditor::new(t.id, (row, col), Kind::of(info), value, data, t.edits.revision())))
 }
 
@@ -656,12 +667,22 @@ pub fn in_view(cell: Rect, view: Rect) -> bool {
     both.width() > 0.0 && both.height() > 0.0
 }
 
+/// How long (egui's clock, in seconds) a fresh editor waits for its cell to scroll into view.
+pub const FRESH_WAIT: f64 = 1.0;
+
 /// Its cell left the rows and columns in view: it is not drawn, and commits once this frame is
-/// drawn, as a click elsewhere would. One not drawn yet waits for its cell to scroll in.
-pub(crate) fn left_view(ed: &mut CellEditor) {
+/// drawn, as a click elsewhere would. One not drawn yet waits for its cell to scroll in, up to
+/// [`FRESH_WAIT`]: past that (a grid with no room for a row, say) it closes unchanged, so an
+/// editor nobody sees does not go on taking Enter and Escape. `now` is egui's clock.
+pub(crate) fn left_view(ed: &mut CellEditor, now: f64) {
     ed.rect = None;
-    if !ed.fresh && ed.pending.is_none() {
+    if ed.pending.is_some() {
+        return;
+    }
+    if !ed.fresh {
         ed.pending = Some(EditorKey::Commit);
+    } else if now - *ed.unseen_since.get_or_insert(now) > FRESH_WAIT {
+        ed.pending = Some(EditorKey::Cancel);
     }
 }
 
@@ -907,6 +928,7 @@ mod tests {
             category: 'B',
             not_null: false,
             has_default: false,
+            generated: Default::default(),
         };
         assert_eq!(Kind::of(Some(&c)), Kind::Bool);
         (c.base_type, c.category) = ("jsonb".into(), 'U');

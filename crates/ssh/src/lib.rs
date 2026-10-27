@@ -220,6 +220,8 @@ fn address(host: &str, port: u16) -> String {
 pub struct Tunnel {
     handle: Handle<Client>,
     used: String,
+    /// Why the host key the user trusted was not saved to `known_hosts`, for a notice.
+    unsaved: Option<String>,
 }
 
 impl std::fmt::Debug for Tunnel {
@@ -267,8 +269,12 @@ impl Tunnel {
                 });
             }
         };
+        let unsaved = match verdict.lock().ok().and_then(|mut slot| slot.take()) {
+            Some(Verdict::Trusted { unsaved }) => unsaved,
+            _ => None,
+        };
         match login(&mut handle, cfg, env, secrets, &addr).await {
-            Ok(used) => Ok(Tunnel { handle, used }),
+            Ok(used) => Ok(Tunnel { handle, used, unsaved }),
             Err(e) => {
                 let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
                 Err(e)
@@ -293,6 +299,12 @@ impl Tunnel {
     /// What logged in: `agent`, `key <path>` or `password`.
     pub fn used(&self) -> &str {
         &self.used
+    }
+
+    /// Why the host key the user trusted for this connection could not be saved to
+    /// `known_hosts`, when saving it failed: the next connection asks again.
+    pub fn unsaved_host_key(&self) -> Option<&str> {
+        self.unsaved.as_deref()
     }
 
     /// The SSH connection has ended (closed, dropped by the server, or keepalives unanswered).

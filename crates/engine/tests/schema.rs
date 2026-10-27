@@ -24,6 +24,7 @@ fn table(schema: &str, name: &str, kind: RelKind) -> TableInfo {
             category: 'N',
             not_null: true,
             has_default: false,
+            generated: Default::default(),
         }],
         primary_key: vec![],
         unique_keys: vec![],

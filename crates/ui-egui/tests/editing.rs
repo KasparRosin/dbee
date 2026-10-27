@@ -363,6 +363,22 @@ fn cells_that_cannot_be_edited_say_why() {
 }
 
 #[test]
+fn a_generated_column_opens_no_editor_and_says_why() {
+    let db = dbee_testkit::require_testdb!();
+    let t = Scratch::new(db, "t_generated_ui", |t| {
+        format!(
+            "CREATE TABLE scratch.{t} (id int PRIMARY KEY, a int, twice int GENERATED ALWAYS AS (a * 2) STORED); INSERT INTO scratch.{t} VALUES (1, 2);"
+        )
+    });
+    let mut ui = opened_rows(db, &t, 1);
+    ui.double_click("grid-cell-0-2");
+    assert!(ui.editor().is_none(), "no editor on a generated column");
+    assert_eq!(ui.notice(), "Generated columns are read-only.");
+    ui.double_click("grid-cell-0-1");
+    assert_eq!(ui.editor_text(), "2", "the column it is computed from edits");
+}
+
+#[test]
 fn a_value_too_large_to_edit_inline_says_so() {
     let db = dbee_testkit::require_testdb!();
     // Made before the session connects, so its catalog has it.
@@ -410,6 +426,27 @@ fn null_opens_empty_and_enter_alone_sends_nothing() {
     // The same with an unchanged value.
     ui.double_click("grid-cell-0-0");
     ui.key("Enter");
+    assert_eq!(ui.edits()["count"], 0);
+    ui.no_notice();
+}
+
+#[test]
+fn an_editor_whose_cell_never_comes_into_view_closes() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    // A window so low that the grid has no room for a row.
+    let mut ui = connected_sized(db, 0.25, egui::vec2(1400.0, 150.0));
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.execute("selection.set", json!({ "anchor": [2, 1], "focus": [2, 1] }));
+    ui.key("Enter");
+    assert_eq!(ui.inspect()["editor"], json!({ "row": 2, "column": 1 }), "Enter opened an editor");
+    assert!(ui.editor().is_none(), "which is not drawn");
+    // A second of egui's clock (frames 0.25 s apart), and it is gone, unchanged.
+    for _ in 0..6 {
+        ui.frame();
+    }
+    assert_eq!(ui.inspect()["editor"], Json::Null);
     assert_eq!(ui.edits()["count"], 0);
     ui.no_notice();
 }

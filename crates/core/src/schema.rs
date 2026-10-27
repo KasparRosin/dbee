@@ -28,6 +28,20 @@ pub enum RelKind {
     ForeignTable,
 }
 
+/// Whether Postgres computes a column's value, so that it takes no written value (an `UPDATE` or
+/// `INSERT` of one fails with SQLSTATE 428C9).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Generated {
+    /// An ordinary column; an identity `BY DEFAULT` or a default can be written over.
+    #[default]
+    No,
+    /// A generated column, `GENERATED ALWAYS AS (…)` (stored, or virtual on Postgres 18).
+    Expression,
+    /// An identity column `GENERATED ALWAYS`.
+    Identity,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
@@ -42,6 +56,9 @@ pub struct ColumnInfo {
     pub category: char,
     pub not_null: bool,
     pub has_default: bool,
+    /// Postgres computes the value (`attgenerated`, `attidentity = 'a'`).
+    #[serde(default)]
+    pub generated: Generated,
 }
 
 impl ColumnInfo {
@@ -64,6 +81,16 @@ impl ColumnInfo {
             "_varchar" | "_bpchar" => "text[]",
             "_bit" | "_varbit" => "bit varying[]",
             _ => &self.type_sql,
+        }
+    }
+
+    /// Why the column's cells cannot be edited, or `None` when they can: Postgres computes the
+    /// value of a generated column and of an identity column `GENERATED ALWAYS`.
+    pub fn not_editable(&self) -> Option<&'static str> {
+        match self.generated {
+            Generated::No => None,
+            Generated::Expression => Some("generated columns are read-only"),
+            Generated::Identity => Some("identity columns GENERATED ALWAYS are read-only"),
         }
     }
 
@@ -179,7 +206,16 @@ mod tests {
     use std::time::Instant;
 
     fn col(name: &str, not_null: bool) -> ColumnInfo {
-        ColumnInfo { name: name.into(), type_sql: "text".into(), type_oid: 25, base_type: "text".into(), category: 'S', not_null, has_default: false }
+        ColumnInfo {
+            name: name.into(),
+            type_sql: "text".into(),
+            type_oid: 25,
+            base_type: "text".into(),
+            category: 'S',
+            not_null,
+            has_default: false,
+            generated: Generated::No,
+        }
     }
     fn table(schema: &str, name: &str) -> TableInfo {
         TableInfo {
@@ -265,6 +301,21 @@ mod tests {
         assert_eq!(c.table_count(), 3);
         assert!(c.table(&TableRef { schema: "shop".into(), name: "items".into() }).is_some());
         assert!(c.table(&TableRef { schema: "shop".into(), name: "nope".into() }).is_none());
+    }
+
+    #[test]
+    fn computed_columns_say_why_they_cannot_be_edited() {
+        let mut c = col("x", false);
+        assert_eq!(c.not_editable(), None);
+        c.generated = Generated::Expression;
+        assert_eq!(c.not_editable(), Some("generated columns are read-only"));
+        c.generated = Generated::Identity;
+        assert_eq!(c.not_editable(), Some("identity columns GENERATED ALWAYS are read-only"));
+        // Catalogs saved before the field existed read as ordinary columns.
+        let mut j = serde_json::to_value(col("x", false)).unwrap();
+        j.as_object_mut().unwrap().remove("generated");
+        assert_eq!(serde_json::from_value::<ColumnInfo>(j).unwrap().generated, Generated::No);
+        assert_eq!(serde_json::to_value(Generated::Identity).unwrap(), "identity");
     }
 
     #[test]

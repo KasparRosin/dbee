@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (connection lists and the paging bar regraded partial) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (gaps.md entries renumbered: generated columns are no longer offered for editing) · **Target:** Beekeeper Studio 5.5.7
 
 Graded by behaviour against what was observed in Beekeeper Studio (`plan/beekeeper/01-observed-ui.md`, `02-ui-ux.md`), not by whether a control exists. Status: **done** (does what the observed element does, for Postgres), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `crates/ui-egui/tests/`).
 
@@ -17,7 +17,7 @@ Graded by behaviour against what was observed in Beekeeper Studio (`plan/beekeep
 | Filter bar | Column, operator, value; + adds; raw SQL toggle; 2 filters free | The same, 13 operators, any number of filters, raw `WHERE` toggle, Apply or Enter | done |
 | Data grid | Type labels, key icons, sort, NULL and empty told apart, line-break glyph, tooltips, column resize modes, hide and reset columns, column filter | Type labels, primary and foreign key icons, sort by header, NULL and empty told apart, line-break glyph, a selection rectangle, column resize, the foreign key link | partial: no hidden columns, column filter or cell tooltips; slow past about 100 columns ([gaps.md](gaps.md) 5) |
 | Paging bar | Page box, row count on demand, refresh, + row, Reset, Apply with a count | First, previous, page, next, last; the estimate then the exact count; refresh; + Row; the changes, Reset, Apply; gives room up in order when narrow | partial: no page box to type a page into |
-| Inline editing | Editor in the cell, staged colours, Apply and Reset, add, clone, delete rows, set NULL | One-line, multi-line (text, json, jsonb, xml) and true/false/NULL editors; Enter, Tab, Escape; staged, new, deleted and failed colours; add and delete rows; set NULL; Ctrl+S | partial: no clone row, no copy of changes as SQL; 32 KiB per cell ([gaps.md](gaps.md) 11) |
+| Inline editing | Editor in the cell, staged colours, Apply and Reset, add, clone, delete rows, set NULL | One-line, multi-line (text, json, jsonb, xml) and true/false/NULL editors; Enter, Tab, Escape; staged, new, deleted and failed colours; add and delete rows; set NULL; Ctrl+S | partial: no clone row, no copy of changes as SQL; 32 KiB per cell ([gaps.md](gaps.md) 10) |
 | Grid right-click menu | Set NULL, copy as TSV, JSON, Markdown, SQL, IN list, column name, quick filter, clone, delete | Set NULL, copy (values, with header, CSV, JSON, Markdown), delete row | partial |
 | Value side panel | JSON row viewer (paid) | The selected cell's whole value, JSON pretty-printed and coloured, select and copy; up to 10 MiB shown | partial: the cell, not the row; read-only |
 | Edit in a modal | Text, JSON, HTML; Minify & Apply | None | not started |
@@ -33,12 +33,13 @@ By count: 3 of 22 elements done and 15 partial, which at half weight is 48 % (es
 
 ## Work
 
-From [gaps.md](gaps.md): wide results first (5), then the editing limits (8, 10, 11). Not estimated as a whole yet.
+From [gaps.md](gaps.md): wide results first (5), then the editing limits (9, 10). Not estimated as a whole yet.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | gaps.md references renumbered (the generated-columns entry is fixed and gone): the editing limits are 9 and 10. |
 | 2026-10-27 | minor | Connection lists (no Copy URL) and the paging bar (no page box) regraded partial: 3 done, 15 partial, 48 % by count; ~45 % stands. |
 | 2026-10-26 | major | M1 built: 22 elements graded against the observed app; ~45 % (estimated). |
 | 2026-10-15 | major | Template (scaffold). |

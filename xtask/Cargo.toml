@@ -10,4 +10,4 @@ description = "dbee workspace tooling: cargo xtask ci | assets | layers | licens
 workspace = true
 
 [dependencies]
-serde_json = { workspace = true, features = ["preserve_order"] }
+serde_json = { workspace = true }

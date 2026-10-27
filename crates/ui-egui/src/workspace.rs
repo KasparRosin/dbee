@@ -74,6 +74,9 @@ pub(crate) struct Workspace {
     /// The query tab whose editor was given the keyboard when it became the active one; `None`
     /// while no query tab is active.
     pub focused_query: Option<TabId>,
+    /// The tab the strip last showed as the active one: another one (a tab just opened, say) is
+    /// scrolled into view when the strip is wider than the window.
+    strip_active: Option<TabId>,
     /// The connection this state belongs to; another one starts afresh.
     connection: Option<String>,
 }
@@ -102,11 +105,12 @@ struct TabView {
 }
 
 /// The number of applied filters, as the tab title's marker counts them: each filter row of an
-/// applied condition, or 1 for an applied raw condition.
+/// applied condition that is part of it (a row with an empty value is left out:
+/// `Filter::restricts`), or 1 for an applied raw condition.
 pub fn applied_filters(applied: &Condition) -> usize {
     match applied {
         Condition::None => 0,
-        Condition::Filters(f) => f.len(),
+        Condition::Filters(f) => f.iter().filter(|f| f.restricts()).count(),
         Condition::Raw(r) if r.trim().is_empty() => 0,
         Condition::Raw(_) => 1,
     }
@@ -347,6 +351,9 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             busy: busy(tab),
         })
         .collect();
+    // A newly active tab (one just opened, or chosen elsewhere) is scrolled into view.
+    let reveal = app.view.work.strip_active != st.active;
+    app.view.work.strip_active = st.active;
     let tags = &mut app.tags;
     let (strip, _) = ui.allocate_exact_size(vec2(ui.available_width(), STRIP_H), Sense::hover());
     ui.painter().rect_filled(strip, CornerRadius::ZERO, t.tab_band);
@@ -359,6 +366,9 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             ui.add_space(4.0);
             for tab in &tabs {
                 if let Some(rect) = draw_tab(ui, tab, tags, acts) {
+                    if reveal {
+                        ui.scroll_to_rect(rect, None);
+                    }
                     active = Some(rect);
                 }
             }
