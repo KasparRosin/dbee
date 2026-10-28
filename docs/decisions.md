@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-27 · **Change:** trivial (self-contained workflows reworded)
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-28 · **Change:** minor (the GitHub repository comes after M1)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -33,6 +33,7 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** Until version 1 runs, there are local commits only; the repository `KasparRosin/dbee` is created then.
 - **Why:** The pre-alpha scaffold has nothing to publish, and the history can be tidied before it is public.
+- **Superseded:** 2026-10-27, by "GitHub repository after M1" below.
 
 ## 2026-10-15: Rust 1.99 minimum
 
@@ -93,3 +94,8 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** `rust-toolchain.toml` names an exact release (`1.99.1`, the minimal profile with clippy and rustfmt), and it is bumped by hand. `rust-version = "1.99"` stays the minimum.
 - **Why:** A new compiler invalidates every cached build. With `stable`, an update of the machine's toolchain rebuilt the whole dependency tree in the middle of the work; a pinned release changes only when the repo says so, in a commit of its own.
+
+## 2026-10-27: GitHub repository after M1; changes land through merge requests
+
+- **Decision:** The private repository `KasparRosin/dbee` is created once M1 is built, before version 1, and `main` is pushed to it after the history tidy. From then on changes land on `main` through merge requests, and CI runs on GitHub.
+- **Why:** M1 does real work and is ready for review on GitHub; CI on GitHub covers the macOS, Windows and BSD builds the local machine cannot run.
