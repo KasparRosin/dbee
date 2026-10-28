@@ -36,8 +36,6 @@ services:
     build:
       context: .
       dockerfile: tools.Dockerfile
-      provenance: false
-      sbom: false
     image: dbee-testdb-tools:local
     command: ["/usr/local/bin/tools-init.sh"]
     environment:
