@@ -202,9 +202,14 @@ pub fn docker_available() -> bool {
 
 /// `docker compose -p dbee-testdb -f <compose.yml> --env-file <compose.env>`. Before the first `up`
 /// there is no env file; placeholders then let `down` and `status` parse the compose file.
+///
+/// Builds attach no provenance or SBOM attestations, which would give every rebuild of the tools
+/// image a new id, so `up --build` would recreate `init` and `sshd`. The variable does this for
+/// any Compose; the compose file's `provenance`/`sbom` keys are refused by older ones (GitHub's).
 fn compose(root: &Path) -> Command {
     let mut c = Command::new("docker");
-    c.current_dir(root).stdin(Stdio::null()).arg("compose").args(["-p", PROJECT, "-f"]).arg(compose_file(root));
+    c.current_dir(root).stdin(Stdio::null()).env("BUILDX_NO_DEFAULT_ATTESTATIONS", "1");
+    c.arg("compose").args(["-p", PROJECT, "-f"]).arg(compose_file(root));
     let env_file = compose_env_path(root);
     if env_file.is_file() {
         c.arg("--env-file").arg(env_file);
