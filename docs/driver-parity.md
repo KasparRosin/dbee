@@ -1,6 +1,6 @@
 # Driver parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (the observation notes are cited as kept outside the repository) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (Work: M2 is three databases) · **Target:** Beekeeper Studio 5.5.7
 
 The engine list is the one observed in Beekeeper Studio's connection type list: 20 engines, 10 free and 10 paid ("*" after the name). The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). "done" means it works end to end against the Docker test servers (measured); the limits are in [gaps.md](gaps.md).
 
@@ -31,13 +31,14 @@ Engines: 1 of 20 (5 %, measured by count). Weighted by use the share is larger, 
 
 ## Work
 
-- **Next:** a database driver interface, so the engine no longer names Postgres types (before M2). The second engine is added on it.
+- **Next:** M2 "Three databases": a database driver interface, so the engine no longer names Postgres types, then MySQL/MariaDB and SQLite on it.
 - **Estimates:** not estimated yet. M1's agent hours were not logged, so there is nothing to calibrate a per-engine figure on ([target-app-parity.md](target-app-parity.md), "Effort and calibration").
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | Work: the driver interface, MySQL/MariaDB and SQLite are M2 "Three databases". |
 | 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
 | 2026-10-26 | major | PostgreSQL connect, browse, query and edit done (M1); the engine list checked against the observed app (TiDB, SQL Anywhere and SurrealDB added), with free and paid marked. |
 | 2026-10-15 | major | Template (scaffold). |

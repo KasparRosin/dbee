@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (Platforms: only Linux x86_64 tested so far)
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** trivial (the driver interface is the start of M2)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -22,7 +22,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `apps/dbee` | exists | L7. Desktop binary: sets up the logger (standard error and `<settings dir>/logs/dbee.log`, levels from `RUST_LOG`) and, on Windows, the graphics start-up; reads `--version`, `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE`, `DBEE_CLIPBOARD` (`memory`: copies and cuts stay in the app, for isolated runs), `DBEE_NO_PREFS` and `DBEE_ALLOW_TARGETS` (an isolated run's allowed connection targets), builds the session's options and runs `DbeeApp`. `tests/m1_day.rs` drives the real window through the M1 day (run by hand). |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
 | `xtask` | exists | Exempt from layering. `ci`, `assets`, `layers`, `licenses`, `provenance`, `testdb`, `run-isolated`, `version`, `stats`, `ico`, `icns`, `contributors`. `xtask/testdb/` holds the test servers' compose file, tools image and seed. |
-| More domain crates | **(planned)** | A database driver interface before M2, so the engine no longer names `dbee-pg`'s types; then a driver per engine. |
+| More domain crates | **(planned)** | A database driver interface at the start of M2, so the engine no longer names `dbee-pg`'s types; then a driver per engine (MySQL/MariaDB and SQLite in M2). |
 
 ## Layers
 
@@ -63,12 +63,13 @@ Desktop only: macOS, Windows, Linux and FreeBSD, of which only Linux x86_64 has 
 
 ## Known gaps
 
-M1's crates are all in place. Postgres is the only engine, and the engine calls `dbee-pg` directly: a driver interface comes before M2. The MCP crate is empty, and the CLI prints its version. The ranked work list is [`gaps.md`](gaps.md).
+M1's crates are all in place. Postgres is the only engine, and the engine calls `dbee-pg` directly: a driver interface comes first in M2 "Three databases". The MCP crate is empty, and the CLI prints its version. The ranked work list is [`gaps.md`](gaps.md).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | trivial | The planned driver interface is the start of M2 "Three databases". |
 | 2026-10-27 | trivial | Platforms: only Linux x86_64 built and run so far |
 | 2026-10-26 | minor | Checked against the crates at the end of M1: `core` (JSON), `sql` (filters, page and edit statements), `pg` (catalog, caps, apply), the engine's modules, the UI's file pickers, the app's logger, `run-isolated`, `m1_day`; the data flow for tables, edits and queries; the planned driver interface |
 | 2026-10-26 | minor | `crates/ui-egui`: copying to the clipboard ("Copied n rows", grid clicks take the keyboard, the in-memory clipboard of isolated runs); `copy.selection` copies at most 8 MiB of text, everything counted |

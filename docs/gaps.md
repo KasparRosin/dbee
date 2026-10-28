@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: no personal names or task ids) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (import and export are M3) · **Target:** Beekeeper Studio 5.5.7
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -12,8 +12,8 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Missing:** exporting a table or a query result to a file (CSV, JSON, SQL) and importing one. The alpha gate's last row ([`roadmap.md`](roadmap.md)).
 - **Evidence:** `engine.commands` lists no export or import command; the way out today is the clipboard, at most 8 MiB of text (entry 8).
-- **Impact:** results larger than a copy, or meant for a file, cannot leave dbee. The maintainer switches to dbee fully once this lands (M2).
-- **Estimate:** M2 "Import and export"; not estimated yet.
+- **Impact:** results larger than a copy, or meant for a file, cannot leave dbee. The maintainer switches to dbee fully once this lands (M3).
+- **Estimate:** M3 "Import and export"; not estimated yet.
 
 ## After alpha
 
@@ -64,15 +64,15 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Limit:** a query keeps at most 10,000 rows per result and 256 MiB of cell text per run, and says `First 10,000 of N rows`.
 - **Evidence:** `QUERY_LIMITS` (`crates/pg/src/query.rs`); `a_result_cut_at_the_cap_says_so` (`crates/ui-egui/tests/query_tab.rs`).
-- **Impact:** a larger result cannot be read through in the query tab. A table tab pages through any number of rows (100 a page; the next page of a million-row table loads in 1.06–1.09 ms, [`target-app-parity.md`](target-app-parity.md), "Performance"), and file export comes in M2.
-- **Estimate:** part of M2's export; paging query results is not estimated.
+- **Impact:** a larger result cannot be read through in the query tab. A table tab pages through any number of rows (100 a page; the next page of a million-row table loads in 1.06–1.09 ms, [`target-app-parity.md`](target-app-parity.md), "Performance"), and file export comes in M3.
+- **Estimate:** part of M3's export; paging query results is not estimated.
 
 ### 8. A copy is at most 8 MiB of text (F)
 
 - **Limit:** one copy (Ctrl+C, Ctrl+Shift+C, the grid menu's formats) holds at most 8 MiB of text, counting everything (quotes, escapes, `NULL`, column names). A larger one copies nothing and says how many rows fit.
 - **Evidence:** `COPY_MAX_BYTES` (`crates/engine/src/cmd/selection.rs`); `a_copy_over_the_cap_copies_nothing_and_says_why` (`crates/ui-egui/tests/clipboard.rs`).
-- **Impact:** large selections need several copies until file export lands in M2 (entry 1).
-- **Estimate:** M2.
+- **Impact:** large selections need several copies until file export lands in M3 (entry 1).
+- **Estimate:** M3.
 
 ### 9. Unique indexes without a constraint are not row keys (F)
 
@@ -141,6 +141,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | Import and export is now M3 (M2 is three databases). |
 | 2026-10-27 | minor | Wording: no personal names or task ids. |
 | 2026-10-27 | minor | Entry 14 fixed and dropped: filters compare `char(n)` as `bpchar`, `bit(n)` as `"bit"` and arrays of `varchar(n)`, `char(n)` and `bit(n)` as `character varying[]`, `bpchar[]` and `"bit"[]`, so they use the column's index and an over-long element matches nothing; 15–17 are now 14–16. |
 | 2026-10-27 | minor | M1 review fixes: generated and identity `GENERATED ALWAYS` columns refused (old entry 8 dropped, 9–15 now 8–14); entries 15 (a failed transaction in a query tab), 16 (keyless paging), 17 (empty filter values). |

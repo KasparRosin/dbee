@@ -1,10 +1,10 @@
 # Target app parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: no personal names or task ids) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (import and export are M3) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
-dbee covers the daily Postgres workflow: connect (also through an SSH tunnel), find a table, filter it, read its JSON, follow a foreign key, edit rows, run queries and copy results. It works end to end in the real window (`apps/dbee/tests/m1_day.rs`, measured). Postgres is the only engine, and there is no file export or import yet (M2).
+dbee covers the daily Postgres workflow: connect (also through an SSH tunnel), find a table, filter it, read its JSON, follow a foreign key, edit rows, run queries and copy results. It works end to end in the real window (`apps/dbee/tests/m1_day.rs`, measured). Postgres is the only engine, and there is no file export or import yet (M3). MySQL/MariaDB and SQLite come first (M2).
 
 Overall parity with Beekeeper Studio: **~25 % (estimated)**, from the weights and dimension scores below. Breadth comes from grading Beekeeper's observed feature list row by row. Readiness stays low until dbee has been used on real databases (a day of real use on the maintainer's own databases, M1's last check).
 
@@ -13,8 +13,8 @@ Overall parity with Beekeeper Studio: **~25 % (estimated)**, from the weights an
 | Audience | Ready % | Agent wall-clock hours to ~95% | Work that dominates |
 |---|---|---|---|
 | Developer querying a local SQLite file | 0 % (measured: no SQLite engine) | not estimated yet | the second engine, on the planned driver interface |
-| Backend developer on Postgres/MySQL | ~30 % (estimated): Postgres's daily workflow only, not yet used on real databases | not estimated yet | file export and import (M2), MySQL, structure views, saved queries and history |
-| Data analyst exporting results | ~10 % (estimated): copies of up to 8 MiB only | not estimated yet | file export (M2), results past 10,000 rows |
+| Backend developer on Postgres/MySQL | ~30 % (estimated): Postgres's daily workflow only, not yet used on real databases | not estimated yet | file export and import (M3), MySQL, structure views, saved queries and history |
+| Data analyst exporting results | ~10 % (estimated): copies of up to 8 MiB only | not estimated yet | file export (M3), results past 10,000 rows |
 
 ## What we measured against and how
 
@@ -41,10 +41,10 @@ Beekeeper Studio 5.5.7, observed black-box in a sandbox, using synthetic databas
 | Connections | 15 | 62 % (7.5 of 12 rows; estimated) | ~45 % (estimated) | not estimated yet | Done: read-only mode, test, save with name, colour and passwords, saved and recent lists with a filter, Fill from URL. Partial: no socket mode or IAM; SSL without client certificates; SSH without a jump host; no Copy URL. Missing: a sample database, team workspaces. `crates/engine/tests/connection.rs`, `crates/ui-egui/tests/connections.rs`, `m1_day` step 1. |
 | Navigation | 10 | 50 % (3 of 6; estimated) | ~40 % (estimated) | not estimated yet | Done: the schema tree, quick search. Partial: the tree's filter and refresh only; tabs without reopen or restore. Missing: database switcher, several windows. `crates/ui-egui/tests/workspace.rs`, `m1_day` step 2. |
 | Query | 20 | 32 % (3.5 of 11; estimated) | ~25 % (estimated) | not estimated yet | Done: run all and run current, several result sets, errors. Partial: the editor has no autocomplete. Missing: manual transactions, saved queries, history, Vim keymap and wrap, find, run to file, AI shell. `crates/ui-egui/tests/query_tab.rs`, `m1_day` step 7. |
-| Results | 10 | 33 % (1 of 3; estimated) | ~30 % (estimated) | M2 | Done: copy as TSV (with or without header), CSV, JSON, Markdown. Missing: downloads. `crates/ui-egui/tests/clipboard.rs`. |
+| Results | 10 | 33 % (1 of 3; estimated) | ~30 % (estimated) | M3 | Done: copy as TSV (with or without header), CSV, JSON, Markdown. Missing: downloads. `crates/ui-egui/tests/clipboard.rs`. |
 | Data | 25 | 59 % (6.5 of 11; estimated) | ~45 % (estimated) | not estimated yet | Done: the filter builder (any number of filters, raw `WHERE`), paging with counts, following a foreign key. Partial: the grid has no tooltips; editing has no copy as SQL, and rows have no clone; the value panel (pretty JSON, copy) stands in for two rows, the edit modal and the JSON row viewer, but it is read-only and shows one cell, not the row; copy has no SQL or IN list formats; columns resize only. Missing: quick filter. `crates/ui-egui/tests/table_tab.rs`, `editing.rs`, `value_panel.rs`, `m1_day` steps 3–6. |
 | Structure | 8 | 0 % (0 of 5) | 0 % | not estimated yet | Not started. |
-| Import/export | 7 | 0 % (0 of 3) | 0 % | M2 | Not started ([gaps.md](gaps.md) 1). |
+| Import/export | 7 | 0 % (0 of 3) | 0 % | M3 | Not started ([gaps.md](gaps.md) 1). |
 | Tools | 3 | 0 % (0 of 2) | 0 % | not estimated yet | Backup, restore and plugins not started. |
 | App | 2 | 0 % (0 of 4) | 0 % | not estimated yet | One light theme of dbee's own; no zoom or help menus. |
 
@@ -104,7 +104,7 @@ The control channel (`dbee --control <port>`) reaches every command and drives t
 
 ## Stage
 
-Pre-alpha. M1 is built: five of the six alpha gate rows pass ([roadmap.md](roadmap.md)), and file export (M2) is the sixth. M1 waits for a day of real use on the maintainer's own databases.
+Pre-alpha. M1 is built: five of the six alpha gate rows pass ([roadmap.md](roadmap.md)), and file export (M3) is the sixth. M1 waits for a day of real use on the maintainer's own databases.
 
 ## Effort and calibration
 
@@ -128,6 +128,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | Import and export is now M3; M2 is three databases (MySQL/MariaDB and SQLite). |
 | 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases, M1 review fixes, earlier runs instead of task ids. |
 | 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
 | 2026-10-27 | minor | Effort counts 59 commits for M1 (four for its last task) and five for the M1 review fixes; gaps.md 13 is now 12. |

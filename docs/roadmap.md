@@ -1,6 +1,6 @@
 # Roadmap: gates and milestones
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (title and role: the detail behind ROADMAP.md) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** major (M2 is three databases; import and export are M3) · **Target:** Beekeeper Studio 5.5.7
 
 The one-page summary is [`ROADMAP.md`](../ROADMAP.md) at the repository root. This page holds the detail behind it: the current focus, the alpha and beta gates, and the milestones.
 
@@ -8,7 +8,7 @@ The one-page summary is [`ROADMAP.md`](../ROADMAP.md) at the repository root. Th
 
 M1 "Daily Postgres workflow" is built. Every task of its plan is done, and the M1 day runs end to end in the real window. It waits for its last check: a day of real use of a Linux release build on the maintainer's own databases. Only the maintainer does that; agents never connect to those databases.
 
-Next: an architecture step, a database driver interface so the engine no longer names Postgres types; then M2 "Import and export".
+In progress: M2 "Three databases". A driver interface comes first, so the engine no longer names Postgres types; then MySQL/MariaDB and SQLite get the full M1 workflow on it. M3 "Import and export" follows.
 
 ## Alpha gate
 
@@ -19,11 +19,11 @@ Next: an architecture step, a database driver interface so the engine no longer 
 | Run a query (M1) | yes (measured) | `m1_day` step 7: a join pasted and run with Ctrl+Enter. Run current, cancel, several results, error cards and the row cap in `crates/engine/tests/query.rs` and `crates/ui-egui/tests/query_tab.rs`. | 0 |
 | Edit a row (M1) | yes (measured) | `m1_day` step 6: a name fixed and a date cleared to NULL, each written with Ctrl+S and checked with psql. All-or-nothing Apply with a failing change in `crates/pg/tests/apply.rs`, `crates/engine/tests/edit.rs` and `crates/ui-egui/tests/editing.rs`. | 0 |
 | Copy results (M1) | yes (measured) | `m1_day` steps 4 and 7: a JSON line copied from the value panel, and a result copied with its header row (Ctrl+A, Ctrl+Shift+C). The formats in `crates/core` and `crates/ui-egui/tests/clipboard.rs`. | 0 |
-| Export to a file (M2) | no | Not built ([gaps.md](gaps.md) entry 1). | not estimated yet |
+| Export to a file (M3) | no | Not built ([gaps.md](gaps.md) entry 1). | not estimated yet |
 
 ## Beta gates
 
-Not defined yet: they follow M2, from the ranked list in [gaps.md](gaps.md) and [target-app-parity.md](target-app-parity.md).
+Not defined yet: they follow M3, from the ranked list in [gaps.md](gaps.md) and [target-app-parity.md](target-app-parity.md).
 
 | Gate | Gap | Hours |
 |---|---|---|
@@ -34,7 +34,8 @@ Not defined yet: they follow M2, from the ranked list in [gaps.md](gaps.md) and 
 |---|---|---|
 | M0 | Scaffold | done (2026-10-16) |
 | M1 | Daily Postgres workflow | built (2026-10-26); waits for a day of real use on the maintainer's own databases |
-| M2 | Import and export | not started |
+| M2 | Three databases | in progress |
+| M3 | Import and export | not started |
 
 The packages declare no file types for now: the `.sqlite` and `.sqlite3` associations (Linux desktop entry and AppStream data, macOS, Windows) come back with the SQLite engine.
 
@@ -46,6 +47,7 @@ Percentages and hours come from [target-app-parity.md](target-app-parity.md) and
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | major | Milestones renumbered: M2 "Three databases" (driver interface, MySQL/MariaDB, SQLite) is in progress; "Import and export" is now M3. |
 | 2026-10-27 | trivial | Titled "gates and milestones", with a line on its role next to ROADMAP.md. |
 | 2026-10-27 | minor | Wording: M1's last check is a day of real use on the maintainer's own databases. |
 | 2026-10-27 | minor | The packages' `.sqlite` and `.sqlite3` file associations removed until the SQLite engine exists. |

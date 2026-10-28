@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-28 · **Change:** minor (the GitHub repository comes after M1)
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (M2 is three databases; SQLite's licence allowed)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -99,3 +99,13 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** The private repository `KasparRosin/dbee` is created once M1 is built, before version 1, and `main` is pushed to it after the history tidy. From then on changes land on `main` through merge requests, and CI runs on GitHub.
 - **Why:** M1 does real work and is ready for review on GitHub; CI on GitHub covers the macOS, Windows and BSD builds the local machine cannot run.
+
+## 2026-10-28: M2 is three databases, before import and export
+
+- **Decision:** M2 is "Three databases": a driver interface, then MySQL/MariaDB and SQLite with the full M1 workflow. Import and export move to M3.
+- **Why:** The engine still names Postgres types, and export and import should be written once against the interface, not once per engine. Two more databases also widen who can use dbee daily.
+
+## 2026-10-28: SQLite's public-domain code is allowed
+
+- **Decision:** The licence allowlist gains SQLite's public-domain dedication, for the SQLite library compiled in by `libsqlite3-sys` (through `rusqlite` with `bundled`). The crates themselves are MIT.
+- **Why:** SQLite is public domain and has no licence text to put on the list. Linking it in keeps dbee one binary with no system library to find.
