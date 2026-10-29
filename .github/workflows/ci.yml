@@ -36,7 +36,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
+            libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
 
       - name: Install Rust (the release, profile and components in rust-toolchain.toml)
         run: rustup toolchain install
