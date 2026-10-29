@@ -69,8 +69,15 @@ copy_docs "$STAGE/usr/share/doc/dbee"
 if command -v desktop-file-validate >/dev/null; then
   desktop-file-validate "$STAGE/usr/share/applications/$APP_ID.desktop"
 fi
+# The metainfo uses AppStream 1.0 tags (<developer>, the vcs-browser url) that older validators,
+# such as Ubuntu 22.04's 0.15, reject; packaging-lint checks it with a current one on every change.
 if command -v appstreamcli >/dev/null; then
-  appstreamcli validate --no-net --explain "$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
+  as_version="$(appstreamcli --version | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1)"
+  if [ "${as_version%%.*}" -ge 1 ] 2>/dev/null; then
+    appstreamcli validate --no-net --explain "$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
+  else
+    echo "skipping the metainfo check: AppStream ${as_version:-?} is older than 1.0"
+  fi
 fi
 
 has() { case " $FORMATS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }

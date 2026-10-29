@@ -309,8 +309,9 @@ jobs:
         with:
           release: "15.1"
           usesh: true
-          cpu: 4
-          mem: 12288
+          # Sized for a private repo's runner: a 12 GB VM failed to boot there (QEMU: cannot allocate memory).
+          cpu: 2
+          mem: 6144
           envs: "VERSION BUILD_DATE BUILD_SHA INPUT_VERSION DBEE_VERSION DBEE_BUILD_DATE DBEE_BUILD_SHA"
           prepare: |
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib
@@ -321,7 +322,7 @@ jobs:
             # The release, profile and components in rust-toolchain.toml.
             rustup toolchain install
             git config --global --add safe.directory "*"
-            export CARGO_TARGET_DIR=/var/tmp/dbee-target CARGO_BUILD_JOBS=4
+            export CARGO_TARGET_DIR=/var/tmp/dbee-target CARGO_BUILD_JOBS=2
             if [ -n "$INPUT_VERSION" ]; then cargo xtask version set "$VERSION" || cargo run -q -p xtask -- version set "$VERSION"; fi
             if [ -f packaging/freebsd/package.sh ]; then
               bash packaging/freebsd/package.sh
