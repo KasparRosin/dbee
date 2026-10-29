@@ -146,7 +146,7 @@ fn parse_url_fills_the_form_and_is_not_journaled() {
     assert_eq!(r, json!({ "host": "db.example.com", "port": 6543, "user": "ann", "password": "s@cret", "database": "shop", "sslMode": "require" }));
     let r = s.run_blocking("connection.parseUrl", json!({ "url": "postgres://localhost" }), T).unwrap();
     assert_eq!(r, json!({ "host": "localhost", "port": null, "user": null, "password": null, "database": null, "sslMode": null }));
-    assert_eq!(s.execute("connection.parseUrl", json!({ "url": "mysql://x" })).unwrap_err().code(), "badParams");
+    assert_eq!(s.execute("connection.parseUrl", json!({ "url": "oracle://x" })).unwrap_err().code(), "badParams");
     assert_eq!(s.execute("connection.parseUrl", json!({})).unwrap_err().code(), "badParams");
     assert!(s.journal().iter().all(|(id, _)| id != "connection.parseUrl"), "a URL can carry a password");
 }

@@ -15,7 +15,7 @@ fn url_ipv6_and_bad_scheme() {
     assert_eq!(parse_url("postgres://[::1]/x").unwrap().host.as_deref(), Some("::1"));
     let u = parse_url("postgres://[::1]:5433/x").unwrap();
     assert_eq!((u.host.as_deref(), u.port), (Some("::1"), Some(5433)));
-    assert!(parse_url("mysql://x").is_err());
+    assert!(parse_url("oracle://x").is_err());
     assert!(parse_url("postgres://h:notaport/x").is_err());
     assert!(parse_url("postgres://h/x?sslmode=bogus").is_err());
     assert!(parse_url("postgres://u%zz@h/x").is_err());
@@ -212,4 +212,123 @@ fn save_leaves_no_temp_files() {
     s.save().unwrap();
     let tmp = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
     assert_eq!(tmp, 0);
+}
+
+#[test]
+fn old_saved_connections_are_postgres() {
+    let c: ConnectionConfig = serde_json::from_str(r#"{"id":"a","name":"x","host":"h","port":5432}"#).unwrap();
+    assert_eq!(c.kind, DbKind::Postgres);
+}
+
+#[test]
+fn kinds_round_trip_by_id() {
+    for k in DbKind::ALL {
+        assert_eq!(DbKind::from_id(k.id()), Some(k));
+    }
+    assert_eq!(DbKind::from_id("oracle"), None);
+}
+
+#[test]
+fn mysql_url() {
+    let p = parse_url("mysql://u:p@db.example:3307/shop?ssl-mode=VERIFY_IDENTITY").unwrap();
+    assert_eq!((p.kind, p.port, p.database.as_deref(), p.ssl_mode), (DbKind::MySql, Some(3307), Some("shop"), Some(SslMode::VerifyFull)));
+}
+
+#[test]
+fn url_schemes_name_their_kind() {
+    for (url, kind) in [
+        ("postgres://h", DbKind::Postgres),
+        ("postgresql://h", DbKind::Postgres),
+        ("mysql://h", DbKind::MySql),
+        ("mariadb://h", DbKind::MariaDb),
+        ("MariaDB://h", DbKind::MariaDb),
+    ] {
+        assert_eq!(parse_url(url).unwrap().kind, kind, "{url}");
+    }
+    assert!(parse_url("sqlite://h").is_err());
+}
+
+#[test]
+fn url_takes_both_sslmode_spellings() {
+    assert_eq!(parse_url("mariadb://h/d?sslmode=verify-ca").unwrap().ssl_mode, Some(SslMode::VerifyCa));
+    assert_eq!(parse_url("mysql://h/d?ssl-mode=REQUIRED").unwrap().ssl_mode, Some(SslMode::Require));
+    assert_eq!(parse_url("mysql://h/d?ssl-mode=DISABLED").unwrap().ssl_mode, Some(SslMode::Disable));
+    assert_eq!(parse_url("mysql://h/d?ssl-mode=PREFERRED").unwrap().ssl_mode, Some(SslMode::Prefer));
+    assert_eq!(parse_url("mysql://h/d?ssl-mode=VERIFY_CA").unwrap().ssl_mode, Some(SslMode::VerifyCa));
+}
+
+#[test]
+fn sqlite_needs_a_file() {
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: None, ..Default::default() };
+    assert!(c.validate().is_err());
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), host: String::new(), port: 0, ..Default::default() };
+    assert!(c.validate().is_ok());
+}
+
+#[test]
+fn sqlite_display_name_is_the_file() {
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ..Default::default() };
+    assert_eq!(c.display_name(), "shop.sqlite");
+    let c = ConnectionConfig { name: "Mine".into(), ..c };
+    assert_eq!(c.display_name(), "Mine");
+}
+
+#[test]
+fn server_kinds_need_host_and_port() {
+    for kind in [DbKind::MySql, DbKind::MariaDb] {
+        let c = ConnectionConfig { kind, host: String::new(), ..Default::default() };
+        assert!(c.validate().is_err());
+        let c = ConnectionConfig { kind, port: 0, ..Default::default() };
+        assert!(c.validate().is_err());
+    }
+}
+
+#[test]
+fn default_port_follows_the_default_kind() {
+    assert_eq!(ConnectionConfig::default().port, DbKind::default().default_port().unwrap());
+}
+
+#[test]
+fn every_kind_has_one_row() {
+    for k in DbKind::ALL {
+        assert_eq!(DbKind::from_id(k.info().id), Some(k));
+        assert!(!k.label().is_empty());
+    }
+    let ids: std::collections::HashSet<&str> = DbKind::ALL.iter().map(|k| k.id()).collect();
+    assert_eq!(ids.len(), DbKind::ALL.len());
+}
+
+#[test]
+fn file_kinds_have_extensions_and_no_port() {
+    for k in DbKind::ALL {
+        match k.info().settings {
+            Settings::File { extensions } => {
+                assert!(k.uses_file());
+                assert!(!extensions.is_empty());
+                assert_eq!(k.default_port(), None);
+            }
+            Settings::Server { .. } => {
+                assert!(!k.uses_file());
+                assert!(k.default_port().is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn ssl_aliases_stay_with_their_kind() {
+    assert!(parse_url("postgres://h/db?sslmode=VERIFY_IDENTITY").is_err());
+    assert_eq!(parse_url("mysql://h/db?sslmode=VERIFY_IDENTITY").unwrap().ssl_mode, Some(SslMode::VerifyFull));
+}
+
+#[test]
+fn saved_kind_json_is_the_id() {
+    for k in DbKind::ALL {
+        assert_eq!(serde_json::to_string(&k).unwrap(), format!("\"{}\"", k.id()));
+        assert_eq!(serde_json::from_str::<DbKind>(&serde_json::to_string(&k).unwrap()).unwrap(), k);
+    }
+    assert_eq!(serde_json::to_string(&DbKind::MariaDb).unwrap(), "\"mariadb\"");
+    assert!(serde_json::from_str::<DbKind>("\"oracle\"").is_err());
+    let j = serde_json::to_value(ConnectionConfig::default()).unwrap();
+    assert_eq!(j["kind"], "postgres");
 }

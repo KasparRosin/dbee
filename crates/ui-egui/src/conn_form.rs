@@ -128,6 +128,7 @@ impl Form {
             ssh,
             read_only: self.read_only,
             save_secrets: self.save_secrets,
+            ..ConnectionConfig::default()
         };
         config.validate().map_err(|e| e.to_string())?;
         Ok(config)

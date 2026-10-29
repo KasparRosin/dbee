@@ -123,7 +123,7 @@ fn fill_from_url_fills_the_form() {
     ui.click("conn-url");
     assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
     // A URL that does not parse keeps the dialog open with the reason.
-    ui.text("mysql://nope");
+    ui.text("oracle://nope");
     ui.click("dialog-ok");
     let i = ui.inspect();
     assert_eq!(i["dialog"], "fillFromUrl", "{i}");

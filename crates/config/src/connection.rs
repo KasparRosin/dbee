@@ -44,6 +44,128 @@ pub enum SslMode {
     VerifyFull,
 }
 
+/// What a database type's settings consist of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settings {
+    /// Host and port, with optional TLS and SSH.
+    Server { tls: bool, ssh: bool },
+    /// A single file, opened by these extensions.
+    File { extensions: &'static [&'static str] },
+}
+
+/// The fixed facts of one database type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindInfo {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub default_port: Option<u16>,
+    pub settings: Settings,
+    pub url_schemes: &'static [&'static str],
+    /// This type's own TLS-mode names in URLs, besides libpq's.
+    pub ssl_aliases: &'static [(&'static str, SslMode)],
+}
+
+const MYSQL_SSL_ALIASES: &[(&str, SslMode)] = &[
+    ("DISABLED", SslMode::Disable),
+    ("PREFERRED", SslMode::Prefer),
+    ("REQUIRED", SslMode::Require),
+    ("VERIFY_CA", SslMode::VerifyCa),
+    ("VERIFY_IDENTITY", SslMode::VerifyFull),
+];
+
+/// The database types dbee can open. Saved as the type's id.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "&'static str")]
+pub enum DbKind {
+    #[default]
+    Postgres,
+    MySql,
+    MariaDb,
+    Sqlite,
+}
+
+impl DbKind {
+    pub const ALL: [DbKind; 4] = [DbKind::Postgres, DbKind::MySql, DbKind::MariaDb, DbKind::Sqlite];
+
+    /// Adding a variant fails to compile here, which is the cue to list it in `ALL` and `info`.
+    #[allow(dead_code)]
+    const fn all_guard(k: DbKind) {
+        match k {
+            DbKind::Postgres | DbKind::MySql | DbKind::MariaDb | DbKind::Sqlite => {}
+        }
+    }
+
+    pub const fn info(self) -> &'static KindInfo {
+        match self {
+            DbKind::Postgres => &KindInfo {
+                id: "postgres",
+                label: "PostgreSQL",
+                default_port: Some(5432),
+                settings: Settings::Server { tls: true, ssh: true },
+                url_schemes: &["postgres", "postgresql"],
+                ssl_aliases: &[],
+            },
+            DbKind::MySql => &KindInfo {
+                id: "mysql",
+                label: "MySQL",
+                default_port: Some(3306),
+                settings: Settings::Server { tls: true, ssh: true },
+                url_schemes: &["mysql"],
+                ssl_aliases: MYSQL_SSL_ALIASES,
+            },
+            DbKind::MariaDb => &KindInfo {
+                id: "mariadb",
+                label: "MariaDB",
+                default_port: Some(3306),
+                settings: Settings::Server { tls: true, ssh: true },
+                url_schemes: &["mariadb"],
+                ssl_aliases: MYSQL_SSL_ALIASES,
+            },
+            DbKind::Sqlite => &KindInfo {
+                id: "sqlite",
+                label: "SQLite",
+                default_port: None,
+                settings: Settings::File { extensions: &["sqlite", "sqlite3", "db"] },
+                url_schemes: &[],
+                ssl_aliases: &[],
+            },
+        }
+    }
+
+    pub const fn id(self) -> &'static str {
+        self.info().id
+    }
+
+    pub fn from_id(id: &str) -> Option<DbKind> {
+        DbKind::ALL.into_iter().find(|k| k.id() == id)
+    }
+
+    pub const fn label(self) -> &'static str {
+        self.info().label
+    }
+
+    pub const fn default_port(self) -> Option<u16> {
+        self.info().default_port
+    }
+
+    pub const fn uses_file(self) -> bool {
+        matches!(self.info().settings, Settings::File { .. })
+    }
+}
+
+impl From<DbKind> for &'static str {
+    fn from(k: DbKind) -> Self {
+        k.id()
+    }
+}
+
+impl TryFrom<String> for DbKind {
+    type Error = String;
+    fn try_from(id: String) -> Result<Self, String> {
+        DbKind::from_id(&id).ok_or_else(|| format!("unknown database type {id:?}"))
+    }
+}
+
 /// The colour tag shown for a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +219,8 @@ impl Default for SshConfig {
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
+    pub kind: DbKind,
+    pub file: Option<PathBuf>,
     pub color: ConnectionColor,
     pub host: String,
     pub port: u16,
@@ -114,9 +238,11 @@ impl Default for ConnectionConfig {
         ConnectionConfig {
             id: String::new(),
             name: String::new(),
+            kind: DbKind::default(),
+            file: None,
             color: ConnectionColor::None,
             host: "localhost".into(),
-            port: 5432,
+            port: DbKind::default().default_port().unwrap_or(0),
             user: String::new(),
             database: String::new(),
             ssl_mode: SslMode::Prefer,
@@ -129,21 +255,37 @@ impl Default for ConnectionConfig {
 }
 
 impl ConnectionConfig {
-    /// The name, or `user@host/database` when the name is empty.
+    /// The name; when empty, a file type's file name, else `user@host/database`.
     pub fn display_name(&self) -> String {
-        if self.name.is_empty() { format!("{}@{}/{}", self.user, self.host, self.database) } else { self.name.clone() }
+        if !self.name.is_empty() {
+            return self.name.clone();
+        }
+        let file_name = self.file.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned());
+        match (self.kind.uses_file(), file_name) {
+            (true, Some(n)) => n,
+            _ => format!("{}@{}/{}", self.user, self.host, self.database),
+        }
     }
 
-    /// Host non-empty, port non-zero, and for SSH a host, a port and a user.
+    /// A file type needs a file. A server type needs a host and a port, and for SSH a host, a port and a user.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let bad = |m: &str| Err(ConfigError::Invalid(m.to_string()));
+        let ssh_allowed = match self.kind.info().settings {
+            Settings::File { .. } => {
+                return match &self.file {
+                    Some(f) if !f.as_os_str().is_empty() => Ok(()),
+                    _ => bad("file is empty"),
+                };
+            }
+            Settings::Server { ssh, .. } => ssh,
+        };
         if self.host.trim().is_empty() {
             return bad("host is empty");
         }
         if self.port == 0 {
             return bad("port must not be 0");
         }
-        if let Some(ssh) = &self.ssh {
+        if let Some(ssh) = self.ssh.as_ref().filter(|_| ssh_allowed) {
             if ssh.host.trim().is_empty() {
                 return bad("SSH host is empty");
             }
@@ -161,6 +303,7 @@ impl ConnectionConfig {
 /// What a connection URL fills in. Absent parts stay `None`. `Debug` hides the password.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct UrlParts {
+    pub kind: DbKind,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
@@ -172,6 +315,7 @@ pub struct UrlParts {
 impl std::fmt::Debug for UrlParts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UrlParts")
+            .field("kind", &self.kind)
             .field("host", &self.host)
             .field("port", &self.port)
             .field("user", &self.user)
@@ -206,15 +350,32 @@ fn some_nonempty(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// Parses `postgres://` and `postgresql://` URLs: userinfo and path are percent-decoded, `[v6]`
-/// hosts work, and `?sslmode=` is read. Other query parameters are ignored.
+/// libpq's TLS-mode names, which every type takes.
+fn libpq_ssl_mode(v: &str) -> Option<SslMode> {
+    Some(match v {
+        "disable" => SslMode::Disable,
+        "allow" | "prefer" => SslMode::Prefer,
+        "require" => SslMode::Require,
+        "verify-ca" => SslMode::VerifyCa,
+        "verify-full" => SslMode::VerifyFull,
+        _ => return None,
+    })
+}
+
+/// Parses a server type's URL (the schemes in the type table): userinfo and path are percent-decoded,
+/// `[v6]` hosts work, and `?sslmode=` or `?ssl-mode=` is read. Other query parameters are ignored.
 pub fn parse_url(url: &str) -> Result<UrlParts, ConfigError> {
     let err = |m: &str| ConfigError::Url(m.to_string());
     let url = url.trim();
-    let rest = ["postgresql://", "postgres://"]
-        .iter()
-        .find_map(|p| url.get(..p.len()).filter(|h| h.eq_ignore_ascii_case(p)).map(|_| &url[p.len()..]))
-        .ok_or_else(|| err("expected a postgres:// or postgresql:// URL"))?;
+    let (kind, rest) = DbKind::ALL
+        .into_iter()
+        .flat_map(|k| k.info().url_schemes.iter().map(move |s| (k, *s)))
+        .find_map(|(k, scheme)| {
+            let head = url.get(..scheme.len())?;
+            let tail = url.get(scheme.len()..)?.strip_prefix("://")?;
+            head.eq_ignore_ascii_case(scheme).then_some((k, tail))
+        })
+        .ok_or_else(|| err("expected a postgres://, postgresql://, mysql:// or mariadb:// URL"))?;
     let rest = rest.split('#').next().unwrap_or("");
     let (before_query, query) = match rest.split_once('?') {
         Some((a, q)) => (a, Some(q)),
@@ -224,7 +385,7 @@ pub fn parse_url(url: &str) -> Result<UrlParts, ConfigError> {
         Some((a, p)) => (a, Some(p)),
         None => (before_query, None),
     };
-    let mut parts = UrlParts::default();
+    let mut parts = UrlParts { kind, ..UrlParts::default() };
     let hostport = match authority.rsplit_once('@') {
         Some((userinfo, hp)) => {
             let (u, p) = match userinfo.split_once(':') {
@@ -262,15 +423,12 @@ pub fn parse_url(url: &str) -> Result<UrlParts, ConfigError> {
         parts.database = some_nonempty(percent_decode(p)?);
     }
     for pair in query.unwrap_or("").split('&') {
-        if let Some(("sslmode", v)) = pair.split_once('=') {
-            parts.ssl_mode = Some(match percent_decode(v)?.as_str() {
-                "disable" => SslMode::Disable,
-                "allow" | "prefer" => SslMode::Prefer,
-                "require" => SslMode::Require,
-                "verify-ca" => SslMode::VerifyCa,
-                "verify-full" => SslMode::VerifyFull,
-                _ => return Err(err("unknown sslmode")),
-            });
+        if let Some((key, v)) = pair.split_once('=')
+            && (key == "sslmode" || key == "ssl-mode")
+        {
+            let v = percent_decode(v)?;
+            let alias = kind.info().ssl_aliases.iter().find(|(name, _)| name.eq_ignore_ascii_case(&v)).map(|(_, m)| *m);
+            parts.ssl_mode = Some(libpq_ssl_mode(&v).or(alias).ok_or_else(|| err("unknown sslmode"))?);
         }
     }
     Ok(parts)
