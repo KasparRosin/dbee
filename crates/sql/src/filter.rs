@@ -1,8 +1,8 @@
 //! Filters and the WHERE clause. Values are always quoted literals; column names must exist in the table.
 
 use crate::lexer::{TokenKind, has_top_level_semicolon, tokenize};
-use crate::{SqlError, quote};
-use dbee_core::{ColumnInfo, TableInfo};
+use crate::{Dialect, SqlError};
+use dbee_core::TableInfo;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// The 13 filter operators.
@@ -148,14 +148,14 @@ pub struct Sort {
 }
 
 /// The condition without the `WHERE` keyword, or `None` when nothing restricts the rows.
-pub fn where_sql(cond: &Condition, table: &TableInfo) -> Result<Option<String>, SqlError> {
+pub fn where_sql(d: Dialect, cond: &Condition, table: &TableInfo) -> Result<Option<String>, SqlError> {
     match cond {
         Condition::None => Ok(None),
         Condition::Raw(raw) => raw_sql(raw),
         Condition::Filters(filters) => {
             let mut parts = Vec::new();
             for filter in filters {
-                if let Some(part) = filter_sql(filter, table)? {
+                if let Some(part) = filter_sql(d, filter, table)? {
                     parts.push(part);
                 }
             }
@@ -176,28 +176,9 @@ fn raw_sql(raw: &str) -> Result<Option<String>, SqlError> {
     Ok(Some(if line_comment { format!("({raw}\n)") } else { format!("({raw})") }))
 }
 
-/// The type a filter value is cast to: the column's type without its length, so that a value
-/// longer than the length matches nothing instead of the rows its cut prefix would match, chosen
-/// to keep the column's own operators, and so its indexes: `char(n)` compares as `bpchar`
-/// (trailing spaces do not count, as for the column), `bit(n)` as `"bit"` (quoted: a bare `bit`
-/// means `bit(1)`), and arrays of `varchar(n)`, `char(n)` and `bit(n)` as `character varying[]`,
-/// `bpchar[]` and `"bit"[]` (no operator compares them with `text[]` or `bit varying[]`). The
-/// others are [`ColumnInfo::write_type_sql`]: `varchar(n)` as `text`, whose indexes it uses.
-fn filter_type(column: &ColumnInfo) -> &str {
-    match column.base_type.as_str() {
-        "bpchar" => "bpchar",
-        "bit" => "\"bit\"",
-        "_varchar" => "character varying[]",
-        "_bpchar" => "bpchar[]",
-        "_bit" => "\"bit\"[]",
-        _ => column.write_type_sql(),
-    }
-}
-
-fn filter_sql(filter: &Filter, table: &TableInfo) -> Result<Option<String>, SqlError> {
+fn filter_sql(d: Dialect, filter: &Filter, table: &TableInfo) -> Result<Option<String>, SqlError> {
     let column = table.column(&filter.column).ok_or_else(|| SqlError::UnknownColumn(filter.column.clone()))?;
-    let type_sql = filter_type(column);
-    let name = quote::ident(&column.name)?;
+    let name = d.ident(&column.name)?;
     if !filter.op.takes_value() {
         return Ok(Some(format!("{name} {}", filter.op.symbol())));
     }
@@ -205,15 +186,15 @@ fn filter_sql(filter: &Filter, table: &TableInfo) -> Result<Option<String>, SqlE
         return Ok(None);
     }
     if filter.op.is_pattern() {
-        return Ok(Some(format!("CAST({name} AS text) {} {}", filter.op.symbol(), quote::literal(&filter.value)?)));
+        return Ok(Some(d.like(filter.op, &name, &d.literal(&filter.value)?)));
     }
     if filter.op == Op::In {
         let items =
-            filter.value.split(',').map(str::trim).filter(|p| !p.is_empty()).map(|p| quote::typed(p, type_sql)).collect::<Result<Vec<_>, _>>()?;
+            filter.value.split(',').map(str::trim).filter(|p| !p.is_empty()).map(|p| d.filter_value(column, p)).collect::<Result<Vec<_>, _>>()?;
         if items.is_empty() {
             return Err(SqlError::EmptyIn);
         }
         return Ok(Some(format!("{name} IN ({})", items.join(", "))));
     }
-    Ok(Some(format!("{name} {} {}", filter.op.symbol(), quote::typed(&filter.value, type_sql)?)))
+    Ok(Some(format!("{name} {} {}", filter.op.symbol(), d.filter_value(column, &filter.value)?)))
 }

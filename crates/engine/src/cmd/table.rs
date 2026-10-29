@@ -47,6 +47,7 @@ use std::sync::Arc;
 use dbee_core::{Catalog, Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef};
 use dbee_pg::query::{run_untyped, scalar_u64};
 use dbee_pg::{PAGE_LIMITS, PgConnection, PgError};
+use dbee_sql::Dialect;
 use dbee_sql::SqlError;
 use dbee_sql::filter::{Condition, Filter, Op, Sort, SortDir, where_sql};
 use dbee_sql::select::{PAGE_SIZE, count_sql, page_sql};
@@ -282,7 +283,7 @@ fn opt_bool(params: &Json, key: &str) -> Result<Option<bool>, EngineError> {
 /// relations that keep one (not views or foreign tables). The UI shows it by the same rule.
 pub fn quick_estimate(info: &TableInfo, cond: &Condition) -> Option<u64> {
     let kept = matches!(info.kind, RelKind::Table | RelKind::PartitionedTable | RelKind::MaterializedView);
-    let unfiltered = matches!(where_sql(cond, info), Ok(None));
+    let unfiltered = matches!(where_sql(Dialect::Postgres, cond, info), Ok(None));
     if kept && unfiltered { info.estimated_rows } else { None }
 }
 
@@ -354,9 +355,9 @@ struct Plan {
 
 /// Checks that the statements for `view` can be built: `BadParams` when not.
 fn check(info: &TableInfo, view: &PageView, last: bool) -> Result<(), EngineError> {
-    page_sql(info, &view.applied, view.sort.as_ref(), view.page).map_err(sql_bad)?;
+    page_sql(Dialect::Postgres, info, &view.applied, view.sort.as_ref(), view.page).map_err(sql_bad)?;
     if last {
-        count_sql(info, &view.applied).map_err(sql_bad)?;
+        count_sql(Dialect::Postgres, info, &view.applied).map_err(sql_bad)?;
     }
     Ok(())
 }
@@ -411,7 +412,7 @@ async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool
     let mut page = view.page;
     let mut counted = None;
     if last {
-        let rows = match count_sql(info, &view.applied) {
+        let rows = match count_sql(Dialect::Postgres, info, &view.applied) {
             Ok(sql) => scalar_u64(conn, &sql).await,
             // Built once already, before the job started.
             Err(e) => Err(PgError::Other(e.to_string())),
@@ -424,7 +425,7 @@ async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool
             Err(e) => return Loaded { counted, page: Err(e) },
         }
     }
-    let rows = match page_sql(info, &view.applied, view.sort.as_ref(), page) {
+    let rows = match page_sql(Dialect::Postgres, info, &view.applied, view.sort.as_ref(), page) {
         Ok(sql) => run_untyped(conn, &sql, PAGE_LIMITS).await,
         Err(e) => Err(PgError::Other(e.to_string())),
     };
@@ -708,7 +709,7 @@ fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let (tab, condition) = (t.id, t.applied.clone());
     let catalog = catalog(s)?;
     let info = lookup(&catalog, &t.table)?;
-    let sql = count_sql(info, &condition).map_err(sql_bad)?;
+    let sql = count_sql(Dialect::Postgres, info, &condition).map_err(sql_bad)?;
     let estimate = quick_estimate(info, &condition);
     let conn = s.browse()?;
     let job_conn = Arc::clone(&conn);

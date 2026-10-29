@@ -880,7 +880,9 @@ fn filters_on_length_types_compare_as_postgres_does() {
             s.state().connected.as_ref().unwrap().catalog.table(&dbee_core::TableRef { schema: "scratch".into(), name: t.clone() }).cloned().unwrap();
         for (column, value) in [("c", "ab"), ("b", "10")] {
             let filter = dbee_sql::filter::Filter { column: column.into(), op: dbee_sql::filter::Op::Eq, value: value.into() };
-            let cond = dbee_sql::filter::where_sql(&dbee_sql::filter::Condition::Filters(vec![filter]), &info).unwrap().unwrap();
+            let cond = dbee_sql::filter::where_sql(dbee_sql::Dialect::Postgres, &dbee_sql::filter::Condition::Filters(vec![filter]), &info)
+                .unwrap()
+                .unwrap();
             let plan = q(&format!("SET enable_seqscan = off; EXPLAIN (COSTS OFF) SELECT id FROM scratch.{t} WHERE {cond}"));
             assert!(plan.contains("Index") && !plan.contains("Seq Scan"), "{on}: {cond}: {plan}");
         }

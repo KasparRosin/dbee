@@ -46,8 +46,7 @@ pub enum Generated {
 #[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
     pub name: String,
-    /// `format_type` output: the type as the server names it, used in key casts (values use
-    /// [`write_type_sql`](Self::write_type_sql)).
+    /// `format_type` output: the type as the server names it, used in key casts.
     pub type_sql: String,
     /// The engine's own base type name (Postgres `pg_type.typname`), read only by that engine's
     /// dialect and driver.
@@ -68,27 +67,6 @@ impl ColumnInfo {
     /// Clearing a text cell stages `''`; any other class stages NULL.
     pub fn clears_to_null(&self) -> bool {
         !matches!(self.class, TypeClass::Text | TypeClass::LongText)
-    }
-
-    /// The type a value to write is cast to. Postgres defines an explicit cast to
-    /// `varchar(n)`, `char(n)` and `bit varying(n)` as cutting the value to the length, and to
-    /// `bit(n)` as cutting or padding it, without an error; only the assignment to the column (or
-    /// to a domain over such a type) refuses a value that does not fit. So these, their arrays
-    /// and domains over them are cast to the type without its length: `text`, `bit varying`,
-    /// `text[]` or `bit varying[]`. Every other type is cast to [`type_sql`](Self::type_sql)
-    /// itself. A key value the server sent fits its column, so key comparisons keep `type_sql`.
-    /// Filters use these types too, except for `char(n)`, `bit(n)` and the arrays of
-    /// `varchar(n)`, `char(n)` and `bit(n)`, which they compare as `bpchar`, `"bit"`,
-    /// `character varying[]`, `bpchar[]` and `"bit"[]` to keep the column's operators and indexes
-    /// (`dbee_sql::filter`).
-    pub fn write_type_sql(&self) -> &str {
-        match self.base_type.as_str() {
-            "varchar" | "bpchar" => "text",
-            "bit" | "varbit" => "bit varying",
-            "_varchar" | "_bpchar" => "text[]",
-            "_bit" | "_varbit" => "bit varying[]",
-            _ => &self.type_sql,
-        }
     }
 
     /// Why the column's cells cannot be edited, or `None` when they can: Postgres computes the
@@ -343,36 +321,6 @@ mod tests {
         j.as_object_mut().unwrap().remove("generated");
         assert_eq!(serde_json::from_value::<ColumnInfo>(j).unwrap().generated, Generated::No);
         assert_eq!(serde_json::to_value(Generated::Identity).unwrap(), "identity");
-    }
-
-    #[test]
-    fn write_type_drops_the_lengths_an_explicit_cast_cuts_to() {
-        let typed = |base: &str, type_sql: &str| ColumnInfo { type_sql: type_sql.into(), base_type: base.into(), ..col("x", false) };
-        for (base, type_sql, write) in [
-            ("varchar", "character varying(10)", "text"),
-            ("varchar", "character varying", "text"),
-            ("bpchar", "character(2)", "text"),
-            ("bit", "bit(2)", "bit varying"),
-            ("varbit", "bit varying(2)", "bit varying"),
-            ("_varchar", "character varying(3)[]", "text[]"),
-            ("_bpchar", "character(2)[]", "text[]"),
-            ("_bit", "bit(2)[]", "bit varying[]"),
-            ("_varbit", "bit varying(2)[]", "bit varying[]"),
-            // A domain over varchar(5): the base type decides, the assignment to the column checks the domain.
-            ("varchar", "scratch.d5", "text"),
-            // Everything else is written as its own type.
-            ("text", "text", "text"),
-            ("int4", "integer", "integer"),
-            ("numeric", "numeric(12,2)", "numeric(12,2)"),
-            ("timestamp", "timestamp(3) without time zone", "timestamp(3) without time zone"),
-            ("char", "\"char\"", "\"char\""),
-            ("_text", "text[]", "text[]"),
-            ("order_status", "shop.order_status", "shop.order_status"),
-        ] {
-            let c = typed(base, type_sql);
-            assert_eq!(c.write_type_sql(), write, "{base} {type_sql}");
-            assert_eq!(c.type_sql, type_sql, "the type itself is unchanged");
-        }
     }
 
     #[test]

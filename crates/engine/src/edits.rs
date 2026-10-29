@@ -39,6 +39,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dbee_core::{ColumnInfo, ResultSet, TableInfo};
+use dbee_sql::Dialect;
 use dbee_sql::SqlError;
 use dbee_sql::edit::{NewValue, delete_sql, insert_sql, update_sql};
 
@@ -214,14 +215,14 @@ impl Edits {
             }
         }
         for (row, changes) in changed {
-            out.push((row, update_sql(info, &key_of(row)?, &changes)?));
+            out.push((row, update_sql(Dialect::Postgres, info, &key_of(row)?, &changes)?));
         }
         for (i, values) in self.new_rows.iter().enumerate() {
             let values = values.iter().map(|(&col, v)| Ok((column(col)?, v))).collect::<Result<Vec<_>, SqlError>>()?;
-            out.push((data.rows.len().saturating_add(i), insert_sql(info, &values)?));
+            out.push((data.rows.len().saturating_add(i), insert_sql(Dialect::Postgres, info, &values)?));
         }
         for &row in &self.deleted {
-            out.push((row, delete_sql(info, &key_of(row)?)?));
+            out.push((row, delete_sql(Dialect::Postgres, info, &key_of(row)?)?));
         }
         Ok(out)
     }
