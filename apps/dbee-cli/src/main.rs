@@ -1,7 +1,7 @@
 //! `dbee-cli`: dbee without a window. Placeholder: `version` and `help` only.
 //!
 //! Packaging smoke-tests the binary with `--version`. The commands in `docs/cli.md` (`commands`,
-//! `describe`, `exec`, `run`, `mcp`, …) arrive with the engine. Exit codes: 0 ok, 1 command
+//! `describe`, `exec`, `run`, …) arrive with the engine. Exit codes: 0 ok, 1 command
 //! failed, 2 usage error.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 

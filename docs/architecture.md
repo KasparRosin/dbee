@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (Platforms: only Linux x86_64 tested so far)
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** trivial (the MCP server is not documented until it exists)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -18,7 +18,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `crates/pg` | exists | L3. The Postgres connection (tokio-postgres): TCP or a channel through the SSH tunnel, TLS with rustls (ring) and the OS certificate verifier, `application_name=dbee`, `standard_conforming_strings = on`, read-only mode, cancel requests; the catalog load (schemas, relations, columns, keys); a simple-query runner that returns values as text exactly as Postgres prints them, within row and byte caps; and the all-or-nothing apply of staged edits in one transaction. Uses `sql` for the statements it builds. |
 | `crates/engine` | exists | L5. `Session`: the session state (`state.rs`), the command registry (`cmd/*`: tabs, connection, schema, table, edit, query, selection), background jobs on a tokio runtime (`jobs.rs`), the panic guard and the journal; staged edits with undo and redo (`edits.rs`), the quick search's scoring (`fuzzy.rs`), the grid a selection addresses and the value view (`view.rs`), and an isolated run's allowed targets (`allowed.rs`). |
 | `crates/ui-egui` | exists | L6. The egui UI and the control channel: the app shell (`DbeeApp`), theme, code-drawn icons, automation ids, shortcuts, UI-only commands, the connection screen (saved and recent lists, the connection form), the workspace (a menu bar built from the commands' menu paths, the schema tree, the tabs strip, the status bar, the quick search), the table tab (the data grid with its inline cell editors, the filter bar, the paging bar), the value panel (the selected cell's whole value, JSON pretty-printed and coloured), the query tab (an SQL editor with line numbers and syntax colours, run and cancel, read-only result sets with a selector and the cap notice, error cards), copying grid cells (Ctrl+C, Ctrl+Shift+C and the grid menu's formats, through `clipboard.copy`, with a "Copied n rows" notice; the system clipboard, or an in-memory one for isolated runs), the connection form's file pickers (rfd on a thread of its own, so the UI never waits) and the dialogs a command's `needs…` answer opens. |
-| `crates/mcp` | exists, empty | L6. MCP server over stdio. |
+| `crates/mcp` | exists, empty | L6. Reserved for an MCP server. |
 | `apps/dbee` | exists | L7. Desktop binary: sets up the logger (standard error and `<settings dir>/logs/dbee.log`, levels from `RUST_LOG`) and, on Windows, the graphics start-up; reads `--version`, `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE`, `DBEE_CLIPBOARD` (`memory`: copies and cuts stay in the app, for isolated runs), `DBEE_NO_PREFS` and `DBEE_ALLOW_TARGETS` (an isolated run's allowed connection targets), builds the session's options and runs `DbeeApp`. `tests/m1_day.rs` drives the real window through the M1 day (run by hand). |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
 | `xtask` | exists | Exempt from layering. `ci`, `assets`, `layers`, `licenses`, `provenance`, `testdb`, `run-isolated`, `version`, `stats`, `ico`, `icns`, `contributors`. `xtask/testdb/` holds the test servers' compose file, tools image and seed. |
@@ -55,7 +55,6 @@ A crate may depend only on lower layers. Register every new crate in `xtask/src/
 
 - Control channel: `dbee --control <port>`, JSON lines on `127.0.0.1`: [`control-protocol.md`](control-protocol.md). `cargo xtask run-isolated` runs the app with it on a throwaway home.
 - CLI **(planned)**: [`cli.md`](cli.md).
-- MCP **(planned)**: `dbee-cli mcp`, headless or bridged to a running app: [`mcp.md`](mcp.md).
 
 ## Platforms
 
@@ -69,6 +68,7 @@ M1's crates are all in place. Postgres is the only engine, and the engine calls 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | trivial | The MCP server is not documented until it exists. |
 | 2026-10-27 | trivial | Platforms: only Linux x86_64 built and run so far |
 | 2026-10-26 | minor | Checked against the crates at the end of M1: `core` (JSON), `sql` (filters, page and edit statements), `pg` (catalog, caps, apply), the engine's modules, the UI's file pickers, the app's logger, `run-isolated`, `m1_day`; the data flow for tables, edits and queries; the planned driver interface |
 | 2026-10-26 | minor | `crates/ui-egui`: copying to the clipboard ("Copied n rows", grid clicks take the keyboard, the in-memory clipboard of isolated runs); `copy.selection` copies at most 8 MiB of text, everything counted |

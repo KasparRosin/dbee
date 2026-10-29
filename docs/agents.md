@@ -1,18 +1,12 @@
 # Agents
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (§7: undocumented behaviour is recorded in the module docs, not in crate READMEs)
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (the MCP server section is removed until the server exists)
 
 dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
 
 # Part 1: driving dbee
 
-The control channel (§2) and the isolated runs for checking UI work (§4) exist. The MCP server (§1) and the command line (§3) are **(planned)**, documented first so the implementation has a contract to meet; today `dbee-cli` prints its version.
-
-## 1. MCP server (planned)
-
-`dbee-cli mcp` serves MCP on stdio, headless (`--demo`, a seeded in-memory SQLite database) or bridged to a running app (`--bridge HOST:PORT`). The core tools `command_list`, `command_run`, `command_batch`, `doc_inspect` and `render_preview` work in both modes. Database tools: `connection_list`, `schema_inspect`, `query_run`, `table_read`. Bridge-only: the `ui_*` tools and `screenshot`. Full reference: [`mcp.md`](mcp.md).
-
-Typical loop: `connection_list` / `schema_inspect` to get names, `command_run` or `query_run`, `table_read` or a screenshot to look at the result, `edit.undo` if it is wrong.
+The control channel (§2) and the isolated runs for checking UI work (§4) exist. The command line (§3) is **(planned)**, documented first so the implementation has a contract to meet; today `dbee-cli` prints its version.
 
 ## 2. Control channel
 
@@ -35,7 +29,7 @@ Every command is one shell call away: `dbee-cli exec <id> k=v…`, `run <script.
 For any UI change, look at the result:
 
 1. `cargo xtask run-isolated --port 7979` (add `--release` for a release build). It builds dbee and runs it on a throwaway home, `target/isolated/<port>/home`, with the control channel on that port, in-memory secrets, an in-memory clipboard (`DBEE_CLIPBOARD=memory`: every copy and cut, a text field's too, stays in the app, and `document.inspect` shows the start of the last as `clipboard` with its length as `clipboardBytes`) and no SSH agent on Linux and macOS (on Windows the OpenSSH agent pipe is still reachable); with the Docker test servers up, that home's `.ssh` holds their test key and host key. The run may connect only to the test servers: each server's port and the sshd's, on `127.0.0.1` and `localhost`, plus `127.0.0.1:1` for error demos (`DBEE_ALLOW_TARGETS` on the child). Without `target/testdb/env.json` only `127.0.0.1:1` is allowed, and run-isolated warns. Test, open and reconnect refuse any other target before any network I/O, with an error saying this isolated run may only connect to the test servers; through an SSH tunnel the SSH server's host and port are what count.
-2. Drive the feature through the control channel (the MCP bridge is planned): commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
+2. Drive the feature through the control channel: commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
 3. Assert on `ui.inspect` and `document.inspect`.
 4. Take `ui.screenshot` (the whole window) and open the PNG; `app.quit` ends the run.
 

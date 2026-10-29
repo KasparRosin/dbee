@@ -39,7 +39,7 @@ People trust dbee with their databases; a crash can lose an unsaved query or lea
 ## Running and looking at the app
 - `cargo run -p dbee` opens the app. `DBEE_NO_PREFS=1` keeps no connections file and no log file.
 - `dbee --control <port>` serves the control channel (JSON lines on `127.0.0.1`, `docs/control-protocol.md`); `cargo xtask run-isolated` runs the app with it on a throwaway home (`docs/agents.md` §4).
-- Planned, documented before it exists: `dbee-cli mcp` (`docs/mcp.md`), the CLI commands in `docs/cli.md`.
+- Planned, documented before it exists: the CLI commands in `docs/cli.md`.
 - **For UI work, look at the result** (a screenshot of the window).
 - Parallel agents: separate `CARGO_TARGET_DIR` per agent; edit only the crates you own; delete your target dir when done.
 

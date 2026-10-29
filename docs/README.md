@@ -7,7 +7,6 @@ Start with the [README](../README.md) for what dbee is and how to build it. Agen
 - [agents.md](agents.md): driving dbee from an agent (the control channel, isolated runs) and developing dbee as one.
 - [control-protocol.md](control-protocol.md): the localhost control channel, `dbee --control <port>`, method by method.
 - [cli.md](cli.md): the command-line tool, `dbee-cli` (planned beyond `version` and `help`).
-- [mcp.md](mcp.md): the MCP server, `dbee-cli mcp` (planned).
 
 ## How dbee is built
 

@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (wording: no personal names or task ids) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** trivial (no MCP server planned in the docs) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -62,7 +62,7 @@ Features, weighted by area: **39 %**, put at **~35 % (estimated)**.
 | File formats (import/export) | 4 | 0 % | measured | none ([file-format-parity.md](file-format-parity.md)) |
 | Localization | 4 | 0 % | measured | English only ([localization-parity.md](localization-parity.md)) |
 | Platforms | 2 | ~25 % | estimated | Linux x86_64 built, packaged and run; macOS, Windows and FreeBSD not built in M1 ([hardware-parity.md](hardware-parity.md)) |
-| Ecosystem and AI | 2 | ~25 % | estimated | The localhost control channel drives every command and the window (`docs/control-protocol.md`); MCP and the CLI's database commands are planned; no AI features |
+| Ecosystem and AI | 2 | ~25 % | estimated | The localhost control channel drives every command and the window (`docs/control-protocol.md`); the CLI's database commands are planned; no AI features |
 
 Weighted: 0.40 × 35 + 0.20 × 5 + 0.12 × 45 + 0.08 × 30 + 0.08 × 25 + 0.02 × 25 + 0.02 × 25 = **25.8 %**, given as **~25 % (estimated)**.
 
@@ -100,7 +100,7 @@ Linux x86_64: built, packaged (tarball, AppImage) and started from the tarball o
 
 ## Ecosystem and AI
 
-The control channel (`dbee --control <port>`) reaches every command and drives the real window: clicks, keys, text, screenshots and inspection. The test suites and the M1 day use it. `dbee-cli mcp` and the CLI's database commands are planned ([mcp.md](mcp.md), [cli.md](cli.md)). There are no AI features in dbee (a non-goal).
+The control channel (`dbee --control <port>`) reaches every command and drives the real window: clicks, keys, text, screenshots and inspection. The test suites and the M1 day use it. The CLI's database commands are planned ([cli.md](cli.md)). There are no AI features in dbee (a non-goal).
 
 ## Stage
 
@@ -128,6 +128,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | trivial | The MCP server is no longer described until it exists. |
 | 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases, M1 review fixes, earlier runs instead of task ids. |
 | 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
 | 2026-10-27 | minor | Effort counts 59 commits for M1 (four for its last task) and five for the M1 review fixes; gaps.md 13 is now 12. |

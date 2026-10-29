@@ -34,7 +34,7 @@ Known gaps and limits are ranked in [docs/gaps.md](docs/gaps.md).
 
 - **Native and fast.** One Rust codebase, with no Electron and no browser engine.
 - **Open source.** Dual-licensed MIT or Apache-2.0, written clean-room from public specifications and black-box observation.
-- **Scriptable.** Every action is a command. The control channel reaches all of them today; a command-line tool and an MCP server are planned.
+- **Scriptable.** Every action is a command. The control channel reaches all of them today; a command-line tool is planned.
 
 ## Platforms
 
@@ -64,7 +64,7 @@ The app writes its log to `<settings dir>/logs/dbee.log`, where the settings dir
 
 ## For agents
 
-`dbee --control <port>` serves a JSON-lines control channel on `127.0.0.1`. It runs every command and drives the window: clicks, keys, inspection and screenshots ([docs/control-protocol.md](docs/control-protocol.md)). `cargo xtask run-isolated` starts the app with it on a throwaway home. The MCP server and the command-line tool's commands are planned and documented first ([docs/mcp.md](docs/mcp.md), [docs/cli.md](docs/cli.md)). Agents working on dbee start with [AGENTS.md](AGENTS.md).
+`dbee --control <port>` serves a JSON-lines control channel on `127.0.0.1`. It runs every command and drives the window: clicks, keys, inspection and screenshots ([docs/control-protocol.md](docs/control-protocol.md)). `cargo xtask run-isolated` starts the app with it on a throwaway home. The command-line tool's commands are planned and documented first ([docs/cli.md](docs/cli.md)). Agents working on dbee start with [AGENTS.md](AGENTS.md).
 
 ## Documentation
 
