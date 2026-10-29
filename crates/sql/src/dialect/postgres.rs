@@ -1,6 +1,103 @@
+//! PostgreSQL.
+
+use super::{Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, Paging, Rules, Separator, StringLiteral, Values, quoted};
+use crate::SqlError;
+use dbee_core::ColumnInfo;
+
+pub(crate) const RULES: Rules = Rules {
+    ident_quote: '"',
+    text_type: "text",
+    ilike: ILike::Native,
+    insert_defaults: InsertDefaults::DefaultValues,
+    use_database: None,
+    bool_literals: ("t", "f"),
+    op_notes: &[],
+    string_literal: StringLiteral::Quoted,
+    binary_literal: None,
+    values: Values::Cast,
+    paging: Paging::LimitOffset,
+    lex: LexRules {
+        double_quote: DoubleQuote::Ident,
+        backtick_idents: false,
+        bracket_idents: false,
+        backslash_escapes: false,
+        escape_strings: true,
+        unicode_strings: true,
+        hex_strings: false,
+        bit_strings: false,
+        hex_numbers: false,
+        dollar_quotes: true,
+        numbered_params: true,
+        dollar_idents: false,
+        hash_comment: false,
+        dash_comment_needs_space: false,
+        nested_block_comments: true,
+        separator: Separator::Semicolon,
+        bodies: Bodies::None,
+        lookahead: 4,
+    },
+    keywords: KEYWORDS,
+};
+
+/// `CAST('value' AS type_sql)`. `type_sql` comes from the server's `format_type` (or is a
+/// type without its length, from [`write_type`] or [`filter_type`]) and is used verbatim.
+fn typed(value: &str, type_sql: &str) -> Result<String, SqlError> {
+    Ok(format!("CAST({} AS {type_sql})", quoted(value, '\'')?))
+}
+
+/// A value to write, cast to [`write_type`].
+pub(super) fn value(column: &ColumnInfo, text: &str) -> Result<String, SqlError> {
+    typed(text, write_type(column))
+}
+
+/// A value of the row's key, cast to the column's own type: the server sent it, so it fits.
+pub(super) fn key_value(column: &ColumnInfo, text: &str) -> Result<String, SqlError> {
+    typed(text, &column.type_sql)
+}
+
+/// A value a filter compares the column with, cast to [`filter_type`].
+pub(super) fn filter_value(column: &ColumnInfo, text: &str) -> Result<String, SqlError> {
+    typed(text, filter_type(column))
+}
+
+/// The type a value to write is cast to. Postgres defines an explicit cast to
+/// `varchar(n)`, `char(n)` and `bit varying(n)` as cutting the value to the length, and to
+/// `bit(n)` as cutting or padding it, without an error; only the assignment to the column (or
+/// to a domain over such a type) refuses a value that does not fit. So these, their arrays
+/// and domains over them are cast to the type without its length: `text`, `bit varying`,
+/// `text[]` or `bit varying[]`. Every other type is cast to `type_sql` itself. A key value the
+/// server sent fits its column, so key comparisons keep `type_sql`.
+fn write_type(column: &ColumnInfo) -> &str {
+    match column.base_type.as_str() {
+        "varchar" | "bpchar" => "text",
+        "bit" | "varbit" => "bit varying",
+        "_varchar" | "_bpchar" => "text[]",
+        "_bit" | "_varbit" => "bit varying[]",
+        _ => &column.type_sql,
+    }
+}
+
+/// The type a filter value is cast to: the column's type without its length, so that a value
+/// longer than the length matches nothing instead of the rows its cut prefix would match, chosen
+/// to keep the column's own operators, and so its indexes: `char(n)` compares as `bpchar`
+/// (trailing spaces do not count, as for the column), `bit(n)` as `"bit"` (quoted: a bare `bit`
+/// means `bit(1)`), and arrays of `varchar(n)`, `char(n)` and `bit(n)` as `character varying[]`,
+/// `bpchar[]` and `"bit"[]` (no operator compares them with `text[]` or `bit varying[]`). The
+/// others are [`write_type`]: `varchar(n)` as `text`, whose indexes it uses.
+fn filter_type(column: &ColumnInfo) -> &str {
+    match column.base_type.as_str() {
+        "bpchar" => "bpchar",
+        "bit" => "\"bit\"",
+        "_varchar" => "character varying[]",
+        "_bpchar" => "bpchar[]",
+        "_bit" => "\"bit\"[]",
+        _ => write_type(column),
+    }
+}
+
 /// Common PostgreSQL keywords (reserved and non-reserved, from the SQL Key Words appendix of the
 /// PostgreSQL documentation), lowercase and sorted so `binary_search` works.
-pub(super) static KEYWORDS: &[&str] = &[
+static KEYWORDS: &[&str] = &[
     "abort",
     "absolute",
     "access",
@@ -435,5 +532,54 @@ pub(super) static KEYWORDS: &[&str] = &[
     "zone",
 ];
 
-/// The longest word of the list.
-pub(super) const LONGEST: usize = super::longest(KEYWORDS);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dbee_core::TypeClass;
+
+    fn column(type_sql: &str, base: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: "x".into(),
+            type_sql: type_sql.into(),
+            base_type: base.into(),
+            class: TypeClass::Other,
+            not_null: false,
+            has_default: false,
+            generated: Default::default(),
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn typed_casts_a_literal() {
+        assert_eq!(typed("42", "integer").unwrap(), "CAST('42' AS integer)");
+        assert_eq!(typed("a\0", "text"), Err(SqlError::Nul));
+    }
+
+    #[test]
+    fn write_type_drops_the_lengths_an_explicit_cast_cuts_to() {
+        for (base, type_sql, write) in [
+            ("varchar", "character varying(10)", "text"),
+            ("varchar", "character varying", "text"),
+            ("bpchar", "character(2)", "text"),
+            ("bit", "bit(2)", "bit varying"),
+            ("varbit", "bit varying(2)", "bit varying"),
+            ("_varchar", "character varying(3)[]", "text[]"),
+            ("_bpchar", "character(2)[]", "text[]"),
+            ("_bit", "bit(2)[]", "bit varying[]"),
+            ("_varbit", "bit varying(2)[]", "bit varying[]"),
+            // A domain over varchar(5): the base type decides, the assignment to the column checks the domain.
+            ("varchar", "scratch.d5", "text"),
+            // Everything else is written as its own type.
+            ("text", "text", "text"),
+            ("int4", "integer", "integer"),
+            ("numeric", "numeric(12,2)", "numeric(12,2)"),
+            ("timestamp", "timestamp(3) without time zone", "timestamp(3) without time zone"),
+            ("char", "\"char\"", "\"char\""),
+            ("_text", "text[]", "text[]"),
+            ("order_status", "shop.order_status", "shop.order_status"),
+        ] {
+            assert_eq!(write_type(&column(type_sql, base)), write, "{base} {type_sql}");
+        }
+    }
+}

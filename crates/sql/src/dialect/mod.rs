@@ -1,7 +1,9 @@
-//! The SQL text differences between Postgres, MySQL (and MariaDB) and SQLite, in one place.
+//! The SQL text differences between engines. Each engine's file holds its [`Rules`], and
+//! [`Dialect::rules`] is the one place a dialect is matched on.
 
+use crate::SqlError;
 use crate::filter::Op;
-use crate::{SqlError, quote};
+use crate::lexer::Token;
 use dbee_core::{ColumnInfo, TableRef, TypeClass};
 use serde::{Deserialize, Serialize};
 
@@ -9,23 +11,213 @@ mod mysql;
 mod postgres;
 mod sqlite;
 
-/// The length of the longest word of a keyword list.
-const fn longest(words: &[&str]) -> usize {
-    let (mut most, mut k) = (0, 0);
-    while k < words.len() {
-        if words[k].len() > most {
-            most = words[k].len();
-        }
-        k += 1;
-    }
-    most
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dialect {
     Postgres,
     MySql,
     Sqlite,
+}
+
+impl Dialect {
+    pub const ALL: [Dialect; 3] = [Dialect::Postgres, Dialect::MySql, Dialect::Sqlite];
+
+    /// The engine's rules: the one `match` on a dialect, besides the guard below.
+    pub(crate) fn rules(self) -> &'static Rules {
+        match self {
+            Dialect::Postgres => &postgres::RULES,
+            Dialect::MySql => &mysql::RULES,
+            Dialect::Sqlite => &sqlite::RULES,
+        }
+    }
+}
+
+// Names every variant, so a new one fails to compile here until `Dialect::ALL` lists it too.
+const _: () = match Dialect::Postgres {
+    Dialect::Postgres | Dialect::MySql | Dialect::Sqlite => {}
+};
+
+/// How one engine writes and reads SQL. Each engine's `RULES` names every field.
+pub(crate) struct Rules {
+    /// The quote around an identifier; one inside it is doubled.
+    pub ident_quote: char,
+    /// The type [`Dialect::as_text`] casts to.
+    pub text_type: &'static str,
+    pub ilike: ILike,
+    /// How an insert gives every column its default.
+    pub insert_defaults: InsertDefaults,
+    /// The statement that makes a database current, `{}` standing for its quoted name.
+    pub use_database: Option<&'static str>,
+    /// The texts a Bool column writes for true and false.
+    pub bool_literals: (&'static str, &'static str),
+    /// What filter operators do on the engine that their labels do not say.
+    pub op_notes: &'static [(&'static [Op], &'static str)],
+    pub string_literal: StringLiteral,
+    /// How a binary value is written where values are literals; `None` writes it as text.
+    pub binary_literal: Option<BinaryLiteral>,
+    /// How a value for a column is written.
+    pub values: Values,
+    /// How a page of rows is asked for.
+    pub paging: Paging,
+    pub lex: LexRules,
+    /// The keywords for highlighting: lowercase, sorted, unique.
+    pub keywords: &'static [&'static str],
+}
+
+/// What the lexer reads: features, never the engine's name.
+pub(crate) struct LexRules {
+    /// What `"…"` quotes.
+    pub double_quote: DoubleQuote,
+    /// `` `…` `` quotes an identifier.
+    pub backtick_idents: bool,
+    /// `[…]` quotes an identifier, up to the first `]`.
+    pub bracket_idents: bool,
+    /// A backslash in a string escapes the character after it.
+    pub backslash_escapes: bool,
+    /// `E'…'` strings, whose backslashes escape.
+    pub escape_strings: bool,
+    /// `U&'…'` strings and `U&"…"` identifiers.
+    pub unicode_strings: bool,
+    /// `X'…'` hex strings.
+    pub hex_strings: bool,
+    /// `B'…'` bit strings.
+    pub bit_strings: bool,
+    /// `0x…` hex numbers.
+    pub hex_numbers: bool,
+    /// `$tag$…$tag$` strings.
+    pub dollar_quotes: bool,
+    /// `$1` parameters.
+    pub numbered_params: bool,
+    /// `$` may start an identifier.
+    pub dollar_idents: bool,
+    /// `#` starts a line comment, so it is no operator.
+    pub hash_comment: bool,
+    /// `--` starts a comment only before a space, a control character or the end of the text.
+    pub dash_comment_needs_space: bool,
+    /// `/* … */` comments nest.
+    pub nested_block_comments: bool,
+    pub separator: Separator,
+    pub bodies: Bodies,
+    /// How far past a token's end the lexer may read to decide it, with one byte to spare: a
+    /// number reads three bytes (`1e+` and no digit), an operator two (three when `--` needs a
+    /// space), a `U` or a `0` two (`U&'`, `0x` and a hex digit), all else one. A lone `$` reads
+    /// further where dollar quotes exist ([`crate::lexer::reach`]).
+    pub lookahead: usize,
+}
+
+/// How `ilike` and `not ilike` are written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ILike {
+    /// `ILIKE`, `NOT ILIKE`.
+    Native,
+    /// `LOWER(…) LIKE LOWER(…)`.
+    LowerLike,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InsertDefaults {
+    /// `INSERT INTO t DEFAULT VALUES`.
+    DefaultValues,
+    /// `INSERT INTO t () VALUES ()`.
+    EmptyLists,
+}
+
+/// How a string literal is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StringLiteral {
+    /// `'…'` with `'` doubled; a backslash is a plain character.
+    Quoted,
+    /// As `Quoted`, but hex when the value holds a backslash, which may or may not escape.
+    HexForBackslash,
+}
+
+/// The hex form of a binary literal; a binary value to write comes as text in the same form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BinaryLiteral {
+    /// `0x…`, and `X''` for no bytes.
+    ZeroX,
+    /// `X'…'`.
+    XQuoted,
+}
+
+/// How a value for a column is written; the logic for each is in its engine's file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Values {
+    /// `CAST('…' AS type)`, the type picked from the column (Postgres).
+    Cast,
+    /// A literal.
+    Literal,
+    /// A literal, but a plain decimal for a number column bare (SQLite).
+    BareNumbers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Paging {
+    /// `LIMIT n OFFSET m`.
+    LimitOffset,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DoubleQuote {
+    Ident,
+    String,
+}
+
+/// What ends a statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Separator {
+    /// `;`.
+    Semicolon,
+    /// `;`, or what a `DELIMITER` line sets.
+    DelimiterCommand,
+}
+
+/// Which statements have a body whose `BEGIN … END` keeps its `;`s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Bodies {
+    None,
+    /// Procedures, functions, triggers and events, their bodies compound statements (MySQL).
+    Compound,
+    /// Triggers, their bodies plain statements (SQLite).
+    TriggerOnly,
+}
+
+/// The body of the statement being split, counting its blocks.
+pub(crate) enum Body {
+    /// No body, or one whose `;`s end the statement.
+    Plain,
+    Compound(mysql::Compound),
+    Trigger(sqlite::Trigger),
+}
+
+impl Bodies {
+    /// The body of the statement whose first token is `toks[k]`.
+    pub(crate) fn body(self, sql: &str, toks: &[Token], k: usize) -> Body {
+        match self {
+            Bodies::Compound if mysql::routine_header(sql, toks, k) => Body::Compound(mysql::Compound::default()),
+            Bodies::TriggerOnly if sqlite::trigger_header(sql, toks, k) => Body::Trigger(sqlite::Trigger::default()),
+            Bodies::None | Bodies::Compound | Bodies::TriggerOnly => Body::Plain,
+        }
+    }
+}
+
+impl Body {
+    /// The blocks open: a `;` ends the statement only when there are none.
+    pub(crate) fn depth(&self) -> usize {
+        match self {
+            Body::Plain => 0,
+            Body::Compound(c) => c.depth,
+            Body::Trigger(t) => t.depth,
+        }
+    }
+
+    /// Reads `toks[k]`, the statement's next significant token.
+    pub(crate) fn step(&mut self, sql: &str, toks: &[Token], k: usize) {
+        match self {
+            Body::Plain => {}
+            Body::Compound(c) => c.step(sql, toks, k),
+            Body::Trigger(t) => t.step(sql, toks, k),
+        }
+    }
 }
 
 fn no_nul(s: &str) -> Result<(), SqlError> {
@@ -47,49 +239,36 @@ fn quoted(s: &str, close: char) -> Result<String, SqlError> {
     Ok(out)
 }
 
-/// The hex digits of `0x…` (MySQL) or `X'…'` (SQLite), as an even number of them.
-fn hex_digits(text: &str, sqlite: bool) -> Result<&str, SqlError> {
-    let digits = if sqlite {
-        text.strip_prefix(['X', 'x']).and_then(|t| t.strip_prefix('\'')).and_then(|t| t.strip_suffix('\''))
-    } else {
-        text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
-    };
-    digits.filter(|d| d.len() % 2 == 0 && d.bytes().all(|b| b.is_ascii_hexdigit())).ok_or(SqlError::BadBinary)
-}
-
-fn is_plain_decimal(text: &str) -> bool {
-    let t = text.strip_prefix('-').unwrap_or(text);
-    let (int, frac) = t.split_once('.').map_or((t, None), |(i, f)| (i, Some(f)));
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    digits(int) && frac.is_none_or(digits)
+impl BinaryLiteral {
+    /// The literal of `text`, a value written in this form with an even number of hex digits.
+    fn of(self, text: &str) -> Result<String, SqlError> {
+        let digits = match self {
+            BinaryLiteral::ZeroX => text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")),
+            BinaryLiteral::XQuoted => text.strip_prefix(['X', 'x']).and_then(|t| t.strip_prefix('\'')).and_then(|t| t.strip_suffix('\'')),
+        };
+        let digits = digits.filter(|d| d.len() % 2 == 0 && d.bytes().all(|b| b.is_ascii_hexdigit())).ok_or(SqlError::BadBinary)?;
+        Ok(match self {
+            BinaryLiteral::ZeroX if digits.is_empty() => "X''".to_string(),
+            BinaryLiteral::ZeroX => format!("0x{digits}"),
+            BinaryLiteral::XQuoted => format!("X'{digits}'"),
+        })
+    }
 }
 
 impl Dialect {
     /// The engine's keywords for highlighting: lowercase, sorted, unique.
     pub fn keywords(self) -> &'static [&'static str] {
-        match self {
-            Dialect::Postgres => postgres::KEYWORDS,
-            Dialect::MySql => mysql::KEYWORDS,
-            Dialect::Sqlite => sqlite::KEYWORDS,
-        }
+        self.rules().keywords
     }
 
     /// True when `word` is one of the engine's keywords, in any case.
     pub fn is_keyword(self, word: &str) -> bool {
-        let longest = match self {
-            Dialect::Postgres => postgres::LONGEST,
-            Dialect::MySql => mysql::LONGEST,
-            Dialect::Sqlite => sqlite::LONGEST,
-        };
-        if word.len() > longest || !word.is_ascii() {
-            return false;
-        }
-        self.keywords().binary_search(&word.to_ascii_lowercase().as_str()).is_ok()
+        self.rules().keywords.binary_search_by(|k| k.bytes().cmp(word.bytes().map(|b| b.to_ascii_lowercase()))).is_ok()
     }
 
-    /// `"name"` (Postgres, SQLite) or `` `name` `` (MySQL), the quote character doubled. NUL is an error.
+    /// `"name"` or `` `name` ``, the engine's quote doubled inside it. NUL is an error.
     pub fn ident(self, name: &str) -> Result<String, SqlError> {
-        quoted(name, if self == Dialect::MySql { '`' } else { '"' })
+        quoted(name, self.rules().ident_quote)
     }
 
     /// `schema.name`, both quoted (SQLite's schema is `main`).
@@ -101,156 +280,117 @@ impl Dialect {
     /// `standard_conforming_strings`. MySQL may or may not escape them, so a value with one is
     /// hex. NUL is an error.
     pub fn literal(self, value: &str) -> Result<String, SqlError> {
-        if self == Dialect::MySql && value.contains('\\') {
-            no_nul(value)?;
-            let hex: String = value.bytes().map(|b| format!("{b:02X}")).collect();
-            return Ok(format!("_utf8mb4 X'{hex}'"));
+        match self.rules().string_literal {
+            StringLiteral::Quoted => quoted(value, '\''),
+            StringLiteral::HexForBackslash => mysql::literal(value),
         }
-        quoted(value, '\'')
     }
 
     /// A value to write into the column.
     pub fn value(self, column: &ColumnInfo, text: &str) -> Result<String, SqlError> {
-        match self {
-            Dialect::Postgres => quote::typed(text, pg_write_type(column)),
-            Dialect::MySql if column.class == TypeClass::Binary => {
-                let digits = hex_digits(text, false)?;
-                Ok(if digits.is_empty() { "X''".to_string() } else { format!("0x{digits}") })
-            }
-            Dialect::Sqlite if column.class == TypeClass::Binary => Ok(format!("X'{}'", hex_digits(text, true)?)),
-            Dialect::Sqlite if column.class == TypeClass::Number && is_plain_decimal(text) => Ok(text.to_string()),
-            Dialect::MySql | Dialect::Sqlite => self.literal(text),
+        let rules = self.rules();
+        match (rules.values, rules.binary_literal) {
+            (Values::Cast, _) => postgres::value(column, text),
+            (_, Some(form)) if column.class == TypeClass::Binary => form.of(text),
+            (Values::BareNumbers, _) if sqlite::is_bare_number(column, text) => Ok(text.to_string()),
+            (Values::Literal | Values::BareNumbers, _) => self.literal(text),
         }
     }
 
     /// A value of the row's key, which the server sent.
     pub fn key_value(self, column: &ColumnInfo, text: &str) -> Result<String, SqlError> {
-        match self {
-            Dialect::Postgres => quote::typed(text, &column.type_sql),
-            _ => self.value(column, text),
+        match self.rules().values {
+            Values::Cast => postgres::key_value(column, text),
+            Values::Literal | Values::BareNumbers => self.value(column, text),
         }
     }
 
     /// A value a filter compares the column with.
     pub fn filter_value(self, column: &ColumnInfo, text: &str) -> Result<String, SqlError> {
-        match self {
-            Dialect::Postgres => quote::typed(text, pg_filter_type(column)),
-            _ => self.value(column, text),
+        match self.rules().values {
+            Values::Cast => postgres::filter_value(column, text),
+            Values::Literal | Values::BareNumbers => self.value(column, text),
         }
     }
 
     /// `expr` as text.
     pub fn as_text(self, expr: &str) -> String {
-        let ty = match self {
-            Dialect::Postgres => "text",
-            Dialect::MySql => "CHAR",
-            Dialect::Sqlite => "TEXT",
-        };
-        format!("CAST({expr} AS {ty})")
+        format!("CAST({expr} AS {})", self.rules().text_type)
     }
 
     /// A pattern filter on the column's text: `like`, `not like`, `ilike` or `not ilike`.
     pub fn like(self, op: Op, column_sql: &str, pattern_sql: &str) -> String {
         let text = self.as_text(column_sql);
-        match (self, op) {
-            (Dialect::MySql | Dialect::Sqlite, Op::ILike | Op::NotILike) => {
+        match (self.rules().ilike, op) {
+            (ILike::LowerLike, Op::ILike | Op::NotILike) => {
                 let not = if op == Op::NotILike { "NOT " } else { "" };
                 format!("LOWER({text}) {not}LIKE LOWER({pattern_sql})")
             }
-            _ => format!("{text} {} {pattern_sql}", op.symbol()),
+            (ILike::Native | ILike::LowerLike, _) => format!("{text} {} {pattern_sql}", op.symbol()),
         }
     }
 
     /// An insert that gives every column its default.
     pub fn insert_defaults(self, table_sql: &str) -> String {
-        match self {
-            Dialect::MySql => format!("INSERT INTO {table_sql} () VALUES ()"),
-            _ => format!("INSERT INTO {table_sql} DEFAULT VALUES"),
+        match self.rules().insert_defaults {
+            InsertDefaults::DefaultValues => format!("INSERT INTO {table_sql} DEFAULT VALUES"),
+            InsertDefaults::EmptyLists => format!("INSERT INTO {table_sql} () VALUES ()"),
         }
     }
 
     /// The statement that makes `name` the current database, on engines that have one.
     pub fn use_database(self, name: &str) -> Result<Option<String>, SqlError> {
-        match self {
-            Dialect::MySql => Ok(Some(format!("USE {}", self.ident(name)?))),
-            _ => Ok(None),
-        }
+        self.rules().use_database.map(|template| Ok(template.replacen("{}", &self.ident(name)?, 1))).transpose()
     }
 
     /// The texts a Bool column writes for true and false.
     pub fn bool_literals(self) -> (&'static str, &'static str) {
-        match self {
-            Dialect::Postgres => ("t", "f"),
-            _ => ("1", "0"),
-        }
+        self.rules().bool_literals
     }
 
     /// What a filter operator does on this engine that the label does not say.
     pub fn op_note(self, op: Op) -> Option<&'static str> {
-        match (self, op) {
-            (Dialect::MySql, Op::Eq | Op::Ne | Op::Like | Op::NotLike) => {
-                Some("Compares by the column's collation; most ignore upper and lower case.")
-            }
-            (Dialect::Sqlite, Op::Like | Op::NotLike) => Some("Ignores upper and lower case for A–Z only."),
-            _ => None,
-        }
-    }
-}
-
-/// The type a value to write is cast to. Postgres defines an explicit cast to
-/// `varchar(n)`, `char(n)` and `bit varying(n)` as cutting the value to the length, and to
-/// `bit(n)` as cutting or padding it, without an error; only the assignment to the column (or
-/// to a domain over such a type) refuses a value that does not fit. So these, their arrays
-/// and domains over them are cast to the type without its length: `text`, `bit varying`,
-/// `text[]` or `bit varying[]`. Every other type is cast to `type_sql` itself. A key value the
-/// server sent fits its column, so key comparisons keep `type_sql`.
-fn pg_write_type(column: &ColumnInfo) -> &str {
-    match column.base_type.as_str() {
-        "varchar" | "bpchar" => "text",
-        "bit" | "varbit" => "bit varying",
-        "_varchar" | "_bpchar" => "text[]",
-        "_bit" | "_varbit" => "bit varying[]",
-        _ => &column.type_sql,
-    }
-}
-
-/// The type a filter value is cast to: the column's type without its length, so that a value
-/// longer than the length matches nothing instead of the rows its cut prefix would match, chosen
-/// to keep the column's own operators, and so its indexes: `char(n)` compares as `bpchar`
-/// (trailing spaces do not count, as for the column), `bit(n)` as `"bit"` (quoted: a bare `bit`
-/// means `bit(1)`), and arrays of `varchar(n)`, `char(n)` and `bit(n)` as `character varying[]`,
-/// `bpchar[]` and `"bit"[]` (no operator compares them with `text[]` or `bit varying[]`). The
-/// others are [`pg_write_type`]: `varchar(n)` as `text`, whose indexes it uses.
-fn pg_filter_type(column: &ColumnInfo) -> &str {
-    match column.base_type.as_str() {
-        "bpchar" => "bpchar",
-        "bit" => "\"bit\"",
-        "_varchar" => "character varying[]",
-        "_bpchar" => "bpchar[]",
-        "_bit" => "\"bit\"[]",
-        _ => pg_write_type(column),
+        self.rules().op_notes.iter().find(|(ops, _)| ops.contains(&op)).map(|&(_, note)| note)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edit::{NewValue, delete_sql, insert_sql, update_sql};
+    use crate::filter::{Condition, Filter, where_sql};
+    use crate::select::{count_sql, page_sql};
+    use dbee_core::{RelKind, TableInfo};
+    use proptest::prelude::*;
 
     #[test]
-    fn keyword_lists_are_lowercase_sorted_and_unique() {
-        for d in ALL {
-            let list = d.keywords();
+    fn rules_are_consts_per_engine() {
+        for d in Dialect::ALL {
+            let list = d.rules().keywords;
+            assert_eq!(d.keywords(), list, "{d:?}");
             assert!(list.windows(2).all(|w| w[0] < w[1]), "{d:?} must be sorted and unique");
             assert!(list.iter().all(|k| k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')), "{d:?}");
-            for k in ["select", "from", "where", "join", "insert", "update", "delete"] {
+            for k in ["select", "from", "where", "join", "insert", "update", "delete", "limit"] {
                 assert!(list.binary_search(&k).is_ok(), "{d:?} {k}");
             }
         }
     }
 
     #[test]
+    fn is_keyword_ignores_case_without_a_cap() {
+        let long = "x".repeat(10_000);
+        for d in Dialect::ALL {
+            assert!(d.is_keyword("SELECT") && d.is_keyword("select") && d.is_keyword("SeLeCt"), "{d:?}");
+            assert_eq!(d.is_keyword("master_ssl_verify_server_cert"), d == Dialect::MySql, "{d:?}");
+            assert_eq!(d.is_keyword("MASTER_SSL_VERIFY_SERVER_CERT"), d == Dialect::MySql, "{d:?}");
+            assert!(!d.is_keyword(&long) && !d.is_keyword(&format!("select{long}")), "{d:?}");
+            assert!(!d.is_keyword("") && !d.is_keyword("sélect") && !d.is_keyword("selec"), "{d:?}");
+        }
+    }
+
+    #[test]
     fn the_longest_keyword_of_each_engine_is_found_and_longer_words_are_not() {
-        for d in ALL {
+        for d in Dialect::ALL {
             let longest = d.keywords().iter().copied().max_by_key(|k| k.len()).unwrap_or_default();
             assert!(d.is_keyword(longest) && d.is_keyword(&longest.to_ascii_uppercase()), "{d:?} {longest}");
             assert!(!d.is_keyword(&format!("{longest}x")), "{d:?}");
@@ -260,11 +400,6 @@ mod tests {
         assert!(!Dialect::Sqlite.is_keyword("master_ssl_verify_server_cert"));
         assert!(Dialect::MySql.is_keyword("accessible") && !Dialect::Postgres.is_keyword("accessible"));
     }
-    use crate::edit::{NewValue, delete_sql, insert_sql, update_sql};
-    use crate::filter::{Condition, Filter, where_sql};
-    use crate::select::{count_sql, page_sql};
-    use dbee_core::{RelKind, TableInfo};
-    use proptest::prelude::*;
 
     fn tr(schema: &str, name: &str) -> TableRef {
         TableRef { schema: schema.into(), name: name.into() }
@@ -308,8 +443,6 @@ mod tests {
         }
     }
 
-    const ALL: [Dialect; 3] = [Dialect::Postgres, Dialect::MySql, Dialect::Sqlite];
-
     #[test]
     fn postgres_output_is_unchanged() {
         let pg = Dialect::Postgres;
@@ -350,7 +483,7 @@ mod tests {
 
     #[test]
     fn nul_is_refused_everywhere() {
-        for d in ALL {
+        for d in Dialect::ALL {
             assert_eq!(d.ident("a\0"), Err(SqlError::Nul));
             assert_eq!(d.literal("a\0"), Err(SqlError::Nul));
             assert_eq!(d.value(&txt("n"), "a\0"), Err(SqlError::Nul));
@@ -360,7 +493,7 @@ mod tests {
 
     #[test]
     fn literals_double_quotes_and_keep_backslashes() {
-        for d in ALL {
+        for d in Dialect::ALL {
             assert_eq!(d.literal("it's").unwrap(), "'it''s'");
             if d != Dialect::MySql {
                 assert_eq!(d.literal(r"a\b").unwrap(), r"'a\b'");
@@ -408,34 +541,6 @@ mod tests {
     }
 
     #[test]
-    fn write_type_drops_the_lengths_an_explicit_cast_cuts_to() {
-        for (base, type_sql, write) in [
-            ("varchar", "character varying(10)", "text"),
-            ("varchar", "character varying", "text"),
-            ("bpchar", "character(2)", "text"),
-            ("bit", "bit(2)", "bit varying"),
-            ("varbit", "bit varying(2)", "bit varying"),
-            ("_varchar", "character varying(3)[]", "text[]"),
-            ("_bpchar", "character(2)[]", "text[]"),
-            ("_bit", "bit(2)[]", "bit varying[]"),
-            ("_varbit", "bit varying(2)[]", "bit varying[]"),
-            // A domain over varchar(5): the base type decides, the assignment to the column checks the domain.
-            ("varchar", "scratch.d5", "text"),
-            // Everything else is written as its own type.
-            ("text", "text", "text"),
-            ("int4", "integer", "integer"),
-            ("numeric", "numeric(12,2)", "numeric(12,2)"),
-            ("timestamp", "timestamp(3) without time zone", "timestamp(3) without time zone"),
-            ("char", "\"char\"", "\"char\""),
-            ("_text", "text[]", "text[]"),
-            ("order_status", "shop.order_status", "shop.order_status"),
-        ] {
-            let c = of_class("x", type_sql, base, TypeClass::Other);
-            assert_eq!(pg_write_type(&c), write, "{base} {type_sql}");
-        }
-    }
-
-    #[test]
     fn ilike_is_lower_like_off_postgres() {
         assert_eq!(Dialect::MySql.like(Op::ILike, "`n`", "'%a%'"), "LOWER(CAST(`n` AS CHAR)) LIKE LOWER('%a%')");
         assert_eq!(Dialect::MySql.like(Op::NotILike, "`n`", "'%a%'"), "LOWER(CAST(`n` AS CHAR)) NOT LIKE LOWER('%a%')");
@@ -444,10 +549,7 @@ mod tests {
         assert_eq!(Dialect::MySql.like(Op::NotLike, "`n`", "'a'"), "CAST(`n` AS CHAR) NOT LIKE 'a'");
         assert_eq!(Dialect::Postgres.like(Op::ILike, "\"n\"", "'a'"), "CAST(\"n\" AS text) ILIKE 'a'");
         assert_eq!(Dialect::Postgres.like(Op::NotILike, "\"n\"", "'a'"), "CAST(\"n\" AS text) NOT ILIKE 'a'");
-        assert_eq!(
-            [Dialect::Postgres, Dialect::MySql, Dialect::Sqlite].map(|d| d.as_text("x")),
-            ["CAST(x AS text)", "CAST(x AS CHAR)", "CAST(x AS TEXT)"]
-        );
+        assert_eq!(Dialect::ALL.map(|d| d.as_text("x")), ["CAST(x AS text)", "CAST(x AS CHAR)", "CAST(x AS TEXT)"]);
     }
 
     #[test]
@@ -520,7 +622,7 @@ mod tests {
     proptest! {
         #[test]
         fn hostile_values_stay_literals(s in ".*") {
-            for d in ALL {
+            for d in Dialect::ALL {
                 match d.literal(&s) {
                     Err(e) => prop_assert!(s.contains('\0') && e == SqlError::Nul),
                     Ok(lit) => {

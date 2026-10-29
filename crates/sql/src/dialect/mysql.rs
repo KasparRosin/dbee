@@ -1,6 +1,152 @@
+//! MySQL and MariaDB.
+
+use super::{BinaryLiteral, Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, Paging, Rules, Separator, StringLiteral, Values, no_nul, quoted};
+use crate::SqlError;
+use crate::filter::Op;
+use crate::lexer::{Token, TokenKind, is_word, significant, word};
+
+pub(crate) const RULES: Rules = Rules {
+    ident_quote: '`',
+    text_type: "CHAR",
+    ilike: ILike::LowerLike,
+    insert_defaults: InsertDefaults::EmptyLists,
+    use_database: Some("USE {}"),
+    bool_literals: ("1", "0"),
+    op_notes: &[(&[Op::Eq, Op::Ne, Op::Like, Op::NotLike], "Compares by the column's collation; most ignore upper and lower case.")],
+    string_literal: StringLiteral::HexForBackslash,
+    binary_literal: Some(BinaryLiteral::ZeroX),
+    values: Values::Literal,
+    paging: Paging::LimitOffset,
+    lex: LexRules {
+        double_quote: DoubleQuote::String,
+        backtick_idents: true,
+        bracket_idents: false,
+        backslash_escapes: true,
+        escape_strings: false,
+        unicode_strings: false,
+        hex_strings: true,
+        bit_strings: true,
+        hex_numbers: true,
+        dollar_quotes: false,
+        numbered_params: false,
+        dollar_idents: true,
+        hash_comment: true,
+        dash_comment_needs_space: true,
+        nested_block_comments: false,
+        separator: Separator::DelimiterCommand,
+        bodies: Bodies::Compound,
+        lookahead: 4,
+    },
+    keywords: KEYWORDS,
+};
+
+/// `'value'`, but `_utf8mb4 X'…'` when it holds a backslash: whether one escapes depends on the
+/// session's `sql_mode`.
+pub(super) fn literal(value: &str) -> Result<String, SqlError> {
+    if !value.contains('\\') {
+        return quoted(value, '\'');
+    }
+    no_nul(value)?;
+    let hex: String = value.bytes().map(|b| format!("{b:02X}")).collect();
+    Ok(format!("_utf8mb4 X'{hex}'"))
+}
+
+/// True when the statement whose first token is `toks[k]` creates a procedure, function, trigger
+/// or event: one whose body may hold `;`.
+pub(super) fn routine_header(sql: &str, toks: &[Token], k: usize) -> bool {
+    let mut sig = toks.get(k..).unwrap_or_default().iter().filter(|t| significant(t)).take(16);
+    if !sig.next().is_some_and(|t| is_word(sql, t, "create")) {
+        return false;
+    }
+    // A bare word after `=` or `@` is the account in DEFINER = user@host.
+    let mut account = false;
+    for t in sig {
+        if account {
+            account = false;
+            if word(sql, t).is_some() {
+                continue;
+            }
+        }
+        match t.kind {
+            TokenKind::Keyword | TokenKind::Ident => {
+                if ["procedure", "function", "trigger", "event"].iter().any(|w| is_word(sql, t, w)) {
+                    return true;
+                }
+                if !["or", "replace", "aggregate", "definer"].iter().any(|w| is_word(sql, t, w)) {
+                    return false;
+                }
+            }
+            TokenKind::String | TokenKind::QuotedIdent => {}
+            TokenKind::Operator | TokenKind::Other => match sql.get(t.range.clone()) {
+                Some("=" | "@") => account = true,
+                Some("(" | ")") => {}
+                _ => return false,
+            },
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Counts the `BEGIN … END` blocks of a routine body, token by token.
+#[derive(Default)]
+pub(crate) struct Compound {
+    pub(super) depth: usize,
+    /// A token here starts a statement of the body, where `IF`, `LOOP`, `REPEAT` and `WHILE` open blocks.
+    fresh: bool,
+    /// The token `END` took along (`END IF`).
+    taken: Option<usize>,
+    /// A `CREATE PROCEDURE`: the token after its parameter list starts a statement.
+    procedure: bool,
+    parens: usize,
+    params_done: bool,
+}
+
+impl Compound {
+    pub(super) fn step(&mut self, sql: &str, toks: &[Token], k: usize) {
+        let Some(t) = toks.get(k) else { return };
+        if let Some(w) = word(sql, t).filter(|_| self.taken != Some(k)) {
+            let is = |x: &str| w.eq_ignore_ascii_case(x);
+            let next = toks.get(k + 1..).unwrap_or_default().iter().position(significant).map(|p| k + 1 + p);
+            if is("begin") || is("case") {
+                self.depth += 1;
+            } else if is("end") {
+                self.depth = self.depth.saturating_sub(1);
+                if let Some(n) =
+                    next.filter(|&n| toks.get(n).is_some_and(|t| ["if", "case", "loop", "repeat", "while"].iter().any(|x| is_word(sql, t, x))))
+                {
+                    self.taken = Some(n);
+                }
+            } else if self.fresh {
+                let call = sql.as_bytes().get(t.range.end) == Some(&b'(');
+                let exists = next.and_then(|n| toks.get(n)).is_some_and(|t| is_word(sql, t, "exists"));
+                if is("loop") || is("while") || (is("if") && !call && !exists) || (is("repeat") && !call) {
+                    self.depth += 1;
+                }
+            }
+            self.fresh = ["begin", "then", "else", "do", "row", "loop", "repeat"].iter().any(|x| is(x));
+            self.procedure |= is("procedure") && !self.params_done;
+        } else {
+            let text = sql.get(t.range.clone());
+            self.fresh = t.kind == TokenKind::Semicolon || (t.kind == TokenKind::Other && text == Some(":"));
+            if t.kind == TokenKind::Other && self.procedure && !self.params_done {
+                match text {
+                    Some("(") => self.parens += 1,
+                    Some(")") => {
+                        self.parens = self.parens.saturating_sub(1);
+                        self.params_done = self.parens == 0;
+                        self.fresh = self.params_done;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// MySQL's reserved words, from the Keywords and Reserved Words page of the MySQL Reference Manual
 /// (the entries marked (R)), lowercase and sorted.
-pub(super) static KEYWORDS: &[&str] = &[
+static KEYWORDS: &[&str] = &[
     "accessible",
     "add",
     "all",
@@ -264,6 +410,3 @@ pub(super) static KEYWORDS: &[&str] = &[
     "year_month",
     "zerofill",
 ];
-
-/// The longest word of the list.
-pub(super) const LONGEST: usize = super::longest(KEYWORDS);

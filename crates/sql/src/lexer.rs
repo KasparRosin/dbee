@@ -4,6 +4,7 @@
 use std::ops::Range;
 
 use crate::Dialect;
+use crate::dialect::{Body, DoubleQuote, LexRules, Separator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
@@ -34,19 +35,18 @@ fn is_ident_cont(b: u8) -> bool {
     is_ident_start(b) || b.is_ascii_digit() || b == b'$'
 }
 
-/// `#` starts a comment in MySQL, so it is no operator there.
-fn is_op_byte(d: Dialect, b: u8) -> bool {
-    b"+-*/<>=~!@%^&|?".contains(&b) || (b == b'#' && d != Dialect::MySql)
+fn is_op_byte(lex: &LexRules, b: u8) -> bool {
+    b"+-*/<>=~!@%^&|?".contains(&b) || (b == b'#' && !lex.hash_comment)
 }
 
 fn at(b: &[u8], i: usize) -> u8 {
     b.get(i).copied().unwrap_or(0)
 }
 
-/// A `--` at `i` starts a comment: always, except in MySQL, where a space or a control character
-/// (or the end of the text) must follow.
-fn dash_comment(d: Dialect, b: &[u8], i: usize) -> bool {
-    at(b, i) == b'-' && at(b, i + 1) == b'-' && (d != Dialect::MySql || at(b, i + 2) <= b' ' || at(b, i + 2) == 0x7f)
+/// A `--` at `i` starts a comment; with `dash_comment_needs_space`, only before a space, a control
+/// character or the end of the text.
+fn dash_comment(lex: &LexRules, b: &[u8], i: usize) -> bool {
+    at(b, i) == b'-' && at(b, i + 1) == b'-' && (!lex.dash_comment_needs_space || at(b, i + 2) <= b' ' || at(b, i + 2) == 0x7f)
 }
 
 /// End of a `'…'` string starting after the opening quote at `i` (`''` escapes; with `backslash`,
@@ -91,7 +91,7 @@ fn find_sub(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 /// Splits `sql` into tokens. Ranges are contiguous and cover the input. An unterminated string,
 /// quoted identifier, dollar quote or comment runs to the end.
 pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
-    let (pg, my, lite) = (d == Dialect::Postgres, d == Dialect::MySql, d == Dialect::Sqlite);
+    let lex = &d.rules().lex;
     let b = sql.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -104,7 +104,7 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
                 i += 1;
             }
             kind = TokenKind::Whitespace;
-        } else if dash_comment(d, b, i) || (my && c == b'#') {
+        } else if dash_comment(lex, b, i) || (lex.hash_comment && c == b'#') {
             while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
                 i += 1;
             }
@@ -113,7 +113,7 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
             let mut depth = 1usize;
             i += 2;
             while i < b.len() && depth > 0 {
-                if pg && b[i] == b'/' && at(b, i + 1) == b'*' {
+                if lex.nested_block_comments && b[i] == b'/' && at(b, i + 1) == b'*' {
                     depth += 1;
                     i += 2;
                 } else if b[i] == b'*' && at(b, i + 1) == b'/' {
@@ -126,43 +126,45 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
             i = i.min(b.len());
             kind = TokenKind::Comment;
         } else if c == b'\'' {
-            i = scan_quoted(b, i + 1, b'\'', my);
+            i = scan_quoted(b, i + 1, b'\'', lex.backslash_escapes);
             kind = TokenKind::String;
-        } else if pg && (c == b'E' || c == b'e') && at(b, i + 1) == b'\'' {
+        } else if lex.escape_strings && (c == b'E' || c == b'e') && at(b, i + 1) == b'\'' {
             i = scan_quoted(b, i + 2, b'\'', true).min(b.len());
             kind = TokenKind::String;
-        } else if pg && (c == b'U' || c == b'u') && at(b, i + 1) == b'&' && (at(b, i + 2) == b'\'' || at(b, i + 2) == b'"') {
+        } else if lex.unicode_strings && (c == b'U' || c == b'u') && at(b, i + 1) == b'&' && (at(b, i + 2) == b'\'' || at(b, i + 2) == b'"') {
             let q = b[i + 2];
             i = scan_quoted(b, i + 3, q, false);
             kind = if q == b'"' { TokenKind::QuotedIdent } else { TokenKind::String };
-        } else if at(b, i + 1) == b'\'' && ((my || lite) && matches!(c, b'X' | b'x') || my && matches!(c, b'B' | b'b')) {
+        } else if at(b, i + 1) == b'\'' && (lex.hex_strings && matches!(c, b'X' | b'x') || lex.bit_strings && matches!(c, b'B' | b'b')) {
             i = scan_quoted(b, i + 2, b'\'', false);
             kind = TokenKind::String;
         } else if c == b'"' {
-            i = scan_quoted(b, i + 1, b'"', my);
-            kind = if my { TokenKind::String } else { TokenKind::QuotedIdent };
-        } else if (my || lite) && c == b'`' {
+            let (quoted, backslash) = match lex.double_quote {
+                DoubleQuote::Ident => (TokenKind::QuotedIdent, false),
+                DoubleQuote::String => (TokenKind::String, lex.backslash_escapes),
+            };
+            i = scan_quoted(b, i + 1, b'"', backslash);
+            kind = quoted;
+        } else if lex.backtick_idents && c == b'`' {
             i = scan_quoted(b, i + 1, b'`', false);
             kind = TokenKind::QuotedIdent;
-        } else if lite && c == b'[' {
+        } else if lex.bracket_idents && c == b'[' {
             i = b[i..].iter().position(|&x| x == b']').map_or(b.len(), |p| i + p + 1);
             kind = TokenKind::QuotedIdent;
-        } else if pg && c == b'$' {
-            if at(b, i + 1).is_ascii_digit() {
+        } else if lex.numbered_params && c == b'$' && at(b, i + 1).is_ascii_digit() {
+            i += 1;
+            while at(b, i).is_ascii_digit() {
                 i += 1;
-                while at(b, i).is_ascii_digit() {
-                    i += 1;
-                }
-                kind = TokenKind::Param;
-            } else if let Some(open_end) = dollar_open(b, i) {
-                let delim = &b[i..open_end];
-                i = find_sub(b, open_end, delim).map_or(b.len(), |p| p + delim.len());
-                kind = TokenKind::String;
-            } else {
-                i += 1;
-                kind = TokenKind::Other;
             }
-        } else if (my || lite) && c == b'0' && matches!(at(b, i + 1), b'x' | b'X') && at(b, i + 2).is_ascii_hexdigit() {
+            kind = TokenKind::Param;
+        } else if lex.dollar_quotes
+            && c == b'$'
+            && let Some(open_end) = dollar_open(b, i)
+        {
+            let delim = &b[i..open_end];
+            i = find_sub(b, open_end, delim).map_or(b.len(), |p| p + delim.len());
+            kind = TokenKind::String;
+        } else if lex.hex_numbers && c == b'0' && matches!(at(b, i + 1), b'x' | b'X') && at(b, i + 2).is_ascii_hexdigit() {
             i += 2;
             while at(b, i).is_ascii_hexdigit() {
                 i += 1;
@@ -188,7 +190,7 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
                 }
             }
             kind = TokenKind::Number;
-        } else if is_ident_start(c) || (my && c == b'$') {
+        } else if is_ident_start(c) || (lex.dollar_idents && c == b'$') {
             while i < b.len() && is_ident_cont(b[i]) {
                 i += 1;
             }
@@ -196,9 +198,9 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
         } else if c == b';' {
             i += 1;
             kind = TokenKind::Semicolon;
-        } else if is_op_byte(d, c) {
+        } else if is_op_byte(lex, c) {
             i += 1;
-            while i < b.len() && is_op_byte(d, b[i]) && !dash_comment(d, b, i) && !(b[i] == b'/' && at(b, i + 1) == b'*') {
+            while i < b.len() && is_op_byte(lex, b[i]) && !dash_comment(lex, b, i) && !(b[i] == b'/' && at(b, i + 1) == b'*') {
                 i += 1;
             }
             kind = TokenKind::Operator;
@@ -223,116 +225,16 @@ struct Stmt {
     span_end: usize,
 }
 
-fn word<'a>(sql: &'a str, t: &Token) -> Option<&'a str> {
+pub(crate) fn word<'a>(sql: &'a str, t: &Token) -> Option<&'a str> {
     if matches!(t.kind, TokenKind::Keyword | TokenKind::Ident) { sql.get(t.range.clone()) } else { None }
 }
 
-fn is_word(sql: &str, t: &Token, w: &str) -> bool {
+pub(crate) fn is_word(sql: &str, t: &Token, w: &str) -> bool {
     word(sql, t).is_some_and(|x| x.eq_ignore_ascii_case(w))
 }
 
-fn significant(t: &Token) -> bool {
+pub(crate) fn significant(t: &Token) -> bool {
     !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment)
-}
-
-/// True when the statement whose first token is `toks[k]` creates a procedure, function, trigger
-/// or event (MySQL), or a trigger (SQLite): one whose body may hold `;`.
-fn routine_header(d: Dialect, sql: &str, toks: &[Token], k: usize) -> bool {
-    let mut sig = toks.get(k..).unwrap_or_default().iter().filter(|t| significant(t)).take(16);
-    if !sig.next().is_some_and(|t| is_word(sql, t, "create")) {
-        return false;
-    }
-    if d == Dialect::Sqlite {
-        let mut rest = sig.skip_while(|t| is_word(sql, t, "temp") || is_word(sql, t, "temporary"));
-        return rest.next().is_some_and(|t| is_word(sql, t, "trigger"));
-    }
-    // A bare word after `=` or `@` is the account in DEFINER = user@host.
-    let mut account = false;
-    for t in sig {
-        if account {
-            account = false;
-            if word(sql, t).is_some() {
-                continue;
-            }
-        }
-        match t.kind {
-            TokenKind::Keyword | TokenKind::Ident => {
-                if ["procedure", "function", "trigger", "event"].iter().any(|w| is_word(sql, t, w)) {
-                    return true;
-                }
-                if !["or", "replace", "aggregate", "definer"].iter().any(|w| is_word(sql, t, w)) {
-                    return false;
-                }
-            }
-            TokenKind::String | TokenKind::QuotedIdent => {}
-            TokenKind::Operator | TokenKind::Other => match sql.get(t.range.clone()) {
-                Some("=" | "@") => account = true,
-                Some("(" | ")") => {}
-                _ => return false,
-            },
-            _ => return false,
-        }
-    }
-    false
-}
-
-/// Counts the `BEGIN … END` blocks of a routine body, token by token.
-#[derive(Default)]
-struct Blocks {
-    on: bool,
-    depth: usize,
-    /// A token here starts a statement of the body, where `IF`, `LOOP`, `REPEAT` and `WHILE` open blocks.
-    fresh: bool,
-    /// The token `END` took along (`END IF`).
-    taken: Option<usize>,
-    /// A `CREATE PROCEDURE`: the token after its parameter list starts a statement.
-    procedure: bool,
-    parens: usize,
-    params_done: bool,
-}
-
-impl Blocks {
-    fn step(&mut self, d: Dialect, sql: &str, toks: &[Token], k: usize) {
-        let Some(t) = toks.get(k) else { return };
-        let me = d == Dialect::MySql;
-        if let Some(w) = word(sql, t).filter(|_| self.taken != Some(k)) {
-            let is = |x: &str| w.eq_ignore_ascii_case(x);
-            let next = toks.get(k + 1..).unwrap_or_default().iter().position(significant).map(|p| k + 1 + p);
-            if is("begin") || is("case") {
-                self.depth += 1;
-            } else if is("end") {
-                self.depth = self.depth.saturating_sub(1);
-                if me
-                    && let Some(n) =
-                        next.filter(|&n| toks.get(n).is_some_and(|t| ["if", "case", "loop", "repeat", "while"].iter().any(|x| is_word(sql, t, x))))
-                {
-                    self.taken = Some(n);
-                }
-            } else if me && self.fresh {
-                let call = sql.as_bytes().get(t.range.end) == Some(&b'(');
-                let exists = next.and_then(|n| toks.get(n)).is_some_and(|t| is_word(sql, t, "exists"));
-                if is("loop") || is("while") || (is("if") && !call && !exists) || (is("repeat") && !call) {
-                    self.depth += 1;
-                }
-            }
-            self.fresh = ["begin", "then", "else", "do", "row", "loop", "repeat"].iter().any(|x| is(x));
-            self.procedure |= me && is("procedure") && !self.params_done;
-        } else {
-            let text = sql.get(t.range.clone());
-            self.fresh = t.kind == TokenKind::Semicolon || (t.kind == TokenKind::Other && text == Some(":"));
-            if t.kind == TokenKind::Other && self.procedure && !self.params_done {
-                match text {
-                    Some("(") => self.parens += 1,
-                    Some(")") => {
-                        self.parens = self.parens.saturating_sub(1);
-                        self.params_done = self.parens == 0;
-                        self.fresh = self.params_done;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
 }
 
 fn ws_end(b: &[u8], mut at: usize) -> usize {
@@ -343,6 +245,7 @@ fn ws_end(b: &[u8], mut at: usize) -> usize {
 }
 
 fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
+    let lex = &d.rules().lex;
     let toks = tokenize(d, sql);
     let b = sql.as_bytes();
     let mut out = Vec::new();
@@ -355,7 +258,7 @@ fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
     let mut delimiter: Option<&str> = None;
     // Bytes before `pos` are done with (a `DELIMITER` line, a delimiter inside a word).
     let mut pos = 0;
-    let mut blocks = Blocks::default();
+    let mut body = Body::Plain;
     for (k, t) in toks.iter().enumerate() {
         if t.range.end <= pos || !significant(t) {
             continue;
@@ -365,7 +268,7 @@ fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
             continue;
         }
         let from = t.range.start.max(pos);
-        if d == Dialect::MySql && cur.is_none() && is_word(sql, t, "delimiter") {
+        if lex.separator == Separator::DelimiterCommand && cur.is_none() && is_word(sql, t, "delimiter") {
             let line_end = b.get(t.range.end..).and_then(|r| r.iter().position(|&c| c == b'\n' || c == b'\r')).map_or(b.len(), |p| t.range.end + p);
             let line = sql.get(t.range.end..line_end).unwrap_or_default();
             if let Some(new) = line.split_ascii_whitespace().next() {
@@ -401,17 +304,15 @@ fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
             continue;
         }
         if cur.is_none() {
-            blocks = Blocks { on: matches!(d, Dialect::MySql | Dialect::Sqlite) && routine_header(d, sql, &toks, k), ..Blocks::default() };
+            body = lex.bodies.body(sql, &toks, k);
         }
-        if t.kind == TokenKind::Semicolon && blocks.depth == 0 {
+        if t.kind == TokenKind::Semicolon && body.depth() == 0 {
             if let Some(range) = cur.take() {
                 out.push(Stmt { range, span_end: ws_end(b, t.range.end) });
             }
             continue;
         }
-        if blocks.on {
-            blocks.step(d, sql, &toks, k);
-        }
+        body.step(sql, &toks, k);
         grow(&mut cur, from, t.range.end);
     }
     if let Some(range) = cur {
@@ -438,6 +339,28 @@ pub fn statement_at(d: Dialect, sql: &str, cursor: usize) -> Option<Range<usize>
 pub fn has_top_level_semicolon(d: Dialect, sql: &str) -> bool {
     tokenize(d, sql).iter().any(|t| t.kind == TokenKind::Semicolon)
 }
+
+/// `tokens[k]` is a lone `$`: one that starts no dollar quote and stands as a 1-byte `Other` token.
+fn lone_dollar(tokens: &[Token], k: usize, text: &str) -> bool {
+    tokens.get(k).is_some_and(|t| t.kind == TokenKind::Other && text.get(t.range.clone()) == Some("$"))
+}
+
+/// The byte up to which `text` decides `tokens[k]` (exclusive), for tokens from [`tokenize`]: the
+/// engine's `lookahead` past the token's end. Where dollar quotes exist, a lone `$` reads the whole
+/// word after it (a dollar quote's tag) and the byte after that, to find no closing `$`; that word
+/// is the next token, so the `$` reaches as far as that token does. At most `text.len()`: a token
+/// that reaches the end of the text can change when text is added there.
+pub fn reach(d: Dialect, tokens: &[Token], k: usize, text: &str) -> usize {
+    let lex = &d.rules().lex;
+    let end = tokens.get(k).map_or(0, |t| t.range.end);
+    let end = if lex.dollar_quotes && lone_dollar(tokens, k, text) {
+        tokens.get(k.saturating_add(1)).map_or(end, |next| next.range.end.max(end))
+    } else {
+        end
+    };
+    end.saturating_add(lex.lookahead).min(text.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,15 +471,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn keywords_are_sorted_and_lowercase() {
-        assert!(Dialect::Postgres.keywords().windows(2).all(|w| w[0] < w[1]), "KEYWORDS must be sorted and unique");
-        assert!(Dialect::Postgres.keywords().iter().all(|k| k.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')));
-        for k in ["select", "from", "where", "join", "insert", "update", "delete", "returning", "limit"] {
-            assert!(Dialect::Postgres.keywords().binary_search(&k).is_ok(), "{k}");
-        }
-    }
-
     proptest! {
         #[test]
         fn tokens_cover_input(s in "\\PC{0,300}") {
@@ -585,7 +499,7 @@ mod tests {
     }
 
     fn dialects() -> impl Strategy<Value = Dialect> {
-        prop_oneof![Just(Dialect::Postgres), Just(Dialect::MySql), Just(Dialect::Sqlite)]
+        proptest::sample::select(Dialect::ALL.to_vec())
     }
 
     #[test]
@@ -759,6 +673,17 @@ mod tests {
             let mut at = 0;
             for k in tokenize(d, &s) { prop_assert_eq!(k.range.start, at); at = k.range.end; prop_assert!(s.is_char_boundary(at)); }
             prop_assert_eq!(at, s.len());
+        }
+        #[test]
+        fn reach_never_passes_the_end_of_the_text(d in dialects(), s in "([a-zA-Z0-9 ;'\"`\\[\\]#$&+.*/\\\\\\n-]|\\$\\$|\\$1|1e\\+|0x|U&|é){0,60}") {
+            let toks = tokenize(d, &s);
+            let mut last = 0;
+            for (k, t) in toks.iter().enumerate() {
+                let r = reach(d, &toks, k, &s);
+                prop_assert!(r <= s.len() && r >= t.range.end && r >= last, "{k} {r}");
+                last = r;
+            }
+            prop_assert!(reach(d, &toks, toks.len(), &s) <= s.len());
         }
         #[test]
         fn sqlish_input_never_panics_in_any_dialect(d in dialects(), s in "([a-zA-Z0-9 ;'\"`\\[\\]#$:=()@\\\\/*\\n\\r-]|DELIMITER |BEGIN |END |CASE |IF |LOOP |CREATE |TRIGGER |PROCEDURE |\\$\\$){0,80}") {

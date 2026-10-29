@@ -1,5 +1,6 @@
 //! The page and count statements for browsing a table.
 
+use crate::dialect::Paging;
 use crate::filter::{Condition, Sort, SortDir, where_sql};
 use crate::{Dialect, SqlError};
 use dbee_core::TableInfo;
@@ -32,7 +33,10 @@ pub fn page_sql(d: Dialect, table: &TableInfo, cond: &Condition, sort: Option<&S
     }
     let order = if order.is_empty() { String::new() } else { format!(" ORDER BY {}", order.join(", ")) };
     let offset = page.saturating_mul(PAGE_SIZE);
-    Ok(format!("SELECT {columns} FROM {}{}{order} LIMIT {} OFFSET {offset}", d.table(&table.table)?, where_clause(d, table, cond)?, PAGE_SIZE + 1,))
+    let paging = match d.rules().paging {
+        Paging::LimitOffset => format!(" LIMIT {} OFFSET {offset}", PAGE_SIZE + 1),
+    };
+    Ok(format!("SELECT {columns} FROM {}{}{order}{paging}", d.table(&table.table)?, where_clause(d, table, cond)?))
 }
 
 /// `SELECT count(*) FROM <table> [WHERE ..]`.

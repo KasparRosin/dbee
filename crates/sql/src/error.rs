@@ -36,3 +36,14 @@ impl fmt::Display for SqlError {
 }
 
 impl std::error::Error for SqlError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display() {
+        assert_eq!(SqlError::Nul.to_string(), "value contains a NUL character");
+        assert!(SqlError::UnknownColumn("x".into()).to_string().contains('x'));
+    }
+}

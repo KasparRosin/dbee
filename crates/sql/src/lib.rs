@@ -9,7 +9,6 @@ pub mod edit;
 pub mod error;
 pub mod filter;
 pub mod lexer;
-pub mod quote;
 pub mod select;
 
 pub use dialect::Dialect;

@@ -194,15 +194,6 @@ fn affected_text(rows: Option<u64>) -> String {
 
 // ---- highlighting ------------------------------------------------------------------------------
 
-/// How far past a token's end `lexer::tokenize` may read to decide it, for every token but a lone
-/// `$` (see [`reach`]), with one byte to spare. The rules read at most: a number three bytes (`1e+`
-/// followed by no digit ends the number before the `e`); an operator two (it stops before `--` and
-/// `/*`); a `U` two (`U&'` or `U&"` starts a Unicode string); whitespace, comments, identifiers,
-/// `$1`, `.`, quoted strings and names one (a doubled quote goes on). MySQL reads three bytes past
-/// an operator (a `--` is a comment only with a space or control character after it) and two past a
-/// `0` (`0x` and a hex digit make a number). A dollar-quoted string ends at its closing tag, and
-/// anything unterminated runs to the end of the text.
-const LOOKAHEAD: usize = 4;
 /// How far past a change the lexer first looks for the old tokens to fit again.
 const RESYNC_BYTES: usize = 1024;
 /// The editor colours the lines in view and [`MARGIN`] more each side, in whole chunks of
@@ -265,22 +256,6 @@ fn ceil_boundary(text: &str, at: usize) -> usize {
     at
 }
 
-/// `list[k]` is a lone `$`: one that starts no dollar quote and stands as a 1-byte `Other` token.
-fn lone_dollar(list: &[Token], k: usize, text: &str) -> bool {
-    list.get(k).is_some_and(|t| t.kind == TokenKind::Other && text.get(t.range.clone()) == Some("$"))
-}
-
-/// The byte up to which the text decides `list[k]` (exclusive). [`LOOKAHEAD`] past its end, but a
-/// lone `$` reads the whole word after it (a dollar quote's tag: letters, digits, characters past
-/// ASCII), and the byte after that, to find no closing `$`. That word is the token after it (an
-/// identifier, or the `E` or `U` that starts a string), so the `$` reaches as far as that token
-/// does.
-fn reach(list: &[Token], k: usize, text: &str) -> usize {
-    let end = list.get(k).map_or(0, |t| t.range.end);
-    let end = if lone_dollar(list, k, text) { list.get(k.saturating_add(1)).map_or(end, |next| next.range.end.max(end)) } else { end };
-    end.saturating_add(LOOKAHEAD)
-}
-
 /// `tokenize(slice)`, its ranges moved to start at `offset`.
 fn lex(dialect: Dialect, slice: &str, offset: usize) -> Vec<Token> {
     lexer::tokenize(dialect, slice)
@@ -293,13 +268,12 @@ fn lex(dialect: Dialect, slice: &str, offset: usize) -> Vec<Token> {
 ///
 /// `lexer::tokenize` starts every token afresh and reads only forward, so tokens from a token
 /// boundary on depend only on the text from there; each token is decided by the text up to its
-/// [`reach`]: [`LOOKAHEAD`] past its end, or for a lone `$` the end of the word after it. An edit
-/// keeps the tokens whose reach ends at or before its first changed byte, and lexes again from
-/// there (a bounded slice first) until a new token starts where an old one did in the unchanged
-/// rest of the text, the token before it decided within the slice: from there on the old tokens
-/// hold, moved by the change in length. The result is what lexing the whole text gives
-/// (`incremental_tokens_match_a_full_lex`, and key by key for dollar quotes in
-/// `typing_and_deleting_dollar_quotes_key_by_key_match_a_full_lex`).
+/// [`lexer::reach`]. An edit keeps the tokens whose reach ends at or before its first changed byte
+/// (and before the end of the text), and lexes again from there (a bounded slice first) until a
+/// new token starts where an old one did in the unchanged rest of the text, the token before it
+/// decided within the slice: from there on the old tokens hold, moved by the change in length.
+/// The result is what lexing the whole text gives (`incremental_tokens_match_a_full_lex`, and key
+/// by key for dollar quotes in `typing_and_deleting_dollar_quotes_key_by_key_match_a_full_lex`).
 struct Tokens {
     dialect: Dialect,
     text: String,
@@ -341,10 +315,14 @@ impl Tokens {
         let prefix = floor_boundary(new, common_prefix(old.as_bytes(), new.as_bytes()));
         let most = old.len().min(new.len()).saturating_sub(prefix);
         let changed_end = ceil_boundary(new, new.len().saturating_sub(common_suffix(old.as_bytes(), new.as_bytes(), most)));
-        // Reach never decreases along the list (a lone `$` reaches as far as the token after it,
-        // which is never another lone `$`), so the tokens kept are a prefix of it.
-        let mut keep = if self.updates == 0 { 0 } else { self.list.partition_point(|t| t.range.end.saturating_add(LOOKAHEAD) <= prefix) };
-        while keep > 0 && reach(&self.list, keep - 1, &old) > prefix {
+        // Reach never decreases along the list, so the tokens kept are a prefix of it. One that
+        // reaches the end of the old text depends on where that text ends.
+        let kept = |k: usize| {
+            let reach = lexer::reach(self.dialect, &self.list, k, &old);
+            reach <= prefix && reach < old.len()
+        };
+        let mut keep = if self.updates == 0 { 0 } else { self.list.partition_point(|t| t.range.end <= prefix) };
+        while keep > 0 && !kept(keep - 1) {
             keep -= 1;
         }
         let restart = keep.checked_sub(1).and_then(|k| self.list.get(k)).map_or(0, |t| t.range.end);
@@ -357,13 +335,10 @@ impl Tokens {
                 break fresh;
             }
             // A token starting after the change where an old one started too, the token before it
-            // decided within the slice (its reach not past the cut).
+            // decided within the slice (its reach not past the cut) or kept.
             let fits = fresh.iter().enumerate().find_map(|(k, t)| {
                 let at = t.range.start;
-                let decided = match k.checked_sub(1) {
-                    Some(before) => reach(&fresh, before, new) <= cut,
-                    None => at.saturating_add(LOOKAHEAD) <= cut,
-                };
+                let decided = k.checked_sub(1).is_none_or(|before| lexer::reach(self.dialect, &fresh, before, new) <= cut);
                 if at < changed_end || !decided {
                     return None;
                 }
@@ -1171,8 +1146,6 @@ mod tests {
     /// A small deterministic random sequence (xorshift), so a failing edit can be replayed.
     struct Rng(u64);
 
-    const ALL_DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::MySql, Dialect::Sqlite];
-
     impl Rng {
         fn next(&mut self, below: usize) -> usize {
             self.0 ^= self.0 << 13;
@@ -1197,7 +1170,7 @@ mod tests {
             "select $tagé$ é $tagé$, $1",
             "do $$ begin perform 1; end $$; select $x1$a$x1$",
         ] {
-            for dialect in ALL_DIALECTS {
+            for dialect in Dialect::ALL {
                 let mut tokens = Tokens::new(dialect);
                 let ends: Vec<usize> = text.char_indices().map(|(at, _)| at).skip(1).chain([text.len()]).collect();
                 for &end in &ends {
@@ -1209,7 +1182,7 @@ mod tests {
             }
         }
         // A tag typed in the middle, its closing `$` last; then that `$` taken away again.
-        for dialect in ALL_DIALECTS {
+        for dialect in Dialect::ALL {
             let mut tokens = Tokens::new(dialect);
             for text in ["as $ select 1", "as $b select 1", "as $bo select 1", "as $bod select 1", "as $body select 1", "as $body$ select 1"] {
                 same_as_full(&mut tokens, text, "typed in the middle");
@@ -1290,7 +1263,7 @@ mod tests {
             "begin ",
             "end ",
         ];
-        for dialect in ALL_DIALECTS {
+        for dialect in Dialect::ALL {
             for seed in [0x9E37_79B9_7F4A_7C15, 12_345, 777, 42, 0xDEAD_BEEF] {
                 let mut rng = Rng(seed);
                 for round in 0..300 {
