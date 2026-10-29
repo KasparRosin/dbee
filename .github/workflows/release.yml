@@ -95,7 +95,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: packaging/macos/package.sh --arch universal
       - name: Verify signatures and notarization
-        if: env.SIGNED == '1' && hashFiles('packaging/macos/verify.sh') != ''
+        if: env.SIGNED == '1'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -231,12 +231,12 @@ jobs:
         run: packaging/linux/package.sh
       - name: Check the packages
         run: |
-          dpkg-deb --info dist/release/*.deb || true
-          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/|metainfo|applications' || true
+          dpkg-deb --info dist/release/*.deb
+          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/|metainfo|applications'
           for appimage in dist/release/*.AppImage; do
             if [ -f "$appimage" ]; then
               chmod +x "$appimage"
-              APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --version || true
+              APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --version
             fi
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -323,28 +323,8 @@ jobs:
             rustup toolchain install
             git config --global --add safe.directory "*"
             export CARGO_TARGET_DIR=/var/tmp/dbee-target CARGO_BUILD_JOBS=2
-            if [ -n "$INPUT_VERSION" ]; then cargo xtask version set "$VERSION" || cargo run -q -p xtask -- version set "$VERSION"; fi
-            if [ -f packaging/freebsd/package.sh ]; then
-              bash packaging/freebsd/package.sh
-            else
-              cargo build --release --locked -p dbee $(cargo metadata --format-version 1 --no-deps | grep -q '"dbee-cli"' && echo "-p dbee-cli" || true)
-              name="dbee-$VERSION-freebsd-x86_64"
-              mkdir -p "dist/release/$name"
-              cp target/release/dbee "dist/release/$name/" 2>/dev/null || cp /var/tmp/dbee-target/release/dbee "dist/release/$name/"
-              if [ -f target/release/dbee-cli ]; then
-                cp target/release/dbee-cli "dist/release/$name/"
-              elif [ -f /var/tmp/dbee-target/release/dbee-cli ]; then
-                cp /var/tmp/dbee-target/release/dbee-cli "dist/release/$name/"
-              fi
-              cp README.md LICENSE-MIT LICENSE-APACHE ATTRIBUTION.md "dist/release/$name/" 2>/dev/null || true
-              if [ -f packaging/linux/dev.rosin.dbee.desktop ]; then
-                cp packaging/linux/dev.rosin.dbee.desktop "dist/release/$name/"
-              fi
-              mkdir -p "dist/release/$name/icons"
-              cp -R assets/app-icon/hicolor "dist/release/$name/icons/" 2>/dev/null || true
-              tar -C dist/release -czf "dist/release/$name.tar.gz" "$name"
-              rm -rf "dist/release/$name" /var/tmp/dbee-target target
-            fi
+            if [ -n "$INPUT_VERSION" ]; then cargo xtask version set "$VERSION"; fi
+            bash packaging/freebsd/package.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-freebsd-x86_64
@@ -399,8 +379,8 @@ jobs:
         run: packaging/linux/package.sh --formats "deb rpm tar"
       - name: Check the packages
         run: |
-          dpkg-deb --info dist/release/*-linux-riscv64.deb 2>/dev/null || true
-          dpkg-deb --contents dist/release/*-linux-riscv64.deb 2>/dev/null | grep -E 'usr/bin/|metainfo|applications' || true
+          dpkg-deb --info dist/release/*-linux-riscv64.deb
+          dpkg-deb --contents dist/release/*-linux-riscv64.deb | grep -E 'usr/bin/|metainfo|applications'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-linux-riscv64
