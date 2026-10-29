@@ -38,11 +38,11 @@ Known gaps and limits are ranked in [docs/gaps.md](docs/gaps.md).
 
 ## Platforms
 
-dbee is built for Linux (x86_64, aarch64, riscv64), macOS (universal), Windows (x64, x86, arm64) and FreeBSD (x86_64). Linux x86_64 is tested. The other platforms are defined in the release pipeline but untested yet ([docs/hardware-parity.md](docs/hardware-parity.md)).
+dbee is built for Linux (x86_64, aarch64, riscv64), macOS (universal), Windows (x64, x86, arm64) and FreeBSD (x86_64). Linux x86_64 is tested. The other platforms build in the release pipeline but nobody has installed and started them yet (Windows ARM64 excepted) ([docs/hardware-parity.md](docs/hardware-parity.md)).
 
 ## Download
 
-No releases yet: the release pipeline is written but has not run ([docs/releasing.md](docs/releasing.md)). Until the first release, build dbee from source.
+v0.1.0 on the Releases page is an unsigned test pre-release of the release pipeline ([docs/releasing.md](docs/releasing.md)). Building dbee from source is still the main way to run it.
 
 ## Build from source
 

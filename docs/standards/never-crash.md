@@ -39,4 +39,4 @@ Before merging code that reads from outside the process, ask what happens with:
 3. Extend the fuzz tests in `crates/engine`:
    - `every_command_survives_empty_params` (`src/tests.rs`) runs every command with empty params.
    - `tests/command_sequence_fuzz.rs` runs random commands with random, often hostile, params (number edges, quotes, NUL, emoji, 10 kB strings, nulls, arrays, 64-deep nesting). After every step no result is `internal`, `inspect()` serializes, the active tab is an open one and no journal entry keeps a secret. A new command adds its param shapes to `PARAM_HINTS` there (a test fails without them). `DBEE_FUZZ_SEED` replays a run (the seed is printed) and `DBEE_FUZZ_STEPS` sets its length (300 by default).
-   - The undo/redo invariant arrives with staged edits.
+   - `undoing_every_edit_then_redoing_restores_them` (`crates/engine/tests/command_sequence_fuzz.rs`) checks the undo/redo invariant on the test server.

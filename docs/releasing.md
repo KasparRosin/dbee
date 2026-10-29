@@ -1,10 +1,10 @@
 # Releasing dbee
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (GitHub setup: private vulnerability reporting; third-party licence texts before the first release)
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (GitHub setup: what is done, what is left; the first test release)
 
 Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `dbee v<version>`. Nobody sees a draft until the owner publishes it. The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 
-**Status:** the pipeline is written but has never run. The GitHub repository does not exist yet (see "GitHub setup" below). User-facing names say **dbee**; files, binaries and ids stay lowercase (`dbee-<version>-<platform>-<arch>.<ext>`, app id `dev.rosin.dbee`).
+**Status:** the pipeline has run twice by hand; the test release `v0.1.0` is published as an unsigned pre-release (see "GitHub setup" below). User-facing names say **dbee**; files, binaries and ids stay lowercase (`dbee-<version>-<platform>-<arch>.<ext>`, app id `dev.rosin.dbee`).
 
 ## Cutting a release
 
@@ -75,20 +75,14 @@ Windows signing uses the `.pfx` pair if both are set, otherwise Azure Trusted Si
 
 Only the `release` branch builds installers; no build workflow runs on `main` or pull requests.
 
-## GitHub setup (once, when the repo is created)
+## GitHub setup
 
-**Not done yet.** The repository is created when version 1 runs; until then there are local commits only.
+The repository `KasparRosin/dbee` exists on GitHub and is private, with the `release` environment. There is no `release` branch yet; both test runs were started by hand (*Run workflow*) from `main`. Rulesets and private vulnerability reporting are not available on a private repository on the free plan.
 
-```sh
-gh repo create KasparRosin/dbee --public --source . --remote origin
-```
-
-Then:
-
-1. Create the `release` branch from `main`.
-2. Create a `release` environment whose deployment branches are limited to `release`.
-3. Add a ruleset on `refs/heads/release` (creation, update, deletion, non-fast-forward) so only the owner can push to it.
-4. Add the signing secrets above to the `release` environment (all optional).
-5. Turn on private vulnerability reporting in the repository's security settings: [`SECURITY.md`](../SECURITY.md) sends reports there.
-6. Run the workflow from `release` with version `0.0.1-rc.1` as a test and check every artifact.
-7. Before the first release: ship the third-party licence texts (crates, egui's fonts) with the binaries.
+1. Create the `release` branch from `main`. **Not done.**
+2. Create a `release` environment whose deployment branches are limited to `release`. **Done** (the environment exists).
+3. Add a ruleset on `refs/heads/release` (creation, update, deletion, non-fast-forward) so only the owner can push to it. **Not available** on the free private plan.
+4. Add the signing secrets above to the `release` environment (all optional). **Not done**; builds are unsigned.
+5. Turn on private vulnerability reporting in the repository's security settings: [`SECURITY.md`](../SECURITY.md) sends reports there. **Not available** on the free private plan.
+6. Run the workflow as a test and check every artifact. **Done** as `0.1.0`, in two runs. Run 1 failed on FreeBSD and both Linux x86_64/aarch64 jobs. Run 2 passed every job, and `v0.1.0` is published as an unsigned pre-release. The Windows ARM64 workflow installed and started the build on ARM64 hardware; nobody has installed and started the other builds yet.
+7. Before the first real release: ship the third-party licence texts (crates, egui's fonts) with the binaries. **Not done.**

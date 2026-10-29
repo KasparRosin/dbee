@@ -2,9 +2,9 @@
 
 **Stage: pre-alpha** · next: alpha, once file export lands (M2). M1 "Daily Postgres workflow" is built and waits for its last check: a day of real use on the maintainer's own databases.
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (what each detail doc holds; the docs index) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** trivial (how the fuzz and m1_day numbers were measured) · **Target:** Beekeeper Studio 5.5.7
 
-Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs`). They are connecting to Postgres (also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M2. Postgres is the only engine. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
+Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs`, run by hand: `#[ignore]`, ci skips it). They are connecting to Postgres (also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M2. Postgres is the only engine. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
 
 ## Headline numbers
 
@@ -23,7 +23,7 @@ Why pre-alpha: five of the six alpha gate rows work end to end, measured in the 
 | Database engines | 1 of 20, Postgres (5 %, measured) | not estimated yet | [driver-parity](docs/driver-parity.md) |
 | UI | ~45 % (estimated) | not estimated yet | [ui-parity](docs/ui-parity.md) |
 | Performance | M1's targets met (measured); ~30 % against Beekeeper (estimated) | — | [target-app-parity](docs/target-app-parity.md) |
-| Stability | 20,000-step command fuzz clean (measured); ~25 % (estimated) | — | [target-app-parity](docs/target-app-parity.md) |
+| Stability | 20,000-step command fuzz clean (measured once on 2026-10-27 with `DBEE_FUZZ_STEPS=20000`; ci runs 300 steps); ~25 % (estimated) | — | [target-app-parity](docs/target-app-parity.md) |
 | File formats (import/export) | 0 % (measured) | M2 | [file-format-parity](docs/file-format-parity.md) |
 | Localization | 0 % (measured) | not estimated yet | [localization-parity](docs/localization-parity.md) |
 | Platforms | Linux x86_64 built, packaged and run; the rest not built in M1 | — | [hardware-parity](docs/hardware-parity.md) |
@@ -70,6 +70,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | trivial | Stability and alpha gate: how the fuzz and `m1_day` were run. |
 | 2026-10-27 | trivial | The detail docs say what they hold, and link the docs index. |
 | 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases; M1 review fixes. |
 | 2026-10-27 | minor | Progress log: M1 review fixes. |
