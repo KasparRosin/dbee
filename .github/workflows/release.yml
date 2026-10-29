@@ -70,10 +70,11 @@ jobs:
             echo "SIGNED=1" >> "$GITHUB_ENV"
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Install Rust (the release in rust-toolchain.toml) and the build targets
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-macos-universal
@@ -157,10 +158,11 @@ jobs:
             echo "::warning::Windows build ships unsigned: no WINDOWS_CERTIFICATE pair and empty Azure Trusted Signing secrets:$missing."
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      - name: Install Rust (the release in rust-toolchain.toml) and the build targets
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-windows-${{ matrix.arch }}
@@ -217,9 +219,8 @@ jobs:
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: 2.47.0
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
+      - name: Install Rust (the release, profile and components in rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-linux-${{ matrix.arch }}
@@ -313,10 +314,12 @@ jobs:
           envs: "VERSION BUILD_DATE BUILD_SHA INPUT_VERSION DBEE_VERSION DBEE_BUILD_DATE DBEE_BUILD_SHA"
           prepare: |
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           run: |
             set -e
             . "$HOME/.cargo/env"
+            # The release, profile and components in rust-toolchain.toml.
+            rustup toolchain install
             git config --global --add safe.directory "*"
             export CARGO_TARGET_DIR=/var/tmp/dbee-target CARGO_BUILD_JOBS=4
             if [ -n "$INPUT_VERSION" ]; then cargo xtask version set "$VERSION" || cargo run -q -p xtask -- version set "$VERSION"; fi
@@ -364,10 +367,11 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
-          targets: riscv64gc-unknown-linux-gnu
+      - name: Install Rust (the release in rust-toolchain.toml) and the build targets
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add riscv64gc-unknown-linux-gnu
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-linux-riscv64
