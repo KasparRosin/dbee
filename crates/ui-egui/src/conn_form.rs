@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use dbee_config::{ConnectionColor, ConnectionConfig, SshAuth, SshConfig, SslMode};
+use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
 
 /// The SSH login choices of the form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +19,9 @@ pub(crate) struct Form {
     /// The saved connection this is, or empty for a new one.
     pub id: String,
     pub name: String,
+    /// Not editable in the form yet; kept so saving does not change it.
+    pub kind: DbKind,
+    pub file: Option<PathBuf>,
     pub color: ConnectionColor,
     pub host: String,
     pub port: String,
@@ -77,6 +80,8 @@ impl Form {
         Form {
             id: c.id.clone(),
             name: c.name.clone(),
+            kind: c.kind,
+            file: c.file.clone(),
             color: c.color,
             host: c.host.clone(),
             port: c.port.to_string(),
@@ -118,6 +123,8 @@ impl Form {
         let config = ConnectionConfig {
             id: self.id.clone(),
             name: self.name.trim().into(),
+            kind: self.kind,
+            file: self.file.clone(),
             color: self.color,
             host: self.host.trim().into(),
             port,
@@ -128,7 +135,6 @@ impl Form {
             ssh,
             read_only: self.read_only,
             save_secrets: self.save_secrets,
-            ..ConnectionConfig::default()
         };
         config.validate().map_err(|e| e.to_string())?;
         Ok(config)
@@ -143,5 +149,22 @@ impl Form {
         } else {
             format!("{}@{}/{}", self.user, self.host, self.database)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saving_keeps_the_type_and_the_file() {
+        let mysql = ConnectionConfig { id: "a".into(), kind: DbKind::MySql, port: 3306, ..ConnectionConfig::default() };
+        let back = Form::from_config(&mysql).to_config().unwrap();
+        assert_eq!((back.kind, back.file), (DbKind::MySql, None));
+
+        let file = Some(PathBuf::from("/x/shop.sqlite"));
+        let sqlite = ConnectionConfig { id: "b".into(), kind: DbKind::Sqlite, file: file.clone(), ..ConnectionConfig::default() };
+        let back = Form::from_config(&sqlite).to_config().unwrap();
+        assert_eq!((back.kind, back.file), (DbKind::Sqlite, file));
     }
 }
