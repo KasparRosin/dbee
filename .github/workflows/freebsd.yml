@@ -52,8 +52,9 @@ jobs:
         with:
           release: "15.1"
           usesh: true
-          cpu: 4
-          mem: 12288
+          # Sized for a private repo's runner: a 12 GB VM failed to boot there (QEMU: cannot allocate memory).
+          cpu: 2
+          mem: 6144
           envs: "DBEE_VERSION DBEE_VERSION_OVERRIDE DBEE_PACKAGE DBEE_BUILD_SHA"
           # Only the packaging run brings files back (dist/release). The target dir lives outside
           # the synced checkout, because copying it out of the VM fails on large builds.
