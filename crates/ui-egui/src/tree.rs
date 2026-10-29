@@ -613,7 +613,7 @@ fn draw_row(
 
 #[cfg(test)]
 mod tests {
-    use dbee_core::ColumnInfo;
+    use dbee_core::{ColumnInfo, TypeClass};
 
     use super::*;
 
@@ -621,12 +621,12 @@ mod tests {
         let col = ColumnInfo {
             name: "id".into(),
             type_sql: "integer".into(),
-            type_oid: 23,
             base_type: "int4".into(),
-            category: 'N',
+            class: TypeClass::Number,
             not_null: true,
             has_default: false,
             generated: Default::default(),
+            hidden: false,
         };
         TableInfo {
             table: TableRef { schema: schema.into(), name: name.into() },
@@ -636,6 +636,7 @@ mod tests {
             unique_keys: vec![],
             foreign_keys: vec![],
             estimated_rows: Some(0),
+            no_edit_reason: None,
         }
     }
 

@@ -3,7 +3,7 @@
 //! and drop it.
 
 use dbee_config::{ConnectionConfig, SslMode};
-use dbee_core::ResultSet;
+use dbee_core::{ResultSet, TypeClass};
 use dbee_pg::query::{Limits, QUERY_LIMITS, describe, run, scalar_u64};
 use dbee_pg::{PgConnection, PgError, Target, connect};
 use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
@@ -148,6 +148,32 @@ async fn describe_names_types_and_leaves_no_statement_behind() {
         );
         let open = ok(&c, "SELECT count(*) FROM pg_prepared_statements", QUERY_LIMITS).await;
         assert_eq!(open.rows[0][0].as_deref(), Some("0"), "pg{major}");
+    }
+}
+
+#[tokio::test]
+async fn pg_described_columns_have_classes() {
+    let db = require_testdb!();
+    for (major, c) in conns(db).await {
+        let rs = ok(&c, "SELECT 1::int4, true, 'x'::text", QUERY_LIMITS).await;
+        assert_eq!(rs.columns.iter().map(|c| c.class).collect::<Vec<_>>(), [TypeClass::Number, TypeClass::Bool, TypeClass::LongText], "pg{major}");
+        // Not a table column: everything the catalog maps, by the prepared statement's type.
+        let sql = "SELECT 'x'::varchar, now(), '{}'::jsonb, '\\x00'::bytea, ARRAY[1], 1.5::numeric, '1 day'::interval, '<a/>'::xml";
+        let rs = ok(&c, sql, QUERY_LIMITS).await;
+        assert_eq!(
+            rs.columns.iter().map(|c| c.class).collect::<Vec<_>>(),
+            [
+                TypeClass::Text,
+                TypeClass::DateTime,
+                TypeClass::Json,
+                TypeClass::Binary,
+                TypeClass::Other,
+                TypeClass::Number,
+                TypeClass::Other,
+                TypeClass::LongText
+            ],
+            "pg{major}"
+        );
     }
 }
 

@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use dbee_config::{ConnectionConfig, SslMode};
+use dbee_core::TypeClass;
 use dbee_core::schema::{Catalog, Generated, RelKind, TableRef};
 use dbee_pg::catalog::load_catalog;
 use dbee_pg::query::{self, QUERY_LIMITS};
@@ -101,17 +102,17 @@ async fn domain_enum_and_types() {
     for (major, cat) in catalogs(db).await {
         let t = cat.table(&tr("shop", "all_types")).expect("all_types");
         let doc = t.column("doc").expect("doc");
-        assert_eq!((doc.base_type.as_str(), doc.category), ("jsonb", 'U'), "pg{major}: {doc:?}");
+        assert_eq!((doc.base_type.as_str(), doc.class), ("jsonb", TypeClass::Json), "pg{major}: {doc:?}");
         assert!(doc.type_sql.contains("json_doc"), "{doc:?}");
         let st = t.column("st").expect("st");
         assert!(st.type_sql.contains("order_status"), "{st:?}");
-        assert_eq!((st.category, st.base_type.as_str()), ('E', "order_status"));
-        assert_eq!(t.column("note").expect("note").category, 'S');
-        assert_eq!(t.column("arr").expect("arr").category, 'A');
-        assert_eq!(t.column("comp").expect("comp").category, 'C');
+        assert_eq!((st.class, st.base_type.as_str()), (TypeClass::Other, "order_status"));
+        assert_eq!(t.column("note").expect("note").class, TypeClass::LongText);
+        assert_eq!(t.column("arr").expect("arr").class, TypeClass::Other);
+        assert_eq!(t.column("comp").expect("comp").class, TypeClass::Other);
         let email = cat.table(&tr("shop", "customers")).expect("customers").column("email").expect("email");
         assert_eq!(email.type_sql, "character varying(200)");
-        assert_eq!((email.base_type.as_str(), email.category, email.type_oid), ("varchar", 'S', 1043));
+        assert_eq!((email.base_type.as_str(), email.class), ("varchar", TypeClass::Text));
         assert!(!email.not_null);
         assert!(cat.table(&tr("shop", "customers")).expect("c").column("name").expect("name").not_null);
     }
@@ -221,5 +222,50 @@ async fn columns_postgres_computes_are_marked() {
         assert_eq!(generated("twice"), Some(Generated::Expression), "pg{major}");
         assert_eq!((generated("a"), generated("d")), (Some(Generated::No), Some(Generated::No)), "pg{major}: BY DEFAULT can be written");
         assert!(table.column("d").is_some_and(|c| c.has_default), "pg{major}");
+    }
+}
+
+#[tokio::test]
+async fn pg_catalog_classes() {
+    let db = require_testdb!();
+    let t = dbee_testkit::unique("t_classes");
+    let domain = dbee_testkit::unique("d_text");
+    for s in &db.servers {
+        let ddl = format!(
+            "CREATE DOMAIN scratch.{domain} AS text;
+             CREATE TABLE scratch.{t} (i int4, f float8, n numeric(10,2), m money, b bool, t text, v varchar(20), c char(3), x xml,
+                 j json, jb jsonb, d date, ts timestamptz, tm time, iv interval, ba bytea, u uuid, ia int4[], d_t scratch.{domain})"
+        );
+        dbee_testkit::psql(s, &ddl).unwrap();
+    }
+    let loaded = catalogs(db).await;
+    for s in &db.servers {
+        let _ = dbee_testkit::psql(s, &format!("DROP TABLE IF EXISTS scratch.{t}; DROP DOMAIN IF EXISTS scratch.{domain}"));
+    }
+    for (major, cat) in loaded {
+        let table = cat.table(&tr("scratch", &t)).unwrap_or_else(|| panic!("pg{major}: no scratch.{t}"));
+        for (name, class) in [
+            ("i", TypeClass::Number),
+            ("f", TypeClass::Number),
+            ("n", TypeClass::Number),
+            ("m", TypeClass::Number),
+            ("b", TypeClass::Bool),
+            ("t", TypeClass::LongText),
+            ("v", TypeClass::Text),
+            ("c", TypeClass::Text),
+            ("x", TypeClass::LongText),
+            ("j", TypeClass::Json),
+            ("jb", TypeClass::Json),
+            ("d", TypeClass::DateTime),
+            ("ts", TypeClass::DateTime),
+            ("tm", TypeClass::DateTime),
+            ("iv", TypeClass::Other),
+            ("ba", TypeClass::Binary),
+            ("u", TypeClass::Other),
+            ("ia", TypeClass::Other),
+            ("d_t", TypeClass::LongText),
+        ] {
+            assert_eq!(table.column(name).map(|c| c.class), Some(class), "pg{major}: {name}");
+        }
     }
 }

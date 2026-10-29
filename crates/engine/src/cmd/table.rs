@@ -880,6 +880,7 @@ fn follow(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dbee_core::TypeClass;
 
     #[test]
     fn totals_serialize_and_settle() {
@@ -951,7 +952,7 @@ mod tests {
             complete: true,
             rows_affected: Some(101),
         };
-        let typed = vec![Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into() }];
+        let typed = vec![Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into(), class: TypeClass::Number }];
         let (page, more, complete) = page_data(rs.clone(), typed.clone());
         assert!(more && complete);
         assert_eq!((page.rows.len(), page.rows_seen, &page.columns), (100, 100, &typed));

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cell::Column;
+use crate::cell::{Column, TypeClass};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,22 +49,25 @@ pub struct ColumnInfo {
     /// `format_type` output: the type as the server names it, used in key casts (values use
     /// [`write_type_sql`](Self::write_type_sql)).
     pub type_sql: String,
-    pub type_oid: u32,
-    /// `pg_type.typname` of the base type.
+    /// The engine's own base type name (Postgres `pg_type.typname`), read only by that engine's
+    /// dialect and driver.
     pub base_type: String,
-    /// `pg_type.typcategory`.
-    pub category: char,
+    /// What the values are, for the grid, editors and copies.
+    pub class: TypeClass,
     pub not_null: bool,
     pub has_default: bool,
     /// Postgres computes the value (`attgenerated`, `attidentity = 'a'`).
     #[serde(default)]
     pub generated: Generated,
+    /// A column the engine keeps out of sight (a SQLite hidden column); the grid does not list it.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl ColumnInfo {
-    /// Clearing a string-category cell stages `''`; any other type stages NULL.
+    /// Clearing a text cell stages `''`; any other class stages NULL.
     pub fn clears_to_null(&self) -> bool {
-        self.category != 'S'
+        !matches!(self.class, TypeClass::Text | TypeClass::LongText)
     }
 
     /// The type a value to write is cast to. Postgres defines an explicit cast to
@@ -98,13 +101,13 @@ impl ColumnInfo {
         }
     }
 
-    /// Editors for these types take Enter as a newline.
+    /// Editors for these classes take Enter as a newline.
     pub fn multiline(&self) -> bool {
-        matches!(self.base_type.as_str(), "text" | "json" | "jsonb" | "xml")
+        matches!(self.class, TypeClass::LongText | TypeClass::Json)
     }
 
     pub fn column(&self) -> Column {
-        Column { name: self.name.clone(), base_type: self.base_type.clone(), type_label: self.type_sql.clone() }
+        Column { name: self.name.clone(), base_type: self.base_type.clone(), type_label: self.type_sql.clone(), class: self.class }
     }
 }
 
@@ -127,13 +130,18 @@ pub struct TableInfo {
     pub unique_keys: Vec<Vec<String>>,
     pub foreign_keys: Vec<ForeignKey>,
     pub estimated_rows: Option<u64>,
+    /// Why the grid cannot edit this table, whatever its keys (for example an engine that cannot
+    /// undo a write). `None` when it can.
+    #[serde(default)]
+    pub no_edit_reason: Option<String>,
 }
 
 impl TableInfo {
     /// The primary key, else the first unique key whose columns are all NOT NULL.
-    /// `None` for views and other relations that cannot be edited, or when there is no key.
+    /// `None` for views and other relations that cannot be edited, for a table with a
+    /// [`no_edit_reason`](Self::no_edit_reason), or when there is no key.
     pub fn row_key(&self) -> Option<Vec<&ColumnInfo>> {
-        if !matches!(self.kind, RelKind::Table | RelKind::PartitionedTable) {
+        if self.no_edit_reason.is_some() || !matches!(self.kind, RelKind::Table | RelKind::PartitionedTable) {
             return None;
         }
         let lookup = |names: &[String]| -> Option<Vec<&ColumnInfo>> {
@@ -213,12 +221,12 @@ mod tests {
         ColumnInfo {
             name: name.into(),
             type_sql: "text".into(),
-            type_oid: 25,
             base_type: "text".into(),
-            category: 'S',
+            class: TypeClass::Text,
             not_null,
             has_default: false,
             generated: Generated::No,
+            hidden: false,
         }
     }
     fn table(schema: &str, name: &str) -> TableInfo {
@@ -230,6 +238,7 @@ mod tests {
             unique_keys: vec![],
             foreign_keys: vec![],
             estimated_rows: None,
+            no_edit_reason: None,
         }
     }
     fn names(v: Vec<&ColumnInfo>) -> Vec<&str> {
@@ -261,25 +270,39 @@ mod tests {
     }
 
     #[test]
-    fn clearing_rules() {
-        let mut c = col("x", false);
-        c.category = 'S';
-        assert!(!c.clears_to_null());
-        for cat in ['N', 'D', 'B', 'U', 'E'] {
-            c.category = cat;
-            assert!(c.clears_to_null(), "{cat}");
+    fn classes_drive_clearing_and_lines() {
+        let info = |class| ColumnInfo { class, ..col("x", false) };
+        assert!(!info(TypeClass::Text).clears_to_null());
+        assert!(!info(TypeClass::LongText).clears_to_null());
+        for class in [TypeClass::Number, TypeClass::Bool, TypeClass::Json, TypeClass::DateTime, TypeClass::Binary, TypeClass::Other] {
+            assert!(info(class).clears_to_null(), "{class:?}");
         }
-        for (ty, multi) in
-            [("text", true), ("json", true), ("jsonb", true), ("xml", true), ("varchar", false), ("int4", false), ("bytea", false), ("_text", false)]
-        {
-            c.base_type = ty.into();
-            assert_eq!(c.multiline(), multi, "{ty}");
+        assert!(info(TypeClass::Json).multiline());
+        assert!(info(TypeClass::LongText).multiline());
+        for class in [TypeClass::Text, TypeClass::Number, TypeClass::Bool, TypeClass::DateTime, TypeClass::Binary, TypeClass::Other] {
+            assert!(!info(class).multiline(), "{class:?}");
         }
-        c.name = "n".into();
+        let mut c = col("n", false);
         c.type_sql = "character varying(200)".into();
         c.base_type = "varchar".into();
         let col = c.column();
-        assert_eq!((col.name.as_str(), col.base_type.as_str(), col.type_label.as_str()), ("n", "varchar", "character varying(200)"));
+        assert_eq!(
+            (col.name.as_str(), col.base_type.as_str(), col.type_label.as_str(), col.class),
+            ("n", "varchar", "character varying(200)", TypeClass::Text)
+        );
+    }
+
+    #[test]
+    fn no_edit_reason_blocks_row_key() {
+        let mut t = table("shop", "users");
+        t.primary_key = vec!["id".into()];
+        assert!(t.row_key().is_some());
+        t.no_edit_reason = Some("The MyISAM table engine can't undo a write".into());
+        assert!(t.row_key().is_none());
+        // Catalogs saved before the field existed have none.
+        let mut j = serde_json::to_value(table("shop", "users")).unwrap();
+        j.as_object_mut().unwrap().remove("noEditReason");
+        assert_eq!(serde_json::from_value::<TableInfo>(j).unwrap().no_edit_reason, None);
     }
 
     fn catalog() -> Catalog {

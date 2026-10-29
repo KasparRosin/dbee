@@ -347,7 +347,10 @@ mod tests {
 
     fn page() -> ResultSet {
         ResultSet {
-            columns: vec![Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into() }, Column::untyped("note")],
+            columns: vec![
+                Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into(), class: dbee_core::TypeClass::Number },
+                Column::untyped("note"),
+            ],
             rows: vec![vec![Some("1".into()), Some("a".into())], vec![Some("2".into()), None], vec![Some("3".into()), Some("c".into())]],
             rows_seen: 3,
             complete: true,
@@ -420,6 +423,7 @@ mod tests {
                 target_columns: vec!["id".into()],
             }],
             estimated_rows: None,
+            no_edit_reason: None,
         };
         assert_eq!(keys(&data, Some(&info)), [Key::Primary, Key::Foreign]);
         assert_eq!(keys(&data, None), [Key::None, Key::None]);

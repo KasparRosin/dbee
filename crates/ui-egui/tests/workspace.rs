@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use dbee_config::{ConnectionColor, ConnectionConfig};
-use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef};
+use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef, TypeClass};
 use dbee_testkit::TestDb;
 use dbee_ui_egui::automation::Tags;
 use dbee_ui_egui::tree::{self, Tree};
@@ -604,12 +604,12 @@ fn synthetic(n: usize) -> Arc<Catalog> {
     let column = |i: usize| ColumnInfo {
         name: format!("column_{i}"),
         type_sql: "integer".into(),
-        type_oid: 23,
         base_type: "int4".into(),
-        category: 'N',
+        class: TypeClass::Number,
         not_null: i == 0,
         has_default: false,
         generated: Default::default(),
+        hidden: false,
     };
     let table = |schema: &str, name: String| TableInfo {
         table: TableRef { schema: schema.into(), name },
@@ -619,6 +619,7 @@ fn synthetic(n: usize) -> Arc<Catalog> {
         unique_keys: vec![],
         foreign_keys: vec![],
         estimated_rows: Some(1000),
+        no_edit_reason: None,
     };
     let mut schemas: Vec<SchemaInfo> = (0..10)
         .map(|s| {

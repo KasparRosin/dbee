@@ -398,7 +398,7 @@ fn machine() -> String {
 #[test]
 #[ignore = "a timing test: cargo test -p dbee-ui-egui --test value_panel -- --ignored --nocapture"]
 fn value_panel_frames_within_budget() {
-    use dbee_core::Column;
+    use dbee_core::{Column, TypeClass};
     use dbee_engine::ValueView;
     use dbee_ui_egui::automation::Tags;
     use dbee_ui_egui::value_panel::{PanelState, contents};
@@ -409,7 +409,10 @@ fn value_panel_frames_within_budget() {
         tags: Tags,
         width: f32,
     }
-    let column = |name: &str, base: &str| Column { name: name.into(), base_type: base.into(), type_label: base.into() };
+    let column = |name: &str, base: &str| {
+        let class = if base == "jsonb" { TypeClass::Json } else { TypeClass::LongText };
+        Column { name: name.into(), base_type: base.into(), type_label: base.into(), class }
+    };
     // The seed's two 20 MB values: one line of text, and a jsonb array of 320,000 objects.
     let text = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_".repeat(312_500);
     let items: Vec<String> = (1..=320_000).map(|i| format!("{{\"i\": {i}, \"s\": \"{}\"}}", "z".repeat(40))).collect();

@@ -1000,15 +1000,16 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use dbee_core::Column;
     use dbee_core::json::JsonToken;
+    use dbee_core::{Column, TypeClass};
     use dbee_engine::{VALUE_VIEW_MAX_BYTES, ValueView};
 
     use super::*;
     use crate::automation::Tags;
 
     fn col(name: &str, base: &str) -> Column {
-        Column { name: name.into(), base_type: base.into(), type_label: base.into() }
+        let class = if base == "jsonb" { TypeClass::Json } else { TypeClass::LongText };
+        Column { name: name.into(), base_type: base.into(), type_label: base.into(), class }
     }
 
     /// One column for every character of `text` (no tabs in it).

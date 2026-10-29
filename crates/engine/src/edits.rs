@@ -439,7 +439,7 @@ impl Edits {
 mod tests {
     use std::collections::BTreeMap;
 
-    use dbee_core::{Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef};
+    use dbee_core::{Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef, TypeClass};
     use dbee_sql::SqlError;
     use dbee_sql::edit::NewValue;
 
@@ -449,12 +449,16 @@ mod tests {
         ColumnInfo {
             name: name.into(),
             type_sql: type_sql.into(),
-            type_oid: 0,
             base_type: base.into(),
-            category,
+            class: match category {
+                'N' => TypeClass::Number,
+                'S' => TypeClass::Text,
+                _ => TypeClass::Other,
+            },
             not_null: name == "id",
             has_default: false,
             generated: Default::default(),
+            hidden: false,
         }
     }
 
@@ -467,6 +471,7 @@ mod tests {
             unique_keys: vec![],
             foreign_keys: vec![],
             estimated_rows: None,
+            no_edit_reason: None,
         }
     }
 

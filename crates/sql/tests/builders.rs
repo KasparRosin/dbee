@@ -1,4 +1,4 @@
-use dbee_core::{ColumnInfo, RelKind, TableInfo, TableRef};
+use dbee_core::{ColumnInfo, RelKind, TableInfo, TableRef, TypeClass};
 use dbee_sql::SqlError;
 use dbee_sql::edit::{NewValue, delete_sql, insert_sql, update_sql};
 use dbee_sql::filter::{Condition, Filter, Op, Sort, SortDir, where_sql};
@@ -8,12 +8,16 @@ fn ci(name: &str, type_sql: &str, category: char) -> ColumnInfo {
     ColumnInfo {
         name: name.into(),
         type_sql: type_sql.into(),
-        type_oid: 0,
         base_type: type_sql.into(),
-        category,
+        class: match category {
+            'N' => TypeClass::Number,
+            'S' => TypeClass::Text,
+            _ => TypeClass::Other,
+        },
         not_null: false,
         has_default: false,
         generated: Default::default(),
+        hidden: false,
     }
 }
 
@@ -26,6 +30,7 @@ fn table_of(schema: &str, name: &str, cols: Vec<ColumnInfo>, key: &[&str]) -> Ta
         unique_keys: vec![],
         foreign_keys: vec![],
         estimated_rows: None,
+        no_edit_reason: None,
     }
 }
 

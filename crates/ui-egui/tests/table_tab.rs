@@ -575,7 +575,7 @@ fn machine() -> String {
 #[test]
 #[ignore = "a timing test: cargo test -p dbee-ui-egui --test table_tab -- --ignored --nocapture"]
 fn grid_frame_within_budget() {
-    use dbee_core::{Column, ResultSet};
+    use dbee_core::{Column, ResultSet, TypeClass};
     use dbee_engine::Selection;
     use dbee_ui_egui::automation::Tags;
     use dbee_ui_egui::grid::{Grid, GridState, RowEdits};
@@ -588,7 +588,9 @@ fn grid_frame_within_budget() {
     }
     // 10,000 rows of 20 columns (a query result at its cap), one value 20 MB long.
     let huge = "y".repeat(20_000_000);
-    let columns = (0..20).map(|c| Column { name: format!("column_{c}"), base_type: "text".into(), type_label: "text".into() }).collect();
+    let columns = (0..20)
+        .map(|c| Column { name: format!("column_{c}"), base_type: "text".into(), type_label: "text".into(), class: TypeClass::LongText })
+        .collect();
     let rows = (0..10_000).map(|r| (0..20).map(|c| Some(if r == 3 && c == 2 { huge.clone() } else { format!("value {r}.{c}") })).collect()).collect();
     let state = State {
         rows: ResultSet { columns, rows, rows_seen: 10_000, complete: true, rows_affected: None },

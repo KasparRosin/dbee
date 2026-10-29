@@ -7,7 +7,7 @@ mod common;
 use std::time::Instant;
 
 use common::*;
-use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef};
+use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef, TypeClass};
 use dbee_engine::fuzzy::{find, score};
 use dbee_testkit::{require_testdb, unique};
 use serde_json::json;
@@ -19,17 +19,18 @@ fn table(schema: &str, name: &str, kind: RelKind) -> TableInfo {
         columns: vec![ColumnInfo {
             name: "id".into(),
             type_sql: "integer".into(),
-            type_oid: 23,
             base_type: "int4".into(),
-            category: 'N',
+            class: TypeClass::Number,
             not_null: true,
             has_default: false,
             generated: Default::default(),
+            hidden: false,
         }],
         primary_key: vec![],
         unique_keys: vec![],
         foreign_keys: vec![],
         estimated_rows: None,
+        no_edit_reason: None,
     }
 }
 

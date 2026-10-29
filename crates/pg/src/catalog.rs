@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use dbee_core::cell::{Cell, ResultSet};
+use dbee_core::cell::{Cell, ResultSet, TypeClass};
 use dbee_core::schema::{Catalog, ColumnInfo, ForeignKey, Generated, RelKind, SchemaInfo, TableInfo, TableRef};
 
 use crate::connect::PgConnection;
@@ -42,7 +42,7 @@ WITH RECURSIVE d(root, cur) AS (
 ), base(root, base) AS (
     SELECT d.root, d.cur FROM d JOIN pg_catalog.pg_type t ON t.oid = d.cur AND t.typtype <> 'd'
 )
-SELECT c.oid::text, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.atttypid::text,
+SELECT c.oid::text, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),
        bt.typname, bt.typcategory::text, a.attnotnull::text,
        (a.atthasdef OR a.attidentity IN ('a', 'd'))::text, (a.attgenerated <> '')::text, (a.attidentity = 'a')::text
 FROM pg_catalog.pg_class c
@@ -74,6 +74,22 @@ WHERE con.contype IN ('p', 'u', 'f') AND con.conparentid = 0
   AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
   AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
 ORDER BY con.conrelid, con.conname, con.oid, k.ord";
+
+/// The class of a column from its base type's `typname` and `typcategory` (a domain has its base
+/// type's): numbers `N`, booleans `B`, `text`, `xml` and `citext` long text, other strings `S`
+/// text, `json` and `jsonb`, dates and times `D`, `bytea`; arrays and everything else `Other`.
+pub(crate) fn class_for(typname: &str, category: char) -> TypeClass {
+    match (typname, category) {
+        ("json" | "jsonb", _) => TypeClass::Json,
+        ("bytea", _) => TypeClass::Binary,
+        ("text" | "xml" | "citext", _) => TypeClass::LongText,
+        (_, 'N') => TypeClass::Number,
+        (_, 'B') => TypeClass::Bool,
+        (_, 'S') => TypeClass::Text,
+        (_, 'D') => TypeClass::DateTime,
+        _ => TypeClass::Other,
+    }
+}
 
 fn bad(what: &str) -> PgError {
     PgError::Other(format!("unexpected catalog data ({what})"))
@@ -154,6 +170,7 @@ pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, PgError> {
             unique_keys: Vec::new(),
             foreign_keys: Vec::new(),
             estimated_rows: estimate(text(row, 4, "reltuples")?),
+            no_edit_reason: None,
         };
         let si = schemas.len() - 1;
         let tables = &mut schemas[si].tables;
@@ -164,20 +181,21 @@ pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, PgError> {
     for row in &columns.rows {
         let oid: u32 = number(row, 0, "column relation")?;
         let Some(&(si, ti)) = index.get(&oid) else { continue };
-        let category = text(row, 5, "typcategory")?.chars().next().ok_or_else(|| bad("typcategory"))?;
+        let category = text(row, 4, "typcategory")?.chars().next().ok_or_else(|| bad("typcategory"))?;
+        let base_type = owned(row, 3, "typname")?;
         schemas[si].tables[ti].columns.push(ColumnInfo {
             name: owned(row, 1, "column name")?,
             type_sql: owned(row, 2, "format_type")?,
-            type_oid: number(row, 3, "type oid")?,
-            base_type: owned(row, 4, "typname")?,
-            category,
-            not_null: boolean(row, 6, "attnotnull")?,
-            has_default: boolean(row, 7, "has default")?,
-            generated: match (boolean(row, 8, "attgenerated")?, boolean(row, 9, "attidentity")?) {
+            class: class_for(&base_type, category),
+            base_type,
+            not_null: boolean(row, 5, "attnotnull")?,
+            has_default: boolean(row, 6, "has default")?,
+            generated: match (boolean(row, 7, "attgenerated")?, boolean(row, 8, "attidentity")?) {
                 (true, _) => Generated::Expression,
                 (false, true) => Generated::Identity,
                 (false, false) => Generated::No,
             },
+            hidden: false,
         });
     }
 

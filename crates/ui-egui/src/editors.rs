@@ -20,7 +20,7 @@
 //!
 //! **Kinds** ([`Kind`], from the column's catalog entry): one line, where Enter commits; several
 //! lines for `text`, `json`, `jsonb` and `xml` (`ColumnInfo::multiline`), where Enter is a newline
-//! and Ctrl+Enter commits; and a true / false / NULL choice for booleans (category `B`), moved
+//! and Ctrl+Enter commits; and a true / false / NULL choice for booleans (class `Bool`), moved
 //! with the arrow keys or clicked.
 //!
 //! **Keys.** While an editor is open it has the keyboard: Enter or Ctrl+Enter commits, Tab
@@ -51,7 +51,7 @@
 
 use std::sync::{Arc, Weak};
 
-use dbee_core::{ColumnInfo, ResultSet};
+use dbee_core::{ColumnInfo, ResultSet, TypeClass};
 use dbee_engine::cmd::edit::can_edit;
 use dbee_engine::{EngineError, Json, Screen, Session, Tab, TabId};
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
@@ -115,7 +115,7 @@ impl Kind {
     /// The kind for `column` (its catalog entry; one line when it is unknown).
     pub fn of(column: Option<&ColumnInfo>) -> Kind {
         match column {
-            Some(c) if c.category == 'B' => Kind::Bool,
+            Some(c) if c.class == TypeClass::Bool => Kind::Bool,
             Some(c) if c.multiline() => Kind::Lines,
             _ => Kind::Line,
         }
@@ -923,18 +923,22 @@ mod tests {
         let mut c = ColumnInfo {
             name: "c".into(),
             type_sql: "boolean".into(),
-            type_oid: 16,
             base_type: "bool".into(),
-            category: 'B',
+            class: TypeClass::Bool,
             not_null: false,
             has_default: false,
             generated: Default::default(),
+            hidden: false,
         };
         assert_eq!(Kind::of(Some(&c)), Kind::Bool);
-        (c.base_type, c.category) = ("jsonb".into(), 'U');
+        c.class = TypeClass::Json;
         assert_eq!(Kind::of(Some(&c)), Kind::Lines);
-        (c.base_type, c.category) = ("date".into(), 'D');
-        assert_eq!(Kind::of(Some(&c)), Kind::Line);
+        c.class = TypeClass::LongText;
+        assert_eq!(Kind::of(Some(&c)), Kind::Lines);
+        for class in [TypeClass::Text, TypeClass::Number, TypeClass::DateTime, TypeClass::Binary, TypeClass::Other] {
+            c.class = class;
+            assert_eq!(Kind::of(Some(&c)), Kind::Line, "{class:?}");
+        }
         assert_eq!(Kind::of(None), Kind::Line);
     }
 }

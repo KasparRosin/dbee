@@ -5,6 +5,8 @@
 
 use std::ops::Range;
 
+use crate::cell::{Column, TypeClass};
+
 /// Largest input or output `pretty` handles.
 pub const MAX_PRETTY_BYTES: usize = 10 * 1024 * 1024;
 
@@ -349,19 +351,25 @@ fn hex4(chars: &mut std::str::Chars<'_>) -> Option<u32> {
     Some(v)
 }
 
-/// What kind of JSON `text` is, for a column of `base_type`.
-pub fn classify(base_type: &str, text: &str) -> JsonKind {
+/// The kind of a `Json`-class column before its value is looked at: `jsonb` where the engine says
+/// so (Postgres `jsonb`), else plain JSON. Any other class is `NotJson`.
+pub fn column_kind(column: &Column) -> JsonKind {
+    match (column.class, column.base_type.as_str()) {
+        (TypeClass::Json, "jsonb") => JsonKind::Jsonb,
+        (TypeClass::Json, _) => JsonKind::Json,
+        _ => JsonKind::NotJson,
+    }
+}
+
+/// What kind of JSON `text` is, for `column`.
+pub fn classify(column: &Column, text: &str) -> JsonKind {
     let looks_like_container = |t: &str| t.trim_matches(is_json_ws).starts_with(['{', '[']);
-    match base_type {
-        "json" | "jsonb" => {
+    match column.class {
+        TypeClass::Json => {
             let nested = decoded_inner(text).is_some_and(|inner| looks_like_container(&inner) && is_valid(&inner));
-            match (nested, base_type) {
-                (true, _) => JsonKind::JsonStringContainingJson,
-                (false, "json") => JsonKind::Json,
-                (false, _) => JsonKind::Jsonb,
-            }
+            if nested { JsonKind::JsonStringContainingJson } else { column_kind(column) }
         }
-        "text" | "varchar" | "bpchar" | "name" | "citext" if looks_like_container(text) && is_valid(text) => JsonKind::TextContainingJson,
+        TypeClass::Text | TypeClass::LongText if looks_like_container(text) && is_valid(text) => JsonKind::TextContainingJson,
         _ => JsonKind::NotJson,
     }
 }
@@ -398,16 +406,32 @@ mod tests {
         );
     }
 
+    fn typed(base: &str, class: TypeClass) -> Column {
+        Column { name: "c".into(), base_type: base.into(), type_label: base.into(), class }
+    }
+
     #[test]
     fn classify_labels() {
-        assert_eq!(classify("jsonb", r#"{"a":1}"#), JsonKind::Jsonb);
-        assert_eq!(classify("jsonb", r#""{\"a\":1}""#), JsonKind::JsonStringContainingJson);
-        assert_eq!(classify("json", r#""just a string""#), JsonKind::Json);
-        assert_eq!(classify("text", r#"  {"a":1} "#), JsonKind::TextContainingJson);
-        assert_eq!(classify("varchar", "[1,2]"), JsonKind::TextContainingJson);
-        assert_eq!(classify("text", "{not json"), JsonKind::NotJson);
-        assert_eq!(classify("text", "123"), JsonKind::NotJson);
-        assert_eq!(classify("int4", "1"), JsonKind::NotJson);
+        let (jsonb, json, text, varchar, int4) = (
+            typed("jsonb", TypeClass::Json),
+            typed("json", TypeClass::Json),
+            typed("text", TypeClass::LongText),
+            typed("varchar", TypeClass::Text),
+            typed("int4", TypeClass::Number),
+        );
+        assert_eq!(classify(&jsonb, r#"{"a":1}"#), JsonKind::Jsonb);
+        assert_eq!(classify(&jsonb, r#""{\"a\":1}""#), JsonKind::JsonStringContainingJson);
+        assert_eq!(classify(&json, r#""just a string""#), JsonKind::Json);
+        assert_eq!(classify(&text, r#"  {"a":1} "#), JsonKind::TextContainingJson);
+        assert_eq!(classify(&varchar, "[1,2]"), JsonKind::TextContainingJson);
+        assert_eq!(classify(&text, "{not json"), JsonKind::NotJson);
+        assert_eq!(classify(&text, "123"), JsonKind::NotJson);
+        assert_eq!(classify(&int4, "1"), JsonKind::NotJson);
+        assert_eq!(column_kind(&jsonb), JsonKind::Jsonb);
+        assert_eq!(column_kind(&json), JsonKind::Json);
+        assert_eq!(column_kind(&text), JsonKind::NotJson);
+        // Another engine's JSON column is plain JSON.
+        assert_eq!(column_kind(&typed("", TypeClass::Json)), JsonKind::Json);
     }
 
     #[test]
@@ -458,7 +482,7 @@ mod tests {
         assert!(is_valid(&d));
         let _ = pretty(&d);
         let _ = highlight(&d);
-        let _ = classify("jsonb", &d);
+        let _ = classify(&typed("jsonb", TypeClass::Json), &d);
     }
 
     #[test]
@@ -498,8 +522,8 @@ mod tests {
     proptest! {
         #[test]
         fn never_panics(s in ".{0,200}") {
-            let _ = classify("text", &s);
-            let _ = classify("jsonb", &s);
+            let _ = classify(&typed("text", TypeClass::LongText), &s);
+            let _ = classify(&typed("jsonb", TypeClass::Json), &s);
             let _ = pretty(&s);
             let _ = decoded_inner(&s);
             let _ = highlight(&s);

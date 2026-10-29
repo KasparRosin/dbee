@@ -89,15 +89,11 @@ impl ValueView {
         if raw.len() > VALUE_VIEW_MAX_BYTES {
             // Too long to pretty-print (`json::pretty` gives up above the cap), so the start of
             // the raw text; the kind is the column's, without walking 20 MB again.
-            view.kind = match column.base_type.as_str() {
-                "jsonb" => JsonKind::Jsonb,
-                "json" => JsonKind::Json,
-                _ => JsonKind::NotJson,
-            };
+            view.kind = json::column_kind(column);
             view.text = cut(raw, VALUE_VIEW_MAX_BYTES).to_owned();
             view.truncated = true;
         } else {
-            view.kind = json::classify(&column.base_type, raw);
+            view.kind = json::classify(column, raw);
             let pretty = match view.kind {
                 JsonKind::NotJson => None,
                 JsonKind::JsonStringContainingJson => json::decoded_inner(raw).and_then(|inner| json::pretty(&inner)),
@@ -244,9 +240,16 @@ pub(crate) fn selection_json(tab: Option<&Tab>) -> Json {
 mod tests {
     use super::*;
     use crate::state::{QueryTab, StatementOutcome};
+    use dbee_core::TypeClass;
 
     fn col(name: &str, base: &str) -> Column {
-        Column { name: name.into(), base_type: base.into(), type_label: base.into() }
+        let class = match base {
+            "int4" => TypeClass::Number,
+            "json" | "jsonb" => TypeClass::Json,
+            "text" => TypeClass::LongText,
+            _ => TypeClass::Other,
+        };
+        Column { name: name.into(), base_type: base.into(), type_label: base.into(), class }
     }
 
     #[test]

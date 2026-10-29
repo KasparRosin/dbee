@@ -311,7 +311,7 @@ enum Staging {
     /// The `value` param.
     Value,
     Null,
-    /// `''` for a string-category column, NULL for every other.
+    /// `''` for a text column, NULL for every other.
     Clear,
 }
 

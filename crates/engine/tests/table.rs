@@ -70,7 +70,7 @@ fn opens_first_page_of_100() {
     let d = read(&mut s);
     assert_eq!((rows(&d), d["page"].as_u64(), d["hasNext"].as_bool()), (100, Some(0), Some(true)));
     // The columns come from the catalog, with their types; rows in primary key order.
-    assert_eq!(d["columns"][0], json!({ "name": "id", "baseType": "int8", "typeLabel": "bigint" }));
+    assert_eq!(d["columns"][0], json!({ "name": "id", "baseType": "int8", "typeLabel": "bigint", "class": "number" }));
     assert_eq!(d["columns"][col(&d, "status")]["typeLabel"], "shop.order_status");
     assert_eq!((cell(&d, 0, "id"), cell(&d, 99, "id")), (Some("1"), Some("100")));
     assert_eq!(d["total"], "unknown");

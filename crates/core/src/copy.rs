@@ -9,7 +9,7 @@ use std::convert::Infallible;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cell::Column;
+use crate::cell::{Column, TypeClass};
 use crate::json;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,7 +299,7 @@ fn json<C: Cells + ?Sized>(out: &mut Out, columns: &[Column], cells: &C) -> Resu
             }
             out.push_str(name)?;
             out.push_str(": ")?;
-            push_json_value(out, &c.base_type, v)
+            push_json_value(out, c.class, v)
         };
         let mut i = 0usize;
         cells.each(row, |v| {
@@ -323,14 +323,25 @@ fn json_string(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-fn push_json_value(out: &mut Out, base_type: &str, v: Option<&str>) -> Result<(), Over> {
+fn push_json_value(out: &mut Out, class: TypeClass, v: Option<&str>) -> Result<(), Over> {
     let Some(text) = v else { return out.push_str("null") };
-    match base_type {
-        "int2" | "int4" | "int8" | "float4" | "float8" | "numeric" | "oid" if is_json_number(text) => out.push_str(text),
-        "bool" if text == "t" => out.push_str("true"),
-        "bool" if text == "f" => out.push_str("false"),
-        "json" | "jsonb" if json::is_valid(text) => out.push_str(text),
+    match class {
+        TypeClass::Number if is_json_number(text) => out.push_str(text),
+        TypeClass::Bool => match json_bool(text) {
+            Some(b) => out.push_str(if b { "true" } else { "false" }),
+            None => push_json_string(out, text),
+        },
+        TypeClass::Json if json::is_valid(text) => out.push_str(text),
         _ => push_json_string(out, text),
+    }
+}
+
+/// A boolean as the engines print it: Postgres `t`/`f`, MySQL and SQLite `1`/`0`, or the words.
+fn json_bool(text: &str) -> Option<bool> {
+    match text {
+        "t" | "true" | "1" => Some(true),
+        "f" | "false" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -424,12 +435,23 @@ fn push_md(out: &mut Out, s: &str) -> Result<(), Over> {
 mod tests {
     use super::*;
 
+    /// The class a Postgres type name has in these tests.
+    fn class_of(t: &str) -> TypeClass {
+        match t {
+            "int2" | "int4" | "int8" | "float4" | "float8" | "numeric" | "oid" => TypeClass::Number,
+            "bool" => TypeClass::Bool,
+            "json" | "jsonb" => TypeClass::Json,
+            "text" => TypeClass::LongText,
+            _ => TypeClass::Other,
+        }
+    }
+
     fn cols() -> Vec<Column> {
         ["id:int4", "name:text", "billing:jsonb", "note:text"]
             .iter()
             .map(|s| {
                 let (n, t) = s.split_once(':').unwrap();
-                Column { name: n.into(), base_type: t.into(), type_label: t.into() }
+                Column { name: n.into(), base_type: t.into(), type_label: t.into(), class: class_of(t) }
             })
             .collect()
     }
@@ -472,7 +494,7 @@ mod tests {
     fn json_scalars_fall_back_to_strings() {
         let c: Vec<Column> = ["int4", "numeric", "bool", "bool", "jsonb", "float8", "text"]
             .iter()
-            .map(|t| Column { name: (*t).into(), base_type: (*t).into(), type_label: String::new() })
+            .map(|t| Column { name: (*t).into(), base_type: (*t).into(), type_label: String::new(), class: class_of(t) })
             .collect();
         let row = vec![Some("x"), Some("NaN"), Some("t"), Some("f"), Some("{bad"), Some("1.5e3"), Some("7")];
         assert_eq!(
@@ -482,8 +504,30 @@ mod tests {
     }
 
     #[test]
+    fn json_copy_by_class() {
+        let col = |class| Column { name: "c".into(), base_type: String::new(), type_label: String::new(), class };
+        let one = |class, value: &str| render(CopyFormat::Json, &[col(class)], &[vec![Some(value)]]);
+        let field = |v: &str| format!("[\n  {{\"c\": {v}}}\n]");
+        // Bool: the engines' spellings of true and false, anything else a string.
+        for (text, out) in
+            [("1", "true"), ("t", "true"), ("true", "true"), ("0", "false"), ("f", "false"), ("false", "false"), ("2", "\"2\""), ("yes", "\"yes\"")]
+        {
+            assert_eq!(one(TypeClass::Bool, text), field(out), "bool {text}");
+        }
+        // Number: bare when it is a JSON number.
+        assert_eq!(one(TypeClass::Number, "1.50"), field("1.50"));
+        assert_eq!(one(TypeClass::Number, "NaN"), field("\"NaN\""));
+        // Text keeps a number-looking value a string; JSON goes in bare when valid.
+        assert_eq!(one(TypeClass::Text, "1"), field("\"1\""));
+        assert_eq!(one(TypeClass::LongText, "true"), field("\"true\""));
+        assert_eq!(one(TypeClass::Json, r#"{"a":1}"#), field(r#"{"a":1}"#));
+        assert_eq!(one(TypeClass::Json, "{bad"), field("\"{bad\""));
+        assert_eq!(one(TypeClass::Other, "1"), field("\"1\""));
+    }
+
+    #[test]
     fn deeply_nested_json_does_not_overflow() {
-        let c = [Column { name: "j".into(), base_type: "jsonb".into(), type_label: String::new() }];
+        let c = [Column { name: "j".into(), base_type: "jsonb".into(), type_label: String::new(), class: TypeClass::Json }];
         let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
         let out = render(CopyFormat::Json, &c, &[vec![Some(deep.as_str())]]);
         assert!(out.starts_with("[\n  {\"j\": ["), "{}", &out[..40]);
@@ -501,7 +545,7 @@ mod tests {
     /// version against.
     mod reference {
         use super::super::{is_json_number, json_string};
-        use crate::cell::Column;
+        use crate::cell::{Column, TypeClass};
         use crate::json;
 
         pub fn delimited(columns: &[Column], rows: &[Vec<Option<&str>>], header: bool, csv: bool) -> String {
@@ -525,13 +569,13 @@ mod tests {
             if rows.is_empty() {
                 return "[]".to_string();
             }
-            let value = |t: &str, v: Option<&str>| {
+            let value = |class: TypeClass, v: Option<&str>| {
                 let Some(text) = v else { return "null".to_string() };
-                match t {
-                    "int2" | "int4" | "int8" | "float4" | "float8" | "numeric" | "oid" if is_json_number(text) => text.to_string(),
-                    "bool" if text == "t" => "true".to_string(),
-                    "bool" if text == "f" => "false".to_string(),
-                    "json" | "jsonb" if json::is_valid(text) => text.to_string(),
+                match class {
+                    TypeClass::Number if is_json_number(text) => text.to_string(),
+                    TypeClass::Bool if ["t", "true", "1"].contains(&text) => "true".to_string(),
+                    TypeClass::Bool if ["f", "false", "0"].contains(&text) => "false".to_string(),
+                    TypeClass::Json if json::is_valid(text) => text.to_string(),
                     _ => json_string(text),
                 }
             };
@@ -541,7 +585,7 @@ mod tests {
                     let fields: Vec<String> = columns
                         .iter()
                         .enumerate()
-                        .map(|(i, c)| format!("{}: {}", json_string(&c.name), value(&c.base_type, row.get(i).copied().flatten())))
+                        .map(|(i, c)| format!("{}: {}", json_string(&c.name), value(c.class, row.get(i).copied().flatten())))
                         .collect();
                     format!("  {{{}}}", fields.join(", "))
                 })
@@ -577,7 +621,11 @@ mod tests {
             let word = |next: &mut dyn FnMut(usize) -> usize| (0..next(4)).map(|_| pieces[next(pieces.len())]).collect::<String>();
             let ncols = next(4);
             let columns: Vec<Column> = (0..ncols)
-                .map(|_| Column { name: word(&mut next), base_type: types[next(types.len())].to_string(), type_label: String::new() })
+                .map(|_| {
+                    let name = word(&mut next);
+                    let t = types[next(types.len())];
+                    Column { name, base_type: t.to_string(), type_label: String::new(), class: class_of(t) }
+                })
                 .collect();
             let owned: Vec<Vec<Option<String>>> = (0..next(4))
                 .map(|_| (0..if next(5) == 0 { next(5) } else { ncols }).map(|_| (next(4) != 0).then(|| word(&mut next))).collect())
