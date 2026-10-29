@@ -5,6 +5,22 @@ use crate::{SqlError, quote};
 use dbee_core::{ColumnInfo, TableRef, TypeClass};
 use serde::{Deserialize, Serialize};
 
+mod mysql;
+mod postgres;
+mod sqlite;
+
+/// The length of the longest word of a keyword list.
+const fn longest(words: &[&str]) -> usize {
+    let (mut most, mut k) = (0, 0);
+    while k < words.len() {
+        if words[k].len() > most {
+            most = words[k].len();
+        }
+        k += 1;
+    }
+    most
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Dialect {
     Postgres,
@@ -49,6 +65,28 @@ fn is_plain_decimal(text: &str) -> bool {
 }
 
 impl Dialect {
+    /// The engine's keywords for highlighting: lowercase, sorted, unique.
+    pub fn keywords(self) -> &'static [&'static str] {
+        match self {
+            Dialect::Postgres => postgres::KEYWORDS,
+            Dialect::MySql => mysql::KEYWORDS,
+            Dialect::Sqlite => sqlite::KEYWORDS,
+        }
+    }
+
+    /// True when `word` is one of the engine's keywords, in any case.
+    pub fn is_keyword(self, word: &str) -> bool {
+        let longest = match self {
+            Dialect::Postgres => postgres::LONGEST,
+            Dialect::MySql => mysql::LONGEST,
+            Dialect::Sqlite => sqlite::LONGEST,
+        };
+        if word.len() > longest || !word.is_ascii() {
+            return false;
+        }
+        self.keywords().binary_search(&word.to_ascii_lowercase().as_str()).is_ok()
+    }
+
     /// `"name"` (Postgres, SQLite) or `` `name` `` (MySQL), the quote character doubled. NUL is an error.
     pub fn ident(self, name: &str) -> Result<String, SqlError> {
         quoted(name, if self == Dialect::MySql { '`' } else { '"' })
@@ -197,6 +235,31 @@ fn pg_filter_type(column: &ColumnInfo) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyword_lists_are_lowercase_sorted_and_unique() {
+        for d in ALL {
+            let list = d.keywords();
+            assert!(list.windows(2).all(|w| w[0] < w[1]), "{d:?} must be sorted and unique");
+            assert!(list.iter().all(|k| k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')), "{d:?}");
+            for k in ["select", "from", "where", "join", "insert", "update", "delete"] {
+                assert!(list.binary_search(&k).is_ok(), "{d:?} {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_longest_keyword_of_each_engine_is_found_and_longer_words_are_not() {
+        for d in ALL {
+            let longest = d.keywords().iter().copied().max_by_key(|k| k.len()).unwrap_or_default();
+            assert!(d.is_keyword(longest) && d.is_keyword(&longest.to_ascii_uppercase()), "{d:?} {longest}");
+            assert!(!d.is_keyword(&format!("{longest}x")), "{d:?}");
+        }
+        assert!(Dialect::MySql.is_keyword("master_ssl_verify_server_cert"));
+        assert!(!Dialect::Postgres.is_keyword("master_ssl_verify_server_cert"));
+        assert!(!Dialect::Sqlite.is_keyword("master_ssl_verify_server_cert"));
+        assert!(Dialect::MySql.is_keyword("accessible") && !Dialect::Postgres.is_keyword("accessible"));
+    }
     use crate::edit::{NewValue, delete_sql, insert_sql, update_sql};
     use crate::filter::{Condition, Filter, where_sql};
     use crate::select::{count_sql, page_sql};
