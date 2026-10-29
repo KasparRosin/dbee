@@ -125,8 +125,11 @@ fn cmd_layers() -> Result<(), String> {
             .collect();
         println!("{:<28} {:<10} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
     }
-    let violations = layers::check(&crates);
+    let violations = layers::check_workspace(&crates);
     println!();
+    for (from, to) in layers::ALLOWED_UNTIL_M2_8 {
+        println!("Allowed until M2.8: {from} -> {to}");
+    }
     if violations.is_empty() {
         println!("OK: {} crates, no layering violations.", crates.len());
         Ok(())

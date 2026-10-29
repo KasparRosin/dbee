@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (M2 is three databases; SQLite's licence allowed)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (the driver interface)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -109,3 +109,9 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** The licence allowlist gains SQLite's public-domain dedication, for the SQLite library compiled in by `libsqlite3-sys` (through `rusqlite` with `bundled`). The crates themselves are MIT.
 - **Why:** SQLite is public domain and has no licence text to put on the list. Linking it in keeps dbee one binary with no system library to find.
+
+## 2026-10-30: A driver interface: traits in dbee-driver, drivers at L4, the engine names none
+
+- **Decision:** `dbee-driver` (L3) holds the interface every database driver implements: the `Driver`, `Connection` and `Cancel` traits, one error type (`DbError`), `ServerInfo`, `Target`, the caps, the apply gate, the shared TLS setup and the `CatalogBuilder`. The drivers (`dbee-pg` now; MySQL/MariaDB and SQLite next) sit at L4, and `dbee-drivers` (L4) is their one list, which only the apps and test code use. `cargo xtask layers` keeps the engine and the UIs from taking a driver crate except as a dev-dependency.
+- **Families:** A driver serves a family of database types: the MySQL driver serves MySQL and MariaDB, and the Postgres driver can later serve Postgres-like servers. It names the types it opens, and each connection says which SQL dialect its server speaks.
+- **Why:** Each engine plugs in the same way, and shared logic (TLS, the apply gate, catalog building) exists once. Adding an engine is one driver crate, one dialect file and one registry line.

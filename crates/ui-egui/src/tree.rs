@@ -650,6 +650,7 @@ mod tests {
                 schema("pg_catalog", true, vec![table("pg_catalog", "pg_class", RelKind::Table)]),
                 schema("pg_toast_temp", false, vec![]),
             ],
+            default_schema: None,
         })
     }
 

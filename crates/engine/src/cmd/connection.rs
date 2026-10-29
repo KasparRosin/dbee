@@ -44,8 +44,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dbee_config::{ConnectionConfig, SecretKind, SecretStore, SshAuth, SslMode, new_id, parse_url};
 use dbee_core::Catalog;
+use dbee_driver::{DbError, Purpose, ServerInfo, Target};
 use dbee_pg::catalog::load_catalog;
-use dbee_pg::{Canceller, PgConnection, PgError, ServerInfo, Target};
+use dbee_pg::{Canceller, PgConnection};
 use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
@@ -421,15 +422,15 @@ pub(crate) fn ssh_error(e: &SshError) -> EngineError {
     EngineError::Db { code: "ssh", message, data }
 }
 
-/// A database or tunnel error as the engine reports it: `Db` with the `PgError` code, its text
+/// A database or tunnel error as the engine reports it: `Db` with the `DbError` code, its text
 /// (which can quote the server, so it is shown, never logged) and details; SSH prompts become
 /// `Needs`. `connectionLost` names the command that fixes it in `data.action`.
-pub(crate) fn db_error(e: &PgError) -> EngineError {
+pub(crate) fn db_error(e: &DbError) -> EngineError {
     let data = match e {
-        PgError::Ssh(ssh) => return ssh_error(ssh),
-        PgError::Server { code, detail, hint, position, .. } => json!({ "sqlstate": code, "detail": detail, "hint": hint, "position": position }),
-        PgError::ConnectionLost => json!({ "action": RECONNECT }),
-        PgError::RowNotFound { statement } => json!({ "statement": statement }),
+        DbError::Ssh(ssh) => return ssh_error(ssh),
+        DbError::Server { code, detail, hint, position, .. } => json!({ "sqlstate": code, "detail": detail, "hint": hint, "position": position }),
+        DbError::ConnectionLost => json!({ "action": RECONNECT }),
+        DbError::RowNotFound { statement } => json!({ "statement": statement }),
         _ => json!({}),
     };
     EngineError::Db { code: e.code(), message: e.to_string(), data }
@@ -447,7 +448,7 @@ impl Session {
         if c.browse.is_closed() || c.tunnel.as_ref().is_some_and(|t| t.is_closed()) {
             c.lost = true;
             log::info!("the browse connection or its tunnel has closed; the session is marked lost");
-            return Err(db_error(&PgError::ConnectionLost));
+            return Err(db_error(&DbError::ConnectionLost));
         }
         Ok(Arc::clone(&c.browse))
     }
@@ -461,8 +462,8 @@ impl Session {
     /// An operation on `conn` failed with `e`. When the connection is gone, the session lets go
     /// of it: a lost browse connection marks the session lost, and a lost query connection is
     /// dropped (the next query run opens a new one).
-    pub(crate) fn db_failed(&mut self, conn: &Arc<PgConnection>, e: &PgError) -> EngineError {
-        if (*e == PgError::ConnectionLost || conn.is_closed())
+    pub(crate) fn db_failed(&mut self, conn: &Arc<PgConnection>, e: &DbError) -> EngineError {
+        if (*e == DbError::ConnectionLost || conn.is_closed())
             && let Some(c) = self.state.connected.as_mut()
         {
             if Arc::ptr_eq(&c.browse, conn) && !c.lost {
@@ -514,7 +515,7 @@ async fn open_connection(config: &ConnectionConfig, env: &SshEnv, creds: &Creden
         None => None,
         Some(ssh) => Some(Arc::new(Tunnel::open(ssh, env, &creds.ssh, creds.trust.as_deref()).await.map_err(|e| ssh_error(&e))?)),
     };
-    let target = Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone() };
+    let target = Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file: false };
     match dbee_pg::connect(target).await {
         Ok(conn) => Ok(Opened { conn, tunnel }),
         Err(e) => {
@@ -522,7 +523,7 @@ async fn open_connection(config: &ConnectionConfig, env: &SshEnv, creds: &Creden
                 t.close().await;
             }
             Err(match e {
-                PgError::Auth { .. } if creds.password.is_none() => EngineError::Needs { need: Need::Password, message: e.to_string() },
+                DbError::Auth { .. } if creds.password.is_none() => EngineError::Needs { need: Need::Password, message: e.to_string() },
                 other => db_error(&other),
             })
         }
@@ -531,7 +532,7 @@ async fn open_connection(config: &ConnectionConfig, env: &SshEnv, creds: &Creden
 
 /// Why a bounded catalog load gave no catalog.
 enum CatalogLoad {
-    Failed(PgError),
+    Failed(DbError),
     /// It took longer than its limit; it was cancelled, and the connection must be discarded.
     TimedOut,
 }
@@ -1135,12 +1136,18 @@ mod tests {
             database: "dbee".into(),
             ..ConnectionConfig::default()
         };
-        let conn = dbee_pg::connect(Target { config: &config, password: Some(&db.password), tunnel: None }).await.unwrap();
+        let conn =
+            dbee_pg::connect(Target { config: &config, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false })
+                .await
+                .unwrap();
         // No load can answer within no time at all: the first poll only sends the query.
         let started = Instant::now();
         assert!(matches!(load_catalog_within(&conn, Duration::ZERO).await, Err(CatalogLoad::TimedOut)));
         assert!(started.elapsed() < CANCEL_GRACE + Duration::from_secs(5), "{:?}", started.elapsed());
-        let fresh = dbee_pg::connect(Target { config: &config, password: Some(&db.password), tunnel: None }).await.unwrap();
+        let fresh =
+            dbee_pg::connect(Target { config: &config, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false })
+                .await
+                .unwrap();
         assert!(load_catalog_within(&fresh, CATALOG_TIMEOUT).await.is_ok_and(|c| c.table_count() > 10));
         assert_eq!(catalog_error(CatalogLoad::TimedOut).code(), "timeout");
     }

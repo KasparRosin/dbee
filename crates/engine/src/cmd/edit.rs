@@ -23,7 +23,7 @@
 //! them twice, so it asks first (`Needs::Confirm { what: "applyAfterUnknownOutcome" }`) unless
 //! `force` (see `Edits::outcome_unknown`). An Apply is never dropped: its job runs to its end. One
 //! runs at a time (`busy`). `table.cancel` on its tab cancels it while its statements before
-//! `COMMIT` run (`dbee_pg::ApplyGate`): it then fails with code `cancelled`, writes nothing and
+//! `COMMIT` run (`dbee_driver::ApplyGate`): it then fails with code `cancelled`, writes nothing and
 //! keeps every edit, as a failed Apply does. Once it has decided to commit, `table.cancel` is
 //! `Busy` ([`COMMITTING`]) and the Apply runs to its end.
 //!
@@ -39,7 +39,8 @@
 use std::sync::Arc;
 
 use dbee_core::ResultSet;
-use dbee_pg::{ApplyError, PgConnection, PgError};
+use dbee_driver::{ApplyError, DbError};
+use dbee_pg::PgConnection;
 use dbee_sql::edit::NewValue;
 use dbee_sql::filter::Condition;
 use serde_json::json;
@@ -441,7 +442,7 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         Arc::make_mut(&mut t.edits).apply_started();
     }
     let job_conn = Arc::clone(&conn);
-    let gate = Arc::new(dbee_pg::ApplyGate::default());
+    let gate = Arc::new(dbee_driver::ApplyGate::default());
     let job_gate = Arc::clone(&gate);
     let job = s.spawn_job(APPLY, async move {
         let written = dbee_pg::apply_gated(&job_conn, &sql, &job_gate).await;
@@ -504,7 +505,7 @@ fn applied(
             })
         }
         Err(ApplyError { index, error }) => {
-            let lost = error == PgError::ConnectionLost;
+            let lost = error == DbError::ConnectionLost;
             let (row, column) = applying.statements.get(index).or(applying.statements.first()).copied().unwrap_or((0, None));
             let edits = Arc::make_mut(&mut t.edits);
             let message = if lost {

@@ -2,24 +2,12 @@
 //! Postgres prints them.
 
 use dbee_core::{Cell, Column, ResultSet, TypeClass};
+use dbee_driver::{DbError, Limits, QUERY_LIMITS};
 use futures_util::StreamExt;
 use tokio_postgres::SimpleQueryMessage;
 use tokio_postgres::types::{Kind, Type};
 
-use crate::{PgConnection, PgError};
-
-/// Caps on what one run keeps: rows, and bytes of cell text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Limits {
-    pub max_rows: usize,
-    pub max_bytes: usize,
-}
-
-/// The query editor's caps: 10,000 rows or 256 MiB of cell text.
-pub const QUERY_LIMITS: Limits = Limits { max_rows: 10_000, max_bytes: 256 * 1024 * 1024 };
-
-/// A table page: 100 rows plus one, so the caller can tell whether another page exists.
-pub const PAGE_LIMITS: Limits = Limits { max_rows: 101, max_bytes: 256 * 1024 * 1024 };
+use crate::PgConnection;
 
 /// Run `sql` (one or more statements) as one simple-query message, holding the connection lock.
 ///
@@ -28,14 +16,14 @@ pub const PAGE_LIMITS: Limits = Limits { max_rows: 101, max_bytes: 256 * 1024 * 
 /// the run with its error. Rows past `limits` are still read (so the connection stays in sync)
 /// and counted in `rows_seen`, but not kept, and `complete` becomes false. The byte cap counts
 /// the cell text kept.
-pub async fn run_untyped(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
+pub async fn run_untyped(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
     let _guard = conn.lock().await?;
     run_locked(conn, sql, limits).await
 }
 
 /// [`run_untyped`] for a caller that already holds the connection lock (an apply, which keeps
 /// it from `BEGIN` to `COMMIT`).
-pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
+pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
     let stream = conn.client().simple_query_raw(sql).await.map_err(|e| conn.error(&e))?;
     let mut stream = std::pin::pin!(stream);
     let mut result = ResultSet { complete: true, ..ResultSet::default() };
@@ -57,7 +45,7 @@ pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -
                 let mut cells: Vec<Cell> = Vec::with_capacity(row.len());
                 let mut row_bytes: usize = 0;
                 for i in 0..row.len() {
-                    let value = row.try_get(i).map_err(|_| PgError::Other("the server sent a value that is not valid UTF-8".into()))?;
+                    let value = row.try_get(i).map_err(|_| DbError::Other("the server sent a value that is not valid UTF-8".into()))?;
                     row_bytes = row_bytes.saturating_add(value.map_or(0, str::len));
                     cells.push(value.map(str::to_owned));
                 }
@@ -129,7 +117,7 @@ fn class_of_type(ty: &Type) -> TypeClass {
 /// them. Running comes first so the user always sees the statement's own error and a failed
 /// prepare cannot abort a transaction they opened; the described columns replace the untyped
 /// ones when the counts match.
-pub async fn run(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
+pub async fn run(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
     let mut result = run_untyped(conn, sql, limits).await?;
     if !result.columns.is_empty()
         && dbee_sql::lexer::statements(dbee_sql::Dialect::Postgres, sql).len() == 1
@@ -142,8 +130,8 @@ pub async fn run(conn: &PgConnection, sql: &str, limits: Limits) -> Result<Resul
 }
 
 /// The first cell of the first row as an unsigned integer (a count).
-pub async fn scalar_u64(conn: &PgConnection, sql: &str) -> Result<u64, PgError> {
+pub async fn scalar_u64(conn: &PgConnection, sql: &str) -> Result<u64, DbError> {
     let result = run_untyped(conn, sql, Limits { max_rows: 1, ..QUERY_LIMITS }).await?;
     let cell = result.rows.first().and_then(|row| row.first()).and_then(|c| c.as_deref());
-    cell.and_then(|text| text.trim().parse::<u64>().ok()).ok_or_else(|| PgError::Other("the query did not return a count".into()))
+    cell.and_then(|text| text.trim().parse::<u64>().ok()).ok_or_else(|| DbError::Other("the query did not return a count".into()))
 }

@@ -17,6 +17,7 @@ dbee-core = { workspace = true }
 dbee-sql = { workspace = true }
 dbee-config = { workspace = true }
 dbee-ssh = { workspace = true }
+dbee-driver = { workspace = true }
 dbee-pg = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }

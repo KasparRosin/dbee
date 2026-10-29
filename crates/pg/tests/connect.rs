@@ -9,9 +9,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, SshAuth, SshConfig, SslMode};
-use dbee_pg::query::{self, QUERY_LIMITS};
-use dbee_pg::{Canceller, MIN_VERSION_NUM, PgConnection, PgError, Target, connect, version_warning};
+use dbee_config::{ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
+use dbee_core::TableRef;
+use dbee_driver::{ApplyGate, Connection, DbError, Driver, Meaning, Purpose, QUERY_LIMITS, Target};
+use dbee_pg::query;
+use dbee_pg::{Canceller, MIN_VERSION_NUM, PgConnection, PgDriver, connect, version_warning};
+use dbee_sql::Dialect;
 use dbee_ssh::{AgentSource, SshEnv, SshSecrets, Tunnel};
 use dbee_testkit::{PgServer, TempHome, TestDb, require_testdb, temp_home, unique};
 
@@ -29,7 +32,7 @@ fn config(s: &PgServer, mode: SslMode) -> ConnectionConfig {
 }
 
 fn target<'a>(c: &'a ConnectionConfig, password: Option<&'a str>) -> Target<'a> {
-    Target { config: c, password, tunnel: None }
+    Target { config: c, password, tunnel: None, purpose: Purpose::Browse, create_file: false }
 }
 
 async fn open(c: &ConnectionConfig, db: &TestDb) -> PgConnection {
@@ -45,7 +48,7 @@ async fn scalar(conn: &PgConnection, sql: &str) -> Option<String> {
     r.rows.first().and_then(|row| row.first()).cloned().flatten()
 }
 
-fn code(r: Result<PgConnection, PgError>) -> &'static str {
+fn code(r: Result<PgConnection, DbError>) -> &'static str {
     match r {
         Ok(_) => "ok",
         Err(e) => e.code(),
@@ -95,7 +98,7 @@ async fn wrong_password_is_auth_error() {
         let c = config(s, SslMode::Prefer);
         let e = connect(target(&c, Some("nope"))).await.err().unwrap();
         assert_eq!(e.code(), "auth", "{e:?}");
-        assert!(matches!(&e, PgError::Auth { message } if !message.is_empty()), "{e:?}");
+        assert!(matches!(&e, DbError::Auth { message } if !message.is_empty()), "{e:?}");
         assert!(!e.to_string().contains("nope"), "{e}");
         // No password at all, when the server asks for one, is an auth error too.
         assert_eq!(code(connect(target(&c, None)).await), "auth");
@@ -116,7 +119,7 @@ async fn read_only_refuses_writes() {
         let rw = open(&config(s, SslMode::Prefer), db).await;
         query::run_untyped(&rw, &format!("DROP TABLE IF EXISTS scratch.{name}"), QUERY_LIMITS).await.unwrap();
         assert_eq!(e.code(), "readOnly", "{e:?}");
-        assert!(matches!(&e, PgError::ReadOnly { message } if message.contains("read-only")), "{e:?}");
+        assert!(matches!(&e, DbError::ReadOnly { message } if message.contains("read-only")), "{e:?}");
         // Reading still works, on the same connection.
         assert_eq!(scalar(&c, "SELECT 1 + 1").await.as_deref(), Some("2"));
     }
@@ -144,15 +147,29 @@ async fn through_ssh_tunnel() {
     let t = tunnel(db, &home).await;
     for s in &db.servers {
         let c = tunnelled(s, db, SslMode::Prefer);
-        let conn = connect(Target { config: &c, password: Some(&db.password), tunnel: Some(Arc::clone(&t)) }).await.unwrap();
+        let conn =
+            connect(Target { config: &c, password: Some(&db.password), tunnel: Some(Arc::clone(&t)), purpose: Purpose::Browse, create_file: false })
+                .await
+                .unwrap();
         assert_eq!(conn.info().version_num / 10000, s.major);
         assert_eq!(scalar(&conn, "SELECT 40 + 2").await.as_deref(), Some("42"));
         // TLS through the tunnel checks the configured host name (the service name).
         let full = ConnectionConfig { ssl_mode: SslMode::VerifyFull, ca_file: Some(db.ca_file.clone()), ..c.clone() };
-        let conn = connect(Target { config: &full, password: Some(&db.password), tunnel: Some(Arc::clone(&t)) }).await.unwrap();
+        let conn = connect(Target {
+            config: &full,
+            password: Some(&db.password),
+            tunnel: Some(Arc::clone(&t)),
+            purpose: Purpose::Browse,
+            create_file: false,
+        })
+        .await
+        .unwrap();
         assert_eq!(scalar(&conn, "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").await.as_deref(), Some("t"));
         // An SSH connection without a tunnel is refused rather than tried directly.
-        assert_eq!(code(connect(Target { config: &c, password: Some(&db.password), tunnel: None }).await), "connect");
+        assert_eq!(
+            code(connect(Target { config: &c, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false }).await),
+            "connect"
+        );
     }
     t.close().await;
 }
@@ -187,7 +204,7 @@ async fn tls_verify_full_needs_trusted_ca() {
         // The OS does not trust the test CA.
         let e = connect(target(&local, Some(&db.password))).await.err().unwrap();
         assert_eq!(e.code(), "tls", "{e:?}");
-        assert!(matches!(&e, PgError::Tls(m) if !m.is_empty()), "{e:?}");
+        assert!(matches!(&e, DbError::Tls(m) if !m.is_empty()), "{e:?}");
         // A CA that did not sign the certificate, a missing CA file.
         assert_eq!(code(connect(target(&ConnectionConfig { ca_file: Some(wrong_ca(db)), ..local.clone() }, Some(&db.password))).await), "tls");
         let missing = db.ca_file.with_file_name("no-such-ca.crt");
@@ -215,7 +232,7 @@ async fn cancel_sleep(conn: Arc<PgConnection>) {
     let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
     let e = result.unwrap_err();
     assert_eq!(e.code(), "cancelled", "{e:?}");
-    assert_eq!(e, PgError::Cancelled);
+    assert_eq!(e, DbError::Cancelled);
     assert!(started.elapsed() < Duration::from_secs(6));
     assert!(!conn.is_closed());
     assert_eq!(scalar(&conn, "SELECT 'still here'").await.as_deref(), Some("still here"));
@@ -233,7 +250,10 @@ async fn cancel_stops_pg_sleep() {
     let t = tunnel(db, &home).await;
     for s in &db.servers {
         let c = tunnelled(s, db, SslMode::Prefer);
-        let conn = connect(Target { config: &c, password: Some(&db.password), tunnel: Some(Arc::clone(&t)) }).await.unwrap();
+        let conn =
+            connect(Target { config: &c, password: Some(&db.password), tunnel: Some(Arc::clone(&t)), purpose: Purpose::Browse, create_file: false })
+                .await
+                .unwrap();
         cancel_sleep(Arc::new(conn)).await;
     }
     t.close().await;
@@ -255,11 +275,11 @@ async fn backend_killed_is_connection_lost() {
                     last = Some(e);
                     break;
                 }
-                other => last = Some(other.err().unwrap_or(PgError::Other("still answering".into()))),
+                other => last = Some(other.err().unwrap_or(DbError::Other("still answering".into()))),
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert_eq!(last, Some(PgError::ConnectionLost));
+        assert_eq!(last, Some(DbError::ConnectionLost));
         assert!(c.is_closed());
     }
 }
@@ -280,14 +300,14 @@ async fn run_untyped_keeps_the_last_result_and_server_errors() {
         let e = query::run_untyped(&c, "SELECT nope FROM pg_class", QUERY_LIMITS).await.unwrap_err();
         assert_eq!(e.code(), "server");
         match e {
-            PgError::Server { code, message, position, .. } => {
+            DbError::Server { code, message, position, .. } => {
                 assert_eq!((code.as_str(), position), ("42703", Some(8)));
                 assert!(message.contains("nope"), "{message}");
             }
             other => panic!("{other:?}"),
         }
         let e = query::run_untyped(&c, "SELECT 1/0", QUERY_LIMITS).await.unwrap_err();
-        assert!(matches!(&e, PgError::Server { code, .. } if code == "22012"), "{e:?}");
+        assert!(matches!(&e, DbError::Server { code, .. } if code == "22012"), "{e:?}");
         // The connection survives errors.
         assert_eq!(scalar(&c, "SELECT 3").await.as_deref(), Some("3"));
     }
@@ -329,29 +349,69 @@ fn old_versions_warn() {
 }
 
 #[test]
-fn error_codes() {
-    let all = [
-        (PgError::Server { code: "42703".into(), message: "m".into(), detail: None, hint: None, position: None }, "server"),
-        (PgError::Auth { message: "m".into() }, "auth"),
-        (PgError::Connect("m".into()), "connect"),
-        (PgError::Tls("m".into()), "tls"),
-        (PgError::Ssh(dbee_ssh::SshError::NoKey), "ssh"),
-        (PgError::ConnectionLost, "connectionLost"),
-        (PgError::Cancelled, "cancelled"),
-        (PgError::ReadOnly { message: "m".into() }, "readOnly"),
-        (PgError::RowNotFound { statement: 0 }, "rowNotFound"),
-        (PgError::Other("m".into()), "other"),
-    ];
-    for (e, code) in all {
-        assert_eq!(e.code(), code);
-        assert!(!e.to_string().is_empty());
-    }
-}
-
-#[test]
 fn connection_types_are_shareable() {
     fn send_sync<T: Send + Sync + 'static>() {}
     send_sync::<PgConnection>();
     send_sync::<Canceller>();
-    send_sync::<PgError>();
+    send_sync::<DbError>();
+    send_sync::<PgDriver>();
+}
+
+#[tokio::test]
+async fn pg_driver_connects_through_the_trait() {
+    let db = require_testdb!();
+    assert_eq!(PgDriver.kinds(), [DbKind::Postgres]);
+    for s in &db.servers {
+        let c = config(s, SslMode::Prefer);
+        let conn = PgDriver.connect(target(&c, Some(&db.password))).await.unwrap();
+        assert_eq!(conn.info().product, "PostgreSQL");
+        assert_eq!(conn.dialect(), Dialect::Postgres);
+        assert_eq!(conn.info().version_num / 10000, s.major);
+        assert!(!conn.is_closed());
+        // Each method reaches the Postgres connection.
+        assert_eq!(conn.scalar_u64("SELECT 40 + 2").await, Ok(42));
+        let typed = conn.run("SELECT 1::int4 AS n", QUERY_LIMITS).await.unwrap();
+        assert_eq!((typed.columns[0].base_type.as_str(), typed.rows[0][0].as_deref()), ("int4", Some("1")));
+        assert!(conn.run_untyped("SELECT 1 AS n", QUERY_LIMITS).await.unwrap().columns[0].base_type.is_empty());
+        let catalog = conn.load_catalog().await.unwrap();
+        assert!(catalog.table(&TableRef { schema: "shop".into(), name: "orders".into() }).is_some());
+        assert_eq!(conn.apply(&[], &ApplyGate::default()).await.map_err(|e| e.to_string()), Ok(0));
+        let e = PgDriver.connect(target(&c, Some("nope"))).await.err().unwrap();
+        assert_eq!(e.code(), "auth", "{e:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_trait_canceller_stops_pg_sleep() {
+    let db = require_testdb!();
+    for s in &db.servers {
+        let conn: Arc<dyn Connection> = PgDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
+        let canceller = conn.canceller();
+        let runner = Arc::clone(&conn);
+        let job = tokio::spawn(async move { runner.run_untyped("SELECT pg_sleep(30)", QUERY_LIMITS).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        canceller.cancel().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+        assert_eq!(result.err(), Some(DbError::Cancelled));
+        assert_eq!(conn.scalar_u64("SELECT 1").await, Ok(1));
+    }
+}
+
+#[tokio::test]
+async fn failed_transaction_is_flagged() {
+    let db = require_testdb!();
+    for s in &db.servers {
+        let conn = PgDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
+        conn.run("BEGIN", QUERY_LIMITS).await.unwrap();
+        let first = conn.run("SELECT 1/0", QUERY_LIMITS).await.unwrap_err();
+        assert!(matches!(&first, DbError::Server { code, meaning: None, .. } if code == "22012"), "{first:?}");
+        let e = conn.run("SELECT 1", QUERY_LIMITS).await.unwrap_err();
+        assert!(
+            matches!(&e, DbError::Server { code, code_label: Some("SQLSTATE"), meaning: Some(Meaning::TransactionAborted), .. } if code == "25P02"),
+            "{e:?}"
+        );
+        assert!(e.to_string().ends_with("(SQLSTATE 25P02)"), "{e}");
+        conn.run("ROLLBACK", QUERY_LIMITS).await.unwrap();
+        assert_eq!(conn.scalar_u64("SELECT 7").await, Ok(7));
+    }
 }

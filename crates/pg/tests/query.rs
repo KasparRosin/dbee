@@ -4,8 +4,9 @@
 
 use dbee_config::{ConnectionConfig, SslMode};
 use dbee_core::{ResultSet, TypeClass};
-use dbee_pg::query::{Limits, QUERY_LIMITS, describe, run, scalar_u64};
-use dbee_pg::{PgConnection, PgError, Target, connect};
+use dbee_driver::{DbError, Limits, Purpose, QUERY_LIMITS, Target};
+use dbee_pg::query::{describe, run, scalar_u64};
+use dbee_pg::{PgConnection, connect};
 use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
 
 async fn open(s: &PgServer, password: &str) -> PgConnection {
@@ -18,7 +19,7 @@ async fn open(s: &PgServer, password: &str) -> PgConnection {
         ssl_mode: SslMode::Prefer,
         ..ConnectionConfig::default()
     };
-    match connect(Target { config: &config, password: Some(password), tunnel: None }).await {
+    match connect(Target { config: &config, password: Some(password), tunnel: None, purpose: Purpose::Browse, create_file: false }).await {
         Ok(c) => c,
         Err(e) => panic!("connect to {} failed: {e}", s.name),
     }
@@ -85,9 +86,9 @@ async fn byte_cap_stops_collecting() {
 async fn page_limit_of_101_rows_is_exact() {
     let db = require_testdb!();
     for (_, c) in conns(db).await {
-        let r = ok(&c, "SELECT g FROM generate_series(1, 101) g", dbee_pg::query::PAGE_LIMITS).await;
+        let r = ok(&c, "SELECT g FROM generate_series(1, 101) g", dbee_driver::PAGE_LIMITS).await;
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (101, 101, true));
-        let r = ok(&c, "SELECT g FROM generate_series(1, 102) g", dbee_pg::query::PAGE_LIMITS).await;
+        let r = ok(&c, "SELECT g FROM generate_series(1, 102) g", dbee_driver::PAGE_LIMITS).await;
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (101, 102, false));
     }
 }
@@ -97,7 +98,7 @@ async fn error_has_position() {
     let db = require_testdb!();
     for (major, c) in conns(db).await {
         match run(&c, "SELECT nope FROM shop.orders", QUERY_LIMITS).await {
-            Err(PgError::Server { code, position, .. }) => {
+            Err(DbError::Server { code, position, .. }) => {
                 assert_eq!(code, "42703", "pg{major}");
                 assert_eq!(position, Some(8), "pg{major}");
             }
@@ -194,7 +195,7 @@ async fn run_inside_a_transaction_does_not_abort_it() {
     for (major, c) in conns(db).await {
         ok(&c, "BEGIN", QUERY_LIMITS).await;
         match run(&c, "SELECT nope", QUERY_LIMITS).await {
-            Err(PgError::Server { code, position, .. }) => {
+            Err(DbError::Server { code, position, .. }) => {
                 assert_eq!(code, "42703", "pg{major}");
                 assert_eq!(position, Some(8), "pg{major}");
             }

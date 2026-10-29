@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
 use dbee_core::{Catalog, ResultSet, TableRef};
-use dbee_pg::{PgConnection, ServerInfo};
+use dbee_driver::ServerInfo;
+use dbee_pg::PgConnection;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
 use serde::{Deserialize, Serialize};

@@ -631,7 +631,7 @@ fn synthetic(n: usize) -> Arc<Catalog> {
     for sys in ["information_schema", "pg_catalog"] {
         schemas.push(SchemaInfo { name: sys.into(), system: true, tables: (0..60).map(|t| table(sys, format!("pg_thing_{t}"))).collect() });
     }
-    Arc::new(Catalog { schemas })
+    Arc::new(Catalog { schemas, default_schema: None })
 }
 
 #[test]

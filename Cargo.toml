@@ -17,7 +17,9 @@ dbee-core = { path = "crates/core" }
 dbee-sql = { path = "crates/sql" }
 dbee-config = { path = "crates/config" }
 dbee-ssh = { path = "crates/ssh" }
+dbee-driver = { path = "crates/driver" }
 dbee-pg = { path = "crates/pg" }
+dbee-drivers = { path = "crates/drivers" }
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }
 dbee-mcp = { path = "crates/mcp" }

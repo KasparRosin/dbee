@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (`crates/testkit`: the MySQL and MariaDB test servers, the SQLite seed, targets over every engine)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (`crates/driver`, the driver interface; `crates/pg` behind it at L4; `crates/drivers`)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -15,26 +15,28 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | `crates/sql` | exists | L1. Identifier and literal quoting (values as `CAST('…' AS <type>)`), the SQL lexer and statement splitting, `WHERE` from filter rows or raw text, the page and count `SELECT`s, and the `UPDATE`, `INSERT` and `DELETE` of staged edits. Pure text over `core`'s schema model; no I/O. |
 | `crates/config` | exists | L1. Connection settings, URL parsing, the saved and recent connections file, and the secret stores (OS keyring, in-memory). No passwords in the file. |
 | `crates/ssh` | exists | L2. The SSH tunnel (russh with ring): host key check against `known_hosts` (unknown hosts ask once and can be learned, changed keys are refused), key, agent and password login, and a direct-tcpip channel per connection. Everything it reads from the machine comes in through `SshEnv`. |
-| `crates/pg` | exists | L3. The Postgres connection (tokio-postgres): TCP or a channel through the SSH tunnel, TLS with rustls (ring) and the OS certificate verifier, `application_name=dbee`, `standard_conforming_strings = on`, read-only mode, cancel requests; the catalog load (schemas, relations, columns, keys); a simple-query runner that returns values as text exactly as Postgres prints them, within row and byte caps; and the all-or-nothing apply of staged edits in one transaction. Uses `sql` for the statements it builds. |
+| `crates/driver` | exists | L3. The driver interface: the `Driver`, `Connection` and `Cancel` traits (everything async, the engine holds `Arc<dyn Connection>`), `DbError` with named meanings for the server errors dbee acts on (the server's code labelled by its driver), `ServerInfo`, `Target`, the row and byte caps, the apply gate, the TLS setup every driver shares (libpq's modes, rustls with ring and the OS verifier), the `CatalogBuilder` that turns a driver's catalog rows into a `Catalog`, and `Drivers`, which finds the driver for a database type. A driver serves a family of database types. |
+| `crates/pg` | exists | L4. The Postgres driver (`PgDriver`, on tokio-postgres): TCP or a channel through the SSH tunnel, TLS through `driver`'s setup, `application_name=dbee`, `standard_conforming_strings = on`, read-only mode, cancel requests; the catalog load (schemas, relations, columns, keys, through the `CatalogBuilder`); a simple-query runner that returns values as text exactly as Postgres prints them, within row and byte caps; and the all-or-nothing apply of staged edits in one transaction. Uses `sql` for the statements it builds. |
+| `crates/drivers` | exists | L4. `all()`: the one list of the drivers dbee ships (Postgres so far). Only the apps and test code depend on it. |
 | `crates/engine` | exists | L5. `Session`: the session state (`state.rs`), the command registry (`cmd/*`: tabs, connection, schema, table, edit, query, selection), background jobs on a tokio runtime (`jobs.rs`), the panic guard and the journal; staged edits with undo and redo (`edits.rs`), the quick search's scoring (`fuzzy.rs`), the grid a selection addresses and the value view (`view.rs`), and an isolated run's allowed targets (`allowed.rs`). |
 | `crates/ui-egui` | exists | L6. The egui UI and the control channel: the app shell (`DbeeApp`), theme, code-drawn icons, automation ids, shortcuts, UI-only commands, the connection screen (saved and recent lists, the connection form), the workspace (a menu bar built from the commands' menu paths, the schema tree, the tabs strip, the status bar, the quick search), the table tab (the data grid with its inline cell editors, the filter bar, the paging bar), the value panel (the selected cell's whole value, JSON pretty-printed and coloured), the query tab (an SQL editor with line numbers and syntax colours, run and cancel, read-only result sets with a selector and the cap notice, error cards), copying grid cells (Ctrl+C, Ctrl+Shift+C and the grid menu's formats, through `clipboard.copy`, with a "Copied n rows" notice; the system clipboard, or an in-memory one for isolated runs), the connection form's file pickers (rfd on a thread of its own, so the UI never waits) and the dialogs a command's `needs…` answer opens. |
 | `crates/mcp` | exists, empty | L6. MCP server over stdio. |
 | `apps/dbee` | exists | L7. Desktop binary: sets up the logger (standard error and `<settings dir>/logs/dbee.log`, levels from `RUST_LOG`) and, on Windows, the graphics start-up; reads `--version`, `--control`, `DBEE_CONTROL_PORT`, `DBEE_SECRET_STORE`, `DBEE_CLIPBOARD` (`memory`: copies and cuts stay in the app, for isolated runs), `DBEE_NO_PREFS` and `DBEE_ALLOW_TARGETS` (an isolated run's allowed connection targets), builds the session's options and runs `DbeeApp`. `tests/m1_day.rs` drives the real window through the M1 day (run by hand). |
 | `apps/dbee-cli` | exists | L7. CLI; prints its version. |
 | `xtask` | exists | Exempt from layering. `ci`, `assets`, `layers`, `licenses`, `provenance`, `testdb`, `run-isolated`, `version`, `stats`, `ico`, `icns`, `contributors`. `xtask/testdb/` holds the test servers' compose file, tools image and seed. |
-| More domain crates | **(planned)** | A database driver interface at the start of M2, so the engine no longer names `dbee-pg`'s types; then a driver per engine (MySQL/MariaDB and SQLite in M2). |
+| More domain crates | **(planned)** | The MySQL/MariaDB driver (`crates/mysql`) and the SQLite driver (`crates/sqlite`), both at L4, in M2. |
 
 ## Layers
 
 | Layer | Crates | Job |
 |---|---|---|
-| L0–L4 | `core`, `testkit` (L0, tests only); `sql`, `config` (L1); `ssh` (L2); `pg` (L3); a driver interface **(planned)** | Values and types, SQL parsing and quoting, database drivers and wire protocols, the connection and schema model. No UI, no engine. |
+| L0–L4 | `core`, `testkit` (L0, tests only); `sql`, `config` (L1); `ssh` (L2); `driver` (L3); the drivers `pg`, `mysql` **(planned)** and `sqlite` **(planned)**, and their registry `drivers` (L4) | Values and types, SQL parsing and quoting, the driver interface, database drivers and wire protocols, the connection and schema model. No UI, no engine. |
 | L5 | `engine` | Session, commands, undo, journal. Depends on L0–L4 only. |
 | L6 | `ui-egui`, `mcp` | Front ends over the engine. egui and friends are allowed here and above (`ui-egui` for the UI, `mcp` for UI control), never below. |
 | L7 | `apps/dbee`, `apps/dbee-cli` | Binaries that wire a front end to the engine. |
 | — | `xtask` | Build tooling (exempt). |
 
-A crate may depend only on lower layers. Register every new crate in `xtask/src/layers.rs` and in this table in the same change.
+A crate may depend only on lower layers. Two rules for the drivers: `drivers` may use every driver, and no driver uses another or the registry; the engine and the front ends (L5, L6) may take a driver or `drivers` only as a dev-dependency, so they know drivers through `driver`'s interface alone (until M2.8 the engine still uses `pg` directly, listed as an exception in `xtask/src/layers.rs`). A driver is registered as one `Class::Driver` line, which both rules then cover. Register every new crate in `xtask/src/layers.rs` and in this table in the same change.
 
 ## Data flow
 
@@ -63,12 +65,13 @@ Desktop only: macOS, Windows, Linux and FreeBSD, of which only Linux x86_64 has 
 
 ## Known gaps
 
-M1's crates are all in place. Postgres is the only engine, and the engine calls `dbee-pg` directly: a driver interface comes first in M2 "Three databases". The MCP crate is empty, and the CLI prints its version. The ranked work list is [`gaps.md`](gaps.md).
+M1's crates are all in place. Postgres is the only engine. The driver interface exists and Postgres sits behind it, but the engine still calls `dbee-pg` directly until M2.8 moves it onto the traits. The MCP crate is empty, and the CLI prints its version. The ranked work list is [`gaps.md`](gaps.md).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-30 | minor | `crates/driver` (L3): the driver interface; `crates/pg` moves to L4 behind it; `crates/drivers` (L4) lists the drivers; the layers check's driver rules (M2.7) |
 | 2026-10-28 | minor | `crates/testkit`: the MySQL and MariaDB test servers, the SQLite seed file and `targets()` over every engine (M2.2) |
 | 2026-10-28 | trivial | The planned driver interface is the start of M2 "Three databases". |
 | 2026-10-27 | trivial | Platforms: only Linux x86_64 built and run so far |

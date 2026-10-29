@@ -1106,11 +1106,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbee-driver"
+version = "0.0.0"
+dependencies = [
+ "dbee-config",
+ "dbee-core",
+ "dbee-sql",
+ "dbee-ssh",
+ "dbee-testkit",
+ "futures-util",
+ "rustls",
+ "rustls-platform-verifier",
+]
+
+[[package]]
+name = "dbee-drivers"
+version = "0.0.0"
+dependencies = [
+ "dbee-config",
+ "dbee-driver",
+ "dbee-pg",
+]
+
+[[package]]
 name = "dbee-engine"
 version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-core",
+ "dbee-driver",
  "dbee-pg",
  "dbee-sql",
  "dbee-ssh",
@@ -1132,13 +1156,13 @@ version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-core",
+ "dbee-driver",
  "dbee-sql",
  "dbee-ssh",
  "dbee-testkit",
  "futures-util",
  "log",
  "rustls",
- "rustls-platform-verifier",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",

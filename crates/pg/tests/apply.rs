@@ -5,9 +5,10 @@
 use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, SslMode};
-use dbee_pg::apply::{ApplyGate, apply, apply_gated};
-use dbee_pg::query::{QUERY_LIMITS, run_untyped};
-use dbee_pg::{PgConnection, PgError, Target, connect};
+use dbee_driver::{ApplyGate, DbError, Purpose, QUERY_LIMITS, Target};
+use dbee_pg::apply::{apply, apply_gated};
+use dbee_pg::query::run_untyped;
+use dbee_pg::{PgConnection, connect};
 use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
 
 async fn open(s: &PgServer, password: &str, read_only: bool) -> PgConnection {
@@ -21,7 +22,7 @@ async fn open(s: &PgServer, password: &str, read_only: bool) -> PgConnection {
         read_only,
         ..ConnectionConfig::default()
     };
-    match connect(Target { config: &config, password: Some(password), tunnel: None }).await {
+    match connect(Target { config: &config, password: Some(password), tunnel: None, purpose: Purpose::Browse, create_file: false }).await {
         Ok(c) => c,
         Err(e) => panic!("connect to {} failed: {e}", s.name),
     }
@@ -88,7 +89,7 @@ async fn one_failure_writes_nothing() {
         let err = apply(&w, &stmts).await.expect_err("must fail");
         assert_eq!(err.index, 1, "pg{major}");
         assert_eq!(err.error.code(), "server", "pg{major}");
-        assert!(matches!(&err.error, PgError::Server { code, .. } if code == "22P02"), "pg{major}: {:?}", err.error);
+        assert!(matches!(&err.error, DbError::Server { code, .. } if code == "22P02"), "pg{major}: {:?}", err.error);
         assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
         // The connection is usable again and not inside a transaction.
         sql(&w, &format!("UPDATE {t} SET name = 'after' WHERE id = 1")).await;
@@ -104,7 +105,7 @@ async fn missing_row_rolls_back() {
         let stmts = vec![format!("UPDATE {t} SET name = 'ghost' WHERE id = 99"), format!("UPDATE {t} SET name = 'uno' WHERE id = 1")];
         let err = apply(&w, &stmts).await.expect_err("must fail");
         assert_eq!(err.index, 0, "pg{major}");
-        assert_eq!(err.error, PgError::RowNotFound { statement: 0 }, "pg{major}");
+        assert_eq!(err.error, DbError::RowNotFound { statement: 0 }, "pg{major}");
         assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
 
         // A statement that matches two rows is also refused, and rolls back the earlier one.

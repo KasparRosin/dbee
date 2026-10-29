@@ -156,6 +156,9 @@ pub struct SchemaInfo {
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
     pub schemas: Vec<SchemaInfo>,
+    /// The schema to show first, as the driver names it (Postgres `public`), when it exists.
+    #[serde(default)]
+    pub default_schema: Option<String>,
 }
 
 impl Catalog {
@@ -289,6 +292,7 @@ mod tests {
                 SchemaInfo { name: "pg_catalog".into(), system: true, tables: vec![table("pg_catalog", "pg_class")] },
                 SchemaInfo { name: "shop".into(), system: false, tables: vec![table("shop", "orders"), table("shop", "items")] },
             ],
+            default_schema: None,
         }
     }
 
@@ -342,7 +346,7 @@ mod tests {
     #[ignore]
     fn filter_1000_tables_within_a_frame() {
         let tables: Vec<TableInfo> = (0..1000).map(|i| table("public", &format!("Table_{i}_Name"))).collect();
-        let c = Catalog { schemas: vec![SchemaInfo { name: "public".into(), system: false, tables }] };
+        let c = Catalog { schemas: vec![SchemaInfo { name: "public".into(), system: false, tables }], default_schema: None };
         let mut times: Vec<f64> = (0..100)
             .map(|_| {
                 let start = Instant::now();

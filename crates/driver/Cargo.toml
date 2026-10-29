@@ -1,0 +1,25 @@
+[package]
+name = "dbee-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "dbee driver interface (L3): the Driver, Connection and Cancel traits, DbError, the apply gate, shared TLS and catalog building, the registry"
+
+[lints]
+workspace = true
+
+[dependencies]
+dbee-core = { workspace = true }
+dbee-sql = { workspace = true }
+dbee-config = { workspace = true }
+dbee-ssh = { workspace = true }
+futures-util = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+
+[dev-dependencies]
+dbee-testkit = { workspace = true }

@@ -45,8 +45,9 @@
 use std::sync::Arc;
 
 use dbee_core::{Catalog, Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef};
+use dbee_driver::{DbError, PAGE_LIMITS};
+use dbee_pg::PgConnection;
 use dbee_pg::query::{run_untyped, scalar_u64};
-use dbee_pg::{PAGE_LIMITS, PgConnection, PgError};
 use dbee_sql::Dialect;
 use dbee_sql::SqlError;
 use dbee_sql::filter::{Condition, Filter, Op, Sort, SortDir, where_sql};
@@ -405,7 +406,7 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
 /// What a page job brings back: the count `last` made, and the page number with its rows.
 pub(crate) struct Loaded {
     counted: Option<u64>,
-    page: Result<(u64, ResultSet), PgError>,
+    page: Result<(u64, ResultSet), DbError>,
 }
 
 async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool) -> Loaded {
@@ -415,7 +416,7 @@ async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool
         let rows = match count_sql(Dialect::Postgres, info, &view.applied) {
             Ok(sql) => scalar_u64(conn, &sql).await,
             // Built once already, before the job started.
-            Err(e) => Err(PgError::Other(e.to_string())),
+            Err(e) => Err(DbError::Other(e.to_string())),
         };
         match rows {
             Ok(n) => {
@@ -427,7 +428,7 @@ async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool
     }
     let rows = match page_sql(Dialect::Postgres, info, &view.applied, view.sort.as_ref(), page) {
         Ok(sql) => run_untyped(conn, &sql, PAGE_LIMITS).await,
-        Err(e) => Err(PgError::Other(e.to_string())),
+        Err(e) => Err(DbError::Other(e.to_string())),
     };
     Loaded { counted, page: rows.map(|rs| (page, rs)) }
 }
@@ -730,7 +731,7 @@ fn apply_count(
     conn: &Arc<PgConnection>,
     tab: TabId,
     condition: &Condition,
-    rows: Result<u64, PgError>,
+    rows: Result<u64, DbError>,
 ) -> Result<Json, EngineError> {
     if !s.is_current_browse(conn) {
         return Ok(ignored());

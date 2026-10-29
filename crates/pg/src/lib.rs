@@ -1,5 +1,6 @@
-//! dbee Postgres connection (layer L3): connecting over TCP or an SSH tunnel, TLS, read-only
-//! mode, cancel, and running SQL text over the simple-query protocol.
+//! dbee Postgres driver (layer L4), behind `dbee-driver`'s interface ([`PgDriver`]): connecting
+//! over TCP or an SSH tunnel, TLS, read-only mode, cancel, running SQL text over the
+//! simple-query protocol, the catalog and the all-or-nothing apply.
 //!
 //! Values are text exactly as Postgres prints them; no prepared statements carry data. Every
 //! session runs with `standard_conforming_strings = on` and a UTF-8 `client_encoding`, which the
@@ -10,11 +11,11 @@
 pub mod apply;
 pub mod catalog;
 pub mod connect;
-pub mod error;
+pub mod driver;
+mod error;
 pub mod query;
 pub mod tls;
 
-pub use apply::{ApplyError, ApplyGate, apply, apply_gated};
-pub use connect::{CONNECT_TIMEOUT, Canceller, MIN_VERSION_NUM, PgConnection, ServerInfo, Target, connect, version_warning};
-pub use error::PgError;
-pub use query::{Limits, PAGE_LIMITS, QUERY_LIMITS};
+pub use apply::{apply, apply_gated};
+pub use connect::{Canceller, MIN_VERSION_NUM, PgConnection, connect, version_warning};
+pub use driver::PgDriver;

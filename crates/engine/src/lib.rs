@@ -85,7 +85,7 @@ pub enum EngineError {
     BadParams { id: String, msg: String },
     /// The command needs an answer first.
     Needs { need: Need, message: String },
-    /// The database or the tunnel failed; `code` is a `dbee_pg::PgError::code`.
+    /// The database or the tunnel failed; `code` is a `dbee_driver::DbError::code`.
     Db { code: &'static str, message: String, data: Json },
     /// Something is already running that this command would collide with.
     Busy(String),
@@ -235,7 +235,7 @@ pub struct Session {
     pub(crate) allowed_targets: Option<Vec<(String, u16)>>,
     /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
     /// decides to commit (one Apply runs at a time).
-    pub(crate) apply_gate: Option<(JobId, Arc<dbee_pg::ApplyGate>)>,
+    pub(crate) apply_gate: Option<(JobId, Arc<dbee_driver::ApplyGate>)>,
     journal: Vec<(String, Json)>,
     value_cache: view::Cache,
 }

@@ -65,6 +65,7 @@ fn find_orders_and_sorting() {
             schema("zeta", false, &["orders", "orders_archive", "my_orders"]),
             schema("shop", false, &["orders"]),
         ],
+        default_schema: None,
     };
     let hits = find(&c, "orders", 20);
     let names: Vec<String> = hits.iter().map(|h| h.table.display()).collect();
@@ -135,7 +136,7 @@ fn quick_search_1000_tables_within_a_frame() {
     let names: Vec<String> =
         (0..1000).map(|i| format!("{}_{}_{i}", ["orders", "users", "items", "product_records", "audit"][i % 5], ["a", "bb", "ccc"][i % 3])).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let c = Catalog { schemas: vec![schema("shop", false, &refs[..800]), schema("pg_catalog", true, &refs[800..])] };
+    let c = Catalog { schemas: vec![schema("shop", false, &refs[..800]), schema("pg_catalog", true, &refs[800..])], default_schema: None };
     let mut times = Vec::new();
     for q in ["ord", "usr", "pr_rec", "zzz", "o", "shop.it"] {
         for _ in 0..20 {

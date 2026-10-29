@@ -6,9 +6,10 @@ use std::time::Instant;
 use dbee_config::{ConnectionConfig, SslMode};
 use dbee_core::TypeClass;
 use dbee_core::schema::{Catalog, Generated, RelKind, TableRef};
+use dbee_driver::{Purpose, QUERY_LIMITS, Target};
 use dbee_pg::catalog::load_catalog;
-use dbee_pg::query::{self, QUERY_LIMITS};
-use dbee_pg::{PgConnection, Target, connect};
+use dbee_pg::query;
+use dbee_pg::{PgConnection, connect};
 use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
 
 fn tr(schema: &str, name: &str) -> TableRef {
@@ -25,7 +26,7 @@ async fn conn(s: &PgServer, db: &TestDb) -> PgConnection {
         ssl_mode: SslMode::Prefer,
         ..ConnectionConfig::default()
     };
-    match connect(Target { config: &config, password: Some(&db.password), tunnel: None }).await {
+    match connect(Target { config: &config, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false }).await {
         Ok(c) => c,
         Err(e) => panic!("connect to {} failed: {e}", s.name),
     }
@@ -267,5 +268,13 @@ async fn pg_catalog_classes() {
         ] {
             assert_eq!(table.column(name).map(|c| c.class), Some(class), "pg{major}: {name}");
         }
+    }
+}
+
+#[tokio::test]
+async fn public_is_the_default_schema() {
+    let db = require_testdb!();
+    for (major, cat) in catalogs(db).await {
+        assert_eq!(cat.default_schema.as_deref(), Some("public"), "pg{major}");
     }
 }

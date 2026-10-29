@@ -43,7 +43,8 @@ use std::sync::{Arc, Weak};
 
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
-use dbee_pg::{Limits, PgConnection, PgError, QUERY_LIMITS, Target};
+use dbee_driver::{DbError, Limits, Purpose, QUERY_LIMITS, Target};
+use dbee_pg::PgConnection;
 use dbee_sql::{Dialect, lexer};
 use dbee_ssh::Tunnel;
 use serde_json::json;
@@ -155,7 +156,7 @@ enum Via {
 /// text the error points at.
 struct Failure {
     statement: usize,
-    error: PgError,
+    error: DbError,
     position: Option<usize>,
 }
 
@@ -188,7 +189,7 @@ fn text_bytes(result: &ResultSet) -> usize {
 /// before left, and once it is spent, later results keep no rows (and say they are incomplete).
 async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop: Arc<Stop>, budget: usize) -> Ran {
     let mut ran = Ran { conn: None, outcomes: Vec::with_capacity(ranges.len()), failure: None };
-    let stopped = |statement| Some(Failure { statement, error: PgError::Cancelled, position: None });
+    let stopped = |statement| Some(Failure { statement, error: DbError::Cancelled, position: None });
     if stop.is_set() {
         ran.failure = stopped(0);
         return ran;
@@ -196,7 +197,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
     let (conn, opened) = match via {
         Via::Open(conn) => (conn, false),
         Via::Connect { config, password, tunnel } => {
-            let target = Target { config: &config, password: password.as_deref(), tunnel };
+            let target = Target { config: &config, password: password.as_deref(), tunnel, purpose: Purpose::Query, create_file: false };
             // A connect that is stopped is dropped: nothing ran on it yet.
             tokio::select! {
                 connected = dbee_pg::connect(target) => match connected {
@@ -220,11 +221,11 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
             break;
         }
         let Some(sql) = text.get(range.clone()) else {
-            ran.failure = Some(Failure { statement: i, error: PgError::Other("the statement is not in the text".into()), position: None });
+            ran.failure = Some(Failure { statement: i, error: DbError::Other("the statement is not in the text".into()), position: None });
             break;
         };
         if let Some(at) = sql.find('\0') {
-            ran.failure = Some(Failure { statement: i, error: PgError::Other(NUL.into()), position: range.start.checked_add(at) });
+            ran.failure = Some(Failure { statement: i, error: DbError::Other(NUL.into()), position: range.start.checked_add(at) });
             break;
         }
         let limits = Limits { max_rows: if left == 0 { 0 } else { RUN_LIMITS.max_rows }, max_bytes: left };
@@ -235,7 +236,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
             }
             Err(error) => {
                 let position = match &error {
-                    PgError::Server { position: Some(chars), .. } => byte_position(&text, &range, *chars),
+                    DbError::Server { position: Some(chars), .. } => byte_position(&text, &range, *chars),
                     _ => None,
                 };
                 ran.failure = Some(Failure { statement: i, error, position });
@@ -249,7 +250,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
 
 /// Runs one statement. When the run is stopped meanwhile, the cancel request goes out and the
 /// statement is waited for (it then usually ends with `Cancelled`).
-async fn run_one(conn: &PgConnection, sql: &str, limits: Limits, stop: &Stop) -> Result<ResultSet, PgError> {
+async fn run_one(conn: &PgConnection, sql: &str, limits: Limits, stop: &Stop) -> Result<ResultSet, DbError> {
     let mut running = std::pin::pin!(dbee_pg::query::run(conn, sql, limits));
     tokio::select! {
         result = &mut running => result,
@@ -323,7 +324,7 @@ fn run_error(e: EngineError, f: &Failure) -> EngineError {
 
 /// The error of a run whose query connection was lost while the session was not.
 fn session_lost() -> EngineError {
-    EngineError::Db { code: PgError::ConnectionLost.code(), message: QUERY_SESSION_LOST.into(), data: json!({}) }
+    EngineError::Db { code: DbError::ConnectionLost.code(), message: QUERY_SESSION_LOST.into(), data: json!({}) }
 }
 
 /// The error `f` gives, on the query connection `conn` (`None` when it could not be opened). A
@@ -332,7 +333,7 @@ fn session_lost() -> EngineError {
 /// (see the module docs).
 fn failed(s: &mut Session, conn: Option<&Arc<PgConnection>>, f: &Failure) -> EngineError {
     let Some(c) = s.state.connected.as_mut() else { return db_error(&f.error) };
-    let query_lost = f.error == PgError::ConnectionLost || conn.is_some_and(|q| q.is_closed());
+    let query_lost = f.error == DbError::ConnectionLost || conn.is_some_and(|q| q.is_closed());
     if query_lost && c.query.as_ref().zip(conn).is_some_and(|(mine, used)| Arc::ptr_eq(mine, used)) {
         c.query = None;
     }
@@ -342,7 +343,7 @@ fn failed(s: &mut Session, conn: Option<&Arc<PgConnection>>, f: &Failure) -> Eng
             c.lost = true;
             log::info!("query: the browse connection or the tunnel has closed; the session is marked lost");
         }
-        return db_error(&PgError::ConnectionLost);
+        return db_error(&DbError::ConnectionLost);
     }
     if query_lost {
         log::info!("query: the query connection was lost; the next run opens a new one");
@@ -355,7 +356,7 @@ fn failed(s: &mut Session, conn: Option<&Arc<PgConnection>>, f: &Failure) -> Eng
 /// detail and hint, else the engine error's text.
 fn query_error(e: &EngineError, f: &Failure) -> QueryError {
     let (message, sqlstate, detail, hint) = match &f.error {
-        PgError::Server { code, message, detail, hint, .. } => {
+        DbError::Server { code, message, detail, hint, .. } => {
             (format!("{message} (SQLSTATE {code})"), Some(code.clone()), detail.clone(), hint.clone())
         }
         _ => (e.to_string(), None, None, None),
@@ -443,7 +444,7 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if c.query.as_ref().is_some_and(|q| q.is_closed()) {
         log::info!("query: the query connection has closed; this run fails, and the next opens a new one");
         c.query = None;
-        let f = Failure { statement: 0, error: PgError::ConnectionLost, position: None };
+        let f = Failure { statement: 0, error: DbError::ConnectionLost, position: None };
         let e = session_lost();
         if let Some(Tab::Query(q)) = s.state.tab_mut(tab) {
             q.results = Vec::new();
