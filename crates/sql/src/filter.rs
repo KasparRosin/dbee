@@ -151,7 +151,7 @@ pub struct Sort {
 pub fn where_sql(d: Dialect, cond: &Condition, table: &TableInfo) -> Result<Option<String>, SqlError> {
     match cond {
         Condition::None => Ok(None),
-        Condition::Raw(raw) => raw_sql(raw),
+        Condition::Raw(raw) => raw_sql(d, raw),
         Condition::Filters(filters) => {
             let mut parts = Vec::new();
             for filter in filters {
@@ -164,15 +164,15 @@ pub fn where_sql(d: Dialect, cond: &Condition, table: &TableInfo) -> Result<Opti
     }
 }
 
-fn raw_sql(raw: &str) -> Result<Option<String>, SqlError> {
+fn raw_sql(d: Dialect, raw: &str) -> Result<Option<String>, SqlError> {
     if raw.trim().is_empty() {
         return Ok(None);
     }
-    if has_top_level_semicolon(raw) {
+    if has_top_level_semicolon(d, raw) {
         return Err(SqlError::Semicolon);
     }
-    // A `--` comment runs to the end of the line, so the closing paren goes on its own line.
-    let line_comment = tokenize(raw).iter().any(|t| t.kind == TokenKind::Comment && raw.get(t.range.clone()).is_some_and(|s| s.starts_with("--")));
+    // A `--` (or MySQL `#`) comment runs to the end of the line, so the closing paren goes on its own line.
+    let line_comment = tokenize(d, raw).iter().any(|t| t.kind == TokenKind::Comment && raw.get(t.range.clone()).is_some_and(|s| !s.starts_with('/')));
     Ok(Some(if line_comment { format!("({raw}\n)") } else { format!("({raw})") }))
 }
 

@@ -3,6 +3,8 @@
 
 use std::ops::Range;
 
+use crate::Dialect;
+
 /// Common PostgreSQL keywords (reserved and non-reserved, from the SQL Key Words appendix of the
 /// PostgreSQL documentation), lowercase and sorted so `binary_search` works.
 pub static KEYWORDS: &[&str] = &[
@@ -440,6 +442,441 @@ pub static KEYWORDS: &[&str] = &[
     "zone",
 ];
 
+/// MySQL's reserved words, from the Keywords and Reserved Words page of the MySQL Reference Manual
+/// (the entries marked (R)), lowercase and sorted.
+pub static MYSQL_KEYWORDS: &[&str] = &[
+    "accessible",
+    "add",
+    "all",
+    "alter",
+    "analyze",
+    "and",
+    "as",
+    "asc",
+    "asensitive",
+    "before",
+    "between",
+    "bigint",
+    "binary",
+    "blob",
+    "both",
+    "by",
+    "call",
+    "cascade",
+    "case",
+    "change",
+    "char",
+    "character",
+    "check",
+    "collate",
+    "column",
+    "condition",
+    "constraint",
+    "continue",
+    "convert",
+    "create",
+    "cross",
+    "cube",
+    "cume_dist",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "cursor",
+    "database",
+    "databases",
+    "day_hour",
+    "day_microsecond",
+    "day_minute",
+    "day_second",
+    "dec",
+    "decimal",
+    "declare",
+    "default",
+    "delayed",
+    "delete",
+    "dense_rank",
+    "desc",
+    "describe",
+    "deterministic",
+    "distinct",
+    "distinctrow",
+    "div",
+    "double",
+    "drop",
+    "dual",
+    "each",
+    "else",
+    "elseif",
+    "empty",
+    "enclosed",
+    "escaped",
+    "except",
+    "exists",
+    "exit",
+    "explain",
+    "false",
+    "fetch",
+    "first_value",
+    "float",
+    "float4",
+    "float8",
+    "for",
+    "force",
+    "foreign",
+    "from",
+    "fulltext",
+    "function",
+    "generated",
+    "get",
+    "grant",
+    "group",
+    "grouping",
+    "groups",
+    "having",
+    "high_priority",
+    "hour_microsecond",
+    "hour_minute",
+    "hour_second",
+    "if",
+    "ignore",
+    "in",
+    "index",
+    "infile",
+    "inner",
+    "inout",
+    "insensitive",
+    "insert",
+    "int",
+    "int1",
+    "int2",
+    "int3",
+    "int4",
+    "int8",
+    "integer",
+    "intersect",
+    "interval",
+    "into",
+    "io_after_gtids",
+    "io_before_gtids",
+    "is",
+    "iterate",
+    "join",
+    "json_table",
+    "key",
+    "keys",
+    "kill",
+    "lag",
+    "last_value",
+    "lateral",
+    "lead",
+    "leading",
+    "leave",
+    "left",
+    "like",
+    "limit",
+    "linear",
+    "lines",
+    "load",
+    "localtime",
+    "localtimestamp",
+    "lock",
+    "long",
+    "longblob",
+    "longtext",
+    "loop",
+    "low_priority",
+    "master_bind",
+    "master_ssl_verify_server_cert",
+    "match",
+    "maxvalue",
+    "mediumblob",
+    "mediumint",
+    "mediumtext",
+    "middleint",
+    "minute_microsecond",
+    "minute_second",
+    "mod",
+    "modifies",
+    "natural",
+    "no_write_to_binlog",
+    "not",
+    "nth_value",
+    "ntile",
+    "null",
+    "numeric",
+    "of",
+    "on",
+    "optimize",
+    "optimizer_costs",
+    "option",
+    "optionally",
+    "or",
+    "order",
+    "out",
+    "outer",
+    "outfile",
+    "over",
+    "partition",
+    "percent_rank",
+    "precision",
+    "primary",
+    "procedure",
+    "purge",
+    "range",
+    "rank",
+    "read",
+    "read_write",
+    "reads",
+    "real",
+    "recursive",
+    "references",
+    "regexp",
+    "release",
+    "rename",
+    "repeat",
+    "replace",
+    "require",
+    "resignal",
+    "restrict",
+    "return",
+    "revoke",
+    "right",
+    "rlike",
+    "row",
+    "row_number",
+    "rows",
+    "schema",
+    "schemas",
+    "second_microsecond",
+    "select",
+    "sensitive",
+    "separator",
+    "set",
+    "show",
+    "signal",
+    "smallint",
+    "spatial",
+    "specific",
+    "sql",
+    "sql_big_result",
+    "sql_calc_found_rows",
+    "sql_small_result",
+    "sqlexception",
+    "sqlstate",
+    "sqlwarning",
+    "ssl",
+    "starting",
+    "stored",
+    "straight_join",
+    "system",
+    "table",
+    "terminated",
+    "then",
+    "tinyblob",
+    "tinyint",
+    "tinytext",
+    "to",
+    "trailing",
+    "trigger",
+    "true",
+    "undo",
+    "union",
+    "unique",
+    "unlock",
+    "unsigned",
+    "update",
+    "usage",
+    "use",
+    "using",
+    "utc_date",
+    "utc_time",
+    "utc_timestamp",
+    "values",
+    "varbinary",
+    "varchar",
+    "varcharacter",
+    "varying",
+    "virtual",
+    "when",
+    "where",
+    "while",
+    "window",
+    "with",
+    "write",
+    "xor",
+    "year_month",
+    "zerofill",
+];
+
+/// SQLite's keywords, from the SQLite Keywords page of sqlite.org, lowercase and sorted.
+pub static SQLITE_KEYWORDS: &[&str] = &[
+    "abort",
+    "action",
+    "add",
+    "after",
+    "all",
+    "alter",
+    "always",
+    "analyze",
+    "and",
+    "as",
+    "asc",
+    "attach",
+    "autoincrement",
+    "before",
+    "begin",
+    "between",
+    "by",
+    "cascade",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "column",
+    "commit",
+    "conflict",
+    "constraint",
+    "create",
+    "cross",
+    "current",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "database",
+    "default",
+    "deferrable",
+    "deferred",
+    "delete",
+    "desc",
+    "detach",
+    "distinct",
+    "do",
+    "drop",
+    "each",
+    "else",
+    "end",
+    "escape",
+    "except",
+    "exclude",
+    "exclusive",
+    "exists",
+    "explain",
+    "fail",
+    "filter",
+    "first",
+    "following",
+    "for",
+    "foreign",
+    "from",
+    "full",
+    "generated",
+    "glob",
+    "group",
+    "groups",
+    "having",
+    "if",
+    "ignore",
+    "immediate",
+    "in",
+    "index",
+    "indexed",
+    "initially",
+    "inner",
+    "insert",
+    "instead",
+    "intersect",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "key",
+    "last",
+    "left",
+    "like",
+    "limit",
+    "match",
+    "materialized",
+    "natural",
+    "no",
+    "not",
+    "nothing",
+    "notnull",
+    "null",
+    "nulls",
+    "of",
+    "offset",
+    "on",
+    "or",
+    "order",
+    "others",
+    "outer",
+    "over",
+    "partition",
+    "plan",
+    "pragma",
+    "preceding",
+    "primary",
+    "query",
+    "raise",
+    "range",
+    "recursive",
+    "references",
+    "regexp",
+    "reindex",
+    "release",
+    "rename",
+    "replace",
+    "restrict",
+    "returning",
+    "right",
+    "rollback",
+    "row",
+    "rows",
+    "savepoint",
+    "select",
+    "set",
+    "table",
+    "temp",
+    "temporary",
+    "then",
+    "ties",
+    "to",
+    "transaction",
+    "trigger",
+    "unbounded",
+    "union",
+    "unique",
+    "update",
+    "using",
+    "vacuum",
+    "values",
+    "view",
+    "virtual",
+    "when",
+    "where",
+    "window",
+    "with",
+    "without",
+];
+
+/// The longest word of any keyword list; longer words are never keywords.
+const MAX_KEYWORD: usize = {
+    let all: [&[&str]; 3] = [KEYWORDS, MYSQL_KEYWORDS, SQLITE_KEYWORDS];
+    let (mut longest, mut l) = (0, 0);
+    while l < all.len() {
+        let mut k = 0;
+        while k < all[l].len() {
+            if all[l][k].len() > longest {
+                longest = all[l][k].len();
+            }
+            k += 1;
+        }
+        l += 1;
+    }
+    longest
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Keyword,
@@ -461,12 +898,17 @@ pub struct Token {
     pub range: Range<usize>,
 }
 
-fn is_keyword(word: &str) -> bool {
-    if word.len() > 24 || !word.is_ascii() {
+fn is_keyword(d: Dialect, word: &str) -> bool {
+    if word.len() > MAX_KEYWORD || !word.is_ascii() {
         return false;
     }
+    let list = match d {
+        Dialect::Postgres => KEYWORDS,
+        Dialect::MySql => MYSQL_KEYWORDS,
+        Dialect::Sqlite => SQLITE_KEYWORDS,
+    };
     let lower = word.to_ascii_lowercase();
-    KEYWORDS.binary_search(&lower.as_str()).is_ok()
+    list.binary_search(&lower.as_str()).is_ok()
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -477,12 +919,19 @@ fn is_ident_cont(b: u8) -> bool {
     is_ident_start(b) || b.is_ascii_digit() || b == b'$'
 }
 
-fn is_op_byte(b: u8) -> bool {
-    b"+-*/<>=~!@#%^&|?".contains(&b)
+/// `#` starts a comment in MySQL, so it is no operator there.
+fn is_op_byte(d: Dialect, b: u8) -> bool {
+    b"+-*/<>=~!@%^&|?".contains(&b) || (b == b'#' && d != Dialect::MySql)
 }
 
 fn at(b: &[u8], i: usize) -> u8 {
     b.get(i).copied().unwrap_or(0)
+}
+
+/// A `--` at `i` starts a comment: always, except in MySQL, where a space or a control character
+/// (or the end of the text) must follow.
+fn dash_comment(d: Dialect, b: &[u8], i: usize) -> bool {
+    at(b, i) == b'-' && at(b, i + 1) == b'-' && (d != Dialect::MySql || at(b, i + 2) <= b' ' || at(b, i + 2) == 0x7f)
 }
 
 /// End of a `'…'` string starting after the opening quote at `i` (`''` escapes; with `backslash`,
@@ -526,7 +975,8 @@ fn find_sub(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 
 /// Splits `sql` into tokens. Ranges are contiguous and cover the input. An unterminated string,
 /// quoted identifier, dollar quote or comment runs to the end.
-pub fn tokenize(sql: &str) -> Vec<Token> {
+pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
+    let (pg, my, lite) = (d == Dialect::Postgres, d == Dialect::MySql, d == Dialect::Sqlite);
     let b = sql.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -539,7 +989,7 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
                 i += 1;
             }
             kind = TokenKind::Whitespace;
-        } else if c == b'-' && at(b, i + 1) == b'-' {
+        } else if dash_comment(d, b, i) || (my && c == b'#') {
             while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
                 i += 1;
             }
@@ -548,7 +998,7 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             let mut depth = 1usize;
             i += 2;
             while i < b.len() && depth > 0 {
-                if b[i] == b'/' && at(b, i + 1) == b'*' {
+                if pg && b[i] == b'/' && at(b, i + 1) == b'*' {
                     depth += 1;
                     i += 2;
                 } else if b[i] == b'*' && at(b, i + 1) == b'/' {
@@ -561,19 +1011,28 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             i = i.min(b.len());
             kind = TokenKind::Comment;
         } else if c == b'\'' {
-            i = scan_quoted(b, i + 1, b'\'', false);
+            i = scan_quoted(b, i + 1, b'\'', my);
             kind = TokenKind::String;
-        } else if (c == b'E' || c == b'e') && at(b, i + 1) == b'\'' {
+        } else if pg && (c == b'E' || c == b'e') && at(b, i + 1) == b'\'' {
             i = scan_quoted(b, i + 2, b'\'', true).min(b.len());
             kind = TokenKind::String;
-        } else if (c == b'U' || c == b'u') && at(b, i + 1) == b'&' && (at(b, i + 2) == b'\'' || at(b, i + 2) == b'"') {
+        } else if pg && (c == b'U' || c == b'u') && at(b, i + 1) == b'&' && (at(b, i + 2) == b'\'' || at(b, i + 2) == b'"') {
             let q = b[i + 2];
             i = scan_quoted(b, i + 3, q, false);
             kind = if q == b'"' { TokenKind::QuotedIdent } else { TokenKind::String };
+        } else if at(b, i + 1) == b'\'' && ((my || lite) && matches!(c, b'X' | b'x') || my && matches!(c, b'B' | b'b')) {
+            i = scan_quoted(b, i + 2, b'\'', false);
+            kind = TokenKind::String;
         } else if c == b'"' {
-            i = scan_quoted(b, i + 1, b'"', false);
+            i = scan_quoted(b, i + 1, b'"', my);
+            kind = if my { TokenKind::String } else { TokenKind::QuotedIdent };
+        } else if (my || lite) && c == b'`' {
+            i = scan_quoted(b, i + 1, b'`', false);
             kind = TokenKind::QuotedIdent;
-        } else if c == b'$' {
+        } else if lite && c == b'[' {
+            i = b[i..].iter().position(|&x| x == b']').map_or(b.len(), |p| i + p + 1);
+            kind = TokenKind::QuotedIdent;
+        } else if pg && c == b'$' {
             if at(b, i + 1).is_ascii_digit() {
                 i += 1;
                 while at(b, i).is_ascii_digit() {
@@ -588,6 +1047,12 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
                 i += 1;
                 kind = TokenKind::Other;
             }
+        } else if (my || lite) && c == b'0' && matches!(at(b, i + 1), b'x' | b'X') && at(b, i + 2).is_ascii_hexdigit() {
+            i += 2;
+            while at(b, i).is_ascii_hexdigit() {
+                i += 1;
+            }
+            kind = TokenKind::Number;
         } else if c.is_ascii_digit() || (c == b'.' && at(b, i + 1).is_ascii_digit()) {
             while at(b, i).is_ascii_digit() {
                 i += 1;
@@ -608,17 +1073,17 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
                 }
             }
             kind = TokenKind::Number;
-        } else if is_ident_start(c) {
+        } else if is_ident_start(c) || (my && c == b'$') {
             while i < b.len() && is_ident_cont(b[i]) {
                 i += 1;
             }
-            kind = if is_keyword(&sql[start..i]) { TokenKind::Keyword } else { TokenKind::Ident };
+            kind = if is_keyword(d, &sql[start..i]) { TokenKind::Keyword } else { TokenKind::Ident };
         } else if c == b';' {
             i += 1;
             kind = TokenKind::Semicolon;
-        } else if is_op_byte(c) {
+        } else if is_op_byte(d, c) {
             i += 1;
-            while i < b.len() && is_op_byte(b[i]) && !(b[i] == b'-' && at(b, i + 1) == b'-') && !(b[i] == b'/' && at(b, i + 1) == b'*') {
+            while i < b.len() && is_op_byte(d, b[i]) && !dash_comment(d, b, i) && !(b[i] == b'/' && at(b, i + 1) == b'*') {
                 i += 1;
             }
             kind = TokenKind::Operator;
@@ -643,30 +1108,179 @@ struct Stmt {
     span_end: usize,
 }
 
-fn scan_statements(sql: &str) -> Vec<Stmt> {
-    let toks = tokenize(sql);
-    let mut out = Vec::new();
-    let mut cur: Option<Range<usize>> = None;
-    for (k, t) in toks.iter().enumerate() {
+fn word<'a>(sql: &'a str, t: &Token) -> Option<&'a str> {
+    if matches!(t.kind, TokenKind::Keyword | TokenKind::Ident) { sql.get(t.range.clone()) } else { None }
+}
+
+fn is_word(sql: &str, t: &Token, w: &str) -> bool {
+    word(sql, t).is_some_and(|x| x.eq_ignore_ascii_case(w))
+}
+
+fn significant(t: &Token) -> bool {
+    !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment)
+}
+
+/// True when the statement whose first token is `toks[k]` creates a procedure, function, trigger
+/// or event (MySQL), or a trigger (SQLite): one whose body may hold `;`.
+fn routine_header(d: Dialect, sql: &str, toks: &[Token], k: usize) -> bool {
+    let mut sig = toks.get(k..).unwrap_or_default().iter().filter(|t| significant(t)).take(16);
+    if !sig.next().is_some_and(|t| is_word(sql, t, "create")) {
+        return false;
+    }
+    if d == Dialect::Sqlite {
+        let mut rest = sig.skip_while(|t| is_word(sql, t, "temp") || is_word(sql, t, "temporary"));
+        return rest.next().is_some_and(|t| is_word(sql, t, "trigger"));
+    }
+    // A bare word after `=` or `@` is the account in DEFINER = user@host.
+    let mut account = false;
+    for t in sig {
+        if account {
+            account = false;
+            if word(sql, t).is_some() {
+                continue;
+            }
+        }
         match t.kind {
-            TokenKind::Whitespace | TokenKind::Comment => {}
-            TokenKind::Semicolon => {
-                if let Some(r) = cur.take() {
-                    let mut span_end = t.range.end;
-                    for w in &toks[k + 1..] {
-                        if w.kind != TokenKind::Whitespace {
-                            break;
-                        }
-                        span_end = w.range.end;
-                    }
-                    out.push(Stmt { range: r, span_end });
+            TokenKind::Keyword | TokenKind::Ident => {
+                if ["procedure", "function", "trigger", "event"].iter().any(|w| is_word(sql, t, w)) {
+                    return true;
+                }
+                if !["or", "replace", "aggregate", "definer"].iter().any(|w| is_word(sql, t, w)) {
+                    return false;
                 }
             }
-            _ => match &mut cur {
-                Some(r) => r.end = t.range.end,
-                None => cur = Some(t.range.clone()),
+            TokenKind::String | TokenKind::QuotedIdent => {}
+            TokenKind::Operator | TokenKind::Other => match sql.get(t.range.clone()) {
+                Some("=" | "@") => account = true,
+                Some("(" | ")") => {}
+                _ => return false,
             },
+            _ => return false,
         }
+    }
+    false
+}
+
+/// Counts the `BEGIN … END` blocks of a routine body, token by token.
+#[derive(Default)]
+struct Blocks {
+    on: bool,
+    depth: usize,
+    /// A token here starts a statement of the body, where `IF`, `LOOP`, `REPEAT` and `WHILE` open blocks.
+    fresh: bool,
+    /// The token `END` took along (`END IF`).
+    taken: Option<usize>,
+}
+
+impl Blocks {
+    fn step(&mut self, d: Dialect, sql: &str, toks: &[Token], k: usize) {
+        let Some(t) = toks.get(k) else { return };
+        let me = d == Dialect::MySql;
+        if let Some(w) = word(sql, t).filter(|_| self.taken != Some(k)) {
+            let is = |x: &str| w.eq_ignore_ascii_case(x);
+            let next = toks.get(k + 1..).unwrap_or_default().iter().position(significant).map(|p| k + 1 + p);
+            if is("begin") || is("case") {
+                self.depth += 1;
+            } else if is("end") {
+                self.depth = self.depth.saturating_sub(1);
+                if me
+                    && let Some(n) =
+                        next.filter(|&n| toks.get(n).is_some_and(|t| ["if", "case", "loop", "repeat", "while"].iter().any(|x| is_word(sql, t, x))))
+                {
+                    self.taken = Some(n);
+                }
+            } else if me && self.fresh {
+                let call = sql.as_bytes().get(t.range.end) == Some(&b'(');
+                let exists = next.and_then(|n| toks.get(n)).is_some_and(|t| is_word(sql, t, "exists"));
+                if is("loop") || is("while") || (is("if") && !call && !exists) || (is("repeat") && !call) {
+                    self.depth += 1;
+                }
+            }
+            self.fresh = ["begin", "then", "else", "do", "row"].iter().any(|x| is(x));
+        } else {
+            self.fresh = t.kind == TokenKind::Semicolon || (t.kind == TokenKind::Other && sql.get(t.range.clone()) == Some(":"));
+        }
+    }
+}
+
+fn ws_end(b: &[u8], mut at: usize) -> usize {
+    while b.get(at).is_some_and(|&c| c.is_ascii_whitespace() || c == 0x0b) {
+        at += 1;
+    }
+    at
+}
+
+fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
+    let toks = tokenize(d, sql);
+    let b = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut cur: Option<Range<usize>> = None;
+    let grow = |cur: &mut Option<Range<usize>>, from: usize, to: usize| match cur {
+        Some(r) => r.end = to,
+        None => *cur = Some(from..to),
+    };
+    // MySQL's `DELIMITER` command: the statement end, when it is not `;`.
+    let mut delimiter: Option<&str> = None;
+    // Bytes before `pos` are done with (a `DELIMITER` line, a delimiter inside a word).
+    let mut pos = 0;
+    let mut blocks = Blocks::default();
+    for (k, t) in toks.iter().enumerate() {
+        if t.range.end <= pos || !significant(t) {
+            continue;
+        }
+        let opaque = matches!(t.kind, TokenKind::String | TokenKind::QuotedIdent);
+        if opaque && t.range.start < pos {
+            continue;
+        }
+        let from = t.range.start.max(pos);
+        if d == Dialect::MySql && cur.is_none() && is_word(sql, t, "delimiter") {
+            let line_end = b.get(t.range.end..).and_then(|r| r.iter().position(|&c| c == b'\n' || c == b'\r')).map_or(b.len(), |p| t.range.end + p);
+            let line = sql.get(t.range.end..line_end).unwrap_or_default();
+            if let Some(new) = line.split_ascii_whitespace().next() {
+                delimiter = (new != ";").then_some(new);
+            }
+            pos = line_end;
+            continue;
+        }
+        if let Some(delim) = delimiter {
+            if opaque {
+                grow(&mut cur, from, t.range.end);
+                continue;
+            }
+            let (mut p, mut piece) = (from, from);
+            while p < t.range.end {
+                if b.get(p..).is_some_and(|rest| rest.starts_with(delim.as_bytes())) {
+                    if p > piece {
+                        grow(&mut cur, piece, p);
+                    }
+                    if let Some(range) = cur.take() {
+                        out.push(Stmt { range, span_end: ws_end(b, p + delim.len()) });
+                    }
+                    p += delim.len();
+                    piece = p;
+                } else {
+                    p += 1;
+                }
+            }
+            if piece < t.range.end {
+                grow(&mut cur, piece, t.range.end);
+            }
+            pos = piece.max(t.range.end);
+            continue;
+        }
+        if cur.is_none() {
+            blocks = Blocks { on: matches!(d, Dialect::MySql | Dialect::Sqlite) && routine_header(d, sql, &toks, k), ..Blocks::default() };
+        }
+        if t.kind == TokenKind::Semicolon && blocks.depth == 0 {
+            if let Some(range) = cur.take() {
+                out.push(Stmt { range, span_end: ws_end(b, t.range.end) });
+            }
+            continue;
+        }
+        if blocks.on {
+            blocks.step(d, sql, &toks, k);
+        }
+        grow(&mut cur, from, t.range.end);
     }
     if let Some(range) = cur {
         out.push(Stmt { range, span_end: sql.len() });
@@ -676,21 +1290,21 @@ fn scan_statements(sql: &str) -> Vec<Stmt> {
 
 /// Statements split on top-level `;`. Leading whitespace and comments, trailing comments and the
 /// `;` are excluded; empty statements are dropped.
-pub fn statements(sql: &str) -> Vec<Range<usize>> {
-    scan_statements(sql).into_iter().map(|s| s.range).collect()
+pub fn statements(d: Dialect, sql: &str) -> Vec<Range<usize>> {
+    scan_statements(d, sql).into_iter().map(|s| s.range).collect()
 }
 
 /// The statement whose span (its start through its `;` and the whitespace after it) holds `cursor`.
 /// Past the end it is the last statement; `None` when there are no statements.
-pub fn statement_at(sql: &str, cursor: usize) -> Option<Range<usize>> {
-    let all = scan_statements(sql);
+pub fn statement_at(d: Dialect, sql: &str, cursor: usize) -> Option<Range<usize>> {
+    let all = scan_statements(d, sql);
     let pick = all.iter().position(|s| cursor < s.span_end).or(all.len().checked_sub(1))?;
     all.into_iter().nth(pick).map(|s| s.range)
 }
 
 /// True when `sql` has a `;` outside strings, comments and quoted identifiers.
-pub fn has_top_level_semicolon(sql: &str) -> bool {
-    tokenize(sql).iter().any(|t| t.kind == TokenKind::Semicolon)
+pub fn has_top_level_semicolon(d: Dialect, sql: &str) -> bool {
+    tokenize(d, sql).iter().any(|t| t.kind == TokenKind::Semicolon)
 }
 #[cfg(test)]
 mod tests {
@@ -698,35 +1312,39 @@ mod tests {
     use proptest::prelude::*;
 
     fn kinds(sql: &str) -> Vec<(TokenKind, &str)> {
-        tokenize(sql).into_iter().filter(|t| t.kind != TokenKind::Whitespace).map(|t| (t.kind, &sql[t.range])).collect()
+        kinds_in(Dialect::Postgres, sql)
+    }
+
+    fn kinds_in(d: Dialect, sql: &str) -> Vec<(TokenKind, &str)> {
+        tokenize(d, sql).into_iter().filter(|t| t.kind != TokenKind::Whitespace).map(|t| (t.kind, &sql[t.range])).collect()
     }
 
     #[test]
     fn splits_statements() {
         let sql = "select 1; select 'a;b'; -- c;\n select $x$ ; $x$; /* only */ ;";
-        let got: Vec<&str> = statements(sql).into_iter().map(|r| &sql[r]).collect();
+        let got: Vec<&str> = statements(Dialect::Postgres, sql).into_iter().map(|r| &sql[r]).collect();
         assert_eq!(got, ["select 1", "select 'a;b'", "select $x$ ; $x$"]);
     }
 
     #[test]
     fn statement_under_cursor() {
         let sql = "select 1;\nselect 2;\n\nselect 3";
-        assert_eq!(&sql[statement_at(sql, 0).unwrap()], "select 1");
-        assert_eq!(&sql[statement_at(sql, 12).unwrap()], "select 2");
-        assert_eq!(&sql[statement_at(sql, sql.len()).unwrap()], "select 3");
-        assert_eq!(statement_at("", 0), None);
-        assert_eq!(statement_at(" ; -- x", 3), None);
-        assert_eq!(&sql[statement_at(sql, 9).unwrap()], "select 1");
-        assert_eq!(&sql[statement_at(sql, 10).unwrap()], "select 2");
-        assert_eq!(&sql[statement_at(sql, 99999).unwrap()], "select 3");
+        assert_eq!(&sql[statement_at(Dialect::Postgres, sql, 0).unwrap()], "select 1");
+        assert_eq!(&sql[statement_at(Dialect::Postgres, sql, 12).unwrap()], "select 2");
+        assert_eq!(&sql[statement_at(Dialect::Postgres, sql, sql.len()).unwrap()], "select 3");
+        assert_eq!(statement_at(Dialect::Postgres, "", 0), None);
+        assert_eq!(statement_at(Dialect::Postgres, " ; -- x", 3), None);
+        assert_eq!(&sql[statement_at(Dialect::Postgres, sql, 9).unwrap()], "select 1");
+        assert_eq!(&sql[statement_at(Dialect::Postgres, sql, 10).unwrap()], "select 2");
+        assert_eq!(&sql[statement_at(Dialect::Postgres, sql, 99999).unwrap()], "select 3");
     }
 
     #[test]
     fn semicolons_inside_strings_do_not_count() {
-        assert!(!has_top_level_semicolon("status = 'a;b'"));
-        assert!(has_top_level_semicolon("x > 5; drop table t"));
-        assert!(!has_top_level_semicolon("x /* ; */ -- ;"));
-        assert!(!has_top_level_semicolon("select \"a;b\", $$;$$, E'\\';'"));
+        assert!(!has_top_level_semicolon(Dialect::Postgres, "status = 'a;b'"));
+        assert!(has_top_level_semicolon(Dialect::Postgres, "x > 5; drop table t"));
+        assert!(!has_top_level_semicolon(Dialect::Postgres, "x /* ; */ -- ;"));
+        assert!(!has_top_level_semicolon(Dialect::Postgres, "select \"a;b\", $$;$$, E'\\';'"));
     }
 
     #[test]
@@ -752,8 +1370,8 @@ mod tests {
         use TokenKind::*;
         let sql = "x -- a\r; drop table t";
         assert_eq!(kinds(sql)[1], (Comment, "-- a"));
-        assert!(has_top_level_semicolon(sql));
-        let got: Vec<&str> = statements(sql).into_iter().map(|r| &sql[r]).collect();
+        assert!(has_top_level_semicolon(Dialect::Postgres, sql));
+        let got: Vec<&str> = statements(Dialect::Postgres, sql).into_iter().map(|r| &sql[r]).collect();
         assert_eq!(got, ["x", "drop table t"]);
     }
 
@@ -765,7 +1383,7 @@ mod tests {
         assert_eq!(kinds("$t$ abc $"), [(String, "$t$ abc $")]);
         assert_eq!(kinds("\"abc"), [(QuotedIdent, "\"abc")]);
         assert_eq!(kinds("E'abc\\"), [(String, "E'abc\\")]);
-        assert_eq!(statements("select 'a;b"), vec![0..11]);
+        assert_eq!(statements(Dialect::Postgres, "select 'a;b"), vec![0..11]);
     }
 
     #[test]
@@ -791,10 +1409,10 @@ mod tests {
             "/*/",
             "/*/ */",
         ] {
-            let t = tokenize(s);
+            let t = tokenize(Dialect::Postgres, s);
             assert_eq!(t.last().map(|k| k.range.end).unwrap_or(0), s.len(), "{s:?}");
-            let _ = statements(s);
-            let _ = statement_at(s, 1);
+            let _ = statements(Dialect::Postgres, s);
+            let _ = statement_at(Dialect::Postgres, s, 1);
         }
     }
 
@@ -810,23 +1428,203 @@ mod tests {
     proptest! {
         #[test]
         fn tokens_cover_input(s in "\\PC{0,300}") {
-            let t = tokenize(&s);
+            let t = tokenize(Dialect::Postgres, &s);
             let mut at = 0;
             for k in &t { prop_assert_eq!(k.range.start, at); prop_assert!(k.range.end > k.range.start); at = k.range.end; }
             prop_assert_eq!(at, s.len());
         }
         #[test]
         fn statements_are_in_bounds(s in "\\PC{0,300}") {
-            for r in statements(&s) { prop_assert!(s.get(r).is_some()); }
+            for r in statements(Dialect::Postgres, &s) { prop_assert!(s.get(r).is_some()); }
         }
         #[test]
         fn sqlish_input_covers_and_splits(s in "[a-z0-9 ;'\"$E&U\\\\/*\\n\\r-]{0,200}") {
-            let t = tokenize(&s);
+            let t = tokenize(Dialect::Postgres, &s);
             prop_assert_eq!(t.last().map(|k| k.range.end).unwrap_or(0), s.len());
-            let st = statements(&s);
+            let st = statements(Dialect::Postgres, &s);
             for w in st.windows(2) { prop_assert!(w[0].end <= w[1].start); }
             for r in &st { prop_assert!(s.get(r.clone()).is_some()); }
-            for c in 0..=s.len() { prop_assert_eq!(statement_at(&s, c).is_some(), !st.is_empty()); }
+            for c in 0..=s.len() { prop_assert_eq!(statement_at(Dialect::Postgres, &s, c).is_some(), !st.is_empty()); }
+        }
+    }
+
+    fn pieces(d: Dialect, sql: &str) -> Vec<&str> {
+        statements(d, sql).into_iter().map(|r| sql[r].trim()).collect()
+    }
+
+    fn dialects() -> impl Strategy<Value = Dialect> {
+        prop_oneof![Just(Dialect::Postgres), Just(Dialect::MySql), Just(Dialect::Sqlite)]
+    }
+
+    #[test]
+    fn mysql_delimiter_blocks() {
+        let sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;";
+        assert_eq!(pieces(Dialect::MySql, sql), ["CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END", "SELECT 3"]);
+    }
+
+    #[test]
+    fn mysql_delimiter_rules() {
+        let my = Dialect::MySql;
+        assert_eq!(
+            pieces(my, "delimiter //\nselect 1; select 2//\nselect 3// delimiter ;\nselect 4;"),
+            ["select 1; select 2", "select 3", "select 4"]
+        );
+        assert_eq!(pieces(my, "DELIMITER\nselect 1; select 2"), ["select 1", "select 2"]);
+        assert_eq!(pieces(my, "DELIMITER $$\nselect '$$', `a$$`, \"$$\" /* $$ */ $$ select 2;"), ["select '$$', `a$$`, \"$$\"", "select 2;"]);
+        assert_eq!(pieces(my, "DELIMITER ;;\nselect 1;; select 2;;"), ["select 1", "select 2"]);
+        assert_eq!(
+            pieces(my, "DELIMITER $$\nCREATE PROCEDURE p() BEGIN IF a THEN SELECT 1; END IF; END $$"),
+            ["CREATE PROCEDURE p() BEGIN IF a THEN SELECT 1; END IF; END"]
+        );
+        let sql = "select 1;\nDELIMITER $$\nselect 2$$";
+        assert_eq!(pieces(my, sql), ["select 1", "select 2"]);
+        assert_eq!(&sql[statement_at(my, sql, 12).unwrap()], "select 2");
+        assert_eq!(pieces(Dialect::Postgres, "DELIMITER $$\nselect 1"), ["DELIMITER $$\nselect 1"]);
+    }
+
+    #[test]
+    fn mysql_begin_end_without_delimiter() {
+        let my = Dialect::MySql;
+        let sql = "CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET NEW.a = 1; END; SELECT 1;";
+        assert_eq!(pieces(my, sql), ["CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW BEGIN SET NEW.a = 1; END", "SELECT 1"]);
+        let nested = "CREATE DEFINER=`root`@`localhost` PROCEDURE p(a INT) BEGIN \
+            DECLARE x INT DEFAULT 0; \
+            IF a > 1 THEN SET x = CASE WHEN a = 2 THEN 1 ELSE 2 END; ELSEIF a THEN SET x = IF(a, 1, 2); ELSE SET x = 0; END IF; \
+            l: LOOP SET x = x + 1; IF x > 3 THEN LEAVE l; END IF; END LOOP l; \
+            WHILE x < 9 DO SET x = x + 1; END WHILE; \
+            REPEAT SET x = x + 1; UNTIL x > 20 END REPEAT; \
+            CASE x WHEN 1 THEN SELECT 1; ELSE SELECT 2; END CASE; \
+            BEGIN SELECT 3; END; \
+            END; SELECT 9;";
+        assert_eq!(pieces(my, nested).len(), 2, "{:?}", pieces(my, nested));
+        assert_eq!(
+            pieces(my, "CREATE OR REPLACE AGGREGATE FUNCTION f() BEGIN SELECT 1; END; SELECT 2"),
+            ["CREATE OR REPLACE AGGREGATE FUNCTION f() BEGIN SELECT 1; END", "SELECT 2"]
+        );
+        assert_eq!(
+            pieces(my, "CREATE DEFINER = CURRENT_USER() EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN SELECT 1; END; SELECT 2"),
+            ["CREATE DEFINER = CURRENT_USER() EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN SELECT 1; END", "SELECT 2"]
+        );
+        assert_eq!(pieces(my, "CREATE PROCEDURE p() SELECT 1; SELECT 2"), ["CREATE PROCEDURE p() SELECT 1", "SELECT 2"]);
+        assert_eq!(pieces(my, "DROP TABLE IF EXISTS t; SELECT IF(1, 2, 3); SELECT 2"), ["DROP TABLE IF EXISTS t", "SELECT IF(1, 2, 3)", "SELECT 2"]);
+        assert_eq!(pieces(my, "CREATE TABLE t (a int); BEGIN; SELECT 1; COMMIT;"), ["CREATE TABLE t (a int)", "BEGIN", "SELECT 1", "COMMIT"]);
+        assert_eq!(pieces(my, "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2;"), ["CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2;"]);
+        assert_eq!(pieces(my, "CREATE PROCEDURE p() BEGIN END END END; SELECT 1"), ["CREATE PROCEDURE p() BEGIN END END END", "SELECT 1"]);
+        assert_eq!(
+            pieces(Dialect::Postgres, "CREATE TRIGGER t BEGIN SELECT 1; END; SELECT 2"),
+            ["CREATE TRIGGER t BEGIN SELECT 1", "END", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn mysql_hash_comment_and_backslash_string() {
+        let sql = "SELECT 'a\\'b;' # c;\n; SELECT 2";
+        assert_eq!(pieces(Dialect::MySql, sql), ["SELECT 'a\\'b;'", "SELECT 2"]);
+        use TokenKind::*;
+        assert_eq!(kinds_in(Dialect::MySql, "a # x\nb"), [(Ident, "a"), (Comment, "# x"), (Ident, "b")]);
+        assert_eq!(kinds_in(Dialect::Postgres, "a # x"), [(Ident, "a"), (Operator, "#"), (Ident, "x")]);
+        assert_eq!(kinds_in(Dialect::MySql, "\"a\\\"b;\" 'c''d'"), [(String, "\"a\\\"b;\""), (String, "'c''d'")]);
+        assert_eq!(kinds_in(Dialect::Postgres, "'a\\' b"), [(String, "'a\\'"), (Ident, "b")]);
+        assert_eq!(kinds_in(Dialect::Sqlite, "'a\\' b"), [(String, "'a\\'"), (Ident, "b")]);
+    }
+
+    #[test]
+    fn mysql_dash_needs_space() {
+        use TokenKind::*;
+        let sql = "SELECT 1--1;";
+        assert!(kinds_in(Dialect::MySql, sql).iter().all(|(k, _)| *k != Comment));
+        assert_eq!(pieces(Dialect::MySql, sql), ["SELECT 1--1"]);
+        assert_eq!(kinds_in(Dialect::MySql, "a -- x\nb"), [(Ident, "a"), (Comment, "-- x"), (Ident, "b")]);
+        assert_eq!(kinds_in(Dialect::MySql, "a --\tx"), [(Ident, "a"), (Comment, "--\tx")]);
+        assert_eq!(kinds_in(Dialect::MySql, "a --"), [(Ident, "a"), (Comment, "--")]);
+        assert_eq!(kinds_in(Dialect::MySql, "a --x"), [(Ident, "a"), (Operator, "--"), (Ident, "x")]);
+        assert_eq!(kinds_in(Dialect::MySql, "a +-- b"), [(Ident, "a"), (Operator, "+"), (Comment, "-- b")]);
+        assert_eq!(kinds_in(Dialect::Sqlite, "a --x"), [(Ident, "a"), (Comment, "--x")]);
+    }
+
+    #[test]
+    fn mysql_literals_and_identifiers() {
+        use TokenKind::*;
+        let my = Dialect::MySql;
+        assert_eq!(kinds_in(my, "`a``;b` x"), [(QuotedIdent, "`a``;b`"), (Ident, "x")]);
+        assert_eq!(kinds_in(my, "0xCAFE x'ab;' b'01' 0x"), [(Number, "0xCAFE"), (String, "x'ab;'"), (String, "b'01'"), (Number, "0"), (Ident, "x")]);
+        assert_eq!(kinds_in(my, "END$$"), [(Ident, "END$$")]);
+        assert_eq!(kinds_in(my, "/* a /* b */ c"), [(Comment, "/* a /* b */"), (Ident, "c")]);
+        assert_eq!(kinds_in(Dialect::Postgres, "/* a /* b */ c */"), [(Comment, "/* a /* b */ c */")]);
+        assert!(!has_top_level_semicolon(my, "select `;`, '\\';', \"\\\";\" # ;"));
+    }
+
+    #[test]
+    fn sqlite_trigger_body() {
+        let lite = Dialect::Sqlite;
+        let sql = "CREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE b SET n = n + 1; END; SELECT 1;";
+        assert_eq!(pieces(lite, sql), ["CREATE TRIGGER t AFTER INSERT ON a BEGIN UPDATE b SET n = n + 1; END", "SELECT 1"]);
+        let case = "CREATE TEMP TRIGGER IF NOT EXISTS t AFTER INSERT ON a WHEN CASE WHEN 1 THEN 1 END BEGIN UPDATE b SET n = CASE WHEN x THEN 1 ELSE 2 END; DELETE FROM c; END; SELECT 1";
+        assert_eq!(pieces(lite, case).len(), 2);
+        assert_eq!(pieces(lite, "BEGIN; SELECT 1; END; SELECT 2"), ["BEGIN", "SELECT 1", "END", "SELECT 2"]);
+        assert_eq!(
+            pieces(lite, "CREATE TABLE t (a); CREATE TRIGGER x AFTER DELETE ON t BEGIN SELECT 1; END"),
+            ["CREATE TABLE t (a)", "CREATE TRIGGER x AFTER DELETE ON t BEGIN SELECT 1; END"]
+        );
+        assert_eq!(
+            pieces(lite, "CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT 1; SELECT 2;"),
+            ["CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT 1; SELECT 2;"]
+        );
+    }
+
+    #[test]
+    fn sqlite_bracket_identifiers() {
+        use TokenKind::*;
+        let lite = Dialect::Sqlite;
+        assert_eq!(kinds_in(lite, "[a;b]"), [(QuotedIdent, "[a;b]")]);
+        assert_eq!(kinds_in(lite, "[a\"]]"), [(QuotedIdent, "[a\"]"), (Other, "]")]);
+        assert_eq!(kinds_in(lite, "[abc"), [(QuotedIdent, "[abc")]);
+        assert_eq!(kinds_in(lite, "`a``;b` X'0A;' x"), [(QuotedIdent, "`a``;b`"), (String, "X'0A;'"), (Ident, "x")]);
+        assert_eq!(
+            kinds_in(lite, "\"a;b\" 0xFF /* a /* b */ c"),
+            [(QuotedIdent, "\"a;b\""), (Number, "0xFF"), (Comment, "/* a /* b */"), (Ident, "c")]
+        );
+        assert_eq!(kinds_in(lite, "a # b"), [(Ident, "a"), (Operator, "#"), (Ident, "b")]);
+        assert_eq!(kinds_in(Dialect::Postgres, "a[1]"), [(Ident, "a"), (Other, "["), (Number, "1"), (Other, "]")]);
+        assert_eq!(pieces(lite, "select [a;b]; select 2"), ["select [a;b]", "select 2"]);
+    }
+
+    #[test]
+    fn keywords_per_dialect() {
+        use TokenKind::*;
+        assert_eq!(kinds_in(Dialect::MySql, "select accessible pragma"), [(Keyword, "select"), (Keyword, "accessible"), (Ident, "pragma")]);
+        assert_eq!(kinds_in(Dialect::Sqlite, "select pragma accessible"), [(Keyword, "select"), (Keyword, "pragma"), (Ident, "accessible")]);
+        assert_eq!(kinds_in(Dialect::MySql, "MASTER_SSL_VERIFY_SERVER_CERT"), [(Keyword, "MASTER_SSL_VERIFY_SERVER_CERT")]);
+        assert_eq!(kinds_in(Dialect::Postgres, "accessible"), [(Ident, "accessible")]);
+    }
+
+    #[test]
+    fn dialect_keyword_lists_are_sorted_and_lowercase() {
+        for list in [KEYWORDS, MYSQL_KEYWORDS, SQLITE_KEYWORDS] {
+            assert!(list.windows(2).all(|w| w[0] < w[1]), "must be sorted and unique");
+            assert!(list.iter().all(|k| k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')));
+            assert!(list.iter().all(|k| k.len() <= MAX_KEYWORD));
+            for k in ["select", "from", "where", "join", "insert", "update", "delete"] {
+                assert!(list.binary_search(&k).is_ok(), "{k}");
+            }
+        }
+        assert!(MAX_KEYWORD >= "master_ssl_verify_server_cert".len());
+    }
+
+    proptest! {
+        #[test]
+        fn never_panics_and_ranges_are_in_bounds(d in dialects(), s in ".{0,400}") {
+            for r in statements(d, &s) { prop_assert!(r.end <= s.len() && s.is_char_boundary(r.start) && s.is_char_boundary(r.end)); }
+            let mut at = 0;
+            for k in tokenize(d, &s) { prop_assert_eq!(k.range.start, at); at = k.range.end; prop_assert!(s.is_char_boundary(at)); }
+            prop_assert_eq!(at, s.len());
+        }
+        #[test]
+        fn sqlish_input_never_panics_in_any_dialect(d in dialects(), s in "([a-zA-Z0-9 ;'\"`\\[\\]#$:=()@\\\\/*\\n\\r-]|DELIMITER |BEGIN |END |CASE |IF |LOOP |CREATE |TRIGGER |PROCEDURE |\\$\\$){0,80}") {
+            let st = statements(d, &s);
+            for w in st.windows(2) { prop_assert!(w[0].end <= w[1].start); }
+            for r in &st { prop_assert!(s.get(r.clone()).is_some()); }
+            for c in 0..=s.len() { prop_assert_eq!(statement_at(d, &s, c).is_some(), !st.is_empty()); }
         }
     }
 }

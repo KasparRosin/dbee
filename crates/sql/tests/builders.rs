@@ -118,6 +118,16 @@ fn raw_line_comment_cannot_swallow_the_rest() {
     assert_eq!(where_sql(Dialect::Postgres, &Condition::Raw("note = '--'".into()), &orders()).unwrap().unwrap(), "(note = '--')");
 }
 #[test]
+fn raw_line_comment_per_dialect() {
+    let hash = Condition::Raw("total > 5 # big ones".into());
+    assert_eq!(where_sql(Dialect::MySql, &hash, &orders()).unwrap().unwrap(), "(total > 5 # big ones\n)");
+    assert_eq!(where_sql(Dialect::Sqlite, &Condition::Raw("a = 1 -- x".into()), &orders()).unwrap().unwrap(), "(a = 1 -- x\n)");
+    // MySQL's `--` needs a space after it, and `#` is no comment elsewhere
+    assert_eq!(where_sql(Dialect::MySql, &Condition::Raw("a = 1--1".into()), &orders()).unwrap().unwrap(), "(a = 1--1)");
+    assert_eq!(where_sql(Dialect::Postgres, &Condition::Raw("a #> b".into()), &orders()).unwrap().unwrap(), "(a #> b)");
+    assert_eq!(where_sql(Dialect::MySql, &Condition::Raw("a = '#'; x".into()), &orders()), Err(SqlError::Semicolon));
+}
+#[test]
 fn page_and_count() {
     assert_eq!(
         page_sql(Dialect::Postgres, &orders(), &Condition::None, None, 2).unwrap(),

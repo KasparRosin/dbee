@@ -132,7 +132,7 @@ fn class_of_type(ty: &Type) -> TypeClass {
 pub async fn run(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, PgError> {
     let mut result = run_untyped(conn, sql, limits).await?;
     if !result.columns.is_empty()
-        && dbee_sql::lexer::statements(sql).len() == 1
+        && dbee_sql::lexer::statements(dbee_sql::Dialect::Postgres, sql).len() == 1
         && let Some(columns) = describe(conn, sql).await
         && columns.len() == result.columns.len()
     {

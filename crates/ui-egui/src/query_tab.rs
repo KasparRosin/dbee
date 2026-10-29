@@ -73,6 +73,7 @@ use std::sync::{Arc, Weak};
 use dbee_core::ResultSet;
 use dbee_engine::cmd::query::can_run;
 use dbee_engine::{Json, QueryError, StatementOutcome, Tab, TabId};
+use dbee_sql::Dialect;
 use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
 use egui::text_edit::TextEditState;
@@ -197,8 +198,10 @@ fn affected_text(rows: Option<u64>) -> String {
 /// `$` (see [`reach`]), with one byte to spare. The rules read at most: a number three bytes (`1e+`
 /// followed by no digit ends the number before the `e`); an operator two (it stops before `--` and
 /// `/*`); a `U` two (`U&'` or `U&"` starts a Unicode string); whitespace, comments, identifiers,
-/// `$1`, `.`, quoted strings and names one (a doubled quote goes on). A dollar-quoted string ends
-/// at its closing tag, and anything unterminated runs to the end of the text.
+/// `$1`, `.`, quoted strings and names one (a doubled quote goes on). MySQL reads three bytes past
+/// an operator (a `--` is a comment only with a space or control character after it) and two past a
+/// `0` (`0x` and a hex digit make a number). A dollar-quoted string ends at its closing tag, and
+/// anything unterminated runs to the end of the text.
 const LOOKAHEAD: usize = 4;
 /// How far past a change the lexer first looks for the old tokens to fit again.
 const RESYNC_BYTES: usize = 1024;
@@ -279,8 +282,8 @@ fn reach(list: &[Token], k: usize, text: &str) -> usize {
 }
 
 /// `tokenize(slice)`, its ranges moved to start at `offset`.
-fn lex(slice: &str, offset: usize) -> Vec<Token> {
-    lexer::tokenize(slice)
+fn lex(dialect: Dialect, slice: &str, offset: usize) -> Vec<Token> {
+    lexer::tokenize(dialect, slice)
         .into_iter()
         .map(|t| Token { kind: t.kind, range: t.range.start.saturating_add(offset)..t.range.end.saturating_add(offset) })
         .collect()
@@ -297,8 +300,8 @@ fn lex(slice: &str, offset: usize) -> Vec<Token> {
 /// hold, moved by the change in length. The result is what lexing the whole text gives
 /// (`incremental_tokens_match_a_full_lex`, and key by key for dollar quotes in
 /// `typing_and_deleting_dollar_quotes_key_by_key_match_a_full_lex`).
-#[derive(Default)]
 struct Tokens {
+    dialect: Dialect,
     text: String,
     list: Vec<Token>,
     line_starts: Vec<usize>,
@@ -307,7 +310,17 @@ struct Tokens {
     lexed: usize,
 }
 
+impl Default for Tokens {
+    fn default() -> Self {
+        Self::new(Dialect::Postgres)
+    }
+}
+
 impl Tokens {
+    fn new(dialect: Dialect) -> Self {
+        Self { dialect, text: String::new(), list: Vec::new(), line_starts: Vec::new(), updates: 0, lexed: 0 }
+    }
+
     /// The tokens of `text` in order, covering it.
     #[cfg(test)]
     fn list(&self) -> &[Token] {
@@ -339,7 +352,7 @@ impl Tokens {
         let tail = loop {
             let slice = new.get(restart..cut).unwrap_or_default();
             self.lexed = self.lexed.saturating_add(slice.len());
-            let fresh = lex(slice, restart);
+            let fresh = lex(self.dialect, slice, restart);
             if cut >= new.len() {
                 break fresh;
             }
@@ -1158,6 +1171,8 @@ mod tests {
     /// A small deterministic random sequence (xorshift), so a failing edit can be replayed.
     struct Rng(u64);
 
+    const ALL_DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::MySql, Dialect::Sqlite];
+
     impl Rng {
         fn next(&mut self, below: usize) -> usize {
             self.0 ^= self.0 << 13;
@@ -1170,7 +1185,7 @@ mod tests {
     /// `tokens` after updating to `text` equals a full lex of `text`.
     fn same_as_full(tokens: &mut Tokens, text: &str, what: &str) {
         tokens.update(text);
-        assert_eq!(tokens.list(), lexer::tokenize(text).as_slice(), "{what}: {text:?}");
+        assert_eq!(tokens.list(), lexer::tokenize(tokens.dialect, text).as_slice(), "{what}: {text:?}");
     }
 
     #[test]
@@ -1182,23 +1197,27 @@ mod tests {
             "select $tagé$ é $tagé$, $1",
             "do $$ begin perform 1; end $$; select $x1$a$x1$",
         ] {
-            let mut tokens = Tokens::default();
-            let ends: Vec<usize> = text.char_indices().map(|(at, _)| at).skip(1).chain([text.len()]).collect();
-            for &end in &ends {
-                same_as_full(&mut tokens, &text[..end], "typed");
-            }
-            for &end in ends.iter().rev() {
-                same_as_full(&mut tokens, &text[..end], "deleted from the end");
+            for dialect in ALL_DIALECTS {
+                let mut tokens = Tokens::new(dialect);
+                let ends: Vec<usize> = text.char_indices().map(|(at, _)| at).skip(1).chain([text.len()]).collect();
+                for &end in &ends {
+                    same_as_full(&mut tokens, &text[..end], "typed");
+                }
+                for &end in ends.iter().rev() {
+                    same_as_full(&mut tokens, &text[..end], "deleted from the end");
+                }
             }
         }
         // A tag typed in the middle, its closing `$` last; then that `$` taken away again.
-        let mut tokens = Tokens::default();
-        for text in ["as $ select 1", "as $b select 1", "as $bo select 1", "as $bod select 1", "as $body select 1", "as $body$ select 1"] {
-            same_as_full(&mut tokens, text, "typed in the middle");
-        }
-        let mut tokens = Tokens::default();
-        for text in ["as $body", "as $body$ select 1; $body$", "as $body select 1; $body$", "$tagé", "$tagé$$"] {
-            same_as_full(&mut tokens, text, "pasted and cut");
+        for dialect in ALL_DIALECTS {
+            let mut tokens = Tokens::new(dialect);
+            for text in ["as $ select 1", "as $b select 1", "as $bo select 1", "as $bod select 1", "as $body select 1", "as $body$ select 1"] {
+                same_as_full(&mut tokens, text, "typed in the middle");
+            }
+            let mut tokens = Tokens::new(dialect);
+            for text in ["as $body", "as $body$ select 1; $body$", "as $body select 1; $body$", "$tagé", "$tagé$$"] {
+                same_as_full(&mut tokens, text, "pasted and cut");
+            }
         }
     }
 
@@ -1254,25 +1273,43 @@ mod tests {
             "from t",
             "<>",
             "::",
+            "#",
+            "`",
+            "[",
+            "]",
+            "x'",
+            "B'",
+            "0x",
+            "0xA",
+            "-- ",
+            "--\t",
+            "+--",
+            "\\'",
+            "DELIMITER ",
+            "create trigger ",
+            "begin ",
+            "end ",
         ];
-        for seed in [0x9E37_79B9_7F4A_7C15, 12_345, 777, 42, 0xDEAD_BEEF] {
-            let mut rng = Rng(seed);
-            for round in 0..300 {
-                let mut text: String = (0..rng.next(40)).map(|_| pieces[rng.next(pieces.len())]).collect();
-                let mut tokens = Tokens::default();
-                tokens.update(&text);
-                for step in 0..60 {
-                    // Two character boundaries, a few characters apart at most.
-                    let bounds: Vec<usize> = text.char_indices().map(|(at, _)| at).chain([text.len()]).collect();
-                    let i = rng.next(bounds.len());
-                    let j = (i + rng.next(8)).min(bounds.len() - 1);
-                    let (a, b) = (bounds[i], bounds[j]);
-                    match rng.next(3) {
-                        0 => text.insert_str(a, pieces[rng.next(pieces.len())]),
-                        1 => text.replace_range(a..b, ""),
-                        _ => text.replace_range(a..b, pieces[rng.next(pieces.len())]),
+        for dialect in ALL_DIALECTS {
+            for seed in [0x9E37_79B9_7F4A_7C15, 12_345, 777, 42, 0xDEAD_BEEF] {
+                let mut rng = Rng(seed);
+                for round in 0..300 {
+                    let mut text: String = (0..rng.next(40)).map(|_| pieces[rng.next(pieces.len())]).collect();
+                    let mut tokens = Tokens::new(dialect);
+                    tokens.update(&text);
+                    for step in 0..60 {
+                        // Two character boundaries, a few characters apart at most.
+                        let bounds: Vec<usize> = text.char_indices().map(|(at, _)| at).chain([text.len()]).collect();
+                        let i = rng.next(bounds.len());
+                        let j = (i + rng.next(8)).min(bounds.len() - 1);
+                        let (a, b) = (bounds[i], bounds[j]);
+                        match rng.next(3) {
+                            0 => text.insert_str(a, pieces[rng.next(pieces.len())]),
+                            1 => text.replace_range(a..b, ""),
+                            _ => text.replace_range(a..b, pieces[rng.next(pieces.len())]),
+                        }
+                        same_as_full(&mut tokens, &text, &format!("{dialect:?}, seed {seed}, round {round}, step {step}"));
                     }
-                    same_as_full(&mut tokens, &text, &format!("seed {seed}, round {round}, step {step}"));
                 }
             }
         }
@@ -1292,14 +1329,14 @@ mod tests {
             tokens.update(&text);
             let lexed = tokens.work().1 - before;
             assert!(lexed <= 2 * RESYNC_BYTES, "an edit at {at} lexed {lexed} bytes");
-            assert_eq!(tokens.list(), lexer::tokenize(&text).as_slice());
+            assert_eq!(tokens.list(), lexer::tokenize(Dialect::Postgres, &text).as_slice());
         }
         // An edit that opens a string changes the rest of the text: all of it is lexed again.
         text.insert(10, '\'');
         let (_, before) = tokens.work();
         tokens.update(&text);
         assert!(tokens.work().1 - before > text.len() / 2);
-        assert_eq!(tokens.list(), lexer::tokenize(&text).as_slice());
+        assert_eq!(tokens.list(), lexer::tokenize(Dialect::Postgres, &text).as_slice());
     }
 
     #[test]

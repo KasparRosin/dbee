@@ -44,7 +44,7 @@ use std::sync::{Arc, Weak};
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
 use dbee_pg::{Limits, PgConnection, PgError, QUERY_LIMITS, Target};
-use dbee_sql::lexer;
+use dbee_sql::{Dialect, lexer};
 use dbee_ssh::Tunnel;
 use serde_json::json;
 
@@ -430,9 +430,9 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
     let ranges = if current {
         let cursor = cursor.ok_or_else(|| bad("`cursor` is required with `current` (a byte offset into the text)"))?;
-        lexer::statement_at(&text, cursor).into_iter().collect()
+        lexer::statement_at(Dialect::Postgres, &text, cursor).into_iter().collect()
     } else {
-        lexer::statements(&text)
+        lexer::statements(Dialect::Postgres, &text)
     };
     if ranges.is_empty() {
         return Err(disabled(NOTHING_TO_RUN));
@@ -587,7 +587,7 @@ mod tests {
         };
         let via = || Via::Connect { config: Box::new(config.clone()), password: Some(db.password.clone()), tunnel: None };
         let text = "select repeat('x', 60) as a; select repeat('y', 60) as b; select 'z' as c".to_owned();
-        let ranges = lexer::statements(&text);
+        let ranges = lexer::statements(Dialect::Postgres, &text);
         let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();
         // 100 bytes for the run: the second result does not fit in what the first left, the third does.
         let ran = run_statements(via(), text.clone(), ranges.clone(), Arc::new(Stop::default()), 100).await;

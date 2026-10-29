@@ -118,7 +118,7 @@ pub async fn apply_gated(conn: &PgConnection, statements: &[String], gate: &Appl
         return Ok(0);
     }
     for (i, sql) in statements.iter().enumerate() {
-        if dbee_sql::lexer::statements(sql).len() != 1 {
+        if dbee_sql::lexer::statements(dbee_sql::Dialect::Postgres, sql).len() != 1 {
             return Err(ApplyError { index: i, error: PgError::Other("a change must be exactly one SQL statement".into()) });
         }
     }
