@@ -113,7 +113,11 @@ impl Form {
 
     /// The connection the form describes, or why it is not usable yet.
     pub(crate) fn to_config(&self) -> Result<ConnectionConfig, String> {
-        let port = parse_port(&self.port).ok_or("The port must be a number from 1 to 65535.")?;
+        let port = match parse_port(&self.port) {
+            Some(p) => p,
+            None if self.kind.uses_file() => 0,
+            None => return Err("The port must be a number from 1 to 65535.".into()),
+        };
         let ssh = if self.ssh_on {
             let port = parse_port(&self.ssh_port).ok_or("The SSH port must be a number from 1 to 65535.")?;
             Some(SshConfig { host: self.ssh_host.trim().into(), port, user: self.ssh_user.trim().into(), auth: self.ssh_auth() })
@@ -163,7 +167,14 @@ mod tests {
         assert_eq!((back.kind, back.file), (DbKind::MySql, None));
 
         let file = Some(PathBuf::from("/x/shop.sqlite"));
-        let sqlite = ConnectionConfig { id: "b".into(), kind: DbKind::Sqlite, file: file.clone(), ..ConnectionConfig::default() };
+        let sqlite = ConnectionConfig {
+            id: "b".into(),
+            kind: DbKind::Sqlite,
+            file: file.clone(),
+            host: String::new(),
+            port: 0,
+            ..ConnectionConfig::default()
+        };
         let back = Form::from_config(&sqlite).to_config().unwrap();
         assert_eq!((back.kind, back.file), (DbKind::Sqlite, file));
     }

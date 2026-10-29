@@ -24,14 +24,40 @@ pub struct ConnectionStore {
     pub saved: Vec<ConnectionConfig>,
     pub recent: Vec<RecentEntry>,
     pub dir: Option<PathBuf>,
+    /// Entries this dbee could not decode (say, a type from a newer dbee), written back as they were.
+    kept_saved: Vec<serde_json::Value>,
+    kept_recent: Vec<serde_json::Value>,
 }
 
+/// The file as entries, each decoded on its own.
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct FileBody {
     version: u32,
-    saved: Vec<ConnectionConfig>,
-    recent: Vec<RecentEntry>,
+    saved: Vec<serde_json::Value>,
+    recent: Vec<serde_json::Value>,
+}
+
+/// Decoded entries, and the ones that would not decode.
+fn decode_each<T: serde::de::DeserializeOwned>(values: Vec<serde_json::Value>) -> (Vec<T>, Vec<serde_json::Value>) {
+    let (mut ok, mut kept) = (Vec::new(), Vec::new());
+    for v in values {
+        match serde_json::from_value::<T>(v.clone()) {
+            Ok(t) => ok.push(t),
+            Err(_) => kept.push(v),
+        }
+    }
+    (ok, kept)
+}
+
+/// `connections.json.bad`, or the first of `.bad.1`, `.bad.2`… not taken yet.
+fn free_bad_name(dir: &Path) -> Option<PathBuf> {
+    let taken = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    let first = dir.join(format!("{FILE}.bad"));
+    if !taken(&first) {
+        return Some(first);
+    }
+    (1..100).map(|n| dir.join(format!("{FILE}.bad.{n}"))).find(|p| !taken(p))
 }
 
 impl Default for FileBody {
@@ -58,15 +84,19 @@ impl ConnectionStore {
         };
         match serde_json::from_slice::<FileBody>(&text) {
             Ok(body) => {
-                store.saved = body.saved;
-                store.recent = body.recent;
+                (store.saved, store.kept_saved) = decode_each(body.saved);
+                (store.recent, store.kept_recent) = decode_each(body.recent);
                 store.recent.truncate(MAX_RECENT);
-                (store, None)
+                let kept = store.kept_saved.len() + store.kept_recent.len();
+                let warning = (kept > 0).then(|| format!("{kept} saved connection entries could not be read and are kept unchanged in the file"));
+                (store, warning)
             }
             Err(e) => {
-                let bad = dir.join(format!("{FILE}.bad"));
-                let moved = match std::fs::rename(&path, &bad) {
-                    Ok(()) => format!("moved it to {}", bad.display()),
+                let moved = match free_bad_name(dir)
+                    .ok_or_else(|| "every .bad name is taken".to_string())
+                    .and_then(|bad| std::fs::rename(&path, &bad).map(|()| bad).map_err(|re| re.to_string()))
+                {
+                    Ok(bad) => format!("moved it to {}", bad.display()),
                     Err(re) => {
                         store.dir = None;
                         format!("could not move it aside ({re}); the file was left untouched and changes will not be saved")
@@ -81,7 +111,19 @@ impl ConnectionStore {
     pub fn save(&self) -> Result<(), ConfigError> {
         let Some(dir) = &self.dir else { return Ok(()) };
         let io = |what: &str, e: std::io::Error| ConfigError::Io(format!("{what}: {e}"));
-        let body = FileBody { version: 1, saved: self.saved.clone(), recent: self.recent.clone() };
+        let to_values = |items: Vec<Result<serde_json::Value, serde_json::Error>>, kept: &[serde_json::Value]| {
+            items.into_iter().collect::<Result<Vec<_>, _>>().map(|mut v| {
+                v.extend(kept.iter().cloned());
+                v
+            })
+        };
+        let saved = to_values(self.saved.iter().map(serde_json::to_value).collect(), &self.kept_saved);
+        let recent = to_values(self.recent.iter().map(serde_json::to_value).collect(), &self.kept_recent);
+        let body = FileBody {
+            version: 1,
+            saved: saved.map_err(|e| ConfigError::Io(e.to_string()))?,
+            recent: recent.map_err(|e| ConfigError::Io(e.to_string()))?,
+        };
         let json = serde_json::to_vec_pretty(&body).map_err(|e| ConfigError::Io(e.to_string()))?;
         std::fs::create_dir_all(dir).map_err(|e| io("create directory", e))?;
         let tmp = dir.join(format!("{FILE}.{}.tmp", crate::connection::new_id()));

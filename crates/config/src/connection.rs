@@ -65,13 +65,21 @@ pub struct KindInfo {
     pub ssl_aliases: &'static [(&'static str, SslMode)],
 }
 
-const MYSQL_SSL_ALIASES: &[(&str, SslMode)] = &[
-    ("DISABLED", SslMode::Disable),
-    ("PREFERRED", SslMode::Prefer),
-    ("REQUIRED", SslMode::Require),
-    ("VERIFY_CA", SslMode::VerifyCa),
-    ("VERIFY_IDENTITY", SslMode::VerifyFull),
-];
+/// MariaDB's row builds on this one: it lists only what differs.
+const MYSQL: KindInfo = KindInfo {
+    id: "mysql",
+    label: "MySQL",
+    default_port: Some(3306),
+    settings: Settings::Server { tls: true, ssh: true },
+    url_schemes: &["mysql"],
+    ssl_aliases: &[
+        ("DISABLED", SslMode::Disable),
+        ("PREFERRED", SslMode::Prefer),
+        ("REQUIRED", SslMode::Require),
+        ("VERIFY_CA", SslMode::VerifyCa),
+        ("VERIFY_IDENTITY", SslMode::VerifyFull),
+    ],
+};
 
 /// The database types dbee can open. Saved as the type's id.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -87,7 +95,7 @@ pub enum DbKind {
 impl DbKind {
     pub const ALL: [DbKind; 4] = [DbKind::Postgres, DbKind::MySql, DbKind::MariaDb, DbKind::Sqlite];
 
-    /// Adding a variant fails to compile here, which is the cue to list it in `ALL` and `info`.
+    /// A new variant fails to compile here, which forces an edit; `info` is exhaustive on its own.
     #[allow(dead_code)]
     const fn all_guard(k: DbKind) {
         match k {
@@ -105,22 +113,8 @@ impl DbKind {
                 url_schemes: &["postgres", "postgresql"],
                 ssl_aliases: &[],
             },
-            DbKind::MySql => &KindInfo {
-                id: "mysql",
-                label: "MySQL",
-                default_port: Some(3306),
-                settings: Settings::Server { tls: true, ssh: true },
-                url_schemes: &["mysql"],
-                ssl_aliases: MYSQL_SSL_ALIASES,
-            },
-            DbKind::MariaDb => &KindInfo {
-                id: "mariadb",
-                label: "MariaDB",
-                default_port: Some(3306),
-                settings: Settings::Server { tls: true, ssh: true },
-                url_schemes: &["mariadb"],
-                ssl_aliases: MYSQL_SSL_ALIASES,
-            },
+            DbKind::MySql => &MYSQL,
+            DbKind::MariaDb => &KindInfo { id: "mariadb", label: "MariaDB", url_schemes: &["mariadb"], ..MYSQL },
             DbKind::Sqlite => &KindInfo {
                 id: "sqlite",
                 label: "SQLite",
@@ -375,7 +369,10 @@ pub fn parse_url(url: &str) -> Result<UrlParts, ConfigError> {
             let tail = url.get(scheme.len()..)?.strip_prefix("://")?;
             head.eq_ignore_ascii_case(scheme).then_some((k, tail))
         })
-        .ok_or_else(|| err("expected a postgres://, postgresql://, mysql:// or mariadb:// URL"))?;
+        .ok_or_else(|| {
+            let schemes: Vec<String> = DbKind::ALL.iter().flat_map(|k| k.info().url_schemes).map(|s| format!("{s}://")).collect();
+            ConfigError::Url(format!("expected a {} URL", schemes.join(", ")))
+        })?;
     let rest = rest.split('#').next().unwrap_or("");
     let (before_query, query) = match rest.split_once('?') {
         Some((a, q)) => (a, Some(q)),

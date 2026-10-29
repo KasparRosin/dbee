@@ -192,8 +192,11 @@ fn failed_bad_rename_leaves_file_untouched() {
     let th = dbee_testkit::temp_home(None, None);
     let dir = th.home.clone();
     std::fs::write(dir.join(FILE), "{oops").unwrap();
-    // a non-empty directory at the .bad path makes the rename fail
+    // every .bad name taken means no free place to move it
     std::fs::create_dir_all(dir.join("connections.json.bad").join("x")).unwrap();
+    for n in 1..100 {
+        std::fs::create_dir_all(dir.join(format!("connections.json.bad.{n}")).join("x")).unwrap();
+    }
     let (mut s, warn) = ConnectionStore::load(Some(&dir));
     assert!(warn.unwrap().contains("untouched"));
     assert!(s.dir.is_none());
@@ -331,4 +334,52 @@ fn saved_kind_json_is_the_id() {
     assert!(serde_json::from_str::<DbKind>("\"oracle\"").is_err());
     let j = serde_json::to_value(ConnectionConfig::default()).unwrap();
     assert_eq!(j["kind"], "postgres");
+}
+
+#[test]
+fn corrupt_file_never_overwrites_an_earlier_bad_file() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    std::fs::write(dir.join("connections.json.bad"), "first").unwrap();
+    std::fs::write(dir.join(FILE), "{oops").unwrap();
+    let (_, warn) = ConnectionStore::load(Some(&dir));
+    assert!(warn.is_some());
+    assert_eq!(std::fs::read_to_string(dir.join("connections.json.bad")).unwrap(), "first");
+    assert_eq!(std::fs::read_to_string(dir.join("connections.json.bad.1")).unwrap(), "{oops");
+}
+
+#[test]
+fn an_unreadable_entry_is_kept_and_the_others_load() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let oracle = serde_json::json!({"id": "o", "name": "Newer", "kind": "oracle", "host": "h", "port": 1521, "future": [1, 2]});
+    let recent = serde_json::json!({"config": {"id": "r", "kind": "oracle"}, "usedAt": 5});
+    let good = serde_json::to_value(cfg("g")).unwrap();
+    let file = serde_json::json!({"version": 1, "saved": [oracle, good], "recent": [recent]});
+    std::fs::write(dir.join(FILE), serde_json::to_vec(&file).unwrap()).unwrap();
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    assert_eq!(s.saved.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["g"]);
+    let warn = warn.unwrap();
+    assert!(warn.contains('2') && !warn.contains("Newer"), "{warn}");
+    assert!(!dir.join("connections.json.bad").exists());
+    s.upsert(cfg("h"));
+    s.save().unwrap();
+    let back: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(FILE)).unwrap()).unwrap();
+    assert!(back["saved"].as_array().unwrap().contains(&oracle));
+    assert!(back["recent"].as_array().unwrap().contains(&recent));
+    assert_eq!(back["saved"].as_array().unwrap().len(), 3);
+    let (again, _) = ConnectionStore::load(Some(&dir));
+    assert_eq!(again.saved.len(), 2);
+}
+
+#[test]
+fn a_sqlite_connection_round_trips_through_the_store() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut s, _) = ConnectionStore::load(Some(&dir));
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ..cfg("s") };
+    s.upsert(c.clone());
+    s.save().unwrap();
+    let (l, warn) = ConnectionStore::load(Some(&dir));
+    assert_eq!((l.saved, warn), (vec![c], None));
 }
