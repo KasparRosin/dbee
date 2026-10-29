@@ -34,7 +34,8 @@ People trust dbee with their databases; a crash can lose an unsaved query or lea
 - **Layering** is enforced by `cargo xtask layers`: domain crates (L0–L4) → `engine` (L5) → `ui-egui`/`mcp` (L6) → `apps/*` (L7). Nothing below L6 depends on egui/eframe/winit/rfd/wgpu. **The UI crate is swappable.** Register every new crate in `xtask/src/layers.rs` and `docs/architecture.md`.
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)`.
 - **Rust only** (no handwritten JS/TS).
-- **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, layers, provenance). One task id per commit (`M1.2: connection list`).
+- **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, layers, provenance).
+- **Commit subjects** and pull request titles follow [`CONTRIBUTING.md`](CONTRIBUTING.md): `<type>: <summary>` or `<type>(<scope>): <summary>`, for example `feat(M2.6): …` or `fix(#9): …`. One task id per commit.
 
 ## Running and looking at the app
 - `cargo run -p dbee` opens the app. `DBEE_NO_PREFS=1` keeps no connections file and no log file.
