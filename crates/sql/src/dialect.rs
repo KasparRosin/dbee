@@ -60,8 +60,14 @@ impl Dialect {
     }
 
     /// `'value'` with `'` doubled; backslashes stay literal, which Postgres gets from
-    /// `standard_conforming_strings` and MySQL from `NO_BACKSLASH_ESCAPES`. NUL is an error.
+    /// `standard_conforming_strings`. MySQL may or may not escape them, so a value with one is
+    /// hex. NUL is an error.
     pub fn literal(self, value: &str) -> Result<String, SqlError> {
+        if self == Dialect::MySql && value.contains('\\') {
+            no_nul(value)?;
+            let hex: String = value.bytes().map(|b| format!("{b:02X}")).collect();
+            return Ok(format!("_utf8mb4 X'{hex}'"));
+        }
         quoted(value, '\'')
     }
 
@@ -293,7 +299,9 @@ mod tests {
     fn literals_double_quotes_and_keep_backslashes() {
         for d in ALL {
             assert_eq!(d.literal("it's").unwrap(), "'it''s'");
-            assert_eq!(d.literal(r"a\b").unwrap(), r"'a\b'");
+            if d != Dialect::MySql {
+                assert_eq!(d.literal(r"a\b").unwrap(), r"'a\b'");
+            }
         }
     }
 
@@ -417,8 +425,33 @@ mod tests {
 
     /// `s` is one literal: it opens and closes with `'` and every inner `'` is doubled.
     fn is_one_literal(s: &str) -> bool {
+        if let Some(hex) = s.strip_prefix("_utf8mb4 X'").and_then(|s| s.strip_suffix('\'')) {
+            return hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b));
+        }
         let Some(inner) = s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else { return false };
         inner.replace("''", "").find('\'').is_none()
+    }
+
+    #[test]
+    fn mysql_literals_with_a_backslash_are_hex() {
+        let col = txt("n");
+        for (text, hex) in [
+            (r"a\b", "615C62"),
+            (r"\'; DROP TABLE t; -- ", "5C273B2044524F50205441424C4520743B202D2D20"),
+            (r"it's a\b", "6974277320615C62"),
+            ("é\\", "C3A95C"),
+        ] {
+            let lit = format!("_utf8mb4 X'{hex}'");
+            assert_eq!(Dialect::MySql.literal(text).unwrap(), lit, "{text}");
+            assert_eq!(Dialect::MySql.value(&col, text).unwrap(), lit);
+            assert_eq!(Dialect::MySql.key_value(&col, text).unwrap(), lit);
+            assert_eq!(Dialect::MySql.filter_value(&col, text).unwrap(), lit);
+            assert_eq!(Dialect::Postgres.literal(text).unwrap().replace("''", "'"), format!("'{text}'"));
+        }
+        assert_eq!(Dialect::MySql.literal("it's").unwrap(), "'it''s'");
+        assert_eq!(Dialect::MySql.literal("").unwrap(), "''");
+        assert_eq!(Dialect::MySql.literal("a\\\0"), Err(SqlError::Nul));
+        assert_eq!(Dialect::Sqlite.literal(r"a\b").unwrap(), r"'a\b'");
     }
 
     proptest! {
@@ -430,6 +463,15 @@ mod tests {
                     Ok(lit) => {
                         prop_assert!(!s.contains('\0') && is_one_literal(&lit), "{lit}");
                         prop_assert!(!lit.contains('\0'));
+                        if d == Dialect::MySql {
+                            prop_assert!(!lit.contains('\\'), "{lit}");
+                            if let Some(hex) = lit.strip_prefix("_utf8mb4 X'").and_then(|l| l.strip_suffix('\'')) {
+                                let bytes: Vec<u8> = (0..hex.len()).step_by(2).filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect();
+                                prop_assert_eq!(bytes, s.as_bytes());
+                            } else {
+                                prop_assert!(!s.contains('\\'));
+                            }
+                        }
                     }
                 }
                 let column = txt("n");
@@ -438,6 +480,7 @@ mod tests {
                         Err(e) => prop_assert!(s.contains('\0') && e == SqlError::Nul),
                         Ok(v) => {
                             prop_assert!(!s.contains('\0') && !v.contains('\0'));
+                            prop_assert!(d != Dialect::MySql || !v.contains('\\'), "{v}");
                             let literal = v.strip_prefix("CAST(").and_then(|v| v.strip_suffix(" AS text)")).unwrap_or(&v);
                             prop_assert!(is_one_literal(literal), "{v}");
                         }
