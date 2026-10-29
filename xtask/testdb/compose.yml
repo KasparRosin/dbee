@@ -1,4 +1,5 @@
-# dbee test servers: Postgres 14, the newest Postgres major and an SSH server, local and test-only.
+# dbee test servers, local and test-only: Postgres 14 and the newest Postgres major; MySQL 5.7, 8.0
+# and the newest; MariaDB 10.11 and the newest; an SSH server.
 # Managed by `cargo xtask testdb up|down|status` (xtask/src/testdb.rs), which writes the variables
 # below to target/testdb/compose.env. By hand:
 #   docker compose -p dbee-testdb -f xtask/testdb/compose.yml --env-file target/testdb/compose.env ps
@@ -29,6 +30,60 @@ x-postgres: &postgres
     start_period: 900s
     start_interval: 2s
 
+# MySQL and MariaDB. The images' entrypoints put `mysqld`/`mariadbd` before arguments that start
+# with `-`, so both flavours take the same ones. They seed on a server without networking, so
+# TCP answers only once the seed is in. The root password is the test password. Their certificate
+# is RSA (mysql/server.crt): MySQL 5.7's image offers no cipher for the ECDSA one.
+x-mysql-args: &mysql-args
+  - --max_allowed_packet=67108864
+  - --character-set-server=utf8mb4
+  - --ssl-ca=/secrets/ca.crt
+  - --ssl-cert=/secrets/mysql/server.crt
+  - --ssl-key=/secrets/mysql/server.key
+  - --skip-name-resolve
+  # Light on memory and disk: five of these run next to the Postgres servers.
+  - --performance_schema=OFF
+  - --innodb_buffer_pool_size=64M
+  - --innodb_flush_log_at_trx_commit=0
+  - --skip-log-bin
+
+x-mysql: &mysql
+  depends_on: *after-init
+  environment:
+    MYSQL_ROOT_PASSWORD: ${DBEE_TEST_PASSWORD:?run cargo xtask testdb up}
+  command: *mysql-args
+  volumes:
+    - secrets:/secrets:ro
+    - ./seed-mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+  ports:
+    - "127.0.0.1::3306"
+  healthcheck:
+    # Without TLS: a TLS fault shows in `testdb up`'s TLS check, not as a server that never gets healthy.
+    test: ["CMD", "mysqladmin", "ping", "--host=127.0.0.1", "--protocol=TCP", "--ssl-mode=DISABLED", "--silent"]
+    interval: 5s
+    timeout: 5s
+    retries: 5
+    start_period: 900s
+    start_interval: 2s
+
+x-mariadb: &mariadb
+  depends_on: *after-init
+  environment:
+    MARIADB_ROOT_PASSWORD: ${DBEE_TEST_PASSWORD:?run cargo xtask testdb up}
+  command: *mysql-args
+  volumes:
+    - secrets:/secrets:ro
+    - ./seed-mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+  ports:
+    - "127.0.0.1::3306"
+  healthcheck:
+    test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    interval: 5s
+    timeout: 5s
+    retries: 5
+    start_period: 900s
+    start_interval: 2s
+
 services:
   # Builds the tools image; `sshd` runs the same image. Only one service builds it, so a cached
   # rebuild keeps the image id and `up --build` reuses the running containers.
@@ -51,6 +106,33 @@ services:
   pgnew:
     <<: *postgres
     image: postgres:${PG_NEWEST:?run cargo xtask testdb up}-alpine
+
+  # The seed reads the hostname: mysql80 and mariadbnew get the big tables (seed-mysql.sql).
+  # mysql:5.7 is built for amd64 only.
+  mysql57:
+    <<: *mysql
+    image: mysql:5.7
+    hostname: mysql57
+
+  mysql80:
+    <<: *mysql
+    image: mysql:8.0
+    hostname: mysql80
+
+  mysqlnew:
+    <<: *mysql
+    image: mysql:${MYSQL_NEWEST:?run cargo xtask testdb up}
+    hostname: mysqlnew
+
+  mariadb1011:
+    <<: *mariadb
+    image: mariadb:10.11
+    hostname: mariadb1011
+
+  mariadbnew:
+    <<: *mariadb
+    image: mariadb:${MARIADB_NEWEST:?run cargo xtask testdb up}
+    hostname: mariadbnew
 
   sshd:
     image: dbee-testdb-tools:local

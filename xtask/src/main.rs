@@ -35,7 +35,7 @@ commands:
   version [set X.Y.Z[-pre]]
                   print or set the workspace version ([workspace.package] in Cargo.toml)
   testdb up|down|status
-                  the Docker test servers (Postgres 14 and newest, sshd); `up` writes target/testdb/env.json
+                  the Docker test servers (Postgres, MySQL, MariaDB, sshd); `up` writes target/testdb/env.json
   stats [--exact] count tests and lines per crate (--exact: ask the test harness via `-- --list`)
   ico <out.ico> <in.png>...
                   pack square PNGs (<= 256 px) into a Windows .ico (see packaging/icons.sh)

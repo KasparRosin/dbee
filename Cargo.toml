@@ -44,6 +44,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-platform-verifier = "0.7"
 futures-util = "0.3"
 
+# storage
+# SQLite compiled in (public domain, docs/standards/licensing.md); the crates are MIT.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
 # ui
 egui = "0.36"
 eframe = { version = "0.36", default-features = false }

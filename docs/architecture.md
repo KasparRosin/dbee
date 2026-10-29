@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** trivial (the driver interface is the start of M2)
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (`crates/testkit`: the MySQL and MariaDB test servers, the SQLite seed, targets over every engine)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -11,7 +11,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | Path | Status | Job |
 |---|---|---|
 | `crates/core` | exists | L0. Cells, result sets, the schema model (`Catalog`, `TableInfo`, row keys, table filtering), grid text, the clipboard copy formats (TSV, CSV, JSON, Markdown) and JSON: classify, validate, pretty-print and highlight, all iterative. Plain values with serde shapes; no I/O. |
-| `crates/testkit` | exists | L0, a dev-dependency only. Finds the Docker test servers (`cargo xtask testdb`), the skip rule (`require_testdb!`), a `psql` helper, unique names and throwaway home directories. |
+| `crates/testkit` | exists | L0, a dev-dependency only. Finds the Docker test servers (`cargo xtask testdb`: Postgres, MySQL, MariaDB, sshd), the skip rule (`require_testdb!`), `psql` and `mysql` helpers, the SQLite seed file (`sqlite_seeded`, built with `rusqlite`), the targets over every engine (`targets()`), unique names and throwaway home directories. |
 | `crates/sql` | exists | L1. Identifier and literal quoting (values as `CAST('…' AS <type>)`), the SQL lexer and statement splitting, `WHERE` from filter rows or raw text, the page and count `SELECT`s, and the `UPDATE`, `INSERT` and `DELETE` of staged edits. Pure text over `core`'s schema model; no I/O. |
 | `crates/config` | exists | L1. Connection settings, URL parsing, the saved and recent connections file, and the secret stores (OS keyring, in-memory). No passwords in the file. |
 | `crates/ssh` | exists | L2. The SSH tunnel (russh with ring): host key check against `known_hosts` (unknown hosts ask once and can be learned, changed keys are refused), key, agent and password login, and a direct-tcpip channel per connection. Everything it reads from the machine comes in through `SshEnv`. |
@@ -69,6 +69,7 @@ M1's crates are all in place. Postgres is the only engine, and the engine calls 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | `crates/testkit`: the MySQL and MariaDB test servers, the SQLite seed file and `targets()` over every engine (M2.2) |
 | 2026-10-28 | trivial | The planned driver interface is the start of M2 "Three databases". |
 | 2026-10-27 | trivial | Platforms: only Linux x86_64 built and run so far |
 | 2026-10-26 | minor | Checked against the crates at the end of M1: `core` (JSON), `sql` (filters, page and edit statements), `pg` (catalog, caps, apply), the engine's modules, the UI's file pickers, the app's logger, `run-isolated`, `m1_day`; the data flow for tables, edits and queries; the planned driver interface |

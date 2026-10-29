@@ -66,12 +66,14 @@ pub const ALLOW_VAR: &str = "DBEE_ALLOW_TARGETS";
 /// Port 1, where nothing listens: a connection error to show, always allowed.
 const ERROR_DEMO: (&str, u16) = ("127.0.0.1", 1);
 
-/// The targets an isolated run may connect to: every server's port and the sshd's, each on
-/// `127.0.0.1` and `localhost`, then [`ERROR_DEMO`]. Without the env file, [`ERROR_DEMO`] alone.
+/// The targets an isolated run may connect to: every Postgres, MySQL and MariaDB server's port and
+/// the sshd's, each on `127.0.0.1` and `localhost`, then [`ERROR_DEMO`]. Without the env file,
+/// [`ERROR_DEMO`] alone.
 pub fn allowed_targets(env: Option<&testdb::Env>) -> Vec<(String, u16)> {
     let mut list = Vec::new();
     if let Some(env) = env {
-        for port in env.servers.iter().map(|s| s.port).chain(std::iter::once(env.sshd.port)) {
+        let servers = env.servers.iter().map(|s| s.port).chain(env.mysql.iter().map(|s| s.port));
+        for port in servers.chain(std::iter::once(env.sshd.port)) {
             for host in ["127.0.0.1", "localhost"] {
                 list.push((host.to_string(), port));
             }
@@ -216,10 +218,14 @@ mod tests {
         c.get_envs().find(|(k, _)| *k == OsStr::new(key)).map(|(_, v)| v)
     }
 
-    fn test_env(ports: &[u16], sshd: u16) -> testdb::Env {
+    fn test_env(ports: &[u16], my_ports: &[u16], sshd: u16) -> testdb::Env {
         testdb::Env {
             password: "pw".into(),
             servers: ports.iter().map(|&port| testdb::Server { name: format!("pg{port}"), major: 14, port }).collect(),
+            mysql: my_ports
+                .iter()
+                .map(|&port| testdb::MyServer { name: format!("mysql{port}"), flavor: "mysql".into(), version: "8.0.46".into(), port })
+                .collect(),
             sshd: testdb::Sshd {
                 port: sshd,
                 user: "dbee".into(),
@@ -227,6 +233,8 @@ mod tests {
                 known_hosts_line: "[127.0.0.1]:2222 ssh-ed25519 AAAA".into(),
                 pg_host: "pg14".into(),
                 pg_port: 5432,
+                my_host: "mysql80".into(),
+                my_port: 3306,
             },
             keys: testdb::Keys { plain: "k".into(), encrypted: "e".into(), passphrase: "p".into(), rsa: "r".into() },
             ca_file: "ca".into(),
@@ -235,16 +243,19 @@ mod tests {
 
     #[test]
     fn allowed_targets_are_the_test_servers_on_both_host_spellings() {
-        let list = allowed_targets(Some(&test_env(&[32780, 32776], 32779)));
-        for port in [32780, 32776, 32779] {
+        let list = allowed_targets(Some(&test_env(&[32780, 32776], &[32781], 32779)));
+        for port in [32780, 32776, 32781, 32779] {
             for host in ["127.0.0.1", "localhost"] {
                 assert!(list.contains(&(host.to_string(), port)), "{host}:{port} missing from {list:?}");
             }
         }
         assert!(list.contains(&("127.0.0.1".to_string(), 1)), "port 1 stays for error demos");
-        assert_eq!(list.len(), 7, "{list:?}");
-        assert!(!list.iter().any(|(_, p)| *p == 5432), "the database port behind the tunnel is not a local target");
-        assert_eq!(allow_list(&list), "127.0.0.1:32780,localhost:32780,127.0.0.1:32776,localhost:32776,127.0.0.1:32779,localhost:32779,127.0.0.1:1");
+        assert_eq!(list.len(), 9, "{list:?}");
+        assert!(!list.iter().any(|(_, p)| *p == 5432 || *p == 3306), "the database ports behind the tunnel are not local targets");
+        assert_eq!(
+            allow_list(&list),
+            "127.0.0.1:32780,localhost:32780,127.0.0.1:32776,localhost:32776,127.0.0.1:32781,localhost:32781,127.0.0.1:32779,localhost:32779,127.0.0.1:1"
+        );
     }
 
     #[test]
