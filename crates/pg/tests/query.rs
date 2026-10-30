@@ -98,9 +98,9 @@ async fn error_has_position() {
     let db = require_testdb!();
     for (major, c) in conns(db).await {
         match run(&c, "SELECT nope FROM shop.orders", QUERY_LIMITS).await {
-            Err(DbError::Server { code, position, .. }) => {
-                assert_eq!(code, "42703", "pg{major}");
-                assert_eq!(position, Some(8), "pg{major}");
+            Err(DbError::Server(s)) => {
+                assert_eq!(s.code, "42703", "pg{major}");
+                assert_eq!(s.position, Some(8), "pg{major}");
             }
             other => panic!("{other:?}"),
         }
@@ -195,9 +195,9 @@ async fn run_inside_a_transaction_does_not_abort_it() {
     for (major, c) in conns(db).await {
         ok(&c, "BEGIN", QUERY_LIMITS).await;
         match run(&c, "SELECT nope", QUERY_LIMITS).await {
-            Err(DbError::Server { code, position, .. }) => {
-                assert_eq!(code, "42703", "pg{major}");
-                assert_eq!(position, Some(8), "pg{major}");
+            Err(DbError::Server(s)) => {
+                assert_eq!(s.code, "42703", "pg{major}");
+                assert_eq!(s.position, Some(8), "pg{major}");
             }
             other => panic!("{other:?}"),
         }

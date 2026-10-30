@@ -41,10 +41,7 @@ const VERIFY_CA_NEEDS_CA_FILE: &str = "verify-ca needs a CA file; use verify-ful
 /// missing, unreadable or certificate-less file is [`DbError::Tls`], and so is `verify-ca`
 /// without a CA file.
 pub fn client_config(mode: SslMode, ca_file: Option<&Path>, alpn: &[&[u8]]) -> Result<Option<Arc<ClientConfig>>, DbError> {
-    if mode == SslMode::Disable {
-        return Ok(None);
-    }
-    let verifier = verifier(mode, ca_file)?;
+    let Some(verifier) = verifier(mode, ca_file)? else { return Ok(None) };
     let mut config = ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
         .map_err(|e| DbError::Tls(format!("no usable TLS version: {e}")))?
@@ -59,31 +56,22 @@ fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-/// The certificate check for `mode`.
-fn verifier(mode: SslMode, ca_file: Option<&Path>) -> Result<Arc<dyn ServerCertVerifier>, DbError> {
-    if mode == SslMode::VerifyCa && ca_file.is_none() {
-        return Err(DbError::Tls(VERIFY_CA_NEEDS_CA_FILE.into()));
-    }
+/// The certificate check for `mode`; `None` for `disable`.
+fn verifier(mode: SslMode, ca_file: Option<&Path>) -> Result<Option<Arc<dyn ServerCertVerifier>>, DbError> {
     let provider = provider();
-    let roots = match mode {
-        SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => ca_file.map(load_roots).transpose()?,
-        SslMode::Disable | SslMode::Prefer => None,
-    };
-    Ok(match (mode, roots) {
-        // No TLS is started in this mode; should it ever be, nothing is trusted.
-        (SslMode::Disable, _) => Arc::new(ChainOnly { roots: Arc::new(RootCertStore::empty()), provider }),
+    Ok(Some(match (mode, ca_file) {
+        (SslMode::Disable, _) => return Ok(None),
         (SslMode::Prefer, _) | (SslMode::Require, None) => Arc::new(NoVerify { provider }),
-        (SslMode::Require | SslMode::VerifyCa, Some(roots)) => Arc::new(ChainOnly { roots: Arc::new(roots), provider }),
-        (SslMode::VerifyFull, Some(roots)) => WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+        (SslMode::VerifyCa, None) => return Err(DbError::Tls(VERIFY_CA_NEEDS_CA_FILE.into())),
+        (SslMode::Require | SslMode::VerifyCa, Some(path)) => Arc::new(ChainOnly { roots: Arc::new(load_roots(path)?), provider }),
+        (SslMode::VerifyFull, Some(path)) => WebPkiServerVerifier::builder_with_provider(Arc::new(load_roots(path)?), provider)
             .build()
             .map_err(|e| DbError::Tls(format!("cannot check certificates: {e}")))?,
         (SslMode::VerifyFull, None) => Arc::new(
             rustls_platform_verifier::Verifier::new(provider)
                 .map_err(|e| DbError::Tls(format!("cannot use the system's trusted certificates: {e}")))?,
         ),
-        // Refused above.
-        (SslMode::VerifyCa, None) => return Err(DbError::Tls(VERIFY_CA_NEEDS_CA_FILE.into())),
-    })
+    }))
 }
 
 /// The certificates in the PEM file at `path`.
@@ -206,7 +194,7 @@ mod tests {
     /// Does the verifier for `mode` (with the test CA as `ca_file`, or the OS roots) accept the
     /// servers' certificate for `name`?
     fn accepts(db: &dbee_testkit::TestDb, mode: SslMode, ca: Option<&Path>, name: &str) -> bool {
-        let v = verifier(mode, ca).unwrap();
+        let v = verifier(mode, ca).unwrap().unwrap();
         let name = ServerName::try_from(name.to_owned()).unwrap();
         v.verify_server_cert(&server_cert(db), &[], &name, &[], UnixTime::now()).is_ok()
     }
@@ -258,13 +246,6 @@ mod tests {
         }
         // Prefer ignores a CA file.
         assert!(accepts(db, SslMode::Prefer, Some(&db.ca_file.with_file_name("server.crt")), "wrong.example"));
-    }
-
-    #[test]
-    fn disable_never_accepts() {
-        let db = dbee_testkit::require_testdb!();
-        assert!(!accepts(db, SslMode::Disable, None, "localhost"));
-        assert!(!accepts(db, SslMode::Disable, Some(db.ca_file.as_path()), "localhost"));
     }
 
     #[test]

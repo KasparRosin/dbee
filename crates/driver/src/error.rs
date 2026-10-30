@@ -11,6 +11,21 @@ pub enum Meaning {
     TransactionAborted,
 }
 
+/// An error the server reported, with its own `code` (Postgres's SQLSTATE, say), which the text
+/// shows after `code_label` when the driver gives one. `position` is the 1-based character
+/// position in the statement text, when the server gave one; `meaning` is set when the driver
+/// knows what the error means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerError {
+    pub code: String,
+    pub code_label: Option<&'static str>,
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+    pub position: Option<u32>,
+    pub meaning: Option<Meaning>,
+}
+
 /// Why a connection or a statement failed.
 ///
 /// The text of [`DbError::Server`], [`DbError::Auth`] and [`DbError::ReadOnly`] comes from the
@@ -18,19 +33,8 @@ pub enum Meaning {
 /// never logged: logs carry [`DbError::code`] only. No variant ever holds a password.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DbError {
-    /// The server reported an error, with its own `code` (Postgres's SQLSTATE, say), which the
-    /// text shows after `code_label` when the driver gives one. `position` is the 1-based
-    /// character position in the statement text, when the server gave one; `meaning` is set
-    /// when the driver knows what the error means.
-    Server {
-        code: String,
-        code_label: Option<&'static str>,
-        message: String,
-        detail: Option<String>,
-        hint: Option<String>,
-        position: Option<u32>,
-        meaning: Option<Meaning>,
-    },
+    /// The server reported an error.
+    Server(Box<ServerError>),
     /// The server refused the login, or asked for a password and none was given.
     Auth { message: String },
     /// The server could not be reached, or did not answer like the server it should be.
@@ -56,7 +60,7 @@ impl DbError {
     /// A stable id for the UI, the control channel and logs.
     pub fn code(&self) -> &'static str {
         match self {
-            DbError::Server { .. } => "server",
+            DbError::Server(_) => "server",
             DbError::Auth { .. } => "auth",
             DbError::Connect(_) => "connect",
             DbError::Tls(_) => "tls",
@@ -73,7 +77,8 @@ impl DbError {
 impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DbError::Server { code, code_label, message, detail, hint, .. } => {
+            DbError::Server(e) => {
+                let ServerError { code, code_label, message, detail, hint, .. } = &**e;
                 match code_label {
                     Some(label) => write!(f, "{message} ({label} {code})")?,
                     None => write!(f, "{message} ({code})")?,
@@ -115,29 +120,30 @@ impl From<SshError> for DbError {
 mod tests {
     use super::*;
 
-    fn server(code: &str, code_label: Option<&'static str>) -> DbError {
-        DbError::Server { code: code.into(), code_label, message: "m".into(), detail: None, hint: None, position: None, meaning: None }
+    fn server(code: &str, code_label: Option<&'static str>) -> ServerError {
+        ServerError { code: code.into(), code_label, message: "m".into(), detail: None, hint: None, position: None, meaning: None }
+    }
+
+    fn boxed(e: ServerError) -> DbError {
+        DbError::Server(Box::new(e))
     }
 
     #[test]
     fn server_code_suffix() {
-        assert_eq!(server("42703", Some("SQLSTATE")).to_string(), "m (SQLSTATE 42703)");
-        assert_eq!(server("SQLITE_BUSY", None).to_string(), "m (SQLITE_BUSY)");
+        assert_eq!(boxed(server("42703", Some("SQLSTATE"))).to_string(), "m (SQLSTATE 42703)");
+        assert_eq!(boxed(server("SQLITE_BUSY", None)).to_string(), "m (SQLITE_BUSY)");
         // Five characters say nothing on their own: only the driver's label names a SQLSTATE.
-        assert_eq!(server("00942", None).to_string(), "m (00942)");
+        assert_eq!(boxed(server("00942", None)).to_string(), "m (00942)");
     }
 
     #[test]
     fn server_text_has_detail_and_hint() {
-        let e = DbError::Server {
-            code: "23505".into(),
-            code_label: Some("SQLSTATE"),
+        let e = boxed(ServerError {
             message: "duplicate key".into(),
             detail: Some("Key (id)=(1) already exists.".into()),
             hint: Some("h".into()),
-            position: None,
-            meaning: None,
-        };
+            ..server("23505", Some("SQLSTATE"))
+        });
         assert_eq!(e.to_string(), "duplicate key (SQLSTATE 23505)\nDetail: Key (id)=(1) already exists.\nHint: h");
     }
 
@@ -151,7 +157,7 @@ mod tests {
     #[test]
     fn error_codes() {
         let all = [
-            (server("42703", Some("SQLSTATE")), "server"),
+            (boxed(server("42703", Some("SQLSTATE"))), "server"),
             (DbError::Auth { message: "m".into() }, "auth"),
             (DbError::Connect("m".into()), "connect"),
             (DbError::Tls("m".into()), "tls"),
@@ -166,16 +172,15 @@ mod tests {
             assert_eq!(e.code(), code);
             assert!(!e.to_string().is_empty());
         }
-        let aborted = DbError::Server {
-            code: "25P02".into(),
-            code_label: Some("SQLSTATE"),
-            message: "m".into(),
-            detail: None,
-            hint: None,
-            position: None,
-            meaning: Some(Meaning::TransactionAborted),
-        };
+        let aborted = boxed(ServerError { meaning: Some(Meaning::TransactionAborted), ..server("25P02", Some("SQLSTATE")) });
         assert_eq!((aborted.code(), aborted.to_string().as_str()), ("server", "m (SQLSTATE 25P02)"));
         assert_eq!(DbError::from(dbee_ssh::SshError::NoKey), DbError::Ssh(dbee_ssh::SshError::NoKey));
+    }
+
+    #[test]
+    fn errors_stay_under_clippys_large_error_limit() {
+        let (db, apply) = (std::mem::size_of::<DbError>(), std::mem::size_of::<crate::ApplyError>());
+        println!("DbError {db} bytes, ApplyError {apply} bytes");
+        assert!(db < 128 && apply < 128, "DbError {db}, ApplyError {apply}");
     }
 }

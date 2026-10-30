@@ -10,9 +10,10 @@
 //! real catalog reaches, instead of the 10,000-row query cap: a database with a few hundred
 //! tables already has more columns than that.
 
+use dbee_core::cell::Cell;
 use dbee_core::cell::{ResultSet, TypeClass};
 use dbee_core::schema::{Catalog, ColumnInfo, Generated, RelKind, TableRef};
-use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, boolean, number, owned, require_complete, text};
+use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
 use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError};
 
 use crate::connect::PgConnection;
@@ -93,6 +94,15 @@ pub(crate) fn class_for(typname: &str, category: char) -> TypeClass {
     }
 }
 
+/// A `bool` as Postgres prints it: `t`/`true` or `f`/`false`.
+fn boolean(row: &[Cell], i: usize, what: &str) -> Result<bool, DbError> {
+    match text(row, i, what)? {
+        "t" | "true" => Ok(true),
+        "f" | "false" => Ok(false),
+        _ => Err(bad(what)),
+    }
+}
+
 fn rel_kind(s: &str) -> Result<RelKind, DbError> {
     match s {
         "r" => Ok(RelKind::Table),
@@ -118,6 +128,16 @@ async fn run(conn: &PgConnection, sql: &str) -> Result<ResultSet, DbError> {
 /// `information_schema` and `pg_catalog`; tables by name; columns by `attnum`. `public` is the
 /// default schema, when it exists.
 pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, DbError> {
+    let rows = catalog_rows(conn).await?;
+    let dropped = rows.dropped();
+    if dropped > 0 {
+        log::info!("pg: catalog: {dropped} rows named a relation the catalog did not list");
+    }
+    Ok(rows.build(Some(DEFAULT_SCHEMA)))
+}
+
+/// The catalog queries' rows, not yet built into a [`Catalog`].
+pub async fn catalog_rows(conn: &PgConnection) -> Result<CatalogBuilder, DbError> {
     let relations = run(conn, RELATIONS_SQL).await?;
     let columns = run(conn, COLUMNS_SQL).await?;
     let constraints = run(conn, CONSTRAINTS_SQL).await?;
@@ -178,5 +198,21 @@ pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, DbError> {
         }
     }
 
-    Ok(catalog.build(Some(DEFAULT_SCHEMA)))
+    Ok(catalog)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn booleans_as_postgres_prints_them() {
+        let row: Vec<Cell> = vec![Some("t".into()), Some("true".into()), Some("f".into()), Some("false".into()), Some("1".into()), None];
+        let read: Vec<_> = (0..4).map(|i| boolean(&row, i, "b")).collect();
+        assert_eq!(read, [Ok(true), Ok(true), Ok(false), Ok(false)]);
+        for i in [4, 5, 6] {
+            let e = boolean(&row, i, "b").err();
+            assert!(e.is_some_and(|e| e.to_string() == "unexpected catalog data (b)"), "{i}");
+        }
+    }
 }

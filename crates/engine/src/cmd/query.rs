@@ -236,7 +236,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
             }
             Err(error) => {
                 let position = match &error {
-                    DbError::Server { position: Some(chars), .. } => byte_position(&text, &range, *chars),
+                    DbError::Server(s) => s.position.and_then(|chars| byte_position(&text, &range, chars)),
                     _ => None,
                 };
                 ran.failure = Some(Failure { statement: i, error, position });
@@ -356,9 +356,7 @@ fn failed(s: &mut Session, conn: Option<&Arc<PgConnection>>, f: &Failure) -> Eng
 /// detail and hint, else the engine error's text.
 fn query_error(e: &EngineError, f: &Failure) -> QueryError {
     let (message, sqlstate, detail, hint) = match &f.error {
-        DbError::Server { code, message, detail, hint, .. } => {
-            (format!("{message} (SQLSTATE {code})"), Some(code.clone()), detail.clone(), hint.clone())
-        }
+        DbError::Server(s) => (format!("{} (SQLSTATE {})", s.message, s.code), Some(s.code.clone()), s.detail.clone(), s.hint.clone()),
         _ => (e.to_string(), None, None, None),
     };
     QueryError { code: e.code(), message, sqlstate, detail, hint, position: f.position, statement: f.statement }

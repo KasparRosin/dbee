@@ -23,5 +23,5 @@ pub use api::{
 };
 pub use apply::{ApplyError, ApplyGate};
 pub use catalog::CatalogBuilder;
-pub use error::{DbError, Meaning};
+pub use error::{DbError, Meaning, ServerError};
 pub use registry::Drivers;

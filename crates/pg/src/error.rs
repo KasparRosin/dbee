@@ -1,7 +1,7 @@
 //! The mapping from tokio-postgres errors to [`DbError`].
 
-use dbee_driver::{DbError, Meaning};
-use tokio_postgres::error::{DbError as ServerError, ErrorPosition, Severity};
+use dbee_driver::{DbError, Meaning, ServerError};
+use tokio_postgres::error::{DbError as PgServerError, ErrorPosition, Severity};
 
 /// What a Postgres error code is called in the error text.
 const SQLSTATE: &str = "SQLSTATE";
@@ -57,7 +57,7 @@ pub(crate) fn map(e: &tokio_postgres::Error, phase: Phase) -> DbError {
     }
 }
 
-fn from_server(db: &ServerError, phase: Phase) -> DbError {
+fn from_server(db: &PgServerError, phase: Phase) -> DbError {
     let code = db.code().code();
     let message = db.message().to_owned();
     match code {
@@ -80,7 +80,7 @@ fn from_server(db: &ServerError, phase: Phase) -> DbError {
         "25P02" => Some(Meaning::TransactionAborted),
         _ => None,
     };
-    DbError::Server {
+    DbError::Server(Box::new(ServerError {
         code: code.to_owned(),
         code_label: Some(SQLSTATE),
         message,
@@ -88,7 +88,7 @@ fn from_server(db: &ServerError, phase: Phase) -> DbError {
         hint: db.hint().map(str::to_owned),
         position,
         meaning,
-    }
+    }))
 }
 
 #[cfg(test)]

@@ -93,4 +93,19 @@ mod tests {
         let e = make(SslMode::VerifyCa, None).err().unwrap();
         assert!(e.to_string().contains("verify-ca needs a CA file"), "{e}");
     }
+
+    #[tokio::test]
+    async fn the_disable_connector_trusts_no_certificate() {
+        let db = dbee_testkit::require_testdb!();
+        let s = &db.servers[0];
+        // TLS forced on: the disable connector must refuse the server, the require one accepts it.
+        let attempt = |tls: Tls| {
+            let mut pg = tokio_postgres::Config::new();
+            pg.host("127.0.0.1").port(s.port).user("postgres").dbname("dbee").password(&db.password).ssl_mode(PgSslMode::Require);
+            async move { pg.connect(tls.connector).await.map(|_| ()).map_err(|e| crate::error::map(&e, crate::error::Phase::Connect)) }
+        };
+        let refused = attempt(make(SslMode::Disable, None).unwrap()).await;
+        assert_eq!(refused.as_ref().map_err(DbError::code), Err("tls"), "{refused:?}");
+        assert_eq!(attempt(make(SslMode::Require, None).unwrap()).await, Ok(()));
+    }
 }

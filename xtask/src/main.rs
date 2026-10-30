@@ -108,7 +108,7 @@ pub fn metadata() -> Result<serde_json::Value, String> {
 fn cmd_layers() -> Result<(), String> {
     let crates = layers::from_metadata(&metadata()?)?;
     println!("Dependency layering (AGENTS.md \"Layering\")\n");
-    println!("{:<28} {:<10} workspace deps", "crate", "layer");
+    println!("{:<28} {:<12} workspace deps", "crate", "layer");
     for c in &crates {
         let ws: Vec<String> = c
             .deps
@@ -123,7 +123,7 @@ fn cmd_layers() -> Result<(), String> {
                 format!("{}{k}", layers::short_name(&d.name))
             })
             .collect();
-        println!("{:<28} {:<10} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
+        println!("{:<28} {:<12} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
     }
     let violations = layers::check_workspace(&crates);
     println!();

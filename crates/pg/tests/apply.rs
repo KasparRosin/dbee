@@ -89,7 +89,7 @@ async fn one_failure_writes_nothing() {
         let err = apply(&w, &stmts).await.expect_err("must fail");
         assert_eq!(err.index, 1, "pg{major}");
         assert_eq!(err.error.code(), "server", "pg{major}");
-        assert!(matches!(&err.error, DbError::Server { code, .. } if code == "22P02"), "pg{major}: {:?}", err.error);
+        assert!(matches!(&err.error, DbError::Server(s) if s.code == "22P02"), "pg{major}: {:?}", err.error);
         assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
         // The connection is usable again and not inside a transaction.
         sql(&w, &format!("UPDATE {t} SET name = 'after' WHERE id = 1")).await;

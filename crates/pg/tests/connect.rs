@@ -300,14 +300,14 @@ async fn run_untyped_keeps_the_last_result_and_server_errors() {
         let e = query::run_untyped(&c, "SELECT nope FROM pg_class", QUERY_LIMITS).await.unwrap_err();
         assert_eq!(e.code(), "server");
         match e {
-            DbError::Server { code, message, position, .. } => {
-                assert_eq!((code.as_str(), position), ("42703", Some(8)));
-                assert!(message.contains("nope"), "{message}");
+            DbError::Server(s) => {
+                assert_eq!((s.code.as_str(), s.position), ("42703", Some(8)));
+                assert!(s.message.contains("nope"), "{}", s.message);
             }
             other => panic!("{other:?}"),
         }
         let e = query::run_untyped(&c, "SELECT 1/0", QUERY_LIMITS).await.unwrap_err();
-        assert!(matches!(&e, DbError::Server { code, .. } if code == "22012"), "{e:?}");
+        assert!(matches!(&e, DbError::Server(s) if s.code == "22012"), "{e:?}");
         // The connection survives errors.
         assert_eq!(scalar(&c, "SELECT 3").await.as_deref(), Some("3"));
     }
@@ -404,10 +404,10 @@ async fn failed_transaction_is_flagged() {
         let conn = PgDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
         conn.run("BEGIN", QUERY_LIMITS).await.unwrap();
         let first = conn.run("SELECT 1/0", QUERY_LIMITS).await.unwrap_err();
-        assert!(matches!(&first, DbError::Server { code, meaning: None, .. } if code == "22012"), "{first:?}");
+        assert!(matches!(&first, DbError::Server(s) if s.code == "22012" && s.meaning.is_none()), "{first:?}");
         let e = conn.run("SELECT 1", QUERY_LIMITS).await.unwrap_err();
         assert!(
-            matches!(&e, DbError::Server { code, code_label: Some("SQLSTATE"), meaning: Some(Meaning::TransactionAborted), .. } if code == "25P02"),
+            matches!(&e, DbError::Server(s) if s.code == "25P02" && s.code_label == Some("SQLSTATE") && s.meaning == Some(Meaning::TransactionAborted)),
             "{e:?}"
         );
         assert!(e.to_string().ends_with("(SQLSTATE 25P02)"), "{e}");

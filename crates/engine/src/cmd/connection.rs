@@ -428,7 +428,7 @@ pub(crate) fn ssh_error(e: &SshError) -> EngineError {
 pub(crate) fn db_error(e: &DbError) -> EngineError {
     let data = match e {
         DbError::Ssh(ssh) => return ssh_error(ssh),
-        DbError::Server { code, detail, hint, position, .. } => json!({ "sqlstate": code, "detail": detail, "hint": hint, "position": position }),
+        DbError::Server(s) => json!({ "sqlstate": s.code, "detail": s.detail, "hint": s.hint, "position": s.position }),
         DbError::ConnectionLost => json!({ "action": RECONNECT }),
         DbError::RowNotFound { statement } => json!({ "statement": statement }),
         _ => json!({}),

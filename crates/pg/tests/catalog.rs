@@ -7,7 +7,7 @@ use dbee_config::{ConnectionConfig, SslMode};
 use dbee_core::TypeClass;
 use dbee_core::schema::{Catalog, Generated, RelKind, TableRef};
 use dbee_driver::{Purpose, QUERY_LIMITS, Target};
-use dbee_pg::catalog::load_catalog;
+use dbee_pg::catalog::{catalog_rows, load_catalog};
 use dbee_pg::query;
 use dbee_pg::{PgConnection, connect};
 use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
@@ -276,5 +276,19 @@ async fn public_is_the_default_schema() {
     let db = require_testdb!();
     for (major, cat) in catalogs(db).await {
         assert_eq!(cat.default_schema.as_deref(), Some("public"), "pg{major}");
+    }
+}
+
+#[tokio::test]
+async fn no_catalog_row_is_dropped() {
+    let db = require_testdb!();
+    for s in &db.servers {
+        let c = conn(s, db).await;
+        // One snapshot for the three queries: other tests here create tables meanwhile.
+        query::run_untyped(&c, "BEGIN ISOLATION LEVEL REPEATABLE READ", QUERY_LIMITS).await.unwrap();
+        let rows = catalog_rows(&c).await;
+        query::run_untyped(&c, "COMMIT", QUERY_LIMITS).await.unwrap();
+        let rows = rows.unwrap_or_else(|e| panic!("pg{}: {e}", s.major));
+        assert_eq!(rows.dropped(), 0, "pg{}", s.major);
     }
 }

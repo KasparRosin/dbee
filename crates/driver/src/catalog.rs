@@ -6,7 +6,7 @@
 //! together the same way for every engine. Which schemas are the engine's own is the driver's
 //! input.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use dbee_core::{Catalog, Cell, ColumnInfo, ForeignKey, RelKind, ResultSet, SchemaInfo, TableInfo, TableRef};
@@ -25,15 +25,6 @@ pub fn text<'a>(row: &'a [Cell], i: usize, what: &str) -> Result<&'a str, DbErro
 
 pub fn owned(row: &[Cell], i: usize, what: &str) -> Result<String, DbError> {
     text(row, i, what).map(str::to_owned)
-}
-
-/// `t`/`true` or `f`/`false`.
-pub fn boolean(row: &[Cell], i: usize, what: &str) -> Result<bool, DbError> {
-    match text(row, i, what)? {
-        "t" | "true" => Ok(true),
-        "f" | "false" => Ok(false),
-        _ => Err(bad(what)),
-    }
 }
 
 pub fn number<T: FromStr>(row: &[Cell], i: usize, what: &str) -> Result<T, DbError> {
@@ -68,8 +59,9 @@ pub enum KeyKind {
     Unique,
 }
 
-/// A column of `table`'s key `constraint`, at `position` in the key. `constraint` names the key
-/// within its table.
+/// A column of `table`'s key `constraint`, at `position` in the key. `constraint` must be unique
+/// within its table: an engine without key names (SQLite) makes one up per key, and rows that
+/// share a name make one key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyRow {
     pub table: TableRef,
@@ -80,7 +72,8 @@ pub struct KeyRow {
 }
 
 /// A column of `table`'s foreign key `constraint` and the `target` column it references, at
-/// `position` in the key.
+/// `position` in the key. `constraint` is also the key's name, and must be unique within its
+/// table as for [`KeyRow`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ForeignKeyRow {
     pub table: TableRef,
@@ -95,7 +88,8 @@ pub struct ForeignKeyRow {
 ///
 /// A table's schema is listed even when no [`schema`](Self::schema) call named it. A row for a
 /// table that no [`table`](Self::table) call listed is dropped (the table went between two
-/// catalog queries, say), and a schema or table listed twice is kept once, as first listed.
+/// catalog queries, say; [`dropped`](Self::dropped) counts them), and a schema or table listed
+/// twice is kept once, as first listed.
 #[derive(Debug, Default)]
 pub struct CatalogBuilder {
     system: Vec<String>,
@@ -131,6 +125,16 @@ impl CatalogBuilder {
 
     pub fn foreign_key(&mut self, row: ForeignKeyRow) {
         self.foreign_keys.push(row);
+    }
+
+    /// How many column, key and foreign-key rows name a table no [`table`](Self::table) row
+    /// listed: [`build`](Self::build) leaves them out.
+    pub fn dropped(&self) -> usize {
+        let listed: HashSet<&TableRef> = self.tables.iter().map(|t| &t.table).collect();
+        let columns = self.columns.iter().map(|r| &r.table);
+        let keys = self.keys.iter().map(|r| &r.table);
+        let foreign_keys = self.foreign_keys.iter().map(|r| &r.table);
+        columns.chain(keys).chain(foreign_keys).filter(|t| !listed.contains(t)).count()
     }
 
     /// The catalog: user schemas first, then the system ones, each group by name; tables by
@@ -326,6 +330,7 @@ mod tests {
         b.column(col("s", "t", 1, "a"));
         b.column(col("s", "t", 2, "b"));
         b.column(col("s", "gone", 1, "lost"));
+        assert_eq!(b.dropped(), 1);
         let cat = b.build(None);
         let cols = |name| cat.table(&tr("s", name)).map(|t| names(&t.columns, |c| &c.name));
         assert_eq!(cols("t"), Some(vec!["a", "b", "c"]));
@@ -343,12 +348,31 @@ mod tests {
         b.key(key("t", "t_c_a", KeyKind::Unique, 2, "a"));
         b.key(key("t", "t_d", KeyKind::Unique, 1, "d"));
         b.key(key("gone", "gone_pkey", KeyKind::Primary, 1, "id"));
+        assert_eq!(b.dropped(), 1);
         let cat = b.build(None);
         let t = cat.table(&tr("s", "t"));
         assert_eq!(t.map(|t| t.primary_key.clone()), Some(vec!["b".to_string(), "a".to_string()]));
         let unique = t.map(|t| t.unique_keys.clone()).unwrap_or_default();
         assert_eq!(unique, [vec!["c".to_string(), "a".to_string()], vec!["d".to_string()]], "in the order the keys came");
         assert_eq!(cat.table_count(), 1);
+    }
+
+    #[test]
+    fn rows_for_unlisted_tables_are_counted() {
+        let mut b = CatalogBuilder::new(&[]);
+        b.table(table("s", "t"));
+        b.column(col("s", "t", 1, "a"));
+        b.key(key("t", "t_pkey", KeyKind::Primary, 1, "a"));
+        b.foreign_key(fk("t", "t_fk", 1, "a", "gone", "id"));
+        assert_eq!(b.dropped(), 0, "a foreign key's target needs no table row");
+        b.column(col("s", "gone", 1, "x"));
+        b.key(key("gone", "gone_pkey", KeyKind::Primary, 1, "x"));
+        b.foreign_key(fk("gone", "gone_fk", 1, "x", "t", "a"));
+        b.column(col("other", "t", 1, "x"));
+        assert_eq!(b.dropped(), 4);
+        let cat = b.build(None);
+        assert_eq!((cat.table_count(), cat.schemas.len()), (1, 1));
+        assert_eq!(cat.table(&tr("s", "t")).map(|t| t.foreign_keys.len()), Some(1));
     }
 
     #[test]
@@ -382,13 +406,10 @@ mod tests {
     #[test]
     fn row_readers() {
         let row: Vec<Cell> = vec![Some("t".into()), Some("false".into()), Some("42".into()), None, Some("x".into())];
-        assert_eq!((boolean(&row, 0, "a"), boolean(&row, 1, "b")), (Ok(true), Ok(false)));
         assert_eq!(number::<u32>(&row, 2, "n"), Ok(42));
         assert_eq!(text(&row, 4, "s"), Ok("x"));
         assert_eq!(owned(&row, 4, "s"), Ok("x".to_string()));
-        for e in
-            [text(&row, 3, "null").err(), text(&row, 9, "past the end").err(), boolean(&row, 4, "bool").err(), number::<u32>(&row, 4, "num").err()]
-        {
+        for e in [text(&row, 3, "null").err(), text(&row, 9, "past the end").err(), number::<u32>(&row, 4, "num").err()] {
             assert!(e.is_some_and(|e| e.code() == "other" && e.to_string().starts_with("unexpected catalog data (")), "{row:?}");
         }
     }
