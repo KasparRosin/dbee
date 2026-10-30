@@ -645,7 +645,7 @@ mod tests {
         let shown = |app: &DbeeApp| app.view.notices.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>();
         let db = |code, message: &str, data| EngineError::Db { code, message: message.into(), data };
         // The engine records these on the tab (their data names the statement): the card shows them.
-        let server = db("server", "column \"nope\" does not exist", json!({ "sqlstate": "42703", "position": 7, "statement": 0 }));
+        let server = db("server", "column \"nope\" does not exist", json!({ "serverCode": "42703", "position": 7, "statement": 0 }));
         app.outcome("query.run", json!({}), Origin::Menu, Some(JobId(3)), Err(server));
         let cancelled = db("cancelled", "the statement was cancelled", json!({ "position": null, "statement": 1 }));
         app.outcome("query.run", json!({}), Origin::Menu, Some(JobId(4)), Err(cancelled));

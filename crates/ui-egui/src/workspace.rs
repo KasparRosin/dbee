@@ -241,7 +241,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let name = c.config.display_name();
     let label = if c.info.read_only { format!("{name} · read-only") } else { name };
     let colour = connection_color(c.config.color);
-    let server = format!("PostgreSQL {}", c.info.version);
+    let server = format!("{} {}", c.info.product, c.info.version);
     let lost = c.lost;
     let job = live_job(&app.session);
     let reconnecting = app.session.running("connection.reconnect");

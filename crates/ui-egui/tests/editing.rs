@@ -687,10 +687,10 @@ fn booleans_choose_true_false_or_null() {
     ui.key("ArrowUp");
     assert_eq!(ui.editor(), Some(json!({ "choice": "false" })));
     ui.key("Enter");
-    assert_eq!(ui.staged(2, 4), Some(json!("false")));
+    assert_eq!(ui.staged(2, 4), Some(json!("f")), "staged as Postgres prints a bool");
     ui.double_click("grid-cell-1-4");
     ui.click("cell-editor-true");
-    assert_eq!(ui.staged(1, 4), Some(json!("true")));
+    assert_eq!(ui.staged(1, 4), Some(json!("t")));
     ui.ctrl("S");
     ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
     assert_eq!(q(db, &format!("SELECT string_agg(coalesce(flag::text, 'null'), ',' ORDER BY id) FROM scratch.{}", t.0)), "null,true,false");

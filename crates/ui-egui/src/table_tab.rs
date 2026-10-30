@@ -24,6 +24,7 @@ use dbee_engine::cmd::LOST;
 use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
 use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab};
+use dbee_sql::Dialect;
 use dbee_sql::select::PAGE_SIZE;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, RichText, Stroke, UiBuilder, pos2};
 use serde_json::json;
@@ -129,13 +130,14 @@ fn blocked(t: &TableTab, lost: bool) -> Option<&'static str> {
     }
 }
 
-/// What the paging bar shows for `t`; `edit_blocked` is why it takes no edits now.
-fn paging(t: &TableTab, info: Option<&TableInfo>, lost: bool, edit_blocked: Option<String>) -> Paging {
+/// What the paging bar shows for `t` on a connection in `dialect`; `edit_blocked` is why it takes
+/// no edits now.
+fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, edit_blocked: Option<String>) -> Paging {
     Paging {
         page: t.shown.page,
         at_end: t.view() == t.shown && !t.has_next,
         total: t.total,
-        estimate: info.and_then(|i| quick_estimate(i, &t.applied)),
+        estimate: info.and_then(|i| quick_estimate(dialect, i, &t.applied)),
         rows: t.data.as_ref().map_or(0, |d| d.rows.len()),
         complete: t.page_complete,
         loading: t.loading.is_some(),
@@ -317,7 +319,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         }
         let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(full.left(), split), full.max)));
         if tab.data.is_some() {
-            runs.extend(paging::show(&mut bottom, &paging(tab, info, lost, edit_blocked), tags));
+            runs.extend(paging::show(&mut bottom, &paging(tab, session.state().dialect(), info, lost, edit_blocked), tags));
         }
     }
     for (command, params) in runs {

@@ -25,13 +25,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionStore, SecretStore};
+use dbee_config::{ConnectionStore, DbKind, SecretStore};
+use dbee_driver::Drivers;
 use dbee_ssh::SshEnv;
 use serde::Serialize;
 use serde_json::{Map, json};
 
 pub use cmd::selection::COPY_MAX_BYTES;
 pub use cmd::{CommandInfo, CommandSpec};
+pub use dbee_driver::Meaning;
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
 pub use state::{Connected, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total};
@@ -184,6 +186,9 @@ pub struct SessionOptions {
     /// `connection.reconnect` may reach (an isolated run's test servers); `None` is no limit.
     /// See [`allowed`].
     pub allowed_targets: Option<Vec<(String, u16)>>,
+    /// The drivers connections open with (the app's are `dbee_drivers::all()`). A database type
+    /// none of them opens is refused with `disabled`.
+    pub drivers: Drivers,
 }
 
 impl std::fmt::Debug for SessionOptions {
@@ -194,6 +199,7 @@ impl std::fmt::Debug for SessionOptions {
             .field("ssh", &self.ssh)
             .field("notify", &self.notify.is_some())
             .field("allowed_targets", &self.allowed_targets)
+            .field("drivers", &self.drivers)
             .finish()
     }
 }
@@ -233,6 +239,7 @@ pub struct Session {
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) ssh: SshEnv,
     pub(crate) allowed_targets: Option<Vec<(String, u16)>>,
+    pub(crate) drivers: Drivers,
     /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
     /// decides to commit (one Apply runs at a time).
     pub(crate) apply_gate: Option<(JobId, Arc<dbee_driver::ApplyGate>)>,
@@ -263,6 +270,7 @@ impl Session {
             secrets: o.secrets,
             ssh: o.ssh,
             allowed_targets: o.allowed_targets,
+            drivers: o.drivers,
             apply_gate: None,
             journal: Vec::new(),
             value_cache: view::Cache::default(),
@@ -445,6 +453,12 @@ impl Session {
         &self.state
     }
 
+    /// The database types this session can open: those a driver opens, in [`DbKind::ALL`]
+    /// order.
+    pub fn kinds(&self) -> Vec<DbKind> {
+        self.drivers.kinds()
+    }
+
     /// The value panel's content: the focus cell of the active tab's selection, with staged
     /// values, pretty-printed when it is JSON and cut to [`VALUE_VIEW_MAX_BYTES`]. `None` without
     /// a selection. Cheap to call every frame: the view is built once per tab, cell, page and
@@ -465,8 +479,9 @@ impl Session {
         self.value_cache.built()
     }
 
-    /// A JSON summary for agents and tests (`document.inspect`): the screen, the connection, the
-    /// tabs and the active one in detail, and the running jobs. Never contains a secret.
+    /// A JSON summary for agents and tests (`document.inspect`): the screen, the database types
+    /// the session can open (`kinds`, their ids), the connection, the tabs and the active one in
+    /// detail, and the running jobs. Never contains a secret.
     pub fn inspect(&self) -> Json {
         let st = &self.state;
         let connection = st.connected.as_ref().map(Connected::summary);
@@ -481,6 +496,7 @@ impl Session {
         };
         json!({
             "screen": st.screen,
+            "kinds": self.kinds(),
             "connection": connection,
             "storeWarning": st.store_warning,
             "secretStore": self.secrets.as_ref().map(|s| s.name()),

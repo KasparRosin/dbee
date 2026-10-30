@@ -2,6 +2,8 @@
 //! home, configs for the Docker test servers, saving a connection, a connected session, and
 //! killing dbee's backends.
 //!
+//! Every session gets every driver dbee ships (`dbee_drivers::all()`).
+//!
 //! Safety: every session keeps its connections file in the temp home, its secrets in a
 //! `MemoryStore`, and reads SSH keys and `known_hosts` from `<temp home>/.ssh` with no agent, so
 //! the real home, `~/.ssh`, SSH agent and keyring are never touched. Tests connect only to the
@@ -76,6 +78,7 @@ fn session_with(home: TempHome, exclusive: bool, adjust: impl FnOnce(&mut Sessio
         ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
         notify: None,
         allowed_targets: None,
+        drivers: dbee_drivers::all(),
     };
     adjust(&mut options);
     TestSession { session: Session::new(options).unwrap(), secrets, home, hold }

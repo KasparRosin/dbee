@@ -8,11 +8,12 @@
 //! a table with a row key). Reset, undo and redo do not: they change only the staged edits, so a
 //! tab whose table was dropped, or that reconnected to a read-only server, can always drop them.
 //! Rows are grid rows (see [`crate::edits`]); `column` is a name or a 0-based index into the
-//! page's columns. A value is text or `null`; a number or a boolean is taken as its text.
+//! page's columns. A value is text or `null`; a number is taken as its text, and a boolean as the
+//! connection's own text for it (its dialect's `bool_literals`: Postgres `t` and `f`).
 //!
 //! **Apply** builds every statement on the caller's thread (`Edits::statements`; edits it cannot
-//! build are `BadParams` and change nothing), then runs one job on the browse connection:
-//! `dbee_pg::apply` writes them all or none in one transaction, and on success the page loads
+//! build are `BadParams` and change nothing), then runs one job on the browse connection: its
+//! `apply` writes them all or none in one transaction, and on success the page loads
 //! again in the same job. Then the edits and their history go (writes are not undone), the page
 //! shows what was written, and an exact total that the writes may have changed is forgotten. When
 //! the Apply fails nothing was written: every edit stays, and `failed` names the grid row of the
@@ -39,8 +40,8 @@
 use std::sync::Arc;
 
 use dbee_core::ResultSet;
-use dbee_driver::{ApplyError, DbError};
-use dbee_pg::PgConnection;
+use dbee_driver::{ApplyError, Connection, DbError};
+use dbee_sql::Dialect;
 use dbee_sql::edit::NewValue;
 use dbee_sql::filter::Condition;
 use serde_json::json;
@@ -266,13 +267,18 @@ fn column(params: &Json, data: &ResultSet) -> Result<usize, EngineError> {
     }
 }
 
-/// `value`: text, or `null` for NULL; a number or a boolean is taken as its text.
-fn value(params: &Json) -> Result<NewValue, EngineError> {
+/// `value`: text, or `null` for NULL; a number is taken as its text, a boolean as `dialect`'s text
+/// for it.
+fn value(params: &Json, dialect: Dialect) -> Result<NewValue, EngineError> {
     match params.get("value") {
         None => Err(bad("`value` is required (text, or null for NULL)")),
         Some(Json::Null) => Ok(NewValue::Null),
         Some(Json::String(t)) => Ok(NewValue::Text(t.clone())),
-        Some(v @ (Json::Number(_) | Json::Bool(_))) => Ok(NewValue::Text(v.to_string())),
+        Some(Json::Bool(b)) => {
+            let (yes, no) = dialect.bool_literals();
+            Ok(NewValue::Text(if *b { yes } else { no }.to_owned()))
+        }
+        Some(v @ Json::Number(_)) => Ok(NewValue::Text(v.to_string())),
         Some(_) => Err(bad("`value` must be text or null")),
     }
 }
@@ -331,7 +337,7 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
     // The cell's column in the catalog: what clearing stages, and whether Postgres computes it.
     let info = lookup(&catalog, &table).ok().and_then(|t| t.column(name));
     let value = match what {
-        Staging::Value => value(params)?,
+        Staging::Value => value(params, s.state.dialect())?,
         Staging::Null => NewValue::Null,
         Staging::Clear => {
             let info = info.ok_or_else(|| bad("the column is no longer in the schema (refresh it)"))?;
@@ -421,7 +427,7 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     };
     let catalog = catalog(s)?;
     let info = lookup(&catalog, &table)?;
-    let statements = edits.statements(info, &data).map_err(|e| bad(e.to_string()))?;
+    let statements = edits.statements(s.state.dialect(), info, &data).map_err(|e| bad(e.to_string()))?;
     if statements.is_empty() {
         return Err(disabled(NOTHING_STAGED));
     }
@@ -445,9 +451,9 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let gate = Arc::new(dbee_driver::ApplyGate::default());
     let job_gate = Arc::clone(&gate);
     let job = s.spawn_job(APPLY, async move {
-        let written = dbee_pg::apply_gated(&job_conn, &sql, &job_gate).await;
+        let written = job_conn.apply(&sql, &job_gate).await;
         let page = match written {
-            Ok(_) => Some(reload.run(&job_conn).await),
+            Ok(_) => Some(reload.run(job_conn.as_ref()).await),
             Err(_) => None,
         };
         let apply: Apply = Box::new(move |s: &mut Session| applied(s, &conn, tab, applying, reload, written, page));
@@ -462,7 +468,7 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 
 fn applied(
     s: &mut Session,
-    conn: &Arc<PgConnection>,
+    conn: &Arc<dyn Connection>,
     tab: TabId,
     applying: Applying,
     reload: Reload,

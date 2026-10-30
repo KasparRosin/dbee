@@ -3,10 +3,11 @@
 //! **Running** is a job on the query connection, which is not the browse connection: a `BEGIN`
 //! left open in a query tab never reaches table pages or an Apply. The job opens the connection
 //! when the session has none (the first run, after a reconnect, or after it was lost), with the
-//! settings, password and tunnel of the open connection, so the query connection of a read-only
-//! connection is read-only too. It runs the statements `dbee_sql::lexer` splits from the tab text
-//! (all of them, or the one under the cursor) one by one, each in auto-commit, and stops at the
-//! first error. Every result is kept ([`QueryTab::results`]) and the last one is shown; all the
+//! driver, settings, password and tunnel of the open connection, so the query connection of a
+//! read-only connection is read-only too. It runs the statements `dbee_sql::lexer` splits from the
+//! tab text in the connection's dialect (all of them, or the one under the cursor) one by one,
+//! each in auto-commit, and stops at the first error. Every result is kept
+//! ([`QueryTab::results`]) and the last one is shown; all the
 //! results of one run together keep at most [`RUN_LIMITS`] (10,000 rows each, 256 MiB of cell text
 //! for the whole run: each statement gets what the ones before left). One run goes at a time in a
 //! session (`Busy`): the query connection runs one statement at a time, and a cancel request hits
@@ -25,12 +26,13 @@
 //!
 //! **Stopping.** `query.cancel`, closing the running tab, `connection.close` and a reconnect stop
 //! the run through its `Stop`. The job then sends the cancel request itself, through the query
-//! connection's `Canceller`, and waits for the statement to end (so the request cannot reach a
+//! connection's `Cancel`, and waits for the statement to end (so the request cannot reach a
 //! later run), and it starts no further statement. A stopped run ends with code `cancelled`. The
 //! job is never dropped or aborted.
 //!
-//! **Errors** keep the server's message, detail and hint ([`QueryError`]); the position the
-//! server gives (characters into the statement) becomes a byte offset into the tab text.
+//! **Errors** keep the server's message, code, meaning, detail and hint ([`QueryError`]); the
+//! position the server gives (characters into the statement) becomes a byte offset into the tab
+//! text.
 //!
 //! **Stale results** (see [`super`]): a run whose tab closed, or whose connection was closed or
 //! replaced, is `{"ignored": true}` and changes nothing.
@@ -43,13 +45,12 @@ use std::sync::{Arc, Weak};
 
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
-use dbee_driver::{DbError, Limits, Purpose, QUERY_LIMITS, Target};
-use dbee_pg::PgConnection;
-use dbee_sql::{Dialect, lexer};
+use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target};
+use dbee_sql::lexer;
 use dbee_ssh::Tunnel;
 use serde_json::json;
 
-use super::connection::db_error;
+use super::connection::{db_error, driver_for};
 use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, bad, disabled, ignored, needs_db, p};
 use crate::jobs::Stop;
 use crate::state::{QueryError, QueryRun, QueryTab, Selection, StatementOutcome};
@@ -147,9 +148,9 @@ fn busy(s: &Session) -> Option<String> {
 /// The connection a run uses.
 enum Via {
     /// The session's query connection.
-    Open(Arc<PgConnection>),
+    Open(Arc<dyn Connection>),
     /// None yet: the job opens one as the browse connection was opened.
-    Connect { config: Box<ConnectionConfig>, password: Option<String>, tunnel: Option<Arc<Tunnel>> },
+    Connect { driver: Arc<dyn Driver>, config: Box<ConnectionConfig>, password: Option<String>, tunnel: Option<Arc<Tunnel>> },
 }
 
 /// Why a run stopped early: at statement `statement` (0-based), with the byte offset in the tab
@@ -164,7 +165,7 @@ struct Failure {
 struct Ran {
     /// The connection the statements ran on and whether the job opened it; `None` when it could
     /// not be opened, or the run stopped first.
-    conn: Option<(Arc<PgConnection>, bool)>,
+    conn: Option<(Arc<dyn Connection>, bool)>,
     outcomes: Vec<StatementOutcome>,
     failure: Option<Failure>,
 }
@@ -196,12 +197,12 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
     }
     let (conn, opened) = match via {
         Via::Open(conn) => (conn, false),
-        Via::Connect { config, password, tunnel } => {
+        Via::Connect { driver, config, password, tunnel } => {
             let target = Target { config: &config, password: password.as_deref(), tunnel, purpose: Purpose::Query, create_file: false };
             // A connect that is stopped is dropped: nothing ran on it yet.
             tokio::select! {
-                connected = dbee_pg::connect(target) => match connected {
-                    Ok(conn) => (Arc::new(conn), true),
+                connected = driver.connect(target) => match connected {
+                    Ok(conn) => (conn, true),
                     Err(error) => {
                         ran.failure = Some(Failure { statement: 0, error, position: None });
                         return ran;
@@ -229,7 +230,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
             break;
         }
         let limits = Limits { max_rows: if left == 0 { 0 } else { RUN_LIMITS.max_rows }, max_bytes: left };
-        match run_one(&conn, sql, limits, &stop).await {
+        match run_one(conn.as_ref(), sql, limits, &stop).await {
             Ok(result) => {
                 left = left.saturating_sub(text_bytes(&result));
                 ran.outcomes.push(StatementOutcome { range, result: Arc::new(result) });
@@ -250,8 +251,8 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
 
 /// Runs one statement. When the run is stopped meanwhile, the cancel request goes out and the
 /// statement is waited for (it then usually ends with `Cancelled`).
-async fn run_one(conn: &PgConnection, sql: &str, limits: Limits, stop: &Stop) -> Result<ResultSet, DbError> {
-    let mut running = std::pin::pin!(dbee_pg::query::run(conn, sql, limits));
+async fn run_one(conn: &dyn Connection, sql: &str, limits: Limits, stop: &Stop) -> Result<ResultSet, DbError> {
+    let mut running = conn.run(sql, limits);
     tokio::select! {
         result = &mut running => result,
         () = stop.stopped() => {
@@ -331,7 +332,7 @@ fn session_lost() -> EngineError {
 /// lost query connection is let go: alone, it is [`session_lost`]; with the browse connection or
 /// the tunnel, which an unopened query connection can also have failed on, the session is lost
 /// (see the module docs).
-fn failed(s: &mut Session, conn: Option<&Arc<PgConnection>>, f: &Failure) -> EngineError {
+fn failed(s: &mut Session, conn: Option<&Arc<dyn Connection>>, f: &Failure) -> EngineError {
     let Some(c) = s.state.connected.as_mut() else { return db_error(&f.error) };
     let query_lost = f.error == DbError::ConnectionLost || conn.is_some_and(|q| q.is_closed());
     if query_lost && c.query.as_ref().zip(conn).is_some_and(|(mine, used)| Arc::ptr_eq(mine, used)) {
@@ -352,20 +353,26 @@ fn failed(s: &mut Session, conn: Option<&Arc<PgConnection>>, f: &Failure) -> Eng
     db_error(&f.error)
 }
 
-/// What the tab shows of `f`, which the run failed with as `e`: a server error's own message,
-/// detail and hint, else the engine error's text.
+/// What the tab shows of `f`, which the run failed with as `e`: a server error's own message with
+/// its code, the code, its meaning, the detail and the hint, else the engine error's text.
 fn query_error(e: &EngineError, f: &Failure) -> QueryError {
-    let (message, sqlstate, detail, hint) = match &f.error {
-        DbError::Server(s) => (format!("{} (SQLSTATE {})", s.message, s.code), Some(s.code.clone()), s.detail.clone(), s.hint.clone()),
-        _ => (e.to_string(), None, None, None),
+    let (message, server_code, meaning, detail, hint) = match &f.error {
+        DbError::Server(s) => (s.message_with_code(), Some(s.code.clone()), s.meaning, s.detail.clone(), s.hint.clone()),
+        _ => (e.to_string(), None, None, None, None),
     };
-    QueryError { code: e.code(), message, sqlstate, detail, hint, position: f.position, statement: f.statement }
+    QueryError { code: e.code(), message, server_code, meaning, detail, hint, position: f.position, statement: f.statement }
 }
 
-fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<PgConnection>, ran: Ran) -> Result<Json, EngineError> {
+/// `conn` is the connection `generation` was taken from.
+fn same_connection(generation: &Weak<dyn Connection>, conn: &Arc<dyn Connection>) -> bool {
+    // Addresses only: two pointers to one `dyn` value may carry different vtables.
+    Weak::as_ptr(generation).cast::<()>() == Arc::as_ptr(conn).cast::<()>()
+}
+
+fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran: Ran) -> Result<Json, EngineError> {
     let me = s.applying_job();
     // The session's connection is still the one the run started on: not closed, not replaced.
-    let Some(c) = s.state.connected.as_mut().filter(|c| Weak::as_ptr(generation) == Arc::as_ptr(&c.browse)) else { return Ok(ignored()) };
+    let Some(c) = s.state.connected.as_mut().filter(|c| same_connection(generation, &c.browse)) else { return Ok(ignored()) };
     // The run is over (clearing the marker of a job that ended is not applying its result).
     if me.is_some() && c.query_run.as_ref().map(|run| run.job) == me {
         c.query_run = None;
@@ -427,11 +434,12 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if let Some(why) = busy(s) {
         return Err(EngineError::Busy(why));
     }
+    let dialect = s.state.dialect();
     let ranges = if current {
         let cursor = cursor.ok_or_else(|| bad("`cursor` is required with `current` (a byte offset into the text)"))?;
-        lexer::statement_at(Dialect::Postgres, &text, cursor).into_iter().collect()
+        lexer::statement_at(dialect, &text, cursor).into_iter().collect()
     } else {
-        lexer::statements(Dialect::Postgres, &text)
+        lexer::statements(dialect, &text)
     };
     if ranges.is_empty() {
         return Err(disabled(NOTHING_TO_RUN));
@@ -454,7 +462,12 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
     let via = match &c.query {
         Some(conn) => Via::Open(Arc::clone(conn)),
-        None => Via::Connect { config: Box::new(c.config.clone()), password: c.credentials.password.clone(), tunnel: c.tunnel.clone() },
+        None => Via::Connect {
+            driver: driver_for(&s.drivers, c.config.kind)?,
+            config: Box::new(c.config.clone()),
+            password: c.credentials.password.clone(),
+            tunnel: c.tunnel.clone(),
+        },
     };
     let generation = Arc::downgrade(&c.browse);
     let stop = Arc::new(Stop::default());
@@ -517,6 +530,7 @@ mod tests {
     use std::time::Duration;
 
     use dbee_config::{SshAuth, SshConfig};
+    use dbee_sql::Dialect;
     use dbee_ssh::{AgentSource, SshEnv};
 
     use super::*;
@@ -548,7 +562,8 @@ mod tests {
         let db = dbee_testkit::require_testdb!();
         let home = dbee_testkit::temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
         let ssh = SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None };
-        let mut s = Session::new(SessionOptions { config_dir: None, secrets: None, ssh, notify: None, allowed_targets: None }).unwrap();
+        let options = SessionOptions { config_dir: None, secrets: None, ssh, notify: None, allowed_targets: None, drivers: dbee_drivers::all() };
+        let mut s = Session::new(options).unwrap();
         let config = ConnectionConfig {
             host: db.sshd.pg_host.clone(),
             port: db.sshd.pg_port,
@@ -584,7 +599,9 @@ mod tests {
             database: "dbee".into(),
             ..ConnectionConfig::default()
         };
-        let via = || Via::Connect { config: Box::new(config.clone()), password: Some(db.password.clone()), tunnel: None };
+        let driver = driver_for(&dbee_drivers::all(), config.kind).unwrap();
+        let via =
+            || Via::Connect { driver: Arc::clone(&driver), config: Box::new(config.clone()), password: Some(db.password.clone()), tunnel: None };
         let text = "select repeat('x', 60) as a; select repeat('y', 60) as b; select 'z' as c".to_owned();
         let ranges = lexer::statements(Dialect::Postgres, &text);
         let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();

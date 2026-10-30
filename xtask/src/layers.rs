@@ -60,10 +60,6 @@ pub const TABLE: &[(&str, Class)] = &[
 /// Each chain is separate. None yet: the registry's use of each driver comes from their classes.
 pub const INTRA_LAYER_ORDER: &[&[&str]] = &[];
 
-/// Until M2.8 moves the engine onto the driver interface, it still uses `dbee-pg` directly.
-/// M2.8 deletes this.
-pub const ALLOWED_UNTIL_M2_8: &[(&str, &str)] = &[("engine", "pg")];
-
 fn intra_layer_allowed(from: (&str, Class), to: (&str, Class)) -> bool {
     if from.1 == Class::Registry && to.1 == Class::Driver {
         return true;
@@ -163,16 +159,6 @@ impl std::fmt::Display for Violation {
 /// Check all rules. Returns violations sorted for stable output.
 pub fn check(crates: &[Crate]) -> Vec<Violation> {
     check_in(TABLE, crates)
-}
-
-/// [`check`], less the dependencies [`ALLOWED_UNTIL_M2_8`] lets through: what `cargo xtask layers`
-/// reports.
-pub fn check_workspace(crates: &[Crate]) -> Vec<Violation> {
-    let allowed = |v: &Violation| match v {
-        Violation::DriverDependency { krate, dep, kind: DepKind::Normal } => ALLOWED_UNTIL_M2_8.contains(&(short_name(krate), short_name(dep))),
-        _ => false,
-    };
-    check(crates).into_iter().filter(|v| !allowed(v)).collect()
 }
 
 fn check_in(table: &[(&str, Class)], crates: &[Crate]) -> Vec<Violation> {
@@ -337,15 +323,6 @@ mod tests {
         let v = check_in(&table, &model(&[("oracle", &[("pg", Normal)])]));
         assert!(matches!(&v[..], [Violation::Upward { from: 4, to: 4, .. }]), "{v:?}");
         assert!(check_in(&table, &model(&[("oracle", &[("driver", Normal), ("ssh", Normal)])])).is_empty());
-    }
-
-    #[test]
-    fn engine_may_use_pg_until_m2_8() {
-        assert_eq!(ALLOWED_UNTIL_M2_8, &[("engine", "pg")]);
-        assert!(check_workspace(&model(&[("engine", &[("pg", Normal)])])).is_empty());
-        for (from, to) in [("engine", "mysql"), ("engine", "drivers"), ("ui-egui", "pg")] {
-            assert_eq!(check_workspace(&model(&[(from, &[(to, Normal)])])).len(), 1, "{from} -> {to}");
-        }
     }
 
     #[test]

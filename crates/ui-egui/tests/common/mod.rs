@@ -5,6 +5,8 @@
 //! clipboard (egui's `CopyText`, which kittest hands back and which never reaches the system
 //! clipboard).
 //!
+//! Every window's session gets every driver dbee ships (`dbee_drivers::all()`).
+//!
 //! Safety: every window keeps its connections file in a throwaway home, its secrets in a
 //! `MemoryStore` (or none), and reads SSH keys and `known_hosts` from `<temp home>/.ssh` with no
 //! agent, so the real home, `~/.ssh`, SSH agent and keyring are never touched. Windows connect
@@ -99,6 +101,7 @@ impl Ui {
             ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
             notify: None,
             allowed_targets: None,
+            drivers: dbee_drivers::all(),
         })
         .unwrap();
         let (tx, rx) = mpsc::channel();

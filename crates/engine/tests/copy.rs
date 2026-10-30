@@ -137,9 +137,9 @@ fn value_view_labels() {
     let v = view(&mut s, 0, 1);
     assert_eq!((v["kindLabel"].as_str(), v["pretty"].clone(), v["isNull"].clone()), (Some("jsonb"), json!(true), json!(false)), "{v}");
     assert!(text(&v).starts_with("{\n  \"a\": 1"), "{v}");
-    assert_eq!((v["column"].as_str(), v["typeLabel"].as_str()), (Some("j"), Some("jsonb")));
+    assert_eq!((v["column"].as_str(), v["typeLabel"].as_str(), v["kind"].as_str()), (Some("j"), Some("jsonb"), Some("json")));
     let direct = s.value_view().unwrap();
-    assert_eq!((direct.kind_label, direct.pretty, direct.truncated), ("jsonb", true, false));
+    assert_eq!((direct.kind_label.as_str(), direct.pretty, direct.truncated), ("jsonb", true, false));
     let v = view(&mut s, 0, 2);
     assert_eq!(v["kindLabel"], "text containing JSON", "{v}");
     assert!(text(&v).starts_with("{\n  \"k\": 1"));

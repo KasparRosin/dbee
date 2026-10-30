@@ -14,6 +14,7 @@
 //! - `DBEE_ALLOW_TARGETS` (`host:port,…`, set by `cargo xtask run-isolated`) limits connections
 //!   to those targets ([`SessionOptions::allowed_targets`]).
 //! - SSH uses `~/.ssh` and the OS agent ([`SshEnv::from_os`]).
+//! - The session opens connections with every driver dbee ships (`dbee_drivers::all()`).
 //!
 //! The logger (`logging.rs`) and the Windows graphics start-up (`graphics.rs`) are set up first.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
@@ -137,6 +138,7 @@ fn session_options(notify: Arc<dyn Fn() + Send + Sync>) -> SessionOptions {
         ssh: SshEnv::from_os(),
         notify: Some(notify),
         allowed_targets,
+        drivers: dbee_drivers::all(),
     }
 }
 

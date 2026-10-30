@@ -14,19 +14,20 @@
 //!   statement without rows how many it affected ([`affected_text`]). With no result yet, a line
 //!   saying how to run.
 //!
-//! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` ([`Tokens::job`], colours
-//! [`crate::theme::SqlSyntax`]), with no soft wrap: a long line scrolls sideways, so each row of
-//! the layout is a line and the gutter's numbers are line numbers. The text lives in the window, a
-//! buffer per tab ([`EditorState`]), so a frame does not copy it: the frame compares it with the
-//! tab's (an agent's `query.setText` replaces it) and sends each change with `query.setText`
-//! (journaled, consecutive ones coalesce). The layouter keeps the job it made for the last text,
-//! theme and coloured lines ([`Highlighter`]), and tokenizes only a text it has not seen, lexing
-//! again only around the change ([`Tokens`]). Only the lines near the view are coloured
-//! ([`colour_window`]: whole chunks of [`CHUNK`] lines, [`MARGIN`] beyond the view each side), so
-//! the job of a big script stays small for egui to hash and split; egui then lays out again only
-//! the paragraphs (lines) that changed. The editor does not animate its scrolling, so a jump far
-//! down is coloured at once. The text has no size cap; the keystroke cost of big scripts is
-//! measured by `keystroke_frames_in_big_scripts` (docs/testing.md §6): a script of short lines
+//! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` in the open connection's
+//! dialect, Postgres's when none is open ([`Tokens::job`], colours [`crate::theme::SqlSyntax`]; a
+//! new dialect lexes the text again from scratch), with no soft wrap: a long line scrolls
+//! sideways, so each row of the layout is a line and the gutter's numbers are line numbers. The
+//! text lives in the window, a buffer per tab ([`EditorState`]), so a frame does not copy it: the
+//! frame compares it with the tab's (an agent's `query.setText` replaces it) and sends each change
+//! with `query.setText` (journaled, consecutive ones coalesce). The layouter keeps the job it made
+//! for the last text, theme and coloured lines ([`Highlighter`]), and tokenizes only a text it has
+//! not seen, lexing again only around the change ([`Tokens`]). Only the lines near the view are
+//! coloured ([`colour_window`]: whole chunks of [`CHUNK`] lines, [`MARGIN`] beyond the view each
+//! side), so the job of a big script stays small for egui to hash and split; egui then lays out
+//! again only the paragraphs (lines) that changed. The editor does not animate its scrolling, so a
+//! jump far down is coloured at once. The text has no size cap; the keystroke cost of big scripts
+//! is measured by `keystroke_frames_in_big_scripts` (docs/testing.md §6): a script of short lines
 //! costs about what egui's plain text editor does, and one very long line costs as much to lay
 //! out as it does there, on every keystroke.
 //!
@@ -39,7 +40,7 @@
 //! one it is the start. A tab's editor takes the keyboard when the tab becomes the active one (a
 //! new tab too), unless a dialog or the quick search is open.
 //!
-//! **Errors.** The card shows the server's message (with its SQLSTATE), detail and hint, and
+//! **Errors.** The card shows the server's message (with its code), detail and hint, and
 //! where the server points, as a line and column of the text (as it is now: the position is a
 //! byte offset into the text the run started with, kept within the text). A click on it puts the
 //! cursor there, with the keyboard; an error without a position offers no click. A cancelled run shows
@@ -62,8 +63,9 @@
 //! results; value `{shown, rows, rowsAffected}`), `query-rows` (value: what the shown result
 //! holds, e.g. `First 10,000 of 25,000 rows`), `query-affected` (value: `2 rows affected`),
 //! `query-error` (value `{code, heading, message, detail, hint, note, position, statement, line,
-//! column, jump}`, `note` the card's line that a ROLLBACK ends a failed transaction (SQLSTATE
-//! 25P02) or null, `jump` saying whether a click moves the cursor) and `query-hint`.
+//! column, jump}`, `note` the card's line that a ROLLBACK ends a failed transaction (an error whose
+//! meaning is `TransactionAborted`, Postgres's 25P02) or null, `jump` saying whether a click moves
+//! the cursor) and `query-hint`.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -72,7 +74,8 @@ use std::sync::{Arc, Weak};
 
 use dbee_core::ResultSet;
 use dbee_engine::cmd::query::can_run;
-use dbee_engine::{Json, QueryError, StatementOutcome, Tab, TabId};
+use dbee_engine::state::NO_CONNECTION_DIALECT;
+use dbee_engine::{Json, Meaning, QueryError, StatementOutcome, Tab, TabId};
 use dbee_sql::Dialect;
 use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
@@ -286,7 +289,7 @@ struct Tokens {
 
 impl Default for Tokens {
     fn default() -> Self {
-        Self::new(Dialect::Postgres)
+        Self::new(NO_CONNECTION_DIALECT)
     }
 }
 
@@ -449,6 +452,15 @@ struct Highlighter {
 }
 
 impl Highlighter {
+    /// Colours with `dialect` from now on. Another dialect starts over: the text is lexed again
+    /// from scratch, and no token or job of the old one is kept.
+    fn set_dialect(&mut self, dialect: Dialect) {
+        if self.tokens.dialect != dialect {
+            self.tokens = Tokens::new(dialect);
+            self.job = None;
+        }
+    }
+
     /// The job for `text` in the theme given: the last one again when nothing changed.
     fn job(&mut self, text: &str, dark: bool, plain: Color32) -> LayoutJob {
         let key = (dark, plain, self.window.clone());
@@ -518,9 +530,14 @@ impl EditorState {
         self.focus = true;
     }
 
-    /// How many texts the layouter tokenized.
+    /// How many texts the layouter tokenized since its dialect last changed.
     pub fn tokenized(&self) -> usize {
         self.highlight.tokens.work().0
+    }
+
+    /// The editor colours the text with `dialect` ([`Highlighter::set_dialect`]).
+    fn set_dialect(&mut self, dialect: Dialect) {
+        self.highlight.set_dialect(dialect);
     }
 
     /// Some token of the text is coloured.
@@ -738,10 +755,7 @@ fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover
     r.clicked()
 }
 
-/// SQLSTATE 25P02: a statement failed earlier in the transaction, which stays open, failed.
-const IN_FAILED_TRANSACTION: &str = "25P02";
-
-/// The card's line under such an error.
+/// The card's line under an error that means the transaction failed earlier.
 pub const ROLLBACK_NOTE: &str = "The transaction this connection is in failed earlier: run ROLLBACK to end it. Until then every statement fails.";
 
 /// The error card's heading for `e` of a run that kept `kept` results.
@@ -763,7 +777,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: us
     let (stroke, ink) = if cancelled { (t.border, t.text) } else { (t.danger, t.danger) };
     let jump = at.is_some();
     let title = heading(e, kept);
-    let note = (e.sqlstate.as_deref() == Some(IN_FAILED_TRANSACTION)).then_some(ROLLBACK_NOTE);
+    let note = (e.meaning == Some(Meaning::TransactionAborted)).then_some(ROLLBACK_NOTE);
     let frame =
         Frame::new().fill(t.card).stroke(Stroke::new(1.0, stroke)).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(12, 8));
     let label = |ui: &mut egui::Ui, text: RichText| ui.add(Label::new(text).wrap().selectable(!jump));
@@ -897,6 +911,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         if focus_now {
             state.editor.focus();
         }
+        state.editor.set_dialect(session.state().dialect());
         let full = ui.available_rect_before_wrap();
         let h = full.height();
         // The split first, so a drag moves the editor in this frame.
@@ -1285,6 +1300,27 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_dialect_change_lexes_the_text_again_from_scratch() {
+        // Each engine reads these differently: backticks, `#`, `$$` and a backslash in a string.
+        let text = "select `a`, \"b\" # note\n, $$x$$ -- c\nselect 'it\\'s'";
+        assert_ne!(lexer::tokenize(Dialect::Postgres, text), lexer::tokenize(Dialect::MySql, text), "the text tells them apart");
+        let mut ed = EditorState::new(text.into());
+        ed.highlight.window = colour_window(0..60);
+        let plain = Color32::BLACK;
+        let note = text.find("# note").unwrap();
+        let job = ed.highlight.job(text, false, plain);
+        assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(Dialect::Postgres, text).as_slice());
+        assert_eq!(colour_at(&job, note), (plain, false), "`#` is an operator on Postgres");
+        for dialect in [Dialect::MySql, Dialect::Sqlite, Dialect::Postgres] {
+            ed.set_dialect(dialect);
+            let job = ed.highlight.job(text, false, plain);
+            assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(dialect, text).as_slice(), "{dialect:?}");
+            let comment = (crate::theme::SQL_LIGHT.comment, true);
+            assert_eq!(colour_at(&job, note) == comment, dialect == Dialect::MySql, "{dialect:?}: the job follows the dialect");
         }
     }
 

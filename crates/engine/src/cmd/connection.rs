@@ -25,6 +25,10 @@
 //! An isolated run's list of allowed targets ([`crate::allowed`]) is checked by test, open and
 //! reconnect before anything else touches the network.
 //!
+//! Connections open through the session's driver for the config's database type
+//! ([`SessionOptions::drivers`](crate::SessionOptions::drivers)); test, open and reconnect refuse
+//! a type without one (`disabled`, "this build has no MySQL driver") before any job starts.
+//!
 //! Connecting is a job: the tunnel, the browse connection and, for open and reconnect, the
 //! catalog, whose load is bounded ([`CATALOG_TIMEOUT`]: past it, it is cancelled, the connection
 //! is discarded and the job fails with `timeout`). The prompts come back as
@@ -35,25 +39,23 @@
 //! A lost connection: when a browse operation fails with `connectionLost` (or the connection
 //! has closed), the session is marked [`Connected::lost`] and the commands that need the
 //! database are disabled with [`LOST`] until `connection.reconnect` replaces the connections.
-//! Database work is stopped only through `Canceller`s, never by dropping a running apply; a job
-//! whose connection was closed or replaced meanwhile is ignored (`{"ignored": true}`, see
-//! [`super`]).
+//! Database work is stopped only through the connections' `Cancel`, never by dropping a running
+//! apply; a job whose connection was closed or replaced meanwhile is ignored (`{"ignored": true}`,
+//! see [`super`]).
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dbee_config::{ConnectionConfig, SecretKind, SecretStore, SshAuth, SslMode, new_id, parse_url};
+use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, SshAuth, SslMode, new_id, parse_url};
 use dbee_core::Catalog;
-use dbee_driver::{DbError, Purpose, ServerInfo, Target};
-use dbee_pg::catalog::load_catalog;
-use dbee_pg::{Canceller, PgConnection};
+use dbee_driver::{Cancel, Connection, DbError, Driver, Drivers, Purpose, Target};
 use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
 
 use super::{CommandSpec, LOST, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
 use crate::allowed::check_target;
-use crate::state::{Connected, Credentials};
+use crate::state::{Connected, Credentials, server_text};
 use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
 
 const LIST: &str = "connection.list";
@@ -428,7 +430,7 @@ pub(crate) fn ssh_error(e: &SshError) -> EngineError {
 pub(crate) fn db_error(e: &DbError) -> EngineError {
     let data = match e {
         DbError::Ssh(ssh) => return ssh_error(ssh),
-        DbError::Server(s) => json!({ "sqlstate": s.code, "detail": s.detail, "hint": s.hint, "position": s.position }),
+        DbError::Server(s) => json!({ "serverCode": s.code, "detail": s.detail, "hint": s.hint, "position": s.position }),
         DbError::ConnectionLost => json!({ "action": RECONNECT }),
         DbError::RowNotFound { statement } => json!({ "statement": statement }),
         _ => json!({}),
@@ -440,7 +442,7 @@ impl Session {
     /// The browse connection, for a command that needs the database. `Disabled` when there is
     /// none or it is lost; when it or the tunnel it runs through has closed since its last use,
     /// the session is marked lost and the error is `connectionLost`.
-    pub(crate) fn browse(&mut self) -> Result<Arc<PgConnection>, EngineError> {
+    pub(crate) fn browse(&mut self) -> Result<Arc<dyn Connection>, EngineError> {
         let c = self.state.connected.as_mut().ok_or_else(|| disabled(NOT_CONNECTED))?;
         if c.lost {
             return Err(disabled(LOST));
@@ -455,14 +457,14 @@ impl Session {
 
     /// `conn` is still the session's browse connection; a job that used another one (closed or
     /// replaced since) must drop its result.
-    pub(crate) fn is_current_browse(&self, conn: &Arc<PgConnection>) -> bool {
+    pub(crate) fn is_current_browse(&self, conn: &Arc<dyn Connection>) -> bool {
         self.state.connected.as_ref().is_some_and(|c| Arc::ptr_eq(&c.browse, conn))
     }
 
     /// An operation on `conn` failed with `e`. When the connection is gone, the session lets go
     /// of it: a lost browse connection marks the session lost, and a lost query connection is
     /// dropped (the next query run opens a new one).
-    pub(crate) fn db_failed(&mut self, conn: &Arc<PgConnection>, e: &DbError) -> EngineError {
+    pub(crate) fn db_failed(&mut self, conn: &Arc<dyn Connection>, e: &DbError) -> EngineError {
         if (*e == DbError::ConnectionLost || conn.is_closed())
             && let Some(c) = self.state.connected.as_mut()
         {
@@ -480,9 +482,14 @@ impl Session {
 
 // ---- connecting ------------------------------------------------------------------------------
 
+/// The driver that opens `kind`; `Disabled` when this build has none.
+pub(crate) fn driver_for(drivers: &Drivers, kind: DbKind) -> Result<Arc<dyn Driver>, EngineError> {
+    drivers.for_kind(kind).cloned().ok_or_else(|| disabled(format!("this build has no {} driver", kind.label())))
+}
+
 /// An open connection and the tunnel it runs through.
 struct Opened {
-    conn: PgConnection,
+    conn: Arc<dyn Connection>,
     tunnel: Option<Arc<Tunnel>>,
 }
 
@@ -504,19 +511,14 @@ impl Opened {
     }
 }
 
-/// What the result texts call the server: `PostgreSQL 14.12`.
-fn server_text(info: &ServerInfo) -> String {
-    format!("PostgreSQL {}", info.version)
-}
-
-/// Opens the tunnel (when the config has one) and a connection through it.
-async fn open_connection(config: &ConnectionConfig, env: &SshEnv, creds: &Credentials) -> Result<Opened, EngineError> {
+/// Opens the tunnel (when the config has one) and a connection through it with `driver`.
+async fn open_connection(driver: &dyn Driver, config: &ConnectionConfig, env: &SshEnv, creds: &Credentials) -> Result<Opened, EngineError> {
     let tunnel = match &config.ssh {
         None => None,
         Some(ssh) => Some(Arc::new(Tunnel::open(ssh, env, &creds.ssh, creds.trust.as_deref()).await.map_err(|e| ssh_error(&e))?)),
     };
     let target = Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file: false };
-    match dbee_pg::connect(target).await {
+    match driver.connect(target).await {
         Ok(conn) => Ok(Opened { conn, tunnel }),
         Err(e) => {
             if let Some(t) = &tunnel {
@@ -537,11 +539,11 @@ enum CatalogLoad {
     TimedOut,
 }
 
-/// `load_catalog`, bounded by `limit`. Past it the statement is cancelled through the
-/// connection's `Canceller` and the load gets [`CANCEL_GRACE`] to end (its result is discarded
+/// The connection's catalog, bounded by `limit`. Past it the statement is cancelled through the
+/// connection's `Cancel` and the load gets [`CANCEL_GRACE`] to end (its result is discarded
 /// either way); then it is `TimedOut`, and the caller discards the connection.
-async fn load_catalog_within(conn: &PgConnection, limit: Duration) -> Result<Catalog, CatalogLoad> {
-    let mut load = std::pin::pin!(load_catalog(conn));
+async fn load_catalog_within(conn: &dyn Connection, limit: Duration) -> Result<Catalog, CatalogLoad> {
+    let mut load = conn.load_catalog();
     match tokio::time::timeout(limit, &mut load).await {
         Ok(result) => result.map_err(CatalogLoad::Failed),
         Err(_) => {
@@ -575,9 +577,14 @@ fn catalog_error(e: CatalogLoad) -> EngineError {
 
 /// [`open_connection`], then the catalog (bounded by [`CATALOG_TIMEOUT`]). On any failure the
 /// new connection and tunnel are closed.
-async fn connect_and_load(config: &ConnectionConfig, env: &SshEnv, creds: &Credentials) -> Result<(Opened, Catalog), EngineError> {
-    let opened = open_connection(config, env, creds).await?;
-    match load_catalog_within(&opened.conn, CATALOG_TIMEOUT).await {
+async fn connect_and_load(
+    driver: &dyn Driver,
+    config: &ConnectionConfig,
+    env: &SshEnv,
+    creds: &Credentials,
+) -> Result<(Opened, Catalog), EngineError> {
+    let opened = open_connection(driver, config, env, creds).await?;
+    match load_catalog_within(opened.conn.as_ref(), CATALOG_TIMEOUT).await {
         Ok(catalog) => Ok((opened, catalog)),
         Err(e) => {
             opened.close().await;
@@ -612,8 +619,8 @@ fn save_store_or_tell(s: &mut Session) {
 /// Sends a cancel request for the statement running on each of `conns` that is still open, in
 /// a detached task. The jobs running them then end with an error (and their results are
 /// dropped where their connection is gone).
-pub(crate) fn cancel_statements(s: &Session, conns: impl IntoIterator<Item = Arc<PgConnection>>) {
-    let cancellers: Vec<Canceller> = conns.into_iter().filter(|c| !c.is_closed()).map(|c| c.canceller()).collect();
+pub(crate) fn cancel_statements(s: &Session, conns: impl IntoIterator<Item = Arc<dyn Connection>>) {
+    let cancellers: Vec<Arc<dyn Cancel>> = conns.into_iter().filter(|c| !c.is_closed()).map(|c| c.canceller()).collect();
     if cancellers.is_empty() {
         return;
     }
@@ -752,12 +759,13 @@ fn ssh_key(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = target_config(s, params)?;
     check_target(s.allowed_targets.as_deref(), &config)?;
+    let driver = driver_for(&s.drivers, config.kind)?;
     let creds = given(params)?;
     let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(TEST, async move {
         let creds = fill_from_store(creds, store, &config, allowed).await;
-        let result = match open_connection(&config, &env, &creds).await {
+        let result = match open_connection(driver.as_ref(), &config, &env, &creds).await {
             Ok(opened) => {
                 let info = opened.conn.info();
                 let r = json!({ "server": server_text(info), "via": opened.via(), "warnings": info.warnings });
@@ -793,6 +801,7 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
     let mut config = target_config(s, params)?;
     check_target(s.allowed_targets.as_deref(), &config)?;
+    let driver = driver_for(&s.drivers, config.kind)?;
     let typed = given(params)?;
     let keep = p::bool_or(params, "savePassword", false)?;
     if config.id.is_empty() {
@@ -802,7 +811,7 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(OPEN, async move {
         let creds = fill_from_store(typed.clone(), store, &config, allowed).await;
-        let result = connect_and_load(&config, &env, &creds).await;
+        let result = connect_and_load(driver.as_ref(), &config, &env, &creds).await;
         let typed = keep.then_some(typed);
         let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds, result, typed));
         apply
@@ -825,19 +834,10 @@ fn apply_open(
     }
     let kept = keep.map(|typed| keep_secrets(s, &mut config, &typed));
     let Opened { conn, tunnel } = opened;
-    let info = conn.info().clone();
+    let (info, dialect) = (conn.info().clone(), conn.dialect());
     s.state.store.touch_recent(&config, unix_now());
-    let c = Connected {
-        config,
-        info,
-        catalog: Arc::new(catalog),
-        lost: false,
-        browse: Arc::new(conn),
-        query: None,
-        query_run: None,
-        tunnel,
-        credentials,
-    };
+    let c =
+        Connected { config, info, dialect, catalog: Arc::new(catalog), lost: false, browse: conn, query: None, query_run: None, tunnel, credentials };
     let mut result = opened_json(&c);
     if let (Json::Object(map), Some(kept)) = (&mut result, kept) {
         map.insert("secretsSaved".into(), json!(kept.is_ok()));
@@ -903,11 +903,12 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = c.config.clone();
     check_target(s.allowed_targets.as_deref(), &config)?;
     let old = Arc::clone(&c.browse);
+    let driver = driver_for(&s.drivers, config.kind)?;
     let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(RECONNECT, async move {
         let creds = fill_from_store(creds, store, &config, allowed).await;
-        let result = connect_and_load(&config, &env, &creds).await;
+        let result = connect_and_load(driver.as_ref(), &config, &env, &creds).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, &old, creds, result));
         apply
     });
@@ -916,7 +917,7 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 
 fn apply_reconnect(
     s: &mut Session,
-    old: &Arc<PgConnection>,
+    old: &Arc<dyn Connection>,
     credentials: Credentials,
     result: Result<(Opened, Catalog), EngineError>,
 ) -> Result<Json, EngineError> {
@@ -929,8 +930,9 @@ fn apply_reconnect(
     let Opened { conn, tunnel } = opened;
     let unsaved = unsaved_host_key(tunnel.as_ref());
     c.info = conn.info().clone();
+    c.dialect = conn.dialect();
     c.catalog = Arc::new(catalog);
-    let old_browse = std::mem::replace(&mut c.browse, Arc::new(conn));
+    let old_browse = std::mem::replace(&mut c.browse, conn);
     let old_query = c.query.take();
     let query_reset = old_query.is_some();
     if let Some(run) = c.query_run.take() {
@@ -977,7 +979,7 @@ fn tell(s: &mut Session, note: Option<String>) {
 fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let conn = s.browse()?;
     let job = s.spawn_job(REFRESH, async move {
-        let result = load_catalog_within(&conn, CATALOG_TIMEOUT).await;
+        let result = load_catalog_within(conn.as_ref(), CATALOG_TIMEOUT).await;
         let apply: Apply = Box::new(move |s: &mut Session| {
             if !s.is_current_browse(&conn) {
                 return Ok(ignored());
@@ -1136,19 +1138,15 @@ mod tests {
             database: "dbee".into(),
             ..ConnectionConfig::default()
         };
-        let conn =
-            dbee_pg::connect(Target { config: &config, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false })
-                .await
-                .unwrap();
+        let driver = driver_for(&dbee_drivers::all(), config.kind).unwrap();
+        let target = || Target { config: &config, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false };
+        let conn = driver.connect(target()).await.unwrap();
         // No load can answer within no time at all: the first poll only sends the query.
         let started = Instant::now();
-        assert!(matches!(load_catalog_within(&conn, Duration::ZERO).await, Err(CatalogLoad::TimedOut)));
+        assert!(matches!(load_catalog_within(conn.as_ref(), Duration::ZERO).await, Err(CatalogLoad::TimedOut)));
         assert!(started.elapsed() < CANCEL_GRACE + Duration::from_secs(5), "{:?}", started.elapsed());
-        let fresh =
-            dbee_pg::connect(Target { config: &config, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false })
-                .await
-                .unwrap();
-        assert!(load_catalog_within(&fresh, CATALOG_TIMEOUT).await.is_ok_and(|c| c.table_count() > 10));
+        let fresh = driver.connect(target()).await.unwrap();
+        assert!(load_catalog_within(fresh.as_ref(), CATALOG_TIMEOUT).await.is_ok_and(|c| c.table_count() > 10));
         assert_eq!(catalog_error(CatalogLoad::TimedOut).code(), "timeout");
     }
 }

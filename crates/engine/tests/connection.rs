@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use common::*;
 use dbee_config::{ConnectionColor, ConnectionConfig, SecretError, SecretKind, SecretStore, SshAuth, SshConfig, SslMode};
+use dbee_driver::Drivers;
 use dbee_engine::{EngineError, Json, Outcome, UiRequest};
+use dbee_sql::Dialect;
 use dbee_testkit::{require_testdb, temp_home, unique};
 use serde_json::json;
 
@@ -189,6 +191,39 @@ fn test_command_reports_server() {
     assert!(!s.busy());
     let e = run_err(&mut s, "connection.test", json!({ "config": refused_config("refused") }));
     assert_eq!(e.code(), "connect", "{e}");
+}
+
+#[test]
+fn session_without_a_driver_says_so() {
+    let _db = require_testdb!();
+    let mut s = session_adjusted(|o| o.drivers = Drivers::default());
+    let id = save(&mut s, pg14_config(), Some(pw()));
+    for command in ["connection.test", "connection.open"] {
+        let e = run_err(&mut s, command, json!({ "id": id }));
+        assert!(matches!(e, EngineError::Disabled { ref why, .. } if why == "this build has no PostgreSQL driver"), "{command}: {e}");
+        assert!(!s.busy(), "{command} started a job");
+    }
+    assert_eq!(s.inspect()["kinds"], json!([]));
+}
+
+#[test]
+fn a_session_reports_the_kinds_it_can_open() {
+    let s = session();
+    let ids: Vec<&str> = dbee_drivers::all().kinds().into_iter().map(|k| k.id()).collect();
+    assert!(ids.contains(&"postgres"), "{ids:?}");
+    assert_eq!(s.kinds(), dbee_drivers::all().kinds());
+    assert_eq!(s.inspect()["kinds"], json!(ids));
+}
+
+#[test]
+fn summary_names_product_and_kind() {
+    let _db = require_testdb!();
+    let s = connected();
+    let c = s.state().connected.as_ref().unwrap();
+    let j = c.summary();
+    assert_eq!(j["kind"], "postgres");
+    assert!(j["server"].as_str().unwrap().starts_with("PostgreSQL 14."), "{j}");
+    assert_eq!((c.info.product.as_str(), c.dialect), ("PostgreSQL", Dialect::Postgres));
 }
 
 #[test]

@@ -8,16 +8,24 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
 use dbee_core::{Catalog, ResultSet, TableRef};
-use dbee_driver::ServerInfo;
-use dbee_pg::PgConnection;
+use dbee_driver::{Connection, Meaning, ServerInfo};
+use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::json;
 
 use crate::edits::Edits;
 use crate::jobs::Stop;
 use crate::{JobId, Json, TabId};
+
+/// The dialect SQL is read with while no connection is open (the query editor's colours then).
+pub const NO_CONNECTION_DIALECT: Dialect = Dialect::Postgres;
+
+/// What the result texts call the server: `PostgreSQL 14.12`.
+pub(crate) fn server_text(info: &ServerInfo) -> String {
+    format!("{} {}", info.product, info.version)
+}
 
 /// Which screen the window shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -37,14 +45,17 @@ pub enum Screen {
 pub struct Connected {
     pub config: ConnectionConfig,
     pub info: ServerInfo,
+    /// The server's SQL rules, from the browse connection: every statement the engine builds or
+    /// splits for this connection is in this dialect.
+    pub dialect: Dialect,
     pub catalog: Arc<Catalog>,
     /// The connection broke; commands that need the database wait for a reconnect.
     pub lost: bool,
     /// Table pages, counts, the catalog and applies.
-    pub(crate) browse: Arc<PgConnection>,
+    pub(crate) browse: Arc<dyn Connection>,
     /// Query tabs' statements; opened on the first query run (and again after a reconnect, or
     /// once it was lost).
-    pub(crate) query: Option<Arc<PgConnection>>,
+    pub(crate) query: Option<Arc<dyn Connection>>,
     /// The query run in progress: one at a time, since the query connection runs one statement at
     /// a time and a cancel request hits whatever runs on it.
     pub(crate) query_run: Option<QueryRun>,
@@ -59,10 +70,11 @@ impl std::fmt::Debug for Connected {
         f.debug_struct("Connected")
             .field("config", &self.config)
             .field("info", &self.info)
+            .field("dialect", &self.dialect)
             .field("tables", &self.catalog.table_count())
             .field("lost", &self.lost)
-            .field("browse", &self.browse)
-            .field("query", &self.query)
+            .field("browse_closed", &self.browse.is_closed())
+            .field("query_closed", &self.query.as_ref().map(|q| q.is_closed()))
             .field("query_run", &self.query_run)
             .field("tunnel", &self.tunnel)
             .field("credentials", &self.credentials)
@@ -71,21 +83,23 @@ impl std::fmt::Debug for Connected {
 }
 
 impl Connected {
-    /// `{id, name, color, host, port, database, user, ssh, readOnly, server, lost}`, as
-    /// `inspect()` and `connection.open` show it. Never a secret.
+    /// `{id, name, color, kind, host, port, database, user, ssh, readOnly, server, lost}`, as
+    /// `inspect()` and `connection.open` show it: `kind` is the database type's id, `server`
+    /// the product and its version (`PostgreSQL 14.12`). Never a secret.
     pub fn summary(&self) -> Json {
         let c = &self.config;
         json!({
             "id": c.id,
             "name": c.display_name(),
             "color": c.color,
+            "kind": c.kind,
             "host": c.host,
             "port": c.port,
             "database": c.database,
             "user": c.user,
             "ssh": c.ssh.is_some(),
             "readOnly": self.info.read_only,
-            "server": self.info.version,
+            "server": server_text(&self.info),
             "lost": self.lost,
         })
     }
@@ -178,17 +192,28 @@ pub struct StatementOutcome {
 pub struct QueryError {
     /// The error's `EngineError` code: `server`, `cancelled`, `readOnly`, `connectionLost`, ….
     pub code: &'static str,
-    /// The server's message with its SQLSTATE (`column "x" does not exist (SQLSTATE 42703)`), or
+    /// The server's message with its code (`column "x" does not exist (SQLSTATE 42703)`), or
     /// dbee's text for errors that are not the server's.
     pub message: String,
-    /// The server's SQLSTATE, for a server error (`25P02`: the transaction failed earlier).
-    pub sqlstate: Option<String>,
+    /// The server's own code, for a server error (Postgres's SQLSTATE: `42703`).
+    pub server_code: Option<String>,
+    /// What the server error means, when the driver knows: `transactionAborted` (a statement
+    /// failed earlier in the transaction, which refuses every statement until a ROLLBACK).
+    #[serde(serialize_with = "meaning_id")]
+    pub meaning: Option<Meaning>,
     pub detail: Option<String>,
     pub hint: Option<String>,
     /// Where the server says the error is, as a byte offset into the tab text.
     pub position: Option<usize>,
     /// The 0-based index of the statement that failed, among those the run ran.
     pub statement: usize,
+}
+
+fn meaning_id<S: Serializer>(meaning: &Option<Meaning>, s: S) -> Result<S::Ok, S::Error> {
+    match meaning {
+        None => s.serialize_none(),
+        Some(Meaning::TransactionAborted) => s.serialize_str("transactionAborted"),
+    }
 }
 
 /// A table tab's row count.
@@ -449,6 +474,11 @@ impl State {
 
     pub fn active_tab(&self) -> Option<&Tab> {
         self.active.and_then(|id| self.tab(id))
+    }
+
+    /// The SQL rules of the open connection; [`NO_CONNECTION_DIALECT`] when none is open.
+    pub fn dialect(&self) -> Dialect {
+        self.connected.as_ref().map_or(NO_CONNECTION_DIALECT, |c| c.dialect)
     }
 
     /// A fresh tab id.

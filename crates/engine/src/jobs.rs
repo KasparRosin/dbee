@@ -2,9 +2,9 @@
 //! ends in an [`Apply`] that changes the state on the caller's thread.
 //!
 //! A job is never aborted. Its task is detached (the join handle is dropped, which does not
-//! cancel it) and runs to its end, so a Postgres apply is never abandoned mid-transaction; work
-//! is stopped cooperatively, through `dbee_pg::Canceller`. A result whose tab has gone is
-//! ignored by its `Apply`.
+//! cancel it) and runs to its end, so an apply is never abandoned mid-transaction; work is
+//! stopped cooperatively, through the connection's `dbee_driver::Cancel`. A result whose tab has
+//! gone is ignored by its `Apply`.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::panic::AssertUnwindSafe;
@@ -258,7 +258,7 @@ impl Jobs {
 impl Drop for Jobs {
     /// Shuts the runtime down without waiting for its threads, so a session can be dropped
     /// anywhere, async code included. Jobs still running are dropped with it (at quit), and an
-    /// open Postgres transaction ends with its connection, rolled back by the server.
+    /// open transaction ends with its connection, rolled back by the server.
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();

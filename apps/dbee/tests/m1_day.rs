@@ -412,7 +412,7 @@ fn m1_day_end_to_end() {
         (json!("Shop live"), json!("red"), json!(true), json!(false)),
         "{d}"
     );
-    assert!(c["server"].as_str().is_some_and(|v| v.starts_with("14")), "pg14 behind the tunnel: {c}");
+    assert!(c["server"].as_str().is_some_and(|v| v.starts_with("PostgreSQL 14.")) && c["kind"] == "postgres", "pg14 behind the tunnel: {c}");
     assert_eq!(app.inspect()["dialog"], Json::Null, "nothing was asked");
     assert!(app.value("status-connection").as_str().is_some_and(|s| s.contains("Shop live")));
     app.shot(&root, "1-workspace");
@@ -481,6 +481,7 @@ fn m1_day_end_to_end() {
         (json!("billing"), json!("jsonb"), json!(true), json!(false)),
         "{v}"
     );
+    assert_eq!((v["kind"].clone(), v["kindLabel"].clone()), (json!("json"), json!("jsonb")), "{v}");
     let panel = app.value("value-panel");
     assert_eq!(
         (panel["column"].clone(), panel["type"].clone(), panel["label"].clone()),

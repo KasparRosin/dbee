@@ -12,7 +12,6 @@ pub const MAX_PRETTY_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JsonKind {
-    Jsonb,
     Json,
     TextContainingJson,
     JsonStringContainingJson,
@@ -22,7 +21,6 @@ pub enum JsonKind {
 impl JsonKind {
     pub fn label(self) -> &'static str {
         match self {
-            JsonKind::Jsonb => "jsonb",
             JsonKind::Json => "json",
             JsonKind::TextContainingJson => "text containing JSON",
             JsonKind::JsonStringContainingJson => "JSON string containing JSON",
@@ -351,12 +349,11 @@ fn hex4(chars: &mut std::str::Chars<'_>) -> Option<u32> {
     Some(v)
 }
 
-/// The kind of a `Json`-class column before its value is looked at: `jsonb` where the engine says
-/// so (Postgres `jsonb`), else plain JSON. Any other class is `NotJson`.
+/// The kind of a column before its value is looked at: a `Json`-class column is JSON, whatever
+/// the engine calls its type. Any other class is `NotJson`.
 pub fn column_kind(column: &Column) -> JsonKind {
-    match (column.class, column.base_type.as_str()) {
-        (TypeClass::Json, "jsonb") => JsonKind::Jsonb,
-        (TypeClass::Json, _) => JsonKind::Json,
+    match column.class {
+        TypeClass::Json => JsonKind::Json,
         _ => JsonKind::NotJson,
     }
 }
@@ -419,7 +416,7 @@ mod tests {
             typed("varchar", TypeClass::Text),
             typed("int4", TypeClass::Number),
         );
-        assert_eq!(classify(&jsonb, r#"{"a":1}"#), JsonKind::Jsonb);
+        assert_eq!(classify(&jsonb, r#"{"a":1}"#), JsonKind::Json);
         assert_eq!(classify(&jsonb, r#""{\"a\":1}""#), JsonKind::JsonStringContainingJson);
         assert_eq!(classify(&json, r#""just a string""#), JsonKind::Json);
         assert_eq!(classify(&text, r#"  {"a":1} "#), JsonKind::TextContainingJson);
@@ -427,7 +424,7 @@ mod tests {
         assert_eq!(classify(&text, "{not json"), JsonKind::NotJson);
         assert_eq!(classify(&text, "123"), JsonKind::NotJson);
         assert_eq!(classify(&int4, "1"), JsonKind::NotJson);
-        assert_eq!(column_kind(&jsonb), JsonKind::Jsonb);
+        assert_eq!(column_kind(&jsonb), JsonKind::Json, "whatever the engine calls the type");
         assert_eq!(column_kind(&json), JsonKind::Json);
         assert_eq!(column_kind(&text), JsonKind::NotJson);
         // Another engine's JSON column is plain JSON.

@@ -91,6 +91,7 @@ mod tests {
         let mut s = Session::new(SessionOptions {
             secrets: Some(std::sync::Arc::new(MemoryStore::default())),
             allowed_targets: Some(vec![("127.0.0.1".into(), server.port)]),
+            drivers: dbee_drivers::all(),
             ..SessionOptions::default()
         })
         .unwrap();

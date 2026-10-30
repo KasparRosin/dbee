@@ -7,15 +7,15 @@
 //! the edits name rows of the page shown; typing in the filter bar (`table.setFilters` with
 //! `apply: false`) does not. A page never lands on staged edits: one that would is ignored.
 //!
-//! **Loading a page** is a job on the browse connection. The command builds the statement first
-//! (SQL that cannot be built, like an unknown column or a `;` in the raw condition, is
-//! `BadParams` and changes nothing), then sets the tab's `applied`, `sort` and `page` to what it
-//! asked for, bumps the tab's `seq` and starts the job. The page statement asks for 101 rows:
-//! 100 are kept, and the 101st sets `has_next`. When the page's cell text passes the byte cap
-//! (`PAGE_LIMITS`, 256 MiB) fewer rows are kept and `page_complete` says so (`pageComplete` in
-//! `table.read` and `inspect()`). Columns are typed from the catalog. A load that
-//! fails sets `error` (the server's text) and puts `applied`, `sort` and `page` back to what the
-//! rows still shown were loaded with; the job's result is the error. `table.page {to: "last"}`
+//! **Loading a page** is a job on the browse connection. The command builds the statement first,
+//! in the connection's dialect (SQL that cannot be built, like an unknown column or a `;` in the
+//! raw condition, is `BadParams` and changes nothing), then sets the tab's `applied`, `sort` and
+//! `page` to what it asked for, bumps the tab's `seq` and starts the job. The page statement asks
+//! for 101 rows: 100 are kept, and the 101st sets `has_next`. When the page's cell text passes the
+//! byte cap (`PAGE_LIMITS`, 256 MiB) fewer rows are kept and `page_complete` says so
+//! (`pageComplete` in `table.read` and `inspect()`). Columns are typed from the catalog. A load
+//! that fails sets `error` (the server's text) and puts `applied`, `sort` and `page` back to what
+//! the rows still shown were loaded with; the job's result is the error. `table.page {to: "last"}`
 //! counts first, in the same job. `table.read` and `inspect()` give the rows with the page they
 //! are (`page`, from `shown`) and the page asked for (`requestedPage`).
 //!
@@ -45,9 +45,7 @@
 use std::sync::Arc;
 
 use dbee_core::{Catalog, Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef};
-use dbee_driver::{DbError, PAGE_LIMITS};
-use dbee_pg::PgConnection;
-use dbee_pg::query::{run_untyped, scalar_u64};
+use dbee_driver::{Connection, DbError, PAGE_LIMITS};
 use dbee_sql::Dialect;
 use dbee_sql::SqlError;
 use dbee_sql::filter::{Condition, Filter, Op, Sort, SortDir, where_sql};
@@ -279,12 +277,13 @@ fn opt_bool(params: &Json, key: &str) -> Result<Option<bool>, EngineError> {
     }
 }
 
-/// The planner's estimate for `cond` on `info`, when there is one to show at once: only when the
-/// condition restricts nothing (none, or only filter rows without a value), and only for
-/// relations that keep one (not views or foreign tables). The UI shows it by the same rule.
-pub fn quick_estimate(info: &TableInfo, cond: &Condition) -> Option<u64> {
+/// The planner's estimate for `cond` on `info` in `dialect`, when there is one to show at once:
+/// only when the condition restricts nothing (none, or only filter rows without a value), and
+/// only for relations that keep one (not views or foreign tables). The UI shows it by the same
+/// rule.
+pub fn quick_estimate(dialect: Dialect, info: &TableInfo, cond: &Condition) -> Option<u64> {
     let kept = matches!(info.kind, RelKind::Table | RelKind::PartitionedTable | RelKind::MaterializedView);
-    let unfiltered = matches!(where_sql(Dialect::Postgres, cond, info), Ok(None));
+    let unfiltered = matches!(where_sql(dialect, cond, info), Ok(None));
     if kept && unfiltered { info.estimated_rows } else { None }
 }
 
@@ -347,33 +346,35 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
 
 /// A page load, checked and ready to start.
 struct Plan {
-    conn: Arc<PgConnection>,
+    conn: Arc<dyn Connection>,
+    dialect: Dialect,
     info: TableInfo,
     view: PageView,
     /// Count first and load the last page (`view.page` is then not used).
     last: bool,
 }
 
-/// Checks that the statements for `view` can be built: `BadParams` when not.
-fn check(info: &TableInfo, view: &PageView, last: bool) -> Result<(), EngineError> {
-    page_sql(Dialect::Postgres, info, &view.applied, view.sort.as_ref(), view.page).map_err(sql_bad)?;
+/// Checks that the statements for `view` can be built in `dialect`: `BadParams` when not.
+fn check(dialect: Dialect, info: &TableInfo, view: &PageView, last: bool) -> Result<(), EngineError> {
+    page_sql(dialect, info, &view.applied, view.sort.as_ref(), view.page).map_err(sql_bad)?;
     if last {
-        count_sql(Dialect::Postgres, info, &view.applied).map_err(sql_bad)?;
+        count_sql(dialect, info, &view.applied).map_err(sql_bad)?;
     }
     Ok(())
 }
 
 /// [`check`], then takes the browse connection. Changes nothing but a lost mark.
 fn prepare(s: &mut Session, info: &TableInfo, view: PageView, last: bool) -> Result<Plan, EngineError> {
-    check(info, &view, last)?;
+    let dialect = s.state.dialect();
+    check(dialect, info, &view, last)?;
     let conn = s.browse()?;
-    Ok(Plan { conn, info: info.clone(), view, last })
+    Ok(Plan { conn, dialect, info: info.clone(), view, last })
 }
 
 /// Starts `plan` for tab `tab`: the tab asks for its view (a new condition forgets the total,
 /// `last` shows it as counting), its `seq` moves on, and the job runs.
 fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result<Outcome, EngineError> {
-    let Plan { conn, info, view, last } = plan;
+    let Plan { conn, dialect, info, view, last } = plan;
     let Some(t) = table_tab_mut(s, tab) else { return Err(bad(format!("no tab {} is open", tab.0))) };
     if t.applied != view.applied {
         t.total = Total::Unknown;
@@ -381,7 +382,7 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     t.applied = view.applied.clone();
     t.sort = view.sort.clone();
     if last {
-        t.total = Total::Counting { estimate: quick_estimate(&info, &view.applied) };
+        t.total = Total::Counting { estimate: quick_estimate(dialect, &info, &view.applied) };
     } else {
         t.page = view.page;
     }
@@ -390,7 +391,7 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     let columns: Vec<Column> = info.columns.iter().map(ColumnInfo::column).collect();
     let job_conn = Arc::clone(&conn);
     let job = s.spawn_job(label, async move {
-        let loaded = load(&job_conn, &info, &view, last).await;
+        let loaded = load(job_conn.as_ref(), dialect, &info, &view, last).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_load(s, &conn, tab, seq, view, last, columns, loaded));
         apply
     });
@@ -409,12 +410,12 @@ pub(crate) struct Loaded {
     page: Result<(u64, ResultSet), DbError>,
 }
 
-async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool) -> Loaded {
+async fn load(conn: &dyn Connection, dialect: Dialect, info: &TableInfo, view: &PageView, last: bool) -> Loaded {
     let mut page = view.page;
     let mut counted = None;
     if last {
-        let rows = match count_sql(Dialect::Postgres, info, &view.applied) {
-            Ok(sql) => scalar_u64(conn, &sql).await,
+        let rows = match count_sql(dialect, info, &view.applied) {
+            Ok(sql) => conn.scalar_u64(&sql).await,
             // Built once already, before the job started.
             Err(e) => Err(DbError::Other(e.to_string())),
         };
@@ -426,8 +427,8 @@ async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool
             Err(e) => return Loaded { counted, page: Err(e) },
         }
     }
-    let rows = match page_sql(Dialect::Postgres, info, &view.applied, view.sort.as_ref(), page) {
-        Ok(sql) => run_untyped(conn, &sql, PAGE_LIMITS).await,
+    let rows = match page_sql(dialect, info, &view.applied, view.sort.as_ref(), page) {
+        Ok(sql) => conn.run_untyped(&sql, PAGE_LIMITS).await,
         Err(e) => Err(DbError::Other(e.to_string())),
     };
     Loaded { counted, page: rows.map(|rs| (page, rs)) }
@@ -450,7 +451,7 @@ fn page_data(mut rs: ResultSet, columns: Vec<Column>) -> (ResultSet, bool, bool)
 
 fn apply_load(
     s: &mut Session,
-    conn: &Arc<PgConnection>,
+    conn: &Arc<dyn Connection>,
     tab: TabId,
     seq: u64,
     mut view: PageView,
@@ -519,6 +520,7 @@ fn apply_load(
 /// after it writes. [`Reload::prepare`] runs on the caller's thread and moves the tab's `seq` on;
 /// [`Reload::run`] loads in the job; [`Reload::finish`] applies the page like any other load.
 pub(crate) struct Reload {
+    dialect: Dialect,
     info: TableInfo,
     view: PageView,
     columns: Vec<Column>,
@@ -528,17 +530,18 @@ pub(crate) struct Reload {
 impl Reload {
     pub(crate) fn prepare(s: &mut Session, tab: TabId, info: &TableInfo) -> Result<Reload, EngineError> {
         let view = table_tab_mut(s, tab).map(|t| t.shown.clone()).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
-        check(info, &view, false)?;
+        let dialect = s.state.dialect();
+        check(dialect, info, &view, false)?;
         let t = table_tab_mut(s, tab).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
         t.seq = t.seq.wrapping_add(1);
-        Ok(Reload { info: info.clone(), view, columns: info.columns.iter().map(ColumnInfo::column).collect(), seq: t.seq })
+        Ok(Reload { dialect, info: info.clone(), view, columns: info.columns.iter().map(ColumnInfo::column).collect(), seq: t.seq })
     }
 
-    pub(crate) async fn run(&self, conn: &PgConnection) -> Loaded {
-        load(conn, &self.info, &self.view, false).await
+    pub(crate) async fn run(&self, conn: &dyn Connection) -> Loaded {
+        load(conn, self.dialect, &self.info, &self.view, false).await
     }
 
-    pub(crate) fn finish(self, s: &mut Session, conn: &Arc<PgConnection>, tab: TabId, loaded: Loaded) -> Result<Json, EngineError> {
+    pub(crate) fn finish(self, s: &mut Session, conn: &Arc<dyn Connection>, tab: TabId, loaded: Loaded) -> Result<Json, EngineError> {
         apply_load(s, conn, tab, self.seq, self.view, false, self.columns, loaded)
     }
 }
@@ -597,11 +600,12 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let raw_mode = raw_mode.unwrap_or(t.raw_mode);
     // SQL dbee will not build leaves the bar as it was; past that check the bar keeps what was
     // typed, even when the connection then turns out to be lost.
+    let dialect = s.state.dialect();
     let checked = if apply {
         let catalog = catalog(s)?;
         let info = lookup(&catalog, &table)?;
         let view = PageView { applied: condition(&filters, &raw, raw_mode), sort, page: 0 };
-        check(info, &view, false)?;
+        check(dialect, info, &view, false)?;
         Some((info.clone(), view))
     } else {
         None
@@ -613,7 +617,7 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     match checked {
         Some((info, view)) => {
             let conn = s.browse()?;
-            start(s, SET_FILTERS, tab, Plan { conn, info, view, last: false })
+            start(s, SET_FILTERS, tab, Plan { conn, dialect, info, view, last: false })
         }
         None => Ok(Outcome::Done(json!({ "tab": tab, "filters": t.filters, "raw": t.raw, "rawMode": t.raw_mode }))),
     }
@@ -710,12 +714,13 @@ fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let (tab, condition) = (t.id, t.applied.clone());
     let catalog = catalog(s)?;
     let info = lookup(&catalog, &t.table)?;
-    let sql = count_sql(Dialect::Postgres, info, &condition).map_err(sql_bad)?;
-    let estimate = quick_estimate(info, &condition);
+    let dialect = s.state.dialect();
+    let sql = count_sql(dialect, info, &condition).map_err(sql_bad)?;
+    let estimate = quick_estimate(dialect, info, &condition);
     let conn = s.browse()?;
     let job_conn = Arc::clone(&conn);
     let job = s.spawn_job(COUNT, async move {
-        let rows = scalar_u64(&job_conn, &sql).await;
+        let rows = job_conn.scalar_u64(&sql).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_count(s, &conn, tab, &condition, rows));
         apply
     });
@@ -728,7 +733,7 @@ fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 
 fn apply_count(
     s: &mut Session,
-    conn: &Arc<PgConnection>,
+    conn: &Arc<dyn Connection>,
     tab: TabId,
     condition: &Condition,
     rows: Result<u64, DbError>,

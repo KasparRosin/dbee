@@ -183,10 +183,11 @@ impl Edits {
         value.map(text)
     }
 
-    /// The statements that write the edits, each with its grid row: updates, then inserts, then
-    /// deletes. `NoKey` when the table has no row key or a loaded row lacks its key value,
-    /// `UnknownColumn` when a staged column or a key column is not in both the page and `info`.
-    pub fn statements(&self, info: &TableInfo, data: &ResultSet) -> Result<Vec<(usize, String)>, SqlError> {
+    /// The statements that write the edits in `dialect`, each with its grid row: updates, then
+    /// inserts, then deletes. `NoKey` when the table has no row key or a loaded row lacks its key
+    /// value, `UnknownColumn` when a staged column or a key column is not in both the page and
+    /// `info`.
+    pub fn statements(&self, dialect: Dialect, info: &TableInfo, data: &ResultSet) -> Result<Vec<(usize, String)>, SqlError> {
         if self.is_empty() {
             return Ok(Vec::new());
         }
@@ -215,14 +216,14 @@ impl Edits {
             }
         }
         for (row, changes) in changed {
-            out.push((row, update_sql(Dialect::Postgres, info, &key_of(row)?, &changes)?));
+            out.push((row, update_sql(dialect, info, &key_of(row)?, &changes)?));
         }
         for (i, values) in self.new_rows.iter().enumerate() {
             let values = values.iter().map(|(&col, v)| Ok((column(col)?, v))).collect::<Result<Vec<_>, SqlError>>()?;
-            out.push((data.rows.len().saturating_add(i), insert_sql(Dialect::Postgres, info, &values)?));
+            out.push((data.rows.len().saturating_add(i), insert_sql(dialect, info, &values)?));
         }
         for &row in &self.deleted {
-            out.push((row, delete_sql(Dialect::Postgres, info, &key_of(row)?)?));
+            out.push((row, delete_sql(dialect, info, &key_of(row)?)?));
         }
         Ok(out)
     }
@@ -544,7 +545,7 @@ mod tests {
         e.stage(&d, 0, 0, text("10"), None).unwrap();
         e.stage(&d, 0, 1, text("it's"), None).unwrap();
         assert_eq!(e.count(), 5);
-        let s = e.statements(&i, &d).unwrap();
+        let s = e.statements(Dialect::Postgres, &i, &d).unwrap();
         assert_eq!(
             s,
             [
@@ -561,7 +562,11 @@ mod tests {
         let mut one = Edits::default();
         one.stage(&d, 1, 2, text("3"), None).unwrap();
         assert_eq!(one.only_column(2, 1), Some(2));
-        assert_eq!(Edits::default().statements(&i, &d), Ok(vec![]));
+        assert_eq!(Edits::default().statements(Dialect::Postgres, &i, &d), Ok(vec![]));
+        // The same edits in another engine's SQL.
+        let mysql = e.statements(Dialect::MySql, &i, &d).unwrap();
+        assert!(mysql.iter().all(|(_, sql)| sql.contains("`s`.`t`")), "{mysql:?}");
+        assert_eq!(mysql.get(2).map(|(_, sql)| sql.as_str()), Some("INSERT INTO `s`.`t` () VALUES ()"));
     }
 
     #[test]
@@ -571,15 +576,15 @@ mod tests {
         e.stage(&d, 0, 1, text("b"), None).unwrap();
         let mut keyless = info();
         keyless.primary_key.clear();
-        assert_eq!(e.statements(&keyless, &d), Err(SqlError::NoKey));
+        assert_eq!(e.statements(Dialect::Postgres, &keyless, &d), Err(SqlError::NoKey));
         // A key value the page does not have, or a NULL one, cannot address the row.
         let mut null_key = d.clone();
         null_key.rows[0][0] = None;
-        assert_eq!(e.statements(&info(), &null_key), Err(SqlError::NoKey));
+        assert_eq!(e.statements(Dialect::Postgres, &info(), &null_key), Err(SqlError::NoKey));
         // A column the catalog no longer has.
         let mut renamed = info();
         renamed.columns[1].name = "label".into();
-        assert_eq!(e.statements(&renamed, &d), Err(SqlError::UnknownColumn("name".into())));
+        assert_eq!(e.statements(Dialect::Postgres, &renamed, &d), Err(SqlError::UnknownColumn("name".into())));
     }
 
     #[test]

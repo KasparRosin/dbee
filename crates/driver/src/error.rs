@@ -26,6 +26,17 @@ pub struct ServerError {
     pub meaning: Option<Meaning>,
 }
 
+impl ServerError {
+    /// The message with the code after it, labelled when the driver gives a label:
+    /// `column "x" does not exist (SQLSTATE 42703)`.
+    pub fn message_with_code(&self) -> String {
+        match self.code_label {
+            Some(label) => format!("{} ({label} {})", self.message, self.code),
+            None => format!("{} ({})", self.message, self.code),
+        }
+    }
+}
+
 /// Why a connection or a statement failed.
 ///
 /// The text of [`DbError::Server`], [`DbError::Auth`] and [`DbError::ReadOnly`] comes from the
@@ -78,15 +89,11 @@ impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DbError::Server(e) => {
-                let ServerError { code, code_label, message, detail, hint, .. } = &**e;
-                match code_label {
-                    Some(label) => write!(f, "{message} ({label} {code})")?,
-                    None => write!(f, "{message} ({code})")?,
-                }
-                if let Some(detail) = detail {
+                write!(f, "{}", e.message_with_code())?;
+                if let Some(detail) = &e.detail {
                     write!(f, "\nDetail: {detail}")?;
                 }
-                if let Some(hint) = hint {
+                if let Some(hint) = &e.hint {
                     write!(f, "\nHint: {hint}")?;
                 }
                 Ok(())
@@ -134,6 +141,10 @@ mod tests {
         assert_eq!(boxed(server("SQLITE_BUSY", None)).to_string(), "m (SQLITE_BUSY)");
         // Five characters say nothing on their own: only the driver's label names a SQLSTATE.
         assert_eq!(boxed(server("00942", None)).to_string(), "m (00942)");
+        assert_eq!(
+            (server("42703", Some("SQLSTATE")).message_with_code(), server("SQLITE_BUSY", None).message_with_code()),
+            ("m (SQLSTATE 42703)".to_owned(), "m (SQLITE_BUSY)".to_owned())
+        );
     }
 
     #[test]
@@ -145,6 +156,8 @@ mod tests {
             ..server("23505", Some("SQLSTATE"))
         });
         assert_eq!(e.to_string(), "duplicate key (SQLSTATE 23505)\nDetail: Key (id)=(1) already exists.\nHint: h");
+        let DbError::Server(s) = &e else { panic!("a server error") };
+        assert_eq!(s.message_with_code(), "duplicate key (SQLSTATE 23505)", "without the detail and the hint");
     }
 
     #[test]

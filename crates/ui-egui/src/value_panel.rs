@@ -750,7 +750,7 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
     }
     ui.add_space(6.0);
     body(&mut ui, view, state, tags);
-    let label = (!view.kind_label.is_empty()).then_some(view.kind_label);
+    let label = (!view.kind_label.is_empty()).then_some(view.kind_label.as_str());
     let head = json!({
         "column": view.column,
         "type": view.type_label,
@@ -778,7 +778,7 @@ fn header(ui: &mut egui::Ui, view: &ValueView) {
     }
     if !view.kind_label.is_empty() {
         ui.add_space(2.0);
-        let label = line_galley(ui, view.kind_label, FontId::proportional(11.5), t.accent, width - 12.0);
+        let label = line_galley(ui, &view.kind_label, FontId::proportional(11.5), t.accent, width - 12.0);
         let (pill, _) = ui.allocate_exact_size(vec2(label.size().x + 12.0, 18.0), Sense::hover());
         ui.painter().rect_filled(pill, CornerRadius::same(RADIUS.saturating_mul(2)), t.selection);
         ui.painter().galley(pos2(pill.left() + 6.0, pill.center().y - label.size().y / 2.0), label, t.accent);

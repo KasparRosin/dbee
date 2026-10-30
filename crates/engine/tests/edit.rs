@@ -146,6 +146,27 @@ fn clearing_rules() {
 }
 
 #[test]
+fn a_json_boolean_stages_the_engines_own_spelling() {
+    let _db = require_testdb!();
+    let (t, _drop) = make_table();
+    let mut s = opened(&t);
+    run(&mut s, "cell.edit", json!({ "row": 1, "column": "flag", "value": true }));
+    run(&mut s, "cell.edit", json!({ "row": 2, "column": "flag", "value": false }));
+    assert_eq!((staged(&s, 1, 4), staged(&s, 2, 4)), (Some(json!("t")), Some(json!("f"))), "as Postgres prints a bool");
+    // The loaded value again unstages it; numbers and text stay as given.
+    run(&mut s, "cell.edit", json!({ "row": 0, "column": "flag", "value": true }));
+    assert_eq!(staged(&s, 0, 4), None);
+    run(&mut s, "cell.edit", json!({ "row": 0, "column": "total", "value": 12.5 }));
+    run(&mut s, "cell.edit", json!({ "row": 0, "column": "name", "value": "true" }));
+    assert_eq!((staged(&s, 0, 2), staged(&s, 0, 1)), (Some(json!("12.5")), Some(json!("true"))));
+    run(&mut s, "edit.apply", json!({}));
+    assert_eq!(
+        q(&format!("SELECT string_agg(coalesce(flag::text, 'null') || ':' || name, ',' ORDER BY id) FROM scratch.{t}")),
+        "true:true,true:Bob,false:Cy"
+    );
+}
+
+#[test]
 fn failed_apply_writes_nothing_and_marks_the_row() {
     let _db = require_testdb!();
     let (t, _drop) = make_table();
@@ -645,7 +666,7 @@ fn values_that_do_not_fit_the_length_are_refused_not_cut() {
         ] {
             run(&mut s, "cell.edit", json!({ "row": 0, "column": column, "value": value }));
             let e = run_err(&mut s, "edit.apply", json!({}));
-            assert_eq!((e.code(), e.data()["sqlstate"].as_str()), ("server", Some(sqlstate)), "{on}: {column} = {value:?}: {e}");
+            assert_eq!((e.code(), e.data()["serverCode"].as_str()), ("server", Some(sqlstate)), "{on}: {column} = {value:?}: {e}");
             assert!(e.to_string().contains("nothing was written"), "{on}: {e}");
             assert_eq!(row(), before, "{on}: {column} = {value:?} wrote nothing");
             let failed = s.inspect()["table"]["failed"].clone();
@@ -658,7 +679,7 @@ fn values_that_do_not_fit_the_length_are_refused_not_cut() {
         run(&mut s, "cell.edit", json!({ "row": new, "column": "id", "value": "2" }));
         run(&mut s, "cell.edit", json!({ "row": new, "column": "c", "value": "abc" }));
         let e = run_err(&mut s, "edit.apply", json!({}));
-        assert_eq!((e.code(), e.data()["sqlstate"].as_str()), ("server", Some("22001")), "{on}: {e}");
+        assert_eq!((e.code(), e.data()["serverCode"].as_str()), ("server", Some("22001")), "{on}: {e}");
         assert_eq!(q(&format!("SELECT count(*) FROM scratch.{t}")), "1", "{on}: no row was added");
         run(&mut s, "edit.reset", json!({}));
 

@@ -364,6 +364,7 @@ fn session() -> Session {
         ssh: SshEnv::default(),
         notify: None,
         allowed_targets: None,
+        drivers: dbee_drivers::all(),
     };
     Session::new(options).unwrap()
 }

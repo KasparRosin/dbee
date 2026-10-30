@@ -30,3 +30,4 @@ rfd = { workspace = true }
 egui_kittest = { workspace = true }
 dbee-testkit = { workspace = true }
 dbee-ssh = { workspace = true }
+dbee-drivers = { workspace = true }

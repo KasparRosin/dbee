@@ -8,7 +8,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
-use dbee_engine::{EngineError, JobId, Json, Outcome, Session, Tab};
+use dbee_engine::{EngineError, JobId, Json, Meaning, Outcome, Session, Tab};
 use dbee_testkit::{require_testdb, unique};
 use serde_json::json;
 
@@ -132,7 +132,7 @@ fn error_position_maps_into_tab_text() {
     assert_eq!(e.code(), "server", "{e}");
     let at = text.find("nope").unwrap();
     assert_eq!((e.data()["position"].as_u64(), e.data()["statement"].as_u64()), (Some(at as u64), Some(1)), "{}", e.data());
-    assert_eq!(e.data()["sqlstate"], "42703");
+    assert_eq!(e.data()["serverCode"], "42703");
     let i = shown(&s);
     assert_eq!((i["error"]["position"].as_u64(), i["error"]["statement"].as_u64()), (Some(at as u64), Some(1)), "{i}");
     assert!(i["error"]["message"].as_str().unwrap().contains("nope"), "{i}");
@@ -141,6 +141,33 @@ fn error_position_maps_into_tab_text() {
     assert_eq!((i["results"].as_array().map(Vec::len), &i["shown"]), (Some(1), &json!(0)), "{i}");
     // A good run clears the error.
     run(&mut s, "query.setText", json!({ "text": "select 1" }));
+    run(&mut s, "query.run", json!({}));
+    assert_eq!(shown(&s)["error"], Json::Null);
+}
+
+#[test]
+fn a_failed_transaction_is_flagged() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    tab(&mut s, "BEGIN; SELECT 1 / 0");
+    run_err(&mut s, json!({}));
+    let error = |s: &Session| match s.state().active_tab() {
+        Some(Tab::Query(q)) => q.error.clone().unwrap(),
+        _ => panic!("a query tab is active"),
+    };
+    let e = error(&s);
+    assert_eq!((e.server_code.as_deref(), e.meaning), (Some("22012"), None), "{e:?}");
+    assert_eq!(shown(&s)["error"]["meaning"], Json::Null);
+    // The transaction stays open and failed: every statement is refused until a ROLLBACK.
+    run(&mut s, "query.setText", json!({ "text": "SELECT 1" }));
+    let failed = run_err(&mut s, json!({}));
+    assert_eq!((failed.code(), &failed.data()["serverCode"]), ("server", &json!("25P02")), "{failed}");
+    let e = error(&s);
+    assert_eq!((e.server_code.as_deref(), e.meaning), (Some("25P02"), Some(Meaning::TransactionAborted)), "{e:?}");
+    assert!(e.message.ends_with("(SQLSTATE 25P02)"), "{}", e.message);
+    let i = shown(&s);
+    assert_eq!((&i["error"]["serverCode"], &i["error"]["meaning"]), (&json!("25P02"), &json!("transactionAborted")), "{i}");
+    run(&mut s, "query.setText", json!({ "text": "ROLLBACK; SELECT 1" }));
     run(&mut s, "query.run", json!({}));
     assert_eq!(shown(&s)["error"], Json::Null);
 }

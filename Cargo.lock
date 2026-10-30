@@ -1066,6 +1066,7 @@ name = "dbee"
 version = "0.0.0"
 dependencies = [
  "dbee-config",
+ "dbee-drivers",
  "dbee-engine",
  "dbee-ssh",
  "dbee-testkit",
@@ -1135,7 +1136,7 @@ dependencies = [
  "dbee-config",
  "dbee-core",
  "dbee-driver",
- "dbee-pg",
+ "dbee-drivers",
  "dbee-sql",
  "dbee-ssh",
  "dbee-testkit",
@@ -1203,6 +1204,7 @@ version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-core",
+ "dbee-drivers",
  "dbee-engine",
  "dbee-sql",
  "dbee-ssh",
