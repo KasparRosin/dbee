@@ -30,17 +30,16 @@ Their licence texts ship with the binaries from the first release on ([docs/rele
 | Asset | Author | Source | Licence | Notes |
 |---|---|---|---|---|
 | `assets/app-icon/dbee-1024.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
-| `assets/app-icon/dbee.icns` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg and dbee-small.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
-| `assets/app-icon/dbee.ico` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg and dbee-small.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
+| `assets/app-icon/dbee.icns` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | Sizes below 64 px resized from the 64 px render |
+| `assets/app-icon/dbee.ico` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | Sizes below 64 px resized from the 64 px render |
 | `assets/app-icon/dbee-macos-512.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
 | `assets/app-icon/dbee.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
-| `assets/app-icon/dbee-small.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | The icon's 16 and 32 px drawing |
 | `assets/app-icon/hicolor/128x128/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
-| `assets/app-icon/hicolor/16x16/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee-small.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
-| `assets/app-icon/hicolor/24x24/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee-small.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
+| `assets/app-icon/hicolor/16x16/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | Resized from the 64 px render |
+| `assets/app-icon/hicolor/24x24/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | Resized from the 64 px render |
 | `assets/app-icon/hicolor/256x256/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
-| `assets/app-icon/hicolor/32x32/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee-small.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
-| `assets/app-icon/hicolor/48x48/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
+| `assets/app-icon/hicolor/32x32/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | Resized from the 64 px render |
+| `assets/app-icon/hicolor/48x48/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | Resized from the 64 px render |
 | `assets/app-icon/hicolor/512x512/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
 | `assets/app-icon/hicolor/64x64/apps/dev.rosin.dbee.png` | Kaspar Rosin and the dbee contributors | Generated from assets/app-icon/dbee.svg by packaging/icons.sh | MIT OR Apache-2.0 | |
 | `assets/app-icon/hicolor/scalable/apps/dev.rosin.dbee.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
