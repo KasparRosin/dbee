@@ -1,11 +1,10 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/banner-dark.svg">
-    <img src="assets/readme/banner-light.svg" alt="dbee">
-  </picture>
+  <img src="assets/app-icon/hicolor/256x256/apps/dev.rosin.dbee.png" alt="dbee" width="128">
 </p>
 
-<p align="center">A cross-platform desktop database client, written in Rust.</p>
+<h1 align="center">dbee</h1>
+
+<p align="center"><b>A fast, free database client for Linux, macOS and Windows.</b></p>
 
 <!-- Later, once CI runs on GitHub: one centred line of 2–3 badges here (CI, licence, latest release). -->
 
