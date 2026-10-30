@@ -9,6 +9,7 @@ Maintainer machines may have a local `plan/AGENTS.local.md` with machine-specifi
 
 ## Assets and iconography — absolute rule
 **No Beekeeper Studio (or any other vendor's) iconography, images, artwork, fonts, templates, themes, sample databases or help text — ever.** This is the most important rule in this repository; breaking it is a serious failure.
+- One exception: the logos of the database engines dbee connects to (PostgreSQL, MySQL, MariaDB, SQLite and later ones) may be shown to name that engine, for example on the connection screen. Use each owner's logo as published (Simple Icons, CC0, is a fine source), follow that owner's trademark guidelines, and never suggest the owner endorses dbee. Each logo file gets an `ATTRIBUTION.md` row naming the source, the licence and the trademark owner. Another database client's icons are never allowed.
 - Every asset in the repo is original work by dbee contributors, or public domain / CC0, or open source / Creative Commons that allows redistribution (or licensed open source by the contributor who created it).
 - Every asset file has a row in [`ATTRIBUTION.md`](ATTRIBUTION.md) (author, source, licence). `cargo xtask assets` enforces it. Adding an asset without a row is a bug.
 - Prefer art generated in code: the UI icon set, colour themes and sample databases are drawn or defined in code and original.

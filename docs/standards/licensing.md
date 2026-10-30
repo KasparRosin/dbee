@@ -18,7 +18,7 @@ Every new dependency gets a one-line justification in its commit and, for a sign
 
 ## Assets
 
-No Beekeeper Studio (or any other vendor's) iconography, images, artwork, fonts, templates, themes, sample databases or help text. See the asset rule in [`AGENTS.md`](../../AGENTS.md). Every asset file has a row in [`ATTRIBUTION.md`](../../ATTRIBUTION.md), enforced by `cargo xtask assets`.
+No Beekeeper Studio (or any other vendor's) iconography, images, artwork, fonts, templates, themes, sample databases or help text. One exception: the logos of the database engines dbee connects to, shown to name that engine, following each owner's trademark guidelines. See the asset rule in [`AGENTS.md`](../../AGENTS.md). Every asset file has a row in [`ATTRIBUTION.md`](../../ATTRIBUTION.md), enforced by `cargo xtask assets`.
 
 The binaries embed egui's default fonts through the `epaint_default_fonts` crate (OFL-1.1, Ubuntu Font Licence 1.0, MIT), listed in ATTRIBUTION.md. Their licence texts, and those of the statically linked crates, ship with the binaries from the first release on ([releasing](../releasing.md)).
 
