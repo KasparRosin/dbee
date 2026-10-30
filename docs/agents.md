@@ -1,6 +1,6 @@
 # Agents
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (the MCP server section is removed until the server exists)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** trivial (§6: commit subjects follow CONTRIBUTING.md)
 
 dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
 
@@ -55,7 +55,7 @@ Maintainers also keep a local planning folder, `plan/` (gitignored): the status 
 2. **Plan tests first.** Write down the acceptance test before the code.
 3. **Implement and test.**
 4. **Verify.** Run `cargo xtask ci`. For UI work, also take a screenshot of the window and look at it.
-5. **Record.** Update the progress docs the change touches (ROADMAP.md, `docs/gaps.md`, the parity docs, with their status lines and revision history). Commit as `M<n>.<k>: …`, one task id per commit, then move on.
+5. **Record.** Update the progress docs the change touches (ROADMAP.md, `docs/gaps.md`, the parity docs, with their status lines and revision history). Commit with a subject in the form [`CONTRIBUTING.md`](../CONTRIBUTING.md) gives, for example `feat(M2.6): …`, one task id per commit, then move on.
 
 For parallel agents see §9.
 
