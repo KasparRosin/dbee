@@ -77,7 +77,8 @@ pub const NO_TABLE_TAB: &str = "no table tab is active";
 /// Rows a page keeps.
 const PAGE_ROWS: usize = PAGE_SIZE as usize;
 
-/// The last page whose offset Postgres takes (`OFFSET` is a `bigint`).
+/// The last page dbee can reach: its `OFFSET` fits a signed 64-bit integer, which every engine
+/// takes.
 const MAX_PAGE: u64 = i64::MAX as u64 / PAGE_SIZE;
 
 /// The rows `table.read` returns when `limit` is not given.
@@ -645,7 +646,7 @@ fn parse_to(params: &Json) -> Result<To, EngineError> {
         },
         Some(n @ Json::Number(_)) => match n.as_u64().and_then(|n| n.checked_sub(1)) {
             Some(page) if page <= MAX_PAGE => Ok(To::Page(page)),
-            Some(_) => Err(bad("`to` is past the last page Postgres can reach")),
+            Some(_) => Err(bad("`to` is past the last page dbee can reach")),
             None => Err(bad(what)),
         },
         _ => Err(bad(what)),

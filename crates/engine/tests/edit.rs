@@ -167,6 +167,18 @@ fn a_json_boolean_stages_the_engines_own_spelling() {
 }
 
 #[test]
+fn a_json_boolean_keeps_its_text_outside_bool_columns() {
+    let _db = require_testdb!();
+    let (t, _drop) = make_table();
+    let mut s = opened(&t);
+    run(&mut s, "cell.edit", json!({ "row": 0, "column": "name", "value": true }));
+    run(&mut s, "cell.edit", json!({ "row": 1, "column": "doc", "value": true }));
+    assert_eq!((staged(&s, 0, 1), staged(&s, 1, 5)), (Some(json!("true")), Some(json!("true"))), "text and jsonb take `true`, not `t`");
+    run(&mut s, "edit.apply", json!({}));
+    assert_eq!(q(&format!("SELECT name || '|' || jsonb_typeof(doc) FROM scratch.{t} WHERE id IN (1, 2) ORDER BY id")), "true|object\nBob|boolean");
+}
+
+#[test]
 fn failed_apply_writes_nothing_and_marks_the_row() {
     let _db = require_testdb!();
     let (t, _drop) = make_table();

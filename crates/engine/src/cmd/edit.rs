@@ -8,8 +8,9 @@
 //! a table with a row key). Reset, undo and redo do not: they change only the staged edits, so a
 //! tab whose table was dropped, or that reconnected to a read-only server, can always drop them.
 //! Rows are grid rows (see [`crate::edits`]); `column` is a name or a 0-based index into the
-//! page's columns. A value is text or `null`; a number is taken as its text, and a boolean as the
-//! connection's own text for it (its dialect's `bool_literals`: Postgres `t` and `f`).
+//! page's columns. A value is text or `null`; a number or a boolean is taken as its text, except
+//! that a boolean in a Bool column takes the connection's own spelling (its dialect's
+//! `bool_literals`: Postgres `t` and `f`).
 //!
 //! **Apply** builds every statement on the caller's thread (`Edits::statements`; edits it cannot
 //! build are `BadParams` and change nothing), then runs one job on the browse connection: its
@@ -39,7 +40,7 @@
 
 use std::sync::Arc;
 
-use dbee_core::ResultSet;
+use dbee_core::{ResultSet, TypeClass};
 use dbee_driver::{ApplyError, Connection, DbError};
 use dbee_sql::Dialect;
 use dbee_sql::edit::NewValue;
@@ -267,18 +268,18 @@ fn column(params: &Json, data: &ResultSet) -> Result<usize, EngineError> {
     }
 }
 
-/// `value`: text, or `null` for NULL; a number is taken as its text, a boolean as `dialect`'s text
-/// for it.
-fn value(params: &Json, dialect: Dialect) -> Result<NewValue, EngineError> {
+/// `value` for a cell of class `class`: text, or `null` for NULL; a number or a boolean is taken
+/// as its text, but a boolean for a Bool column as `dialect`'s spelling of it.
+fn value(params: &Json, class: TypeClass, dialect: Dialect) -> Result<NewValue, EngineError> {
     match params.get("value") {
         None => Err(bad("`value` is required (text, or null for NULL)")),
         Some(Json::Null) => Ok(NewValue::Null),
         Some(Json::String(t)) => Ok(NewValue::Text(t.clone())),
-        Some(Json::Bool(b)) => {
+        Some(Json::Bool(b)) if class == TypeClass::Bool => {
             let (yes, no) = dialect.bool_literals();
             Ok(NewValue::Text(if *b { yes } else { no }.to_owned()))
         }
-        Some(v @ Json::Number(_)) => Ok(NewValue::Text(v.to_string())),
+        Some(v @ (Json::Number(_) | Json::Bool(_))) => Ok(NewValue::Text(v.to_string())),
         Some(_) => Err(bad("`value` must be text or null")),
     }
 }
@@ -333,11 +334,11 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
         Some(Tab::Table(t)) => t.table.clone(),
         _ => return Err(disabled(NO_TABLE_TAB)),
     };
-    let name = data.columns.get(col).map(|c| c.name.as_str()).unwrap_or_default();
+    let (name, class) = data.columns.get(col).map_or(("", TypeClass::Other), |c| (c.name.as_str(), c.class));
     // The cell's column in the catalog: what clearing stages, and whether Postgres computes it.
     let info = lookup(&catalog, &table).ok().and_then(|t| t.column(name));
     let value = match what {
-        Staging::Value => value(params, s.state.dialect())?,
+        Staging::Value => value(params, class, s.state.dialect())?,
         Staging::Null => NewValue::Null,
         Staging::Clear => {
             let info = info.ok_or_else(|| bad("the column is no longer in the schema (refresh it)"))?;

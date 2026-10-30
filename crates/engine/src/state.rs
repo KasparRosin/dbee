@@ -22,8 +22,8 @@ use crate::{JobId, Json, TabId};
 /// The dialect SQL is read with while no connection is open (the query editor's colours then).
 pub const NO_CONNECTION_DIALECT: Dialect = Dialect::Postgres;
 
-/// What the result texts call the server: `PostgreSQL 14.12`.
-pub(crate) fn server_text(info: &ServerInfo) -> String {
+/// What the result texts and the status bar call the server: `PostgreSQL 14.12`.
+pub fn server_text(info: &ServerInfo) -> String {
     format!("{} {}", info.product, info.version)
 }
 
