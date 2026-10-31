@@ -19,6 +19,7 @@ use dbee_mysql::wire::{MAX_PAYLOAD, Packets};
 use dbee_mysql::{Canceller, Flavor, MySqlConnection, connect, version_num, version_warning};
 use dbee_ssh::{AgentSource, SshEnv, SshSecrets, Tunnel};
 use dbee_testkit::{MyFlavor, MyServer, TempHome, TestDb, require_testdb, temp_home, unique};
+use mysql_common::auth::plugins::mysql_native_password::scramble_native;
 use mysql_common::constants::{CapabilityFlags, StatusFlags};
 use proptest::prelude::*;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -694,6 +695,7 @@ async fn auth_switch_to_an_unknown_method_is_auth_error() {
     for method in ["mysql_clear_password", "auth_gssapi_client", "client_ed25519"] {
         let caps = server_caps(true);
         let switch = [&[0xFE][..], method.as_bytes(), &[0], b"0123456789abcdefghij", &[0]].concat();
+        let again = switch.clone();
         let (port, server) = fake_server(frame(&greeting("8.0.99", "mysql_native_password", caps), 0), move |_| vec![switch.clone()]).await;
         let e = connect_fake(port).await.err().unwrap();
         assert_eq!(e.code(), "auth", "{method}: {e:?}");
@@ -703,10 +705,14 @@ async fn auth_switch_to_an_unknown_method_is_auth_error() {
         assert_eq!(got.len(), 1, "{method}: {got:?}");
         assert!(!holds_password(&got), "{method}");
 
-        // A greeting that asks for it at once gets no handshake response at all.
-        let (port, server) = fake_server(frame(&greeting("8.0.99", method, caps), 0), |_| vec![ok_packet(0, 0)]).await;
-        assert_eq!(connect_fake(port).await.err().map(|e| e.code()), Some("auth"), "{method}");
-        assert!(server.await.unwrap().is_empty(), "{method}");
+        // A greeting that names it is answered with a method dbee speaks; the switch back to it
+        // ends the login.
+        let (port, server) = fake_server(frame(&greeting("8.0.99", method, caps), 0), move |_| vec![again.clone()]).await;
+        let e = connect_fake(port).await.err().unwrap();
+        assert!(e.code() == "auth" && e.to_string().contains(method), "{method}: {e:?}");
+        let got = server.await.unwrap();
+        assert_eq!(got.len(), 1, "{method}: {got:?}");
+        assert!(got[0].ends_with(b"caching_sha2_password\0") && !holds_password(&got), "{method}");
     }
 }
 
@@ -778,29 +784,83 @@ async fn an_older_server_warns_and_goes_on() {
     assert!(!conn.is_closed(), "a server error leaves the connection usable");
 }
 
+/// Answers a fake MariaDB 11.4 that refuses some queries with errors (`q<errno>`) and hangs up on
+/// any other.
+fn answer_as_mariadb(payload: &[u8]) -> Vec<Vec<u8>> {
+    let sql = String::from_utf8_lossy(payload.get(1..).unwrap_or_default()).into_owned();
+    match payload.first() {
+        Some(0x03) if sql.starts_with("SELECT CONNECTION_ID()") => {
+            let mut p = vec![lenenc(2), column_def("a"), column_def("b")];
+            p.push([lenenc_str(b"7"), lenenc_str(b"11.4.2-MariaDB")].concat());
+            p.push(ok_packet(0xFE, 0));
+            p
+        }
+        Some(0x03) if sql.contains("@@session.tx_read_only") => one_value("x", Some("0"), true),
+        Some(0x03) if sql.starts_with("SET") => vec![ok_packet(0, 0)],
+        Some(0x03) if sql == "q1146" => vec![err_packet(1146, "Table 'shop.x' doesn't exist")],
+        Some(0x03) if sql == "q1317" => vec![err_packet(1317, "Query execution was interrupted")],
+        Some(0x03) if sql == "q1792" => vec![err_packet(1792, "Cannot execute statement in a READ ONLY transaction")],
+        Some(0x03) => vec![],
+        _ => vec![ok_packet(0, 0)],
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_greeting_method_is_answered_with_a_known_one() {
+    // MariaDB's greeting names client_ed25519; dbee answers with mysql_native_password, and the
+    // server's switch to it, with a new challenge, gets that method's scramble.
+    let nonce = *b"ABCDEFGHIJKLMNOPQRST";
+    let mut step = 0;
+    let answer = move |payload: &[u8]| -> Vec<Vec<u8>> {
+        step += 1;
+        match step {
+            1 => vec![[&[0xFE][..], b"mysql_native_password\0", &nonce, &[0]].concat()],
+            2 => vec![ok_packet(0, 0)],
+            _ => answer_as_mariadb(payload),
+        }
+    };
+    let (port, server) = fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "client_ed25519", server_caps(true)), 0), answer).await;
+    let conn = connect_fake(port).await.unwrap();
+    assert_eq!(conn.info().product, "MariaDB");
+    drop(conn);
+    let got = server.await.unwrap();
+    assert!(got[0].ends_with(b"mysql_native_password\0"), "{got:?}");
+    assert_eq!(got[1], scramble_native(&nonce, FAKE_PASSWORD.as_bytes()).unwrap());
+    assert!(!holds_password(&got));
+}
+
+#[tokio::test]
+async fn a_read_only_check_error_is_reported_as_itself() {
+    // Only "no such variable" (1193) moves on to the other spelling.
+    let answer = |payload: &[u8]| -> Vec<Vec<u8>> {
+        let sql = String::from_utf8_lossy(payload.get(1..).unwrap_or_default()).into_owned();
+        match payload.first() {
+            Some(0x03) if sql.contains("@@session.transaction_read_only") => vec![err_packet(1227, "Access denied; you need the SUPER privilege")],
+            _ => answer_as_mysql56(payload),
+        }
+    };
+    let (port, server) = fake_server(frame(&greeting("5.6.51-log", "mysql_native_password", server_caps(false)), 0), answer).await;
+    let e = connect_fake(port).await.err().unwrap();
+    assert!(matches!(&e, DbError::Server(s) if s.code == "1227"), "{e:?}");
+    let got = server.await.unwrap();
+    assert!(!got.iter().any(|p| p.windows(12).any(|w| w == b"tx_read_only")), "asked for the other spelling");
+}
+
+#[tokio::test]
+async fn a_server_without_found_rows_is_refused() {
+    let caps = server_caps(true) & !CapabilityFlags::CLIENT_FOUND_ROWS.bits();
+    let (port, server) = fake_server(frame(&greeting("8.0.99", "mysql_native_password", caps), 0), |_| vec![ok_packet(0, 0)]).await;
+    let e = connect_fake(port).await.err().unwrap();
+    assert!(matches!(&e, DbError::Connect(m) if m.contains("CLIENT_FOUND_ROWS")), "{e:?}");
+    assert!(server.await.unwrap().is_empty(), "refused before the handshake response");
+}
+
 /// A fake MariaDB server's error packets: the error number with its flavor's label, or what
 /// dbee makes of the number.
 #[tokio::test]
 async fn server_errors_carry_the_errno_and_flavor() {
-    let answer = |payload: &[u8]| -> Vec<Vec<u8>> {
-        let sql = String::from_utf8_lossy(payload.get(1..).unwrap_or_default()).into_owned();
-        match payload.first() {
-            Some(0x03) if sql.starts_with("SELECT CONNECTION_ID()") => {
-                let mut p = vec![lenenc(2), column_def("a"), column_def("b")];
-                p.push([lenenc_str(b"7"), lenenc_str(b"11.4.2-MariaDB")].concat());
-                p.push(ok_packet(0xFE, 0));
-                p
-            }
-            Some(0x03) if sql.contains("@@session.tx_read_only") => one_value("x", Some("0"), true),
-            Some(0x03) if sql.starts_with("SET") => vec![ok_packet(0, 0)],
-            Some(0x03) if sql == "q1146" => vec![err_packet(1146, "Table 'shop.x' doesn't exist")],
-            Some(0x03) if sql == "q1317" => vec![err_packet(1317, "Query execution was interrupted")],
-            Some(0x03) if sql == "q1792" => vec![err_packet(1792, "Cannot execute statement in a READ ONLY transaction")],
-            Some(0x03) => vec![],
-            _ => vec![ok_packet(0, 0)],
-        }
-    };
-    let (port, _server) = fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0), answer).await;
+    let (port, _server) =
+        fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0), answer_as_mariadb).await;
     let conn = connect_fake(port).await.unwrap();
     assert_eq!((conn.info().product.as_str(), conn.info().version_num), ("MariaDB", 110402));
     let e = conn.query_text("q1146").await.unwrap_err();
@@ -978,7 +1038,7 @@ proptest! {
     fn hostile_results_never_panic(
         deprecate_eof in any::<bool>(),
         count in 0u64..4,
-        defs in prop::collection::vec(prop_oneof![packet(), mutated(column_def("c"))], 0..4),
+        defs in prop::collection::vec(prop_oneof![packet(), mutated(column_def("c")), Just(column_def(&"n".repeat(70_000)))], 0..4),
         rows in prop::collection::vec(packet(), 0..4),
     ) {
         let answer = [vec![lenenc(count)], defs, rows].concat();

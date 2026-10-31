@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use dbee_config::SslMode;
 use dbee_driver::{CONNECT_TIMEOUT, DbError, Purpose, QUERY_LIMITS, ServerInfo, Target, tls};
@@ -11,11 +12,13 @@ use dbee_ssh::Tunnel;
 use mysql_common::constants::{CapabilityFlags, Command};
 use rustls::pki_types::ServerName;
 use rustls::{AlertDescription, ClientConfig};
+use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::auth::{self, Login};
 use crate::cancel::{Canceller, KillRoute, Statements};
+use crate::errors;
 use crate::flavor::{Flavor, version_num, version_warning};
 use crate::wire::{self, MAX_PAYLOAD, Packets, Stream, TextResult};
 
@@ -26,8 +29,16 @@ const LOGIN_MAX_PAYLOAD: usize = 64 * 1024;
 /// Works when the server's mode is empty.
 const BROWSE_SQL_MODE: &str = "SET SESSION sql_mode = TRIM(BOTH ',' FROM CONCAT(@@SESSION.sql_mode, ',STRICT_ALL_TABLES,NO_BACKSLASH_ESCAPES'))";
 
-/// Why a TLS handshake that the server ended with one of these alerts failed.
+/// Why a TLS handshake failed that the server ended with a handshake-failure or
+/// insufficient-security alert, or with a protocol-version alert.
 const NO_SHARED_CIPHER: &str = "the server offers only TLS ciphers dbee does not support; connect through an SSH tunnel instead";
+const NO_SHARED_VERSION: &str = "the server offers only TLS versions dbee does not support; connect through an SSH tunnel instead";
+
+/// TCP keepalive on direct connections, as for Postgres: the first probe after this long
+/// without traffic, then one this often, and the connection is dead after this many unanswered.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const KEEPALIVE_RETRIES: u32 = 3;
 
 /// Where a connection goes: directly to `host:port`, or through the tunnel to it.
 #[derive(Clone)]
@@ -105,8 +116,15 @@ async fn open_stream(route: &Route) -> Result<Stream, DbError> {
         return Ok(Box::new(tunnel.connect(&route.host, route.port).await?));
     }
     let tcp = TcpStream::connect((route.host.as_str(), route.port)).await.map_err(|e| DbError::Connect(e.to_string()))?;
-    tcp.set_nodelay(true).map_err(|e| DbError::Connect(e.to_string()))?;
+    tune(&tcp).map_err(|e| DbError::Connect(e.to_string()))?;
     Ok(Box::new(tcp))
+}
+
+/// A direct connection's socket options: no delay for small packets, and keepalive probes.
+fn tune(tcp: &TcpStream) -> std::io::Result<()> {
+    tcp.set_nodelay(true)?;
+    let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_IDLE).with_interval(KEEPALIVE_INTERVAL).with_retries(KEEPALIVE_RETRIES);
+    SockRef::from(tcp).set_tcp_keepalive(&keepalive)
 }
 
 /// Run the TLS handshake on the session's stream; the server name checked is the configured
@@ -120,9 +138,10 @@ async fn start_tls(packets: Packets, config: Arc<ClientConfig>, host: &str) -> R
 
 fn tls_error(e: &std::io::Error) -> DbError {
     match e.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()) {
-        Some(rustls::Error::AlertReceived(
-            AlertDescription::HandshakeFailure | AlertDescription::InsufficientSecurity | AlertDescription::ProtocolVersion,
-        )) => DbError::Tls(NO_SHARED_CIPHER.into()),
+        Some(rustls::Error::AlertReceived(AlertDescription::HandshakeFailure | AlertDescription::InsufficientSecurity)) => {
+            DbError::Tls(NO_SHARED_CIPHER.into())
+        }
+        Some(rustls::Error::AlertReceived(AlertDescription::ProtocolVersion)) => DbError::Tls(NO_SHARED_VERSION.into()),
         Some(inner) => DbError::Tls(inner.to_string()),
         None => DbError::Tls(e.to_string()),
     }
@@ -253,7 +272,7 @@ async fn read_only_state(session: &mut Session, flavor: Flavor) -> Result<(&'sta
                 let [value] = setup_row(r, variable)?;
                 return Ok((variable, value.unwrap_or_default()));
             }
-            Err(DbError::Server(_)) => {}
+            Err(e) if errors::is_errno(&e, errors::ER_UNKNOWN_SYSTEM_VARIABLE) => {}
             Err(e) => return Err(e),
         }
     }
@@ -349,5 +368,34 @@ impl MySqlConnection {
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_alerts_say_what_the_server_lacks() {
+        let alert = |a| tls_error(&std::io::Error::new(std::io::ErrorKind::InvalidData, rustls::Error::AlertReceived(a)));
+        assert_eq!(alert(AlertDescription::HandshakeFailure), DbError::Tls(NO_SHARED_CIPHER.into()));
+        assert_eq!(alert(AlertDescription::InsufficientSecurity), DbError::Tls(NO_SHARED_CIPHER.into()));
+        let versions = alert(AlertDescription::ProtocolVersion);
+        assert_eq!(versions, DbError::Tls(NO_SHARED_VERSION.into()));
+        assert!(versions.to_string().contains("TLS versions") && versions.to_string().contains("SSH tunnel"), "{versions}");
+        assert_eq!(alert(AlertDescription::BadCertificate).code(), "tls");
+    }
+
+    // socket2 reads the keepalive times back on Unix only.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn direct_connections_have_keepalive() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        tune(&tcp).unwrap();
+        let sock = socket2::SockRef::from(&tcp);
+        assert!(tcp.nodelay().unwrap() && sock.keepalive().unwrap());
+        let set = (sock.tcp_keepalive_time().unwrap(), sock.tcp_keepalive_interval().unwrap(), sock.tcp_keepalive_retries().unwrap());
+        assert_eq!(set, (KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_RETRIES));
     }
 }

@@ -3,8 +3,9 @@
 //!
 //! The password leaves dbee only as a scramble, encrypted with the server's RSA key, or in clear
 //! over TLS: [`cleartext`] is the one place that sends it so, and it refuses without TLS. A
-//! method dbee does not speak (`mysql_clear_password` among them) ends the login before the
-//! password is used. Nothing here logs the password, a scramble or the RSA exchange.
+//! switch to a method dbee does not speak (`mysql_clear_password` among them) ends the login
+//! before the password is used; a greeting that names one is answered with the flavor's default
+//! method. Nothing here logs the password, a scramble or the RSA exchange.
 
 use dbee_driver::DbError;
 use mysql_common::auth::plugins::caching_sha2_password::scramble_sha256;
@@ -31,9 +32,12 @@ const WANTED: CapabilityFlags = CapabilityFlags::CLIENT_PROTOCOL_41
     .union(CapabilityFlags::CLIENT_TRANSACTIONS)
     .union(CapabilityFlags::CLIENT_DEPRECATE_EOF);
 
-/// What the server must offer: the 4.1 protocol with plugin logins (MySQL 5.5 and newer).
-const REQUIRED: CapabilityFlags =
-    CapabilityFlags::CLIENT_PROTOCOL_41.union(CapabilityFlags::CLIENT_SECURE_CONNECTION).union(CapabilityFlags::CLIENT_PLUGIN_AUTH);
+/// What the server must offer: the 4.1 protocol with plugin logins (MySQL 5.5 and newer), and
+/// matched rather than changed rows in the counts Apply checks.
+const REQUIRED: CapabilityFlags = CapabilityFlags::CLIENT_PROTOCOL_41
+    .union(CapabilityFlags::CLIENT_SECURE_CONNECTION)
+    .union(CapabilityFlags::CLIENT_PLUGIN_AUTH)
+    .union(CapabilityFlags::CLIENT_FOUND_ROWS);
 
 /// A login takes a handful of packets; a server that goes on is refused.
 const MAX_LOGIN_PACKETS: usize = 8;
@@ -73,8 +77,10 @@ fn not_mysql() -> DbError {
     DbError::Connect("the server did not answer like a MySQL or MariaDB server".into())
 }
 
-fn too_old() -> DbError {
-    DbError::Connect("the server is older than MySQL 5.5's protocol (plugin logins), which dbee needs".into())
+/// A server without some of [`REQUIRED`].
+fn lacks(missing: CapabilityFlags) -> DbError {
+    let names: Vec<&str> = missing.iter_names().map(|(name, _)| name).collect();
+    DbError::Connect(format!("the server does not offer {}, which dbee needs", names.join(", ")))
 }
 
 fn out_of_turn() -> DbError {
@@ -101,7 +107,7 @@ fn check_greeting(payload: &[u8]) -> Result<(), DbError> {
     let fixed: &[u8; 31] = payload.get(at..at.saturating_add(31)).and_then(|f| f.try_into().ok()).ok_or_else(not_mysql)?;
     let caps = CapabilityFlags::from_bits_truncate(u32::from_le_bytes([fixed[13], fixed[14], fixed[18], fixed[19]]));
     if !caps.contains(REQUIRED) {
-        return Err(too_old());
+        return Err(lacks(REQUIRED.difference(caps)));
     }
     let challenge_len = usize::from(fixed[20]);
     if !(8..=127).contains(&challenge_len) {
@@ -137,7 +143,7 @@ pub(crate) fn parse_greeting(payload: &[u8]) -> Result<Greeting, DbError> {
 /// and a database at login when asked for.
 pub(crate) fn capabilities(g: &Greeting, tls: bool, database: bool) -> Result<CapabilityFlags, DbError> {
     if !g.capabilities.contains(REQUIRED) {
-        return Err(too_old());
+        return Err(lacks(REQUIRED.difference(g.capabilities)));
     }
     let mut caps = WANTED & g.capabilities;
     if tls {
@@ -190,6 +196,15 @@ impl Method {
                 let shown: String = other.iter().take(64).map(|&b| if b.is_ascii_graphic() { char::from(b) } else { '?' }).collect();
                 Err(DbError::Auth { message: format!("the server asks for the login method {shown}, which dbee does not support") })
             }
+        }
+    }
+
+    /// The answer to a greeting that names a method dbee does not speak: the flavor's own
+    /// default, which the server's auth switch then corrects.
+    fn default_for(flavor: Flavor) -> Method {
+        match flavor {
+            Flavor::MySql => Method::CachingSha2,
+            Flavor::MariaDb => Method::Native,
         }
     }
 
@@ -259,7 +274,7 @@ fn handshake_response(g: &Greeting, who: &Login<'_>, caps: CapabilityFlags, meth
 /// Log in after greeting `g`, on `p` (over TLS when `tls`), until the server's OK packet.
 pub(crate) async fn login(p: &mut Packets, g: &Greeting, who: &Login<'_>, caps: CapabilityFlags, tls: bool) -> Result<(), DbError> {
     let flavor = Flavor::from_version(&g.version);
-    let mut method = Method::named(&g.plugin)?;
+    let mut method = Method::named(&g.plugin).unwrap_or_else(|_| Method::default_for(flavor));
     let mut nonce = g.nonce;
     let (answer, mut step) = method.first(who.password, &nonce, tls)?;
     log::debug!("mysql: logging in with {}", method.name());
@@ -335,7 +350,7 @@ mod tests {
     #[test]
     fn capabilities_follow_the_server() {
         let old = greeting(CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_SECURE_CONNECTION, (5, 1, 0));
-        assert_eq!(capabilities(&old, false, false).unwrap_err(), too_old());
+        assert!(matches!(capabilities(&old, false, false).unwrap_err(), DbError::Connect(m) if m.contains("CLIENT_PLUGIN_AUTH")));
         let no_eof = greeting(REQUIRED | CapabilityFlags::CLIENT_FOUND_ROWS, (5, 6, 0));
         assert_eq!(capabilities(&no_eof, false, false).unwrap(), REQUIRED | CapabilityFlags::CLIENT_FOUND_ROWS);
         assert_eq!(capabilities(&no_eof, false, true).unwrap_err().code(), "connect");
@@ -359,7 +374,14 @@ mod tests {
         for len in [0, 7, 60, 127, 128, 135, 255] {
             assert_eq!(parse_greeting(&greeting_bytes(CapabilityFlags::all(), len)).unwrap_err().code(), "connect", "{len}");
         }
-        assert_eq!(parse_greeting(&greeting_bytes(CapabilityFlags::CLIENT_PROTOCOL_41, 21)).unwrap_err(), too_old());
+        let e = parse_greeting(&greeting_bytes(CapabilityFlags::CLIENT_PROTOCOL_41, 21)).unwrap_err();
+        assert_eq!(
+            e,
+            DbError::Connect("the server does not offer CLIENT_FOUND_ROWS, CLIENT_SECURE_CONNECTION, CLIENT_PLUGIN_AUTH, which dbee needs".into())
+        );
+        let no_found_rows = CapabilityFlags::all().difference(CapabilityFlags::CLIENT_FOUND_ROWS);
+        let e = parse_greeting(&greeting_bytes(no_found_rows, 21)).unwrap_err();
+        assert_eq!(e, DbError::Connect("the server does not offer CLIENT_FOUND_ROWS, which dbee needs".into()));
         let mut panicked = vec![10];
         panicked.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 0, 168, 0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(parse_greeting(&panicked).unwrap_err().code(), "connect");

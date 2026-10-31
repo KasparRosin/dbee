@@ -31,6 +31,9 @@ const CHUNK: usize = 0xFF_FFFF;
 /// More columns than any table can have (MySQL's limit is 4096).
 const MAX_COLUMNS: u64 = 65_535;
 
+/// The largest column definition dbee reads: names of up to 64 characters, far under this.
+const MAX_COLUMN_DEFINITION: usize = 64 * 1024;
+
 const MIB: usize = 1024 * 1024;
 
 /// Framed packets on a stream, with the sequence ids of the exchange in progress.
@@ -79,6 +82,13 @@ impl Packets {
     /// [`DbError::ConnectionLost`]; a packet out of sequence or a payload over the cap is
     /// [`DbError::Other`], checked from each header before its payload is read.
     pub async fn read(&mut self) -> Result<Vec<u8>, DbError> {
+        self.read_up_to(self.max, "packet").await
+    }
+
+    /// [`Packets::read`], capped at `max` bytes as well; a payload over it is refused as a
+    /// `what` larger than that.
+    pub(crate) async fn read_up_to(&mut self, max: usize, what: &str) -> Result<Vec<u8>, DbError> {
+        let max = max.min(self.max);
         let mut payload = Vec::new();
         loop {
             let mut header = [0u8; 4];
@@ -89,8 +99,8 @@ impl Packets {
                 return Err(DbError::Other(format!("the server sent packet {seq} where packet {} was due", self.seq)));
             }
             self.seq = self.seq.wrapping_add(1);
-            if payload.len().saturating_add(len) > self.max {
-                return Err(DbError::Other(format!("the server sent a packet larger than {}", size_text(self.max))));
+            if payload.len().saturating_add(len) > max {
+                return Err(DbError::Other(format!("the server sent a {what} larger than {}", size_text(max))));
             }
             let want = payload.len().saturating_add(len);
             (&mut self.io).take(len as u64).read_to_end(&mut payload).await.map_err(|_| DbError::ConnectionLost)?;
@@ -124,7 +134,11 @@ impl Packets {
 }
 
 fn size_text(bytes: usize) -> String {
-    if bytes >= MIB { format!("{} MiB", bytes / MIB) } else { format!("{} KiB", bytes / 1024) }
+    match bytes {
+        b if b >= MIB => format!("{} MiB", b / MIB),
+        b if b >= 1024 => format!("{} KiB", b / 1024),
+        b => format!("{b} bytes"),
+    }
 }
 
 fn malformed(what: &str) -> DbError {
@@ -195,10 +209,17 @@ async fn read_rows(
         _ => return Err(malformed("column count")),
     };
     let mut columns = Vec::new();
+    // The column names count against the byte cap, with the cells.
+    let mut bytes: usize = 0;
     for _ in 0..count {
-        let def = p.read().await?;
+        let def = p.read_up_to(MAX_COLUMN_DEFINITION, "column definition").await?;
         let column = ParseBuf(&def).parse::<Column>(()).map_err(|_| malformed("column definition"))?;
-        columns.push(column.name_str().into_owned());
+        let name = column.name_str().into_owned();
+        bytes = bytes.saturating_add(name.len());
+        if bytes > limits.max_bytes {
+            return Err(DbError::Other(format!("the server sent column names larger than {}", size_text(limits.max_bytes))));
+        }
+        columns.push(name);
     }
     let old_eof = !caps.contains(CapabilityFlags::CLIENT_DEPRECATE_EOF);
     if old_eof {
@@ -209,7 +230,6 @@ async fn read_rows(
         parse_ok::<OldEofPacket>(&eof, caps)?;
     }
     let mut set = TextResult { columns, complete: true, ..TextResult::default() };
-    let mut bytes: usize = 0;
     loop {
         let packet = p.read().await?;
         match packet.first() {
@@ -469,6 +489,43 @@ mod tests {
         assert_eq!(ParseBuf(&v[6]).parse::<Column>(()).unwrap().name_str(), "name");
         // The parsers check the header byte.
         assert!(parse_ok::<CommonOkPacket>(&v[1], caps).is_err() && parse_ok::<ResultSetTerminator>(&v[0], caps).is_err());
+    }
+
+    /// Protocol::ColumnDefinition41 of a column `name`.
+    fn column_def(name: &str) -> Vec<u8> {
+        let lenenc =
+            |s: &[u8]| [if s.len() < 251 { vec![s.len() as u8] } else { [&[0xFD][..], &s.len().to_le_bytes()[..3]].concat() }, s.to_vec()].concat();
+        let mut p = Vec::new();
+        for part in [&b"def"[..], b"", b"", b"", name.as_bytes(), name.as_bytes()] {
+            p.extend(lenenc(part));
+        }
+        p.extend_from_slice(&[0x0C, 45, 0, 0, 4, 0, 0, 0xFD, 0, 0, 0, 0, 0]);
+        p
+    }
+
+    /// A one-column result set (column `name`, a row per value), framed from sequence id 0.
+    fn result_set(name: &str, values: &[&str]) -> Vec<u8> {
+        let mut payloads = vec![vec![1], column_def(name)];
+        payloads.extend(values.iter().map(|v| [&[v.len() as u8][..], v.as_bytes()].concat()));
+        payloads.push(vec![0xFE, 0, 0, 2, 0, 0, 0]);
+        payloads.iter().enumerate().map(|(i, p)| frame(p, i as u8)).collect::<Vec<_>>().concat()
+    }
+
+    #[tokio::test]
+    async fn column_definitions_and_names_are_capped() {
+        let caps = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF;
+        let small = Limits { max_rows: 100, max_bytes: 10 };
+        let read = |input: Vec<u8>, limits: Limits| async move {
+            let (mut p, _) = packets(input);
+            read_result(&mut p, caps, Flavor::MySql, limits).await
+        };
+        // The name's 6 bytes count with the cells': the second row does not fit in 10.
+        let r = read(result_set("abcdef", &["xyz", "xyz"]), small).await.unwrap();
+        assert_eq!((r.columns, r.rows, r.rows_seen, r.complete), (vec!["abcdef".to_owned()], vec![vec![Some("xyz".to_owned())]], 2, false));
+        let e = read(result_set("abcdefghijk", &[]), small).await.unwrap_err();
+        assert!(matches!(&e, DbError::Other(m) if m.contains("column names larger than")), "{e:?}");
+        let e = read(result_set(&"n".repeat(70_000), &[]), dbee_driver::QUERY_LIMITS).await.unwrap_err();
+        assert_eq!(e, DbError::Other("the server sent a column definition larger than 64 KiB".into()));
     }
 
     #[test]

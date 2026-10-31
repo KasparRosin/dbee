@@ -1172,6 +1172,7 @@ dependencies = [
  "mysql_common",
  "proptest",
  "rustls",
+ "socket2",
  "tokio",
  "tokio-rustls",
 ]
