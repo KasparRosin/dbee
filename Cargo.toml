@@ -19,6 +19,7 @@ dbee-config = { path = "crates/config" }
 dbee-ssh = { path = "crates/ssh" }
 dbee-driver = { path = "crates/driver" }
 dbee-pg = { path = "crates/pg" }
+dbee-mysql = { path = "crates/mysql" }
 dbee-drivers = { path = "crates/drivers" }
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }
@@ -42,6 +43,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 # so a new version must be checked against crates/pg/src/error.rs before it is taken.
 tokio-postgres = "=0.7.18"
 tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
+# MySQL's TLS upgrade on dbee's own stream; already in the tree through tokio-postgres-rustls.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# MySQL packets, login scrambles and RSA, no networking of its own; no default features (zlib, derive).
+mysql_common = { version = "0.38", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7"
 futures-util = "0.3"

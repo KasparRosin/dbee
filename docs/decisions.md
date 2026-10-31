@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (the driver interface)
+> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (dbee's own MySQL client; MySQL 5.7's TLS)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -115,3 +115,15 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 - **Decision:** `dbee-driver` (L3) holds the interface every database driver implements: the `Driver`, `Connection` and `Cancel` traits, one error type (`DbError`), `ServerInfo`, `Target`, the caps, the apply gate, the shared TLS setup and the `CatalogBuilder`. The drivers (`dbee-pg` now; MySQL/MariaDB and SQLite next) sit at L4, and `dbee-drivers` (L4) is their one list, which only the apps and test code use. `cargo xtask layers` keeps the engine and the UIs from taking a driver crate except as a dev-dependency.
 - **Families:** A driver serves a family of database types: the MySQL driver serves MySQL and MariaDB, and the Postgres driver can later serve Postgres-like servers. It names the types it opens, and each connection says which SQL dialect its server speaks.
 - **Why:** Each engine plugs in the same way, and shared logic (TLS, the apply gate, catalog building) exists once. Adding an engine is one driver crate, one dialect file and one registry line.
+
+## 2026-10-30: dbee's own MySQL client on mysql_common
+
+- **Decision:** `dbee-mysql` speaks MySQL's client/server protocol itself. `mysql_common` 0.38 (MIT OR Apache-2.0, default features off: no zlib, no derive macros) gives the packet structs, the login scrambles and RSA; the I/O is dbee's own: TCP or a channel through the SSH tunnel, upgraded to TLS by `tokio-rustls` 0.26 (default features off; `ring`, `tls12` and `logging`; already in the tree through `tokio-postgres-rustls`) with the same rustls verifier as Postgres. Values travel over the text protocol (`COM_QUERY`), as the server prints them. MariaDB is a flavor of the same driver, told by `@@version`, not by the connection's type.
+- **Logins:** `mysql_native_password`, `caching_sha2_password` (the fast path; the full path over TLS, or with the password encrypted with the server's RSA key) and `sha256_password` (the same rule). The password is never sent in clear without TLS; any other method (`mysql_clear_password` among them) ends the login before the password is used. Without TLS the RSA exchange keeps the password from a listener, not from a man in the middle, who can hand over a key of their own; TLS or the SSH tunnel protect against that.
+- **Hostile servers:** every length, count and offset a server sends is checked, and every `mysql_common` parser dbee feeds server bytes to is fuzzed. Two of them panic on hostile input (the greeting parser on a challenge length of 128 to 135, the RSA key's DER parser on a length past its data), so dbee checks those bytes against the documented layouts before handing them over.
+- **Why (checked 2026-10-28):** `mysql_async` 0.37's TLS needs `webpki-roots` (`rustls-tls`) or OpenSSL (`native-tls-tls`), both forbidden, and takes no stream of dbee's, so no tunnel channel; `sqlx` opens its own socket (a loopback forward) and checks certificates against the OS's roots, not through the OS verifier. `mysql_common` has no networking of its own.
+
+## 2026-10-30: MySQL 5.7's TLS is out of rustls's reach; plain direct and SSH work
+
+- **Decision:** The official `mysql:5.7` image offers TLS only with DHE-RSA ciphers on TLS 1.2, which rustls never speaks. dbee tells this from the TLS failure itself (the server's handshake alert), not from the version: `require`, `verify-ca` and `verify-full` fail with a TLS error that says the server offers only ciphers dbee does not support and points to an SSH tunnel, and `prefer` connects without TLS, as libpq's `prefer` does after a failed handshake. Plain direct connections and connections through the SSH tunnel work.
+- **Why:** No new TLS stack (OpenSSL and aws-lc stay out) and no 5.7-only code path (spec amendment of 2026-10-29). The tunnel encrypts the link instead.

@@ -1,0 +1,27 @@
+[package]
+name = "dbee-mysql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "dbee MySQL and MariaDB driver (L4): dbee's own protocol client on mysql_common, with TLS, SSH tunnel, read-only mode and cancel"
+
+[lints]
+workspace = true
+
+[dependencies]
+dbee-config = { workspace = true }
+dbee-ssh = { workspace = true }
+dbee-driver = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+mysql_common = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+dbee-testkit = { workspace = true }
+proptest = { workspace = true }
