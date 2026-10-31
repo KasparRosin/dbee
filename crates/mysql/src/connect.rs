@@ -30,6 +30,9 @@ const LOGIN_MAX_PAYLOAD: usize = 64 * 1024;
 /// Works when the server's mode is empty.
 const BROWSE_SQL_MODE: &str = "SET SESSION sql_mode = TRIM(BOTH ',' FROM CONCAT(@@SESSION.sql_mode, ',STRICT_ALL_TABLES,NO_BACKSLASH_ESCAPES'))";
 
+/// The browse connection commits each statement outside an apply, whatever the server's default.
+const BROWSE_AUTOCOMMIT: &str = "SET SESSION autocommit = 1";
+
 /// Why a TLS handshake failed that the server ended with a handshake-failure or an
 /// insufficient-security alert (ciphers), or with a protocol-version alert (versions).
 const NO_SHARED_CIPHER: &str = "the server offers only TLS ciphers dbee does not support; connect through an SSH tunnel instead";
@@ -195,10 +198,10 @@ fn server_key(cfg: &ConnectionConfig, tunnel: bool) -> ServerKey {
 /// Open a connection on the caller's tokio runtime.
 ///
 /// After the login (as `utf8mb4_general_ci`, with `CLIENT_FOUND_ROWS`), the session runs `SET
-/// NAMES utf8mb4`; a browse connection also makes its `sql_mode` strict and turns backslash
-/// escapes off; a read-only connection runs `SET SESSION TRANSACTION READ ONLY`, which the
-/// flavor's variable must then confirm. In `prefer` mode a failed TLS handshake is tried again
-/// without TLS, as libpq does.
+/// NAMES utf8mb4`; a browse connection also makes its `sql_mode` strict, turns backslash
+/// escapes off and autocommit on; a read-only connection runs `SET SESSION TRANSACTION READ
+/// ONLY`, which the flavor's variable must then confirm. In `prefer` mode a failed TLS handshake
+/// is tried again without TLS, as libpq does.
 pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     // The timeouts need a runtime; without one they would panic.
     tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("connecting needs a tokio runtime".into()))?;
@@ -291,6 +294,7 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     session.query("SET NAMES utf8mb4", QUERY_LIMITS).await?;
     if purpose == Purpose::Browse {
         session.query(BROWSE_SQL_MODE, QUERY_LIMITS).await?;
+        session.query(BROWSE_AUTOCOMMIT, QUERY_LIMITS).await?;
     }
     if read_only {
         session.query("SET SESSION TRANSACTION READ ONLY", QUERY_LIMITS).await?;

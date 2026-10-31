@@ -49,13 +49,13 @@ async fn text_exactly_as_mysql_prints() {
         let sql = "SELECT CAST(1.50 AS DECIMAL(10,2)) n, TIMESTAMP '2024-01-02 03:04:05' t, NULL z, '' e, CAST(X'00FF' AS BINARY) b";
         let r = ok(&c, sql, QUERY_LIMITS).await;
         assert_eq!(r.rows[0], [Some("1.50".into()), Some("2024-01-02 03:04:05".into()), None, Some("".into()), Some("0x00FF".into())], "{}", s.name);
-        assert_eq!(names(&r), ["n", "t", "z", "e", "b"]);
+        assert_eq!(names(&r), ["n", "t", "z", "e", "b"], "{}", s.name);
         let classes: Vec<TypeClass> = r.columns.iter().map(|c| c.class).collect();
         assert_eq!(classes, [TypeClass::Number, TypeClass::DateTime, TypeClass::Other, TypeClass::Text, TypeClass::Binary], "{}", s.name);
         assert!(r.complete && r.rows_seen == 1 && r.rows_affected.is_none(), "{}: {r:?}", s.name);
         // Untyped, the values are the same; an empty binary value is `0x`.
         let u = c.run_untyped("SELECT CAST(X'00FF' AS BINARY) b, CAST('' AS BINARY) e, 'x' x", QUERY_LIMITS).await.unwrap();
-        assert_eq!(u.rows[0], [Some("0x00FF".into()), Some("0x".into()), Some("x".into())]);
+        assert_eq!(u.rows[0], [Some("0x00FF".into()), Some("0x".into()), Some("x".into())], "{}", s.name);
         assert!(u.columns.iter().all(|c| c.base_type.is_empty() && c.class == TypeClass::Other), "{}: {:?}", s.name, u.columns);
     }
 }
@@ -114,7 +114,12 @@ async fn classes_of_described_columns() {
             "{}",
             s.name
         );
-        assert_eq!(types[14..19], [("blob", "blob"), ("bit", "bit"), ("char", "char(36)"), ("varchar", "varchar(45)"), ("geometry", "geometry")]);
+        assert_eq!(
+            types[14..19],
+            [("blob", "blob"), ("bit", "bit"), ("char", "char(36)"), ("varchar", "varchar(45)"), ("geometry", "geometry")],
+            "{}",
+            s.name
+        );
         // Binary values as hex; the bool as the server prints it.
         let first = &r.rows[0];
         assert_eq!((first[4].as_deref(), first[14].as_deref(), first[15].as_deref()), (Some("1"), Some("0xDEADBEEF"), Some("0xA5")), "{}", s.name);
@@ -166,8 +171,15 @@ async fn a_mariadb_json_column_is_json() {
         // MariaDB's JSON is a LONGTEXT with a check; its extended metadata says it holds JSON.
         let c = open(s, db).await;
         let r = ok(&c, "SELECT doc, JSON_OBJECT('a', 1) j, note FROM shop.all_types ORDER BY id", QUERY_LIMITS).await;
-        let got: Vec<(&str, &str, TypeClass)> = r.columns.iter().map(|c| (c.name.as_str(), c.base_type.as_str(), c.class)).collect();
-        assert_eq!(got, [("doc", "json", TypeClass::Json), ("j", "json", TypeClass::Json), ("note", "text", TypeClass::LongText)], "{}", s.name);
+        // JSON_OBJECT(..) comes as a VARCHAR whose format is json: no length in its label.
+        let got: Vec<(&str, &str, &str, TypeClass)> =
+            r.columns.iter().map(|c| (c.name.as_str(), c.base_type.as_str(), c.type_label.as_str(), c.class)).collect();
+        assert_eq!(
+            got,
+            [("doc", "json", "json", TypeClass::Json), ("j", "json", "json", TypeClass::Json), ("note", "text", "text", TypeClass::LongText)],
+            "{}",
+            s.name
+        );
         assert_eq!(r.rows[0][0].as_deref(), Some(r#"{"a": {"b": [1, 2, 3]}, "s": "text"}"#), "{}", s.name);
         assert_eq!(r.rows[2][0], None, "{}", s.name);
         seen += 1;
@@ -182,8 +194,8 @@ async fn row_cap_keeps_first_and_counts_all() {
         let c = open(s, db).await;
         let r = ok(&c, "SELECT id FROM shop.big_rows ORDER BY id LIMIT 25000", QUERY_LIMITS).await;
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (10_000, 25_000, false), "{}", s.name);
-        assert_eq!(r.rows[0], [Some("1".to_owned())]);
-        assert_eq!(r.rows[9_999], [Some("10000".to_owned())]);
+        assert_eq!(r.rows[0], [Some("1".to_owned())], "{}", s.name);
+        assert_eq!(r.rows[9_999], [Some("10000".to_owned())], "{}", s.name);
         // The connection stayed in step.
         assert_eq!(c.scalar_u64("SELECT 7").await.unwrap(), 7, "{}", s.name);
     }
@@ -200,8 +212,8 @@ async fn byte_cap_stops_collecting() {
         let sql = "SELECT CAST(REPEAT('a', 1000) AS BINARY) b FROM shop.big_rows LIMIT 10";
         let r = ok(&c, sql, Limits { max_rows: 1000, max_bytes: 1 + 3 * 2002 }).await;
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (3, 10, false), "{}", s.name);
-        assert_eq!(r.rows[0][0].as_ref().map(String::len), Some(2002));
-        assert_eq!(c.scalar_u64("SELECT 1").await.unwrap(), 1);
+        assert_eq!(r.rows[0][0].as_ref().map(String::len), Some(2002), "{}", s.name);
+        assert_eq!(c.scalar_u64("SELECT 1").await.unwrap(), 1, "{}", s.name);
     }
 }
 
@@ -268,8 +280,8 @@ async fn error_has_errno_and_flavor() {
             }
             other => panic!("{}: {other:?}", s.name),
         }
-        assert!(!c.is_closed());
-        assert_eq!(c.scalar_u64("SELECT 2").await.unwrap(), 2, "usable after an error");
+        assert!(!c.is_closed(), "{}", s.name);
+        assert_eq!(c.scalar_u64("SELECT 2").await.unwrap(), 2, "{}: usable after an error", s.name);
     }
 }
 
@@ -339,7 +351,7 @@ async fn update_reports_rows_affected() {
         let _ = c.run(&format!("DROP TABLE IF EXISTS {t}"), QUERY_LIMITS).await;
         let r = r.unwrap_or_else(|e| panic!("{}: {e}", s.name));
         assert_eq!(r.rows_affected, Some(3), "{}", s.name);
-        assert!(r.columns.is_empty() && r.rows.is_empty() && r.complete);
+        assert!(r.columns.is_empty() && r.rows.is_empty() && r.complete, "{}", s.name);
     }
 }
 
@@ -348,8 +360,8 @@ async fn scalar_u64_reads_a_count_and_rejects_the_rest() {
     let db = require_testdb!();
     for s in &db.mysql {
         let c = open(s, db).await;
-        assert_eq!(c.scalar_u64("SELECT COUNT(*) FROM shop.orders").await.unwrap(), dbee_testkit::ORDERS_COUNT);
-        assert_eq!(c.scalar_u64("SELECT COUNT(*) FROM shop.orders WHERE 1 = 0").await.unwrap(), 0);
+        assert_eq!(c.scalar_u64("SELECT COUNT(*) FROM shop.orders").await.unwrap(), dbee_testkit::ORDERS_COUNT, "{}", s.name);
+        assert_eq!(c.scalar_u64("SELECT COUNT(*) FROM shop.orders WHERE 1 = 0").await.unwrap(), 0, "{}", s.name);
         for bad in ["SELECT 'abc'", "SELECT 1 FROM shop.orders WHERE 1 = 0", "SELECT -1", "SELECT NULL"] {
             assert_eq!(c.scalar_u64(bad).await.unwrap_err().code(), "other", "{}: {bad}", s.name);
         }
@@ -368,7 +380,7 @@ async fn a_cancelled_sleep_is_cancelled() {
         canceller.cancel().await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
         assert_eq!(result.unwrap_err(), DbError::Cancelled, "{}", s.name);
-        assert!(!c.is_closed());
-        assert_eq!(c.scalar_u64("SELECT 3").await.unwrap(), 3);
+        assert!(!c.is_closed(), "{}", s.name);
+        assert_eq!(c.scalar_u64("SELECT 3").await.unwrap(), 3, "{}", s.name);
     }
 }

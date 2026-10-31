@@ -20,9 +20,6 @@ pub(crate) struct ColumnDefinition {
     /// The name the result gives the column (its alias), as UTF-8 with invalid bytes replaced.
     pub(crate) name: String,
     pub(crate) facts: TypeFacts,
-    /// The digits after the point; nothing reads it yet but the tests that check the parser.
-    #[allow(dead_code)]
-    pub(crate) decimals: u8,
 }
 
 /// A column definition as MySQL's and MariaDB's documentation lay it out: six length-encoded
@@ -30,7 +27,7 @@ pub(crate) struct ColumnDefinition {
 /// MariaDB's extended metadata when `extended_metadata` was agreed (a length-encoded string of
 /// pairs of a 1-byte key and a length-encoded value, of which dbee reads the format `json`),
 /// then the 12 bytes of fixed fields. Every length is checked against the packet, and nothing
-/// may follow.
+/// may follow. A type byte dbee does not know (a newer server's type) is `MYSQL_TYPE_UNKNOWN`.
 pub(crate) fn parse_column(def: &[u8], extended_metadata: bool) -> Result<ColumnDefinition, DbError> {
     let bad = || malformed("column definition");
     let mut rest = def;
@@ -53,15 +50,15 @@ pub(crate) fn parse_column(def: &[u8], extended_metadata: bool) -> Result<Column
         }
     }
     let Some((FIXED_FIELDS, fixed)) = lenenc_int(rest) else { return Err(bad()) };
-    let [c0, c1, l0, l1, l2, l3, column_type, f0, f1, decimals, _, _] = <[u8; 12]>::try_from(fixed).map_err(|_| bad())?;
+    let [c0, c1, l0, l1, l2, l3, column_type, f0, f1, _decimals, _, _] = <[u8; 12]>::try_from(fixed).map_err(|_| bad())?;
     let facts = TypeFacts {
-        column_type: ColumnType::try_from(column_type).map_err(|_| bad())?,
+        column_type: ColumnType::try_from(column_type).unwrap_or(ColumnType::MYSQL_TYPE_UNKNOWN),
         flags: ColumnFlags::from_bits_truncate(u16::from_le_bytes([f0, f1])),
         charset: u16::from_le_bytes([c0, c1]),
         length: u32::from_le_bytes([l0, l1, l2, l3]),
         json,
     };
-    Ok(ColumnDefinition { name: String::from_utf8_lossy(name).into_owned(), facts, decimals })
+    Ok(ColumnDefinition { name: String::from_utf8_lossy(name).into_owned(), facts })
 }
 
 #[cfg(test)]
@@ -112,8 +109,8 @@ mod tests {
         let theirs = ParseBuf(def).parse::<mysql_common::packets::Column>(()).map_err(|e| TestCaseError::fail(e.to_string()))?;
         let f = &ours.facts;
         prop_assert_eq!(
-            (ours.name.as_str(), f.column_type, f.flags, f.charset, f.length, ours.decimals),
-            (&*theirs.name_str(), theirs.column_type(), theirs.flags(), theirs.character_set(), theirs.column_length(), theirs.decimals())
+            (ours.name.as_str(), f.column_type, f.flags, f.charset, f.length),
+            (&*theirs.name_str(), theirs.column_type(), theirs.flags(), theirs.character_set(), theirs.column_length())
         );
         Ok(())
     }
@@ -122,10 +119,7 @@ mod tests {
     fn column_definitions_as_documented() {
         let def = definition(&names("doc"), None, LONGTEXT);
         let c = parse_column(&def, false).unwrap();
-        assert_eq!(
-            (c.name.as_str(), c.facts.column_type, c.facts.charset, c.facts.length, c.decimals),
-            ("doc", ColumnType::MYSQL_TYPE_BLOB, 45, u32::MAX, 0)
-        );
+        assert_eq!((c.name.as_str(), c.facts.column_type, c.facts.charset, c.facts.length), ("doc", ColumnType::MYSQL_TYPE_BLOB, 45, u32::MAX));
         assert_eq!(c.facts.flags, ColumnFlags::BLOB_FLAG | ColumnFlags::BINARY_FLAG);
         assert!(!c.facts.json);
         same_as_mysql_common(&def, &c).unwrap();
@@ -149,8 +143,9 @@ mod tests {
         assert_eq!(bad(def[..def.len() - 1].to_vec()), "other", "one byte short");
         let thirteen = [&def[..def.len() - 13], &[0x0D], &LONGTEXT, &[0]].concat();
         assert_eq!(bad(thirteen), "other", "fixed fields that are not 12 bytes");
+        // A type a newer server added is one dbee does not know, not a broken definition.
         let unknown_type = [&def[..def.len() - 6], &[21], &def[def.len() - 5..]].concat();
-        assert_eq!(bad(unknown_type), "other");
+        assert_eq!(parse_column(&unknown_type, false).unwrap().facts.column_type, ColumnType::MYSQL_TYPE_UNKNOWN);
         assert_eq!(bad([&b"\x03abc"[..], &def[4..]].concat()), "other", "the catalog is always def");
         // A string longer than the packet, in each of its lenenc widths.
         for long in [
@@ -186,10 +181,15 @@ mod tests {
         fn generated_definitions_read_as_mysql_common_reads_them((strings, fixed) in fields(), pairs in pairs()) {
             let def = definition(&strings, None, fixed);
             let ours = parse_column(&def, false);
-            prop_assert_eq!(ours.is_ok(), strings[0] == b"def" && ColumnType::try_from(fixed[6]).is_ok());
-            prop_assert_eq!(ours.is_ok(), ParseBuf(&def).parse::<mysql_common::packets::Column>(()).is_ok());
+            let known = ColumnType::try_from(fixed[6]).is_ok();
+            prop_assert_eq!(ours.is_ok(), strings[0] == b"def");
+            prop_assert_eq!(ours.is_ok() && known, ParseBuf(&def).parse::<mysql_common::packets::Column>(()).is_ok());
             if let Ok(ours) = ours {
-                same_as_mysql_common(&def, &ours)?;
+                if known {
+                    same_as_mysql_common(&def, &ours)?;
+                } else {
+                    prop_assert_eq!(ours.facts.column_type, ColumnType::MYSQL_TYPE_UNKNOWN);
+                }
                 let ext = parse_column(&definition(&strings, Some(&pairs), fixed), true).unwrap();
                 let json = pairs.iter().any(|(key, value)| *key == 1 && value == b"json");
                 prop_assert_eq!(ext, ColumnDefinition { facts: TypeFacts { json, ..ours.facts }, ..ours });
@@ -249,14 +249,14 @@ mod tests {
     }
 
     /// The fields dbee reads of a column definition, as mysql_common reads them.
-    fn mysql_common_reads(def: &[u8]) -> (String, ColumnType, ColumnFlags, u16, u32, u8) {
+    fn mysql_common_reads(def: &[u8]) -> (String, ColumnType, ColumnFlags, u16, u32) {
         let c = ParseBuf(def).parse::<mysql_common::packets::Column>(()).unwrap();
-        (c.name_str().into_owned(), c.column_type(), c.flags(), c.character_set(), c.column_length(), c.decimals())
+        (c.name_str().into_owned(), c.column_type(), c.flags(), c.character_set(), c.column_length())
     }
 
-    fn dbee_reads(def: &[u8], extended: bool) -> ((String, ColumnType, ColumnFlags, u16, u32, u8), bool) {
+    fn dbee_reads(def: &[u8], extended: bool) -> ((String, ColumnType, ColumnFlags, u16, u32), bool) {
         let c = parse_column(def, extended).unwrap();
-        ((c.name, c.facts.column_type, c.facts.flags, c.facts.charset, c.facts.length, c.decimals), c.facts.json)
+        ((c.name, c.facts.column_type, c.facts.flags, c.facts.charset, c.facts.length), c.facts.json)
     }
 
     #[tokio::test]

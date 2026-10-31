@@ -9,7 +9,7 @@ use mysql_common::packets::{CommonOkPacket, OkPacket, OkPacketDeserializer, OkPa
 use crate::column::parse_column;
 use crate::errors;
 use crate::flavor::Flavor;
-use crate::values::{self, Cell};
+use crate::values::{self, CellText};
 use crate::wire::{CHUNK, Packets, lenenc_int, malformed, size_text};
 
 /// More columns than any table can have (MySQL's limit is 4096).
@@ -25,10 +25,11 @@ pub(crate) fn parse_ok<K: OkPacketKind>(payload: &[u8], caps: CapabilityFlags) -
 
 /// Read the answer to a command: an OK packet, an ERR packet, or result sets, as many as the
 /// server says follow (`SERVER_MORE_RESULTS_EXISTS`). The result holds the last result set's
-/// typed columns and rows, values as text ([`Cell`]), and the affected rows of the last OK packet
-/// (matched rows, as dbee logs in with `CLIENT_FOUND_ROWS`), `None` when no OK packet came. An
-/// ERR packet ends it with its error. Rows past `limits` are read but not kept.
-/// MariaDB's extended metadata is in each column definition when `extended_metadata` was agreed.
+/// typed columns and rows, values as text ([`CellText`], counted against the caps before it is
+/// built), and the affected rows of the last OK packet (matched rows, as dbee logs in with
+/// `CLIENT_FOUND_ROWS`), `None` when no OK packet came. An ERR packet ends it with its error.
+/// Rows past `limits` are read but not kept. MariaDB's extended metadata is in each column
+/// definition when `extended_metadata` was agreed.
 pub(crate) async fn read_result(
     p: &mut Packets,
     caps: CapabilityFlags,
@@ -120,15 +121,15 @@ async fn read_rows(
             continue;
         }
         let row = parse_row(&packet, count)?;
-        let cells: Vec<Option<Cell<'_>>> =
-            row.into_iter().zip(&set.columns).map(|(value, column)| value.map(|v| Cell::of(column.class, v))).collect();
-        let row_bytes = cells.iter().fold(0usize, |sum, cell| sum.saturating_add(cell.as_ref().map_or(0, Cell::len)));
+        let cells: Vec<Option<CellText<'_>>> =
+            row.into_iter().zip(&set.columns).map(|(value, column)| value.map(|v| CellText::of(column.class, v))).collect();
+        let row_bytes = cells.iter().fold(0usize, |sum, cell| sum.saturating_add(cell.as_ref().map_or(0, CellText::len)));
         if bytes.saturating_add(row_bytes) > limits.max_bytes {
             set.complete = false;
             continue;
         }
         bytes = bytes.saturating_add(row_bytes);
-        set.rows.push(cells.into_iter().map(|cell| cell.map(Cell::into_string)).collect());
+        set.rows.push(cells.into_iter().map(|cell| cell.map(CellText::into_string)).collect());
     }
 }
 
@@ -254,24 +255,57 @@ mod tests {
         assert!(parse_ok::<CommonOkPacket>(&v[1], caps).is_err() && parse_ok::<ResultSetTerminator>(&v[0], caps).is_err());
     }
 
-    /// Protocol::ColumnDefinition41 of a column `name`.
-    fn column_def(name: &str) -> Vec<u8> {
+    /// `VAR_STRING`, the type of a `VARCHAR` result.
+    const VAR_STRING: u8 = 0xFD;
+
+    /// Protocol::ColumnDefinition41 of a column `name` of type `column_type`, in utf8mb4.
+    fn column_def_of(name: &str, column_type: u8) -> Vec<u8> {
         let lenenc =
             |s: &[u8]| [if s.len() < 251 { vec![s.len() as u8] } else { [&[0xFD][..], &s.len().to_le_bytes()[..3]].concat() }, s.to_vec()].concat();
         let mut p = Vec::new();
         for part in [&b"def"[..], b"", b"", b"", name.as_bytes(), name.as_bytes()] {
             p.extend(lenenc(part));
         }
-        p.extend_from_slice(&[0x0C, 45, 0, 0, 4, 0, 0, 0xFD, 0, 0, 0, 0, 0]);
+        p.extend_from_slice(&[0x0C, 45, 0, 0, 4, 0, 0, column_type, 0, 0, 0, 0, 0]);
         p
     }
 
     /// A one-column result set (column `name`, a row per value), framed from sequence id 0.
     fn result_set(name: &str, values: &[&str]) -> Vec<u8> {
-        let mut payloads = vec![vec![1], column_def(name)];
-        payloads.extend(values.iter().map(|v| [&[v.len() as u8][..], v.as_bytes()].concat()));
+        let values: Vec<&[u8]> = values.iter().map(|v| v.as_bytes()).collect();
+        result_set_of(name, VAR_STRING, &values)
+    }
+
+    /// [`result_set`] of a column of type `column_type`, with values of any bytes.
+    fn result_set_of(name: &str, column_type: u8, values: &[&[u8]]) -> Vec<u8> {
+        let mut payloads = vec![vec![1], column_def_of(name, column_type)];
+        payloads.extend(values.iter().map(|v| [&[v.len() as u8][..], v].concat()));
         payloads.push(vec![0xFE, 0, 0, 2, 0, 0, 0]);
         payloads.iter().enumerate().map(|(i, p)| frame(p, i as u8)).collect::<Vec<_>>().concat()
+    }
+
+    async fn read(input: Vec<u8>, limits: Limits) -> Result<ResultSet, DbError> {
+        let (mut p, _) = packets(input);
+        read_result(&mut p, CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF, Flavor::MySql, false, limits).await
+    }
+
+    #[tokio::test]
+    async fn invalid_text_counts_as_its_replacements_at_the_cap() {
+        // E9 61 FF is shown as U+FFFD a U+FFFD: 7 bytes, and 8 with the name.
+        let value: &[u8] = &[0xE9, b'a', 0xFF];
+        let fits = read(result_set_of("c", VAR_STRING, &[value]), Limits { max_rows: 10, max_bytes: 8 }).await.unwrap();
+        assert_eq!((fits.rows, fits.complete), (vec![vec![Some("\u{FFFD}a\u{FFFD}".to_owned())]], true));
+        let cut = read(result_set_of("c", VAR_STRING, &[value, b"x"]), Limits { max_rows: 10, max_bytes: 7 }).await.unwrap();
+        assert_eq!((cut.rows.len(), cut.rows_seen, cut.complete), (0, 2, false));
+    }
+
+    #[tokio::test]
+    async fn a_type_dbee_does_not_know_comes_as_text() {
+        // 0x15 is no type MySQL's documentation lists: a newer server's, say.
+        let r = read(result_set_of("v", 0x15, &[b"\x01new", b"plain"]), dbee_driver::QUERY_LIMITS).await.unwrap();
+        let c = &r.columns[0];
+        assert_eq!((c.name.as_str(), c.base_type.as_str(), c.class), ("v", "", dbee_core::TypeClass::Other));
+        assert_eq!(r.rows, [[Some("\u{1}new".to_owned())], [Some("plain".to_owned())]]);
     }
 
     #[tokio::test]

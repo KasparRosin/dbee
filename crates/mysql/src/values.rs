@@ -2,8 +2,6 @@
 //! catalog can give too), and its values as text: as the server sends them, binary ones as `0x`
 //! and hex.
 
-use std::borrow::Cow;
-
 use dbee_core::{Column, TypeClass};
 use mysql_common::collations::{Collation, CollationId};
 use mysql_common::constants::{ColumnFlags, ColumnType};
@@ -42,8 +40,9 @@ impl TypeFacts {
 }
 
 /// The class of a column with type facts `t`. `TINYINT(1)` (`BOOL`) is a true/false column;
-/// strings and blobs in the `binary` character set hold bytes, as do `BIT` and the other types
-/// MySQL sends as bytes (geometries, vectors).
+/// strings and blobs in the `binary` character set hold bytes, as do `BIT`, geometries and
+/// vectors. A type dbee does not know (`MYSQL_TYPE_UNKNOWN`, which stands for one a newer
+/// server added) is shown as text.
 pub(crate) fn class_of(t: &TypeFacts) -> TypeClass {
     use ColumnType::*;
     if t.json {
@@ -74,10 +73,10 @@ pub(crate) fn class_of(t: &TypeFacts) -> TypeClass {
         | MYSQL_TYPE_TIMESTAMP
         | MYSQL_TYPE_TIMESTAMP2 => TypeClass::DateTime,
         MYSQL_TYPE_ENUM | MYSQL_TYPE_SET => TypeClass::Text,
-        MYSQL_TYPE_BIT => TypeClass::Binary,
+        MYSQL_TYPE_BIT | MYSQL_TYPE_GEOMETRY | MYSQL_TYPE_VECTOR => TypeClass::Binary,
         MYSQL_TYPE_STRING | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_VARCHAR if !t.binary() => TypeClass::Text,
         MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB | MYSQL_TYPE_BLOB if !t.binary() => TypeClass::LongText,
-        MYSQL_TYPE_NULL => TypeClass::Other,
+        MYSQL_TYPE_NULL | MYSQL_TYPE_UNKNOWN => TypeClass::Other,
         _ if t.binary() => TypeClass::Binary,
         _ => TypeClass::Other,
     }
@@ -144,7 +143,8 @@ fn blob_name(t: &TypeFacts) -> &'static str {
 pub(crate) fn column(name: String, t: &TypeFacts) -> Column {
     let base = type_name(t);
     let sized = matches!(t.column_type, ColumnType::MYSQL_TYPE_STRING | ColumnType::MYSQL_TYPE_VAR_STRING | ColumnType::MYSQL_TYPE_VARCHAR)
-        && !t.flags.intersects(ColumnFlags::ENUM_FLAG | ColumnFlags::SET_FLAG);
+        && !t.flags.intersects(ColumnFlags::ENUM_FLAG | ColumnFlags::SET_FLAG)
+        && !t.json;
     let type_label = match t.chars() {
         Some(n) if sized => format!("{base}({n})"),
         _ => base.to_owned(),
@@ -152,35 +152,42 @@ pub(crate) fn column(name: String, t: &TypeFacts) -> Column {
     Column { name, base_type: base.to_owned(), type_label, class: class_of(t) }
 }
 
-/// A value of a column, before it is made text; its [`len`](Cell::len) is the length of that text.
+/// A value of a column, before its text is built: [`len`](CellText::len) is the length that
+/// text will have, counted without building it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Cell<'a> {
-    /// The bytes as UTF-8, invalid sequences replaced.
-    Text(Cow<'a, str>),
+pub(crate) enum CellText<'a> {
+    /// Bytes shown as UTF-8, each invalid sequence replaced by U+FFFD.
+    Text(&'a [u8]),
     /// Bytes, written `0x` and uppercase hex.
     Hex(&'a [u8]),
 }
 
-impl Cell<'_> {
+/// The length of U+FFFD in UTF-8, which stands for each invalid sequence.
+const REPLACEMENT_LEN: usize = '\u{FFFD}'.len_utf8();
+
+impl CellText<'_> {
     /// A value of a column of class `class`.
-    pub(crate) fn of(class: TypeClass, bytes: &[u8]) -> Cell<'_> {
+    pub(crate) fn of(class: TypeClass, bytes: &[u8]) -> CellText<'_> {
         match class {
-            TypeClass::Binary => Cell::Hex(bytes),
-            _ => Cell::Text(String::from_utf8_lossy(bytes)),
+            TypeClass::Binary => CellText::Hex(bytes),
+            _ => CellText::Text(bytes),
         }
     }
 
     pub(crate) fn len(&self) -> usize {
         match self {
-            Cell::Text(text) => text.len(),
-            Cell::Hex(bytes) => bytes.len().saturating_mul(2).saturating_add(2),
+            CellText::Text(bytes) => bytes.utf8_chunks().fold(0usize, |sum, chunk| {
+                let replaced = if chunk.invalid().is_empty() { 0 } else { REPLACEMENT_LEN };
+                sum.saturating_add(chunk.valid().len()).saturating_add(replaced)
+            }),
+            CellText::Hex(bytes) => bytes.len().saturating_mul(2).saturating_add(2),
         }
     }
 
     pub(crate) fn into_string(self) -> String {
         match self {
-            Cell::Text(text) => text.into_owned(),
-            Cell::Hex(bytes) => {
+            CellText::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            CellText::Hex(bytes) => {
                 let mut text = String::with_capacity(bytes.len().saturating_mul(2).saturating_add(2));
                 text.push_str("0x");
                 for &b in bytes {
@@ -248,11 +255,15 @@ mod tests {
             assert_eq!(class(facts(MYSQL_TYPE_STRING, flag, UTF8MB4, 36)), TypeClass::Text);
         }
         assert_eq!(class(of(MYSQL_TYPE_BIT, BINARY, 8)), TypeClass::Binary);
-        // Geometries and vectors come as bytes; NULL and unknown text have no class.
-        assert_eq!(class(of(MYSQL_TYPE_GEOMETRY, BINARY, u32::MAX)), TypeClass::Binary);
-        assert_eq!(class(of(MYSQL_TYPE_VECTOR, BINARY, 64)), TypeClass::Binary);
+        // Geometries and vectors are bytes, also where the catalog gives them no character set.
+        for charset in [BINARY, 0] {
+            assert_eq!(class(of(MYSQL_TYPE_GEOMETRY, charset, u32::MAX)), TypeClass::Binary, "{charset}");
+            assert_eq!(class(of(MYSQL_TYPE_VECTOR, charset, 64)), TypeClass::Binary, "{charset}");
+        }
+        // NULL and a type dbee does not know are shown as they come, as text.
         assert_eq!(class(of(MYSQL_TYPE_NULL, BINARY, 0)), TypeClass::Other);
         assert_eq!(class(of(MYSQL_TYPE_UNKNOWN, UTF8MB4, 0)), TypeClass::Other);
+        assert_eq!(class(of(MYSQL_TYPE_UNKNOWN, BINARY, 0)), TypeClass::Other);
     }
 
     #[test]
@@ -272,6 +283,8 @@ mod tests {
         assert_eq!(named(of(MYSQL_TYPE_VAR_STRING, 4000, 180)), pair("varchar", "varchar"));
         assert_eq!(named(facts(MYSQL_TYPE_STRING, ColumnFlags::ENUM_FLAG, UTF8MB4, 36)), pair("enum", "enum"));
         assert_eq!(named(of(MYSQL_TYPE_LONG, BINARY, 11)), pair("int", "int"));
+        // MariaDB's JSON_OBJECT(..) is a VARCHAR whose format is json: no length for JSON.
+        assert_eq!(named(TypeFacts { json: true, ..of(MYSQL_TYPE_VAR_STRING, UTF8MB4, 72) }), pair("json", "json"));
         // Every blob comes as a blob: its name by the most it holds, in characters.
         for (length, text, blob) in [(1020, "tinytext", "blob"), (262_140, "text", "mediumblob"), (67_108_860, "mediumtext", "longblob")] {
             assert_eq!(named(of(MYSQL_TYPE_BLOB, UTF8MB4, length)).0, text, "{length}");
@@ -284,19 +297,61 @@ mod tests {
 
     #[test]
     fn values_as_text() {
-        let text = |class, bytes: &[u8]| Cell::of(class, bytes).into_string();
+        let text = |class, bytes: &[u8]| CellText::of(class, bytes).into_string();
         assert_eq!(text(TypeClass::Binary, &[0x00, 0xFF, 0x0A, 0xDE]), "0x00FF0ADE");
         assert_eq!(text(TypeClass::Binary, &[]), "0x");
         assert_eq!(text(TypeClass::Text, b"plain"), "plain");
         assert_eq!(text(TypeClass::Number, &[b'1', 0xE9, b'2']), "1\u{FFFD}2");
-        assert_eq!(Cell::of(TypeClass::Text, &[0xE9]).len(), 3, "the replacement counts as its bytes");
+        assert_eq!(CellText::of(TypeClass::Text, &[0xE9]).len(), 3, "the replacement counts as its bytes");
+    }
+
+    /// Bytes that are mostly UTF-8 with some bytes changed, or any bytes.
+    fn mostly_text() -> impl Strategy<Value = Vec<u8>> {
+        let changed = (any::<String>(), prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..6)).prop_map(|(text, edits)| {
+            let mut bytes = text.into_bytes();
+            for (at, byte) in edits {
+                if !bytes.is_empty() {
+                    let i = at.index(bytes.len());
+                    bytes[i] = byte;
+                }
+            }
+            bytes
+        });
+        prop_oneof![changed, prop::collection::vec(any::<u8>(), 0..200)]
     }
 
     proptest! {
         #[test]
+        fn counted_text_is_as_long_as_the_text(bytes in mostly_text()) {
+            prop_assert_eq!(CellText::Text(&bytes).len(), String::from_utf8_lossy(&bytes).len());
+        }
+
+        #[test]
+        fn every_column_type_gets_a_class(
+            type_byte in any::<u8>(),
+            flags in any::<u16>(),
+            charset in prop_oneof![Just(BINARY), Just(UTF8MB4), any::<u16>()],
+            length in prop_oneof![Just(1u32), Just(u32::MAX), any::<u32>()],
+            json in any::<bool>(),
+        ) {
+            let column_type = ColumnType::try_from(type_byte).unwrap_or(ColumnType::MYSQL_TYPE_UNKNOWN);
+            let t = TypeFacts { column_type, flags: ColumnFlags::from_bits_truncate(flags), charset, length, json };
+            let c = column("c".into(), &t);
+            prop_assert_eq!(c.class, class_of(&t));
+            prop_assert!(c.type_label.starts_with(&c.base_type), "{:?}", c);
+            if json {
+                prop_assert_eq!((c.class, c.base_type.as_str()), (TypeClass::Json, "json"));
+            }
+            let bytes = matches!(column_type, ColumnType::MYSQL_TYPE_BIT | ColumnType::MYSQL_TYPE_GEOMETRY | ColumnType::MYSQL_TYPE_VECTOR);
+            if c.class == TypeClass::Binary {
+                prop_assert!(charset == BINARY || bytes, "{:?}", t);
+            }
+        }
+
+        #[test]
         fn a_cells_length_is_its_texts(bytes in prop::collection::vec(any::<u8>(), 0..200), binary in any::<bool>()) {
             let class = if binary { TypeClass::Binary } else { TypeClass::LongText };
-            let cell = Cell::of(class, &bytes);
+            let cell = CellText::of(class, &bytes);
             let len = cell.len();
             let text = cell.into_string();
             prop_assert_eq!(len, text.len());

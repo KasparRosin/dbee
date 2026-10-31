@@ -314,9 +314,13 @@ async fn browse_session_is_strict() {
         assert!(mode.split(',').any(|m| m == "NO_BACKSLASH_ESCAPES"), "{}: {mode}", s.name);
         assert_eq!(scalar(&browse, "SELECT 'a\\b'").await.as_deref(), Some("a\\b"));
 
+        assert_eq!(scalar(&browse, "SELECT @@SESSION.autocommit").await.as_deref(), Some("1"), "{}", s.name);
+
         let query = open_as(&config(s, SslMode::Prefer), &db.password, Purpose::Query).await;
         let session = scalar(&query, "SELECT @@SESSION.sql_mode").await;
         assert_eq!(session, scalar(&query, "SELECT @@GLOBAL.sql_mode").await, "{}", s.name);
+        let autocommit = scalar(&query, "SELECT @@SESSION.autocommit").await;
+        assert_eq!(autocommit, scalar(&query, "SELECT @@GLOBAL.autocommit").await, "{}", s.name);
         for conn in [&browse, &query] {
             assert_eq!(scalar(conn, "SELECT @@character_set_client").await.as_deref(), Some("utf8mb4"));
             assert_eq!(scalar(conn, "SELECT @@character_set_results").await.as_deref(), Some("utf8mb4"));
@@ -978,6 +982,29 @@ async fn a_server_without_found_rows_is_refused() {
     let e = connect_fake(port).await.err().unwrap();
     assert!(matches!(&e, DbError::Connect(m) if m.contains("CLIENT_FOUND_ROWS")), "{e:?}");
     assert!(server.await.unwrap().is_empty(), "refused before the handshake response");
+}
+
+/// The statements a connection's setup sent to a fake MariaDB server, for `purpose`.
+async fn setup_statements(purpose: Purpose) -> Vec<String> {
+    let (port, server) =
+        fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0), answer_as_mariadb).await;
+    let c = fake_config(port);
+    let conn = connect(Target { config: &c, password: Some(FAKE_PASSWORD), tunnel: None, purpose, create_file: false }).await.unwrap();
+    drop(conn);
+    let got = server.await.unwrap();
+    got.iter().filter(|p| p.first() == Some(&0x03)).map(|p| String::from_utf8_lossy(&p[1..]).into_owned()).collect()
+}
+
+/// The test servers' default is autocommit on, and only a global setting changes that, so a
+/// fake server shows what the browse session sends.
+#[tokio::test]
+async fn the_browse_session_turns_autocommit_on() {
+    let browse = setup_statements(Purpose::Browse).await;
+    let at = |prefix: &str| browse.iter().position(|s| s.starts_with(prefix));
+    let (names, mode, autocommit) = (at("SET NAMES"), at("SET SESSION sql_mode"), at("SET SESSION autocommit = 1"));
+    assert!(names < mode && mode < autocommit && names.is_some(), "{browse:?}");
+    let query = setup_statements(Purpose::Query).await;
+    assert!(!query.iter().any(|s| s.contains("autocommit") || s.contains("sql_mode")), "the query session keeps the server's: {query:?}");
 }
 
 /// A fake MariaDB server's error packets: the error number with its flavor's label, or what
