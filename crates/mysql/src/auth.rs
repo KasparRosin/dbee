@@ -60,15 +60,41 @@ pub(crate) enum ServerKey {
     Refused,
 }
 
-/// Why a login stopped before asking for the server's key.
-const KEY_REFUSED: &str = "the server wants the password protected with its own key, and this connection is not encrypted; turn on TLS on \
-                           the server, connect through an SSH tunnel, or allow the server's public key in this connection's settings";
+/// Why a login stopped before asking for the server's key: the server offers no TLS, or its TLS
+/// could not be used (a handshake that failed).
+const KEY_REFUSED_NO_TLS: &str = "the server wants the password protected with its own key, and this connection is not encrypted because the \
+                                  server offers no TLS; turn on TLS on the server, connect through an SSH tunnel, or allow the server's \
+                                  public key in this connection's settings";
+const KEY_REFUSED_TLS_UNUSABLE: &str = "the server wants the password protected with its own key, and this connection is not encrypted \
+                                        because the server's TLS could not be used; connect through an SSH tunnel, or allow the server's \
+                                        public key in this connection's settings";
 
-/// The request for the server's key, `request`, when `key` allows it.
-fn key_request(request: u8, key: ServerKey) -> Result<Vec<u8>, DbError> {
-    match key {
-        ServerKey::Allowed | ServerKey::AllowedWithWarning => Ok(vec![request]),
-        ServerKey::Refused => Err(DbError::Auth { message: KEY_REFUSED.into() }),
+/// The link a login runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Link {
+    /// The stream is TLS: the password may go in clear.
+    tls: bool,
+    /// The server's greeting offers TLS; without `tls`, it could not be used.
+    tls_offered: bool,
+    /// Without TLS, whether the server's RSA key may protect the password.
+    key: ServerKey,
+}
+
+impl Link {
+    /// The request for the server's key, `request`, when the link allows it.
+    fn key_request(self, request: u8) -> Result<Vec<u8>, DbError> {
+        let refused = |text: &str| Err(DbError::Auth { message: text.into() });
+        match self.key {
+            ServerKey::Allowed | ServerKey::AllowedWithWarning => Ok(vec![request]),
+            ServerKey::Refused if self.tls_offered => refused(KEY_REFUSED_TLS_UNUSABLE),
+            ServerKey::Refused => refused(KEY_REFUSED_NO_TLS),
+        }
+    }
+
+    /// A first answer by `method` would ask for a key the link refuses (`sha256_password`'s
+    /// does, for a password, without TLS).
+    fn refuses_first_answer_of(self, method: Method, password: &[u8]) -> bool {
+        method == Method::Sha256 && !self.tls && !password.is_empty() && self.key == ServerKey::Refused
     }
 }
 
@@ -241,23 +267,23 @@ impl Method {
 
     /// The first answer to the challenge `nonce`, and where that leaves the exchange. An empty
     /// password is an empty answer.
-    fn first(self, password: &[u8], nonce: &[u8; 20], tls: bool, key: ServerKey) -> Result<(Vec<u8>, Step), DbError> {
+    fn first(self, password: &[u8], nonce: &[u8; 20], link: Link) -> Result<(Vec<u8>, Step), DbError> {
         let scrambled = |s: Option<Vec<u8>>| s.ok_or_else(|| DbError::Other("could not compute the login scramble".into()));
         Ok(match self {
             Method::Native | Method::CachingSha2 if password.is_empty() => (Vec::new(), Step::Answered),
             Method::Native => (scrambled(scramble_native(nonce, password).map(Vec::from))?, Step::Answered),
             Method::CachingSha2 => (scrambled(scramble_sha256(nonce, password).map(Vec::from))?, Step::Answered),
-            Method::Sha256 if tls || password.is_empty() => (cleartext(password, tls)?, Step::PasswordSent),
-            Method::Sha256 => (key_request(SHA256_KEY_REQUEST, key)?, Step::WaitingForKey),
+            Method::Sha256 if link.tls || password.is_empty() => (cleartext(password, link.tls)?, Step::PasswordSent),
+            Method::Sha256 => (link.key_request(SHA256_KEY_REQUEST)?, Step::WaitingForKey),
         })
     }
 
     /// The answer to the server's AuthMoreData `data` in `step`, if one is due, and the next step.
-    fn more(self, step: Step, data: &[u8], password: &[u8], nonce: &[u8; 20], tls: bool, key: ServerKey) -> Result<(Option<Vec<u8>>, Step), DbError> {
+    fn more(self, step: Step, data: &[u8], password: &[u8], nonce: &[u8; 20], link: Link) -> Result<(Option<Vec<u8>>, Step), DbError> {
         match (self, step, data) {
             (Method::CachingSha2, Step::Answered, [FAST_AUTH_OK]) => Ok((None, Step::FastOk)),
-            (Method::CachingSha2, Step::Answered, [FULL_AUTH]) if tls => Ok((Some(cleartext(password, tls)?), Step::PasswordSent)),
-            (Method::CachingSha2, Step::Answered, [FULL_AUTH]) => Ok((Some(key_request(CACHING_SHA2_KEY_REQUEST, key)?), Step::WaitingForKey)),
+            (Method::CachingSha2, Step::Answered, [FULL_AUTH]) if link.tls => Ok((Some(cleartext(password, link.tls)?), Step::PasswordSent)),
+            (Method::CachingSha2, Step::Answered, [FULL_AUTH]) => Ok((Some(link.key_request(CACHING_SHA2_KEY_REQUEST)?), Step::WaitingForKey)),
             (Method::CachingSha2 | Method::Sha256, Step::WaitingForKey, key) => Ok((Some(rsa_encrypt(password, nonce, key)?), Step::PasswordSent)),
             _ => Err(out_of_turn()),
         }
@@ -298,10 +324,16 @@ fn handshake_response(g: &Greeting, who: &Login<'_>, caps: CapabilityFlags, meth
 /// when the password went out encrypted with the server's key, as `key` allows.
 pub(crate) async fn login(p: &mut Packets, g: &Greeting, who: &Login<'_>, caps: CapabilityFlags, tls: bool, key: ServerKey) -> Result<bool, DbError> {
     let flavor = Flavor::from_version(&g.version);
-    let mut method = Method::named(&g.plugin).unwrap_or_else(|_| Method::default_for(flavor));
+    let link = Link { tls, tls_offered: g.offers_tls(), key };
+    // A method dbee does not speak, or one whose first answer the link refuses, is answered with
+    // the flavor's default: the server's switch then names the account's own method.
+    let mut method = match Method::named(&g.plugin) {
+        Ok(named) if !link.refuses_first_answer_of(named, who.password) => named,
+        _ => Method::default_for(flavor),
+    };
     let mut nonce = g.nonce;
     let mut used_key = false;
-    let (answer, mut step) = method.first(who.password, &nonce, tls, key)?;
+    let (answer, mut step) = method.first(who.password, &nonce, link)?;
     log::debug!("mysql: logging in with {}", method.name());
     p.write(&handshake_response(g, who, caps, method, answer)).await?;
     for _ in 0..MAX_LOGIN_PACKETS {
@@ -317,13 +349,13 @@ pub(crate) async fn login(p: &mut Packets, g: &Greeting, who: &Login<'_>, caps: 
                 method = Method::named(switch.auth_plugin().as_bytes())?;
                 nonce = nonce_of(switch.plugin_data())?;
                 log::debug!("mysql: the server switched the login to {}", method.name());
-                let (answer, next) = method.first(who.password, &nonce, tls, key)?;
+                let (answer, next) = method.first(who.password, &nonce, link)?;
                 step = next;
                 p.write(&answer).await?;
             }
             Some(0x01) => {
                 let more = ParseBuf(&reply).parse::<AuthMoreData>(()).map_err(|_| out_of_turn())?;
-                let (answer, next) = method.more(step, more.data(), who.password, &nonce, tls, key)?;
+                let (answer, next) = method.more(step, more.data(), who.password, &nonce, link)?;
                 used_key |= step == Step::WaitingForKey && next == Step::PasswordSent;
                 step = next;
                 if let Some(answer) = answer {
@@ -344,6 +376,8 @@ mod tests {
     use crate::rsa::tests::KEY_2048;
 
     const NONCE: [u8; 20] = *b"abcdefghijklmnopqrst";
+    const PLAIN: Link = Link { tls: false, tls_offered: false, key: ServerKey::Allowed };
+    const TLS: Link = Link { tls: true, tls_offered: true, key: ServerKey::Allowed };
 
     fn greeting(caps: CapabilityFlags, version: (u16, u16, u16)) -> Greeting {
         Greeting { version: "8.0.99".into(), version_parts: version, capabilities: caps, nonce: NONCE, plugin: b"caching_sha2_password".to_vec() }
@@ -425,16 +459,16 @@ mod tests {
     fn the_methods_exchanges() {
         let pw = b"secret";
         // Empty passwords answer empty, except sha256's, which is the bare terminator.
-        assert_eq!(Method::Native.first(b"", &NONCE, false, ServerKey::Allowed).unwrap(), (vec![], Step::Answered));
-        assert_eq!(Method::CachingSha2.first(b"", &NONCE, false, ServerKey::Allowed).unwrap(), (vec![], Step::Answered));
-        assert_eq!(Method::Sha256.first(b"", &NONCE, false, ServerKey::Allowed).unwrap(), (vec![0], Step::PasswordSent));
-        assert_eq!(Method::Native.first(pw, &NONCE, false, ServerKey::Allowed).unwrap().0.len(), 20);
-        assert_eq!(Method::CachingSha2.first(pw, &NONCE, false, ServerKey::Allowed).unwrap().0.len(), 32);
+        assert_eq!(Method::Native.first(b"", &NONCE, PLAIN).unwrap(), (vec![], Step::Answered));
+        assert_eq!(Method::CachingSha2.first(b"", &NONCE, PLAIN).unwrap(), (vec![], Step::Answered));
+        assert_eq!(Method::Sha256.first(b"", &NONCE, PLAIN).unwrap(), (vec![0], Step::PasswordSent));
+        assert_eq!(Method::Native.first(pw, &NONCE, PLAIN).unwrap().0.len(), 20);
+        assert_eq!(Method::CachingSha2.first(pw, &NONCE, PLAIN).unwrap().0.len(), 32);
         // sha256_password: the password over TLS, else a request for the key.
-        assert_eq!(Method::Sha256.first(pw, &NONCE, true, ServerKey::Allowed).unwrap(), (b"secret\0".to_vec(), Step::PasswordSent));
-        assert_eq!(Method::Sha256.first(pw, &NONCE, false, ServerKey::Allowed).unwrap(), (vec![SHA256_KEY_REQUEST], Step::WaitingForKey));
+        assert_eq!(Method::Sha256.first(pw, &NONCE, TLS).unwrap(), (b"secret\0".to_vec(), Step::PasswordSent));
+        assert_eq!(Method::Sha256.first(pw, &NONCE, PLAIN).unwrap(), (vec![SHA256_KEY_REQUEST], Step::WaitingForKey));
         // caching_sha2_password: the fast path, or the full one.
-        let more = |step, data: &[u8], tls| Method::CachingSha2.more(step, data, pw, &NONCE, tls, ServerKey::Allowed);
+        let more = |step, data: &[u8], tls| Method::CachingSha2.more(step, data, pw, &NONCE, Link { tls, ..PLAIN });
         assert_eq!(more(Step::Answered, &[FAST_AUTH_OK], false).unwrap(), (None, Step::FastOk));
         assert_eq!(more(Step::Answered, &[FULL_AUTH], true).unwrap(), (Some(b"secret\0".to_vec()), Step::PasswordSent));
         assert_eq!(more(Step::Answered, &[FULL_AUTH], false).unwrap(), (Some(vec![CACHING_SHA2_KEY_REQUEST]), Step::WaitingForKey));
@@ -444,25 +478,37 @@ mod tests {
         for (step, data) in [(Step::FastOk, &[FULL_AUTH][..]), (Step::PasswordSent, &[FAST_AUTH_OK]), (Step::Answered, &[9])] {
             assert_eq!(more(step, data, false).unwrap_err().code(), "connect", "{step:?} {data:?}");
         }
-        assert_eq!(Method::Native.more(Step::Answered, &[FULL_AUTH], pw, &NONCE, false, ServerKey::Allowed).unwrap_err().code(), "connect");
-        assert_eq!(Method::Sha256.more(Step::Answered, KEY_2048.as_bytes(), pw, &NONCE, false, ServerKey::Allowed).unwrap_err().code(), "connect");
+        assert_eq!(Method::Native.more(Step::Answered, &[FULL_AUTH], pw, &NONCE, PLAIN).unwrap_err().code(), "connect");
+        assert_eq!(Method::Sha256.more(Step::Answered, KEY_2048.as_bytes(), pw, &NONCE, PLAIN).unwrap_err().code(), "connect");
     }
 
     #[test]
     fn the_servers_key_is_asked_for_only_when_allowed() {
         let pw = b"secret";
         for key in [ServerKey::Allowed, ServerKey::AllowedWithWarning] {
-            assert_eq!(Method::Sha256.first(pw, &NONCE, false, key).unwrap(), (vec![SHA256_KEY_REQUEST], Step::WaitingForKey));
-            let full = Method::CachingSha2.more(Step::Answered, &[FULL_AUTH], pw, &NONCE, false, key).unwrap();
+            let link = Link { key, ..PLAIN };
+            assert_eq!(Method::Sha256.first(pw, &NONCE, link).unwrap(), (vec![SHA256_KEY_REQUEST], Step::WaitingForKey));
+            let full = Method::CachingSha2.more(Step::Answered, &[FULL_AUTH], pw, &NONCE, link).unwrap();
             assert_eq!(full, (Some(vec![CACHING_SHA2_KEY_REQUEST]), Step::WaitingForKey));
         }
-        let refused = DbError::Auth { message: KEY_REFUSED.into() };
-        assert_eq!(Method::Sha256.first(pw, &NONCE, false, ServerKey::Refused).unwrap_err(), refused);
-        assert_eq!(Method::CachingSha2.more(Step::Answered, &[FULL_AUTH], pw, &NONCE, false, ServerKey::Refused).unwrap_err(), refused);
+        // The text says whether the server offers no TLS, or offers TLS that could not be used.
+        let no_tls = Link { key: ServerKey::Refused, ..PLAIN };
+        let unusable = Link { tls_offered: true, ..no_tls };
+        for (link, text) in [(no_tls, KEY_REFUSED_NO_TLS), (unusable, KEY_REFUSED_TLS_UNUSABLE)] {
+            let refused = DbError::Auth { message: text.into() };
+            assert_eq!(Method::Sha256.first(pw, &NONCE, link).unwrap_err(), refused);
+            assert_eq!(Method::CachingSha2.more(Step::Answered, &[FULL_AUTH], pw, &NONCE, link).unwrap_err(), refused);
+        }
+        assert!(KEY_REFUSED_NO_TLS.contains("turn on TLS on the server") && !KEY_REFUSED_TLS_UNUSABLE.contains("turn on TLS"));
+        assert!(KEY_REFUSED_TLS_UNUSABLE.contains("could not be used") && KEY_REFUSED_TLS_UNUSABLE.contains("SSH tunnel"));
         // Over TLS, or with nothing to protect, no key is asked for.
-        assert_eq!(Method::Sha256.first(pw, &NONCE, true, ServerKey::Refused).unwrap().1, Step::PasswordSent);
-        assert_eq!(Method::Sha256.first(b"", &NONCE, false, ServerKey::Refused).unwrap(), (vec![0], Step::PasswordSent));
-        assert_eq!(Method::CachingSha2.more(Step::Answered, &[FULL_AUTH], pw, &NONCE, true, ServerKey::Refused).unwrap().1, Step::PasswordSent);
+        assert_eq!(Method::Sha256.first(pw, &NONCE, Link { tls: true, ..no_tls }).unwrap().1, Step::PasswordSent);
+        assert_eq!(Method::Sha256.first(b"", &NONCE, no_tls).unwrap(), (vec![0], Step::PasswordSent));
+        assert_eq!(Method::CachingSha2.more(Step::Answered, &[FULL_AUTH], pw, &NONCE, Link { tls: true, ..no_tls }).unwrap().1, Step::PasswordSent);
+        // Only sha256_password's first answer asks for the key, and only for a password.
+        assert!(no_tls.refuses_first_answer_of(Method::Sha256, pw));
+        assert!(!no_tls.refuses_first_answer_of(Method::Sha256, b"") && !no_tls.refuses_first_answer_of(Method::CachingSha2, pw));
+        assert!(!PLAIN.refuses_first_answer_of(Method::Sha256, pw) && !Link { tls: true, ..no_tls }.refuses_first_answer_of(Method::Sha256, pw));
     }
 
     #[test]

@@ -407,8 +407,10 @@ async fn the_servers_key_only_without_encryption_or_when_allowed() {
         let root = open(&config(s, SslMode::Prefer), db).await;
         let user = User::create(s, &root, "sha256_password").await;
         let direct = ConnectionConfig { user: user.name.clone(), ..config(s, SslMode::Prefer) };
+        // Its TLS is on but unusable to rustls, so the text does not say to turn it on.
         let e = connect(target(&direct, Some(&user.password))).await.err().unwrap();
-        assert!(matches!(&e, DbError::Auth { message } if message.contains("allow the server's public key")), "{}: {e:?}", s.name);
+        let unusable = |m: &str| m.contains("TLS could not be used") && m.contains("allow the server's public key") && !m.contains("turn on TLS");
+        assert!(matches!(&e, DbError::Auth { message } if unusable(message)), "{}: {e:?}", s.name);
         let mut allowed = direct.clone();
         allowed.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
         let warnings = open_as(&allowed, &user.password, Purpose::Query).await.info().warnings.clone();
@@ -799,14 +801,44 @@ async fn the_servers_key_is_refused_where_encryption_was_wanted() {
     let prefer = |port| ConnectionConfig { ssl_mode: SslMode::Prefer, ..fake_config(port) };
     let (port, server) = fake_server(frame(&greeting("8.0.99", "caching_sha2_password", caps), 0), |_| vec![vec![0x01, 0x04]]).await;
     let e = connect_fake_as(&prefer(port)).await.err().unwrap();
-    assert!(matches!(&e, DbError::Auth { message } if message.contains("not encrypted")), "{e:?}");
+    let no_tls =
+        |e: &DbError| matches!(e, DbError::Auth { message } if message.contains("offers no TLS") && message.contains("turn on TLS on the server"));
+    assert!(no_tls(&e), "{e:?}");
     let got = server.await.unwrap();
     assert_eq!(got.len(), 1, "no key request after the scramble: {got:?}");
     assert!(!holds_password(&got));
-    // sha256_password asks for the key in its first answer: no handshake response at all.
-    let (port, server) = fake_server(frame(&greeting("5.7.99", "sha256_password", caps), 0), |_| vec![ok_packet(0, 0)]).await;
-    assert_eq!(connect_fake_as(&prefer(port)).await.err().map(|e| e.code()), Some("auth"));
-    assert!(server.await.unwrap().is_empty());
+    // A greeting naming sha256_password is answered with the flavor's default; the switch to
+    // sha256_password, whose first answer would ask for the key, ends the login.
+    let switch = [&b"\xFEsha256_password\0"[..], b"0123456789abcdefghij", &[0]].concat();
+    let (port, server) = fake_server(frame(&greeting("5.7.99", "sha256_password", caps), 0), move |_| vec![switch.clone()]).await;
+    let e = connect_fake_as(&prefer(port)).await.err().unwrap();
+    assert!(no_tls(&e), "{e:?}");
+    let got = server.await.unwrap();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].ends_with(b"caching_sha2_password\0") && !holds_password(&got));
+}
+
+#[tokio::test]
+async fn a_sha256_greeting_lets_the_accounts_method_decide() {
+    // prefer, no TLS, the key not allowed: a mysql_native_password account still logs in.
+    let nonce = *b"ABCDEFGHIJKLMNOPQRST";
+    let mut step = 0;
+    let answer = move |payload: &[u8]| -> Vec<Vec<u8>> {
+        step += 1;
+        match step {
+            1 => vec![[&[0xFE][..], b"mysql_native_password\0", &nonce, &[0]].concat()],
+            2 => vec![ok_packet(0, 0)],
+            _ => answer_as_mariadb(payload),
+        }
+    };
+    let (port, server) = fake_server(frame(&greeting("8.0.99", "sha256_password", server_caps(true)), 0), answer).await;
+    let conn = connect_fake_as(&ConnectionConfig { ssl_mode: SslMode::Prefer, ..fake_config(port) }).await.unwrap();
+    assert!(conn.info().warnings.is_empty(), "{:?}", conn.info());
+    drop(conn);
+    let got = server.await.unwrap();
+    assert!(got[0].ends_with(b"caching_sha2_password\0"), "{got:?}");
+    assert_eq!(got[1], scramble_native(&nonce, FAKE_PASSWORD.as_bytes()).unwrap());
+    assert!(!holds_password(&got));
 }
 
 #[tokio::test]

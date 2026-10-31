@@ -29,14 +29,14 @@ const LOGIN_MAX_PAYLOAD: usize = 64 * 1024;
 /// Works when the server's mode is empty.
 const BROWSE_SQL_MODE: &str = "SET SESSION sql_mode = TRIM(BOTH ',' FROM CONCAT(@@SESSION.sql_mode, ',STRICT_ALL_TABLES,NO_BACKSLASH_ESCAPES'))";
 
-/// Why a TLS handshake failed that the server ended with a handshake-failure or
-/// insufficient-security alert, or with a protocol-version alert.
+/// Why a TLS handshake failed that the server ended with a handshake-failure or an
+/// insufficient-security alert (ciphers), or with a protocol-version alert (versions).
 const NO_SHARED_CIPHER: &str = "the server offers only TLS ciphers dbee does not support; connect through an SSH tunnel instead";
+const NO_SHARED_VERSION: &str = "the server offers only TLS versions dbee does not support; connect through an SSH tunnel instead";
+
 /// The warning when the user allowed the server's key on a link that should have had TLS.
 const UNCHECKED_KEY: &str =
     "The password was protected with a key from the server that dbee could not check, because the connection is not encrypted";
-
-const NO_SHARED_VERSION: &str = "the server offers only TLS versions dbee does not support; connect through an SSH tunnel instead";
 
 /// TCP keepalive on direct connections, as for Postgres: the first probe after this long
 /// without traffic, then one this often, and the connection is dead after this many unanswered.
