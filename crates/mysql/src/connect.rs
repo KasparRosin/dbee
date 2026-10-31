@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dbee_config::SslMode;
+use dbee_config::{ALLOW_PUBLIC_KEY, ConnectionConfig, SslMode};
 use dbee_driver::{CONNECT_TIMEOUT, DbError, Purpose, QUERY_LIMITS, ServerInfo, Target, tls};
 use dbee_ssh::Tunnel;
 use mysql_common::constants::{CapabilityFlags, Command};
@@ -16,7 +16,7 @@ use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
 
-use crate::auth::{self, Login};
+use crate::auth::{self, Login, ServerKey};
 use crate::cancel::{Canceller, KillRoute, Statements};
 use crate::errors;
 use crate::flavor::{Flavor, version_num, version_warning};
@@ -32,6 +32,10 @@ const BROWSE_SQL_MODE: &str = "SET SESSION sql_mode = TRIM(BOTH ',' FROM CONCAT(
 /// Why a TLS handshake failed that the server ended with a handshake-failure or
 /// insufficient-security alert, or with a protocol-version alert.
 const NO_SHARED_CIPHER: &str = "the server offers only TLS ciphers dbee does not support; connect through an SSH tunnel instead";
+/// The warning when the user allowed the server's key on a link that should have had TLS.
+const UNCHECKED_KEY: &str =
+    "The password was protected with a key from the server that dbee could not check, because the connection is not encrypted";
+
 const NO_SHARED_VERSION: &str = "the server offers only TLS versions dbee does not support; connect through an SSH tunnel instead";
 
 /// TCP keepalive on direct connections, as for Postgres: the first probe after this long
@@ -71,11 +75,14 @@ pub(crate) struct Session {
     flavor: Flavor,
     /// The TLS settings the session runs with; `None` when it is plain.
     tls: Option<Arc<ClientConfig>>,
+    /// The password went out encrypted with the server's RSA key.
+    used_server_key: bool,
 }
 
 impl Session {
-    /// Open the stream, read the greeting, start TLS as `tls` says, and log in.
-    pub(crate) async fn open(route: &Route, who: &Login<'_>, tls: &TlsUse) -> Result<Session, DbError> {
+    /// Open the stream, read the greeting, start TLS as `tls` says, and log in, with the
+    /// server's RSA key as `key` allows.
+    pub(crate) async fn open(route: &Route, who: &Login<'_>, tls: &TlsUse, key: ServerKey) -> Result<Session, DbError> {
         let mut packets = Packets::new(open_stream(route).await?, LOGIN_MAX_PAYLOAD);
         let greeting = auth::parse_greeting(&packets.read().await?)?;
         let config = match tls {
@@ -89,9 +96,9 @@ impl Session {
             packets.write(&auth::ssl_request(caps)).await?;
             packets = start_tls(packets, Arc::clone(config), &route.host).await?;
         }
-        auth::login(&mut packets, &greeting, who, caps, config.is_some()).await?;
+        let used_server_key = auth::login(&mut packets, &greeting, who, caps, config.is_some(), key).await?;
         packets.set_max(MAX_PAYLOAD);
-        Ok(Session { packets, caps, flavor: Flavor::from_version(&greeting.version), tls: config })
+        Ok(Session { packets, caps, flavor: Flavor::from_version(&greeting.version), tls: config, used_server_key })
     }
 
     /// Run `sql` as one `COM_QUERY` and read the answer.
@@ -155,6 +162,19 @@ pub(crate) fn while_connecting(e: DbError) -> DbError {
     }
 }
 
+/// Whether the login may use the server's RSA key on a link without TLS: yes when the user chose
+/// no encryption or the tunnel gives it; when TLS was wanted (`prefer` ending up plain on a
+/// direct connection, which an attacker on the link can force) only with the option on.
+fn server_key(cfg: &ConnectionConfig, tunnel: bool) -> ServerKey {
+    if tunnel || cfg.ssl_mode == SslMode::Disable {
+        ServerKey::Allowed
+    } else if cfg.option_on(ALLOW_PUBLIC_KEY.id) {
+        ServerKey::AllowedWithWarning
+    } else {
+        ServerKey::Refused
+    }
+}
+
 /// Open a connection on the caller's tokio runtime.
 ///
 /// After the login (as `utf8mb4_general_ci`, with `CLIENT_FOUND_ROWS`), the session runs `SET
@@ -178,13 +198,17 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     let route = Route { host: cfg.host.clone(), port: cfg.port, tunnel: t.tunnel.clone() };
     let password = t.password.unwrap_or_default();
     let who = Login { user: &cfg.user, password: password.as_bytes(), database: Some(cfg.database.as_str()).filter(|d| !d.is_empty()) };
-    let (session, info, connection_id) = match attempt(&route, &who, &tls, cfg.read_only, t.purpose).await {
+    let key = server_key(cfg, t.tunnel.is_some());
+    let (session, mut info, connection_id) = match attempt(&route, &who, &tls, key, cfg.read_only, t.purpose).await {
         Err(DbError::Tls(_)) if matches!(tls, TlsUse::Prefer(_)) => {
             log::info!("mysql: the TLS handshake failed in prefer mode; connecting without TLS");
-            attempt(&route, &who, &TlsUse::Off, cfg.read_only, t.purpose).await
+            attempt(&route, &who, &TlsUse::Off, key, cfg.read_only, t.purpose).await
         }
         other => other,
     }?;
+    if session.used_server_key && key == ServerKey::AllowedWithWarning {
+        info.warnings.push(UNCHECKED_KEY.into());
+    }
     let statements = Arc::new(Statements::default());
     let tls_used = session.tls.clone().map_or(TlsUse::Off, TlsUse::Require);
     let canceller = Canceller(Arc::new(KillRoute {
@@ -192,17 +216,25 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
         user: cfg.user.clone(),
         password: password.to_owned(),
         tls: tls_used,
+        server_key: key,
         connection_id,
         statements: Arc::clone(&statements),
     }));
     Ok(MySqlConnection { session: Mutex::new(session), info, closed: AtomicBool::new(false), statements, canceller })
 }
 
-async fn attempt(route: &Route, who: &Login<'_>, tls: &TlsUse, read_only: bool, purpose: Purpose) -> Result<(Session, ServerInfo, u64), DbError> {
+async fn attempt(
+    route: &Route,
+    who: &Login<'_>,
+    tls: &TlsUse,
+    key: ServerKey,
+    read_only: bool,
+    purpose: Purpose,
+) -> Result<(Session, ServerInfo, u64), DbError> {
     let addr = route.address();
     log::info!("mysql: connecting to {addr}{}", if route.tunnel.is_some() { " through SSH" } else { "" });
     let opening = async {
-        let mut session = Session::open(route, who, tls).await?;
+        let mut session = Session::open(route, who, tls, key).await?;
         let (info, id) = setup(&mut session, read_only, purpose).await?;
         Ok((session, info, id))
     };
@@ -374,6 +406,23 @@ impl MySqlConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_servers_key_follows_the_tls_mode_the_tunnel_and_the_option() {
+        let with = |ssl_mode, allow: bool| {
+            let mut c = ConnectionConfig { kind: dbee_config::DbKind::MySql, ssl_mode, ..ConnectionConfig::default() };
+            if allow {
+                c.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
+            }
+            c
+        };
+        assert_eq!(server_key(&with(SslMode::Disable, false), false), ServerKey::Allowed);
+        assert_eq!(server_key(&with(SslMode::Prefer, false), true), ServerKey::Allowed);
+        assert_eq!(server_key(&with(SslMode::Prefer, false), false), ServerKey::Refused);
+        assert_eq!(server_key(&with(SslMode::Prefer, true), false), ServerKey::AllowedWithWarning);
+        // require and verify-* always have TLS; should one ever be plain, the key is refused.
+        assert_eq!(server_key(&with(SslMode::Require, false), false), ServerKey::Refused);
+    }
 
     #[test]
     fn tls_alerts_say_what_the_server_lacks() {

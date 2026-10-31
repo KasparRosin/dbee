@@ -383,3 +383,39 @@ fn a_sqlite_connection_round_trips_through_the_store() {
     let (l, warn) = ConnectionStore::load(Some(&dir));
     assert_eq!((l.saved, warn), (vec![c], None));
 }
+
+#[test]
+fn options_round_trip_and_stay_out_of_the_file_when_empty() {
+    let v = serde_json::to_value(ConnectionConfig::default()).unwrap();
+    assert!(v.get("options").is_none(), "{v}");
+    let mut c = ConnectionConfig { kind: DbKind::MySql, ..cfg("m") };
+    c.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
+    c.options.insert("aLaterOption".into(), "42".into());
+    let v = serde_json::to_value(&c).unwrap();
+    assert_eq!((&v["options"]["allowPublicKey"], &v["options"]["aLaterOption"]), (&serde_json::json!("true"), &serde_json::json!("42")));
+    assert_eq!(serde_json::from_value::<ConnectionConfig>(v).unwrap(), c);
+    assert!(c.option_on("allowPublicKey"));
+    assert!(!c.option_on("aLaterOption") && !c.option_on("missing"));
+    c.options.insert(ALLOW_PUBLIC_KEY.id.into(), "yes".into());
+    assert!(!c.option_on(ALLOW_PUBLIC_KEY.id), "only \"true\" is on");
+
+    // A key this build does not know survives a load and a save.
+    let th = dbee_testkit::temp_home(None, None);
+    let (mut s, _) = ConnectionStore::load(Some(&th.home));
+    s.upsert(c.clone());
+    s.save().unwrap();
+    let (l, warn) = ConnectionStore::load(Some(&th.home));
+    assert!(warn.is_none());
+    l.save().unwrap();
+    let (l, _) = ConnectionStore::load(Some(&th.home));
+    assert_eq!(l.get("m").unwrap().options.get("aLaterOption").map(String::as_str), Some("42"));
+    assert_eq!(l.get("m"), Some(&c));
+}
+
+#[test]
+fn each_kind_lists_its_options() {
+    assert_eq!(ALLOW_PUBLIC_KEY, KindOption { id: "allowPublicKey", label: "Allow the server's public key without encryption" });
+    assert_eq!(DbKind::MySql.info().options, [ALLOW_PUBLIC_KEY]);
+    assert_eq!(DbKind::MariaDb.info().options, [ALLOW_PUBLIC_KEY]);
+    assert!(DbKind::Postgres.info().options.is_empty() && DbKind::Sqlite.info().options.is_empty());
+}

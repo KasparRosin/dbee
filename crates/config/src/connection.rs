@@ -2,6 +2,7 @@
 //! [`SecretStore`](crate::SecretStore).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -63,7 +64,20 @@ pub struct KindInfo {
     pub url_schemes: &'static [&'static str],
     /// This type's own TLS-mode names in URLs, besides libpq's.
     pub ssl_aliases: &'static [(&'static str, SslMode)],
+    /// The type's own on/off settings, kept in [`ConnectionConfig::options`].
+    pub options: &'static [KindOption],
 }
+
+/// An on/off setting of one database type, saved under `id` in [`ConnectionConfig::options`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindOption {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+/// MySQL's and MariaDB's: on a link without TLS that the user wanted encrypted, the password
+/// may go out encrypted with a key the server sends, which dbee cannot check.
+pub const ALLOW_PUBLIC_KEY: KindOption = KindOption { id: "allowPublicKey", label: "Allow the server's public key without encryption" };
 
 /// MariaDB's row builds on this one: it lists only what differs.
 const MYSQL: KindInfo = KindInfo {
@@ -79,6 +93,7 @@ const MYSQL: KindInfo = KindInfo {
         ("VERIFY_CA", SslMode::VerifyCa),
         ("VERIFY_IDENTITY", SslMode::VerifyFull),
     ],
+    options: &[ALLOW_PUBLIC_KEY],
 };
 
 /// The database types dbee can open. Saved as the type's id.
@@ -112,6 +127,7 @@ impl DbKind {
                 settings: Settings::Server { tls: true, ssh: true },
                 url_schemes: &["postgres", "postgresql"],
                 ssl_aliases: &[],
+                options: &[],
             },
             DbKind::MySql => &MYSQL,
             DbKind::MariaDb => &KindInfo { id: "mariadb", label: "MariaDB", url_schemes: &["mariadb"], ..MYSQL },
@@ -122,6 +138,7 @@ impl DbKind {
                 settings: Settings::File { extensions: &["sqlite", "sqlite3", "db"] },
                 url_schemes: &[],
                 ssl_aliases: &[],
+                options: &[],
             },
         }
     }
@@ -225,6 +242,10 @@ pub struct ConnectionConfig {
     pub ssh: Option<SshConfig>,
     pub read_only: bool,
     pub save_secrets: bool,
+    /// The type's own settings ([`KindInfo::options`]), by id; keys this build does not know
+    /// are kept.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, String>,
 }
 
 impl Default for ConnectionConfig {
@@ -244,11 +265,17 @@ impl Default for ConnectionConfig {
             ssh: None,
             read_only: false,
             save_secrets: true,
+            options: BTreeMap::new(),
         }
     }
 }
 
 impl ConnectionConfig {
+    /// The option `id` ([`KindInfo::options`]) is on: its value is `"true"`.
+    pub fn option_on(&self, id: &str) -> bool {
+        self.options.get(id).is_some_and(|v| v == "true")
+    }
+
     /// The name; when empty, a file type's file name, else `user@host/database`.
     pub fn display_name(&self) -> String {
         if !self.name.is_empty() {

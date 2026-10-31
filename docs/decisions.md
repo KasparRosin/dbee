@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-30 · **Last updated:** 2026-10-30 · **Change:** minor (dbee's own MySQL client; MySQL 5.7's TLS)
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** minor (MySQL's server key only without encryption or when allowed; per-type connection options)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -127,3 +127,9 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** The official `mysql:5.7` image offers TLS only with DHE-RSA ciphers on TLS 1.2, which rustls never speaks. dbee tells this from the TLS failure itself (the server's handshake alert), not from the version: `require`, `verify-ca` and `verify-full` fail with a TLS error that says the server offers only ciphers dbee does not support and points to an SSH tunnel, and `prefer` connects without TLS, as libpq's `prefer` does after a failed handshake. Plain direct connections and connections through the SSH tunnel work.
 - **Why:** No new TLS stack (OpenSSL and aws-lc stay out) and no 5.7-only code path (spec amendment of 2026-10-29). The tunnel encrypts the link instead.
+
+## 2026-10-31: MySQL's server key only without encryption or when allowed; per-type connection options
+
+- **Decision:** On a link without TLS, `caching_sha2_password` and `sha256_password` protect the password with an RSA key the server sends, which dbee cannot check. dbee fetches that key when the user chose no encryption (`disable`) or the SSH tunnel encrypts the link, with no warning. When the user wanted encryption and the link ended up plain on a direct connection (`prefer`, with TLS failed or not offered, which an attacker on the link can force), the login is refused before the password is used, unless the connection's `allowPublicKey` option is on; then it goes ahead with a warning on the connection. `require` and the `verify-*` modes always have TLS. dbee follows MySQL's own clients in refusing the key on a link the user wanted encrypted, but allows it when the user chose no encryption.
+- **Options:** A database type's own settings are on/off options: `ConnectionConfig.options` (by id, left out of the file when empty, keys a build does not know kept) and `KindInfo.options` (id and label). MySQL lists `allowPublicKey`, and MariaDB inherits it through its row; Postgres and SQLite list none. The connection form shows them from M2.15.
+- **Why:** Whoever sits on a plain link can hand dbee a key of their own and read the password. Where the user asked for no encryption, or the tunnel gives it, there is nothing to protect against; where the user wanted encryption, that choice must not be undone silently. One options map keeps engine-only settings off the shared struct.

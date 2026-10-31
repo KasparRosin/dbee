@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
+use dbee_config::{ALLOW_PUBLIC_KEY, ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
 use dbee_driver::{Cancel, DbError, Purpose, Target};
 use dbee_mysql::wire::{MAX_PAYLOAD, Packets};
 use dbee_mysql::{Canceller, Flavor, MySqlConnection, connect, version_num, version_warning};
@@ -397,6 +397,36 @@ async fn an_abandoned_query_closes_the_connection() {
 }
 
 #[tokio::test]
+async fn the_servers_key_only_without_encryption_or_when_allowed() {
+    let db = require_testdb!();
+    let home = temp_home(None, Some(&db.sshd.known_hosts_line));
+    let t = tunnel(db, &home).await;
+    let mut seen = 0;
+    for s in db.mysql.iter().filter(|s| !rustls_can_reach(s)) {
+        // prefer ends up plain on this server, and sha256_password then wants the server's key.
+        let root = open(&config(s, SslMode::Prefer), db).await;
+        let user = User::create(s, &root, "sha256_password").await;
+        let direct = ConnectionConfig { user: user.name.clone(), ..config(s, SslMode::Prefer) };
+        let e = connect(target(&direct, Some(&user.password))).await.err().unwrap();
+        assert!(matches!(&e, DbError::Auth { message } if message.contains("allow the server's public key")), "{}: {e:?}", s.name);
+        let mut allowed = direct.clone();
+        allowed.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
+        let warnings = open_as(&allowed, &user.password, Purpose::Query).await.info().warnings.clone();
+        assert!(warnings.len() == 1 && warnings[0].contains("could not check"), "{}: {warnings:?}", s.name);
+        // No encryption chosen, or the tunnel's: no warning.
+        let plain = ConnectionConfig { ssl_mode: SslMode::Disable, ..direct.clone() };
+        assert!(open_as(&plain, &user.password, Purpose::Query).await.info().warnings.is_empty(), "{}", s.name);
+        let through = ConnectionConfig { user: user.name.clone(), ..tunnelled(s, db, SslMode::Prefer) };
+        let conn = connect(Target { tunnel: Some(Arc::clone(&t)), ..target(&through, Some(&user.password)) }).await.unwrap();
+        assert!(conn.info().warnings.is_empty(), "{}: {:?}", s.name, conn.info());
+        user.drop_now(&root).await;
+        seen += 1;
+    }
+    assert_eq!(seen, 1, "mysql57 is the server prefer reaches without TLS");
+    t.close().await;
+}
+
+#[tokio::test]
 async fn login_methods() {
     let db = require_testdb!();
     for s in db.mysql.iter().filter(|s| s.flavor == MyFlavor::MySql) {
@@ -417,6 +447,7 @@ async fn login_methods() {
                 let c = ConnectionConfig { user: user.name.clone(), ..config(s, SslMode::Disable) };
                 let conn = open_as(&c, &user.password, Purpose::Query).await;
                 assert_eq!(cipher(&conn).await, "", "{} {method}", s.name);
+                assert!(conn.info().warnings.is_empty(), "{} {method}: {:?}", s.name, conn.info());
                 assert_eq!(scalar(&conn, "SELECT CURRENT_USER()").await, Some(format!("{}@%", user.name)));
             }
             let c = ConnectionConfig { user: user.name.clone(), ..config(s, SslMode::Disable) };
@@ -682,8 +713,11 @@ fn fake_config(port: u16) -> ConnectionConfig {
 
 /// Connect to the fake server on `port` as `root` with [`FAKE_PASSWORD`].
 async fn connect_fake(port: u16) -> Result<MySqlConnection, DbError> {
-    let c = fake_config(port);
-    connect(Target { config: &c, password: Some(FAKE_PASSWORD), tunnel: None, purpose: Purpose::Query, create_file: false }).await
+    connect_fake_as(&fake_config(port)).await
+}
+
+async fn connect_fake_as(c: &ConnectionConfig) -> Result<MySqlConnection, DbError> {
+    connect(Target { config: c, password: Some(FAKE_PASSWORD), tunnel: None, purpose: Purpose::Query, create_file: false }).await
 }
 
 fn holds_password(payloads: &[Vec<u8>]) -> bool {
@@ -744,6 +778,65 @@ async fn full_login_without_tls_never_sends_the_password_in_clear() {
     let got = server.await.unwrap();
     assert_eq!(got.len(), 1);
     assert!(!holds_password(&got));
+}
+
+/// A 2048-bit RSA public key, as MySQL sends its own.
+const RSA_KEY: &str = "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlZT/mLblmmuu4gQOB1ha
+7ixbmi0XguCiWT9sXg6N/C9/wEfE/t96ZzdQIg9YduYVHEgWG3QgYUj4Oh3r7nFo
+k276KvixSutLYjAz8Pp58iDPRxDQz5Po6uEABLna312psovJLOTH87OfJKlKVQG2
+oLdSJuoVVp+YzNE9xlR8k03mTVCpRgBKR8bKb8oZe0OKhacqokceaisVzsk837rj
+HVS3m+rvy/Ea3+mtZpqmawtVPvxzCElTfdGtOVwlp63JlJ3CCQ5FB6swEfTW5BWa
+iUYSUy3d4JX3yQ/kS5EeezphehJ0WUg1WKgxwaSRAriJwl7p4NVCi+ScixSPyC9D
+iwIDAQAB
+-----END PUBLIC KEY-----
+";
+
+#[tokio::test]
+async fn the_servers_key_is_refused_where_encryption_was_wanted() {
+    // prefer, and the server offers no TLS: an attacker on the link could have taken it away.
+    let caps = server_caps(true);
+    let prefer = |port| ConnectionConfig { ssl_mode: SslMode::Prefer, ..fake_config(port) };
+    let (port, server) = fake_server(frame(&greeting("8.0.99", "caching_sha2_password", caps), 0), |_| vec![vec![0x01, 0x04]]).await;
+    let e = connect_fake_as(&prefer(port)).await.err().unwrap();
+    assert!(matches!(&e, DbError::Auth { message } if message.contains("not encrypted")), "{e:?}");
+    let got = server.await.unwrap();
+    assert_eq!(got.len(), 1, "no key request after the scramble: {got:?}");
+    assert!(!holds_password(&got));
+    // sha256_password asks for the key in its first answer: no handshake response at all.
+    let (port, server) = fake_server(frame(&greeting("5.7.99", "sha256_password", caps), 0), |_| vec![ok_packet(0, 0)]).await;
+    assert_eq!(connect_fake_as(&prefer(port)).await.err().map(|e| e.code()), Some("auth"));
+    assert!(server.await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_servers_key_when_allowed_comes_with_a_warning() {
+    for (mode, allow, warned) in [(SslMode::Prefer, true, true), (SslMode::Disable, false, false)] {
+        let mut step = 0;
+        let answer = move |payload: &[u8]| -> Vec<Vec<u8>> {
+            step += 1;
+            match step {
+                1 => vec![vec![0x01, 0x04]],
+                2 if payload == [0x02] => vec![[&[0x01][..], RSA_KEY.as_bytes()].concat()],
+                3 if payload.len() == 256 => vec![ok_packet(0, 0)],
+                2 | 3 => vec![],
+                _ => answer_as_mariadb(payload),
+            }
+        };
+        let (port, server) = fake_server(frame(&greeting("8.0.99", "caching_sha2_password", server_caps(true)), 0), answer).await;
+        let mut c = ConnectionConfig { ssl_mode: mode, ..fake_config(port) };
+        if allow {
+            c.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
+        }
+        let conn = connect_fake_as(&c).await.unwrap_or_else(|e| panic!("{mode:?}: {e}"));
+        let warnings = conn.info().warnings.clone();
+        assert_eq!(warnings.iter().any(|w| w.contains("could not check")), warned, "{mode:?}: {warnings:?}");
+        assert_eq!(warnings.len(), usize::from(warned), "{mode:?}: {warnings:?}");
+        drop(conn);
+        let got = server.await.unwrap();
+        assert_eq!((got[1].as_slice(), got[2].len()), (&[0x02][..], 256), "{mode:?}");
+        assert!(!holds_password(&got));
+    }
 }
 
 /// Answers a fake MySQL 5.6: no CLIENT_DEPRECATE_EOF, and no `transaction_read_only`.

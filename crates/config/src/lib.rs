@@ -7,7 +7,8 @@ pub mod secrets;
 pub mod store;
 
 pub use connection::{
-    ConfigError, ConnectionColor, ConnectionConfig, DbKind, KindInfo, Settings, SshAuth, SshConfig, SslMode, UrlParts, home_dir, new_id, parse_url,
+    ALLOW_PUBLIC_KEY, ConfigError, ConnectionColor, ConnectionConfig, DbKind, KindInfo, KindOption, Settings, SshAuth, SshConfig, SslMode, UrlParts,
+    home_dir, new_id, parse_url,
 };
 pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretKind, SecretStore, keyring_store};
 pub use store::{ConnectionStore, RecentEntry};

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dbee_driver::{CONNECT_TIMEOUT, Cancel, DbError, DbFuture};
 use tokio::sync::Mutex;
 
-use crate::auth::Login;
+use crate::auth::{Login, ServerKey};
 use crate::connect::{Route, Session, TlsUse, while_connecting};
 
 /// The statements run on one connection, numbered from 1, and the one a `KILL QUERY` targeted,
@@ -46,6 +46,7 @@ pub(crate) struct KillRoute {
     pub(crate) user: String,
     pub(crate) password: String,
     pub(crate) tls: TlsUse,
+    pub(crate) server_key: ServerKey,
     pub(crate) connection_id: u64,
     pub(crate) statements: Arc<Statements>,
 }
@@ -76,7 +77,7 @@ impl Canceller {
                 return Ok(false);
             }
             let who = Login { user: &k.user, password: k.password.as_bytes(), database: None };
-            let mut session = Session::open(&k.route, &who, &k.tls).await.map_err(while_connecting)?;
+            let mut session = Session::open(&k.route, &who, &k.tls, k.server_key).await.map_err(while_connecting)?;
             let target = k.statements.running.load(Ordering::SeqCst);
             if target == 0 {
                 session.quit().await;

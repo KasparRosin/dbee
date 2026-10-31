@@ -1,6 +1,7 @@
 //! The connection form's fields as typed ([`Form`]), and turning them into a
 //! [`ConnectionConfig`] (port numbers, validation). Drawing is in [`crate::connections`].
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
@@ -41,6 +42,8 @@ pub(crate) struct Form {
     pub ssh_auth: Auth,
     /// The key file chosen with "Change…"; `None` picks automatically.
     pub ssh_key: Option<PathBuf>,
+    /// Not editable in the form yet; kept so saving does not change them.
+    pub options: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for Form {
@@ -99,6 +102,7 @@ impl Form {
             ssh_user: ssh.user,
             ssh_auth,
             ssh_key,
+            options: c.options.clone(),
         }
     }
 
@@ -139,6 +143,7 @@ impl Form {
             ssh,
             read_only: self.read_only,
             save_secrets: self.save_secrets,
+            options: self.options.clone(),
         };
         config.validate().map_err(|e| e.to_string())?;
         Ok(config)
@@ -159,6 +164,14 @@ impl Form {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_keeps_the_options() {
+        let mut mysql = ConnectionConfig { id: "a".into(), kind: DbKind::MySql, port: 3306, ..ConnectionConfig::default() };
+        mysql.options.insert(dbee_config::ALLOW_PUBLIC_KEY.id.into(), "true".into());
+        mysql.options.insert("aLaterOption".into(), "x".into());
+        assert_eq!(Form::from_config(&mysql).to_config().unwrap().options, mysql.options);
+    }
 
     #[test]
     fn saving_keeps_the_type_and_the_file() {
