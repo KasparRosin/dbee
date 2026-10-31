@@ -13,6 +13,8 @@ description = "dbee MySQL and MariaDB driver (L4): dbee's own protocol client on
 workspace = true
 
 [dependencies]
+dbee-core = { workspace = true }
+dbee-sql = { workspace = true }
 dbee-config = { workspace = true }
 dbee-ssh = { workspace = true }
 dbee-driver = { workspace = true }

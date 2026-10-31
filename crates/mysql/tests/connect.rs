@@ -14,7 +14,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use dbee_config::{ALLOW_PUBLIC_KEY, ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
-use dbee_driver::{Cancel, DbError, Purpose, Target};
+use dbee_driver::{Cancel, DbError, Purpose, QUERY_LIMITS, Target};
 use dbee_mysql::wire::{MAX_PAYLOAD, Packets};
 use dbee_mysql::{Canceller, Flavor, MySqlConnection, connect, version_num, version_warning};
 use dbee_ssh::{AgentSource, SshEnv, SshSecrets, Tunnel};
@@ -62,7 +62,7 @@ async fn open(c: &ConnectionConfig, db: &TestDb) -> MySqlConnection {
 
 /// The cell `col` of the first row.
 async fn cell(conn: &MySqlConnection, sql: &str, col: usize) -> Option<String> {
-    let r = conn.query_text(sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let r = conn.run(sql, QUERY_LIMITS).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
     r.rows.first().and_then(|row| row.get(col)).cloned().flatten()
 }
 
@@ -291,10 +291,10 @@ async fn read_only_refuses_writes() {
         assert!(c.info().read_only, "{}", s.name);
         assert_eq!(scalar(&c, &format!("SELECT {}", read_only_variable(s))).await.as_deref(), Some("1"), "{}", s.name);
         let name = unique("t_ro");
-        let e = c.query_text(&format!("CREATE TABLE scratch.{name} (a int)")).await.unwrap_err();
+        let e = c.run(&format!("CREATE TABLE scratch.{name} (a int)"), QUERY_LIMITS).await.unwrap_err();
         // Safety net: if the table was created after all, drop it.
         let rw = open(&config(s, SslMode::Prefer), db).await;
-        rw.query_text(&format!("DROP TABLE IF EXISTS scratch.{name}")).await.unwrap();
+        rw.run(&format!("DROP TABLE IF EXISTS scratch.{name}"), QUERY_LIMITS).await.unwrap();
         assert_eq!(e.code(), "readOnly", "{}: {e:?}", s.name);
         assert!(matches!(&e, DbError::ReadOnly { message } if message.contains("READ ONLY")), "{}: {e:?}", s.name);
         // Reading still works, on the same connection.
@@ -322,9 +322,9 @@ async fn browse_session_is_strict() {
             assert_eq!(scalar(conn, "SELECT @@character_set_results").await.as_deref(), Some("utf8mb4"));
         }
         // The browse setting works on a server whose mode is empty.
-        query.query_text("SET SESSION sql_mode = ''").await.unwrap();
+        query.run("SET SESSION sql_mode = ''", QUERY_LIMITS).await.unwrap();
         let set = "SET SESSION sql_mode = TRIM(BOTH ',' FROM CONCAT(@@SESSION.sql_mode, ',STRICT_ALL_TABLES,NO_BACKSLASH_ESCAPES'))";
-        query.query_text(set).await.unwrap();
+        query.run(set, QUERY_LIMITS).await.unwrap();
         let mode = scalar(&query, "SELECT @@SESSION.sql_mode").await.unwrap_or_default();
         let mut modes: Vec<&str> = mode.split(',').collect();
         modes.sort_unstable();
@@ -338,7 +338,7 @@ async fn cancel_sleep(conn: Arc<MySqlConnection>) {
     let canceller: Arc<dyn Cancel> = Arc::new(conn.canceller());
     let runner = Arc::clone(&conn);
     let started = Instant::now();
-    let job = tokio::spawn(async move { runner.query_text("SELECT SLEEP(30)").await });
+    let job = tokio::spawn(async move { runner.run("SELECT SLEEP(30)", QUERY_LIMITS).await });
     tokio::time::sleep(Duration::from_millis(300)).await;
     canceller.cancel().await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
@@ -379,7 +379,7 @@ async fn late_kill_never_cancels_the_next_statement() {
         assert_eq!(scalar(&conn, "SELECT SLEEP(0.5)").await.as_deref(), Some("0"), "{}", s.name);
         // A KILL QUERY the server gets while the connection is idle does not carry over.
         let id = scalar(&conn, "SELECT CONNECTION_ID()").await.unwrap();
-        open(&config(s, SslMode::Prefer), db).await.query_text(&format!("KILL QUERY {id}")).await.unwrap();
+        open(&config(s, SslMode::Prefer), db).await.run(&format!("KILL QUERY {id}"), QUERY_LIMITS).await.unwrap();
         assert_eq!(scalar(&conn, "SELECT SLEEP(0.5)").await.as_deref(), Some("0"), "{}", s.name);
     }
 }
@@ -390,9 +390,9 @@ async fn an_abandoned_query_closes_the_connection() {
     for s in &db.mysql {
         let conn = open(&config(s, SslMode::Prefer), db).await;
         // Its answer would still be on the wire for the next statement to read.
-        assert!(tokio::time::timeout(Duration::from_millis(200), conn.query_text("SELECT SLEEP(5)")).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(200), conn.run("SELECT SLEEP(5)", QUERY_LIMITS)).await.is_err());
         assert!(conn.is_closed(), "{}", s.name);
-        assert_eq!(conn.query_text("SELECT 1").await.unwrap_err(), DbError::ConnectionLost);
+        assert_eq!(conn.run("SELECT 1", QUERY_LIMITS).await.unwrap_err(), DbError::ConnectionLost);
     }
 }
 
@@ -492,12 +492,12 @@ impl User {
     async fn create(s: &MyServer, root: &MySqlConnection, method: &str) -> User {
         let name = unique("dbee_u");
         let password = unique("pw");
-        root.query_text(&format!("CREATE USER '{name}'@'%' IDENTIFIED WITH {method} BY '{password}'")).await.unwrap();
+        root.run(&format!("CREATE USER '{name}'@'%' IDENTIFIED WITH {method} BY '{password}'"), QUERY_LIMITS).await.unwrap();
         User { server: s.clone(), name, password, dropped: false }
     }
 
     async fn drop_now(mut self, root: &MySqlConnection) {
-        root.query_text(&format!("DROP USER IF EXISTS '{}'@'%'", self.name)).await.unwrap();
+        root.run(&format!("DROP USER IF EXISTS '{}'@'%'", self.name), QUERY_LIMITS).await.unwrap();
         self.dropped = true;
     }
 }
@@ -901,9 +901,9 @@ async fn an_older_server_warns_and_goes_on() {
     assert!(info.warnings[0].contains("5.7"), "{info:?}");
     assert!(!info.read_only);
     // Result sets end with EOF packets on a server without CLIENT_DEPRECATE_EOF.
-    let r = conn.query_text("SELECT 1").await.unwrap();
-    assert_eq!((r.columns.as_slice(), r.rows.as_slice()), (&["v".to_owned()][..], &[vec![None]][..]));
-    let e = conn.query_text("BOGUS").await.unwrap_err();
+    let r = conn.run("SELECT 1", QUERY_LIMITS).await.unwrap();
+    assert_eq!((r.columns.len(), r.columns[0].name.as_str(), r.rows.as_slice()), (1, "v", &[vec![None]][..]));
+    let e = conn.run("BOGUS", QUERY_LIMITS).await.unwrap_err();
     assert!(matches!(&e, DbError::Server(s) if s.code == "1064" && s.code_label == Some("MySQL error")), "{e:?}");
     assert!(e.to_string().ends_with("(MySQL error 1064)"), "{e}");
     assert!(!conn.is_closed(), "a server error leaves the connection usable");
@@ -988,16 +988,16 @@ async fn server_errors_carry_the_errno_and_flavor() {
         fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0), answer_as_mariadb).await;
     let conn = connect_fake(port).await.unwrap();
     assert_eq!((conn.info().product.as_str(), conn.info().version_num), ("MariaDB", 110402));
-    let e = conn.query_text("q1146").await.unwrap_err();
+    let e = conn.run("q1146", QUERY_LIMITS).await.unwrap_err();
     assert_eq!(e.to_string(), "Table 'shop.x' doesn't exist (MariaDB error 1146)");
     let DbError::Server(s) = &e else { panic!("{e:?}") };
     assert_eq!((s.code.as_str(), s.code_label, &s.detail, &s.hint, s.position, s.meaning), ("1146", Some("MariaDB error"), &None, &None, None, None));
-    assert_eq!(conn.query_text("q1317").await.unwrap_err(), DbError::Cancelled);
-    assert_eq!(conn.query_text("q1792").await.unwrap_err().code(), "readOnly");
+    assert_eq!(conn.run("q1317", QUERY_LIMITS).await.unwrap_err(), DbError::Cancelled);
+    assert_eq!(conn.run("q1792", QUERY_LIMITS).await.unwrap_err().code(), "readOnly");
     // The server hangs up: the connection is lost, and stays so.
-    assert_eq!(conn.query_text("bye").await.unwrap_err(), DbError::ConnectionLost);
+    assert_eq!(conn.run("bye", QUERY_LIMITS).await.unwrap_err(), DbError::ConnectionLost);
     assert!(conn.is_closed());
-    assert_eq!(conn.query_text("q1146").await.unwrap_err(), DbError::ConnectionLost);
+    assert_eq!(conn.run("q1146", QUERY_LIMITS).await.unwrap_err(), DbError::ConnectionLost);
 }
 
 // ---------------------------------------------------------------------------------------------

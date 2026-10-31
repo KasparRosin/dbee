@@ -1165,7 +1165,9 @@ name = "dbee-mysql"
 version = "0.0.0"
 dependencies = [
  "dbee-config",
+ "dbee-core",
  "dbee-driver",
+ "dbee-sql",
  "dbee-ssh",
  "dbee-testkit",
  "log",

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dbee_driver::{CONNECT_TIMEOUT, Cancel, DbError, DbFuture};
+use dbee_driver::{CONNECT_TIMEOUT, Cancel, DbError, DbFuture, QUERY_LIMITS};
 use tokio::sync::Mutex;
 
 use crate::auth::{Login, ServerKey};
@@ -84,7 +84,7 @@ impl Canceller {
                 return Ok(false);
             }
             k.statements.killed.store(target, Ordering::SeqCst);
-            let killed = session.query(&format!("KILL QUERY {}", k.connection_id)).await;
+            let killed = session.query(&format!("KILL QUERY {}", k.connection_id), QUERY_LIMITS).await;
             if killed.is_err() {
                 let _ = k.statements.killed.compare_exchange(target, 0, Ordering::SeqCst, Ordering::SeqCst);
             }

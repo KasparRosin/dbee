@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** minor (MySQL's server key only without encryption or when allowed; per-type connection options)
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-11-01 · **Change:** minor (MySQL column definitions read by dbee; MariaDB's JSON)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -133,3 +133,9 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 - **Decision:** On a link without TLS, `caching_sha2_password` and `sha256_password` protect the password with an RSA key the server sends, which dbee cannot check. dbee fetches that key when the user chose no encryption (`disable`) or the SSH tunnel encrypts the link, with no warning. When the user wanted encryption and the link ended up plain on a direct connection (`prefer`, with TLS failed or not offered, which an attacker on the link can force), the login is refused before the password is used, unless the connection's `allowPublicKey` option is on; then it goes ahead with a warning on the connection. `require` and the `verify-*` modes always have TLS. dbee follows MySQL's own clients in refusing the key on a link the user wanted encrypted, but allows it when the user chose no encryption.
 - **Options:** A database type's own settings are on/off options: `ConnectionConfig.options` (by id, left out of the file when empty, keys a build does not know kept) and `KindInfo.options` (id and label). MySQL lists `allowPublicKey`, and MariaDB inherits it through its row; Postgres and SQLite list none. The connection form shows them from M2.15.
 - **Why:** Whoever sits on a plain link can hand dbee a key of their own and read the password. Where the user asked for no encryption, or the tunnel gives it, there is nothing to protect against; where the user wanted encryption, that choice must not be undone silently. One options map keeps engine-only settings off the shared struct.
+
+## 2026-11-01: dbee reads MySQL's column definitions itself; MariaDB's JSON from its extended metadata
+
+- **Decision:** `dbee-mysql` parses every column definition itself, from MySQL's and MariaDB's documented layout, on both flavors, instead of with `mysql_common`'s `Column`: one code path, every length checked against the packet, fuzzed, and held to `mysql_common`'s reading of the same definitions on every test server. From a MariaDB server that offers it, dbee asks for `MARIADB_CLIENT_EXTENDED_METADATA` and reads the extra field only when it was agreed; its format `json` makes a column JSON, and its other keys are skipped.
+- **Classes:** A column's class comes from its type, flags, character set and length: `TINYINT(1)` is true/false (every server sends the declared width), strings and blobs in the `binary` character set hold bytes, and so do `BIT`, geometries and vectors, whose values are shown as `0x` and hex rather than as text they would not survive.
+- **Why:** MariaDB has no JSON type: without the extended metadata a JSON column looks exactly like a `LONGTEXT` with a binary collation, and `mysql_common`'s parser cannot read the definitions once the metadata is on.

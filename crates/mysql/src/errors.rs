@@ -8,8 +8,13 @@ use mysql_common::packets::ErrPacket;
 use crate::flavor::Flavor;
 
 const ER_ACCESS_DENIED_ERROR: u16 = 1045;
+const ER_SERVER_SHUTDOWN: u16 = 1053;
 const ER_QUERY_INTERRUPTED: u16 = 1317;
 const ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION: u16 = 1792;
+/// MariaDB's: the connection was killed.
+const ER_CONNECTION_KILLED: u16 = 1927;
+/// MySQL's: the connection was idle past `wait_timeout`.
+const ER_CLIENT_INTERACTION_TIMEOUT: u16 = 4031;
 /// The server has no session variable of that name.
 pub(crate) const ER_UNKNOWN_SYSTEM_VARIABLE: u16 = 1193;
 
@@ -19,13 +24,19 @@ enum Becomes {
     Auth,
     Cancelled,
     ReadOnly,
+    /// The server ends the session.
+    ConnectionLost,
 }
 
-/// The error numbers dbee acts on; the same on MySQL and MariaDB.
-const ERRNOS: &[(u16, Becomes)] = &[
-    (ER_ACCESS_DENIED_ERROR, Becomes::Auth),
-    (ER_QUERY_INTERRUPTED, Becomes::Cancelled),
-    (ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION, Becomes::ReadOnly),
+/// The error numbers dbee acts on, and the flavor they mean that on (`None`: both; the numbers
+/// from 1900 and 4000 differ between the two).
+const ERRNOS: &[(u16, Option<Flavor>, Becomes)] = &[
+    (ER_ACCESS_DENIED_ERROR, None, Becomes::Auth),
+    (ER_SERVER_SHUTDOWN, None, Becomes::ConnectionLost),
+    (ER_QUERY_INTERRUPTED, None, Becomes::Cancelled),
+    (ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION, None, Becomes::ReadOnly),
+    (ER_CONNECTION_KILLED, Some(Flavor::MariaDb), Becomes::ConnectionLost),
+    (ER_CLIENT_INTERACTION_TIMEOUT, Some(Flavor::MySql), Becomes::ConnectionLost),
 ];
 
 /// `e` is the server's error `errno`.
@@ -45,10 +56,12 @@ pub(crate) fn from_err_packet(payload: &[u8], caps: CapabilityFlags, flavor: Fla
 /// Error `errno` with the server's `message`. The SQLSTATE is left out: MySQL gives `HY000` for
 /// most errors, and the error number is what its users look up.
 fn from_errno(errno: u16, message: String, flavor: Flavor) -> DbError {
-    match ERRNOS.iter().find(|(n, _)| *n == errno).map(|(_, becomes)| *becomes) {
+    let known = ERRNOS.iter().find(|(n, on, _)| *n == errno && on.is_none_or(|on| on == flavor));
+    match known.map(|(_, _, becomes)| *becomes) {
         Some(Becomes::Auth) => DbError::Auth { message },
         Some(Becomes::Cancelled) => DbError::Cancelled,
         Some(Becomes::ReadOnly) => DbError::ReadOnly { message },
+        Some(Becomes::ConnectionLost) => DbError::ConnectionLost,
         None => DbError::Server(Box::new(ServerError {
             code: errno.to_string(),
             code_label: Some(flavor.code_label()),
@@ -78,6 +91,10 @@ mod tests {
         assert_eq!(map(1792, Flavor::MySql), DbError::ReadOnly { message: "the message".into() });
         assert_eq!(map(1146, Flavor::MySql).to_string(), "the message (MySQL error 1146)");
         assert_eq!(map(1146, Flavor::MariaDb).to_string(), "the message (MariaDB error 1146)");
+        // The server ends the session; numbers past 1900 mean other things on the other flavor.
+        assert_eq!((map(1053, Flavor::MySql), map(1053, Flavor::MariaDb)), (DbError::ConnectionLost, DbError::ConnectionLost));
+        assert_eq!((map(4031, Flavor::MySql), map(1927, Flavor::MariaDb)), (DbError::ConnectionLost, DbError::ConnectionLost));
+        assert_eq!((map(4031, Flavor::MariaDb).code(), map(1927, Flavor::MySql).code()), ("server", "server"));
     }
 
     #[test]

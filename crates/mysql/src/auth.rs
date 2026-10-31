@@ -10,7 +10,7 @@
 use dbee_driver::DbError;
 use mysql_common::auth::plugins::caching_sha2_password::scramble_sha256;
 use mysql_common::auth::plugins::mysql_native_password::scramble_native;
-use mysql_common::constants::CapabilityFlags;
+use mysql_common::constants::{CapabilityFlags, MariadbCapabilities};
 use mysql_common::io::ParseBuf;
 use mysql_common::packets::{AuthMoreData, AuthPlugin, AuthSwitchRequest, CommonOkPacket, HandshakePacket, HandshakeResponse, SslRequest};
 use mysql_common::proto::MySerialize;
@@ -24,13 +24,23 @@ use crate::wire::{self, MAX_PAYLOAD, Packets};
 const CHARSET: u8 = 45;
 
 /// The capabilities dbee asks for, of those the server offers; `CLIENT_SSL` and
-/// `CLIENT_CONNECT_WITH_DB` are added when used.
+/// `CLIENT_CONNECT_WITH_DB` are added when used. `CLIENT_MULTI_RESULTS` lets a `CALL` return
+/// result sets; several statements in one text stay refused.
 const WANTED: CapabilityFlags = CapabilityFlags::CLIENT_PROTOCOL_41
     .union(CapabilityFlags::CLIENT_SECURE_CONNECTION)
     .union(CapabilityFlags::CLIENT_PLUGIN_AUTH)
     .union(CapabilityFlags::CLIENT_FOUND_ROWS)
     .union(CapabilityFlags::CLIENT_TRANSACTIONS)
+    .union(CapabilityFlags::CLIENT_MULTI_RESULTS)
     .union(CapabilityFlags::CLIENT_DEPRECATE_EOF);
+
+/// The MariaDB capability dbee asks a MariaDB server for, when it offers it: the extended
+/// metadata, which tells a JSON column from a text one.
+pub(crate) const MARIADB_WANTED: MariadbCapabilities = MariadbCapabilities::MARIADB_CLIENT_EXTENDED_METADATA;
+
+/// MariaDB's name for the first capability bit: a server that clears it sends MariaDB's own
+/// capabilities in the greeting, and reads the client's in the requests.
+const CLIENT_MYSQL: CapabilityFlags = CapabilityFlags::CLIENT_LONG_PASSWORD;
 
 /// What the server must offer: the 4.1 protocol with plugin logins (MySQL 5.5 and newer), and
 /// matched rather than changed rows in the counts Apply checks.
@@ -112,6 +122,8 @@ pub(crate) struct Greeting {
     pub(crate) version: String,
     version_parts: (u16, u16, u16),
     pub(crate) capabilities: CapabilityFlags,
+    /// MariaDB's own capabilities; none when the server sets [`CLIENT_MYSQL`].
+    mariadb: MariadbCapabilities,
     nonce: [u8; 20],
     plugin: Vec<u8>,
 }
@@ -183,6 +195,7 @@ pub(crate) fn parse_greeting(payload: &[u8]) -> Result<Greeting, DbError> {
         version: hs.server_version_str().into_owned(),
         version_parts: hs.server_version_parsed().unwrap_or_default(),
         capabilities: hs.capabilities(),
+        mariadb: if hs.capabilities().contains(CLIENT_MYSQL) { MariadbCapabilities::empty() } else { hs.mariadb_ext_capabilities() },
         nonce: nonce_of(&hs.nonce())?,
         plugin: hs.auth_plugin_name_ref().unwrap_or(b"mysql_native_password").to_vec(),
     })
@@ -207,10 +220,16 @@ pub(crate) fn capabilities(g: &Greeting, tls: bool, database: bool) -> Result<Ca
     Ok(caps)
 }
 
+/// The MariaDB capabilities dbee asks for: `wanted` as far as a MariaDB server offers it, and
+/// none from MySQL.
+pub(crate) fn mariadb_capabilities(g: &Greeting, wanted: MariadbCapabilities) -> MariadbCapabilities {
+    if Flavor::from_version(&g.version) == Flavor::MariaDb { wanted & g.mariadb } else { MariadbCapabilities::empty() }
+}
+
 /// The request to start TLS (Protocol::SSLRequest), sent before the handshake response.
-pub(crate) fn ssl_request(caps: CapabilityFlags) -> Vec<u8> {
+pub(crate) fn ssl_request(caps: CapabilityFlags, mariadb: MariadbCapabilities) -> Vec<u8> {
     let mut buf = Vec::new();
-    SslRequest::new(caps, MAX_PAYLOAD as u32, CHARSET).serialize(&mut buf);
+    SslRequest::new(caps, MAX_PAYLOAD as u32, CHARSET).with_mariadb_capabilities(mariadb).serialize(&mut buf);
     buf
 }
 
@@ -300,7 +319,14 @@ fn cleartext(password: &[u8], tls: bool) -> Result<Vec<u8>, DbError> {
 }
 
 /// The handshake response (Protocol::HandshakeResponse41), answering with `method`.
-fn handshake_response(g: &Greeting, who: &Login<'_>, caps: CapabilityFlags, method: Method, answer: Vec<u8>) -> Vec<u8> {
+fn handshake_response(
+    g: &Greeting,
+    who: &Login<'_>,
+    caps: CapabilityFlags,
+    mariadb: MariadbCapabilities,
+    method: Method,
+    answer: Vec<u8>,
+) -> Vec<u8> {
     let response = HandshakeResponse::new(
         Some(answer),
         g.version_parts,
@@ -310,7 +336,8 @@ fn handshake_response(g: &Greeting, who: &Login<'_>, caps: CapabilityFlags, meth
         caps,
         None,
         MAX_PAYLOAD as u32,
-    );
+    )
+    .with_mariadb_ext_capabilities(mariadb);
     let mut buf = Vec::new();
     response.serialize(&mut buf);
     // mysql_common picks the character set by the server's version; dbee always asks for utf8mb4.
@@ -320,9 +347,18 @@ fn handshake_response(g: &Greeting, who: &Login<'_>, caps: CapabilityFlags, meth
     buf
 }
 
-/// Log in after greeting `g`, on `p` (over TLS when `tls`), until the server's OK packet; true
-/// when the password went out encrypted with the server's key, as `key` allows.
-pub(crate) async fn login(p: &mut Packets, g: &Greeting, who: &Login<'_>, caps: CapabilityFlags, tls: bool, key: ServerKey) -> Result<bool, DbError> {
+/// Log in after greeting `g`, on `p` (over TLS when `tls`), asking for `caps` and MariaDB's
+/// `mariadb`, until the server's OK packet; true when the password went out encrypted with the
+/// server's key, as `key` allows.
+pub(crate) async fn login(
+    p: &mut Packets,
+    g: &Greeting,
+    who: &Login<'_>,
+    caps: CapabilityFlags,
+    mariadb: MariadbCapabilities,
+    tls: bool,
+    key: ServerKey,
+) -> Result<bool, DbError> {
     let flavor = Flavor::from_version(&g.version);
     let link = Link { tls, tls_offered: g.offers_tls(), key };
     // A method dbee does not speak, or one whose first answer the link refuses, is answered with
@@ -335,7 +371,7 @@ pub(crate) async fn login(p: &mut Packets, g: &Greeting, who: &Login<'_>, caps: 
     let mut used_key = false;
     let (answer, mut step) = method.first(who.password, &nonce, link)?;
     log::debug!("mysql: logging in with {}", method.name());
-    p.write(&handshake_response(g, who, caps, method, answer)).await?;
+    p.write(&handshake_response(g, who, caps, mariadb, method, answer)).await?;
     for _ in 0..MAX_LOGIN_PACKETS {
         let reply = p.read().await?;
         match reply.first() {
@@ -380,7 +416,14 @@ mod tests {
     const TLS: Link = Link { tls: true, tls_offered: true, key: ServerKey::Allowed };
 
     fn greeting(caps: CapabilityFlags, version: (u16, u16, u16)) -> Greeting {
-        Greeting { version: "8.0.99".into(), version_parts: version, capabilities: caps, nonce: NONCE, plugin: b"caching_sha2_password".to_vec() }
+        Greeting {
+            version: "8.0.99".into(),
+            version_parts: version,
+            capabilities: caps,
+            mariadb: MariadbCapabilities::empty(),
+            nonce: NONCE,
+            plugin: b"caching_sha2_password".to_vec(),
+        }
     }
 
     #[test]
@@ -390,7 +433,7 @@ mod tests {
             let g = greeting(all, version);
             let caps = capabilities(&g, false, true).unwrap();
             let who = Login { user: "root", password: b"pw", database: Some("shop") };
-            let r = handshake_response(&g, &who, caps, Method::CachingSha2, vec![1; 32]);
+            let r = handshake_response(&g, &who, caps, MariadbCapabilities::empty(), Method::CachingSha2, vec![1; 32]);
             // capability flags, max packet size, character set, 23 bytes of filler.
             assert_eq!(r[..4], caps.bits().to_le_bytes(), "{version:?}");
             assert_eq!(r[4..8], (1u32 << 30).to_le_bytes());
@@ -403,7 +446,8 @@ mod tests {
         let caps = capabilities(&greeting(all, (8, 0, 0)), true, false).unwrap();
         assert!(caps.contains(WANTED | CapabilityFlags::CLIENT_SSL) && !caps.contains(CapabilityFlags::CLIENT_CONNECT_WITH_DB));
         assert!(!caps.intersects(CapabilityFlags::CLIENT_LOCAL_FILES | CapabilityFlags::CLIENT_MULTI_STATEMENTS | CapabilityFlags::CLIENT_COMPRESS));
-        let ssl = ssl_request(caps);
+        assert!(caps.contains(CapabilityFlags::CLIENT_MULTI_RESULTS) && !caps.contains(CapabilityFlags::CLIENT_PS_MULTI_RESULTS));
+        let ssl = ssl_request(caps, MariadbCapabilities::empty());
         assert_eq!((&ssl[..4], &ssl[4..8], ssl[8], ssl.len()), (&caps.bits().to_le_bytes()[..], &(1u32 << 30).to_le_bytes()[..], CHARSET, 32));
     }
 
@@ -419,9 +463,42 @@ mod tests {
     /// Protocol::HandshakeV10 as MySQL's documentation lays it out, with a challenge of
     /// `challenge_len` bytes announced and 13 sent in its second part.
     fn greeting_bytes(caps: CapabilityFlags, challenge_len: u8) -> Vec<u8> {
+        greeting_of("8.0.99", caps, challenge_len, 0)
+    }
+
+    /// [`greeting_bytes`] of server `version`, with MariaDB's capabilities `mariadb` in the last
+    /// 4 of the 10 reserved bytes, where MariaDB's documentation puts them.
+    fn greeting_of(version: &str, caps: CapabilityFlags, challenge_len: u8, mariadb: u32) -> Vec<u8> {
         let caps = caps.bits().to_le_bytes();
-        let fixed = [&[0; 4][..], &NONCE[..8], &[0], &caps[..2], &[45], &[2, 0], &caps[2..], &[challenge_len], &[0; 10]].concat();
-        [&b"\x0a8.0.99\0"[..], &fixed, &NONCE[8..], &[0], b"caching_sha2_password\0"].concat()
+        let reserved = [&[0; 6][..], &mariadb.to_le_bytes()].concat();
+        let fixed = [&[0; 4][..], &NONCE[..8], &[0], &caps[..2], &[45], &[2, 0], &caps[2..], &[challenge_len], &reserved].concat();
+        [&[10][..], version.as_bytes(), &[0], &fixed, &NONCE[8..], &[0], b"caching_sha2_password\0"].concat()
+    }
+
+    #[test]
+    fn mariadb_capabilities_only_from_mariadb() {
+        let extended = MariadbCapabilities::MARIADB_CLIENT_EXTENDED_METADATA;
+        let offered = extended.bits() | MariadbCapabilities::MARIADB_CLIENT_PROGRESS.bits();
+        let mariadb = CapabilityFlags::all().difference(CLIENT_MYSQL);
+        let g = parse_greeting(&greeting_of("5.5.5-11.4.2-MariaDB", mariadb, 21, offered)).unwrap();
+        assert_eq!(mariadb_capabilities(&g, MARIADB_WANTED), extended, "only what dbee wants");
+        assert_eq!(mariadb_capabilities(&g, MariadbCapabilities::empty()), MariadbCapabilities::empty());
+        // A server that sets CLIENT_MYSQL has no room for them; MySQL is never asked.
+        let g = parse_greeting(&greeting_of("5.5.5-11.4.2-MariaDB", CapabilityFlags::all(), 21, offered)).unwrap();
+        assert_eq!(mariadb_capabilities(&g, MARIADB_WANTED), MariadbCapabilities::empty());
+        let g = parse_greeting(&greeting_of("8.0.99", mariadb, 21, offered)).unwrap();
+        assert_eq!(mariadb_capabilities(&g, MARIADB_WANTED), MariadbCapabilities::empty());
+        // MariaDB's documentation puts them in the last 4 of the 23 filler bytes, both requests.
+        let g = parse_greeting(&greeting_of("5.5.5-11.4.2-MariaDB", mariadb, 21, offered)).unwrap();
+        let caps = capabilities(&g, true, false).unwrap();
+        let asked = mariadb_capabilities(&g, MARIADB_WANTED);
+        assert!(!caps.contains(CLIENT_MYSQL));
+        let who = Login { user: "root", password: b"pw", database: None };
+        let r = handshake_response(&g, &who, caps, asked, Method::Native, vec![1; 20]);
+        let ssl = ssl_request(caps, asked);
+        for request in [&r[..32], &ssl[..]] {
+            assert_eq!((&request[9..28], &request[28..32]), (&[0u8; 19][..], &extended.bits().to_le_bytes()[..]));
+        }
     }
 
     #[test]
