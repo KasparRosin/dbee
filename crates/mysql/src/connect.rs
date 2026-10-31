@@ -20,7 +20,8 @@ use crate::auth::{self, Login, ServerKey};
 use crate::cancel::{Canceller, KillRoute, Statements};
 use crate::errors;
 use crate::flavor::{Flavor, version_num, version_warning};
-use crate::wire::{self, MAX_PAYLOAD, Packets, Stream};
+use crate::result;
+use crate::wire::{MAX_PAYLOAD, Packets, Stream};
 
 /// The largest payload dbee reads before the login is done.
 const LOGIN_MAX_PAYLOAD: usize = 64 * 1024;
@@ -70,11 +71,11 @@ pub(crate) enum TlsUse {
 
 /// A logged-in protocol session: its packets, and what the login agreed on.
 pub(crate) struct Session {
-    packets: Packets,
-    caps: CapabilityFlags,
+    pub(crate) packets: Packets,
+    pub(crate) caps: CapabilityFlags,
     flavor: Flavor,
     /// MariaDB's extended metadata comes in each column definition.
-    extended_metadata: bool,
+    pub(crate) extended_metadata: bool,
     /// The TLS settings the session runs with; `None` when it is plain.
     tls: Option<Arc<ClientConfig>>,
     /// The password went out encrypted with the server's RSA key.
@@ -90,7 +91,13 @@ impl Session {
 
     /// [`Session::open`], asking a MariaDB server for the MariaDB capabilities in `wanted` it
     /// offers.
-    async fn open_asking(route: &Route, who: &Login<'_>, tls: &TlsUse, key: ServerKey, wanted: MariadbCapabilities) -> Result<Session, DbError> {
+    pub(crate) async fn open_asking(
+        route: &Route,
+        who: &Login<'_>,
+        tls: &TlsUse,
+        key: ServerKey,
+        wanted: MariadbCapabilities,
+    ) -> Result<Session, DbError> {
         let mut packets = Packets::new(open_stream(route).await?, LOGIN_MAX_PAYLOAD);
         let greeting = auth::parse_greeting(&packets.read().await?)?;
         let config = match tls {
@@ -118,7 +125,7 @@ impl Session {
         command.push(Command::COM_QUERY as u8);
         command.extend_from_slice(sql.as_bytes());
         self.packets.write(&command).await?;
-        wire::read_result(&mut self.packets, self.caps, self.flavor, self.extended_metadata, limits).await
+        result::read_result(&mut self.packets, self.caps, self.flavor, self.extended_metadata, limits).await
     }
 
     /// Say goodbye (`COM_QUIT`); the server closes the connection.
@@ -378,80 +385,7 @@ impl MySqlConnection {
 
 #[cfg(test)]
 mod tests {
-    use mysql_common::constants::{ColumnFlags, ColumnType};
-    use mysql_common::io::ParseBuf;
-
     use super::*;
-
-    /// The column definitions of `sql`'s result set, as `session` receives them; the rest of
-    /// the answer is read and dropped.
-    async fn definitions(session: &mut Session, sql: &str) -> Vec<Vec<u8>> {
-        session.packets.reset();
-        session.packets.write(&[&[Command::COM_QUERY as u8][..], sql.as_bytes()].concat()).await.unwrap();
-        let count = session.packets.read().await.unwrap();
-        assert!(count.len() == 1 && count[0] < 251, "{sql}: {count:?}");
-        let mut defs = Vec::new();
-        for _ in 0..count[0] {
-            defs.push(session.packets.read().await.unwrap());
-        }
-        if !session.caps.contains(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
-            session.packets.read().await.unwrap();
-        }
-        while !matches!(session.packets.read().await.unwrap().as_slice(), [0xFE, ..]) {}
-        defs
-    }
-
-    /// The fields dbee reads of a column definition, as mysql_common reads them.
-    fn mysql_common_reads(def: &[u8]) -> (String, ColumnType, ColumnFlags, u16, u32, u8) {
-        let c = ParseBuf(def).parse::<mysql_common::packets::Column>(()).unwrap();
-        (c.name_str().into_owned(), c.column_type(), c.flags(), c.character_set(), c.column_length(), c.decimals())
-    }
-
-    fn dbee_reads(def: &[u8], extended: bool) -> ((String, ColumnType, ColumnFlags, u16, u32, u8), bool) {
-        let c = wire::parse_column(def, extended).unwrap();
-        ((c.name, c.facts.column_type, c.facts.flags, c.facts.charset, c.facts.length, c.decimals), c.facts.json)
-    }
-
-    #[tokio::test]
-    async fn column_definitions_read_as_mysql_common_reads_them() {
-        let db = dbee_testkit::require_testdb!();
-        let queries = [
-            "SELECT * FROM shop.all_types",
-            "SELECT CAST(1.50 AS DECIMAL(10,2)) n, NOW(3) t, NULL z, '' e, CAST(X'00FF' AS BINARY) b, 1.5e0 f, JSON_OBJECT('a', 1) j, \
-             JSON_EXTRACT('[1]', '$[0]') x",
-            "SELECT * FROM odd.`Odd \"Name\" é`",
-        ];
-        for s in &db.mysql {
-            let route = Route { host: "127.0.0.1".into(), port: s.port, tunnel: None };
-            let who = Login { user: "root", password: db.password.as_bytes(), database: None };
-            let mut plain = Session::open_asking(&route, &who, &TlsUse::Off, ServerKey::Allowed, MariadbCapabilities::empty()).await.unwrap();
-            let mut extended = Session::open(&route, &who, &TlsUse::Off, ServerKey::Allowed).await.unwrap();
-            let mariadb = s.flavor == dbee_testkit::MyFlavor::MariaDb;
-            assert_eq!((plain.extended_metadata, extended.extended_metadata), (false, mariadb), "{}", s.name);
-            for sql in queries {
-                let (before, now) = (definitions(&mut plain, sql).await, definitions(&mut extended, sql).await);
-                assert_eq!(before.len(), now.len(), "{}: {sql}", s.name);
-                let mut json = Vec::new();
-                for (b, n) in before.iter().zip(&now) {
-                    let theirs = mysql_common_reads(b);
-                    assert_eq!(dbee_reads(b, false), (theirs.clone(), false), "{}: {sql}", s.name);
-                    let (ours, is_json) = dbee_reads(n, extended.extended_metadata);
-                    assert_eq!(ours, theirs, "{}: {sql}", s.name);
-                    if is_json {
-                        json.push(ours.0);
-                    }
-                }
-                // MariaDB names its JSON in the extended metadata; MySQL has a JSON type.
-                let expected: &[&str] = match sql {
-                    _ if !mariadb => &[],
-                    "SELECT * FROM shop.all_types" => &["doc"],
-                    q if q.contains("JSON_OBJECT") => &["j", "x"],
-                    _ => &[],
-                };
-                assert_eq!(json, expected, "{}: {sql}", s.name);
-            }
-        }
-    }
 
     #[test]
     fn the_servers_key_follows_the_tls_mode_the_tunnel_and_the_option() {

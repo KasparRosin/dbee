@@ -18,10 +18,12 @@
 mod apply;
 mod auth;
 pub mod cancel;
+mod column;
 pub mod connect;
 mod errors;
 pub mod flavor;
 mod query;
+mod result;
 mod rsa;
 mod values;
 pub mod wire;

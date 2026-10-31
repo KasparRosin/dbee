@@ -17,8 +17,9 @@ use mysql_common::proto::MySerialize;
 
 use crate::errors;
 use crate::flavor::Flavor;
+use crate::result;
 use crate::rsa::rsa_encrypt;
-use crate::wire::{self, MAX_PAYLOAD, Packets};
+use crate::wire::{MAX_PAYLOAD, Packets};
 
 /// `utf8mb4_general_ci`, the handshake's character set.
 const CHARSET: u8 = 45;
@@ -376,7 +377,7 @@ pub(crate) async fn login(
         let reply = p.read().await?;
         match reply.first() {
             Some(0x00) => {
-                wire::parse_ok::<CommonOkPacket>(&reply, caps)?;
+                result::parse_ok::<CommonOkPacket>(&reply, caps)?;
                 return Ok(used_key);
             }
             Some(0xFF) => return Err(errors::from_err_packet(&reply, caps, flavor)),
