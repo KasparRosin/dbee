@@ -12,9 +12,14 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod auth;
+pub mod cancel;
 pub mod connect;
 mod errors;
+pub mod flavor;
+mod rsa;
 pub mod wire;
 
-pub use connect::{Canceller, Flavor, MySqlConnection, connect, version_num, version_warning};
+pub use cancel::Canceller;
+pub use connect::{MySqlConnection, connect};
+pub use flavor::{Flavor, version_num, version_warning};
 pub use wire::TextResult;

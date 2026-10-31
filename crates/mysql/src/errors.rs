@@ -5,7 +5,7 @@ use mysql_common::constants::CapabilityFlags;
 use mysql_common::io::ParseBuf;
 use mysql_common::packets::ErrPacket;
 
-use crate::connect::Flavor;
+use crate::flavor::Flavor;
 
 const ER_ACCESS_DENIED_ERROR: u16 = 1045;
 const ER_QUERY_INTERRUPTED: u16 = 1317;

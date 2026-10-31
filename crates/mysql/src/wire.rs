@@ -10,8 +10,8 @@ use mysql_common::io::ParseBuf;
 use mysql_common::packets::{Column, CommonOkPacket, OkPacket, OkPacketDeserializer, OkPacketKind, OldEofPacket, ResultSetTerminator};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::connect::Flavor;
 use crate::errors;
+use crate::flavor::Flavor;
 
 /// A byte stream both ways; a trait object can name only one such trait.
 pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}

@@ -3,10 +3,10 @@
 //! connection.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dbee_config::SslMode;
-use dbee_driver::{CONNECT_TIMEOUT, Cancel, DbError, DbFuture, Purpose, QUERY_LIMITS, ServerInfo, Target, tls};
+use dbee_driver::{CONNECT_TIMEOUT, DbError, Purpose, QUERY_LIMITS, ServerInfo, Target, tls};
 use dbee_ssh::Tunnel;
 use mysql_common::constants::{CapabilityFlags, Command};
 use rustls::pki_types::ServerName;
@@ -15,6 +15,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::auth::{self, Login};
+use crate::cancel::{Canceller, KillRoute, Statements};
+use crate::flavor::{Flavor, version_num, version_warning};
 use crate::wire::{self, MAX_PAYLOAD, Packets, Stream, TextResult};
 
 /// The largest payload dbee reads before the login is done.
@@ -27,92 +29,12 @@ const BROWSE_SQL_MODE: &str = "SET SESSION sql_mode = TRIM(BOTH ',' FROM CONCAT(
 /// Why a TLS handshake that the server ended with one of these alerts failed.
 const NO_SHARED_CIPHER: &str = "the server offers only TLS ciphers dbee does not support; connect through an SSH tunnel instead";
 
-/// Which server a connection reached, told by its version: the MySQL family's members.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Flavor {
-    MySql,
-    MariaDb,
-}
-
-impl Flavor {
-    /// MariaDB says so in its version (`10.11.19-MariaDB-ubu2204`); any other server is MySQL.
-    pub fn from_version(version: &str) -> Flavor {
-        if version.contains("MariaDB") { Flavor::MariaDb } else { Flavor::MySql }
-    }
-
-    /// [`ServerInfo::product`].
-    pub fn product(self) -> &'static str {
-        match self {
-            Flavor::MySql => "MySQL",
-            Flavor::MariaDb => "MariaDB",
-        }
-    }
-
-    /// What an error number is called in the error text: `… (MySQL error 1146)`.
-    pub(crate) fn code_label(self) -> &'static str {
-        match self {
-            Flavor::MySql => "MySQL error",
-            Flavor::MariaDb => "MariaDB error",
-        }
-    }
-
-    /// The oldest supported server, as [`version_num`]: MySQL 5.7, MariaDB 10.11.
-    pub fn min_version_num(self) -> u32 {
-        match self {
-            Flavor::MySql => 50700,
-            Flavor::MariaDb => 101100,
-        }
-    }
-
-    /// The session variable that says whether transactions are read-only, then the other
-    /// spelling: MySQL has `transaction_read_only` (from 5.7.20), MariaDB 10.11 only
-    /// `tx_read_only`.
-    fn read_only_variables(self) -> [&'static str; 2] {
-        match self {
-            Flavor::MySql => ["transaction_read_only", "tx_read_only"],
-            Flavor::MariaDb => ["tx_read_only", "transaction_read_only"],
-        }
-    }
-}
-
-/// `@@version`'s leading `major.minor.patch` as one number that grows with it:
-/// `major * 10000 + minor * 100 + patch` (`8.0.46` is 80046, `10.11.19` is 101119).
-pub fn version_num(version: &str) -> Option<u32> {
-    let mut rest = version;
-    let mut parts = [0u32; 3];
-    for (i, part) in parts.iter_mut().enumerate() {
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        *part = rest.get(..digits)?.parse().ok()?;
-        rest = rest.get(digits..)?;
-        if i < 2 {
-            rest = rest.strip_prefix('.')?;
-        }
-    }
-    let [major, minor, patch] = parts;
-    major.checked_mul(10_000)?.checked_add(minor.min(99) * 100)?.checked_add(patch.min(99))
-}
-
-/// The warning for a server older than its flavor's [`Flavor::min_version_num`], or `None`.
-pub fn version_warning(flavor: Flavor, version_num: u32) -> Option<String> {
-    let min = flavor.min_version_num();
-    if version_num >= min {
-        return None;
-    }
-    let short = |n: u32| format!("{}.{}", n / 10_000, n / 100 % 100);
-    Some(format!(
-        "{} {} is older than {}, the oldest version dbee supports; some things may not work",
-        flavor.product(),
-        short(version_num),
-        short(min)
-    ))
-}
-
 /// Where a connection goes: directly to `host:port`, or through the tunnel to it.
 #[derive(Clone)]
-struct Route {
-    host: String,
-    port: u16,
-    tunnel: Option<Arc<Tunnel>>,
+pub(crate) struct Route {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) tunnel: Option<Arc<Tunnel>>,
 }
 
 impl Route {
@@ -124,7 +46,7 @@ impl Route {
 
 /// TLS for one attempt to connect.
 #[derive(Clone)]
-enum TlsUse {
+pub(crate) enum TlsUse {
     Off,
     /// TLS when the server offers it.
     Prefer(Arc<ClientConfig>),
@@ -132,7 +54,7 @@ enum TlsUse {
 }
 
 /// A logged-in protocol session: its packets, and what the login agreed on.
-struct Session {
+pub(crate) struct Session {
     packets: Packets,
     caps: CapabilityFlags,
     flavor: Flavor,
@@ -142,7 +64,7 @@ struct Session {
 
 impl Session {
     /// Open the stream, read the greeting, start TLS as `tls` says, and log in.
-    async fn open(route: &Route, who: &Login<'_>, tls: &TlsUse) -> Result<Session, DbError> {
+    pub(crate) async fn open(route: &Route, who: &Login<'_>, tls: &TlsUse) -> Result<Session, DbError> {
         let mut packets = Packets::new(open_stream(route).await?, LOGIN_MAX_PAYLOAD);
         let greeting = auth::parse_greeting(&packets.read().await?)?;
         let config = match tls {
@@ -162,7 +84,7 @@ impl Session {
     }
 
     /// Run `sql` as one `COM_QUERY` and read the answer.
-    async fn query(&mut self, sql: &str) -> Result<TextResult, DbError> {
+    pub(crate) async fn query(&mut self, sql: &str) -> Result<TextResult, DbError> {
         self.packets.reset();
         let mut command = Vec::with_capacity(sql.len().saturating_add(1));
         command.push(Command::COM_QUERY as u8);
@@ -172,7 +94,7 @@ impl Session {
     }
 
     /// Say goodbye (`COM_QUIT`); the server closes the connection.
-    async fn quit(mut self) {
+    pub(crate) async fn quit(mut self) {
         self.packets.reset();
         let _ = self.packets.write(&[Command::COM_QUIT as u8]).await;
     }
@@ -207,7 +129,7 @@ fn tls_error(e: &std::io::Error) -> DbError {
 }
 
 /// While connecting, a closed stream means the server would not talk.
-fn while_connecting(e: DbError) -> DbError {
+pub(crate) fn while_connecting(e: DbError) -> DbError {
     match e {
         DbError::ConnectionLost => DbError::Connect("the server closed the connection".into()),
         other => other,
@@ -427,144 +349,5 @@ impl MySqlConnection {
                 Err(e)
             }
         }
-    }
-}
-
-/// The statements run on one connection, numbered from 1, and the one a `KILL QUERY` targeted,
-/// so a late KILL never cancels the next statement.
-#[derive(Default)]
-struct Statements {
-    last: AtomicU64,
-    /// The running statement's number, 0 while none runs.
-    running: AtomicU64,
-    killed: AtomicU64,
-    /// Held while a KILL is on its way: no statement starts meanwhile, so the KILL meets the
-    /// statement it was meant for or none.
-    kill: Mutex<()>,
-}
-
-impl Statements {
-    /// A statement starts; its number.
-    async fn begin(&self) -> u64 {
-        let _no_kill_on_its_way = self.kill.lock().await;
-        let n = self.last.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-        self.running.store(n, Ordering::SeqCst);
-        n
-    }
-
-    /// Statement `n` ended; true when a KILL targeted it.
-    fn end(&self, n: u64) -> bool {
-        let _ = self.running.compare_exchange(n, 0, Ordering::SeqCst, Ordering::SeqCst);
-        self.killed.load(Ordering::SeqCst) == n
-    }
-}
-
-/// What a cancel needs to log in a second time: the route, the login, the TLS the connection
-/// ended up with, and whose statement to kill.
-struct KillRoute {
-    route: Route,
-    user: String,
-    password: String,
-    tls: TlsUse,
-    connection_id: u64,
-    statements: Arc<Statements>,
-}
-
-/// Stops the statement running on one connection with `KILL QUERY <id>`, sent over a second
-/// connection (through the tunnel when the connection uses one). Cheap to clone; holds no lock
-/// of the connection's.
-#[derive(Clone)]
-pub struct Canceller(Arc<KillRoute>);
-
-impl std::fmt::Debug for Canceller {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The route holds the password: not shown.
-        f.debug_struct("Canceller").field("connection_id", &self.0.connection_id).field("tunnel", &self.0.route.tunnel.is_some()).finish()
-    }
-}
-
-impl Canceller {
-    /// Kill the statement running now, if one is. `Ok` means the KILL was delivered, or nothing
-    /// ran; the statement then fails with [`DbError::Cancelled`], unless it finished first.
-    pub async fn cancel(&self) -> Result<(), DbError> {
-        // The timeout below needs a runtime; without one it would panic.
-        tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("cancelling needs a tokio runtime".into()))?;
-        let k = &self.0;
-        let sending = async {
-            let _gate = k.statements.kill.lock().await;
-            if k.statements.running.load(Ordering::SeqCst) == 0 {
-                return Ok(false);
-            }
-            let who = Login { user: &k.user, password: k.password.as_bytes(), database: None };
-            let mut session = Session::open(&k.route, &who, &k.tls).await.map_err(while_connecting)?;
-            let target = k.statements.running.load(Ordering::SeqCst);
-            if target == 0 {
-                session.quit().await;
-                return Ok(false);
-            }
-            k.statements.killed.store(target, Ordering::SeqCst);
-            let killed = session.query(&format!("KILL QUERY {}", k.connection_id)).await;
-            if killed.is_err() {
-                let _ = k.statements.killed.compare_exchange(target, 0, Ordering::SeqCst, Ordering::SeqCst);
-            }
-            session.quit().await;
-            killed.map(|_| true)
-        };
-        match tokio::time::timeout(CONNECT_TIMEOUT, sending).await {
-            Ok(Ok(sent)) => {
-                log::info!("mysql: {}", if sent { "KILL QUERY sent" } else { "nothing to cancel" });
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                log::info!("mysql: cancel failed ({})", e.code());
-                Err(e)
-            }
-            Err(_) => Err(DbError::Connect(format!("the cancel was not delivered within {} s", CONNECT_TIMEOUT.as_secs()))),
-        }
-    }
-}
-
-impl Cancel for Canceller {
-    fn cancel(&self) -> DbFuture<'_, ()> {
-        Box::pin(Canceller::cancel(self))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_kill_counts_only_for_the_statement_it_targeted() {
-        let s = Statements::default();
-        let first = s.begin().await;
-        s.killed.store(first, Ordering::SeqCst);
-        assert!(s.end(first));
-        // The next statement is not the one the KILL targeted.
-        let second = s.begin().await;
-        assert!(second > first && !s.end(second));
-        assert_eq!(s.running.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn no_statement_starts_while_a_kill_is_on_its_way() {
-        let s = Arc::new(Statements::default());
-        let gate = s.kill.lock().await;
-        let starting = tokio::spawn({
-            let s = Arc::clone(&s);
-            async move { s.begin().await }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(s.running.load(Ordering::SeqCst), 0, "started under the gate");
-        drop(gate);
-        let n = starting.await.unwrap();
-        assert_eq!(s.running.load(Ordering::SeqCst), n);
-    }
-
-    #[test]
-    fn read_only_variables_by_flavor() {
-        assert_eq!(Flavor::MySql.read_only_variables()[0], "transaction_read_only");
-        assert_eq!(Flavor::MariaDb.read_only_variables()[0], "tx_read_only");
-        assert_eq!((Flavor::MySql.code_label(), Flavor::MariaDb.code_label()), ("MySQL error", "MariaDB error"));
     }
 }
