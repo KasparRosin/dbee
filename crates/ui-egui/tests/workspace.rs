@@ -567,7 +567,7 @@ fn status_bar_lists_only_live_jobs() {
 fn lost_connection_offers_reconnect() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected_to(db, pg14(db), true);
-    let server = db.servers.iter().find(|s| s.major == 14).unwrap();
+    let server = db.server("pg14").unwrap();
     let sql = "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = 'dbee'";
     dbee_testkit::psql(server, sql).unwrap();
     // The next database action finds the connection gone.

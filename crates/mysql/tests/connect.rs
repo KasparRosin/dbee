@@ -1,4 +1,4 @@
-//! Connection tests. Most run against every MySQL and MariaDB server in `db.mysql` (`cargo xtask
+//! Connection tests. Most run against every MySQL and MariaDB server in `db.servers` (`cargo xtask
 //! testdb up`); the rest talk to a fake server on 127.0.0.1 that this file plays, byte by byte as
 //! MySQL's protocol documentation describes the packets.
 //!
@@ -20,22 +20,24 @@ use dbee_mysql::wire::{MAX_PAYLOAD, Packets};
 use dbee_mysql::{Canceller, Flavor, MySqlConnection, MySqlDriver, connect, version_num, version_warning};
 use dbee_sql::Dialect;
 use dbee_ssh::{AgentSource, SshEnv, SshSecrets, Tunnel};
-use dbee_testkit::{MyFlavor, MyServer, TempHome, TestDb, require_testdb, temp_home, unique};
+use dbee_testkit::{Kind, Server, TempHome, TestDb, require_testdb, temp_home, unique};
 use mysql_common::auth::plugins::mysql_native_password::scramble_native;
 use mysql_common::constants::{CapabilityFlags, StatusFlags};
 use proptest::prelude::*;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
 
-fn kind(s: &MyServer) -> DbKind {
-    match s.flavor {
-        MyFlavor::MySql => DbKind::MySql,
-        MyFlavor::MariaDb => DbKind::MariaDb,
-    }
+/// The MySQL and MariaDB test servers.
+fn mysql_servers(db: &TestDb) -> impl Iterator<Item = &Server> {
+    db.servers_of(&[Kind::MySql, Kind::MariaDb])
+}
+
+fn kind(s: &Server) -> DbKind {
+    DbKind::from_id(s.kind.id()).unwrap()
 }
 
 /// `root@127.0.0.1:<port>`, no database, with the given TLS mode.
-fn config(s: &MyServer, mode: SslMode) -> ConnectionConfig {
+fn config(s: &Server, mode: SslMode) -> ConnectionConfig {
     ConnectionConfig {
         name: format!("test {}", s.name),
         kind: kind(s),
@@ -85,12 +87,12 @@ fn code(r: Result<MySqlConnection, DbError>) -> &'static str {
 }
 
 /// MySQL 5.7's image offers TLS only with ciphers rustls does not speak (DHE-RSA on TLS 1.2).
-fn rustls_can_reach(s: &MyServer) -> bool {
+fn rustls_can_reach(s: &Server) -> bool {
     s.name != "mysql57"
 }
 
 /// What a TLS failure against mysql57 must say.
-fn assert_cipher_error(e: &DbError, s: &MyServer) {
+fn assert_cipher_error(e: &DbError, s: &Server) {
     assert_eq!(e.code(), "tls", "{}: {e:?}", s.name);
     let text = e.to_string();
     assert!(text.contains("cipher") && text.contains("SSH"), "{}: {text}", s.name);
@@ -118,8 +120,8 @@ async fn tunnel(db: &TestDb, home: &TempHome) -> Arc<Tunnel> {
 }
 
 /// The server as the sshd sees it: `<service>:3306`.
-fn tunnelled(s: &MyServer, db: &TestDb, mode: SslMode) -> ConnectionConfig {
-    ConnectionConfig { host: s.name.clone(), port: 3306, ssh: Some(ssh_config(db)), ..config(s, mode) }
+fn tunnelled(s: &Server, db: &TestDb, mode: SslMode) -> ConnectionConfig {
+    ConnectionConfig { host: s.name.clone(), port: s.service_port, ssh: Some(ssh_config(db)), ..config(s, mode) }
 }
 
 async fn open_tunnelled(c: &ConnectionConfig, db: &TestDb, t: &Arc<Tunnel>) -> MySqlConnection {
@@ -130,10 +132,10 @@ async fn open_tunnelled(c: &ConnectionConfig, db: &TestDb, t: &Arc<Tunnel>) -> M
 #[tokio::test]
 async fn connects_and_reports_version() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(&config(s, SslMode::Prefer), db).await;
         let info = c.info();
-        let product = if s.flavor == MyFlavor::MariaDb { "MariaDB" } else { "MySQL" };
+        let product = if s.kind == Kind::MariaDb { "MariaDB" } else { "MySQL" };
         assert_eq!(info.product, product, "{}", s.name);
         assert!(info.version.starts_with(&s.version), "{}: {info:?}", s.name);
         assert_eq!(info.version_num, expected_num(&s.version), "{}: {info:?}", s.name);
@@ -157,7 +159,7 @@ async fn connects_and_reports_version() {
 async fn mariadb_version_num_is_the_real_version() {
     let db = require_testdb!();
     let mut seen = 0;
-    for s in db.mysql.iter().filter(|s| s.flavor == MyFlavor::MariaDb) {
+    for s in mysql_servers(db).filter(|s| s.kind == Kind::MariaDb) {
         let info = open(&config(s, SslMode::Prefer), db).await.info().clone();
         // The handshake says 5.5.5-10.11…; @@version does not.
         assert!(!info.version.starts_with("5.5.5-") && info.version.contains("MariaDB"), "{info:?}");
@@ -193,7 +195,7 @@ fn old_versions_warn() {
 #[tokio::test]
 async fn wrong_password_is_auth_error() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = config(s, SslMode::Prefer);
         let e = connect(target(&c, Some("nope-pw"))).await.err().unwrap();
         assert_eq!(e.code(), "auth", "{}: {e:?}", s.name);
@@ -207,7 +209,7 @@ async fn wrong_password_is_auth_error() {
 #[tokio::test]
 async fn tls_require_encrypts() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let plain = open(&config(s, SslMode::Disable), db).await;
         assert_eq!(cipher(&plain).await, "", "{}", s.name);
         let prefer = open(&config(s, SslMode::Prefer), db).await;
@@ -231,7 +233,7 @@ async fn tls_require_encrypts() {
 #[tokio::test]
 async fn tls_verify_full_needs_trusted_ca() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let local = ConnectionConfig { host: "localhost".into(), ..config(s, SslMode::VerifyFull) };
         let with_ca = ConnectionConfig { ca_file: Some(db.ca_file.clone()), ..local.clone() };
         if !rustls_can_reach(s) {
@@ -257,7 +259,7 @@ async fn through_ssh_tunnel() {
     let db = require_testdb!();
     let home = temp_home(None, Some(&db.sshd.known_hosts_line));
     let t = tunnel(db, &home).await;
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = tunnelled(s, db, SslMode::Prefer);
         let conn = open_tunnelled(&c, db, &t).await;
         assert!(conn.info().version.starts_with(&s.version), "{}: {:?}", s.name, conn.info());
@@ -270,24 +272,24 @@ async fn through_ssh_tunnel() {
         // An SSH connection without a tunnel is refused rather than tried directly.
         assert_eq!(code(connect(target(&c, Some(&db.password))).await), "connect");
     }
-    let mysql80 = db.mysql.iter().find(|s| s.name == db.sshd.my_host).unwrap();
-    let conn = open_tunnelled(&ConnectionConfig { port: db.sshd.my_port, ..tunnelled(mysql80, db, SslMode::Prefer) }, db, &t).await;
+    let mysql80 = db.server("mysql80").unwrap();
+    let conn = open_tunnelled(&ConnectionConfig { port: mysql80.service_port, ..tunnelled(mysql80, db, SslMode::Prefer) }, db, &t).await;
     assert!(conn.info().version.starts_with("8.0"), "{:?}", conn.info());
     t.close().await;
 }
 
 /// The variable a server's flavor reads for read-only mode.
-fn read_only_variable(s: &MyServer) -> &'static str {
-    match s.flavor {
-        MyFlavor::MySql => "@@session.transaction_read_only",
-        MyFlavor::MariaDb => "@@session.tx_read_only",
+fn read_only_variable(s: &Server) -> &'static str {
+    match s.kind {
+        Kind::MariaDb => "@@session.tx_read_only",
+        _ => "@@session.transaction_read_only",
     }
 }
 
 #[tokio::test]
 async fn read_only_refuses_writes() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let ro = ConnectionConfig { read_only: true, ..config(s, SslMode::Prefer) };
         let c = open(&ro, db).await;
         assert!(c.info().read_only, "{}", s.name);
@@ -309,7 +311,7 @@ async fn read_only_refuses_writes() {
 #[tokio::test]
 async fn browse_session_is_strict() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let browse = open_as(&config(s, SslMode::Prefer), &db.password, Purpose::Browse).await;
         let mode = scalar(&browse, "SELECT @@SESSION.sql_mode").await.unwrap_or_default();
         assert!(mode.split(',').any(|m| m == "STRICT_ALL_TABLES"), "{}: {mode}", s.name);
@@ -357,14 +359,14 @@ async fn cancel_sleep(conn: Arc<MySqlConnection>) {
 #[tokio::test]
 async fn cancel_stops_sleep() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         for mode in [SslMode::Prefer, SslMode::Disable] {
             cancel_sleep(Arc::new(open(&config(s, mode), db).await)).await;
         }
     }
     let home = temp_home(None, Some(&db.sshd.known_hosts_line));
     let t = tunnel(db, &home).await;
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         cancel_sleep(Arc::new(open_tunnelled(&tunnelled(s, db, SslMode::Prefer), db, &t).await)).await;
     }
     t.close().await;
@@ -373,7 +375,7 @@ async fn cancel_stops_sleep() {
 #[tokio::test]
 async fn late_kill_never_cancels_the_next_statement() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let conn = Arc::new(open(&config(s, SslMode::Prefer), db).await);
         let canceller: Canceller = conn.canceller();
         // A cancel with nothing running reaches nothing.
@@ -393,7 +395,7 @@ async fn late_kill_never_cancels_the_next_statement() {
 #[tokio::test]
 async fn an_abandoned_query_closes_the_connection() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let conn = open(&config(s, SslMode::Prefer), db).await;
         // Its answer would still be on the wire for the next statement to read.
         assert!(tokio::time::timeout(Duration::from_millis(200), conn.run("SELECT SLEEP(5)", QUERY_LIMITS)).await.is_err());
@@ -408,7 +410,7 @@ async fn the_servers_key_only_without_encryption_or_when_allowed() {
     let home = temp_home(None, Some(&db.sshd.known_hosts_line));
     let t = tunnel(db, &home).await;
     let mut seen = 0;
-    for s in db.mysql.iter().filter(|s| !rustls_can_reach(s)) {
+    for s in mysql_servers(db).filter(|s| !rustls_can_reach(s)) {
         // prefer ends up plain on this server, and sha256_password then wants the server's key.
         let root = open(&config(s, SslMode::Prefer), db).await;
         let user = User::create(s, &root, "sha256_password").await;
@@ -437,7 +439,7 @@ async fn the_servers_key_only_without_encryption_or_when_allowed() {
 #[tokio::test]
 async fn login_methods() {
     let db = require_testdb!();
-    for s in db.mysql.iter().filter(|s| s.flavor == MyFlavor::MySql) {
+    for s in mysql_servers(db).filter(|s| s.kind == Kind::MySql) {
         let root = open(&config(s, SslMode::Prefer), db).await;
         let methods = active_methods(&root).await;
         // Each server has the methods of its version: native is gone from 9, sha256 and caching_sha2 came in 5.6 and 8.0.
@@ -488,14 +490,14 @@ async fn active_methods(root: &MySqlConnection) -> Vec<&'static str> {
 /// A throwaway account `<unique>@%` with a random password, dropped by `drop_now` (or, should a
 /// test fail first, by `Drop` through the server's own client).
 struct User {
-    server: MyServer,
+    server: Server,
     name: String,
     password: String,
     dropped: bool,
 }
 
 impl User {
-    async fn create(s: &MyServer, root: &MySqlConnection, method: &str) -> User {
+    async fn create(s: &Server, root: &MySqlConnection, method: &str) -> User {
         let name = unique("dbee_u");
         let password = unique("pw");
         root.run(&format!("CREATE USER '{name}'@'%' IDENTIFIED WITH {method} BY '{password}'"), QUERY_LIMITS).await.unwrap();
@@ -551,10 +553,10 @@ fn connection_types_are_shareable() {
 async fn mysql_driver_connects_through_the_trait() {
     let db = require_testdb!();
     assert_eq!(MySqlDriver.kinds(), [DbKind::MySql, DbKind::MariaDb]);
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = config(s, SslMode::Prefer);
         let conn = MySqlDriver.connect(target(&c, Some(&db.password))).await.unwrap();
-        let product = if s.flavor == MyFlavor::MariaDb { "MariaDB" } else { "MySQL" };
+        let product = if s.kind == Kind::MariaDb { "MariaDB" } else { "MySQL" };
         assert_eq!((conn.info().product.as_str(), conn.info().version_num), (product, expected_num(&s.version)), "{}", s.name);
         assert_eq!(conn.dialect(), Dialect::MySql);
         assert!(!conn.is_closed());
@@ -580,7 +582,7 @@ async fn mysql_driver_connects_through_the_trait() {
 #[tokio::test]
 async fn the_trait_canceller_stops_sleep() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let conn: Arc<dyn Connection> = MySqlDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
         let canceller = conn.canceller();
         let runner = Arc::clone(&conn);

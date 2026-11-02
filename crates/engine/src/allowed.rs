@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn reconnect_is_checked_too() {
         let db = dbee_testkit::require_testdb!();
-        let server = db.servers.iter().find(|s| s.major == 14).unwrap();
+        let server = db.server("pg14").unwrap();
         let mut s = Session::new(SessionOptions {
             secrets: Some(std::sync::Arc::new(MemoryStore::default())),
             allowed_targets: Some(vec![("127.0.0.1".into(), server.port)]),

@@ -97,7 +97,7 @@ mod tests {
     #[tokio::test]
     async fn the_disable_connector_trusts_no_certificate() {
         let db = dbee_testkit::require_testdb!();
-        let s = &db.servers[0];
+        let s = db.server("pg14").unwrap();
         // TLS forced on: the disable connector must refuse the server, the require one accepts it.
         let attempt = |tls: Tls| {
             let mut pg = tokio_postgres::Config::new();

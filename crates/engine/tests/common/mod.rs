@@ -26,7 +26,7 @@ use std::time::Duration;
 use dbee_config::{ConnectionConfig, MemoryStore, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, Json, Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{PgServer, TempHome, TestDb, temp_home};
+use dbee_testkit::{Server, TempHome, TestDb, temp_home};
 use serde_json::json;
 
 /// How long a test waits for a job.
@@ -111,17 +111,17 @@ pub fn db() -> &'static TestDb {
 }
 
 /// The Postgres 14 server.
-pub fn pg14() -> &'static PgServer {
-    db().servers.iter().find(|s| s.major == 14).expect("the test servers include pg14")
+pub fn pg14() -> &'static Server {
+    db().server("pg14").expect("the test servers include pg14")
 }
 
 /// The newest Postgres.
-pub fn pgnew() -> &'static PgServer {
-    db().servers.iter().max_by_key(|s| s.major).expect("the test servers include pgnew")
+pub fn pgnew() -> &'static Server {
+    db().server("pgnew").expect("the test servers include pgnew")
 }
 
 /// `postgres@127.0.0.1:<port>/dbee`, named after the server, TLS `prefer`, no id.
-pub fn server_config(s: &PgServer) -> ConnectionConfig {
+pub fn server_config(s: &Server) -> ConnectionConfig {
     ConnectionConfig {
         name: s.name.clone(),
         host: "127.0.0.1".into(),
@@ -151,8 +151,13 @@ pub fn ssh_config(auth: SshAuth) -> SshConfig {
 
 /// pg14 through the test sshd: the database host as the sshd sees it (`pg14:5432`).
 pub fn via_ssh(auth: SshAuth) -> ConnectionConfig {
-    let d = db();
-    ConnectionConfig { name: "pg14 via ssh".into(), host: d.sshd.pg_host.clone(), port: d.sshd.pg_port, ssh: Some(ssh_config(auth)), ..pg14_config() }
+    ConnectionConfig {
+        name: "pg14 via ssh".into(),
+        host: pg14().name.clone(),
+        port: pg14().service_port,
+        ssh: Some(ssh_config(auth)),
+        ..pg14_config()
+    }
 }
 
 /// `[127.0.0.1]:<sshd port>`, as `known_hosts` and the host key errors name the sshd.
@@ -203,7 +208,7 @@ pub fn connected_exclusive() -> TestSession {
 
 /// Terminates every dbee backend on `server`, then waits (up to 10 s) until none is left. Only
 /// inside an [`exclusive_session`]: it kills every dbee connection on the server.
-pub fn kill_dbee_backends(s: &TestSession, server: &PgServer) {
+pub fn kill_dbee_backends(s: &TestSession, server: &Server) {
     assert!(matches!(s.hold, Hold::Exclusive(_)), "kill_dbee_backends needs an exclusive_session()");
     // The two-argument form (Postgres 14+) waits until the backend has exited. A backend of an
     // earlier test may already be exiting by itself and report `f`; the session's own is `t`.

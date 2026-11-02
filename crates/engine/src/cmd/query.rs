@@ -564,9 +564,10 @@ mod tests {
         let ssh = SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None };
         let options = SessionOptions { config_dir: None, secrets: None, ssh, notify: None, allowed_targets: None, drivers: dbee_drivers::all() };
         let mut s = Session::new(options).unwrap();
+        let pg14 = db.server("pg14").unwrap();
         let config = ConnectionConfig {
-            host: db.sshd.pg_host.clone(),
-            port: db.sshd.pg_port,
+            host: pg14.name.clone(),
+            port: pg14.service_port,
             user: "postgres".into(),
             database: "dbee".into(),
             ssh: Some(SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth: SshAuth::Key { path: None } }),
@@ -591,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn one_byte_budget_for_the_whole_run() {
         let db = dbee_testkit::require_testdb!();
-        let server = db.servers.iter().find(|s| s.major == 14).unwrap();
+        let server = db.server("pg14").unwrap();
         let config = ConnectionConfig {
             host: "127.0.0.1".into(),
             port: server.port,

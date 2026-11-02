@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-use dbee_testkit::{PgServer, TestDb, psql, temp_home, unique};
+use dbee_testkit::{Server, TestDb, psql, temp_home, unique};
 use dbee_ui_egui::value_panel::{LINE_H, PAD};
 use serde_json::{Value as Json, json};
 
@@ -277,13 +277,13 @@ impl Drop for App {
     }
 }
 
-fn pg14(db: &TestDb) -> &PgServer {
-    db.servers.iter().find(|s| s.name == db.sshd.pg_host).unwrap()
+fn pg14(db: &TestDb) -> &Server {
+    db.server("pg14").unwrap()
 }
 
 /// The day's own customer and order, deleted when the test ends, also when it fails.
 struct DayRows {
-    server: PgServer,
+    server: Server,
     customer: String,
     order: String,
     /// The customer's name as inserted, with a typo to fix: `Custmer m1day_<hex>`.
@@ -294,7 +294,7 @@ struct DayRows {
 
 /// Removes the rows earlier runs left (a killed run cannot delete its own): the orders of the
 /// customers marked [`MARK`], then those customers.
-fn sweep(server: &PgServer) {
+fn sweep(server: &Server) {
     let deleted = |sql: String| {
         let out = psql(server, &format!("WITH d AS ({sql} RETURNING 1) SELECT count(*) FROM d")).unwrap();
         out.trim().parse::<u64>().unwrap_or_else(|_| panic!("sweep: {out}"))
@@ -307,7 +307,7 @@ fn sweep(server: &PgServer) {
 }
 
 /// `<customers> <orders>`: the row counts of the tables the day writes to.
-fn counts(server: &PgServer) -> String {
+fn counts(server: &Server) -> String {
     psql(server, "SELECT (SELECT count(*) FROM shop.customers) || ' ' || (SELECT count(*) FROM shop.orders)").unwrap().trim().to_string()
 }
 
@@ -389,8 +389,8 @@ fn m1_day_end_to_end() {
     let config = json!({
         "name": "Shop live",
         "color": "red",
-        "host": db.sshd.pg_host,
-        "port": db.sshd.pg_port,
+        "host": pg14(db).name,
+        "port": pg14(db).service_port,
         "user": "postgres",
         "database": "dbee",
         "sslMode": "prefer",

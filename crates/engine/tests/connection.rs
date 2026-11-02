@@ -178,10 +178,10 @@ fn ssh_key_preview() {
 fn test_command_reports_server() {
     let db = require_testdb!();
     let mut s = session();
-    for server in &db.servers {
+    for server in db.servers_of(&[dbee_testkit::Kind::Postgres]) {
         let r = s.run_blocking("connection.test", json!({ "config": server_config(server), "password": pw() }), T).unwrap();
         let text = r["server"].as_str().unwrap();
-        assert!(text.contains("PostgreSQL") && text.contains(&server.major.to_string()), "{r}");
+        assert!(text.contains("PostgreSQL") && text.contains(&server.major().to_string()), "{r}");
         assert_eq!(r["via"], "direct");
         let i = s.inspect();
         assert_eq!(i["screen"], "connections");

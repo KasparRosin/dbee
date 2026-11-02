@@ -1,4 +1,4 @@
-//! All-or-nothing apply tests against every MySQL and MariaDB server in `db.mysql` (`cargo xtask
+//! All-or-nothing apply tests against every MySQL and MariaDB server in `db.servers` (`cargo xtask
 //! testdb up`). Each creates a `scratch` InnoDB table of its own, checks results from a second
 //! connection, and drops the table.
 
@@ -7,12 +7,17 @@ use std::time::Duration;
 use dbee_config::{ConnectionConfig, DbKind, SslMode};
 use dbee_driver::{ApplyError, ApplyGate, DbError, Purpose, QUERY_LIMITS, Target};
 use dbee_mysql::{MySqlConnection, connect};
-use dbee_testkit::{MyFlavor, MyServer, TestDb, require_testdb, unique};
+use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
 
-async fn open(s: &MyServer, db: &TestDb, read_only: bool) -> MySqlConnection {
+/// The MySQL and MariaDB test servers.
+fn mysql_servers(db: &TestDb) -> impl Iterator<Item = &Server> {
+    db.servers_of(&[Kind::MySql, Kind::MariaDb])
+}
+
+async fn open(s: &Server, db: &TestDb, read_only: bool) -> MySqlConnection {
     let config = ConnectionConfig {
         name: format!("test {}", s.name),
-        kind: if s.flavor == MyFlavor::MariaDb { DbKind::MariaDb } else { DbKind::MySql },
+        kind: DbKind::from_id(s.kind.id()).unwrap(),
         host: "127.0.0.1".into(),
         port: s.port,
         user: "root".into(),
@@ -48,10 +53,10 @@ async fn apply(c: &MySqlConnection, statements: &[String]) -> Result<u64, ApplyE
 /// Run `body(server, writer, reader, table)` against every server with a fresh two-row table.
 async fn with_table<F, Fut>(db: &'static TestDb, body: F)
 where
-    F: Fn(&'static MyServer, MySqlConnection, MySqlConnection, String) -> Fut,
+    F: Fn(&'static Server, MySqlConnection, MySqlConnection, String) -> Fut,
     Fut: Future<Output = ()>,
 {
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let writer = open(s, db, false).await;
         let reader = open(s, db, false).await;
         let table = format!("scratch.`{}`", unique("apply"));

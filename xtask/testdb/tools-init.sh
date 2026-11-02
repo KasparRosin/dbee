@@ -1,8 +1,8 @@
 #!/bin/sh
 # The `init` service of compose.yml: writes the dbee test servers' secrets into /secrets, once.
 #   - ca.crt, and server.crt / server.key for the Postgres servers (ECDSA P-256; SAN localhost,
-#     127.0.0.1 and every database service's name); the key is mode 0600 and owned by uid 70, the
-#     postgres user on Alpine.
+#     127.0.0.1 and every database service's name, $DBEE_TEST_HOSTS); the key is mode 0600 and
+#     owned by uid 70, the postgres user on Alpine.
 #   - mysql/server.crt / mysql/server.key for the MySQL and MariaDB servers: RSA 2048, the same names
 #     and CA. MySQL 5.7's image (OpenSSL 1.0.2) offers no cipher for an ECDSA key. The key is owned
 #     by uid 999, the mysql user of the MySQL and MariaDB images.
@@ -17,6 +17,7 @@ if [ -f "$out/.done" ]; then
     exit 0
 fi
 : "${DBEE_TEST_PASSPHRASE:?DBEE_TEST_PASSPHRASE must be set}"
+: "${DBEE_TEST_HOSTS:?DBEE_TEST_HOSTS must be set}"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -28,11 +29,15 @@ openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -
     -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
 openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -sha256 \
     -subj "/CN=localhost" -keyout server.key -out server.csr
-cat > server.ext <<'EXT'
+san="DNS:localhost, IP:127.0.0.1"
+for host in $(echo "$DBEE_TEST_HOSTS" | tr ',' ' '); do
+    san="$san, DNS:$host"
+done
+cat > server.ext <<EXT
 basicConstraints = critical, CA:FALSE
 keyUsage = critical, digitalSignature
 extendedKeyUsage = serverAuth
-subjectAltName = DNS:localhost, IP:127.0.0.1, DNS:pg14, DNS:pgnew, DNS:mysql57, DNS:mysql80, DNS:mysqlnew, DNS:mariadb1011, DNS:mariadbnew
+subjectAltName = $san
 EXT
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -sha256 -days 3650 \
     -extfile server.ext -out server.crt

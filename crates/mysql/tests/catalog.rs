@@ -1,4 +1,4 @@
-//! Catalog tests against every MySQL and MariaDB server in `db.mysql` (`cargo xtask testdb up`).
+//! Catalog tests against every MySQL and MariaDB server in `db.servers` (`cargo xtask testdb up`).
 //! Every load also checks that no row named a table the catalog did not list. Tests that write
 //! make their own `scratch` table and drop it; their DDL holds [`DDL`] for writing, so no load
 //! runs while a table comes or goes.
@@ -9,8 +9,13 @@ use dbee_config::{ConnectionConfig, DbKind, SslMode};
 use dbee_core::{Catalog, Generated, RelKind, TableInfo, TableRef, TypeClass};
 use dbee_driver::{Purpose, QUERY_LIMITS, Target};
 use dbee_mysql::{MySqlConnection, connect};
-use dbee_testkit::{MyFlavor, MyServer, TestDb, require_testdb, unique};
+use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
 use tokio::sync::RwLock;
+
+/// The MySQL and MariaDB test servers.
+fn mysql_servers(db: &TestDb) -> impl Iterator<Item = &Server> {
+    db.servers_of(&[Kind::MySql, Kind::MariaDb])
+}
 
 /// Loads hold it for reading; a test's DDL for writing.
 static DDL: RwLock<()> = RwLock::const_new(());
@@ -19,12 +24,12 @@ fn tr(schema: &str, name: &str) -> TableRef {
     TableRef { schema: schema.into(), name: name.into() }
 }
 
-fn mariadb(s: &MyServer) -> bool {
-    s.flavor == MyFlavor::MariaDb
+fn mariadb(s: &Server) -> bool {
+    s.kind == Kind::MariaDb
 }
 
 /// `root@127.0.0.1`, on `database` when it is not empty.
-fn config(s: &MyServer, database: &str) -> ConnectionConfig {
+fn config(s: &Server, database: &str) -> ConnectionConfig {
     ConnectionConfig {
         name: format!("test {}", s.name),
         kind: if mariadb(s) { DbKind::MariaDb } else { DbKind::MySql },
@@ -37,7 +42,7 @@ fn config(s: &MyServer, database: &str) -> ConnectionConfig {
     }
 }
 
-async fn open(s: &MyServer, db: &TestDb, database: &str) -> MySqlConnection {
+async fn open(s: &Server, db: &TestDb, database: &str) -> MySqlConnection {
     let c = config(s, database);
     match connect(Target { config: &c, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false }).await {
         Ok(conn) => conn,
@@ -46,7 +51,7 @@ async fn open(s: &MyServer, db: &TestDb, database: &str) -> MySqlConnection {
 }
 
 /// The catalog of `conn`, whose rows must all name a listed table.
-async fn try_load(conn: &MySqlConnection, s: &MyServer) -> Result<Catalog, String> {
+async fn try_load(conn: &MySqlConnection, s: &Server) -> Result<Catalog, String> {
     let _no_ddl = DDL.read().await;
     let rows = conn.catalog_rows().await.map_err(|e| format!("catalog rows on {}: {e}", s.name))?;
     if rows.dropped() != 0 {
@@ -55,21 +60,21 @@ async fn try_load(conn: &MySqlConnection, s: &MyServer) -> Result<Catalog, Strin
     conn.load_catalog().await.map_err(|e| format!("load_catalog on {}: {e}", s.name))
 }
 
-async fn load(conn: &MySqlConnection, s: &MyServer) -> Catalog {
+async fn load(conn: &MySqlConnection, s: &Server) -> Catalog {
     try_load(conn, s).await.unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Every server's whole catalog.
-async fn catalogs(db: &TestDb) -> Vec<(&MyServer, Catalog)> {
+async fn catalogs(db: &TestDb) -> Vec<(&Server, Catalog)> {
     let mut out = Vec::new();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let conn = open(s, db, "").await;
         out.push((s, load(&conn, s).await));
     }
     out
 }
 
-fn table<'a>(cat: &'a Catalog, s: &MyServer, schema: &str, name: &str) -> &'a TableInfo {
+fn table<'a>(cat: &'a Catalog, s: &Server, schema: &str, name: &str) -> &'a TableInfo {
     cat.table(&tr(schema, name)).unwrap_or_else(|| panic!("{}: no {schema}.{name}", s.name))
 }
 
@@ -138,7 +143,7 @@ async fn system_databases_last_and_flagged() {
 #[tokio::test]
 async fn set_database_narrows_the_list() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let conn = open(s, db, "shop").await;
         let cat = load(&conn, s).await;
         assert_eq!(names(&cat.schemas, |x| &x.name), ["shop"], "{}", s.name);
@@ -191,9 +196,9 @@ async fn generated_and_auto_increment() {
 async fn each_servers_defaults_keys_and_generated_columns() {
     let db = require_testdb!();
     let t = unique("t_columns");
-    let persistent = |s: &MyServer| if mariadb(s) { ", p INT AS (x * 4) PERSISTENT" } else { "" };
+    let persistent = |s: &Server| if mariadb(s) { ", p INT AS (x * 4) PERSISTENT" } else { "" };
     let mut loaded = Vec::new();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let conn = open(s, db, "").await;
         let create = format!(
             "CREATE TABLE scratch.`{t}` (a INT AUTO_INCREMENT, x INT NOT NULL, v INT GENERATED ALWAYS AS (x * 2) VIRTUAL, \
@@ -267,7 +272,7 @@ const MARIADB_TYPES: &str = "(j JSON, t TEXT CHECK (JSON_VALID(t)), v VARCHAR(20
 async fn classes_as_a_query_gives_them() {
     let db = require_testdb!();
     let t = unique("t_classes");
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let conn = open(s, db, "").await;
         let made = if mariadb(s) { ddl(&conn, &format!("CREATE TABLE scratch.`{t}` {MARIADB_TYPES}")).await } else { Ok(()) };
         let compared = match made {
@@ -314,7 +319,7 @@ async fn classes_as_a_query_gives_them() {
 
 /// The catalog, after checking that its classes are a query's for some seed tables and, on
 /// MariaDB, for the scratch table `t`.
-async fn compare_classes(conn: &MySqlConnection, s: &MyServer, t: &str) -> Result<Catalog, String> {
+async fn compare_classes(conn: &MySqlConnection, s: &Server, t: &str) -> Result<Catalog, String> {
     let cat = try_load(conn, s).await?;
     let mut tables = vec![("shop", "all_types"), ("odd", "Odd \"Name\" é"), ("shop", "orders"), ("shop", "legacy_dates")];
     if mariadb(s) {
@@ -337,7 +342,7 @@ async fn compare_classes(conn: &MySqlConnection, s: &MyServer, t: &str) -> Resul
 async fn functional_key_parts_are_no_key() {
     let db = require_testdb!();
     let t = unique("t_functional");
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let (conn, in_scratch) = (open(s, db, "").await, open(s, db, "scratch").await);
         let create = format!("CREATE TABLE scratch.`{t}` (a INT NOT NULL, b INT, UNIQUE KEY uk (a, (b + 1)))");
         if let Err(e) = ddl(&conn, &create).await {
@@ -375,7 +380,7 @@ async fn odd_identifiers_survive() {
 async fn row_estimates() {
     let db = require_testdb!();
     for (s, cat) in catalogs(db).await {
-        let expected: u64 = if s.full_seed() { 1_000_000 } else { 30_000 };
+        let expected: u64 = if s.full_seed { 1_000_000 } else { 30_000 };
         let n = table(&cat, s, "shop", "big_rows").estimated_rows.expect("estimate");
         assert!((expected / 2..=expected * 2).contains(&n), "{}: {n}", s.name);
     }
@@ -384,7 +389,7 @@ async fn row_estimates() {
 #[tokio::test]
 async fn three_hundred_tables_load_quickly() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let conn = open(s, db, "").await;
         load(&conn, s).await;
         // The second load, alone, so the time is the load's own and not a cold cache's.

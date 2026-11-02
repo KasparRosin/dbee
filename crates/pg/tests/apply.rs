@@ -1,5 +1,5 @@
 //! All-or-nothing apply tests against the Docker test servers (`cargo xtask testdb up`); every
-//! test runs against every server in `db.servers`. Each creates a `scratch` table of its own,
+//! test runs against every Postgres server in `db.servers`. Each creates a `scratch` table of its own,
 //! checks results from a second connection, and drops the table.
 
 use std::time::Duration;
@@ -9,9 +9,14 @@ use dbee_driver::{ApplyGate, DbError, Purpose, QUERY_LIMITS, Target};
 use dbee_pg::apply::{apply, apply_gated};
 use dbee_pg::query::run_untyped;
 use dbee_pg::{PgConnection, connect};
-use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
+use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
 
-async fn open(s: &PgServer, password: &str, read_only: bool) -> PgConnection {
+/// The Postgres test servers.
+fn postgres(db: &TestDb) -> impl Iterator<Item = &Server> {
+    db.servers_of(&[Kind::Postgres])
+}
+
+async fn open(s: &Server, password: &str, read_only: bool) -> PgConnection {
     let config = ConnectionConfig {
         name: format!("test {}", s.name),
         host: "127.0.0.1".into(),
@@ -52,13 +57,13 @@ where
     F: Fn(u32, PgConnection, PgConnection, String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    for s in &db.servers {
+    for s in postgres(db) {
         let writer = open(s, &db.password, false).await;
         let reader = open(s, &db.password, false).await;
         let table = format!("scratch.\"{}\"", unique("apply"));
         sql(&writer, &format!("CREATE TABLE {table} (id int PRIMARY KEY, name text, amount numeric)")).await;
         sql(&writer, &format!("INSERT INTO {table} VALUES (1, 'one', 1.5), (2, 'two', 2.5)")).await;
-        body(s.major, writer, reader, table.clone()).await;
+        body(s.major(), writer, reader, table.clone()).await;
         let cleaner = open(s, &db.password, false).await;
         sql(&cleaner, &format!("DROP TABLE IF EXISTS {table}")).await;
     }
@@ -121,7 +126,7 @@ async fn missing_row_rolls_back() {
 async fn read_only_connection_refuses() {
     let db = require_testdb!();
     with_table(db, |major, _w, _r, t| async move {
-        let s = db.servers.iter().find(|s| s.major == major).expect("server");
+        let s = postgres(db).find(|s| s.major() == major).expect("server");
         let ro = open(s, &db.password, true).await;
         let stmts = vec![format!("UPDATE {t} SET name = 'uno' WHERE id = 1")];
         let err = apply(&ro, &stmts).await.expect_err("must fail");

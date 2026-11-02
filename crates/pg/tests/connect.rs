@@ -1,5 +1,5 @@
 //! Connection tests against the Docker test servers (`cargo xtask testdb up`). Each test runs
-//! against every server in `db.servers` (Postgres 14 and the newest major).
+//! against every Postgres server in `db.servers` (Postgres 14 and the newest major).
 //!
 //! Safety: tunnels are opened with an `SshEnv` over a throwaway home from `temp_home` and no
 //! agent, so the real `~/.ssh` and SSH agent are never touched. Nothing here writes: the one
@@ -16,10 +16,15 @@ use dbee_pg::query;
 use dbee_pg::{Canceller, MIN_VERSION_NUM, PgConnection, PgDriver, connect, version_warning};
 use dbee_sql::Dialect;
 use dbee_ssh::{AgentSource, SshEnv, SshSecrets, Tunnel};
-use dbee_testkit::{PgServer, TempHome, TestDb, require_testdb, temp_home, unique};
+use dbee_testkit::{Kind, Server, TempHome, TestDb, require_testdb, temp_home, unique};
+
+/// The Postgres test servers.
+fn postgres(db: &TestDb) -> impl Iterator<Item = &Server> {
+    db.servers_of(&[Kind::Postgres])
+}
 
 /// `postgres@127.0.0.1:<port>/dbee` with the given TLS mode.
-fn config(s: &PgServer, mode: SslMode) -> ConnectionConfig {
+fn config(s: &Server, mode: SslMode) -> ConnectionConfig {
     ConnectionConfig {
         name: format!("test {}", s.name),
         host: "127.0.0.1".into(),
@@ -72,18 +77,18 @@ async fn tunnel(db: &TestDb, home: &TempHome) -> Arc<Tunnel> {
 }
 
 /// The server as the sshd sees it: `<service>:5432`.
-fn tunnelled(s: &PgServer, db: &TestDb, mode: SslMode) -> ConnectionConfig {
-    ConnectionConfig { host: s.name.clone(), port: 5432, ssh: Some(ssh_config(db)), ..config(s, mode) }
+fn tunnelled(s: &Server, db: &TestDb, mode: SslMode) -> ConnectionConfig {
+    ConnectionConfig { host: s.name.clone(), port: s.service_port, ssh: Some(ssh_config(db)), ..config(s, mode) }
 }
 
 #[tokio::test]
 async fn connects_and_reports_version() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let c = open(&config(s, SslMode::Prefer), db).await;
         let info = c.info();
-        assert_eq!(info.version_num / 10000, s.major, "{info:?}");
-        assert!(info.version.starts_with(&s.major.to_string()), "{info:?}");
+        assert_eq!(info.version_num / 10000, s.major(), "{info:?}");
+        assert!(info.version.starts_with(&s.major().to_string()), "{info:?}");
         assert!(!info.read_only && info.warnings.is_empty(), "{info:?}");
         assert!(!c.is_closed());
         assert_eq!(scalar(&c, "SHOW application_name").await.as_deref(), Some("dbee"));
@@ -94,7 +99,7 @@ async fn connects_and_reports_version() {
 #[tokio::test]
 async fn wrong_password_is_auth_error() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let c = config(s, SslMode::Prefer);
         let e = connect(target(&c, Some("nope"))).await.err().unwrap();
         assert_eq!(e.code(), "auth", "{e:?}");
@@ -108,7 +113,7 @@ async fn wrong_password_is_auth_error() {
 #[tokio::test]
 async fn read_only_refuses_writes() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let ro = ConnectionConfig { read_only: true, ..config(s, SslMode::Prefer) };
         let c = open(&ro, db).await;
         assert!(c.info().read_only);
@@ -128,7 +133,7 @@ async fn read_only_refuses_writes() {
 #[tokio::test]
 async fn standard_conforming_strings_on() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let c = open(&config(s, SslMode::Prefer), db).await;
         // Quoting (dbee-sql) is safe only with both of these.
         assert_eq!(scalar(&c, "SHOW standard_conforming_strings").await.as_deref(), Some("on"));
@@ -145,13 +150,13 @@ async fn through_ssh_tunnel() {
     let db = require_testdb!();
     let home = temp_home(None, Some(&db.sshd.known_hosts_line));
     let t = tunnel(db, &home).await;
-    for s in &db.servers {
+    for s in postgres(db) {
         let c = tunnelled(s, db, SslMode::Prefer);
         let conn =
             connect(Target { config: &c, password: Some(&db.password), tunnel: Some(Arc::clone(&t)), purpose: Purpose::Browse, create_file: false })
                 .await
                 .unwrap();
-        assert_eq!(conn.info().version_num / 10000, s.major);
+        assert_eq!(conn.info().version_num / 10000, s.major());
         assert_eq!(scalar(&conn, "SELECT 40 + 2").await.as_deref(), Some("42"));
         // TLS through the tunnel checks the configured host name (the service name).
         let full = ConnectionConfig { ssl_mode: SslMode::VerifyFull, ca_file: Some(db.ca_file.clone()), ..c.clone() };
@@ -178,7 +183,7 @@ async fn through_ssh_tunnel() {
 async fn tls_require_encrypts() {
     let db = require_testdb!();
     let ssl = "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()";
-    for s in &db.servers {
+    for s in postgres(db) {
         for (mode, expected) in [(SslMode::Require, "t"), (SslMode::Prefer, "t"), (SslMode::Disable, "f")] {
             let c = open(&config(s, mode), db).await;
             assert_eq!(scalar(&c, ssl).await.as_deref(), Some(expected), "{mode:?}");
@@ -194,7 +199,7 @@ async fn tls_require_encrypts() {
 #[tokio::test]
 async fn tls_verify_full_needs_trusted_ca() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let local = ConnectionConfig { host: "localhost".into(), ..config(s, SslMode::VerifyFull) };
         let with_ca = ConnectionConfig { ca_file: Some(db.ca_file.clone()), ..local.clone() };
         let c = open(&with_ca, db).await;
@@ -241,14 +246,14 @@ async fn cancel_sleep(conn: Arc<PgConnection>) {
 #[tokio::test]
 async fn cancel_stops_pg_sleep() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         for mode in [SslMode::Prefer, SslMode::Disable] {
             cancel_sleep(Arc::new(open(&config(s, mode), db).await)).await;
         }
     }
     let home = temp_home(None, Some(&db.sshd.known_hosts_line));
     let t = tunnel(db, &home).await;
-    for s in &db.servers {
+    for s in postgres(db) {
         let c = tunnelled(s, db, SslMode::Prefer);
         let conn =
             connect(Target { config: &c, password: Some(&db.password), tunnel: Some(Arc::clone(&t)), purpose: Purpose::Browse, create_file: false })
@@ -262,7 +267,7 @@ async fn cancel_stops_pg_sleep() {
 #[tokio::test]
 async fn backend_killed_is_connection_lost() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let c = open(&config(s, SslMode::Prefer), db).await;
         let pid = scalar(&c, "SELECT pg_backend_pid()").await.unwrap();
         let other = open(&config(s, SslMode::Prefer), db).await;
@@ -287,7 +292,7 @@ async fn backend_killed_is_connection_lost() {
 #[tokio::test]
 async fn run_untyped_keeps_the_last_result_and_server_errors() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let c = open(&config(s, SslMode::Prefer), db).await;
         let r = query::run_untyped(&c, "SELECT 1 AS a; SELECT 2 AS b, NULL AS c, '' AS d", QUERY_LIMITS).await.unwrap();
         assert_eq!(r.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["b", "c", "d"]);
@@ -320,12 +325,12 @@ async fn unreachable_server_is_connect_error() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let s = PgServer { name: "none".into(), major: 0, port };
+    let s = Server { name: "none".into(), kind: Kind::Postgres, version: "0".into(), port, service_port: 5432, full_seed: false };
     let started = Instant::now();
     assert_eq!(code(connect(target(&config(&s, SslMode::Prefer), Some(&db.password))).await), "connect");
     // A server that hangs up at once.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let s = PgServer { port: listener.local_addr().unwrap().port(), ..s };
+    let s = Server { port: listener.local_addr().unwrap().port(), ..s };
     tokio::spawn(async move {
         while let Ok((sock, _)) = listener.accept().await {
             drop(sock);
@@ -334,7 +339,7 @@ async fn unreachable_server_is_connect_error() {
     assert_eq!(code(connect(target(&config(&s, SslMode::Disable), Some(&db.password))).await), "connect");
     assert!(started.elapsed() < Duration::from_secs(10));
     // Settings that cannot work.
-    let bad = ConnectionConfig { host: String::new(), ..config(&db.servers[0], SslMode::Prefer) };
+    let bad = ConnectionConfig { host: String::new(), ..config(postgres(db).next().unwrap(), SslMode::Prefer) };
     assert_eq!(code(connect(target(&bad, Some(&db.password))).await), "connect");
 }
 
@@ -361,12 +366,12 @@ fn connection_types_are_shareable() {
 async fn pg_driver_connects_through_the_trait() {
     let db = require_testdb!();
     assert_eq!(PgDriver.kinds(), [DbKind::Postgres]);
-    for s in &db.servers {
+    for s in postgres(db) {
         let c = config(s, SslMode::Prefer);
         let conn = PgDriver.connect(target(&c, Some(&db.password))).await.unwrap();
         assert_eq!(conn.info().product, "PostgreSQL");
         assert_eq!(conn.dialect(), Dialect::Postgres);
-        assert_eq!(conn.info().version_num / 10000, s.major);
+        assert_eq!(conn.info().version_num / 10000, s.major());
         assert!(!conn.is_closed());
         // Each method reaches the Postgres connection.
         assert_eq!(conn.scalar_u64("SELECT 40 + 2").await, Ok(42));
@@ -384,7 +389,7 @@ async fn pg_driver_connects_through_the_trait() {
 #[tokio::test]
 async fn the_trait_canceller_stops_pg_sleep() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let conn: Arc<dyn Connection> = PgDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
         let canceller = conn.canceller();
         let runner = Arc::clone(&conn);
@@ -400,7 +405,7 @@ async fn the_trait_canceller_stops_pg_sleep() {
 #[tokio::test]
 async fn failed_transaction_is_flagged() {
     let db = require_testdb!();
-    for s in &db.servers {
+    for s in postgres(db) {
         let conn = PgDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
         conn.run("BEGIN", QUERY_LIMITS).await.unwrap();
         let first = conn.run("SELECT 1/0", QUERY_LIMITS).await.unwrap_err();

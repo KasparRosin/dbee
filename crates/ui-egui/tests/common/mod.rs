@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
 use dbee_engine::{Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{PgServer, TempHome, TestDb, temp_home, unique};
+use dbee_testkit::{Server, TempHome, TestDb, temp_home, unique};
 use dbee_ui_egui::{ControlRequest, DbeeApp};
 use egui::{Event, Pos2};
 use egui_kittest::Harness;
@@ -328,12 +328,12 @@ pub fn visible(entry: &Option<Json>) -> bool {
 }
 
 /// The Postgres 14 test server.
-pub fn pg14_server(db: &TestDb) -> &PgServer {
-    db.servers.iter().find(|s| s.major == 14).unwrap()
+pub fn pg14_server(db: &TestDb) -> &Server {
+    db.server("pg14").unwrap()
 }
 
 /// `postgres@127.0.0.1:<port>/dbee` on `server`, named after it, TLS `prefer`.
-pub fn server_config(server: &PgServer) -> ConnectionConfig {
+pub fn server_config(server: &Server) -> ConnectionConfig {
     ConnectionConfig {
         name: server.name.clone(),
         host: "127.0.0.1".into(),

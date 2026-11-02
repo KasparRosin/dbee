@@ -34,7 +34,7 @@ fn connected_sized(db: &TestDb, step: f32, size: egui::Vec2) -> Ui {
 }
 
 /// [`connected`] to `server`.
-fn connected_to(db: &TestDb, server: &dbee_testkit::PgServer) -> Ui {
+fn connected_to(db: &TestDb, server: &dbee_testkit::Server) -> Ui {
     Ui::connected_with(db, Setup { step: Some(0.25), config: Some(server_config(server)), ..Setup::default() })
 }
 
@@ -103,7 +103,7 @@ impl Ui {
 }
 
 /// Drops `scratch.<name>` on `server` when the test ends, also when it fails.
-struct ScratchOn<'a>(&'a dbee_testkit::PgServer, String);
+struct ScratchOn<'a>(&'a dbee_testkit::Server, String);
 
 impl Drop for ScratchOn<'_> {
     fn drop(&mut self) {
@@ -285,7 +285,7 @@ fn ctrl_s_applies_all_or_nothing() {
 #[test]
 fn a_value_too_long_for_its_column_fails_the_apply_and_says_why() {
     let db = dbee_testkit::require_testdb!();
-    for server in &db.servers {
+    for server in db.servers_of(&[dbee_testkit::Kind::Postgres]) {
         let name = unique("t_len_ui");
         let _drop = ScratchOn(server, name.clone());
         dbee_testkit::psql(

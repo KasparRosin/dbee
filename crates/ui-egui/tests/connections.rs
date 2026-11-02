@@ -69,8 +69,8 @@ fn rect(entry: &Json) -> [f64; 4] {
 fn via_ssh(db: &TestDb, auth: SshAuth) -> ConnectionConfig {
     ConnectionConfig {
         name: "pg14 via ssh".into(),
-        host: db.sshd.pg_host.clone(),
-        port: db.sshd.pg_port,
+        host: pg14_server(db).name.clone(),
+        port: pg14_server(db).service_port,
         ssh: Some(SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth }),
         ..pg14(db)
     }

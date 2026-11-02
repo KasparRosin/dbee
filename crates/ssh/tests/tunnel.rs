@@ -36,13 +36,19 @@ fn server_key_base64(db: &TestDb) -> String {
     db.sshd.known_hosts_line.split_whitespace().nth(2).unwrap_or_default().to_owned()
 }
 
+/// pg14 as the sshd reaches it: `pg14:5432`.
+fn pg14(db: &TestDb) -> (&str, u16) {
+    let s = db.server("pg14").unwrap();
+    (&s.name, s.service_port)
+}
+
 fn server_fingerprint(db: &TestDb) -> String {
     parse_public_key_base64(&server_key_base64(db)).unwrap().fingerprint(HashAlg::Sha256).to_string()
 }
 
 /// Opens a channel to Postgres through the tunnel and checks that it answers an SSLRequest.
 async fn reaches_postgres(t: &Tunnel, db: &TestDb) {
-    let mut s = t.connect(&db.sshd.pg_host, db.sshd.pg_port).await.unwrap();
+    let mut s = t.connect(pg14(db).0, pg14(db).1).await.unwrap();
     s.write_all(&[0, 0, 0, 8, 4, 210, 22, 47]).await.unwrap(); // SSLRequest
     let mut b = [0u8; 1];
     s.read_exact(&mut b).await.unwrap();
@@ -72,7 +78,7 @@ async fn default_key_login_reaches_postgres() {
     assert!(!t.is_closed());
     t.close().await;
     assert!(t.is_closed());
-    assert!(matches!(t.connect(&db.sshd.pg_host, db.sshd.pg_port).await, Err(SshError::Channel(_))));
+    assert!(matches!(t.connect(pg14(db).0, pg14(db).1).await, Err(SshError::Channel(_))));
 }
 
 #[tokio::test]

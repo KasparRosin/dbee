@@ -599,7 +599,7 @@ fn edits_follow_the_tab_they_were_made_in() {
 }
 
 /// Drops the scratch objects it names on `server` when the test ends, also when it fails.
-struct ScratchOn(&'static dbee_testkit::PgServer, Vec<String>);
+struct ScratchOn(&'static dbee_testkit::Server, Vec<String>);
 
 impl Drop for ScratchOn {
     fn drop(&mut self) {
@@ -615,8 +615,8 @@ impl Drop for ScratchOn {
 #[test]
 fn values_that_do_not_fit_the_length_are_refused_not_cut() {
     let db = require_testdb!();
-    for server in &db.servers {
-        let server: &'static dbee_testkit::PgServer = server;
+    for server in db.servers_of(&[dbee_testkit::Kind::Postgres]) {
+        let server: &'static dbee_testkit::Server = server;
         let t = unique("t_len");
         let domain = format!("{t}_d5");
         let _drop = ScratchOn(server, vec![format!("TABLE IF EXISTS scratch.{t}"), format!("DOMAIN IF EXISTS scratch.{domain}")]);
@@ -866,8 +866,8 @@ fn columns_postgres_computes_cannot_be_edited() {
 #[test]
 fn filters_on_length_types_compare_as_postgres_does() {
     let db = require_testdb!();
-    for server in &db.servers {
-        let server: &'static dbee_testkit::PgServer = server;
+    for server in db.servers_of(&[dbee_testkit::Kind::Postgres]) {
+        let server: &'static dbee_testkit::Server = server;
         let t = unique("t_lenf");
         let domain = format!("{t}_d5");
         let _drop = ScratchOn(server, vec![format!("TABLE IF EXISTS scratch.{t}"), format!("DOMAIN IF EXISTS scratch.{domain}")]);

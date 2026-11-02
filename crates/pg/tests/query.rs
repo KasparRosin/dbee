@@ -1,5 +1,5 @@
 //! Statement runner tests against the Docker test servers (`cargo xtask testdb up`); every test
-//! runs against every server in `db.servers`. Writing tests use a `scratch` table of their own
+//! runs against every Postgres server in `db.servers`. Writing tests use a `scratch` table of their own
 //! and drop it.
 
 use dbee_config::{ConnectionConfig, SslMode};
@@ -7,9 +7,14 @@ use dbee_core::{ResultSet, TypeClass};
 use dbee_driver::{DbError, Limits, Purpose, QUERY_LIMITS, Target};
 use dbee_pg::query::{describe, run, scalar_u64};
 use dbee_pg::{PgConnection, connect};
-use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
+use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
 
-async fn open(s: &PgServer, password: &str) -> PgConnection {
+/// The Postgres test servers.
+fn postgres(db: &TestDb) -> impl Iterator<Item = &Server> {
+    db.servers_of(&[Kind::Postgres])
+}
+
+async fn open(s: &Server, password: &str) -> PgConnection {
     let config = ConnectionConfig {
         name: format!("test {}", s.name),
         host: "127.0.0.1".into(),
@@ -28,8 +33,8 @@ async fn open(s: &PgServer, password: &str) -> PgConnection {
 /// One connection per test server.
 async fn conns(db: &TestDb) -> Vec<(u32, PgConnection)> {
     let mut out = Vec::new();
-    for s in &db.servers {
-        out.push((s.major, open(s, &db.password).await));
+    for s in postgres(db) {
+        out.push((s.major(), open(s, &db.password).await));
     }
     out
 }

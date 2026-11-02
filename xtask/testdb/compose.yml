@@ -1,7 +1,8 @@
 # dbee test servers, local and test-only: Postgres 14 and the newest Postgres major; MySQL 5.7, 8.0
 # and the newest; MariaDB 10.11 and the newest; an SSH server.
 # Managed by `cargo xtask testdb up|down|status` (xtask/src/testdb.rs), which writes the variables
-# below to target/testdb/compose.env. By hand:
+# below to target/testdb/compose.env. Each database service's image comes from its row in
+# SERVICES there (DBEE_IMAGE_<SERVICE>), and the certificate's names from the same list. By hand:
 #   docker compose -p dbee-testdb -f xtask/testdb/compose.yml --env-file target/testdb/compose.env ps
 name: dbee-testdb
 
@@ -95,43 +96,43 @@ services:
     command: ["/usr/local/bin/tools-init.sh"]
     environment:
       DBEE_TEST_PASSPHRASE: ${DBEE_TEST_PASSPHRASE:?run cargo xtask testdb up}
+      DBEE_TEST_HOSTS: ${DBEE_TEST_HOSTS:?run cargo xtask testdb up}
     volumes:
       - secrets:/secrets
     restart: "no"
 
   pg14:
     <<: *postgres
-    image: postgres:14-alpine
+    image: ${DBEE_IMAGE_PG14:?run cargo xtask testdb up}
 
   pgnew:
     <<: *postgres
-    image: postgres:${PG_NEWEST:?run cargo xtask testdb up}-alpine
+    image: ${DBEE_IMAGE_PGNEW:?run cargo xtask testdb up}
 
   # The seed reads the hostname: mysql80 and mariadbnew get the big tables (seed-mysql.sql).
-  # mysql:5.7 is built for amd64 only.
   mysql57:
     <<: *mysql
-    image: mysql:5.7
+    image: ${DBEE_IMAGE_MYSQL57:?run cargo xtask testdb up}
     hostname: mysql57
 
   mysql80:
     <<: *mysql
-    image: mysql:8.0
+    image: ${DBEE_IMAGE_MYSQL80:?run cargo xtask testdb up}
     hostname: mysql80
 
   mysqlnew:
     <<: *mysql
-    image: mysql:${MYSQL_NEWEST:?run cargo xtask testdb up}
+    image: ${DBEE_IMAGE_MYSQLNEW:?run cargo xtask testdb up}
     hostname: mysqlnew
 
   mariadb1011:
     <<: *mariadb
-    image: mariadb:10.11
+    image: ${DBEE_IMAGE_MARIADB1011:?run cargo xtask testdb up}
     hostname: mariadb1011
 
   mariadbnew:
     <<: *mariadb
-    image: mariadb:${MARIADB_NEWEST:?run cargo xtask testdb up}
+    image: ${DBEE_IMAGE_MARIADBNEW:?run cargo xtask testdb up}
     hostname: mariadbnew
 
   sshd:

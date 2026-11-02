@@ -618,7 +618,7 @@ fn table_commands_need_a_table_tab() {
 #[test]
 fn browses_on_every_server() {
     let db = require_testdb!();
-    for server in &db.servers {
+    for server in db.servers_of(&[dbee_testkit::Kind::Postgres]) {
         let mut s = session();
         open(&mut s, json!({ "config": server_config(server), "password": pw() }));
         open_table(&mut s, "shop", "orders");

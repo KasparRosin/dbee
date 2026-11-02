@@ -13,8 +13,8 @@
 --
 -- Sizes: on mysql80 and mariadbnew (the day's servers) `big_rows` holds 1,000,000 rows and
 -- `big_cell` its 20 MB row; elsewhere 30,000 rows and no row in `big_cell`, to keep `testdb up`
--- light on the CPU. compose.yml sets each service's hostname to its name, and
--- `dbee_testkit::MyServer::full_seed` names the same two servers.
+-- light on the CPU. compose.yml sets each service's hostname to its name; the two servers' rows in
+-- SERVICES (xtask/src/testdb.rs) say `full_seed`, and `testdb up` checks that they agree.
 
 SET NAMES utf8mb4;
 -- MariaDB builds JSON_ARRAYAGG on GROUP_CONCAT, which this caps.

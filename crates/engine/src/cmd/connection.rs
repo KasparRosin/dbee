@@ -1130,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn catalog_load_is_bounded() {
         let db = dbee_testkit::require_testdb!();
-        let server = db.servers.iter().find(|s| s.major == 14).unwrap();
+        let server = db.server("pg14").unwrap();
         let config = ConnectionConfig {
             host: "127.0.0.1".into(),
             port: server.port,

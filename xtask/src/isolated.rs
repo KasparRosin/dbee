@@ -66,14 +66,13 @@ pub const ALLOW_VAR: &str = "DBEE_ALLOW_TARGETS";
 /// Port 1, where nothing listens: a connection error to show, always allowed.
 const ERROR_DEMO: (&str, u16) = ("127.0.0.1", 1);
 
-/// The targets an isolated run may connect to: every Postgres, MySQL and MariaDB server's port and
+/// The targets an isolated run may connect to: every database server's port and
 /// the sshd's, each on `127.0.0.1` and `localhost`, then [`ERROR_DEMO`]. Without the env file,
 /// [`ERROR_DEMO`] alone.
 pub fn allowed_targets(env: Option<&testdb::Env>) -> Vec<(String, u16)> {
     let mut list = Vec::new();
     if let Some(env) = env {
-        let servers = env.servers.iter().map(|s| s.port).chain(env.mysql.iter().map(|s| s.port));
-        for port in servers.chain(std::iter::once(env.sshd.port)) {
+        for port in env.servers.iter().map(|s| s.port).chain(std::iter::once(env.sshd.port)) {
             for host in ["127.0.0.1", "localhost"] {
                 list.push((host.to_string(), port));
             }
@@ -219,22 +218,24 @@ mod tests {
     }
 
     fn test_env(ports: &[u16], my_ports: &[u16], sshd: u16) -> testdb::Env {
+        let server = |name: String, kind: testdb::Kind, version: &str, port: u16| testdb::Server {
+            name,
+            kind,
+            version: version.into(),
+            port,
+            service_port: kind.info().port,
+            full_seed: true,
+        };
+        let pg = ports.iter().map(|&port| server(format!("pg{port}"), testdb::Kind::Postgres, "14.19", port));
+        let my = my_ports.iter().map(|&port| server(format!("mysql{port}"), testdb::Kind::MySql, "8.0.46", port));
         testdb::Env {
             password: "pw".into(),
-            servers: ports.iter().map(|&port| testdb::Server { name: format!("pg{port}"), major: 14, port }).collect(),
-            mysql: my_ports
-                .iter()
-                .map(|&port| testdb::MyServer { name: format!("mysql{port}"), flavor: "mysql".into(), version: "8.0.46".into(), port })
-                .collect(),
+            servers: pg.chain(my).collect(),
             sshd: testdb::Sshd {
                 port: sshd,
                 user: "dbee".into(),
                 password_user: "dbeepw".into(),
                 known_hosts_line: "[127.0.0.1]:2222 ssh-ed25519 AAAA".into(),
-                pg_host: "pg14".into(),
-                pg_port: 5432,
-                my_host: "mysql80".into(),
-                my_port: 3306,
             },
             keys: testdb::Keys { plain: "k".into(), encrypted: "e".into(), passphrase: "p".into(), rsa: "r".into() },
             ca_file: "ca".into(),

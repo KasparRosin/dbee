@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use dbee_testkit::{MyFlavor, ORDERS_COUNT, TestTarget, mysql, require_testdb, sqlite_seeded, targets, testdb};
+use dbee_testkit::{Kind, ORDERS_COUNT, TestDb, TestTarget, mysql, require_testdb, sqlite_seeded, targets, testdb};
 
 /// Under `target/`: the system temp directory may be small (docs/testing.md §3).
 fn tmp() -> PathBuf {
@@ -27,10 +27,15 @@ fn count(c: &rusqlite::Connection, sql: &str) -> u64 {
     c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap().try_into().unwrap()
 }
 
+/// The MySQL and MariaDB servers.
+fn mysql_servers(db: &TestDb) -> impl Iterator<Item = &dbee_testkit::Server> {
+    db.servers_of(&[Kind::MySql, Kind::MariaDb])
+}
+
 #[test]
 fn every_mysql_server_answers() {
     require_testdb!();
-    let servers = &testdb().unwrap().mysql;
+    let servers: Vec<_> = mysql_servers(testdb().unwrap()).collect();
     assert_eq!(servers.len(), 5);
     for s in servers {
         assert_eq!(mysql(s, "SELECT COUNT(*) FROM shop.orders").unwrap().trim(), ORDERS_COUNT.to_string(), "{}", s.name);
@@ -40,28 +45,28 @@ fn every_mysql_server_answers() {
 #[test]
 fn mysql_versions_are_the_supported_ones() {
     let db = require_testdb!();
-    let names: Vec<_> = db.mysql.iter().map(|s| (s.name.as_str(), s.flavor)).collect();
+    let names: Vec<_> = mysql_servers(db).map(|s| (s.name.as_str(), s.kind)).collect();
     assert_eq!(
         names,
         [
-            ("mysql57", MyFlavor::MySql),
-            ("mysql80", MyFlavor::MySql),
-            ("mysqlnew", MyFlavor::MySql),
-            ("mariadb1011", MyFlavor::MariaDb),
-            ("mariadbnew", MyFlavor::MariaDb)
+            ("mysql57", Kind::MySql),
+            ("mysql80", Kind::MySql),
+            ("mysqlnew", Kind::MySql),
+            ("mariadb1011", Kind::MariaDb),
+            ("mariadbnew", Kind::MariaDb)
         ]
     );
-    let version = |name: &str| &db.mysql.iter().find(|s| s.name == name).unwrap().version;
+    let version = |name: &str| &db.server(name).unwrap().version;
     assert!(version("mysql57").starts_with("5.7."), "{}", version("mysql57"));
     assert!(version("mysql80").starts_with("8.0."), "{}", version("mysql80"));
     assert!(version("mariadb1011").starts_with("10.11."), "{}", version("mariadb1011"));
     let major = |v: &str| v.split('.').next().unwrap().parse::<u32>().unwrap();
     assert!(major(version("mysqlnew")) > 8, "{}", version("mysqlnew"));
     assert!(major(version("mariadbnew")) > 10, "{}", version("mariadbnew"));
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let printed = mysql(s, "SELECT VERSION()").unwrap();
         assert!(printed.trim().starts_with(&s.version), "{}: {printed}", s.name);
-        assert_eq!(printed.contains("MariaDB"), s.flavor == MyFlavor::MariaDb, "{}: {printed}", s.name);
+        assert_eq!(printed.contains("MariaDB"), s.kind == Kind::MariaDb, "{}: {printed}", s.name);
     }
 }
 
@@ -69,7 +74,7 @@ fn mysql_versions_are_the_supported_ones() {
 #[test]
 fn mysql_seed_facts() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let q = |sql: &str| mysql(s, sql).unwrap_or_else(|e| panic!("{}: {e}", s.name)).trim().to_owned();
         let at = &s.name;
         assert_eq!(q("SELECT COUNT(*) FROM shop.customers"), "500", "{at}");
@@ -82,12 +87,11 @@ fn mysql_seed_facts() {
         assert_eq!(q("SELECT COUNT(*) FROM shop.all_types"), "3", "{at}");
         assert_eq!(q("SELECT COUNT(*) FROM shop.events"), "200", "{at}");
         assert_eq!(q("SELECT COUNT(*) FROM shop.order_totals"), "500", "{at}");
-        let big = TestTarget::My(s).big_rows();
-        assert_eq!(q("SELECT COUNT(*) FROM shop.big_rows"), big.to_string(), "{at}");
-        assert_eq!(q("SELECT MAX(payload) FROM shop.big_rows"), if s.full_seed() { "payload 999999" } else { "payload 9999" }, "{at}");
-        let cell = if s.full_seed() { "20000000" } else { "" };
+        assert_eq!(q("SELECT COUNT(*) FROM shop.big_rows"), s.big_rows().to_string(), "{at}");
+        assert_eq!(q("SELECT MAX(payload) FROM shop.big_rows"), if s.full_seed { "payload 999999" } else { "payload 9999" }, "{at}");
+        let cell = if s.full_seed { "20000000" } else { "" };
         assert_eq!(q("SELECT CHAR_LENGTH(t) FROM shop.big_cell"), cell, "{at}");
-        if s.full_seed() {
+        if s.full_seed {
             assert!(q("SELECT LENGTH(j) FROM shop.big_cell").parse::<u64>().unwrap() >= 20_000_000, "{at}");
         }
         assert_eq!(q("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'shop' AND TABLE_NAME = 'audit_log'"), "MyISAM", "{at}");
@@ -104,7 +108,9 @@ fn mysql_seed_facts() {
         assert!(not_after.split('\t').nth(1).is_some_and(|v| v.contains("GMT")), "{at}: no server certificate: {not_after:?}");
         assert!(mysql(s, "SELECT nope").unwrap_err().contains("nope"), "{at}");
     }
-    assert_eq!((db.sshd.my_host.as_str(), db.sshd.my_port), ("mysql80", 3306));
+    assert_eq!(db.server("mysql80").map(|s| s.service_port), Some(3306), "the sshd reaches mysql80:3306");
+    let full: Vec<_> = mysql_servers(db).filter(|s| s.full_seed).map(|s| s.name.as_str()).collect();
+    assert_eq!(full, ["mysql80", "mariadbnew"]);
 }
 
 #[test]
@@ -147,21 +153,23 @@ fn sqlite_copies_are_independent() {
 fn targets_cover_every_engine() {
     require_testdb!();
     let all = targets();
-    let k: BTreeSet<_> = all.iter().map(|t| t.kind()).collect();
+    let k: BTreeSet<_> = all.iter().map(|t| t.kind().id()).collect();
     assert_eq!(k, ["mariadb", "mysql", "postgres", "sqlite"].into());
     let names: Vec<_> = all.iter().map(TestTarget::name).collect();
     assert_eq!(names, ["pg14", "pgnew", "mysql57", "mysql80", "mysqlnew", "mariadb1011", "mariadbnew", "sqlite"]);
-    let lite = all.iter().find_map(|t| if let TestTarget::Lite(p) = t { Some(p.clone()) } else { None }).unwrap();
+    let lite = all.iter().find_map(|t| t.file().map(Path::to_path_buf)).unwrap();
     assert!(lite.is_file() && lite.starts_with(dbee_testkit::repo_root().join("target")), "{lite:?}");
+    assert_eq!(all.iter().filter(|t| t.is_file()).count(), 1);
     for t in &all {
         let sleep = t.sleep_sql(30);
-        match t.kind() {
+        match t.kind().id() {
             "postgres" => assert_eq!(sleep, "SELECT pg_sleep(30)"),
             "mysql" | "mariadb" => assert_eq!(sleep, "SELECT SLEEP(30)"),
             _ => assert!(sleep.starts_with("WITH RECURSIVE") && sleep.contains("1000000000"), "{sleep}"),
         }
-        let full = !matches!(t, TestTarget::My(s) if !s.full_seed());
+        let full = !t.server().is_some_and(|s| !s.full_seed);
         assert_eq!(t.big_rows(), if full { 1_000_000 } else { 30_000 }, "{}", t.name());
+        assert_eq!(t.server().map(|s| s.kind), (!t.is_file()).then_some(t.kind()), "{}", t.name());
     }
     drop(all);
     assert!(!lite.exists(), "a dropped SQLite target removes its copy");

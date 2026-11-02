@@ -1,4 +1,4 @@
-//! Statement runner tests against every MySQL and MariaDB server in `db.mysql` (`cargo xtask
+//! Statement runner tests against every MySQL and MariaDB server in `db.servers` (`cargo xtask
 //! testdb up`). Tests that write use a `scratch` table or procedure of their own and drop it.
 
 use std::time::{Duration, Instant};
@@ -7,12 +7,17 @@ use dbee_config::{ConnectionConfig, DbKind, SslMode};
 use dbee_core::{ResultSet, TypeClass};
 use dbee_driver::{DbError, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, Target};
 use dbee_mysql::{MySqlConnection, connect};
-use dbee_testkit::{MyFlavor, MyServer, TestDb, require_testdb, unique};
+use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
 
-fn config(s: &MyServer) -> ConnectionConfig {
+/// The MySQL and MariaDB test servers.
+fn mysql_servers(db: &TestDb) -> impl Iterator<Item = &Server> {
+    db.servers_of(&[Kind::MySql, Kind::MariaDb])
+}
+
+fn config(s: &Server) -> ConnectionConfig {
     ConnectionConfig {
         name: format!("test {}", s.name),
-        kind: if s.flavor == MyFlavor::MariaDb { DbKind::MariaDb } else { DbKind::MySql },
+        kind: DbKind::from_id(s.kind.id()).unwrap(),
         host: "127.0.0.1".into(),
         port: s.port,
         user: "root".into(),
@@ -21,7 +26,7 @@ fn config(s: &MyServer) -> ConnectionConfig {
     }
 }
 
-async fn open_for(s: &MyServer, db: &TestDb, purpose: Purpose) -> MySqlConnection {
+async fn open_for(s: &Server, db: &TestDb, purpose: Purpose) -> MySqlConnection {
     let c = config(s);
     match connect(Target { config: &c, password: Some(&db.password), tunnel: None, purpose, create_file: false }).await {
         Ok(conn) => conn,
@@ -29,7 +34,7 @@ async fn open_for(s: &MyServer, db: &TestDb, purpose: Purpose) -> MySqlConnectio
     }
 }
 
-async fn open(s: &MyServer, db: &TestDb) -> MySqlConnection {
+async fn open(s: &Server, db: &TestDb) -> MySqlConnection {
     open_for(s, db, Purpose::Browse).await
 }
 
@@ -44,7 +49,7 @@ fn names(r: &ResultSet) -> Vec<&str> {
 #[tokio::test]
 async fn text_exactly_as_mysql_prints() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         let sql = "SELECT CAST(1.50 AS DECIMAL(10,2)) n, TIMESTAMP '2024-01-02 03:04:05' t, NULL z, '' e, CAST(X'00FF' AS BINARY) b";
         let r = ok(&c, sql, QUERY_LIMITS).await;
@@ -63,7 +68,7 @@ async fn text_exactly_as_mysql_prints() {
 #[tokio::test]
 async fn text_that_is_not_utf8_is_replaced_and_counted() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open_for(s, db, Purpose::Query).await;
         // The query tab may change the results' character set: é comes as latin1's one byte.
         ok(&c, "SET character_set_results = latin1", QUERY_LIMITS).await;
@@ -79,7 +84,7 @@ async fn text_that_is_not_utf8_is_replaced_and_counted() {
 #[tokio::test]
 async fn mariadbs_own_types_are_other() {
     let db = require_testdb!();
-    for s in db.mysql.iter().filter(|s| s.flavor == MyFlavor::MariaDb) {
+    for s in mysql_servers(db).filter(|s| s.kind == Kind::MariaDb) {
         let c = open(s, db).await;
         let t = unique("t_own_types");
         ok(&c, &format!("CREATE TABLE scratch.`{t}` (u UUID, i6 INET6, i4 INET4, pt POINT)"), QUERY_LIMITS).await;
@@ -129,7 +134,7 @@ async fn classes_of_described_columns() {
         ("pt", Binary),
         ("total", Number),
     ];
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         let r = ok(&c, "SELECT * FROM shop.all_types ORDER BY id", QUERY_LIMITS).await;
         let got: Vec<(&str, TypeClass)> = r.columns.iter().map(|c| (c.name.as_str(), c.class)).collect();
@@ -194,7 +199,7 @@ async fn classes_of_described_columns() {
 async fn a_mariadb_json_column_is_json() {
     let db = require_testdb!();
     let mut seen = 0;
-    for s in db.mysql.iter().filter(|s| s.flavor == MyFlavor::MariaDb) {
+    for s in mysql_servers(db).filter(|s| s.kind == Kind::MariaDb) {
         // MariaDB's JSON is a LONGTEXT with a check; its extended metadata says it holds JSON.
         let c = open(s, db).await;
         let r = ok(&c, "SELECT doc, JSON_OBJECT('a', 1) j, note FROM shop.all_types ORDER BY id", QUERY_LIMITS).await;
@@ -217,7 +222,7 @@ async fn a_mariadb_json_column_is_json() {
 #[tokio::test]
 async fn row_cap_keeps_first_and_counts_all() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         let r = ok(&c, "SELECT id FROM shop.big_rows ORDER BY id LIMIT 25000", QUERY_LIMITS).await;
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (10_000, 25_000, false), "{}", s.name);
@@ -231,7 +236,7 @@ async fn row_cap_keeps_first_and_counts_all() {
 #[tokio::test]
 async fn byte_cap_stops_collecting() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         let r = ok(&c, "SELECT REPEAT('x', 100000) x FROM shop.big_rows LIMIT 100", Limits { max_rows: 1000, max_bytes: 1 << 20 }).await;
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (10, 100, false), "{}", s.name);
@@ -247,7 +252,7 @@ async fn byte_cap_stops_collecting() {
 #[tokio::test]
 async fn page_limit_of_101_rows_is_exact() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         let r = ok(&c, "SELECT id FROM shop.big_rows ORDER BY id LIMIT 101", PAGE_LIMITS).await;
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (101, 101, true), "{}", s.name);
@@ -260,7 +265,7 @@ async fn page_limit_of_101_rows_is_exact() {
 async fn twenty_megabyte_cell_loads() {
     let db = require_testdb!();
     let mut seen = 0;
-    for s in db.mysql.iter().filter(|s| s.full_seed()) {
+    for s in mysql_servers(db).filter(|s| s.full_seed) {
         let c = open(s, db).await;
         let started = Instant::now();
         let r = ok(&c, "SELECT id, t, j FROM shop.big_cell", QUERY_LIMITS).await;
@@ -280,7 +285,7 @@ async fn twenty_megabyte_cell_loads() {
 #[tokio::test]
 async fn several_result_sets_keep_the_last() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         let p = format!("scratch.{}", unique("two_selects"));
         ok(&c, &format!("CREATE PROCEDURE {p}() BEGIN SELECT 1 AS a; SELECT 2 AS b, 'x' AS c UNION ALL SELECT 3, 'y'; END"), QUERY_LIMITS).await;
@@ -297,11 +302,11 @@ async fn several_result_sets_keep_the_last() {
 #[tokio::test]
 async fn error_has_errno_and_flavor() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         match c.run("SELECT nope FROM shop.orders", QUERY_LIMITS).await {
             Err(DbError::Server(e)) => {
-                let label = if s.flavor == MyFlavor::MariaDb { "MariaDB error" } else { "MySQL error" };
+                let label = if s.kind == Kind::MariaDb { "MariaDB error" } else { "MySQL error" };
                 assert_eq!((e.code.as_str(), e.code_label, e.detail.as_deref()), ("1054", Some(label), None), "{}", s.name);
                 assert!(e.message.contains("nope"), "{}: {e:?}", s.name);
             }
@@ -325,7 +330,7 @@ async fn wait_gone(other: &MySqlConnection, id: u64) {
 #[tokio::test]
 async fn killed_connection_reports_connection_lost() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         let id = c.scalar_u64("SELECT CONNECTION_ID()").await.unwrap();
         let other = open(s, db).await;
@@ -354,7 +359,7 @@ async fn a_timed_out_connection_reports_connection_lost() {
     // MySQL 8 and newer say goodbye with an error packet (4031) before they close; the others
     // just close.
     let mut idle = Vec::new();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         ok(&c, "SET SESSION wait_timeout = 1", QUERY_LIMITS).await;
         idle.push((s, c));
@@ -369,7 +374,7 @@ async fn a_timed_out_connection_reports_connection_lost() {
 #[tokio::test]
 async fn update_reports_rows_affected() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         let t = format!("scratch.{}", unique("t_query"));
         ok(&c, &format!("CREATE TABLE {t} (a INT)"), QUERY_LIMITS).await;
@@ -385,7 +390,7 @@ async fn update_reports_rows_affected() {
 #[tokio::test]
 async fn scalar_u64_reads_a_count_and_rejects_the_rest() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = open(s, db).await;
         assert_eq!(c.scalar_u64("SELECT COUNT(*) FROM shop.orders").await.unwrap(), dbee_testkit::ORDERS_COUNT, "{}", s.name);
         assert_eq!(c.scalar_u64("SELECT COUNT(*) FROM shop.orders WHERE 1 = 0").await.unwrap(), 0, "{}", s.name);
@@ -398,7 +403,7 @@ async fn scalar_u64_reads_a_count_and_rejects_the_rest() {
 #[tokio::test]
 async fn a_cancelled_sleep_is_cancelled() {
     let db = require_testdb!();
-    for s in &db.mysql {
+    for s in mysql_servers(db) {
         let c = std::sync::Arc::new(open(s, db).await);
         let canceller = c.canceller();
         let runner = std::sync::Arc::clone(&c);
