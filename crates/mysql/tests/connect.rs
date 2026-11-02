@@ -566,6 +566,12 @@ async fn mysql_driver_connects_through_the_trait() {
         let catalog = conn.load_catalog().await.unwrap();
         assert!(catalog.table(&TableRef { schema: "shop".into(), name: "orders".into() }).is_some(), "{}", s.name);
         assert_eq!(conn.apply(&[], &ApplyGate::default()).await.map_err(|e| e.to_string()), Ok(0));
+        // The trait's catalog is the connection's own, which dropped no row.
+        let shop = ConnectionConfig { database: "shop".into(), ..c.clone() };
+        let by_trait = MySqlDriver.connect(target(&shop, Some(&db.password))).await.unwrap().load_catalog().await.unwrap();
+        let own = open(&shop, db).await;
+        assert_eq!(own.catalog_rows().await.unwrap().dropped(), 0, "{}", s.name);
+        assert_eq!(by_trait, own.load_catalog().await.unwrap(), "{}", s.name);
         let e = MySqlDriver.connect(target(&c, Some("nope"))).await.err().unwrap();
         assert_eq!(e.code(), "auth", "{}: {e:?}", s.name);
     }

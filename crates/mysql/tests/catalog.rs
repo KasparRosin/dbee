@@ -45,12 +45,18 @@ async fn open(s: &MyServer, db: &TestDb, database: &str) -> MySqlConnection {
     }
 }
 
-/// The catalog of `conn`, whose rows all name a listed table.
-async fn load(conn: &MySqlConnection, s: &MyServer) -> Catalog {
+/// The catalog of `conn`, whose rows must all name a listed table.
+async fn try_load(conn: &MySqlConnection, s: &MyServer) -> Result<Catalog, String> {
     let _no_ddl = DDL.read().await;
-    let rows = conn.catalog_rows().await.unwrap_or_else(|e| panic!("catalog rows on {}: {e}", s.name));
-    assert_eq!(rows.dropped(), 0, "{}: rows named a table the catalog did not list", s.name);
-    conn.load_catalog().await.unwrap_or_else(|e| panic!("load_catalog on {}: {e}", s.name))
+    let rows = conn.catalog_rows().await.map_err(|e| format!("catalog rows on {}: {e}", s.name))?;
+    if rows.dropped() != 0 {
+        return Err(format!("{}: {} rows named a table the catalog did not list", s.name, rows.dropped()));
+    }
+    conn.load_catalog().await.map_err(|e| format!("load_catalog on {}: {e}", s.name))
+}
+
+async fn load(conn: &MySqlConnection, s: &MyServer) -> Catalog {
+    try_load(conn, s).await.unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Every server's whole catalog.
@@ -165,7 +171,7 @@ async fn generated_and_auto_increment() {
         assert!(id.not_null && id.has_default && id.generated == Generated::No, "{}: {id:?}", s.name);
         let all = table(&cat, s, "shop", "all_types");
         let total = all.column("total").expect("total");
-        assert_eq!((total.generated, total.has_default), (Generated::Expression, false), "{}: {total:?}", s.name);
+        assert_eq!((total.generated, total.has_default), (Generated::Expression, true), "{}: the server fills it: {total:?}", s.name);
         assert_eq!(total.not_editable(), Some("generated columns are read-only"));
         for name in ["note", "flag", "doc", "pt"] {
             let c = all.column(name).expect("column");
@@ -195,14 +201,14 @@ async fn each_servers_defaults_keys_and_generated_columns() {
              e VARCHAR(10) NOT NULL DEFAULT '', q VARCHAR(10) DEFAULT 'it''s', \
              ts TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, u DATETIME NULL ON UPDATE CURRENT_TIMESTAMP, \
              c INT, `j``x é` JSON, lt LONGTEXT, ct TEXT CHECK (JSON_VALID(ct)){p}, \
-             PRIMARY KEY (x, a), KEY (a), UNIQUE KEY (e, q), FOREIGN KEY (c) REFERENCES shop.customers (id))",
+             PRIMARY KEY (x, a), KEY (a), UNIQUE KEY z_last (e, q), UNIQUE KEY a_first (sn), FOREIGN KEY (c) REFERENCES shop.customers (id))",
             p = persistent(s)
         );
         // A MariaDB sequence is no table, and its columns are left out with it.
         let sequence = if mariadb(s) { ddl(&conn, &format!("CREATE SEQUENCE scratch.`{t}_seq`")).await } else { Ok(()) };
         let made = ddl(&conn, &create).await.and(sequence);
         let cat = match made {
-            Ok(()) => Ok(load(&conn, s).await),
+            Ok(()) => try_load(&conn, s).await,
             Err(e) => Err(e),
         };
         let gone = ddl(&conn, &format!("DROP TABLE IF EXISTS scratch.`{t}`, scratch.`{t}_seq`")).await;
@@ -220,15 +226,17 @@ async fn each_servers_defaults_keys_and_generated_columns() {
             assert_eq!(column(name).has_default, has_default, "{}: {:?}", s.name, column(name));
         }
         for name in ["v", "s"].into_iter().chain(mariadb(s).then_some("p")) {
-            assert_eq!((column(name).generated, column(name).has_default), (Generated::Expression, false), "{}: {name}", s.name);
+            assert_eq!((column(name).generated, column(name).has_default), (Generated::Expression, true), "{}: {name}", s.name);
         }
         assert_eq!(column("a").generated, Generated::No, "{}", s.name);
         assert!(column("x").not_null && column("e").not_null && !column("q").not_null, "{}", s.name);
         assert_eq!(column("j`x é").class, TypeClass::Json, "{}: JSON, also with a backtick in its name", s.name);
-        assert_eq!((column("lt").class, column("ct").class), (TypeClass::LongText, TypeClass::LongText), "{}", s.name);
-        // Keys in key order, not column order; a foreign key into another database.
+        // MariaDB makes a text with its own json_valid check JSON; MySQL does not.
+        let checked = if mariadb(s) { TypeClass::Json } else { TypeClass::LongText };
+        assert_eq!((column("lt").class, column("ct").class), (TypeClass::LongText, checked), "{}", s.name);
+        // Keys in key order, not column order; unique keys by name; a foreign key into another database.
         assert_eq!(table.primary_key, ["x", "a"], "{}", s.name);
-        assert_eq!(table.unique_keys, vec![vec!["e".to_string(), "q".to_string()]], "{}", s.name);
+        assert_eq!(table.unique_keys, vec![vec!["sn".to_string()], vec!["e".to_string(), "q".to_string()]], "{}", s.name);
         let fk = table.fk_for("c").expect("fk");
         assert_eq!((fk.target.clone(), fk.target_columns.clone()), (tr("shop", "customers"), vec!["id".to_string()]), "{}", s.name);
     }
@@ -249,20 +257,26 @@ async fn mariadb_json_is_json() {
     }
 }
 
+/// MariaDB's JSON and its own types, as a query and the catalog see them: a column's own
+/// `json_valid` check makes a string or blob JSON, a table's check does not.
+const MARIADB_TYPES: &str = "(j JSON, t TEXT CHECK (JSON_VALID(t)), v VARCHAR(20) CHECK (json_valid(v)), \
+    c CHAR(10) CHECK (json_valid(c)), b BLOB CHECK (json_valid(b)), e ENUM('a', '[]') CHECK (json_valid(e)), lt LONGTEXT, \
+    u UUID, i6 INET6, i4 INET4, CHECK (json_valid(lt)))";
+
 #[tokio::test]
 async fn classes_as_a_query_gives_them() {
     let db = require_testdb!();
+    let t = unique("t_classes");
     for s in &db.mysql {
         let conn = open(s, db, "").await;
-        let cat = load(&conn, s).await;
-        for (schema, name) in [("shop", "all_types"), ("odd", "Odd \"Name\" é"), ("shop", "orders"), ("shop", "legacy_dates")] {
-            let t = table(&cat, s, schema, name);
-            let sql = format!("SELECT * FROM `{schema}`.`{name}` LIMIT 0");
-            let described = conn.run(&sql, QUERY_LIMITS).await.unwrap_or_else(|e| panic!("{}: {sql}: {e}", s.name));
-            let by_query: Vec<(&str, TypeClass)> = described.columns.iter().map(|c| (c.name.as_str(), c.class)).collect();
-            let by_catalog: Vec<(&str, TypeClass)> = t.columns.iter().map(|c| (c.name.as_str(), c.class)).collect();
-            assert_eq!(by_catalog, by_query, "{}: {schema}.{name}", s.name);
-        }
+        let made = if mariadb(s) { ddl(&conn, &format!("CREATE TABLE scratch.`{t}` {MARIADB_TYPES}")).await } else { Ok(()) };
+        let compared = match made {
+            Ok(()) => compare_classes(&conn, s, &t).await,
+            Err(e) => Err(e),
+        };
+        let gone = ddl(&conn, &format!("DROP TABLE IF EXISTS scratch.`{t}`")).await;
+        let cat = compared.unwrap_or_else(|e| panic!("{e}"));
+        gone.unwrap_or_else(|e| panic!("{}: {e}", s.name));
         let all = table(&cat, s, "shop", "all_types");
         for (name, class) in [
             ("flag", TypeClass::Bool),
@@ -276,6 +290,70 @@ async fn classes_as_a_query_gives_them() {
             ("note", TypeClass::LongText),
         ] {
             assert_eq!(all.column(name).map(|c| c.class), Some(class), "{}: {name}", s.name);
+        }
+        if mariadb(s) {
+            let own = table(&cat, s, "scratch", &t);
+            let classes: Vec<(&str, TypeClass)> = own.columns.iter().map(|c| (c.name.as_str(), c.class)).collect();
+            use TypeClass::*;
+            let expected = [
+                ("j", Json),
+                ("t", Json),
+                ("v", Json),
+                ("c", Json),
+                ("b", Json),
+                ("e", Text),
+                ("lt", LongText),
+                ("u", Other),
+                ("i6", Other),
+                ("i4", Other),
+            ];
+            assert_eq!(classes, expected, "{}", s.name);
+        }
+    }
+}
+
+/// The catalog, after checking that its classes are a query's for some seed tables and, on
+/// MariaDB, for the scratch table `t`.
+async fn compare_classes(conn: &MySqlConnection, s: &MyServer, t: &str) -> Result<Catalog, String> {
+    let cat = try_load(conn, s).await?;
+    let mut tables = vec![("shop", "all_types"), ("odd", "Odd \"Name\" é"), ("shop", "orders"), ("shop", "legacy_dates")];
+    if mariadb(s) {
+        tables.push(("scratch", t));
+    }
+    for (schema, name) in tables {
+        let listed = cat.table(&tr(schema, name)).ok_or_else(|| format!("{}: no {schema}.{name}", s.name))?;
+        let sql = format!("SELECT * FROM `{schema}`.`{name}` LIMIT 0");
+        let described = conn.run(&sql, QUERY_LIMITS).await.map_err(|e| format!("{}: {sql}: {e}", s.name))?;
+        let by_query: Vec<(&str, TypeClass)> = described.columns.iter().map(|c| (c.name.as_str(), c.class)).collect();
+        let by_catalog: Vec<(&str, TypeClass)> = listed.columns.iter().map(|c| (c.name.as_str(), c.class)).collect();
+        if by_catalog != by_query {
+            return Err(format!("{}: {schema}.{name}: the catalog says {by_catalog:?}, a query {by_query:?}", s.name));
+        }
+    }
+    Ok(cat)
+}
+
+#[tokio::test]
+async fn functional_key_parts_are_no_key() {
+    let db = require_testdb!();
+    let t = unique("t_functional");
+    for s in &db.mysql {
+        let (conn, in_scratch) = (open(s, db, "").await, open(s, db, "scratch").await);
+        let create = format!("CREATE TABLE scratch.`{t}` (a INT NOT NULL, b INT, UNIQUE KEY uk (a, (b + 1)))");
+        if let Err(e) = ddl(&conn, &create).await {
+            println!("{}: no functional key parts, skipped ({e})", s.name);
+            continue;
+        }
+        // The settings' database narrows the query that finds them too.
+        let whole = try_load(&conn, s).await;
+        let narrowed = try_load(&in_scratch, s).await;
+        let gone = ddl(&conn, &format!("DROP TABLE IF EXISTS scratch.`{t}`")).await;
+        gone.unwrap_or_else(|e| panic!("{}: {e}", s.name));
+        for cat in [whole, narrowed] {
+            let cat = cat.unwrap_or_else(|e| panic!("{e}"));
+            let listed = table(&cat, s, "scratch", &t);
+            // Its listed column, a, is not unique: the key is left out.
+            assert!(listed.unique_keys.is_empty() && listed.row_key().is_none(), "{}: {:?}", s.name, listed.unique_keys);
         }
     }
 }
@@ -308,12 +386,15 @@ async fn three_hundred_tables_load_quickly() {
     let db = require_testdb!();
     for s in &db.mysql {
         let conn = open(s, db, "").await;
-        // Alone, so the time is the load's own.
+        load(&conn, s).await;
+        // The second load, alone, so the time is the load's own and not a cold cache's.
         let _alone = DDL.write().await;
         let start = Instant::now();
-        let cat = conn.load_catalog().await.unwrap_or_else(|e| panic!("load_catalog on {}: {e}", s.name));
+        let rows = conn.catalog_rows().await.unwrap_or_else(|e| panic!("catalog rows on {}: {e}", s.name));
+        assert_eq!(rows.dropped(), 0, "{}", s.name);
+        let cat = rows.build(None);
         let took = start.elapsed();
-        println!("{}: load_catalog took {took:?} ({} tables)", s.name, cat.table_count());
+        println!("{}: the second catalog load took {took:?} ({} tables)", s.name, cat.table_count());
         let many = cat.schemas.iter().find(|x| x.name == "many").expect("many");
         assert_eq!((many.tables.len(), many.tables[0].table.name.as_str()), (300, "t_001"), "{}", s.name);
         assert!(took.as_secs_f64() < 2.0, "{}: took {took:?}", s.name);

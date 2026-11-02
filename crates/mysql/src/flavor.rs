@@ -58,9 +58,9 @@ impl Flavor {
         }
     }
 
-    /// JSON columns are `LONGTEXT` with a `json_valid` check, which
-    /// `information_schema.CHECK_CONSTRAINTS` lists: MariaDB's. MySQL has a JSON type, and no
-    /// such table before 8.0.16.
+    /// A string column with its own `json_valid` check, which
+    /// `information_schema.CHECK_CONSTRAINTS` lists, holds JSON: MariaDB's, whose JSON type is
+    /// such a `LONGTEXT`. MySQL has a JSON type, and no such table before 8.0.16.
     pub(crate) fn json_is_checked_text(self) -> bool {
         self == Flavor::MariaDb
     }

@@ -71,11 +71,12 @@ impl TypeFacts {
     /// gives them: `data_type` is `DATA_TYPE`; `column_type` is `COLUMN_TYPE`, whose `enum(..)` and
     /// `set(..)` give the flags and `tinyint(1)` the length 1; `charset` is
     /// `CHARACTER_SET_NAME`, NULL for bytes and numbers (whose definitions say `binary`);
-    /// `json_valid` is a `json_valid` check, which makes a MariaDB `LONGTEXT` its JSON. The
+    /// `json_valid` is the column's own `json_valid` check, which on MariaDB makes a string or
+    /// blob (not an `ENUM` or `SET`) JSON, as its extended metadata says. The
     /// length is known only for `tinyint(1)`, the one place [`class_of`] reads it, and a text
     /// character set only as not [`BINARY`].
     pub(crate) fn from_catalog(data_type: &str, column_type: &str, charset: Option<&str>, json_valid: bool) -> TypeFacts {
-        let data_type = data_type.to_ascii_lowercase();
+        use ColumnType::*;
         let column_type = column_type.to_ascii_lowercase();
         let ty = type_of_name(data_type.as_bytes());
         let flags = if column_type.starts_with("enum(") {
@@ -85,12 +86,16 @@ impl TypeFacts {
         } else {
             ColumnFlags::empty()
         };
+        let string = matches!(
+            ty,
+            MYSQL_TYPE_STRING | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB
+        );
         TypeFacts {
             column_type: ty,
             flags,
             charset: if charset.is_some() { UNKNOWN_TEXT } else { BINARY },
             length: u32::from(column_type.starts_with("tinyint(1)")),
-            json: json_valid && data_type == "longtext",
+            json: json_valid && string && flags.is_empty(),
         }
     }
 
@@ -395,12 +400,23 @@ mod tests {
         ] {
             assert_eq!(class(data_type, column_type, charset, false), expected, "{column_type}");
         }
-        // MariaDB's JSON is a LONGTEXT with a json_valid check; the check makes no other type JSON.
-        assert_eq!(class("longtext", "longtext", utf8, true), Json);
-        assert_eq!(class("LONGTEXT", "LONGTEXT", utf8, true), Json);
-        assert_eq!(class("text", "text", utf8, true), LongText);
-        assert_eq!(class("varchar", "varchar(10)", utf8, true), Text);
-        assert_eq!(class("longblob", "longblob", None, true), Binary);
+        // A column's own json_valid check makes a MariaDB string or blob JSON, as its metadata does;
+        // not an ENUM, SET or number.
+        for (data_type, column_type, charset) in [
+            ("longtext", "longtext", utf8),
+            ("LONGTEXT", "LONGTEXT", utf8),
+            ("text", "text", utf8),
+            ("tinytext", "tinytext", utf8),
+            ("varchar", "varchar(10)", utf8),
+            ("char", "char(10)", utf8),
+            ("blob", "blob", None),
+            ("varbinary", "varbinary(10)", None),
+        ] {
+            assert_eq!(class(data_type, column_type, charset, true), Json, "{column_type}");
+        }
+        assert_eq!(class("enum", "enum('a','[]')", utf8, true), Text);
+        assert_eq!(class("set", "set('a')", utf8, true), Text);
+        assert_eq!(class("int", "int(11)", None, true), Number);
         // The facts the class rules read are those of the result column's definition.
         let enum_facts = TypeFacts::from_catalog("enum", "enum('a')", utf8, false);
         assert_eq!((enum_facts.column_type, enum_facts.flags), (ColumnType::MYSQL_TYPE_STRING, ColumnFlags::ENUM_FLAG));
