@@ -782,9 +782,10 @@ fn table_cancel_waits_for_an_apply_that_is_committing() {
             continue;
         }
         let (name, _drop) = make_table(&t);
-        let mut gate = t.commit_gate(&name).unwrap();
-        // Exclusive: on MariaDB the gate holds every COMMIT on the server.
+        // Exclusive first: on MariaDB the gate holds every COMMIT and DDL on the server, so it is
+        // taken only once no other test's session can be waiting on one.
         let mut s = connected_exclusive_to(&t);
+        let mut gate = t.commit_gate(&name).unwrap();
         open_table(&mut s, "scratch", &name);
         set_cell(&mut s, 0, "name", "committed");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };

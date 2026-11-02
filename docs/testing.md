@@ -52,7 +52,7 @@ cargo xtask testdb status   # ports from the env file, and docker compose ps
 cargo xtask testdb down     # remove the containers, their volumes and target/testdb
 ```
 
-- **Servers.** Each listens on a random port on `127.0.0.1`. `SERVICES` in `xtask/src/testdb.rs` is the one list of the database servers: name, type, image, release and whether it holds the full seed. The compose file takes each image from it (`DBEE_IMAGE_<SERVICE>` in `compose.env`) and the certificate its names; adding a server of a known type is a row there and its block in `compose.yml`.
+- **Servers.** Each listens on a random port on `127.0.0.1`. `SERVICES` in `xtask/src/testdb.rs` is the one list of the database servers: name, type, image, release and whether it holds the full seed. The compose file takes each image from it (`DBEE_IMAGE_<SERVICE>` in `compose.env`), the certificate its names (`DBEE_TEST_HOSTS`) and the sshd the servers it forwards to (`DBEE_TEST_FORWARDS`, which `up` checks on the running sshd); adding a server of a known type is a row there and its block in `compose.yml`.
   - `pg14` runs `postgres:14-alpine`, the oldest supported major.
   - `pgnew` runs the newest released major, `postgres:18-alpine` on 2026-10-19.
   - Both have database `dbee`, superuser `postgres` with the generated password, and TLS on.
@@ -60,7 +60,7 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
   - They have user `root` with the generated password, no default database, TLS on and `max_allowed_packet` 64 MiB. They run light (`performance_schema` off, a 64 MB buffer pool, no binary log), as five of them run next to the Postgres servers: about 820 MiB together, measured. `up` checks each server's version and seed against its row, and on MySQL and MariaDB a TLS connection with the CA checked.
   - Their certificates are for `localhost`, `127.0.0.1` and every database service's name, signed by a generated CA: ECDSA for Postgres, RSA for MySQL and MariaDB (MySQL 5.7's image offers no cipher for an ECDSA key).
   - `mysql57`'s image (OpenSSL 1.0.2) has no ECDHE and no TLS 1.3, only DHE-RSA suites, so a client on rustls (dbee's) cannot agree on a cipher with it.
-  - `sshd`: user `dbee` logs in with the test keys (ed25519, ed25519 with a passphrase, RSA 3072), user `dbeepw` only with the generated password. Forwarding reaches the database servers (`pg14:5432`, `pgnew:5432`, `mysql57:3306`, …, `mariadbnew:3306`) and nothing else.
+  - `sshd`: user `dbee` logs in with the test keys (ed25519, ed25519 with a passphrase, RSA 3072), user `dbeepw` only with the generated password. Forwarding reaches the database servers of `SERVICES` (`pg14:5432`, `pgnew:5432`, `mysql57:3306`, …, `mariadbnew:3306`) and nothing else.
 - **Env file.** `up` writes `<repo>/target/testdb/env.json`, always under the repository's `target/`, whatever `CARGO_TARGET_DIR` says.
   - It holds the password; one `servers` list, each with its type, version, port, port inside the network (where the sshd reaches it as `name:port`) and whether it holds the full seed; the SSH users and `known_hosts` line; the key files (copied to `target/testdb/keys/`, mode 0600) with the passphrase; and the CA file.
   - `dbee_testkit::testdb()` reads it. `target/testdb/compose.env` holds the variables every `docker compose` call passes with `--env-file`.

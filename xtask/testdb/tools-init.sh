@@ -8,16 +8,18 @@
 #     by uid 999, the mysql user of the MySQL and MariaDB images.
 #   - SSH client keys id_ed25519, id_ed25519_enc (passphrase $DBEE_TEST_PASSPHRASE) and id_rsa
 #     (3072 bits), with their public halves in authorized_keys.
-# Synthetic, test-only material for `cargo xtask testdb`; a second run changes nothing.
+# Synthetic, test-only material for `cargo xtask testdb`. The completion marker `.done` holds the
+# host list the certificates were made for: a second run with the same list changes nothing, one
+# with another list makes everything again.
 set -eu
 
 out=/secrets
-if [ -f "$out/.done" ]; then
+: "${DBEE_TEST_PASSPHRASE:?DBEE_TEST_PASSPHRASE must be set}"
+: "${DBEE_TEST_HOSTS:?DBEE_TEST_HOSTS must be set}"
+if [ -f "$out/.done" ] && [ "$(cat "$out/.done")" = "$DBEE_TEST_HOSTS" ]; then
     echo "tools-init: $out is complete, nothing to do"
     exit 0
 fi
-: "${DBEE_TEST_PASSPHRASE:?DBEE_TEST_PASSPHRASE must be set}"
-: "${DBEE_TEST_HOSTS:?DBEE_TEST_HOSTS must be set}"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -59,5 +61,5 @@ install -d -m 0755 "$out/mysql"
 install -m 0644 mysql-server.crt "$out/mysql/server.crt"
 install -m 0600 -o 999 -g 999 mysql-server.key "$out/mysql/server.key"
 install -m 0600 id_ed25519 id_ed25519_enc id_rsa "$out/"
-touch "$out/.done"
+printf '%s' "$DBEE_TEST_HOSTS" > "$out/.done"
 echo "tools-init: wrote $out"

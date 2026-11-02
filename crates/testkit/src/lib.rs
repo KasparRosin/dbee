@@ -26,6 +26,10 @@ pub const PROJECT: &str = "dbee-testdb";
 /// What a skipped test says.
 pub const NOT_UP: &str = "the Docker test servers are not up (run `cargo xtask testdb up`)";
 
+/// What a skipped test says when the env file is not in this tree's shape.
+pub const OLD_ENV: &str =
+    "target/testdb/env.json was written by an older tree's `cargo xtask testdb up` (run `cargo xtask testdb down`, then `cargo xtask testdb up`)";
+
 /// The rows of `shop.orders` in every seed (`orders` on SQLite).
 pub const ORDERS_COUNT: u64 = 5_000;
 
@@ -331,6 +335,17 @@ pub fn testdb() -> Option<&'static TestDb> {
     DB.get_or_init(|| load_from(&env_file()).filter(reachable)).as_ref()
 }
 
+/// Why [`testdb`] has no servers: [`OLD_ENV`] when the env file is JSON but not this tree's shape,
+/// else [`NOT_UP`].
+pub fn not_up() -> &'static str {
+    not_up_at(&env_file())
+}
+
+fn not_up_at(path: &Path) -> &'static str {
+    let json = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    if json.is_some_and(|v| parse(&v).is_none()) { OLD_ENV } else { NOT_UP }
+}
+
 /// Parse an env file; `None` when it is missing or not the expected shape.
 pub fn load_from(path: &Path) -> Option<TestDb> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -399,9 +414,9 @@ macro_rules! require_testdb {
             ::core::option::Option::Some(db) => db,
             ::core::option::Option::None => {
                 if $crate::oracles_required() {
-                    ::core::panic!("DBEE_REQUIRE_ORACLES=1 and {}", $crate::NOT_UP);
+                    ::core::panic!("DBEE_REQUIRE_ORACLES=1 and {}", $crate::not_up());
                 }
-                $crate::skipped(&::std::format!("{}: {}", ::core::module_path!(), $crate::NOT_UP));
+                $crate::skipped(&::std::format!("{}: {}", ::core::module_path!(), $crate::not_up()));
                 return;
             }
         }
@@ -466,7 +481,7 @@ pub fn psql(server: &Server, sql: &str) -> Result<String, String> {
 /// per row, the values tab-separated, unescaped, NULL as `NULL`. Returns stdout, or stderr on
 /// error. The password reaches the client as `MYSQL_PWD`, never as an argument.
 pub fn mysql(server: &Server, sql: &str) -> Result<String, String> {
-    let db = testdb().ok_or_else(|| NOT_UP.to_owned())?;
+    let db = testdb().ok_or_else(|| not_up().to_owned())?;
     let Some(Client::MySql(client)) = server.kind.info().client else {
         return Err(format!("{} is not a MySQL or MariaDB server", server.name));
     };
@@ -564,7 +579,7 @@ fn holder_ids(marker: &str) -> String {
 /// returns once the session sleeps with the transaction open (see [`Held`]). `sql` must not end
 /// the transaction.
 pub fn hold(server: &Server, sql: &str) -> Result<Held, String> {
-    let db = testdb().ok_or_else(|| NOT_UP.to_owned())?;
+    let db = testdb().ok_or_else(|| not_up().to_owned())?;
     let marker = unique("dbee_test_hold");
     let mut c = compose();
     let sleeping = match server.kind.info().client {
@@ -640,7 +655,9 @@ impl CommitGate {
 impl Drop for CommitGate {
     fn drop(&mut self) {
         self.held = None;
-        let _ = crate::sql(&self.server, &format!("DROP {}", self.cleanup));
+        if !self.cleanup.is_empty() {
+            let _ = crate::sql(&self.server, &format!("DROP {}", self.cleanup));
+        }
     }
 }
 
@@ -811,9 +828,9 @@ impl TestTarget {
         (self.kind.info().row_lock_waits_sql)(table)
     }
 
-    /// A [`CommitGate`] on `scratch.<table>`: set up before the session that commits loads the
-    /// table (it may add a trigger), and before that session's update starts; on MariaDB it holds
-    /// every COMMIT on the server, and DDL too.
+    /// A [`CommitGate`] on `scratch.<table>`, set up before the session that commits loads the
+    /// table (it may add a trigger) and starts its update. On MariaDB it holds every COMMIT and DDL
+    /// on the server: take it only while no other test's session runs.
     pub fn commit_gate(&self, table: &str) -> Result<CommitGate, String> {
         let server = self.server().ok_or_else(|| format!("{}: no server", self.name()))?;
         let wait = self.kind.info().commit_wait.ok_or_else(|| format!("{}: no way to hold a COMMIT", self.name()))?;
@@ -1027,10 +1044,16 @@ mod tests {
         assert_eq!(db.keys.passphrase, "pp");
         assert_eq!(db.ca_file, PathBuf::from("/k/ca.crt"));
 
-        std::fs::write(&path, r#"{"password":"pw"}"#).unwrap();
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(not_up_at(&path), NOT_UP, "this tree's shape");
+        // The shape an older tree wrote (one `mysql` list beside the Postgres `servers`).
+        std::fs::write(&path, r#"{"password":"pw","servers":[{"name":"pg14","major":14,"port":1}],"mysql":[]}"#).unwrap();
         assert!(load_from(&path).is_none());
+        assert_eq!(not_up_at(&path), OLD_ENV);
         std::fs::write(&path, "not json").unwrap();
         assert!(load_from(&path).is_none());
+        assert_eq!(not_up_at(&path), NOT_UP);
+        assert_eq!(not_up_at(&dir.home.join("missing.json")), NOT_UP);
     }
 
     #[test]

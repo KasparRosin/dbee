@@ -2,7 +2,8 @@
 # and the newest; MariaDB 10.11 and the newest; an SSH server.
 # Managed by `cargo xtask testdb up|down|status` (xtask/src/testdb.rs), which writes the variables
 # below to target/testdb/compose.env. Each database service's image comes from its row in
-# SERVICES there (DBEE_IMAGE_<SERVICE>), and the certificate's names from the same list. By hand:
+# SERVICES there (DBEE_IMAGE_<SERVICE>), and the certificate's names and the sshd's forwards from
+# the same list. By hand:
 #   docker compose -p dbee-testdb -f xtask/testdb/compose.yml --env-file target/testdb/compose.env ps
 name: dbee-testdb
 
@@ -139,9 +140,14 @@ services:
     image: dbee-testdb-tools:local
     pull_policy: never
     depends_on: *after-init
-    command: ["sh", "-c", "echo \"dbeepw:$${DBEE_TEST_PASSWORD}\" | chpasswd >/dev/null && exec /usr/sbin/sshd -D -e"]
+    # Forwards only to the database servers, from SERVICES (DBEE_TEST_FORWARDS, comma-separated).
+    command:
+      - sh
+      - -c
+      - echo "dbeepw:$${DBEE_TEST_PASSWORD}" | chpasswd >/dev/null && exec /usr/sbin/sshd -D -e -o "PermitOpen=$$(echo "$${DBEE_TEST_FORWARDS}" | tr , ' ')"
     environment:
       DBEE_TEST_PASSWORD: ${DBEE_TEST_PASSWORD:?run cargo xtask testdb up}
+      DBEE_TEST_FORWARDS: ${DBEE_TEST_FORWARDS:?run cargo xtask testdb up}
     volumes:
       - secrets:/secrets:ro
     ports:

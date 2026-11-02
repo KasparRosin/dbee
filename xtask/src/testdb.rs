@@ -2,8 +2,9 @@
 //!
 //! Compose project `dbee-testdb` (`xtask/testdb/compose.yml`), all published on random `127.0.0.1`
 //! ports: the database servers of [`SERVICES`] and an SSH server (`sshd`). [`SERVICES`] is the one
-//! list of the database servers: the compose file takes each one's image from it and the
-//! certificate its names (both through `compose.env`), `up` checks each one against it, and
+//! list of the database servers: the compose file takes each one's image from it, the certificate
+//! its names and the sshd the list it forwards to (all through `compose.env`), `up` checks each one
+//! against it, and
 //! `env.json` lists them as `up` found them. What differs between database types is in
 //! [`Kind::info`].
 //!
@@ -143,6 +144,8 @@ const VAR_PASSWORD: &str = "DBEE_TEST_PASSWORD";
 const VAR_PASSPHRASE: &str = "DBEE_TEST_PASSPHRASE";
 /// The database services' names, comma-separated, for the servers' certificate.
 const VAR_HOSTS: &str = "DBEE_TEST_HOSTS";
+/// The database services as the sshd reaches them, `name:port` comma-separated: all it forwards to.
+const VAR_FORWARDS: &str = "DBEE_TEST_FORWARDS";
 
 /// The variable the compose file takes `service`'s image from: `DBEE_IMAGE_PG14`.
 fn image_var(service: &str) -> String {
@@ -152,6 +155,20 @@ fn image_var(service: &str) -> String {
 /// [`VAR_HOSTS`]'s value.
 fn hosts() -> String {
     SERVICES.iter().map(|s| s.name).collect::<Vec<_>>().join(",")
+}
+
+/// [`VAR_FORWARDS`]'s value.
+fn forwards() -> String {
+    SERVICES.iter().map(|s| format!("{}:{}", s.name, s.kind.info().port)).collect::<Vec<_>>().join(",")
+}
+
+/// The `PermitOpen=` list of the sshd's `/proc/1/cmdline`, comma-separated as [`forwards`] writes
+/// it. sshd sets its own process title, one line that goes on after the list (`[listener] …`), so
+/// the list is the `host:port` words after `PermitOpen=`.
+fn permit_open(cmdline: &str) -> Option<String> {
+    let (_, rest) = cmdline.split_once("PermitOpen=")?;
+    let words: Vec<&str> = rest.split(|c: char| c == '\0' || c.is_whitespace()).take_while(|w| w.contains(':') && !w.starts_with('[')).collect();
+    Some(words.join(","))
 }
 
 /// Each service's image variable and image.
@@ -285,6 +302,8 @@ struct ComposeVars {
     passphrase: String,
     /// [`VAR_HOSTS`].
     hosts: String,
+    /// [`VAR_FORWARDS`].
+    forwards: String,
     /// Each service's [`image_var`] and image, in [`SERVICES`] order.
     images: Vec<(String, String)>,
 }
@@ -292,12 +311,14 @@ struct ComposeVars {
 impl ComposeVars {
     /// The variables for [`SERVICES`] with these credentials.
     fn new(password: String, passphrase: String) -> ComposeVars {
-        ComposeVars { password, passphrase, hosts: hosts(), images: images() }
+        ComposeVars { password, passphrase, hosts: hosts(), forwards: forwards(), images: images() }
     }
 
     fn render(&self) -> String {
         let mut text = "# Written by `cargo xtask testdb up`; passed to every docker compose call with --env-file.\n".to_owned();
-        for (var, value) in [(VAR_PASSWORD, &self.password), (VAR_PASSPHRASE, &self.passphrase), (VAR_HOSTS, &self.hosts)] {
+        for (var, value) in
+            [(VAR_PASSWORD, &self.password), (VAR_PASSPHRASE, &self.passphrase), (VAR_HOSTS, &self.hosts), (VAR_FORWARDS, &self.forwards)]
+        {
             text.push_str(&format!("{var}={value}\n"));
         }
         for (var, image) in &self.images {
@@ -316,12 +337,18 @@ impl ComposeVars {
             let image = get(&var)?;
             images.push((var, image));
         }
-        Some(ComposeVars { password: get(VAR_PASSWORD)?, passphrase: get(VAR_PASSPHRASE)?, hosts: get(VAR_HOSTS)?, images })
+        Some(ComposeVars {
+            password: get(VAR_PASSWORD)?,
+            passphrase: get(VAR_PASSPHRASE)?,
+            hosts: get(VAR_HOSTS)?,
+            forwards: get(VAR_FORWARDS)?,
+            images,
+        })
     }
 
-    /// The images and names these variables give are the ones [`SERVICES`] has.
+    /// The images, names and forwards these variables give are the ones [`SERVICES`] has.
     fn current(&self) -> bool {
-        self.hosts == hosts() && self.images == images()
+        self.hosts == hosts() && self.forwards == forwards() && self.images == images()
     }
 }
 
@@ -383,8 +410,12 @@ fn compose(root: &Path) -> Command {
     if in_file.is_some() {
         c.arg("--env-file").arg(env_file);
     }
-    let mut placeholders =
-        vec![(VAR_PASSWORD.to_owned(), "unset".to_owned()), (VAR_PASSPHRASE.to_owned(), "unset".to_owned()), (VAR_HOSTS.to_owned(), hosts())];
+    let mut placeholders = vec![
+        (VAR_PASSWORD.to_owned(), "unset".to_owned()),
+        (VAR_PASSPHRASE.to_owned(), "unset".to_owned()),
+        (VAR_HOSTS.to_owned(), hosts()),
+        (VAR_FORWARDS.to_owned(), forwards()),
+    ];
     placeholders.extend(images());
     for (var, placeholder) in placeholders {
         if in_file.as_deref().is_some_and(|text| sets(text, &var)) {
@@ -569,6 +600,13 @@ pub fn up(root: &Path) -> Result<Env, String> {
 
     let servers = SERVICES.iter().map(|s| check(root, s, &vars.password)).collect::<Result<Vec<_>, _>>()?;
     let ssh = compose_port(root, "sshd", 22)?;
+    // The running sshd forwards to the servers of SERVICES (the compose file passes them).
+    let mut c = compose(root);
+    c.args(["exec", "-T", "sshd", "cat", "/proc/1/cmdline"]);
+    let cmdline = run_captured(c, "read the sshd's command line")?;
+    if permit_open(&cmdline).as_deref() != Some(forwards().as_str()) {
+        return Err(format!("the sshd forwards to {:?}, not to the servers of SERVICES ({})", permit_open(&cmdline), forwards()));
+    }
 
     let keys = keys_dir(root);
     if keys.exists() {
@@ -731,6 +769,12 @@ mod tests {
         }
         assert_eq!(Kind::from_id("sqlite"), None, "no server");
         assert_eq!(image_var("mariadb1011"), "DBEE_IMAGE_MARIADB1011");
+        // The sshd forwards to every server, and to nothing else.
+        assert_eq!(forwards(), "pg14:5432,pgnew:5432,mysql57:3306,mysql80:3306,mysqlnew:3306,mariadb1011:3306,mariadbnew:3306");
+        let listed = forwards().replace(',', " ");
+        assert_eq!(permit_open(&format!("sshd: /usr/sbin/sshd -D -e -o PermitOpen={listed} [listener] 0 of 100-100 startups")), Some(forwards()));
+        assert_eq!(permit_open(&format!("/usr/sbin/sshd\0-D\0-e\0-o\0PermitOpen={listed}\0")), Some(forwards()));
+        assert_eq!(permit_open("/usr/sbin/sshd\0-D\0-e\0"), None);
     }
 
     #[test]
@@ -740,6 +784,7 @@ mod tests {
         assert_eq!(ComposeVars::parse(&vars.render()), Some(vars.clone()));
         assert!(vars.render().contains("DBEE_IMAGE_PGNEW=postgres:18-alpine\n"), "{}", vars.render());
         assert!(vars.render().contains("DBEE_TEST_HOSTS=pg14,pgnew,mysql57,mysql80,mysqlnew,mariadb1011,mariadbnew\n"));
+        assert!(vars.render().contains("DBEE_TEST_FORWARDS=pg14:5432,"), "{}", vars.render());
         let without = |var: &str| vars.render().lines().filter(|l| !l.starts_with(var)).collect::<Vec<_>>().join("\n");
         assert_eq!(ComposeVars::parse(&without(VAR_PASSWORD)), None);
         assert_eq!(ComposeVars::parse(&vars.render().replace("DBEE_TEST_PASSWORD=abc", "DBEE_TEST_PASSWORD=")), None);
@@ -750,7 +795,8 @@ mod tests {
         let mut other = vars.clone();
         other.images[4].1 = "mysql:9.7".into();
         assert!(!other.current());
-        assert!(!ComposeVars { hosts: "pg14".into(), ..vars }.current());
+        assert!(!ComposeVars { hosts: "pg14".into(), ..vars.clone() }.current());
+        assert!(!ComposeVars { forwards: "pg14:5432".into(), ..vars }.current());
     }
 
     #[test]
@@ -765,6 +811,7 @@ mod tests {
         assert!(envs.contains(&("DBEE_TEST_PASSWORD".into(), None)), "{envs:?}");
         assert!(envs.contains(&("DBEE_IMAGE_MYSQLNEW".into(), Some("mysql:26.10".into()))), "{envs:?}");
         assert!(envs.contains(&("DBEE_TEST_HOSTS".into(), Some(hosts()))), "{envs:?}");
+        assert!(envs.contains(&("DBEE_TEST_FORWARDS".into(), Some(forwards()))), "{envs:?}");
         assert!(c.get_args().any(|a| a == "--env-file"));
         assert!(sets("A=1\nDBEE_IMAGE_PG14=x\n", "DBEE_IMAGE_PG14") && !sets("DBEE_IMAGE_PG14_X=1\n", "DBEE_IMAGE_PG14"));
     }
