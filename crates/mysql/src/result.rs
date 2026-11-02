@@ -90,7 +90,7 @@ async fn read_rows(
         if bytes > limits.max_bytes {
             return Err(DbError::Other(format!("the server sent column names larger than {}", size_text(limits.max_bytes))));
         }
-        columns.push(values::column(column.name, &column.facts));
+        columns.push(values::column(column.name, &column.facts, column.type_name.as_deref()));
     }
     let old_eof = !caps.contains(CapabilityFlags::CLIENT_DEPRECATE_EOF);
     if old_eof {

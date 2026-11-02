@@ -77,6 +77,33 @@ async fn text_that_is_not_utf8_is_replaced_and_counted() {
 }
 
 #[tokio::test]
+async fn mariadbs_own_types_are_other() {
+    let db = require_testdb!();
+    for s in db.mysql.iter().filter(|s| s.flavor == MyFlavor::MariaDb) {
+        let c = open(s, db).await;
+        let t = unique("t_own_types");
+        ok(&c, &format!("CREATE TABLE scratch.`{t}` (u UUID, i6 INET6, i4 INET4, pt POINT)"), QUERY_LIMITS).await;
+        let insert = format!("INSERT INTO scratch.`{t}` VALUES ('123e4567-e89b-12d3-a456-426614174000', '::1', '10.0.0.1', POINT(1, 2))");
+        let read = match c.run(&insert, QUERY_LIMITS).await {
+            Ok(_) => c.run(&format!("SELECT * FROM scratch.`{t}`"), QUERY_LIMITS).await,
+            Err(e) => Err(e),
+        };
+        ok(&c, &format!("DROP TABLE scratch.`{t}`"), QUERY_LIMITS).await;
+        let r = read.unwrap_or_else(|e| panic!("{}: {e}", s.name));
+        // MariaDB sends them as text strings and names the type in its extended metadata.
+        let got: Vec<(&str, &str, TypeClass)> = r.columns.iter().map(|c| (c.base_type.as_str(), c.type_label.as_str(), c.class)).collect();
+        let expected = [
+            ("uuid", "uuid", TypeClass::Other),
+            ("inet6", "inet6", TypeClass::Other),
+            ("inet4", "inet4", TypeClass::Other),
+            ("geometry", "geometry", TypeClass::Binary),
+        ];
+        assert_eq!(got, expected, "{}", s.name);
+        assert_eq!(r.rows[0][..3], [Some("123e4567-e89b-12d3-a456-426614174000".into()), Some("::1".into()), Some("10.0.0.1".into())]);
+    }
+}
+
+#[tokio::test]
 async fn classes_of_described_columns() {
     let db = require_testdb!();
     use TypeClass::*;

@@ -25,6 +25,47 @@ pub(crate) struct TypeFacts {
     pub(crate) json: bool,
 }
 
+/// The protocol type of a type named as `information_schema.COLUMNS.DATA_TYPE` names it, in any
+/// case; MariaDB's extended metadata names its own types the same way. A name dbee does not know
+/// (MariaDB's `uuid`, `inet6`) is `MYSQL_TYPE_UNKNOWN`.
+pub(crate) fn type_of_name(name: &[u8]) -> ColumnType {
+    use ColumnType::*;
+    match name.to_ascii_lowercase().as_slice() {
+        b"tinyint" => MYSQL_TYPE_TINY,
+        b"smallint" => MYSQL_TYPE_SHORT,
+        b"mediumint" => MYSQL_TYPE_INT24,
+        b"int" => MYSQL_TYPE_LONG,
+        b"bigint" => MYSQL_TYPE_LONGLONG,
+        b"decimal" => MYSQL_TYPE_NEWDECIMAL,
+        b"float" => MYSQL_TYPE_FLOAT,
+        b"double" => MYSQL_TYPE_DOUBLE,
+        b"year" => MYSQL_TYPE_YEAR,
+        b"date" => MYSQL_TYPE_DATE,
+        b"time" => MYSQL_TYPE_TIME,
+        b"datetime" => MYSQL_TYPE_DATETIME,
+        b"timestamp" => MYSQL_TYPE_TIMESTAMP,
+        b"char" | b"binary" | b"enum" | b"set" => MYSQL_TYPE_STRING,
+        b"varchar" | b"varbinary" => MYSQL_TYPE_VAR_STRING,
+        b"tinytext" | b"tinyblob" => MYSQL_TYPE_TINY_BLOB,
+        b"text" | b"blob" => MYSQL_TYPE_BLOB,
+        b"mediumtext" | b"mediumblob" => MYSQL_TYPE_MEDIUM_BLOB,
+        b"longtext" | b"longblob" => MYSQL_TYPE_LONG_BLOB,
+        b"bit" => MYSQL_TYPE_BIT,
+        b"json" => MYSQL_TYPE_JSON,
+        b"geometry"
+        | b"point"
+        | b"linestring"
+        | b"polygon"
+        | b"multipoint"
+        | b"multilinestring"
+        | b"multipolygon"
+        | b"geometrycollection"
+        | b"geomcollection" => MYSQL_TYPE_GEOMETRY,
+        b"vector" => MYSQL_TYPE_VECTOR,
+        _ => MYSQL_TYPE_UNKNOWN,
+    }
+}
+
 impl TypeFacts {
     /// The facts `information_schema.COLUMNS` gives a column, as its result column's definition
     /// gives them: `data_type` is `DATA_TYPE`; `column_type` is `COLUMN_TYPE`, whose `enum(..)` and
@@ -34,36 +75,9 @@ impl TypeFacts {
     /// length is known only for `tinyint(1)`, the one place [`class_of`] reads it, and a text
     /// character set only as not [`BINARY`].
     pub(crate) fn from_catalog(data_type: &str, column_type: &str, charset: Option<&str>, json_valid: bool) -> TypeFacts {
-        use ColumnType::*;
         let data_type = data_type.to_ascii_lowercase();
         let column_type = column_type.to_ascii_lowercase();
-        let ty = match data_type.as_str() {
-            "tinyint" => MYSQL_TYPE_TINY,
-            "smallint" => MYSQL_TYPE_SHORT,
-            "mediumint" => MYSQL_TYPE_INT24,
-            "int" => MYSQL_TYPE_LONG,
-            "bigint" => MYSQL_TYPE_LONGLONG,
-            "decimal" => MYSQL_TYPE_NEWDECIMAL,
-            "float" => MYSQL_TYPE_FLOAT,
-            "double" => MYSQL_TYPE_DOUBLE,
-            "year" => MYSQL_TYPE_YEAR,
-            "date" => MYSQL_TYPE_DATE,
-            "time" => MYSQL_TYPE_TIME,
-            "datetime" => MYSQL_TYPE_DATETIME,
-            "timestamp" => MYSQL_TYPE_TIMESTAMP,
-            "char" | "binary" | "enum" | "set" => MYSQL_TYPE_STRING,
-            "varchar" | "varbinary" => MYSQL_TYPE_VAR_STRING,
-            "tinytext" | "tinyblob" => MYSQL_TYPE_TINY_BLOB,
-            "text" | "blob" => MYSQL_TYPE_BLOB,
-            "mediumtext" | "mediumblob" => MYSQL_TYPE_MEDIUM_BLOB,
-            "longtext" | "longblob" => MYSQL_TYPE_LONG_BLOB,
-            "bit" => MYSQL_TYPE_BIT,
-            "json" => MYSQL_TYPE_JSON,
-            "geometry" | "point" | "linestring" | "polygon" | "multipoint" | "multilinestring" | "multipolygon" | "geometrycollection"
-            | "geomcollection" => MYSQL_TYPE_GEOMETRY,
-            "vector" => MYSQL_TYPE_VECTOR,
-            _ => MYSQL_TYPE_UNKNOWN,
-        };
+        let ty = type_of_name(data_type.as_bytes());
         let flags = if column_type.starts_with("enum(") {
             ColumnFlags::ENUM_FLAG
         } else if column_type.starts_with("set(") {
@@ -196,9 +210,13 @@ fn blob_name(t: &TypeFacts) -> &'static str {
 }
 
 /// The result column `name` with type facts `t`: its type's name, the name with the length in
-/// characters for strings (`varchar(45)`), and its class.
-pub(crate) fn column(name: String, t: &TypeFacts) -> Column {
-    let base = type_name(t);
+/// characters for strings (`varchar(45)`), and its class. `server_type` is the server's own name
+/// for the type (MariaDB's extended metadata), shown when dbee knows no name for it.
+pub(crate) fn column(name: String, t: &TypeFacts, server_type: Option<&str>) -> Column {
+    let base = match type_name(t) {
+        "" => server_type.unwrap_or_default(),
+        known => known,
+    };
     let sized = matches!(t.column_type, ColumnType::MYSQL_TYPE_STRING | ColumnType::MYSQL_TYPE_VAR_STRING | ColumnType::MYSQL_TYPE_VARCHAR)
         && !t.flags.intersects(ColumnFlags::ENUM_FLAG | ColumnFlags::SET_FLAG)
         && !t.json;
@@ -395,7 +413,7 @@ mod tests {
     fn names_and_labels() {
         use ColumnType::*;
         let named = |t: TypeFacts| {
-            let c = column("c".into(), &t);
+            let c = column("c".into(), &t, None);
             (c.base_type, c.type_label)
         };
         let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
@@ -418,6 +436,13 @@ mod tests {
         assert_eq!(named(of(MYSQL_TYPE_BLOB, BINARY, 255)).0, "tinyblob");
         assert_eq!(named(of(MYSQL_TYPE_BLOB, BINARY, 65_535)).0, "blob");
         assert_eq!(named(of(MYSQL_TYPE_LONG_BLOB, UTF8MB4, u32::MAX)).0, "longtext");
+        // A type dbee knows no name for takes the server's (MariaDB's uuid); a known one keeps dbee's.
+        let uuid = column("u".into(), &of(MYSQL_TYPE_UNKNOWN, UTF8MB4, 144), Some("uuid"));
+        assert_eq!((uuid.base_type.as_str(), uuid.type_label.as_str(), uuid.class), ("uuid", "uuid", TypeClass::Other));
+        let point = column("p".into(), &of(MYSQL_TYPE_GEOMETRY, BINARY, u32::MAX), Some("point"));
+        assert_eq!((point.base_type.as_str(), point.class), ("geometry", TypeClass::Binary));
+        assert_eq!(type_of_name(b"UUID"), MYSQL_TYPE_UNKNOWN);
+        assert_eq!((type_of_name(b"Point"), type_of_name(b"varchar")), (MYSQL_TYPE_GEOMETRY, MYSQL_TYPE_VAR_STRING));
     }
 
     #[test]
@@ -461,7 +486,7 @@ mod tests {
         ) {
             let column_type = ColumnType::try_from(type_byte).unwrap_or(ColumnType::MYSQL_TYPE_UNKNOWN);
             let t = TypeFacts { column_type, flags: ColumnFlags::from_bits_truncate(flags), charset, length, json };
-            let c = column("c".into(), &t);
+            let c = column("c".into(), &t, None);
             prop_assert_eq!(c.class, class_of(&t));
             prop_assert!(c.type_label.starts_with(&c.base_type), "{:?}", c);
             if json {

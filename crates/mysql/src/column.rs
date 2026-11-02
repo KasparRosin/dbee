@@ -4,14 +4,16 @@
 use dbee_driver::DbError;
 use mysql_common::constants::{ColumnFlags, ColumnType};
 
-use crate::values::TypeFacts;
+use crate::values::{TypeFacts, type_of_name};
 use crate::wire::{lenenc_int, lenenc_str, malformed};
 
 /// The length of a column definition's fixed fields: character set, length, type, flags,
 /// decimals and two unused bytes.
 const FIXED_FIELDS: u64 = 0x0C;
 
-/// The key of a value in MariaDB's extended metadata that names the format (`json`).
+/// The keys of the values in MariaDB's extended metadata that name the type (`uuid`, `point`)
+/// and the format (`json`).
+const TYPE_NAME: u8 = 0x00;
 const FORMAT: u8 = 0x01;
 
 /// A result column as its definition (Protocol::ColumnDefinition41) gives it.
@@ -20,14 +22,18 @@ pub(crate) struct ColumnDefinition {
     /// The name the result gives the column (its alias), as UTF-8 with invalid bytes replaced.
     pub(crate) name: String,
     pub(crate) facts: TypeFacts,
+    /// MariaDB's name for the column's type, when its extended metadata gives one.
+    pub(crate) type_name: Option<String>,
 }
 
 /// A column definition as MySQL's and MariaDB's documentation lay it out: six length-encoded
 /// strings (catalog, always `def`; schema; table; original table; name; original name), then
 /// MariaDB's extended metadata when `extended_metadata` was agreed (a length-encoded string of
-/// pairs of a 1-byte key and a length-encoded value, of which dbee reads the format `json`),
-/// then the 12 bytes of fixed fields. Every length is checked against the packet, and nothing
-/// may follow. A type byte dbee does not know (a newer server's type) is `MYSQL_TYPE_UNKNOWN`.
+/// pairs of a 1-byte key and a length-encoded value, of which dbee reads the type's name and
+/// the format `json`), then the 12 bytes of fixed fields. Every length is checked against the
+/// packet, and nothing may follow. A type byte dbee does not know (a newer server's type) is
+/// `MYSQL_TYPE_UNKNOWN`; a type name, the last one given, decides the type as the catalog's
+/// `DATA_TYPE` does, so MariaDB's `uuid` is a type dbee does not know either.
 pub(crate) fn parse_column(def: &[u8], extended_metadata: bool) -> Result<ColumnDefinition, DbError> {
     let bad = || malformed("column definition");
     let mut rest = def;
@@ -40,25 +46,35 @@ pub(crate) fn parse_column(def: &[u8], extended_metadata: bool) -> Result<Column
         return Err(bad());
     }
     let mut json = false;
+    let mut type_name = None;
     if extended_metadata {
         let (mut pairs, after) = lenenc_str(rest).ok_or_else(bad)?;
         rest = after;
         while let Some((&key, tail)) = pairs.split_first() {
             let (value, tail) = lenenc_str(tail).ok_or_else(bad)?;
-            json |= key == FORMAT && value == b"json";
+            match key {
+                TYPE_NAME => type_name = Some(value),
+                FORMAT => json |= value == b"json",
+                _ => {}
+            }
             pairs = tail;
         }
     }
     let Some((FIXED_FIELDS, fixed)) = lenenc_int(rest) else { return Err(bad()) };
     let [c0, c1, l0, l1, l2, l3, column_type, f0, f1, _decimals, _, _] = <[u8; 12]>::try_from(fixed).map_err(|_| bad())?;
+    let column_type = match type_name {
+        Some(name) => type_of_name(name),
+        None => ColumnType::try_from(column_type).unwrap_or(ColumnType::MYSQL_TYPE_UNKNOWN),
+    };
     let facts = TypeFacts {
-        column_type: ColumnType::try_from(column_type).unwrap_or(ColumnType::MYSQL_TYPE_UNKNOWN),
+        column_type,
         flags: ColumnFlags::from_bits_truncate(u16::from_le_bytes([f0, f1])),
         charset: u16::from_le_bytes([c0, c1]),
         length: u32::from_le_bytes([l0, l1, l2, l3]),
         json,
     };
-    Ok(ColumnDefinition { name: String::from_utf8_lossy(name).into_owned(), facts })
+    let type_name = type_name.map(|n| String::from_utf8_lossy(n).into_owned());
+    Ok(ColumnDefinition { name: String::from_utf8_lossy(name).into_owned(), facts, type_name })
 }
 
 #[cfg(test)]
@@ -123,16 +139,22 @@ mod tests {
         assert_eq!(c.facts.flags, ColumnFlags::BLOB_FLAG | ColumnFlags::BINARY_FLAG);
         assert!(!c.facts.json);
         same_as_mysql_common(&def, &c).unwrap();
-        // MariaDB's extended metadata: only the format json makes JSON.
-        for (pairs, json) in [
-            (vec![(1, b"json".to_vec())], true),
-            (vec![(0, b"point".to_vec()), (1, b"json".to_vec())], true),
-            (vec![], false),
-            (vec![(0, b"json".to_vec())], false),
-            (vec![(1, b"jsonb".to_vec()), (7, vec![1; 300])], false),
+        // MariaDB's extended metadata: the format json makes JSON; a type name, the last one
+        // given, decides the type as DATA_TYPE does, in any case.
+        use ColumnType::*;
+        for (pairs, json, column_type, type_name) in [
+            (vec![(1, b"json".to_vec())], true, MYSQL_TYPE_BLOB, None),
+            (vec![(0, b"point".to_vec()), (1, b"json".to_vec())], true, MYSQL_TYPE_GEOMETRY, Some("point")),
+            (vec![], false, MYSQL_TYPE_BLOB, None),
+            (vec![(0, b"json".to_vec())], false, MYSQL_TYPE_JSON, Some("json")),
+            (vec![(1, b"jsonb".to_vec()), (7, vec![1; 300])], false, MYSQL_TYPE_BLOB, None),
+            (vec![(0, b"uuid".to_vec())], false, MYSQL_TYPE_UNKNOWN, Some("uuid")),
+            (vec![(0, b"uuid".to_vec()), (0, b"POINT".to_vec())], false, MYSQL_TYPE_GEOMETRY, Some("POINT")),
+            (vec![(0, vec![0xFF, b'x'])], false, MYSQL_TYPE_UNKNOWN, Some("\u{FFFD}x")),
         ] {
             let ext = parse_column(&definition(&names("doc"), Some(&pairs), LONGTEXT), true).unwrap();
-            assert_eq!(ext, ColumnDefinition { facts: TypeFacts { json, ..c.facts }, ..c.clone() }, "{pairs:?}");
+            let facts = TypeFacts { json, column_type, ..c.facts };
+            assert_eq!(ext, ColumnDefinition { facts, type_name: type_name.map(str::to_owned), ..c.clone() }, "{pairs:?}");
         }
         // The definition must be what was agreed: with the extended metadata or without it.
         let ext = definition(&names("doc"), Some(&[(1, b"json".to_vec())]), LONGTEXT);
@@ -159,8 +181,10 @@ mod tests {
             let def = [&long[..], &def[4..]].concat();
             assert_eq!(bad(def), "other", "{long:?}");
         }
-        let overlong_value = [&def[..def.len() - 13], &[3, 1, 0xFC, 0xFF], &def[def.len() - 13..]].concat();
-        assert_eq!(parse_column(&overlong_value, true).unwrap_err().code(), "other");
+        for key in [0, 1] {
+            let overlong_value = [&def[..def.len() - 13], &[3, key, 0xFC, 0xFF], &def[def.len() - 13..]].concat();
+            assert_eq!(parse_column(&overlong_value, true).unwrap_err().code(), "other", "{key}");
+        }
     }
 
     /// The fields of a column definition, as a server could send them: the catalog `def`
@@ -172,7 +196,7 @@ mod tests {
     }
 
     fn pairs() -> impl Strategy<Value = Vec<(u8, Vec<u8>)>> {
-        let value = prop_oneof![Just(b"json".to_vec()), Just(b"point".to_vec()), prop::collection::vec(any::<u8>(), 0..300)];
+        let value = prop_oneof![Just(b"json".to_vec()), Just(b"point".to_vec()), Just(b"uuid".to_vec()), prop::collection::vec(any::<u8>(), 0..300)];
         prop::collection::vec((prop_oneof![Just(0u8), Just(1u8), any::<u8>()], value), 0..4)
     }
 
@@ -192,7 +216,10 @@ mod tests {
                 }
                 let ext = parse_column(&definition(&strings, Some(&pairs), fixed), true).unwrap();
                 let json = pairs.iter().any(|(key, value)| *key == 1 && value == b"json");
-                prop_assert_eq!(ext, ColumnDefinition { facts: TypeFacts { json, ..ours.facts }, ..ours });
+                let type_name = pairs.iter().rev().find(|(key, _)| *key == 0).map(|(_, value)| value);
+                let column_type = type_name.map_or(ours.facts.column_type, |name| type_of_name(name));
+                let type_name = type_name.map(|name| String::from_utf8_lossy(name).into_owned());
+                prop_assert_eq!(ext, ColumnDefinition { facts: TypeFacts { json, column_type, ..ours.facts }, type_name, ..ours });
             }
         }
 
