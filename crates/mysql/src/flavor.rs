@@ -47,6 +47,23 @@ impl Flavor {
             Flavor::MariaDb => ["tx_read_only", "transaction_read_only"],
         }
     }
+
+    /// The text `information_schema.COLUMNS.COLUMN_DEFAULT` holds for a column whose default is
+    /// NULL: MariaDB writes `NULL` and quotes string defaults; MySQL gives SQL NULL, so its
+    /// `NULL` is a string default.
+    pub(crate) fn null_default(self) -> Option<&'static str> {
+        match self {
+            Flavor::MySql => None,
+            Flavor::MariaDb => Some("NULL"),
+        }
+    }
+
+    /// JSON columns are `LONGTEXT` with a `json_valid` check, which
+    /// `information_schema.CHECK_CONSTRAINTS` lists: MariaDB's. MySQL has a JSON type, and no
+    /// such table before 8.0.16.
+    pub(crate) fn json_is_checked_text(self) -> bool {
+        self == Flavor::MariaDb
+    }
 }
 
 /// `@@version`'s leading `major.minor.patch` as one number that grows with it:
@@ -90,5 +107,11 @@ mod tests {
         assert_eq!(Flavor::MySql.read_only_variables()[0], "transaction_read_only");
         assert_eq!(Flavor::MariaDb.read_only_variables()[0], "tx_read_only");
         assert_eq!((Flavor::MySql.code_label(), Flavor::MariaDb.code_label()), ("MySQL error", "MariaDB error"));
+    }
+
+    #[test]
+    fn catalog_spellings_by_flavor() {
+        assert_eq!((Flavor::MySql.null_default(), Flavor::MariaDb.null_default()), (None, Some("NULL")));
+        assert!(!Flavor::MySql.json_is_checked_text() && Flavor::MariaDb.json_is_checked_text());
     }
 }

@@ -14,9 +14,11 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use dbee_config::{ALLOW_PUBLIC_KEY, ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
-use dbee_driver::{Cancel, DbError, Purpose, QUERY_LIMITS, Target};
+use dbee_core::TableRef;
+use dbee_driver::{ApplyGate, Cancel, Connection, DbError, Driver, Purpose, QUERY_LIMITS, Target};
 use dbee_mysql::wire::{MAX_PAYLOAD, Packets};
-use dbee_mysql::{Canceller, Flavor, MySqlConnection, connect, version_num, version_warning};
+use dbee_mysql::{Canceller, Flavor, MySqlConnection, MySqlDriver, connect, version_num, version_warning};
+use dbee_sql::Dialect;
 use dbee_ssh::{AgentSource, SshEnv, SshSecrets, Tunnel};
 use dbee_testkit::{MyFlavor, MyServer, TempHome, TestDb, require_testdb, temp_home, unique};
 use mysql_common::auth::plugins::mysql_native_password::scramble_native;
@@ -542,6 +544,47 @@ fn connection_types_are_shareable() {
     fn send_sync<T: Send + Sync + 'static>() {}
     send_sync::<MySqlConnection>();
     send_sync::<Canceller>();
+    send_sync::<MySqlDriver>();
+}
+
+#[tokio::test]
+async fn mysql_driver_connects_through_the_trait() {
+    let db = require_testdb!();
+    assert_eq!(MySqlDriver.kinds(), [DbKind::MySql, DbKind::MariaDb]);
+    for s in &db.mysql {
+        let c = config(s, SslMode::Prefer);
+        let conn = MySqlDriver.connect(target(&c, Some(&db.password))).await.unwrap();
+        let product = if s.flavor == MyFlavor::MariaDb { "MariaDB" } else { "MySQL" };
+        assert_eq!((conn.info().product.as_str(), conn.info().version_num), (product, expected_num(&s.version)), "{}", s.name);
+        assert_eq!(conn.dialect(), Dialect::MySql);
+        assert!(!conn.is_closed());
+        // Each method reaches the MySQL connection.
+        assert_eq!(conn.scalar_u64("SELECT 40 + 2").await, Ok(42));
+        let typed = conn.run("SELECT CAST(1.5 AS DECIMAL(3,1)) AS n", QUERY_LIMITS).await.unwrap();
+        assert_eq!((typed.columns[0].base_type.as_str(), typed.rows[0][0].as_deref()), ("decimal", Some("1.5")), "{}", s.name);
+        assert!(conn.run_untyped("SELECT 1 AS n", QUERY_LIMITS).await.unwrap().columns[0].base_type.is_empty());
+        let catalog = conn.load_catalog().await.unwrap();
+        assert!(catalog.table(&TableRef { schema: "shop".into(), name: "orders".into() }).is_some(), "{}", s.name);
+        assert_eq!(conn.apply(&[], &ApplyGate::default()).await.map_err(|e| e.to_string()), Ok(0));
+        let e = MySqlDriver.connect(target(&c, Some("nope"))).await.err().unwrap();
+        assert_eq!(e.code(), "auth", "{}: {e:?}", s.name);
+    }
+}
+
+#[tokio::test]
+async fn the_trait_canceller_stops_sleep() {
+    let db = require_testdb!();
+    for s in &db.mysql {
+        let conn: Arc<dyn Connection> = MySqlDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
+        let canceller = conn.canceller();
+        let runner = Arc::clone(&conn);
+        let job = tokio::spawn(async move { runner.run_untyped("SELECT SLEEP(30)", QUERY_LIMITS).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        canceller.cancel().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+        assert_eq!(result.err(), Some(DbError::Cancelled), "{}", s.name);
+        assert_eq!(conn.scalar_u64("SELECT 1").await, Ok(1), "{}", s.name);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

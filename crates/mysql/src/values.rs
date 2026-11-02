@@ -9,6 +9,9 @@ use mysql_common::constants::{ColumnFlags, ColumnType};
 /// The character set number of `binary`: its strings hold bytes, not text.
 const BINARY: u16 = 63;
 
+/// A text character set whose number is not known (MySQL's unknown collation).
+const UNKNOWN_TEXT: u16 = 0;
+
 /// What a column definition says about a column's type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TypeFacts {
@@ -23,6 +26,60 @@ pub(crate) struct TypeFacts {
 }
 
 impl TypeFacts {
+    /// The facts `information_schema.COLUMNS` gives a column, as its result column's definition
+    /// gives them: `data_type` is `DATA_TYPE`; `column_type` is `COLUMN_TYPE`, whose `enum(..)` and
+    /// `set(..)` give the flags and `tinyint(1)` the length 1; `charset` is
+    /// `CHARACTER_SET_NAME`, NULL for bytes and numbers (whose definitions say `binary`);
+    /// `json_valid` is a `json_valid` check, which makes a MariaDB `LONGTEXT` its JSON. The
+    /// length is known only for `tinyint(1)`, the one place [`class_of`] reads it, and a text
+    /// character set only as not [`BINARY`].
+    pub(crate) fn from_catalog(data_type: &str, column_type: &str, charset: Option<&str>, json_valid: bool) -> TypeFacts {
+        use ColumnType::*;
+        let data_type = data_type.to_ascii_lowercase();
+        let column_type = column_type.to_ascii_lowercase();
+        let ty = match data_type.as_str() {
+            "tinyint" => MYSQL_TYPE_TINY,
+            "smallint" => MYSQL_TYPE_SHORT,
+            "mediumint" => MYSQL_TYPE_INT24,
+            "int" => MYSQL_TYPE_LONG,
+            "bigint" => MYSQL_TYPE_LONGLONG,
+            "decimal" => MYSQL_TYPE_NEWDECIMAL,
+            "float" => MYSQL_TYPE_FLOAT,
+            "double" => MYSQL_TYPE_DOUBLE,
+            "year" => MYSQL_TYPE_YEAR,
+            "date" => MYSQL_TYPE_DATE,
+            "time" => MYSQL_TYPE_TIME,
+            "datetime" => MYSQL_TYPE_DATETIME,
+            "timestamp" => MYSQL_TYPE_TIMESTAMP,
+            "char" | "binary" | "enum" | "set" => MYSQL_TYPE_STRING,
+            "varchar" | "varbinary" => MYSQL_TYPE_VAR_STRING,
+            "tinytext" | "tinyblob" => MYSQL_TYPE_TINY_BLOB,
+            "text" | "blob" => MYSQL_TYPE_BLOB,
+            "mediumtext" | "mediumblob" => MYSQL_TYPE_MEDIUM_BLOB,
+            "longtext" | "longblob" => MYSQL_TYPE_LONG_BLOB,
+            "bit" => MYSQL_TYPE_BIT,
+            "json" => MYSQL_TYPE_JSON,
+            "geometry" | "point" | "linestring" | "polygon" | "multipoint" | "multilinestring" | "multipolygon" | "geometrycollection"
+            | "geomcollection" => MYSQL_TYPE_GEOMETRY,
+            "vector" => MYSQL_TYPE_VECTOR,
+            _ => MYSQL_TYPE_UNKNOWN,
+        };
+        let flags = if column_type.starts_with("enum(") {
+            ColumnFlags::ENUM_FLAG
+        } else if column_type.starts_with("set(") {
+            ColumnFlags::SET_FLAG
+        } else {
+            ColumnFlags::empty()
+        };
+        TypeFacts {
+            column_type: ty,
+            flags,
+            charset: if charset.is_some() { UNKNOWN_TEXT } else { BINARY },
+            length: u32::from(column_type.starts_with("tinyint(1)")),
+            json: json_valid && data_type == "longtext",
+        }
+    }
+
     fn binary(&self) -> bool {
         self.charset == BINARY
     }
@@ -264,6 +321,74 @@ mod tests {
         assert_eq!(class(of(MYSQL_TYPE_NULL, BINARY, 0)), TypeClass::Other);
         assert_eq!(class(of(MYSQL_TYPE_UNKNOWN, UTF8MB4, 0)), TypeClass::Other);
         assert_eq!(class(of(MYSQL_TYPE_UNKNOWN, BINARY, 0)), TypeClass::Other);
+    }
+
+    #[test]
+    fn catalog_facts_classes() {
+        use TypeClass::*;
+        let class = |data_type, column_type, charset, json_valid| class_of(&TypeFacts::from_catalog(data_type, column_type, charset, json_valid));
+        let utf8 = Some("utf8mb4");
+        for (data_type, column_type, charset, expected) in [
+            ("tinyint", "tinyint(1)", None, Bool),
+            ("tinyint", "tinyint(1) unsigned", None, Bool),
+            ("tinyint", "tinyint(4)", None, Number),
+            ("tinyint", "tinyint(10)", None, Number),
+            ("tinyint", "tinyint", None, Number),
+            ("smallint", "smallint(6)", None, Number),
+            ("mediumint", "mediumint", None, Number),
+            ("int", "int(11)", None, Number),
+            ("bigint", "bigint unsigned", None, Number),
+            ("decimal", "decimal(12,2)", None, Number),
+            ("float", "float", None, Number),
+            ("double", "double", None, Number),
+            ("year", "year(4)", None, Number),
+            ("date", "date", None, DateTime),
+            ("time", "time", None, DateTime),
+            ("datetime", "datetime(3)", None, DateTime),
+            ("timestamp", "timestamp", None, DateTime),
+            ("char", "char(36)", utf8, Text),
+            ("char", "char(2)", Some("latin1"), Text),
+            ("varchar", "varchar(200)", utf8, Text),
+            ("enum", "enum('new','paid')", utf8, Text),
+            ("set", "set('x','y z')", utf8, Text),
+            ("tinytext", "tinytext", utf8, LongText),
+            ("text", "text", utf8, LongText),
+            ("mediumtext", "mediumtext", utf8, LongText),
+            ("longtext", "longtext", utf8, LongText),
+            ("binary", "binary(16)", None, Binary),
+            ("varbinary", "varbinary(4)", None, Binary),
+            ("tinyblob", "tinyblob", None, Binary),
+            ("blob", "blob", None, Binary),
+            ("mediumblob", "mediumblob", None, Binary),
+            ("longblob", "longblob", None, Binary),
+            ("bit", "bit(8)", None, Binary),
+            ("json", "json", None, Json),
+            ("geometry", "geometry", None, Binary),
+            ("point", "point", None, Binary),
+            ("linestring", "linestring", None, Binary),
+            ("polygon", "polygon", None, Binary),
+            ("multipoint", "multipoint", None, Binary),
+            ("multilinestring", "multilinestring", None, Binary),
+            ("multipolygon", "multipolygon", None, Binary),
+            ("geometrycollection", "geometrycollection", None, Binary),
+            ("geomcollection", "geomcollection", None, Binary),
+            ("vector", "vector(3)", None, Binary),
+            ("uuid", "uuid", None, Other),
+        ] {
+            assert_eq!(class(data_type, column_type, charset, false), expected, "{column_type}");
+        }
+        // MariaDB's JSON is a LONGTEXT with a json_valid check; the check makes no other type JSON.
+        assert_eq!(class("longtext", "longtext", utf8, true), Json);
+        assert_eq!(class("LONGTEXT", "LONGTEXT", utf8, true), Json);
+        assert_eq!(class("text", "text", utf8, true), LongText);
+        assert_eq!(class("varchar", "varchar(10)", utf8, true), Text);
+        assert_eq!(class("longblob", "longblob", None, true), Binary);
+        // The facts the class rules read are those of the result column's definition.
+        let enum_facts = TypeFacts::from_catalog("enum", "enum('a')", utf8, false);
+        assert_eq!((enum_facts.column_type, enum_facts.flags), (ColumnType::MYSQL_TYPE_STRING, ColumnFlags::ENUM_FLAG));
+        let bytes = TypeFacts::from_catalog("varbinary", "varbinary(16)", None, false);
+        assert_eq!((bytes.column_type, bytes.charset), (ColumnType::MYSQL_TYPE_VAR_STRING, BINARY));
+        assert_eq!(TypeFacts::from_catalog("tinyint", "tinyint(1)", None, false).length, 1);
     }
 
     #[test]

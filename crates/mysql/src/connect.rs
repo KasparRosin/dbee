@@ -240,7 +240,8 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
         connection_id,
         statements: Arc::clone(&statements),
     }));
-    Ok(MySqlConnection { session: Mutex::new(session), info, closed: AtomicBool::new(false), statements, canceller })
+    let database = who.database.map(str::to_owned);
+    Ok(MySqlConnection { session: Mutex::new(session), info, database, closed: AtomicBool::new(false), statements, canceller })
 }
 
 async fn attempt(
@@ -339,6 +340,8 @@ async fn read_only_state(session: &mut Session, flavor: Flavor) -> Result<(&'sta
 pub struct MySqlConnection {
     session: Mutex<Session>,
     info: ServerInfo,
+    /// The database the settings name, if any: the catalog lists only it.
+    pub(crate) database: Option<String>,
     /// Set when the session broke, or an operation on it was abandoned half-way.
     closed: AtomicBool,
     pub(crate) statements: Arc<Statements>,
@@ -355,6 +358,11 @@ impl MySqlConnection {
     /// What the server said about itself.
     pub fn info(&self) -> &ServerInfo {
         &self.info
+    }
+
+    /// Which member of the MySQL family the connection reached.
+    pub(crate) fn flavor(&self) -> Flavor {
+        Flavor::from_version(&self.info.version)
     }
 
     /// The connection has ended; every further operation fails with

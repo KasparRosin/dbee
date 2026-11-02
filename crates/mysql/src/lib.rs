@@ -7,8 +7,11 @@
 //! - [`MySqlConnection::run`] runs SQL text as one `COM_QUERY`, within the row and byte caps,
 //!   with values as text as the server sends them (binary ones as `0x` and hex) and each column
 //!   typed from its definition; [`MySqlConnection::apply`] writes staged changes all or nothing.
+//! - [`MySqlConnection::load_catalog`] reads databases, tables, columns and keys from
+//!   `information_schema` in a fixed number of queries.
 //! - [`Canceller`] stops the running statement with `KILL QUERY` over a second connection.
 //! - [`Flavor`] tells MySQL from MariaDB by the server's version; both speak `Dialect::MySql`.
+//! - [`MySqlDriver`] puts all of it behind the driver interface, for both flavors.
 //!
 //! Every length, count and offset a server sends is checked before it is used, and no buffer
 //! grows past the bytes that arrived. Logs name hosts, ports, login methods and error codes
@@ -18,8 +21,10 @@
 mod apply;
 mod auth;
 pub mod cancel;
+mod catalog;
 mod column;
 pub mod connect;
+pub mod driver;
 mod errors;
 pub mod flavor;
 mod query;
@@ -30,4 +35,5 @@ pub mod wire;
 
 pub use cancel::Canceller;
 pub use connect::{MySqlConnection, connect};
+pub use driver::MySqlDriver;
 pub use flavor::{Flavor, version_num, version_warning};
