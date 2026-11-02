@@ -308,6 +308,15 @@ pub fn q(t: &TestTarget, sql: &str) -> String {
     t.sql(sql).unwrap_or_else(|e| panic!("{}: {e}", t.name())).trim().to_owned()
 }
 
+/// Polls `sql` on `t`'s server until it prints `want` (up to 20 s).
+pub fn until_sql(t: &TestTarget, sql: &str, want: &str, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while q(t, sql) != want {
+        assert!(std::time::Instant::now() < deadline, "{}: gave up waiting for {what}", t.name());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Drops the scratch objects it names (`TABLE IF EXISTS scratch.t`) on its target when the test
 /// ends, also when it fails.
 pub struct Scratch<'a>(pub &'a TestTarget, pub Vec<String>);

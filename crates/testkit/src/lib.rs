@@ -94,6 +94,20 @@ pub struct KindInfo {
     pub connection_id_sql: &'static str,
     /// Counts dbee's statements running now whose text holds `marker`.
     running_with_sql: fn(&str) -> String,
+    /// Counts dbee's updates of `scratch.<table>` that sleep in [`KindInfo::slow_updates_sql`]'s
+    /// trigger now.
+    slow_update_running_sql: fn(&str) -> String,
+    /// What the engine shows for this kind (expected values of its tests):
+    /// the type label of a column made with [`KindInfo::json_type`], and of `shop.big_cell.j`;
+    pub json_type_label: &'static str,
+    /// the type label of the seed's plain JSON column, `shop.orders.meta`;
+    pub plain_json_label: &'static str,
+    /// whether that JSON type keeps an object's keys sorted (else as written);
+    pub json_sorts_keys: bool,
+    /// the type of an integer literal in a query (`select 3`);
+    pub int_literal_type: &'static str,
+    /// the start of the error of a scalar subquery that returns two rows.
+    pub subquery_rows_error: &'static str,
 }
 
 /// How a [`CommitGate`] holds a COMMIT, from before the update it commits starts.
@@ -155,6 +169,16 @@ impl Kind {
                 running_with_sql: |m| {
                     format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND state = 'active' AND query LIKE '%{m}%'")
                 },
+                slow_update_running_sql: |t| {
+                    format!(
+                        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND wait_event = 'PgSleep' AND query LIKE 'UPDATE \"scratch\".\"{t}\"%'"
+                    )
+                },
+                json_type_label: "jsonb",
+                plain_json_label: "json",
+                json_sorts_keys: true,
+                int_literal_type: "int4",
+                subquery_rows_error: "more than one row returned by a subquery used as an expression",
             },
             Kind::MySql => &KindInfo { product: "MySQL", id: "mysql", client: Some(Client::MySql("mysql")), ..MYSQL },
             // MariaDB 10.11 has no `transaction_read_only`.
@@ -164,6 +188,11 @@ impl Kind {
                 client: Some(Client::MySql("mariadb")),
                 read_only_sql: ("SELECT @@SESSION.tx_read_only", "1"),
                 commit_wait: Some(CommitWait::BackupStage),
+                // Its JSON is a LONGTEXT with a json_valid check, kept as written.
+                json_type_label: "longtext",
+                plain_json_label: "longtext",
+                json_sorts_keys: false,
+                int_literal_type: "int",
                 ..MYSQL
             },
             // SQLite has no sleep: a count to 10⁹, which runs far longer than any test waits.
@@ -189,6 +218,13 @@ impl Kind {
                 read_only_sql: ("PRAGMA query_only", "1"),
                 connection_id_sql: "",
                 running_with_sql: |_| String::new(),
+                slow_update_running_sql: |_| String::new(),
+                // Measured with its driver (M2.13).
+                json_type_label: "",
+                plain_json_label: "",
+                json_sorts_keys: false,
+                int_literal_type: "",
+                subquery_rows_error: "",
             },
         }
     }
@@ -235,6 +271,16 @@ const MYSQL: KindInfo = KindInfo {
     read_only_sql: ("SELECT @@SESSION.transaction_read_only", "1"),
     connection_id_sql: "SELECT CONNECTION_ID()",
     running_with_sql: |m| format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{m}%' AND ID <> CONNECTION_ID()"),
+    slow_update_running_sql: |t| {
+        format!(
+            "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%@dbee_slow_{t} =%' AND STATE = 'User sleep' AND ID <> CONNECTION_ID()"
+        )
+    },
+    json_type_label: "json",
+    plain_json_label: "json",
+    json_sorts_keys: true,
+    int_literal_type: "bigint",
+    subquery_rows_error: "Subquery returns more than 1 row",
 };
 
 /// The test servers, as `env.json` describes them.
@@ -804,6 +850,12 @@ impl TestTarget {
     /// A query that counts dbee's statements running now whose text holds `marker`.
     pub fn running_with_sql(&self, marker: &str) -> String {
         (self.kind.info().running_with_sql)(marker)
+    }
+
+    /// A query that counts dbee's updates of `scratch.<table>` sleeping in the trigger of
+    /// [`TestTarget::slow_updates_sql`].
+    pub fn slow_update_running_sql(&self, table: &str) -> String {
+        (self.kind.info().slow_update_running_sql)(table)
     }
 
     /// Ends the server's connection `id` (from [`KindInfo::connection_id_sql`]) and waits (up to

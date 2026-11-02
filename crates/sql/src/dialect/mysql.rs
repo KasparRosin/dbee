@@ -11,6 +11,10 @@ pub(crate) const RULES: Rules = Rules {
     ilike: ILike::LowerLike,
     insert_defaults: InsertDefaults::EmptyLists,
     use_database: Some("USE {}"),
+    // Measured on MySQL 5.7, 8.0 and 26.10 and MariaDB 10.11 and 13.0: a NUL inside a string
+    // literal is a character. Outside one, a NUL followed by more text (a comment too) is a syntax
+    // error, one in a /* */ comment is ignored, and one followed only by spaces ends the
+    // statement there, so the engine refuses every NUL outside a string literal.
     text_holds_nul: true,
     bool_literals: ("1", "0"),
     op_notes: &[(&[Op::Eq, Op::Ne, Op::Like, Op::NotLike], "Compares by the column's collation; most ignore upper and lower case.")],

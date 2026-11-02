@@ -9,13 +9,7 @@ use russh::client::Msg;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::Handle;
 
-/// A direct-tcpip channel of the tunnel, read and written as a byte stream.
-///
-/// Dropping russh's stream closes the channel from a task it spawns, which panics on a thread
-/// without a Tokio runtime. A database connection is dropped wherever its last owner goes, in the
-/// app on the UI thread, so this one keeps the runtime it was opened on and drops russh's stream
-/// inside it. Once that runtime has shut down, the close task is not run, and the channel ends with
-/// the SSH connection.
+/// A direct-tcpip channel of the tunnel as a byte stream, which can be dropped off its runtime.
 pub struct TunnelStream {
     /// `None` only while it is dropped.
     inner: Option<ChannelStream<Msg>>,

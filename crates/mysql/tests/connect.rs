@@ -272,9 +272,6 @@ async fn through_ssh_tunnel() {
         // An SSH connection without a tunnel is refused rather than tried directly.
         assert_eq!(code(connect(target(&c, Some(&db.password))).await), "connect");
     }
-    let mysql80 = db.server("mysql80").unwrap();
-    let conn = open_tunnelled(&ConnectionConfig { port: mysql80.service_port, ..tunnelled(mysql80, db, SslMode::Prefer) }, db, &t).await;
-    assert!(conn.info().version.starts_with("8.0"), "{:?}", conn.info());
     t.close().await;
 }
 

@@ -3,7 +3,7 @@
 
 use crate::SqlError;
 use crate::filter::Op;
-use crate::lexer::Token;
+use crate::lexer::{Token, TokenKind, tokenize};
 use dbee_core::{ColumnInfo, TableRef, TypeClass};
 use serde::{Deserialize, Serialize};
 
@@ -47,8 +47,9 @@ pub(crate) struct Rules {
     pub insert_defaults: InsertDefaults,
     /// The statement that makes a database current, `{}` standing for its quoted name.
     pub use_database: Option<&'static str>,
-    /// Statement text may hold a NUL character, inside a string literal. Literals still never
-    /// carry one as a raw byte: [`StringLiteral::HexForBackslash`] writes such a value as hex.
+    /// Statement text may hold a NUL character inside a string literal; outside one no engine
+    /// takes it ([`Dialect::misplaced_nul`]). The literals dbee writes still never carry one as a
+    /// raw byte: [`StringLiteral::HexForBackslash`] writes such a value as hex.
     pub text_holds_nul: bool,
     /// The texts a Bool column writes for true and false.
     pub bool_literals: (&'static str, &'static str),
@@ -351,11 +352,25 @@ impl Dialect {
         self.rules().use_database.is_some()
     }
 
-    /// Statement text may hold a NUL character (inside a string literal); where it cannot, a
-    /// statement with one must be refused, as the protocol cannot carry it or the server would
-    /// cut it off there.
+    /// Statement text may hold a NUL character inside a string literal ([`Rules::text_holds_nul`]),
+    /// so a value with one can be written.
     pub fn statement_may_hold_nul(self) -> bool {
         self.rules().text_holds_nul
+    }
+
+    /// The byte offset of the first NUL in `sql` the engine cannot take, which must not be sent:
+    /// any NUL where statements cannot hold one, else one outside a string literal.
+    pub fn misplaced_nul(self, sql: &str) -> Option<usize> {
+        let first = sql.find('\0')?;
+        if !self.rules().text_holds_nul {
+            return Some(first);
+        }
+        let tokens = tokenize(self, sql);
+        let in_literal = |at: usize| {
+            let k = tokens.partition_point(|t| t.range.end <= at);
+            tokens.get(k).is_some_and(|t| t.kind == TokenKind::String && t.range.contains(&at))
+        };
+        sql.match_indices('\0').map(|(at, _)| at).find(|&at| !in_literal(at))
     }
 
     /// The texts a Bool column writes for true and false.
@@ -494,6 +509,31 @@ mod tests {
         assert_eq!(Dialect::MySql.ident("a\"b").unwrap(), "`a\"b`");
         assert_eq!(Dialect::Sqlite.ident("a\"b").unwrap(), "\"a\"\"b\"");
         assert_eq!(Dialect::Sqlite.table(&tr("main", "t")).unwrap(), "\"main\".\"t\"");
+    }
+
+    #[test]
+    fn a_nul_outside_a_string_literal_is_misplaced_everywhere() {
+        let refused_everywhere = [
+            ("select 1\0 + 1", 8),
+            ("select 1 -- c\0", 13),
+            ("select 1 # c\0\n", 12),
+            ("/* \0 */ select 1", 3),
+            ("select `a\0`", 9),
+            ("delete from t \0   ", 14),
+        ];
+        for d in Dialect::ALL {
+            for (sql, at) in refused_everywhere {
+                assert_eq!(d.misplaced_nul(sql), Some(at), "{d:?}: {sql:?}");
+            }
+            assert_eq!(d.misplaced_nul("select 'no nul'"), None, "{d:?}");
+            // Inside a string literal only where statements may hold one.
+            let in_literal = if d.statement_may_hold_nul() { None } else { Some(9) };
+            assert_eq!(d.misplaced_nul("select 'a\0b'"), in_literal, "{d:?}");
+            // The first misplaced one, after a literal that holds one.
+            let after = d.misplaced_nul("select 'a\0', 1\0");
+            assert_eq!(after, if d.statement_may_hold_nul() { Some(14) } else { Some(9) }, "{d:?}");
+        }
+        assert_eq!(Dialect::MySql.misplaced_nul("select \"a\0b\""), None, "a double-quoted string is a literal on MySQL");
     }
 
     #[test]

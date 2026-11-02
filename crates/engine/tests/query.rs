@@ -61,7 +61,8 @@ fn run_all_gives_one_result_per_statement() {
         assert_eq!(results.len(), 3, "{r}");
         assert_eq!(r["shown"], 2);
         assert_eq!(names(&results[2]), ["c"]);
-        assert_eq!(results[2]["columns"][0]["class"], "number", "{}: a single statement's columns are typed", t.name());
+        let typed = (&results[2]["columns"][0]["class"], &results[2]["columns"][0]["baseType"]);
+        assert_eq!(typed, (&json!("number"), &json!(t.kind().info().int_literal_type)), "{}: a single statement's columns are typed", t.name());
         let b = text.find("select 2").unwrap();
         assert_eq!((results[1]["start"].as_u64(), results[1]["end"].as_u64()), (Some(b as u64), Some(b as u64 + 13)), "{}", results[1]);
         // The tab keeps them all; the state holds the rows.
@@ -233,14 +234,21 @@ fn statements_without_rows_report_rows_affected() {
     });
 }
 
+/// Waits until a statement whose text holds `marker` runs (the first run also opens the query
+/// connection).
+fn until_running(t: &TestTarget, marker: &str) {
+    until_sql(t, &t.running_with_sql(marker), "1", "the statement to run");
+}
+
 #[test]
 fn cancel_stops_a_long_query() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        tab(s, &t.sleep_sql(30));
+        let m = marker();
+        tab(s, &slow_with(t, &m));
         let job = start(s, json!({}));
         assert_eq!(shown(s)["running"], json!(job.0));
-        std::thread::sleep(Duration::from_millis(300));
+        until_running(t, &m);
         let started = Instant::now();
         assert_eq!(run(s, "query.cancel", json!({}))["sent"], true);
         let e = s.wait(job, Duration::from_secs(5)).unwrap_err();
@@ -261,9 +269,10 @@ fn cancel_stops_the_statements_after_it() {
     for_each_engine(|t, s| {
         let name = unique("t_query");
         let _drop = scratch_table(t, &name, "CREATE TABLE {t} (id int)");
-        tab(s, &format!("select 1; {}; insert into scratch.{name} values (1)", t.sleep_sql(30)));
+        let m = marker();
+        tab(s, &format!("select 1; {}; insert into scratch.{name} values (1)", slow_with(t, &m)));
         let job = start(s, json!({}));
-        std::thread::sleep(Duration::from_millis(300));
+        until_running(t, &m);
         run(s, "query.cancel", json!({}));
         let e = s.wait(job, Duration::from_secs(5)).unwrap_err();
         assert_eq!((e.code(), e.data()["statement"].as_u64()), ("cancelled", Some(1)), "{}: {e} {}", t.name(), e.data());
@@ -355,8 +364,7 @@ fn disconnect_during_query_cancels_it() {
         let m = marker();
         tab(s, &slow_with(t, &m));
         let job = start(s, json!({}));
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(q(t, &t.running_with_sql(&m)), "1", "the query runs");
+        until_running(t, &m);
         run(s, "connection.close", json!({ "force": true }));
         assert!(s.wait_idle(Duration::from_secs(5)), "the query was not cancelled");
         assert_eq!(q(t, &t.running_with_sql(&m)), "0", "{}", t.name());
@@ -373,7 +381,7 @@ fn closing_running_tab_ignores_result() {
         let m = marker();
         tab(s, &slow_with(t, &m));
         let job = start(s, json!({}));
-        std::thread::sleep(Duration::from_millis(300));
+        until_running(t, &m);
         run(s, "tab.close", json!({ "force": true }));
         assert!(s.wait_idle(Duration::from_secs(5)), "closing the tab did not cancel its query");
         assert_eq!(s.pump(), vec![(job, Ok(json!({ "ignored": true })))]);
@@ -392,7 +400,7 @@ fn reconnect_during_query_stops_it() {
         let m = marker();
         tab(s, &slow_with(t, &m));
         let job = start(s, json!({}));
-        std::thread::sleep(Duration::from_millis(300));
+        until_running(t, &m);
         run(s, "connection.reconnect", json!({}));
         assert_eq!(shown(s)["running"], Json::Null, "the run died with its connection");
         assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap(), json!({ "ignored": true }));
@@ -469,9 +477,10 @@ fn queries_and_their_cancel_go_through_the_tunnel() {
         assert_eq!(s.inspect()["connection"]["ssh"], true);
         tab(&mut s, "select 'through' as app");
         assert_eq!(names(&run(&mut s, "query.run", json!({}))["results"][0]), ["app"]);
-        run(&mut s, "query.setText", json!({ "text": t.sleep_sql(30) }));
+        let m = marker();
+        run(&mut s, "query.setText", json!({ "text": slow_with(&t, &m) }));
         let job = start(&mut s, json!({}));
-        std::thread::sleep(Duration::from_millis(300));
+        until_running(&t, &m);
         run(&mut s, "query.cancel", json!({}));
         assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap_err().code(), "cancelled", "{}", t.name());
     }
@@ -551,6 +560,12 @@ fn mysql_query_tab_uses_the_tree_database() {
         run(&mut s, "query.setText", json!({ "text": "SELECT COUNT(*) FROM orders" }));
         run(&mut s, "query.run", json!({}));
         assert_eq!(first_value(&s), Some(ORDERS_COUNT.to_string()));
+        // A database that is gone: the run fails, saying which.
+        run(&mut s, "query.setDatabase", json!({ "tab": shop, "database": "dbee_gone" }));
+        let e = run_fails(&mut s, json!({}));
+        assert_eq!(e.code(), "server", "{}: {e}", t.name());
+        assert!(e.to_string().starts_with("the tab's database `dbee_gone`: ") && e.to_string().contains("dbee_gone'"), "{e}");
+        assert!(shown(&s)["error"]["message"].as_str().unwrap_or_default().starts_with("the tab's database `dbee_gone`: "), "{}", shown(&s));
         // None again, and refusals.
         let r = run(&mut s, "query.setDatabase", json!({ "tab": shop, "database": null }));
         assert_eq!(r["database"], Json::Null);
@@ -586,16 +601,39 @@ fn mysql_query_tab_uses_the_tree_database() {
 fn a_nul_in_a_statement_runs_where_the_engine_takes_it() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        let text = "select 1;\nselect 'a\u{0}b' as v";
-        tab(s, text);
-        if !s.state().dialect().statement_may_hold_nul() {
+        let refused = |s: &mut TestSession, text: &str| {
+            run(s, "query.setText", json!({ "text": text }));
             let e = run_fails(s, json!({}));
-            assert_eq!(e.code(), "other", "{}: {e}", t.name());
+            assert_eq!(e.code(), "other", "{}: {text:?}: {e}", t.name());
             assert!(e.to_string().contains("which this database can't take"), "{e}");
             assert!(!e.to_string().contains("Postgres"), "{e}");
-            assert_eq!((e.data()["statement"].as_u64(), e.data()["position"].as_u64()), (Some(1), Some(text.find('\u{0}').unwrap() as u64)));
+            assert_eq!(
+                (e.data()["statement"].as_u64(), e.data()["position"].as_u64()),
+                (Some(1), Some(text.rfind('\u{0}').unwrap() as u64)),
+                "{text:?}"
+            );
+        };
+        let name = unique("t_nul");
+        let _drop = scratch_table(t, &name, "CREATE TABLE {t} (id int PRIMARY KEY); INSERT INTO {t} VALUES (1), (2)");
+        tab(s, "select 1");
+        // Outside a string literal no engine takes it: MySQL runs `DELETE … <NUL>  ` as if the NUL
+        // ended it, and turns down a NUL followed by more text. Nothing is sent. (A comment after
+        // the statement is not sent at all.)
+        for text in [
+            "select 1;\nselect 2 -- a comment\u{0}\n + 1".to_owned(),
+            "select 1;\nselect 2\u{0} + 1".to_owned(),
+            format!("select 1;\ndelete from scratch.{name} \u{0}   "),
+        ] {
+            refused(s, &text);
+        }
+        assert_eq!(q(t, &format!("SELECT count(*) FROM scratch.{name}")), "2", "{}", t.name());
+        // Inside a string literal: a character where the engine takes it.
+        let text = "select 1;\nselect 'a\u{0}b' as v";
+        if !s.state().dialect().statement_may_hold_nul() {
+            refused(s, text);
             return;
         }
+        run(s, "query.setText", json!({ "text": text }));
         run(s, "query.run", json!({}));
         assert_eq!(first_value(s).as_deref(), Some("a\u{0}b"), "{}", t.name());
     });

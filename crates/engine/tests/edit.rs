@@ -542,7 +542,7 @@ fn connection_lost_during_apply_keeps_the_edits() {
         open_table(&mut s, "scratch", &name);
         set_cell(&mut s, 0, "name", "lost");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        std::thread::sleep(Duration::from_millis(300));
+        until_sql(&t, &t.slow_update_running_sql(&name), "1", "the Apply's update to run");
         kill_dbee_connections(&t, &s);
         let e = s.wait(job, T).unwrap_err();
         assert_eq!(e.code(), "connectionLost", "{}: {e}", t.name());
@@ -583,7 +583,7 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
         let mut s = opened(&t, &name);
         set_cell(&mut s, 1, "name", "cut off");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        std::thread::sleep(Duration::from_millis(300));
+        until_sql(&t, &t.slow_update_running_sql(&name), "1", "the Apply's update to run");
         run(&mut s, "connection.reconnect", json!({}));
         // The Apply ran on the connection the reconnect let go: its result will be ignored, so the
         // tab cannot know what it wrote.
@@ -628,7 +628,7 @@ fn table_cancel_never_cancels_an_apply() {
         let mut s = opened(&t, &name);
         set_cell(&mut s, 0, "name", "kept");
         let Outcome::Started(apply) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        std::thread::sleep(Duration::from_millis(300));
+        until_sql(&t, &t.slow_update_running_sql(&name), "1", "the Apply's update to run");
         // Another tab's page load waits behind the Apply on the browse connection; cancelling it
         // would cancel the Apply's statement instead.
         let Outcome::Started(load) = s.execute("table.open", json!({ "schema": "scratch", "table": name })).unwrap() else {
@@ -812,7 +812,7 @@ fn a_page_that_does_not_load_after_the_write_says_the_changes_were_written() {
         set_cell(s, 0, "name", "Ann");
         let r = apply(s);
         assert_eq!(r["written"], 1, "{r}");
-        assert!(r["reloadError"].as_str().is_some_and(|e| !e.is_empty()), "{}: {r}", t.name());
+        assert!(r["reloadError"].as_str().is_some_and(|e| e.starts_with(t.kind().info().subquery_rows_error)), "{}: {r}", t.name());
         assert_eq!(q(t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "Ann");
         let table = summary(s);
         let error = table["error"].as_str().unwrap_or_default();

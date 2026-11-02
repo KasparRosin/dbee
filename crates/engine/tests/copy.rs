@@ -131,12 +131,14 @@ fn value_view_labels() {
             assert!(!v.is_null(), "no value at {row},{col}");
             v
         };
-        // A JSON column is labelled with its type.
+        // A JSON column is labelled with its type, its text pretty, keys in the engine's order.
+        let info = t.kind().info();
         let v = view(&mut s, 0, 1);
         let label = v["typeLabel"].as_str().unwrap_or_default().to_owned();
-        assert!(!label.is_empty(), "{}: {v}", t.name());
+        assert_eq!(label, info.json_type_label, "{}: {v}", t.name());
         assert_eq!((v["kindLabel"].as_str(), v["pretty"].clone(), v["isNull"].clone()), (Some(label.as_str()), json!(true), json!(false)), "{v}");
-        assert!(text(&v).starts_with("{\n  \""), "{v}");
+        let pretty = if info.json_sorts_keys { "{\n  \"a\": 1,\n  \"b\": 2\n}" } else { "{\n  \"b\": 2,\n  \"a\": 1\n}" };
+        assert_eq!(text(&v), pretty, "{}", t.name());
         assert_eq!((v["column"].as_str(), v["kind"].as_str()), (Some("j"), Some("json")));
         let direct = s.value_view().unwrap();
         assert_eq!((direct.kind_label.as_str(), direct.pretty, direct.truncated), (label.as_str(), true, false));
@@ -241,7 +243,7 @@ fn value_view_truncates_huge_values() {
         // The JSON cell is as large: cut as well, still labelled with its type.
         run(s, "selection.set", json!({ "anchor": [0, 2] }));
         let v = run(s, "value.show", json!({}));
-        assert_eq!((v["truncated"].clone(), v["kindLabel"].clone()), (json!(true), v["typeLabel"].clone()), "{}: {v}", t.name());
+        assert_eq!((v["truncated"].clone(), v["kindLabel"].clone()), (json!(true), json!(t.kind().info().json_type_label)), "{}: {v}", t.name());
         assert!(text(&v).len() <= VALUE_VIEW_MAX_BYTES);
     });
 }

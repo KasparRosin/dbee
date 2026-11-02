@@ -46,7 +46,7 @@ use std::sync::{Arc, Weak};
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
 use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target};
-use dbee_sql::lexer;
+use dbee_sql::{Dialect, lexer};
 use dbee_ssh::Tunnel;
 use serde_json::json;
 
@@ -209,10 +209,10 @@ fn text_bytes(result: &ResultSet) -> usize {
 
 /// What a run sends besides the statements, from the tab and the connection's dialect.
 struct RunSetup {
-    /// Sent before the first statement: the tab's database made current.
-    use_database: Option<String>,
-    /// Statement text may hold a NUL character.
-    nul_ok: bool,
+    /// Sent before the first statement: the tab's database, and its `USE`.
+    use_database: Option<(String, String)>,
+    /// What the statements are checked with before they are sent (a NUL the server cannot take).
+    dialect: Dialect,
 }
 
 /// Runs `ranges` of `text` on the connection `via` gives, until one fails or `stop` is set; the
@@ -246,9 +246,16 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
             }
         }
     };
-    if let Some(sql) = setup.use_database
+    if let Some((name, sql)) = setup.use_database
         && let Err(error) = run_one(conn.as_ref(), &sql, Limits { max_rows: 0, max_bytes: 0 }, &stop).await
     {
+        let error = match error {
+            DbError::Server(mut e) => {
+                e.message = format!("the tab's database `{name}`: {}", e.message);
+                DbError::Server(e)
+            }
+            other => other,
+        };
         ran.failure = Some(Failure { statement: 0, error, position: None });
         ran.conn = Some((conn, opened));
         return ran;
@@ -263,7 +270,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
             ran.failure = Some(Failure { statement: i, error: DbError::Other("the statement is not in the text".into()), position: None });
             break;
         };
-        if let Some(at) = sql.find('\0').filter(|_| !setup.nul_ok) {
+        if let Some(at) = setup.dialect.misplaced_nul(sql) {
             ran.failure = Some(Failure { statement: i, error: DbError::Other(NUL.into()), position: range.start.checked_add(at) });
             break;
         }
@@ -485,10 +492,10 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         return Err(disabled(NOTHING_TO_RUN));
     }
     let use_database = match database {
-        Some(name) => dialect.use_database(&name).map_err(|e| bad(format!("the tab's database: {e}")))?,
+        Some(name) => dialect.use_database(&name).map_err(|e| bad(format!("the tab's database: {e}")))?.map(|sql| (name, sql)),
         None => None,
     };
-    let setup = RunSetup { use_database, nul_ok: dialect.statement_may_hold_nul() };
+    let setup = RunSetup { use_database, dialect };
     // A closed browse connection or tunnel marks the session lost.
     s.browse()?;
     let c = s.state.connected.as_mut().ok_or_else(|| disabled(NOT_CONNECTED))?;
@@ -680,7 +687,7 @@ mod tests {
         let ranges = lexer::statements(Dialect::Postgres, &text);
         let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();
         // 100 bytes for the run: the second result does not fit in what the first left, the third does.
-        let setup = || RunSetup { use_database: None, nul_ok: false };
+        let setup = || RunSetup { use_database: None, dialect: Dialect::Postgres };
         let ran = run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), 100).await;
         assert!(ran.failure.is_none());
         assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (1, 1, true)]);

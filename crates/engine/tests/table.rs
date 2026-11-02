@@ -636,7 +636,8 @@ fn json_string_keeps_its_quotes() {
         let d = read(s);
         let meta = cell(&d, 0, "meta").unwrap();
         assert!(meta.starts_with('"'), "{}: {meta}", t.name());
-        assert_eq!(d["columns"][col(&d, "meta")]["class"], "json", "{}", t.name());
+        let meta = &d["columns"][col(&d, "meta")];
+        assert_eq!((&meta["class"], &meta["baseType"]), (&json!("json"), &json!(t.kind().info().plain_json_label)), "{}", t.name());
     });
 }
 
@@ -660,6 +661,10 @@ fn twenty_megabyte_cell_loads() {
 fn a_page_cut_by_the_byte_cap_says_so() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // 280 MB written: on the servers that hold the full seed, which are sized for it.
+        if !t.full_seed() {
+            continue;
+        }
         let name = unique("t_page_cap");
         // 14 values of 20,000,000 characters: 280 MB, past a page's 256 MiB of cell text.
         let inserts: String = (1..=14).map(|i| format!("INSERT INTO scratch.{name} VALUES ({i}, REPEAT('x', 20000000));")).collect();
