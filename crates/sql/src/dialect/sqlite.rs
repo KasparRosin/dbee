@@ -11,6 +11,8 @@ pub(crate) const RULES: Rules = Rules {
     ilike: ILike::LowerLike,
     insert_defaults: InsertDefaults::DefaultValues,
     use_database: None,
+    // Its prepare stops at a NUL, so text after one would be cut off unseen.
+    text_holds_nul: false,
     bool_literals: ("1", "0"),
     op_notes: &[(&[Op::Like, Op::NotLike], "Ignores upper and lower case for A–Z only.")],
     string_literal: StringLiteral::Quoted,

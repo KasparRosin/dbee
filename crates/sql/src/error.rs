@@ -5,7 +5,8 @@ use std::fmt;
 /// Why a piece of SQL could not be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SqlError {
-    /// A value or name contains NUL, which no supported database can store or parse.
+    /// A name contains NUL, which no engine allows, or a value does where the statement cannot
+    /// hold one ([`crate::Dialect::statement_may_hold_nul`]).
     Nul,
     /// An `IN` filter with no values.
     EmptyIn,

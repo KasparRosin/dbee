@@ -459,8 +459,7 @@ fn count_rows_on_a_view_and_its_read_only_note() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = Ui::connected(db);
     ui.open("shop", "order_totals");
-    let note = ui.value("table-note");
-    assert!(note.as_str().is_some_and(|n| n.contains("views are read-only")), "{note}");
+    assert_eq!(ui.value("table-note"), "These rows cannot be edited: views are read-only.");
     // No estimate for a view: never `~0`.
     assert_eq!(ui.value("page-count"), "Count rows");
     ui.click("page-count");
@@ -470,6 +469,30 @@ fn count_rows_on_a_view_and_its_read_only_note() {
     // An editable table has no note.
     ui.open("shop", "customers");
     assert!(ui.tag("table-note").is_none());
+}
+
+/// A table's own reason, a sentence of the driver's (an engine without transactions), shows as
+/// written.
+#[test]
+fn a_table_that_cannot_undo_shows_its_own_reason() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = db.server("mysql80").unwrap();
+    let config = dbee_config::ConnectionConfig {
+        name: mysql.name.clone(),
+        kind: dbee_config::DbKind::MySql,
+        host: "127.0.0.1".into(),
+        port: mysql.port,
+        user: "root".into(),
+        ..dbee_config::ConnectionConfig::default()
+    };
+    let mut ui = Ui::connected_with(db, Setup { config: Some(config), ..Setup::default() });
+    ui.open("shop", "audit_log");
+    let reason = ui.table()["noEditReason"].as_str().unwrap_or_default().to_owned();
+    assert!(reason.starts_with("The MyISAM table engine can't undo a write") && reason.ends_with('.'), "{reason}");
+    assert_eq!(ui.value("table-note"), reason.as_str());
+    // dbee's own reasons keep their lead-in.
+    ui.open("shop", "order_totals");
+    assert_eq!(ui.value("table-note"), "These rows cannot be edited: views are read-only.");
 }
 
 #[test]

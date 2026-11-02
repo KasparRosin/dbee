@@ -40,7 +40,9 @@ impl Query {
     fn sql(&self, database: Option<&str>) -> Result<String, DbError> {
         let narrowed = match database {
             Some(name) => {
-                let name = Dialect::MySql.literal(name).map_err(|e| DbError::Other(format!("the database name cannot be used: {e}")))?;
+                // A name, which MySQL keeps free of NUL, though a literal could carry one.
+                let literal = Dialect::MySql.ident(name).and_then(|_| Dialect::MySql.literal(name));
+                let name = literal.map_err(|e| DbError::Other(format!("the database name cannot be used: {e}")))?;
                 Some(format!("{} = {name}", self.schema_column))
             }
             None => None,

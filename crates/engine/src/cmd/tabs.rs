@@ -13,7 +13,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "New Query Tab",
         menu: &["File"],
         shortcut: Some("Ctrl+T"),
-        params: "{text?}",
+        params: "{text?, schema?: the schema the tree has selected}",
         enabled: always,
         run: new_query,
         journal: true,
@@ -68,9 +68,12 @@ pub(crate) const SPECS: &[CommandSpec] = &[
 /// The prefix of query tab titles: `Query 1`, `Query 2`, …
 const QUERY_TITLE: &str = "Query ";
 
-/// `{text?}` → `{tab}`: a new query tab, made active, titled with the lowest free number.
+/// `{text?, schema?}` → `{tab}`: a new query tab, made active, titled with the lowest free
+/// number. On an engine with `USE` its database is `schema` (the tree's selected schema or table's
+/// schema), else the settings' database, else none.
 fn new_query(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let text = p::opt_str(params, "text")?.unwrap_or_default().to_string();
+    let database = new_tab_database(s, p::opt_str(params, "schema")?)?;
     let used: HashSet<u64> = s
         .state
         .tabs
@@ -83,9 +86,17 @@ fn new_query(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     // At most `used.len()` numbers are taken, so a free one is found within `used.len() + 1`.
     let number = (1..=u64::MAX).find(|n| !used.contains(n)).unwrap_or(u64::MAX);
     let id = s.state.take_tab_id();
-    s.state.tabs.push(Tab::Query(QueryTab::new(id, format!("{QUERY_TITLE}{number}"), text)));
+    s.state.tabs.push(Tab::Query(QueryTab { database, ..QueryTab::new(id, format!("{QUERY_TITLE}{number}"), text) }));
     s.state.active = Some(id);
     Ok(Outcome::Done(json!({ "tab": id })))
+}
+
+/// The database a new query tab runs in (see [`new_query`]): none off an engine with `USE`.
+fn new_tab_database(s: &Session, schema: Option<&str>) -> Result<Option<String>, EngineError> {
+    let Some(c) = s.state.connected.as_ref().filter(|c| c.dialect.has_use_database()) else { return Ok(None) };
+    let Some(name) = schema.filter(|n| !n.is_empty()).or(Some(c.config.database.as_str()).filter(|d| !d.is_empty())) else { return Ok(None) };
+    c.dialect.use_database(name).map_err(|e| bad(format!("`schema`: {e}")))?;
+    Ok(Some(name.to_owned()))
 }
 
 /// `{tab}`: makes an open tab the active one.

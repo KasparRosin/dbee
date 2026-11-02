@@ -1,6 +1,6 @@
-//! `schema.inspect`, `quickSearch.find` and the fuzzy scoring behind it. The command tests need
-//! the Docker test servers (`cargo xtask testdb up`); the scoring and the 1,000-table timing do
-//! not.
+//! `schema.inspect`, `quickSearch.find` and the fuzzy scoring behind it. The command tests run on
+//! every engine and need the Docker test servers (`cargo xtask testdb up`); the scoring and the
+//! 1,000-table timing do not.
 
 mod common;
 
@@ -81,30 +81,32 @@ fn find_orders_and_sorting() {
 #[test]
 fn quick_search_finds_orders() {
     let _db = require_testdb!();
-    let mut s = connected();
-    let r = s.run_blocking("quickSearch.find", json!({ "query": "ord" }), T).unwrap();
-    assert_eq!(r[0]["schema"], "shop", "{r}");
-    assert_eq!(r[0]["table"], "orders", "{r}");
-    assert_eq!(r[0]["kind"], "table");
-    let limited = s.run_blocking("quickSearch.find", json!({ "query": "o", "limit": 3 }), T).unwrap();
-    assert_eq!(limited.as_array().map(Vec::len), Some(3));
-    let e = s.run_blocking("quickSearch.find", json!({}), T).unwrap_err();
-    assert_eq!(e.code(), "badParams");
+    for_each_engine(|t, s| {
+        let r = s.run_blocking("quickSearch.find", json!({ "query": "ord" }), T).unwrap();
+        assert_eq!(r[0]["schema"], "shop", "{}: {r}", t.name());
+        assert_eq!(r[0]["table"], "orders", "{r}");
+        assert_eq!(r[0]["kind"], "table");
+        let limited = s.run_blocking("quickSearch.find", json!({ "query": "o", "limit": 3 }), T).unwrap();
+        assert_eq!(limited.as_array().map(Vec::len), Some(3));
+        let e = s.run_blocking("quickSearch.find", json!({}), T).unwrap_err();
+        assert_eq!(e.code(), "badParams");
+    });
 }
 
 #[test]
 fn inspect_catalog_and_table() {
     let _db = require_testdb!();
-    let mut s = connected();
-    let all = s.run_blocking("schema.inspect", json!({}), T).unwrap();
-    assert!(all["schemas"].as_array().is_some_and(|a| !a.is_empty()), "{all}");
-    let t = s.run_blocking("schema.inspect", json!({ "schema": "shop", "table": "orders" }), T).unwrap();
-    assert_eq!(t["table"]["name"], "orders");
-    assert!(t["columns"].as_array().is_some_and(|a| !a.is_empty()));
-    let one = s.run_blocking("schema.inspect", json!({ "schema": "shop" }), T).unwrap();
-    assert_eq!(one["name"], "shop");
-    assert_eq!(s.run_blocking("schema.inspect", json!({ "schema": "shop", "table": "nope" }), T).unwrap_err().code(), "badParams");
-    assert_eq!(s.run_blocking("schema.inspect", json!({ "table": "orders" }), T).unwrap_err().code(), "badParams");
+    for_each_engine(|_, s| {
+        let all = s.run_blocking("schema.inspect", json!({}), T).unwrap();
+        assert!(all["schemas"].as_array().is_some_and(|a| !a.is_empty()), "{all}");
+        let t = s.run_blocking("schema.inspect", json!({ "schema": "shop", "table": "orders" }), T).unwrap();
+        assert_eq!(t["table"]["name"], "orders");
+        assert!(t["columns"].as_array().is_some_and(|a| !a.is_empty()));
+        let one = s.run_blocking("schema.inspect", json!({ "schema": "shop" }), T).unwrap();
+        assert_eq!(one["name"], "shop");
+        assert_eq!(s.run_blocking("schema.inspect", json!({ "schema": "shop", "table": "nope" }), T).unwrap_err().code(), "badParams");
+        assert_eq!(s.run_blocking("schema.inspect", json!({ "table": "orders" }), T).unwrap_err().code(), "badParams");
+    });
 }
 
 #[test]
@@ -117,16 +119,17 @@ fn needs_a_connection() {
 #[test]
 fn refresh_sees_new_table() {
     let _db = require_testdb!();
-    let mut s = connected();
-    let u = unique("t_inspect");
-    dbee_testkit::psql(pg14(), &format!("CREATE TABLE scratch.{u} (id int)")).unwrap();
-    let refreshed = s.run_blocking("schema.refresh", json!({}), T);
-    let inspected = s.run_blocking("schema.inspect", json!({ "schema": "scratch", "table": u }), T);
-    let found = s.run_blocking("quickSearch.find", json!({ "query": u }), T);
-    dbee_testkit::psql(pg14(), &format!("DROP TABLE scratch.{u}")).unwrap();
-    refreshed.unwrap();
-    assert_eq!(inspected.unwrap()["table"]["name"], u.as_str());
-    assert_eq!(found.unwrap()[0]["table"], u.as_str());
+    for_each_engine(|t, s| {
+        let u = unique("t_inspect");
+        let guard = scratch_table(t, &u, "CREATE TABLE {t} (id int)");
+        let refreshed = s.run_blocking("schema.refresh", json!({}), T);
+        let inspected = s.run_blocking("schema.inspect", json!({ "schema": "scratch", "table": u }), T);
+        let found = s.run_blocking("quickSearch.find", json!({ "query": u }), T);
+        drop(guard);
+        refreshed.unwrap();
+        assert_eq!(inspected.unwrap()["table"]["name"], u.as_str(), "{}", t.name());
+        assert_eq!(found.unwrap()[0]["table"], u.as_str());
+    });
 }
 
 /// No server: the command runs this same `find` on the session's catalog.

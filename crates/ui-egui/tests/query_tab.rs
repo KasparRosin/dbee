@@ -446,6 +446,41 @@ fn the_split_between_editor_and_results_drags() {
     assert!((other - after).abs() < 1.0, "{after} vs {other}");
 }
 
+/// The editor lexes with the open connection's dialect: on MySQL `#` starts a comment and a
+/// backtick quotes a name, which on Postgres are an operator and a stray character, both plain.
+/// A new editor starts with the dialect of no connection, so the MySQL window shows the switch.
+#[test]
+fn the_editor_lexes_with_the_open_connections_dialect() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = db.server("mysql80").unwrap();
+    let config = dbee_config::ConnectionConfig {
+        name: mysql.name.clone(),
+        kind: dbee_config::DbKind::MySql,
+        host: "127.0.0.1".into(),
+        port: mysql.port,
+        user: "root".into(),
+        ..dbee_config::ConnectionConfig::default()
+    };
+    let highlighted = |ui: &mut Ui, text: &str| {
+        ui.execute("query.setText", json!({ "text": text }));
+        ui.frame();
+        ui.editor()["highlighted"].clone()
+    };
+    let cases = [("x # y", "a comment"), ("x `y`", "a quoted name")];
+    {
+        let mut ui = Ui::connected_with(db, Setup { config: Some(config), ..Setup::default() });
+        ui.ctrl("T");
+        ui.frame();
+        for (text, what) in cases {
+            assert_eq!(highlighted(&mut ui, text), true, "{text:?} on MySQL holds {what}");
+        }
+    }
+    let mut ui = query_tab(db);
+    for (text, _) in cases {
+        assert_eq!(highlighted(&mut ui, text), false, "{text:?} on Postgres");
+    }
+}
+
 #[test]
 fn the_layouter_tokenizes_only_when_the_text_changes() {
     use dbee_ui_egui::query_tab::{EditorState, editor};

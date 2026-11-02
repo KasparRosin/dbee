@@ -163,12 +163,15 @@ pub struct QueryTab {
     pub shown: usize,
     /// Why the last run stopped early: an error, or a cancel.
     pub error: Option<QueryError>,
+    /// The database each run starts in, made current first with the dialect's `USE`; `None` runs
+    /// in whatever database the query connection has (none, or the last one made current).
+    pub database: Option<String>,
 }
 
 impl QueryTab {
-    /// A tab with `text` that has not run.
+    /// A tab with `text` that has not run, with no database of its own.
     pub fn new(id: TabId, title: String, text: String) -> QueryTab {
-        QueryTab { id, title, text, running: None, selection: None, results: Vec::new(), shown: 0, error: None }
+        QueryTab { id, title, text, running: None, selection: None, results: Vec::new(), shown: 0, error: None, database: None }
     }
 
     /// The result the grid shows, when there is one.
@@ -195,7 +198,8 @@ pub struct QueryError {
     /// The server's message with its code (`column "x" does not exist (SQLSTATE 42703)`), or
     /// dbee's text for errors that are not the server's.
     pub message: String,
-    /// The server's own code, for a server error (Postgres's SQLSTATE: `42703`).
+    /// The server's own code, for a server error (Postgres's SQLSTATE `42703`, MySQL's errno
+    /// `1054`).
     pub server_code: Option<String>,
     /// What the server error means, when the driver knows: `transactionAborted` (a statement
     /// failed earlier in the transaction, which refuses every statement until a ROLLBACK).

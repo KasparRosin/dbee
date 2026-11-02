@@ -1135,6 +1135,7 @@ version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-driver",
+ "dbee-mysql",
  "dbee-pg",
 ]
 

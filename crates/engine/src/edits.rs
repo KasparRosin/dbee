@@ -274,18 +274,15 @@ impl Edits {
     }
 
     /// Stages `value` for grid cell `(row, col)`; `true` when that changed the edits. `Err` names
-    /// what is wrong with the cell or the value (outside the grid, a row marked for deletion, a
-    /// column Postgres computes, a NUL character). `column` is the cell's column in the catalog,
-    /// when it is there.
+    /// what is wrong with the cell (outside the grid, a row marked for deletion, a column the
+    /// engine computes). `column` is the cell's column in the catalog, when it is there. Whether
+    /// the dialect can write the value is the command's to check.
     pub(crate) fn stage(&mut self, data: &ResultSet, row: usize, col: usize, value: NewValue, column: Option<&ColumnInfo>) -> Result<bool, String> {
         if col >= data.columns.len() {
             return Err(format!("the page has no column {col}"));
         }
         if let Some(why) = column.and_then(ColumnInfo::not_editable) {
             return Err(why.to_owned());
-        }
-        if matches!(&value, NewValue::Text(t) if t.contains('\0')) {
-            return Err(SqlError::Nul.to_string());
         }
         match row.checked_sub(data.rows.len()) {
             None => {
@@ -510,7 +507,6 @@ mod tests {
         // Out of the grid, or on a column the page does not have.
         assert!(e.stage(&d, 2, 0, text("x"), None).is_err());
         assert!(e.stage(&d, 0, 3, text("x"), None).is_err());
-        assert!(e.stage(&d, 0, 1, text("nul\0"), None).is_err());
         assert_eq!(e.count(), 1);
     }
 

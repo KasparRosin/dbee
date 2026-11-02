@@ -55,6 +55,9 @@ use crate::{Apply, EngineError, Json, Need, Outcome, Session, Tab, TabId};
 
 const EDIT: &str = "cell.edit";
 const SET_NULL: &str = "cell.setNull";
+
+/// Why a value with a NUL character is refused where the dialect cannot write one.
+const NUL: &str = "the value holds a NUL character (U+0000), which this database can't take";
 const CLEAR: &str = "cell.clear";
 const ADD_ROW: &str = "row.add";
 const DELETE_ROWS: &str = "row.delete";
@@ -190,7 +193,7 @@ fn editable_tab(s: &Session) -> Result<&TableTab, String> {
     active_table(s)?;
     let Some(Tab::Table(t)) = s.state.active_tab() else { return Err(NO_TABLE_TAB.into()) };
     if let Some(why) = not_editable(s, t) {
-        return Err(why.into());
+        return Err(why.into_owned());
     }
     if t.loading.is_some() {
         return Err(LOADING.into());
@@ -269,11 +272,13 @@ fn column(params: &Json, data: &ResultSet) -> Result<usize, EngineError> {
 }
 
 /// `value` for a cell of class `class`: text, or `null` for NULL; a number or a boolean is taken
-/// as its text, but a boolean for a Bool column as `dialect`'s spelling of it.
+/// as its text, but a boolean for a Bool column as `dialect`'s spelling of it. Text with a NUL
+/// character only where `dialect` can write one.
 fn value(params: &Json, class: TypeClass, dialect: Dialect) -> Result<NewValue, EngineError> {
     match params.get("value") {
         None => Err(bad("`value` is required (text, or null for NULL)")),
         Some(Json::Null) => Ok(NewValue::Null),
+        Some(Json::String(t)) if t.contains('\0') && !dialect.statement_may_hold_nul() => Err(bad(NUL)),
         Some(Json::String(t)) => Ok(NewValue::Text(t.clone())),
         Some(Json::Bool(b)) if class == TypeClass::Bool => {
             let (yes, no) = dialect.bool_literals();
@@ -335,7 +340,7 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
         _ => return Err(disabled(NO_TABLE_TAB)),
     };
     let (name, class) = data.columns.get(col).map_or(("", TypeClass::Other), |c| (c.name.as_str(), c.class));
-    // The cell's column in the catalog: what clearing stages, and whether Postgres computes it.
+    // The cell's column in the catalog: what clearing stages, and whether the engine computes it.
     let info = lookup(&catalog, &table).ok().and_then(|t| t.column(name));
     let value = match what {
         Staging::Value => value(params, class, s.state.dialect())?,

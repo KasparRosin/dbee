@@ -1,6 +1,6 @@
 //! MySQL and MariaDB.
 
-use super::{BinaryLiteral, Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, Paging, Rules, Separator, StringLiteral, Values, no_nul, quoted};
+use super::{BinaryLiteral, Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, Paging, Rules, Separator, StringLiteral, Values, quoted};
 use crate::SqlError;
 use crate::filter::Op;
 use crate::lexer::{Token, TokenKind, is_word, significant, word};
@@ -11,6 +11,7 @@ pub(crate) const RULES: Rules = Rules {
     ilike: ILike::LowerLike,
     insert_defaults: InsertDefaults::EmptyLists,
     use_database: Some("USE {}"),
+    text_holds_nul: true,
     bool_literals: ("1", "0"),
     op_notes: &[(&[Op::Eq, Op::Ne, Op::Like, Op::NotLike], "Compares by the column's collation; most ignore upper and lower case.")],
     string_literal: StringLiteral::HexForBackslash,
@@ -40,13 +41,12 @@ pub(crate) const RULES: Rules = Rules {
     keywords: KEYWORDS,
 };
 
-/// `'value'`, but `_utf8mb4 X'…'` when it holds a backslash: whether one escapes depends on the
-/// session's `sql_mode`.
+/// `'value'`, but `_utf8mb4 X'…'` when it holds a backslash, whose escaping depends on the
+/// session's `sql_mode`, or a NUL, so that none reaches the statement as a raw byte.
 pub(super) fn literal(value: &str) -> Result<String, SqlError> {
-    if !value.contains('\\') {
+    if !value.contains(['\\', '\0']) {
         return quoted(value, '\'');
     }
-    no_nul(value)?;
     let hex: String = value.bytes().map(|b| format!("{b:02X}")).collect();
     Ok(format!("_utf8mb4 X'{hex}'"))
 }

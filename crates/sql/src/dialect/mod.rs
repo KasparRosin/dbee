@@ -47,6 +47,9 @@ pub(crate) struct Rules {
     pub insert_defaults: InsertDefaults,
     /// The statement that makes a database current, `{}` standing for its quoted name.
     pub use_database: Option<&'static str>,
+    /// Statement text may hold a NUL character, inside a string literal. Literals still never
+    /// carry one as a raw byte: [`StringLiteral::HexForBackslash`] writes such a value as hex.
+    pub text_holds_nul: bool,
     /// The texts a Bool column writes for true and false.
     pub bool_literals: (&'static str, &'static str),
     /// What filter operators do on the engine that their labels do not say.
@@ -126,7 +129,7 @@ pub(crate) enum InsertDefaults {
 pub(crate) enum StringLiteral {
     /// `'…'` with `'` doubled; a backslash is a plain character.
     Quoted,
-    /// As `Quoted`, but hex when the value holds a backslash, which may or may not escape.
+    /// As `Quoted`, but hex when the value holds a backslash, which may or may not escape, or a NUL.
     HexForBackslash,
 }
 
@@ -278,7 +281,7 @@ impl Dialect {
 
     /// `'value'` with `'` doubled; backslashes stay literal, which Postgres gets from
     /// `standard_conforming_strings`. MySQL may or may not escape them, so a value with one is
-    /// hex. NUL is an error.
+    /// hex, as is one with a NUL. NUL is an error where the statement cannot hold one.
     pub fn literal(self, value: &str) -> Result<String, SqlError> {
         match self.rules().string_literal {
             StringLiteral::Quoted => quoted(value, '\''),
@@ -341,6 +344,18 @@ impl Dialect {
     /// The statement that makes `name` the current database, on engines that have one.
     pub fn use_database(self, name: &str) -> Result<Option<String>, SqlError> {
         self.rules().use_database.map(|template| Ok(template.replacen("{}", &self.ident(name)?, 1))).transpose()
+    }
+
+    /// The engine has a statement that makes a database current ([`Dialect::use_database`]).
+    pub fn has_use_database(self) -> bool {
+        self.rules().use_database.is_some()
+    }
+
+    /// Statement text may hold a NUL character (inside a string literal); where it cannot, a
+    /// statement with one must be refused, as the protocol cannot carry it or the server would
+    /// cut it off there.
+    pub fn statement_may_hold_nul(self) -> bool {
+        self.rules().text_holds_nul
     }
 
     /// The texts a Bool column writes for true and false.
@@ -482,12 +497,21 @@ mod tests {
     }
 
     #[test]
-    fn nul_is_refused_everywhere() {
+    fn nul_follows_each_dialects_rule() {
+        assert_eq!(Dialect::ALL.map(Dialect::statement_may_hold_nul), [false, true, false]);
         for d in Dialect::ALL {
+            // No engine takes NUL in a name.
             assert_eq!(d.ident("a\0"), Err(SqlError::Nul));
-            assert_eq!(d.literal("a\0"), Err(SqlError::Nul));
-            assert_eq!(d.value(&txt("n"), "a\0"), Err(SqlError::Nul));
-            assert_eq!(d.use_database("a\0"), if d == Dialect::MySql { Err(SqlError::Nul) } else { Ok(None) });
+            assert_eq!(d.use_database("a\0"), if d.has_use_database() { Err(SqlError::Nul) } else { Ok(None) });
+            if d.statement_may_hold_nul() {
+                // Never as a raw byte in the statement: hex, as for a backslash.
+                for out in [d.literal("a\0b"), d.value(&txt("n"), "a\0b"), d.key_value(&txt("n"), "a\0b"), d.filter_value(&txt("n"), "a\0b")] {
+                    assert_eq!(out.as_deref(), Ok("_utf8mb4 X'610062'"), "{d:?}");
+                }
+            } else {
+                assert_eq!(d.literal("a\0"), Err(SqlError::Nul));
+                assert_eq!(d.value(&txt("n"), "a\0"), Err(SqlError::Nul));
+            }
         }
     }
 
@@ -561,6 +585,7 @@ mod tests {
 
     #[test]
     fn use_database_only_on_mysql() {
+        assert_eq!(Dialect::ALL.map(Dialect::has_use_database), [false, true, false]);
         assert_eq!(Dialect::MySql.use_database("shop").unwrap(), Some("USE `shop`".to_string()));
         assert_eq!(Dialect::MySql.use_database("a`b").unwrap(), Some("USE `a``b`".to_string()));
         assert_eq!(Dialect::Postgres.use_database("shop").unwrap(), None);
@@ -615,7 +640,8 @@ mod tests {
         }
         assert_eq!(Dialect::MySql.literal("it's").unwrap(), "'it''s'");
         assert_eq!(Dialect::MySql.literal("").unwrap(), "''");
-        assert_eq!(Dialect::MySql.literal("a\\\0"), Err(SqlError::Nul));
+        assert_eq!(Dialect::MySql.literal("a\\\0").unwrap(), "_utf8mb4 X'615C00'");
+        assert_eq!(Dialect::MySql.literal("\0").unwrap(), "_utf8mb4 X'00'");
         assert_eq!(Dialect::Sqlite.literal(r"a\b").unwrap(), r"'a\b'");
     }
 
@@ -624,9 +650,9 @@ mod tests {
         fn hostile_values_stay_literals(s in ".*") {
             for d in Dialect::ALL {
                 match d.literal(&s) {
-                    Err(e) => prop_assert!(s.contains('\0') && e == SqlError::Nul),
+                    Err(e) => prop_assert!(s.contains('\0') && !d.statement_may_hold_nul() && e == SqlError::Nul),
                     Ok(lit) => {
-                        prop_assert!(!s.contains('\0') && is_one_literal(&lit), "{lit}");
+                        prop_assert!((d.statement_may_hold_nul() || !s.contains('\0')) && is_one_literal(&lit), "{lit}");
                         prop_assert!(!lit.contains('\0'));
                         if d == Dialect::MySql {
                             prop_assert!(!lit.contains('\\'), "{lit}");
@@ -634,7 +660,7 @@ mod tests {
                                 let bytes: Vec<u8> = (0..hex.len()).step_by(2).filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect();
                                 prop_assert_eq!(bytes, s.as_bytes());
                             } else {
-                                prop_assert!(!s.contains('\\'));
+                                prop_assert!(!s.contains('\\') && !s.contains('\0'));
                             }
                         }
                     }
@@ -642,9 +668,9 @@ mod tests {
                 let column = txt("n");
                 for out in [d.value(&column, &s), d.key_value(&column, &s), d.filter_value(&column, &s)] {
                     match out {
-                        Err(e) => prop_assert!(s.contains('\0') && e == SqlError::Nul),
+                        Err(e) => prop_assert!(s.contains('\0') && !d.statement_may_hold_nul() && e == SqlError::Nul),
                         Ok(v) => {
-                            prop_assert!(!s.contains('\0') && !v.contains('\0'));
+                            prop_assert!((d.statement_may_hold_nul() || !s.contains('\0')) && !v.contains('\0'));
                             prop_assert!(d != Dialect::MySql || !v.contains('\\'), "{v}");
                             let literal = v.strip_prefix("CAST(").and_then(|v| v.strip_suffix(" AS text)")).unwrap_or(&v);
                             prop_assert!(is_one_literal(literal), "{v}");

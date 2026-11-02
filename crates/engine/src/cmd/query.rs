@@ -59,6 +59,7 @@ use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
 const RUN: &str = "query.run";
 const CANCEL: &str = "query.cancel";
 const SHOW_RESULT: &str = "query.showResult";
+const SET_DATABASE: &str = "query.setDatabase";
 
 /// Why `query.run` does not start: the text holds no statement.
 pub const NOTHING_TO_RUN: &str = "there is no statement to run";
@@ -71,8 +72,12 @@ pub const RUN_LIMITS: Limits = QUERY_LIMITS;
 /// docs).
 pub const QUERY_SESSION_LOST: &str = "the query connection was lost, and its session with it: the statement that was running may or may not have taken effect (its outcome is unknown), any other uncommitted work in the transaction is gone, and SET values and temporary tables are gone. Run again to open a new one";
 
-/// The error of a statement holding a NUL character, which the protocol cannot carry.
-const NUL: &str = "the statement holds a NUL character (U+0000), which Postgres cannot take";
+/// The error of a statement holding a NUL character where the dialect says the server cannot
+/// take one.
+const NUL: &str = "the statement holds a NUL character (U+0000), which this database can't take";
+
+/// Why `query.setDatabase` is off: the dialect has no `USE`.
+pub const NO_DATABASE_SWITCH: &str = "a query tab's database can't be set on this connection";
 
 pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -108,6 +113,17 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         journal: false,
         undoable: false,
     },
+    CommandSpec {
+        id: SET_DATABASE,
+        label: "Set Query Database",
+        menu: &[],
+        shortcut: None,
+        params: "{tab?, database: a name, or null for none}",
+        enabled: can_set_database,
+        run: set_database,
+        journal: true,
+        undoable: false,
+    },
 ];
 
 /// `query.run`'s enabled check: a query tab is active, on a connection that is not lost. The UI's
@@ -116,6 +132,12 @@ pub(crate) const SPECS: &[CommandSpec] = &[
 pub fn can_run(s: &Session) -> Result<(), String> {
     needs_db(s)?;
     active_query(s)
+}
+
+/// `query.setDatabase`'s enabled check: a connection is open whose dialect has `USE`.
+pub fn can_set_database(s: &Session) -> Result<(), String> {
+    let c = s.state.connected.as_ref().ok_or(NOT_CONNECTED)?;
+    if c.dialect.has_use_database() { Ok(()) } else { Err(NO_DATABASE_SWITCH.into()) }
 }
 
 // ---- stopping a run --------------------------------------------------------------------------
@@ -185,10 +207,19 @@ fn text_bytes(result: &ResultSet) -> usize {
     result.rows.iter().flatten().flatten().map(String::len).fold(0, usize::saturating_add)
 }
 
-/// Runs `ranges` of `text` on the connection `via` gives, until one fails or `stop` is set. The
-/// results together keep at most `budget` bytes of cell text: each statement gets what the ones
-/// before left, and once it is spent, later results keep no rows (and say they are incomplete).
-async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop: Arc<Stop>, budget: usize) -> Ran {
+/// What a run sends besides the statements, from the tab and the connection's dialect.
+struct RunSetup {
+    /// Sent before the first statement: the tab's database made current.
+    use_database: Option<String>,
+    /// Statement text may hold a NUL character.
+    nul_ok: bool,
+}
+
+/// Runs `ranges` of `text` on the connection `via` gives, until one fails or `stop` is set; the
+/// `USE` of `setup` first, a failure of which is the first statement's. The results together keep
+/// at most `budget` bytes of cell text: each statement gets what the ones before left, and once it
+/// is spent, later results keep no rows (and say they are incomplete).
+async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup: RunSetup, stop: Arc<Stop>, budget: usize) -> Ran {
     let mut ran = Ran { conn: None, outcomes: Vec::with_capacity(ranges.len()), failure: None };
     let stopped = |statement| Some(Failure { statement, error: DbError::Cancelled, position: None });
     if stop.is_set() {
@@ -215,6 +246,13 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
             }
         }
     };
+    if let Some(sql) = setup.use_database
+        && let Err(error) = run_one(conn.as_ref(), &sql, Limits { max_rows: 0, max_bytes: 0 }, &stop).await
+    {
+        ran.failure = Some(Failure { statement: 0, error, position: None });
+        ran.conn = Some((conn, opened));
+        return ran;
+    }
     let mut left = budget;
     for (i, range) in ranges.into_iter().enumerate() {
         if stop.is_set() {
@@ -225,7 +263,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, stop:
             ran.failure = Some(Failure { statement: i, error: DbError::Other("the statement is not in the text".into()), position: None });
             break;
         };
-        if let Some(at) = sql.find('\0') {
+        if let Some(at) = sql.find('\0').filter(|_| !setup.nul_ok) {
             ran.failure = Some(Failure { statement: i, error: DbError::Other(NUL.into()), position: range.start.checked_add(at) });
             break;
         }
@@ -288,12 +326,14 @@ fn results_json(q: &QueryTab) -> Vec<Json> {
     q.results.iter().enumerate().map(|(i, o)| outcome_json(i, o)).collect()
 }
 
-/// The tab as `inspect()` shows it: `{tab, title, text, running, results, shown, error}`.
+/// The tab as `inspect()` shows it: `{tab, title, text, database, running, results, shown,
+/// error}`.
 pub(crate) fn summary(q: &QueryTab) -> Json {
     json!({
         "tab": q.id,
         "title": q.title,
         "text": q.text,
+        "database": q.database,
         "running": q.running,
         "results": results_json(q),
         "shown": q.shown,
@@ -422,8 +462,8 @@ fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran
 fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let current = p::bool_or(params, "current", false)?;
     let cursor = p::opt_usize(params, "cursor")?;
-    let (tab, text) = match s.state.active_tab() {
-        Some(Tab::Query(q)) => (q.id, q.text.clone()),
+    let (tab, text, database) = match s.state.active_tab() {
+        Some(Tab::Query(q)) => (q.id, q.text.clone(), q.database.clone()),
         _ => return Err(disabled(NO_QUERY_TAB)),
     };
     if let Some(at) = cursor
@@ -444,6 +484,11 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if ranges.is_empty() {
         return Err(disabled(NOTHING_TO_RUN));
     }
+    let use_database = match database {
+        Some(name) => dialect.use_database(&name).map_err(|e| bad(format!("the tab's database: {e}")))?,
+        None => None,
+    };
+    let setup = RunSetup { use_database, nul_ok: dialect.statement_may_hold_nul() };
     // A closed browse connection or tunnel marks the session lost.
     s.browse()?;
     let c = s.state.connected.as_mut().ok_or_else(|| disabled(NOT_CONNECTED))?;
@@ -473,7 +518,7 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let stop = Arc::new(Stop::default());
     let job_stop = Arc::clone(&stop);
     let job = s.spawn_job(RUN, async move {
-        let ran = run_statements(via, text, ranges, job_stop, RUN_LIMITS.max_bytes).await;
+        let ran = run_statements(via, text, ranges, setup, job_stop, RUN_LIMITS.max_bytes).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_run(s, tab, &generation, ran));
         apply
     });
@@ -502,6 +547,34 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
         _ => false,
     };
     Ok(Outcome::Done(json!({ "tab": tab, "sent": sent })))
+}
+
+/// `{tab?, database}` → `{tab, database}`: the database the query tab's runs start in (default:
+/// the active tab); `null` for none. A name is any the dialect can write in its `USE`.
+fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    let dialect = s.state.dialect();
+    let tab = match p::opt_tab_id(params, "tab")? {
+        Some(id) => match s.state.tab(id) {
+            Some(Tab::Query(q)) => q.id,
+            Some(Tab::Table(_)) => return Err(bad(format!("tab {} is not a query tab", id.0))),
+            None => return Err(bad(format!("no tab {} is open", id.0))),
+        },
+        None => match s.state.active_tab() {
+            Some(Tab::Query(q)) => q.id,
+            _ => return Err(disabled(NO_QUERY_TAB)),
+        },
+    };
+    let database = match params.get("database") {
+        Some(Json::Null) => None,
+        Some(Json::String(name)) if !name.is_empty() => {
+            dialect.use_database(name).map_err(|e| bad(format!("`database`: {e}")))?;
+            Some(name.clone())
+        }
+        _ => return Err(bad("`database` is required: a database's name, or null for none")),
+    };
+    let Some(Tab::Query(q)) = s.state.tab_mut(tab) else { return Err(disabled(NO_QUERY_TAB)) };
+    q.database = database;
+    Ok(Outcome::Done(json!({ "tab": tab, "database": q.database })))
 }
 
 /// `{index}` → `{tab, shown, result}`: the grid shows result `index` of the last run.
@@ -607,11 +680,12 @@ mod tests {
         let ranges = lexer::statements(Dialect::Postgres, &text);
         let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();
         // 100 bytes for the run: the second result does not fit in what the first left, the third does.
-        let ran = run_statements(via(), text.clone(), ranges.clone(), Arc::new(Stop::default()), 100).await;
+        let setup = || RunSetup { use_database: None, nul_ok: false };
+        let ran = run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), 100).await;
         assert!(ran.failure.is_none());
         assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (1, 1, true)]);
         // Spent by the first result: the later ones keep nothing.
-        let ran = run_statements(via(), text, ranges, Arc::new(Stop::default()), 60).await;
+        let ran = run_statements(via(), text, ranges, setup(), Arc::new(Stop::default()), 60).await;
         assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (0, 1, false)]);
         assert_eq!(RUN_LIMITS, QUERY_LIMITS, "a whole run gets the query editor's caps");
     }

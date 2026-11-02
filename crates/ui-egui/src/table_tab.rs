@@ -1,7 +1,7 @@
 //! The table tab's body ([`show`]), from top to bottom:
 //!
 //! - a small note when the rows cannot be edited, saying why (`table-note`: a view, no row key,
-//!   a read-only connection);
+//!   a read-only connection, or the table's own reason as the driver writes it);
 //! - the filter bar ([`crate::filter_bar`]);
 //! - an inline card (`table-error`) when the last Apply failed, with the server's message (the
 //!   staged changes stay, and the grid marks the row it failed on), or else when the last page
@@ -155,9 +155,10 @@ fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, 
     }
 }
 
-/// The note above the grid for rows that cannot be edited.
-fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str) {
-    let text = format!("These rows cannot be edited: {why}.");
+/// The note above the grid for rows that cannot be edited, `why` being the engine's reason. The
+/// table's own reason (`own`, the driver's) is a sentence and shows as written; dbee's are phrases.
+fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str, own: Option<&str>) {
+    let text = if own == Some(why) { why.to_owned() } else { format!("These rows cannot be edited: {why}.") };
     let r = ui.label(RichText::new(text.as_str()).size(12.0).color(TOKENS.text_muted));
     tags.tag_value("table-note", &r, text.as_str());
 }
@@ -241,7 +242,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         // lost, no page on its way and no Apply running.
         let edit_blocked = can_edit(session).err();
         if let Some(why) = read_only {
-            note(&mut top, tags, why);
+            note(&mut top, tags, &why, info.and_then(|i| i.no_edit_reason.as_deref()));
             top.add_space(2.0);
         }
         // The filter bar: the table's columns from the schema, else the page's.

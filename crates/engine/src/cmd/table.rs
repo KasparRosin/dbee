@@ -42,6 +42,7 @@
 //! Logs carry the command ids and job labels only (the job runtime times them), never SQL,
 //! filter values or cells.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use dbee_core::{Catalog, Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef};
@@ -293,23 +294,32 @@ fn last_page(rows: u64) -> u64 {
     rows.saturating_sub(1) / PAGE_SIZE
 }
 
-/// Why the tab's rows cannot be edited, or `None` when they can (`notEditableReason`).
-pub fn not_editable(s: &Session, t: &TableTab) -> Option<&'static str> {
-    let Some(c) = s.state.connected.as_ref() else { return Some(NOT_CONNECTED) };
+/// Why the tab's rows cannot be edited, or `None` when they can (`notEditableReason`): the
+/// connection, the relation's kind, the table's own reason (`noEditReason`), or its key.
+pub fn not_editable<'a>(s: &'a Session, t: &TableTab) -> Option<Cow<'a, str>> {
+    let Some(c) = s.state.connected.as_ref() else { return Some(NOT_CONNECTED.into()) };
     if c.info.read_only || c.config.read_only {
-        return Some("read-only connection");
+        return Some("read-only connection".into());
     }
-    let Some(info) = c.catalog.table(&t.table) else { return Some("the table is no longer in the schema") };
+    let Some(info) = c.catalog.table(&t.table) else { return Some("the table is no longer in the schema".into()) };
     match info.kind {
         RelKind::Table | RelKind::PartitionedTable => {}
-        RelKind::View => return Some("views are read-only"),
-        RelKind::MaterializedView => return Some("materialized views are read-only"),
-        RelKind::ForeignTable => return Some("foreign tables are read-only"),
+        RelKind::View => return Some("views are read-only".into()),
+        RelKind::MaterializedView => return Some("materialized views are read-only".into()),
+        RelKind::ForeignTable => return Some("foreign tables are read-only".into()),
+    }
+    if let Some(why) = &info.no_edit_reason {
+        return Some(why.as_str().into());
     }
     if info.row_key().is_none() {
-        return Some("no primary key or unique not-null key");
+        return Some("no primary key or unique not-null key".into());
     }
     None
+}
+
+/// The table's own reason it cannot be edited, whatever the connection (`noEditReason`).
+fn no_edit_reason<'a>(s: &'a Session, t: &TableTab) -> Option<&'a str> {
+    s.state.connected.as_ref()?.catalog.table(&t.table)?.no_edit_reason.as_deref()
 }
 
 /// The tab as `inspect()` shows it.
@@ -336,6 +346,7 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "error": t.error,
         "editable": reason.is_none(),
         "notEditableReason": reason,
+        "noEditReason": no_edit_reason(s, t),
         "edits": super::edit::summary(&t.edits, t.data.as_ref().map_or(0, |d| d.rows.len())),
         "failed": t.edits.failed.as_ref().map(|f| json!({ "row": f.row, "column": f.column, "message": f.message, "code": f.code })),
         "outcomeUnknown": t.edits.outcome_unknown(),

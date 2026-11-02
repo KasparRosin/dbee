@@ -50,10 +50,56 @@ pub enum Kind {
 #[derive(Debug)]
 pub struct KindInfo {
     pub id: &'static str,
+    /// What the server calls itself (`ServerInfo.product`).
+    pub product: &'static str,
+    /// The SQL dialect dbee reads it with, as `dbee_sql::Dialect` names it in JSON.
+    pub dialect: &'static str,
+    /// The user tests connect as, with [`TestDb::password`]; empty for a file.
+    pub user: &'static str,
+    /// The database tests connect to; empty for none (MySQL's servers have no default one).
+    pub database: &'static str,
     /// Its client inside a server's container; `None` for a file.
     client: Option<Client>,
     /// A query that runs about `secs` seconds, for cancel tests.
     sleep_sql: fn(u32) -> String,
+    /// A `WHERE` condition that holds and takes about `secs` seconds once per statement, whatever
+    /// the number of rows: a slow page or count.
+    slow_condition_sql: fn(u32) -> String,
+    /// The seed's table of odd names in schema `odd`: quotes, a space, and a character outside
+    /// ASCII (MySQL names hold no emoji).
+    pub odd_table: &'static str,
+    /// The type a scratch table gives a text that may be 20 MB long.
+    pub long_text_type: &'static str,
+    /// The type a scratch table gives a JSON document.
+    pub json_type: &'static str,
+    /// Lists the ids of dbee's connections, run through the kind's client; `None` for a file,
+    /// which has no connection to lose.
+    dbee_connections_sql: Option<&'static str>,
+    /// Ends the connection with that id.
+    kill_sql: fn(&str) -> String,
+    /// Makes every UPDATE of `scratch.<table>` take `secs` seconds: the SQL that does it, and what
+    /// a [`Scratch`]-style guard drops afterwards (`DROP <that>`).
+    slow_updates_sql: fn(&str, u32) -> (String, String),
+    /// Counts dbee's statements on `scratch.<table>` that wait for a row lock.
+    row_lock_waits_sql: fn(&str) -> String,
+    /// How a test makes a COMMIT wait ([`CommitGate`]); `None` where it cannot.
+    commit_wait: Option<CommitWait>,
+    /// A query a session runs to show whether it is read-only, and what it prints when it is.
+    pub read_only_sql: (&'static str, &'static str),
+    /// A query a session runs to print its own connection's id (the one `kill_sql` takes).
+    pub connection_id_sql: &'static str,
+    /// Counts dbee's statements running now whose text holds `marker`.
+    running_with_sql: fn(&str) -> String,
+}
+
+/// How a [`CommitGate`] holds a COMMIT, from before the update it commits starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitWait {
+    /// A deferred trigger on the table takes an advisory lock in the COMMIT, which the gate holds
+    /// (Postgres).
+    AdvisoryLock,
+    /// The gate's `BACKUP STAGE BLOCK_COMMIT` lets updates run and holds every COMMIT (MariaDB).
+    BackupStage,
 }
 
 /// A database client inside a server's container.
@@ -70,14 +116,75 @@ impl Kind {
     /// The one `match` on a kind.
     pub fn info(self) -> &'static KindInfo {
         match self {
-            Kind::Postgres => &KindInfo { id: "postgres", client: Some(Client::Psql), sleep_sql: |secs| format!("SELECT pg_sleep({secs})") },
-            Kind::MySql => &KindInfo { id: "mysql", client: Some(Client::MySql("mysql")), sleep_sql: mysql_sleep },
-            Kind::MariaDb => &KindInfo { id: "mariadb", client: Some(Client::MySql("mariadb")), sleep_sql: mysql_sleep },
+            Kind::Postgres => &KindInfo {
+                id: "postgres",
+                product: "PostgreSQL",
+                dialect: "Postgres",
+                user: "postgres",
+                database: "dbee",
+                client: Some(Client::Psql),
+                sleep_sql: |secs| format!("SELECT pg_sleep({secs})"),
+                slow_condition_sql: |secs| format!("(SELECT true FROM pg_sleep({secs}))"),
+                odd_table: "Odd \"Name\" 🐝",
+                long_text_type: "text",
+                json_type: "jsonb",
+                // dbee connects with application_name `dbee`; the two-argument terminate (Postgres
+                // 14+) waits until the backend has exited.
+                dbee_connections_sql: Some("SELECT pid FROM pg_stat_activity WHERE application_name = 'dbee'"),
+                kill_sql: |pid| format!("SELECT pg_terminate_backend({pid}, 5000)"),
+                slow_updates_sql: |t, secs| {
+                    let f = format!("scratch.{t}_slow()");
+                    let sql = format!(
+                        "CREATE FUNCTION {f} RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep({secs}); RETURN NEW; END $$;
+                         CREATE TRIGGER slow BEFORE UPDATE ON scratch.{t} FOR EACH ROW EXECUTE FUNCTION {f};"
+                    );
+                    (sql, format!("FUNCTION IF EXISTS {f} CASCADE"))
+                },
+                row_lock_waits_sql: |t| {
+                    format!(
+                        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND wait_event_type = 'Lock' AND query LIKE 'UPDATE \"scratch\".\"{t}\"%'"
+                    )
+                },
+                commit_wait: Some(CommitWait::AdvisoryLock),
+                read_only_sql: ("SHOW default_transaction_read_only", "on"),
+                connection_id_sql: "SELECT pg_backend_pid()",
+                running_with_sql: |m| {
+                    format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND state = 'active' AND query LIKE '%{m}%'")
+                },
+            },
+            Kind::MySql => &KindInfo { product: "MySQL", id: "mysql", client: Some(Client::MySql("mysql")), ..MYSQL },
+            // MariaDB 10.11 has no `transaction_read_only`.
+            Kind::MariaDb => &KindInfo {
+                product: "MariaDB",
+                id: "mariadb",
+                client: Some(Client::MySql("mariadb")),
+                read_only_sql: ("SELECT @@SESSION.tx_read_only", "1"),
+                commit_wait: Some(CommitWait::BackupStage),
+                ..MYSQL
+            },
             // SQLite has no sleep: a count to 10⁹, which runs far longer than any test waits.
             Kind::Sqlite => &KindInfo {
                 id: "sqlite",
+                product: "SQLite",
+                dialect: "Sqlite",
+                user: "",
+                database: "",
                 client: None,
                 sleep_sql: |_| "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 1000000000) SELECT count(*) FROM c".into(),
+                slow_condition_sql: |_| {
+                    "(WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 1000000000) SELECT count(*) FROM c) > 0".into()
+                },
+                odd_table: "Odd \"Name\" 🐝",
+                long_text_type: "TEXT",
+                json_type: "TEXT",
+                dbee_connections_sql: None,
+                kill_sql: |_| String::new(),
+                slow_updates_sql: |_, _| (String::new(), String::new()),
+                row_lock_waits_sql: |_| String::new(),
+                commit_wait: None,
+                read_only_sql: ("PRAGMA query_only", "1"),
+                connection_id_sql: "",
+                running_with_sql: |_| String::new(),
             },
         }
     }
@@ -92,9 +199,39 @@ impl Kind {
     }
 }
 
-fn mysql_sleep(secs: u32) -> String {
-    format!("SELECT SLEEP({secs})")
-}
+/// What MySQL and MariaDB share.
+const MYSQL: KindInfo = KindInfo {
+    id: "mysql",
+    product: "MySQL",
+    dialect: "MySql",
+    user: "root",
+    database: "",
+    client: None,
+    sleep_sql: |secs| format!("SELECT SLEEP({secs})"),
+    // A sleep in the WHERE clause or a subquery runs once per row; a derived table runs once.
+    slow_condition_sql: |secs| format!("EXISTS (SELECT 1 FROM (SELECT SLEEP({secs}) AS z) AS d)"),
+    odd_table: "Odd \"Name\" é",
+    long_text_type: "LONGTEXT",
+    json_type: "JSON",
+    // The tests' own client connects over the socket (host `localhost`); dbee comes over TCP, so
+    // these are dbee's connections while no other tool connects as root.
+    dbee_connections_sql: Some("SELECT ID FROM information_schema.PROCESSLIST WHERE USER = 'root' AND HOST <> 'localhost' AND ID <> CONNECTION_ID()"),
+    kill_sql: |id| format!("KILL {id}"),
+    slow_updates_sql: |t, secs| {
+        // While it sleeps, the session's statement is the trigger's, which names the table.
+        let sql = format!("CREATE TRIGGER scratch.{t}_slow BEFORE UPDATE ON scratch.{t} FOR EACH ROW SET @dbee_slow_{t} = SLEEP({secs})");
+        (sql, format!("TRIGGER IF EXISTS scratch.{t}_slow"))
+    },
+    row_lock_waits_sql: |t| {
+        format!("SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_state = 'LOCK WAIT' AND trx_query LIKE 'UPDATE `scratch`.`{t}`%'")
+    },
+    // MySQL has no lock that holds a COMMIT but not the update before it: the global read lock
+    // holds both, and taken between the two it loses the race with a COMMIT sent at once.
+    commit_wait: None,
+    read_only_sql: ("SELECT @@SESSION.transaction_read_only", "1"),
+    connection_id_sql: "SELECT CONNECTION_ID()",
+    running_with_sql: |m| format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{m}%' AND ID <> CONNECTION_ID()"),
+};
 
 /// The test servers, as `env.json` describes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +258,7 @@ impl TestDb {
     }
 
     /// The servers of these kinds, in order.
-    pub fn servers_of<'a>(&'a self, kinds: &'a [Kind]) -> impl Iterator<Item = &'a Server> + 'a {
+    pub fn servers_of<'a, 'k>(&'a self, kinds: &'k [Kind]) -> impl Iterator<Item = &'a Server> + use<'a, 'k> {
         self.servers.iter().filter(|s| kinds.contains(&s.kind))
     }
 }
@@ -345,7 +482,52 @@ pub fn mysql(server: &Server, sql: &str) -> Result<String, String> {
     }
 }
 
-/// A psql session of its own on a test server that ran `sql` in an open transaction and now
+/// Run `sql` on a server with its kind's client, as [`KindInfo::user`] on
+/// [`KindInfo::database`]: one line per row, the values separated by `|`, NULL as an empty value
+/// (`psql -At`'s shape, on every kind). Returns stdout, or stderr on error.
+pub fn sql(server: &Server, sql: &str) -> Result<String, String> {
+    match server.kind.info().client {
+        Some(Client::Psql) => psql(server, sql),
+        Some(Client::MySql(_)) => {
+            let out = mysql(server, sql)?;
+            let line = |l: &str| l.split('\t').map(|v| if v == "NULL" { "" } else { v }).collect::<Vec<_>>().join("|");
+            Ok(out.lines().map(line).map(|l| l + "\n").collect())
+        }
+        None => Err(format!("{} has no client", server.name)),
+    }
+}
+
+/// Ends every dbee connection on `server` and waits (up to 10 s) until none is left; `Err` when
+/// there was none to end. It ends every dbee connection on the server, also those of tests running
+/// beside the caller.
+pub fn kill_dbee_connections(server: &Server) -> Result<(), String> {
+    let info = server.kind.info();
+    let list = info.dbee_connections_sql.ok_or_else(|| format!("{} has no connections to end", server.name))?;
+    let ids = |what: &str| -> Result<Vec<String>, String> {
+        Ok(sql(server, list).map_err(|e| format!("{what}: {e}"))?.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect())
+    };
+    let found = ids("list dbee's connections")?;
+    if found.is_empty() {
+        return Err(format!("no dbee connection on {}", server.name));
+    }
+    for id in &found {
+        // A connection that ended meanwhile cannot be ended again.
+        let _ = sql(server, &(info.kill_sql)(id));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = ids("count dbee's connections")?;
+        if left.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(format!("{} dbee connection(s) still on {} after 10 s", left.len(), server.name));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A client session of its own on a test server that ran `sql` in an open transaction and now
 /// sleeps, until dropped (at most 60 s): what a lock `sql` took (`SELECT … FOR UPDATE`) is held
 /// that long. Dropping it ends the session, which rolls the transaction back.
 #[derive(Debug)]
@@ -357,33 +539,109 @@ pub struct Held {
 
 impl Drop for Held {
     fn drop(&mut self) {
-        let end = format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '{}'", self.marker);
-        let _ = psql(&self.server, &end);
+        let _ = match self.server.kind.info().client {
+            Some(Client::Psql) => {
+                psql(&self.server, &format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '{}'", self.marker))
+            }
+            Some(Client::MySql(_)) => {
+                let ids = mysql(&self.server, &holder_ids(&self.marker)).unwrap_or_default();
+                let kills: String = ids.lines().map(str::trim).filter(|l| !l.is_empty()).map(|id| format!("KILL {id};")).collect();
+                if kills.is_empty() { Ok(String::new()) } else { mysql(&self.server, &kills) }
+            }
+            None => Ok(String::new()),
+        };
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// Runs `sql` in a transaction of a psql session of its own on a Postgres server, in the
-/// background, and returns once the session sleeps with the transaction open (see [`Held`]).
-/// `sql` must not end the transaction.
+/// The ids of the MySQL sessions running a statement that holds `marker`, but this one.
+fn holder_ids(marker: &str) -> String {
+    format!("SELECT ID FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{marker}%' AND ID <> CONNECTION_ID()")
+}
+
+/// Runs `sql` in a transaction of a client session of its own on a server, in the background, and
+/// returns once the session sleeps with the transaction open (see [`Held`]). `sql` must not end
+/// the transaction.
 pub fn hold(server: &Server, sql: &str) -> Result<Held, String> {
+    let db = testdb().ok_or_else(|| NOT_UP.to_owned())?;
     let marker = unique("dbee_test_hold");
-    let script = format!("SET application_name = '{marker}'; BEGIN; {sql}; SELECT pg_sleep(60); ROLLBACK;");
     let mut c = compose();
-    c.args(["exec", "-T", &server.name, "psql", "-U", "postgres", "-d", "dbee", "-At", "-v", "ON_ERROR_STOP=1", "-c", &script]);
+    let sleeping = match server.kind.info().client {
+        Some(Client::Psql) => {
+            let script = format!("SET application_name = '{marker}'; BEGIN; {sql}; SELECT pg_sleep(60); ROLLBACK;");
+            c.args(["exec", "-T", &server.name, "psql", "-U", "postgres", "-d", "dbee", "-At", "-v", "ON_ERROR_STOP=1", "-c", &script]);
+            format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = '{marker}' AND wait_event = 'PgSleep'")
+        }
+        Some(Client::MySql(client)) => {
+            c.env("MYSQL_PWD", &db.password);
+            c.args(["exec", "-T", "-e", "MYSQL_PWD", &server.name, client, "--user=root", "--batch"]);
+            c.arg(format!("--execute=START TRANSACTION; {sql}; SELECT SLEEP(60), '{marker}'; ROLLBACK;"));
+            format!(
+                "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{marker}%' AND STATE = 'User sleep' AND ID <> CONNECTION_ID()"
+            )
+        }
+        None => return Err(format!("{} has no client", server.name)),
+    };
     c.stdout(Stdio::null()).stderr(Stdio::null());
     let child = c.spawn().map_err(|e| format!("docker compose exec {}: {e}", server.name))?;
     let held = Held { server: server.clone(), marker, child };
-    let sleeping = format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = '{}' AND wait_event = 'PgSleep'", held.marker);
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while psql(server, &sleeping)?.trim() != "1" {
+    while crate::sql(server, &sleeping)?.trim() != "1" {
         if std::time::Instant::now() > deadline {
-            return Err(format!("the psql session on {} did not get to its sleep within 20 s", server.name));
+            return Err(format!("the client session on {} did not get to its sleep within 20 s", server.name));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(held)
+}
+
+/// Polls `sql` on `server` until it prints `want` (up to 20 s).
+fn until(server: &Server, sql: &str, want: &str, what: &str) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while crate::sql(server, sql)?.trim() != want {
+        if std::time::Instant::now() > deadline {
+            return Err(format!("{}: gave up waiting for {what}", server.name));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+/// Makes the COMMIT of a transaction that updated `scratch.<table>` wait, until the gate is
+/// dropped ([`TestTarget::commit_gate`]).
+#[derive(Debug)]
+pub struct CommitGate {
+    server: Server,
+    table: String,
+    wait: CommitWait,
+    held: Option<Held>,
+    /// What to drop when the gate goes (`DROP <that>`).
+    cleanup: String,
+}
+
+impl CommitGate {
+    /// Waits (up to 20 s) until a dbee COMMIT on the table waits at the gate.
+    pub fn until_committing(&mut self) -> Result<(), String> {
+        let t = &self.table;
+        let committing = match self.wait {
+            CommitWait::AdvisoryLock => format!(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND query = 'COMMIT' AND wait_event = 'advisory'
+                   AND pid IN (SELECT pid FROM pg_locks WHERE relation = 'scratch.{t}'::regclass)"
+            ),
+            CommitWait::BackupStage => {
+                "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO = 'COMMIT' AND STATE = 'Waiting for backup lock'".to_owned()
+            }
+        };
+        until(&self.server, &committing, "1", "the COMMIT to wait at the gate")
+    }
+}
+
+impl Drop for CommitGate {
+    fn drop(&mut self) {
+        self.held = None;
+        let _ = crate::sql(&self.server, &format!("DROP {}", self.cleanup));
+    }
 }
 
 /// `<repo>/target/testkit`: the SQLite seed and the copies [`targets`] makes. Under `target/`, as the
@@ -503,9 +761,94 @@ impl TestTarget {
         (self.kind.info().sleep_sql)(secs)
     }
 
+    /// A `WHERE` condition that holds and takes about `secs` seconds once per statement (on
+    /// SQLite much longer).
+    pub fn slow_condition_sql(&self, secs: u32) -> String {
+        (self.kind.info().slow_condition_sql)(secs)
+    }
+
     /// The rows of `big_rows` in this target's seed.
     pub fn big_rows(&self) -> u64 {
         self.server().map_or(BIG_ROWS, Server::big_rows)
+    }
+
+    /// The target's seed is the full one, with the 20 MB row of `big_cell` ([`Server::full_seed`];
+    /// a file always is).
+    pub fn full_seed(&self) -> bool {
+        self.server().is_none_or(|s| s.full_seed)
+    }
+
+    /// SQL that makes every UPDATE of `scratch.<table>` take `secs` seconds, and what to drop
+    /// afterwards (`DROP <that>`).
+    pub fn slow_updates_sql(&self, table: &str, secs: u32) -> (String, String) {
+        (self.kind.info().slow_updates_sql)(table, secs)
+    }
+
+    /// A query that counts dbee's statements running now whose text holds `marker`.
+    pub fn running_with_sql(&self, marker: &str) -> String {
+        (self.kind.info().running_with_sql)(marker)
+    }
+
+    /// Ends the server's connection `id` (from [`KindInfo::connection_id_sql`]) and waits (up to
+    /// 10 s) until it is gone.
+    pub fn kill_connection(&self, id: &str) -> Result<(), String> {
+        let server = self.server().ok_or_else(|| format!("{}: no server", self.name()))?;
+        let info = self.kind.info();
+        let list = info.dbee_connections_sql.ok_or_else(|| format!("{}: no connections", self.name()))?;
+        crate::sql(server, &(info.kill_sql)(id))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while crate::sql(server, list)?.lines().any(|l| l.trim() == id) {
+            if std::time::Instant::now() > deadline {
+                return Err(format!("{}: connection {id} still there after 10 s", self.name()));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
+    /// A query that counts dbee's statements on `scratch.<table>` waiting for a row lock.
+    pub fn row_lock_waits_sql(&self, table: &str) -> String {
+        (self.kind.info().row_lock_waits_sql)(table)
+    }
+
+    /// A [`CommitGate`] on `scratch.<table>`: set up before the session that commits loads the
+    /// table (it may add a trigger), and before that session's update starts; on MariaDB it holds
+    /// every COMMIT on the server, and DDL too.
+    pub fn commit_gate(&self, table: &str) -> Result<CommitGate, String> {
+        let server = self.server().ok_or_else(|| format!("{}: no server", self.name()))?;
+        let wait = self.kind.info().commit_wait.ok_or_else(|| format!("{}: no way to hold a COMMIT", self.name()))?;
+        let mut gate = CommitGate { server: server.clone(), table: table.to_owned(), wait, held: None, cleanup: String::new() };
+        match wait {
+            CommitWait::AdvisoryLock => {
+                let f = format!("scratch.{table}_commit_gate()");
+                crate::sql(
+                    server,
+                    &format!(
+                        "CREATE FUNCTION {f} RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(hashtext('{table}')); RETURN NULL; END $$;
+                         CREATE CONSTRAINT TRIGGER commit_gate AFTER UPDATE ON scratch.{table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {f};"
+                    ),
+                )?;
+                gate.cleanup = format!("FUNCTION IF EXISTS {f} CASCADE");
+                gate.held = Some(hold(server, &format!("SELECT pg_advisory_lock(hashtext('{table}'))"))?);
+            }
+            CommitWait::BackupStage => {
+                gate.held = Some(hold(server, "BACKUP STAGE START; BACKUP STAGE FLUSH; BACKUP STAGE BLOCK_DDL; BACKUP STAGE BLOCK_COMMIT")?);
+            }
+        }
+        Ok(gate)
+    }
+
+    /// The target can hold a COMMIT with a [`CommitGate`].
+    pub fn can_hold_commit(&self) -> bool {
+        self.server().is_some() && self.kind.info().commit_wait.is_some()
+    }
+
+    /// Runs `sql` on the target's server as [`sql`] does; a file has no client here.
+    pub fn sql(&self, sql: &str) -> Result<String, String> {
+        match self.server() {
+            Some(server) => crate::sql(server, sql),
+            None => Err(format!("{}: no client for a file", self.name())),
+        }
     }
 }
 
@@ -525,12 +868,24 @@ impl Drop for TestTarget {
 /// Every database to run an engine test on: every test server, and one fresh SQLite copy (under
 /// `target/testkit/copies`). Without the test servers only the SQLite copy.
 pub fn targets() -> Vec<TestTarget> {
+    targets_of(&Kind::ALL)
+}
+
+/// [`targets`] of these kinds only; the SQLite copy is made only when they hold [`Kind::Sqlite`].
+pub fn targets_of(kinds: &[Kind]) -> Vec<TestTarget> {
     let mut all = Vec::new();
     if let Some(db) = testdb() {
-        all.extend(db.servers.iter().map(|s| TestTarget { kind: s.kind, place: Place::Server(s) }));
+        all.extend(db.servers_of(kinds).map(target));
     }
-    all.push(TestTarget { kind: Kind::Sqlite, place: Place::File(sqlite_seeded(&testkit_dir().join("copies"))) });
+    if kinds.contains(&Kind::Sqlite) {
+        all.push(TestTarget { kind: Kind::Sqlite, place: Place::File(sqlite_seeded(&testkit_dir().join("copies"))) });
+    }
     all
+}
+
+/// The target of one test server.
+pub fn target(server: &'static Server) -> TestTarget {
+    TestTarget { kind: server.kind, place: Place::Server(server) }
 }
 
 /// A throwaway home directory with `.ssh/` (mode 0700), removed on drop.

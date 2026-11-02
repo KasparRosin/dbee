@@ -44,13 +44,14 @@ enum Hint {
 /// Param shapes per command id: (key, hint) pairs. The fuzz builds well-formed params from them
 /// most of the time, so commands get past their params checks and change the state.
 const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
-    ("tab.newQuery", &[("text", Hint::Text)]),
+    ("tab.newQuery", &[("text", Hint::Text), ("schema", Hint::Text)]),
     ("tab.activate", &[("tab", Hint::Tab)]),
     ("tab.list", &[]),
     ("query.setText", &[("text", Hint::Text)]),
     ("query.run", &[("current", Hint::Bool), ("cursor", Hint::Count)]),
     ("query.cancel", &[]),
     ("query.showResult", &[("index", Hint::Count)]),
+    ("query.setDatabase", &[("tab", Hint::Tab), ("database", Hint::Text)]),
     ("tab.close", &[("tab", Hint::Tab), ("force", Hint::Bool)]),
     ("connection.list", &[]),
     ("connection.save", &[("config", CONFIG), ("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text)]),

@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 dbee-driver = { workspace = true }
 dbee-pg = { workspace = true }
+dbee-mysql = { workspace = true }
 
 [dev-dependencies]
 dbee-config = { workspace = true }
