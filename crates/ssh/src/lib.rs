@@ -9,6 +9,9 @@
 
 pub mod keys;
 pub mod known_hosts;
+mod stream;
+
+pub use stream::TunnelStream;
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -16,11 +19,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dbee_config::{SshAuth, SshConfig};
-use russh::client::{self, AuthResult, Handle, Msg};
+use russh::client::{self, AuthResult, Handle};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
-use russh::{AgentAuthError, ChannelOpenFailure, ChannelStream, Disconnect, Preferred};
+use russh::{AgentAuthError, ChannelOpenFailure, Disconnect, Preferred};
 
 use crate::keys::LoadError;
 use crate::known_hosts::Verdict;
@@ -282,9 +285,12 @@ impl Tunnel {
         }
     }
 
-    /// A new direct-tcpip channel to `host:port`, as the SSH server resolves it.
-    pub async fn connect(&self, host: &str, port: u16) -> Result<ChannelStream<Msg>, SshError> {
+    /// A new direct-tcpip channel to `host:port`, as the SSH server resolves it. Called on a Tokio
+    /// runtime; the stream can be dropped anywhere ([`TunnelStream`]).
+    pub async fn connect(&self, host: &str, port: u16) -> Result<TunnelStream, SshError> {
         let target = address(host, port);
+        let runtime =
+            tokio::runtime::Handle::try_current().map_err(|_| SshError::Channel(format!("opening a channel to {target} needs a tokio runtime")))?;
         if self.is_closed() {
             return Err(SshError::Channel(format!("the SSH connection is closed, so {target} cannot be reached")));
         }
@@ -292,7 +298,7 @@ impl Tunnel {
         match tokio::time::timeout(CONNECT_TIMEOUT, opening).await {
             Err(_) => Err(SshError::Channel(format!("the SSH server did not open a channel to {target} within {} s", CONNECT_TIMEOUT.as_secs()))),
             Ok(Err(e)) => Err(SshError::Channel(channel_error(&target, e))),
-            Ok(Ok(channel)) => Ok(channel.into_stream()),
+            Ok(Ok(channel)) => Ok(TunnelStream::new(channel.into_stream(), runtime)),
         }
     }
 

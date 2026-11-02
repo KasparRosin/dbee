@@ -327,7 +327,28 @@ fn tunnel_and_open_are_send() {
     send(&p);
     // What `connect` returns can carry a database connection on a spawned task.
     fn stream<T: Send + Unpin + tokio::io::AsyncRead + tokio::io::AsyncWrite>() {}
-    stream::<russh::ChannelStream<russh::client::Msg>>();
+    stream::<dbee_ssh::TunnelStream>();
+}
+
+/// A stream is dropped wherever its last owner goes: in the app, on the UI thread, which runs no
+/// runtime, and after the runtime it was opened on shut down. Neither panics, and the tunnel goes on.
+#[test]
+fn a_stream_can_be_dropped_off_the_runtime() {
+    let db = require_testdb!();
+    let home = temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let (tunnel, on_a_plain_thread, after_shutdown) = runtime.block_on(async {
+        let t = Tunnel::open(&cfg(db, SshAuth::Key { path: None }), &env(&home), &SshSecrets::default(), None).await.unwrap();
+        let a = t.connect(pg14(db).0, pg14(db).1).await.unwrap();
+        let b = t.connect(pg14(db).0, pg14(db).1).await.unwrap();
+        (t, a, b)
+    });
+    std::thread::spawn(move || drop(on_a_plain_thread)).join().expect("a stream dropped on a thread without a runtime");
+    assert!(!tunnel.is_closed());
+    runtime.block_on(reaches_postgres(&tunnel, db));
+    drop(runtime);
+    std::thread::spawn(move || drop(after_shutdown)).join().expect("a stream dropped after its runtime shut down");
+    drop(tunnel);
 }
 
 #[test]
