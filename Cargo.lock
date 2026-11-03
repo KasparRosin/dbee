@@ -1209,6 +1209,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbee-sqlite"
+version = "0.0.0"
+dependencies = [
+ "dbee-config",
+ "dbee-core",
+ "dbee-driver",
+ "dbee-sql",
+ "dbee-testkit",
+ "log",
+ "proptest",
+ "rusqlite",
+ "tokio",
+]
+
+[[package]]
 name = "dbee-ssh"
 version = "0.0.0"
 dependencies = [

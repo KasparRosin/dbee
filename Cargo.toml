@@ -20,6 +20,7 @@ dbee-ssh = { path = "crates/ssh" }
 dbee-driver = { path = "crates/driver" }
 dbee-pg = { path = "crates/pg" }
 dbee-mysql = { path = "crates/mysql" }
+dbee-sqlite = { path = "crates/sqlite" }
 dbee-drivers = { path = "crates/drivers" }
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }

@@ -1,0 +1,194 @@
+//! All-or-nothing apply tests, each on a fresh copy of the SQLite seed (`dbee_testkit::targets_of`)
+//! with a table of its own, checked from a second connection to the file.
+
+use std::time::{Duration, Instant};
+
+use dbee_config::{ConnectionConfig, DbKind};
+use dbee_driver::{ApplyError, ApplyGate, DbError, Purpose, QUERY_LIMITS, Target};
+use dbee_sqlite::{SqliteConnection, connect};
+use dbee_testkit::{Kind, TestTarget, targets_of};
+
+const TABLE: &str = "apply_t";
+
+async fn open(seed: &TestTarget, read_only: bool, purpose: Purpose) -> SqliteConnection {
+    let c = ConnectionConfig {
+        name: "test sqlite".into(),
+        kind: DbKind::Sqlite,
+        file: Some(seed.file().unwrap().to_path_buf()),
+        read_only,
+        ..ConnectionConfig::default()
+    };
+    connect(Target { config: &c, password: None, tunnel: None, purpose, create_file: false }).await.unwrap_or_else(|e| panic!("open: {e}"))
+}
+
+async fn sql(c: &SqliteConnection, sql: &str) {
+    if let Err(e) = c.run_untyped(sql, QUERY_LIMITS).await {
+        panic!("{sql}: {e}");
+    }
+}
+
+/// `id:name:amount` of every row, ordered by id, read through `c`.
+async fn rows(c: &SqliteConnection) -> Vec<String> {
+    let r = c
+        .run_untyped(&format!("SELECT id || ':' || coalesce(name, '-') || ':' || coalesce(amount, '-') FROM {TABLE} ORDER BY id"), QUERY_LIMITS)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    r.rows.into_iter().filter_map(|row| row.into_iter().next().flatten()).collect()
+}
+
+async fn apply(c: &SqliteConnection, statements: &[String]) -> Result<u64, ApplyError> {
+    c.apply(statements, &ApplyGate::default()).await
+}
+
+/// A fresh seed copy with a two-row table, a writer (the browse connection) and a reader.
+async fn with_table() -> (TestTarget, SqliteConnection, SqliteConnection) {
+    let seed = targets_of(&[Kind::Sqlite]).pop().expect("the SQLite seed");
+    let writer = open(&seed, false, Purpose::Browse).await;
+    let reader = open(&seed, false, Purpose::Query).await;
+    sql(&writer, &format!("CREATE TABLE {TABLE} (id INTEGER PRIMARY KEY, name TEXT, amount NUMERIC)")).await;
+    sql(&writer, &format!("INSERT INTO {TABLE} VALUES (1, 'one', 1.5), (2, 'two', 2.5)")).await;
+    (seed, writer, reader)
+}
+
+const UNCHANGED: [&str; 2] = ["1:one:1.5", "2:two:2.5"];
+
+#[tokio::test]
+async fn apply_writes_all_or_nothing() {
+    let (seed, w, r) = with_table().await;
+    let t = TABLE;
+
+    // Every statement in one transaction.
+    let stmts = vec![format!("UPDATE {t} SET name = 'uno' WHERE id = 1"), format!("UPDATE {t} SET amount = 9.25 WHERE id = 2")];
+    assert_eq!(apply(&w, &stmts).await.map_err(|e| e.to_string()), Ok(2));
+    assert_eq!(rows(&r).await, ["1:uno:1.5", "2:two:9.25"]);
+    sql(&w, &format!("UPDATE {t} SET name = 'one' WHERE id = 1; UPDATE {t} SET amount = 2.5 WHERE id = 2")).await;
+    assert_eq!(rows(&r).await, UNCHANGED);
+
+    // One failure writes nothing, and the connection is usable after it, outside a transaction.
+    let stmts = vec![format!("UPDATE {t} SET name = 'uno' WHERE id = 1"), format!("UPDATE {t} SET id = 1 WHERE id = 2")];
+    let err = apply(&w, &stmts).await.expect_err("must fail");
+    assert_eq!(err.index, 1);
+    assert!(matches!(&err.error, DbError::Server(e) if e.code == "1555"), "{:?}", err.error);
+    assert_eq!(rows(&r).await, UNCHANGED);
+    sql(&w, &format!("UPDATE {t} SET name = 'after' WHERE id = 1")).await;
+    assert_eq!(rows(&r).await[0], "1:after:1.5");
+    sql(&w, &format!("UPDATE {t} SET name = 'one' WHERE id = 1")).await;
+
+    // A statement that matches no row, or two, rolls back the ones before it.
+    let stmts = vec![format!("UPDATE {t} SET name = 'ghost' WHERE id = 99"), format!("UPDATE {t} SET name = 'uno' WHERE id = 1")];
+    let err = apply(&w, &stmts).await.expect_err("must fail");
+    assert_eq!((err.index, &err.error), (0, &DbError::RowNotFound { statement: 0 }));
+    let stmts = vec![format!("UPDATE {t} SET name = 'uno' WHERE id = 1"), format!("UPDATE {t} SET name = 'many'")];
+    let err = apply(&w, &stmts).await.expect_err("must fail");
+    assert_eq!((err.index, err.error.code()), (1, "rowNotFound"));
+    assert_eq!(rows(&r).await, UNCHANGED);
+
+    // A read-only connection refuses at the start, rolls back and still answers.
+    let ro = open(&seed, true, Purpose::Browse).await;
+    let err = apply(&ro, &[format!("UPDATE {t} SET name = 'uno' WHERE id = 1")]).await.expect_err("must fail");
+    assert_eq!((err.index, err.error.code()), (0, "readOnly"));
+    assert!(!err.to_string().contains(t), "Display must not carry statement text");
+    assert!(!ro.is_closed());
+    assert_eq!(rows(&ro).await, UNCHANGED);
+    assert!(!w.is_closed());
+}
+
+#[tokio::test]
+async fn apply_while_file_locked_fails_cleanly() {
+    let (seed, w, r) = with_table().await;
+    // Another connection holds the file's write lock.
+    let holder = open(&seed, false, Purpose::Query).await;
+    sql(&holder, "BEGIN EXCLUSIVE").await;
+    let started = Instant::now();
+    let err = apply(&w, &[format!("UPDATE {TABLE} SET name = 'uno' WHERE id = 1")]).await.expect_err("locked");
+    let waited = started.elapsed();
+    assert_eq!((err.index, err.error.code()), (0, "server"), "{err}");
+    assert!(matches!(&err.error, DbError::Server(e) if e.code == "5" && e.message == "database is locked"), "{:?}", err.error);
+    assert!(waited >= Duration::from_millis(4_500) && waited < Duration::from_secs(10), "the busy timeout: {waited:?}");
+    sql(&holder, "ROLLBACK").await;
+    assert_eq!(rows(&r).await, UNCHANGED, "nothing written once the lock is gone");
+    assert!(!w.is_closed());
+    let written = apply(&w, &[format!("UPDATE {TABLE} SET name = 'uno' WHERE id = 1")]).await.map_err(|e| e.to_string());
+    assert_eq!(written, Ok(1));
+}
+
+#[tokio::test]
+async fn empty_apply_sends_nothing() {
+    let (_seed, w, _r) = with_table().await;
+    assert_eq!(apply(&w, &[]).await.map_err(|e| e.to_string()), Ok(0));
+    assert!(!w.is_closed());
+}
+
+#[tokio::test]
+async fn multi_statement_text_is_refused_before_sending() {
+    let (_seed, w, r) = with_table().await;
+    let t = TABLE;
+    for bad in [format!("UPDATE {t} SET name = 'x' WHERE id = 1; COMMIT"), format!("UPDATE {t} SET name = 'x' WHERE id = 1; SELECT 1")] {
+        let stmts = vec![format!("UPDATE {t} SET name = 'ok' WHERE id = 2"), bad];
+        let err = apply(&w, &stmts).await.expect_err("refused");
+        assert_eq!((err.index, err.error.code()), (1, "other"));
+    }
+    assert_eq!(rows(&r).await, UNCHANGED);
+    assert!(!w.is_closed());
+}
+
+#[tokio::test]
+async fn dropped_apply_marks_the_connection_closed() {
+    let (seed, w, r) = with_table().await;
+    let stmts = vec![format!("UPDATE {TABLE} SET name = 'gone' WHERE id = 1 AND {}", seed.slow_condition_sql(30))];
+    let out = tokio::time::timeout(Duration::from_millis(300), apply(&w, &stmts)).await;
+    assert!(out.is_err(), "apply should still be running");
+    assert!(w.is_closed());
+    // Nothing may run on it: it is still inside the abandoned transaction.
+    assert_eq!(w.run_untyped("SELECT 1", QUERY_LIMITS).await.unwrap_err().code(), "connectionLost");
+    let later = vec![format!("UPDATE {TABLE} SET name = 'later' WHERE id = 2")];
+    assert_eq!(apply(&w, &later).await.unwrap_err().error.code(), "connectionLost");
+    // Stop the running statement and drop the connection: the original rows remain, and the
+    // file takes writes again.
+    let _ = w.canceller().cancel().await;
+    drop(w);
+    assert_eq!(rows(&r).await, UNCHANGED);
+    let again = open(&seed, false, Purpose::Browse).await;
+    assert_eq!(apply(&again, &later).await.map_err(|e| e.to_string()), Ok(1));
+}
+
+#[tokio::test]
+async fn a_gate_cancels_an_apply_until_it_commits() {
+    let (seed, w, r) = with_table().await;
+    let t = TABLE;
+    // Cancelled before it starts: nothing is sent past BEGIN IMMEDIATE, nothing is written.
+    let gate = ApplyGate::default();
+    assert!(gate.cancel());
+    let err = w.apply(&[format!("UPDATE {t} SET name = 'x' WHERE id = 1")], &gate).await.expect_err("cancelled");
+    assert_eq!((err.index, err.error.code()), (0, "cancelled"));
+    assert!(!gate.committing() && !w.is_closed(), "it rolled back and stays usable");
+    assert_eq!(rows(&r).await, UNCHANGED);
+
+    // Cancelled while its second statement runs: the interrupt stops it, SQLite ends the
+    // transaction, and the first statement is rolled back too.
+    let gate = ApplyGate::default();
+    let stmts = vec![
+        format!("UPDATE {t} SET name = 'first' WHERE id = 2"),
+        format!("UPDATE {t} SET name = 'slow' WHERE id = 1 AND {}", seed.slow_condition_sql(30)),
+    ];
+    let canceller = w.canceller();
+    let cancel = async {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(gate.cancel(), "before the commit");
+        canceller.cancel().await.unwrap();
+    };
+    let started = Instant::now();
+    let (out, ()) = tokio::join!(w.apply(&stmts, &gate), cancel);
+    let err = out.expect_err("cancelled");
+    assert_eq!((err.index, err.error.code()), (1, "cancelled"));
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    assert!(!w.is_closed(), "the rollback found the transaction ended, which is no loss");
+    assert_eq!(rows(&r).await, UNCHANGED);
+
+    // Once it decided to commit, a cancel is refused.
+    let gate = ApplyGate::default();
+    let written = w.apply(&[format!("UPDATE {t} SET name = 'z' WHERE id = 2")], &gate).await.map_err(|e| e.to_string());
+    assert_eq!(written, Ok(1));
+    assert!(gate.committing() && !gate.cancel());
+    assert_eq!(rows(&r).await, ["1:one:1.5", "2:z:2.5"]);
+}

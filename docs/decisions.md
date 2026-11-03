@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-11-01 · **Change:** minor (MySQL column definitions read by dbee; MariaDB's JSON)
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-11-03 · **Change:** minor (rusqlite with the bundled SQLite)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -139,3 +139,15 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 - **Decision:** `dbee-mysql` parses every column definition itself, from MySQL's and MariaDB's documented layout, on both flavors, instead of with `mysql_common`'s `Column`: one code path, every length checked against the packet, fuzzed, and held to `mysql_common`'s reading of the same definitions on every test server. From a MariaDB server that offers it, dbee asks for `MARIADB_CLIENT_EXTENDED_METADATA` and reads the extra field only when it was agreed; its format `json` makes a column JSON, and its other keys are skipped.
 - **Classes:** A column's class comes from its type, flags, character set and length: `TINYINT(1)` is true/false (every server sends the declared width), strings and blobs in the `binary` character set hold bytes, and so do `BIT`, geometries and vectors, whose values are shown as `0x` and hex rather than as text they would not survive. A type dbee does not know (one a newer server adds) is shown as text, and the queries that touch it go on working.
 - **Why:** MariaDB has no JSON type: without the extended metadata a JSON column looks exactly like a `LONGTEXT` with a binary collation, and `mysql_common`'s parser cannot read the definitions once the metadata is on.
+
+## 2026-11-03: rusqlite with the bundled SQLite
+
+- **Decision:** `dbee-sqlite` is built on `rusqlite` 0.40 (MIT) with `bundled`, which compiles SQLite (public domain) into dbee through `libsqlite3-sys` (MIT), and with `column_decltype`, which gives a result column's declared type. Every SQLite call runs on a blocking thread, one operation at a time on each connection; an apply runs one blocking call per statement, so its gate is read between them.
+- **Facts measured (SQLite 3.53.2), which the driver follows:**
+  - SQLite ends a statement at a NUL outside a string literal and runs the part before it (`DELETE FROM t<NUL> WHERE id = 1` deleted every row); one inside a literal is an error. The driver refuses statement text holding a NUL before SQLite sees it, and the dialect's rule stays that statements cannot hold one.
+  - `sqlite3_interrupt` sent while no statement runs has no effect on the next one. dbee sends it only while a call of its own runs, so a cancel never reaches a later call.
+  - `CAST(x AS TEXT)` of a real is SQLite's own form, neither the shortest nor a fixed number of digits (`5e-324` prints `4.9406564584124654e-324`), so reals become text through SQLite itself.
+  - rusqlite panics on a result column name or declared type that is not UTF-8, which a crafted file's schema can hold. Before it reads them, the driver checks the schemas' names and types and refuses such a result.
+  - The bundled build reads `file:` names as URIs even without the URI flag, so the driver opens a file by its absolute path.
+  - An interrupted write inside a transaction ends the transaction; the apply's `ROLLBACK` then has nothing to undo, as on the other engines.
+- **Why:** SQLite in the binary means no system library to find, and the same SQLite on every platform. rusqlite is the established binding; dbee uses it as a library.

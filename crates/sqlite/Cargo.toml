@@ -1,0 +1,27 @@
+[package]
+name = "dbee-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "dbee SQLite driver (L4): rusqlite with the SQLite library compiled in, files opened read-write or read-only, interrupt, catalog from the pragmas, apply"
+
+[lints]
+workspace = true
+
+[dependencies]
+dbee-core = { workspace = true }
+dbee-sql = { workspace = true }
+dbee-config = { workspace = true }
+dbee-driver = { workspace = true }
+tokio = { workspace = true }
+# column_decltype: a result column's declared type, which gives its class.
+rusqlite = { workspace = true, features = ["column_decltype"] }
+log = { workspace = true }
+
+[dev-dependencies]
+dbee-testkit = { workspace = true }
+proptest = { workspace = true }
