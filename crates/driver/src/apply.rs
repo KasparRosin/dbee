@@ -88,6 +88,13 @@ pub trait ApplySession: Send {
     /// Run one statement; the rows it changed, when the server said.
     fn execute(&mut self, sql: &str) -> impl Future<Output = Result<Option<u64>, DbError>> + Send;
 
+    /// End the transaction without its changes. The default sends `ROLLBACK`; an engine that can
+    /// end a transaction itself, or never start one, checks first whether one is open.
+    fn rollback(&mut self) -> impl Future<Output = Result<(), DbError>> + Send {
+        let rolling = self.execute("ROLLBACK");
+        async move { rolling.await.map(drop) }
+    }
+
     /// Refuse every later operation on the connection with [`DbError::ConnectionLost`]: the
     /// server may still hold the transaction open, so the caller must drop the connection and
     /// reconnect (which discards the transaction).
@@ -164,8 +171,8 @@ pub async fn apply<S: ApplySession>(
 /// ended, during the `ROLLBACK`: one more `ROLLBACK` then ends the transaction.
 async fn roll_back<S: ApplySession>(session: &mut S) -> bool {
     for _ in 0..2 {
-        match session.execute("ROLLBACK").await {
-            Ok(_) => return true,
+        match session.rollback().await {
+            Ok(()) => return true,
             Err(DbError::Cancelled) => {}
             Err(_) => return false,
         }
