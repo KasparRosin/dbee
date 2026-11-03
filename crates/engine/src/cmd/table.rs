@@ -13,7 +13,8 @@
 //! `page` to what it asked for, bumps the tab's `seq` and starts the job. The page statement asks
 //! for 101 rows: 100 are kept, and the 101st sets `has_next`. When the page's cell text passes the
 //! byte cap (`PAGE_LIMITS`, 256 MiB) fewer rows are kept and `page_complete` says so
-//! (`pageComplete` in `table.read` and `inspect()`). Columns are typed from the catalog. A load
+//! (`pageComplete` in `table.read` and `inspect()`). Columns are typed from the catalog; the
+//! page shows the visible ones and keeps the row key's hidden ones beside them (`hidden`). A load
 //! that fails sets `error` (the server's text) and puts `applied`, `sort` and `page` back to what
 //! the rows still shown were loaded with; the job's result is the error. `table.page {to: "last"}`
 //! counts first, in the same job. `table.read` and `inspect()` give the rows with the page they
@@ -400,7 +401,7 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     }
     t.seq = t.seq.wrapping_add(1);
     let seq = t.seq;
-    let columns: Vec<Column> = info.columns.iter().map(ColumnInfo::column).collect();
+    let columns = PageColumns::of(&info);
     let job_conn = Arc::clone(&conn);
     let job = s.spawn_job(label, async move {
         let loaded = load(job_conn.as_ref(), dialect, &info, &view, last).await;
@@ -446,6 +447,19 @@ async fn load(conn: &dyn Connection, dialect: Dialect, info: &TableInfo, view: &
     Loaded { counted, page: rows.map(|rs| (page, rs)) }
 }
 
+/// The columns a page statement reads ([`TableInfo::page_columns`]), typed from the catalog, and
+/// how many of them, from the first, are visible.
+pub(crate) struct PageColumns {
+    columns: Vec<Column>,
+    visible: usize,
+}
+
+impl PageColumns {
+    fn of(info: &TableInfo) -> PageColumns {
+        PageColumns { columns: info.page_columns().into_iter().map(ColumnInfo::column).collect(), visible: info.visible_columns().count() }
+    }
+}
+
 /// The page as the tab keeps it: at most 100 rows, the catalog's columns. Then whether more rows
 /// follow, and whether every row of the page was kept (the byte cap can stop short of it; the
 /// 101st row only says that more follow, so missing it is no loss).
@@ -461,6 +475,17 @@ fn page_data(mut rs: ResultSet, columns: Vec<Column>) -> (ResultSet, bool, bool)
     (rs, has_next, complete)
 }
 
+/// `rs` cut after its first `visible` columns: the rows the grid shows, and the hidden key
+/// columns beside them (every row cut the same way; a short row stays short).
+fn split_hidden(mut rs: ResultSet, visible: usize) -> (ResultSet, ResultSet) {
+    if visible >= rs.columns.len() {
+        return (rs, ResultSet::default());
+    }
+    let columns = rs.columns.split_off(visible);
+    let rows = rs.rows.iter_mut().map(|row| row.split_off(visible.min(row.len()))).collect();
+    (rs, ResultSet { columns, rows, ..ResultSet::default() })
+}
+
 fn apply_load(
     s: &mut Session,
     conn: &Arc<dyn Connection>,
@@ -468,7 +493,7 @@ fn apply_load(
     seq: u64,
     mut view: PageView,
     last: bool,
-    columns: Vec<Column>,
+    columns: PageColumns,
     loaded: Loaded,
 ) -> Result<Json, EngineError> {
     if !s.is_current_browse(conn) {
@@ -506,11 +531,15 @@ fn apply_load(
             // Nothing is staged; what could be undone or redone named the rows of the old page.
             t.edits = Arc::default();
             view.page = page;
-            let (data, has_next, complete) = page_data(rs, columns);
+            let typed = columns.columns.len();
+            let (data, has_next, complete) = page_data(rs, columns.columns);
+            // A result of other columns than the statement named is shown as it came.
+            let (data, hidden) = if data.columns.len() == typed { split_hidden(data, columns.visible) } else { (data, ResultSet::default()) };
             let (rows, width) = (data.rows.len(), data.columns.len());
             let fits = |(r, c): (usize, usize)| r < rows && c < width;
             t.selection = t.selection.filter(|sel| fits(sel.anchor) && fits(sel.focus));
             t.data = Some(Arc::new(data));
+            t.hidden = Arc::new(hidden);
             t.has_next = has_next;
             t.page_complete = complete;
             t.error = None;
@@ -535,7 +564,7 @@ pub(crate) struct Reload {
     dialect: Dialect,
     info: TableInfo,
     view: PageView,
-    columns: Vec<Column>,
+    columns: PageColumns,
     seq: u64,
 }
 
@@ -546,7 +575,7 @@ impl Reload {
         check(dialect, info, &view, false)?;
         let t = table_tab_mut(s, tab).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
         t.seq = t.seq.wrapping_add(1);
-        Ok(Reload { dialect, info: info.clone(), view, columns: info.columns.iter().map(ColumnInfo::column).collect(), seq: t.seq })
+        Ok(Reload { dialect, info: info.clone(), view, columns: PageColumns::of(info), seq: t.seq })
     }
 
     pub(crate) async fn run(&self, conn: &dyn Connection) -> Loaded {
@@ -700,7 +729,7 @@ fn sort(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let catalog = catalog(s)?;
     let info = lookup(&catalog, &t.table)?;
-    if info.column(column).is_none() {
+    if info.visible_column(column).is_none() {
         return Err(bad("the table has no such `column`"));
     }
     let current = t.sort.as_ref().filter(|sort| sort.column == column).map(|sort| sort.dir);
@@ -829,8 +858,8 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// pageComplete, total, editable, notEditableReason, outcomeUnknown, loading, error}`: the loaded
 /// rows from `offset`, at most `limit`, each a list of text or `null`, and the 0-based page they
 /// are (`requestedPage` is the one asked for, which differs while a load runs). `pageComplete` is
-/// false when the byte cap kept fewer rows than the page has. Before the first page arrives, the
-/// catalog's columns and no rows.
+/// false when the byte cap kept fewer rows than the page has. The columns are the visible ones;
+/// before the first page arrives, the catalog's, and no rows.
 fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let offset = p::opt_usize(params, "offset")?.unwrap_or(0);
     let limit = p::opt_usize(params, "limit")?.unwrap_or(READ_LIMIT);
@@ -839,7 +868,7 @@ fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         Some(d) => (json!(d.columns), json!(d.rows.iter().skip(offset).take(limit).collect::<Vec<_>>())),
         None => {
             let catalog = catalog(s)?;
-            let columns: Vec<Column> = catalog.table(&t.table).map(|i| i.columns.iter().map(ColumnInfo::column).collect()).unwrap_or_default();
+            let columns: Vec<Column> = catalog.table(&t.table).map(|i| i.visible_columns().map(ColumnInfo::column).collect()).unwrap_or_default();
             (json!(columns), json!([]))
         }
     };
@@ -986,5 +1015,24 @@ mod tests {
         assert_eq!(page.rows.len(), 40);
         let probe_lost = ResultSet { rows: rs.rows[..100].to_vec(), complete: false, ..rs };
         assert!(page_data(probe_lost, vec![]).2, "only the 101st row was not kept");
+    }
+
+    #[test]
+    fn a_page_keeps_its_hidden_key_beside_the_rows_it_shows() {
+        let cell = |v: &str| Some(v.to_owned());
+        let rs = ResultSet {
+            columns: vec![Column::untyped("body"), Column::untyped("rowid")],
+            rows: vec![vec![cell("a"), cell("1")], vec![cell("b")], vec![]],
+            rows_seen: 3,
+            complete: true,
+            rows_affected: None,
+        };
+        let (shown, hidden) = split_hidden(rs.clone(), 1);
+        assert_eq!((shown.columns, shown.rows), (vec![Column::untyped("body")], vec![vec![cell("a")], vec![cell("b")], vec![]]));
+        assert_eq!((shown.rows_seen, shown.complete), (3, true));
+        assert_eq!((hidden.columns, hidden.rows), (vec![Column::untyped("rowid")], vec![vec![cell("1")], vec![], vec![]]), "short rows stay short");
+        // Every column shows: nothing beside it.
+        let (shown, hidden) = split_hidden(rs.clone(), 2);
+        assert_eq!((shown, hidden), (rs, ResultSet::default()));
     }
 }

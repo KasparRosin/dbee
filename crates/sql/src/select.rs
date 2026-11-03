@@ -12,13 +12,15 @@ fn where_clause(d: Dialect, table: &TableInfo, cond: &Condition) -> Result<Strin
     Ok(where_sql(d, cond, table)?.map(|w| format!(" WHERE {w}")).unwrap_or_default())
 }
 
-/// `SELECT <columns> FROM <table> [WHERE ..] [ORDER BY ..] LIMIT 101 OFFSET <page * 100>`.
+/// `SELECT <columns> FROM <table> [WHERE ..] [ORDER BY ..] LIMIT 101 OFFSET <page * 100>`, the
+/// columns being the table's [`page_columns`](TableInfo::page_columns). The sort is by a visible
+/// column.
 pub fn page_sql(d: Dialect, table: &TableInfo, cond: &Condition, sort: Option<&Sort>, page: u64) -> Result<String, SqlError> {
-    let columns = table.columns.iter().map(|c| d.ident(&c.name)).collect::<Result<Vec<_>, _>>()?.join(", ");
+    let columns = table.page_columns().iter().map(|c| d.ident(&c.name)).collect::<Result<Vec<_>, _>>()?.join(", ");
     let mut order = Vec::new();
     let mut sorted_by = None;
     if let Some(sort) = sort {
-        let column = table.column(&sort.column).ok_or_else(|| SqlError::UnknownColumn(sort.column.clone()))?;
+        let column = table.visible_column(&sort.column).ok_or_else(|| SqlError::UnknownColumn(sort.column.clone()))?;
         let dir = match sort.dir {
             SortDir::Asc => "ASC",
             SortDir::Desc => "DESC",

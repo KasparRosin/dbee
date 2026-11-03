@@ -18,7 +18,9 @@ async fn open(seed: &TestTarget, read_only: bool, purpose: Purpose) -> SqliteCon
         read_only,
         ..ConnectionConfig::default()
     };
-    connect(Target { config: &c, password: None, tunnel: None, purpose, create_file: false }).await.unwrap_or_else(|e| panic!("open: {e}"))
+    connect(Target { config: &c, password: None, tunnel: None, purpose, create_file: false, own_file_only: false })
+        .await
+        .unwrap_or_else(|e| panic!("open: {e}"))
 }
 
 async fn sql(c: &SqliteConnection, sql: &str) {

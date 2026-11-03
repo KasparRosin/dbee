@@ -37,7 +37,7 @@ fn config(s: &Server, mode: SslMode) -> ConnectionConfig {
 }
 
 fn target<'a>(c: &'a ConnectionConfig, password: Option<&'a str>) -> Target<'a> {
-    Target { config: c, password, tunnel: None, purpose: Purpose::Browse, create_file: false }
+    Target { config: c, password, tunnel: None, purpose: Purpose::Browse, create_file: false, own_file_only: false }
 }
 
 async fn open(c: &ConnectionConfig, db: &TestDb) -> PgConnection {
@@ -152,10 +152,16 @@ async fn through_ssh_tunnel() {
     let t = tunnel(db, &home).await;
     for s in postgres(db) {
         let c = tunnelled(s, db, SslMode::Prefer);
-        let conn =
-            connect(Target { config: &c, password: Some(&db.password), tunnel: Some(Arc::clone(&t)), purpose: Purpose::Browse, create_file: false })
-                .await
-                .unwrap();
+        let conn = connect(Target {
+            config: &c,
+            password: Some(&db.password),
+            tunnel: Some(Arc::clone(&t)),
+            purpose: Purpose::Browse,
+            create_file: false,
+            own_file_only: false,
+        })
+        .await
+        .unwrap();
         assert_eq!(conn.info().version_num / 10000, s.major());
         assert_eq!(scalar(&conn, "SELECT 40 + 2").await.as_deref(), Some("42"));
         // TLS through the tunnel checks the configured host name (the service name).
@@ -166,13 +172,24 @@ async fn through_ssh_tunnel() {
             tunnel: Some(Arc::clone(&t)),
             purpose: Purpose::Browse,
             create_file: false,
+            own_file_only: false,
         })
         .await
         .unwrap();
         assert_eq!(scalar(&conn, "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").await.as_deref(), Some("t"));
         // An SSH connection without a tunnel is refused rather than tried directly.
         assert_eq!(
-            code(connect(Target { config: &c, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false }).await),
+            code(
+                connect(Target {
+                    config: &c,
+                    password: Some(&db.password),
+                    tunnel: None,
+                    purpose: Purpose::Browse,
+                    create_file: false,
+                    own_file_only: false
+                })
+                .await
+            ),
             "connect"
         );
     }
@@ -255,10 +272,16 @@ async fn cancel_stops_pg_sleep() {
     let t = tunnel(db, &home).await;
     for s in postgres(db) {
         let c = tunnelled(s, db, SslMode::Prefer);
-        let conn =
-            connect(Target { config: &c, password: Some(&db.password), tunnel: Some(Arc::clone(&t)), purpose: Purpose::Browse, create_file: false })
-                .await
-                .unwrap();
+        let conn = connect(Target {
+            config: &c,
+            password: Some(&db.password),
+            tunnel: Some(Arc::clone(&t)),
+            purpose: Purpose::Browse,
+            create_file: false,
+            own_file_only: false,
+        })
+        .await
+        .unwrap();
         cancel_sleep(Arc::new(conn)).await;
     }
     t.close().await;

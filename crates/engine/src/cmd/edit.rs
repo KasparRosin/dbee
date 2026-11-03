@@ -426,14 +426,16 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if s.jobs.is_running_label(APPLY) {
         return Err(EngineError::Busy(APPLYING.into()));
     }
-    let (tab, table, edits, data) = match s.state.active_tab() {
+    let (tab, table, edits, data, hidden) = match s.state.active_tab() {
         Some(Tab::Table(t)) if t.applying.is_some() => return Err(EngineError::Busy(APPLYING.into())),
-        Some(Tab::Table(t)) => (t.id, t.table.clone(), Arc::clone(&t.edits), t.data.clone().ok_or_else(|| disabled(NOT_LOADED))?),
+        Some(Tab::Table(t)) => {
+            (t.id, t.table.clone(), Arc::clone(&t.edits), t.data.clone().ok_or_else(|| disabled(NOT_LOADED))?, Arc::clone(&t.hidden))
+        }
         _ => return Err(disabled(NO_TABLE_TAB)),
     };
     let catalog = catalog(s)?;
     let info = lookup(&catalog, &table)?;
-    let statements = edits.statements(s.state.dialect(), info, &data).map_err(|e| bad(e.to_string()))?;
+    let statements = edits.statements(s.state.dialect(), info, &data, &hidden).map_err(|e| bad(e.to_string()))?;
     if statements.is_empty() {
         return Err(disabled(NOTHING_STAGED));
     }

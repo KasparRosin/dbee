@@ -289,9 +289,13 @@ pub struct TableTab {
     pub sort: Option<Sort>,
     /// 0-based.
     pub page: u64,
-    /// The loaded page: at most 100 rows, columns typed from the catalog. `None` until the first
-    /// page arrives.
+    /// The loaded page: at most 100 rows, the table's visible columns typed from the catalog.
+    /// `None` until the first page arrives.
     pub data: Option<Arc<ResultSet>>,
+    /// The page's row key columns that are not visible (`TableInfo::page_columns`), row for row
+    /// with `data`: what the edits find their rows by, never shown. No columns when every key
+    /// column is visible.
+    pub hidden: Arc<ResultSet>,
     /// More rows follow this page (the page statement got 101).
     pub has_next: bool,
     /// `data` holds every row of its page: false when the page's cell text passed the byte cap
@@ -329,6 +333,7 @@ impl TableTab {
             sort: view.sort.clone(),
             page: view.page,
             data: None,
+            hidden: Arc::default(),
             has_next: false,
             page_complete: true,
             total: Total::Unknown,

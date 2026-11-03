@@ -63,7 +63,9 @@ pub enum Purpose {
 
 /// Where and how to connect. `password` is the database password (never stored in `config`);
 /// `tunnel` is the open SSH tunnel when `config.ssh` is set; `create_file` lets a file database
-/// make its file when it does not exist yet.
+/// make its file when it does not exist yet; `own_file_only` keeps the connection's SQL from
+/// opening or making any file but the database's own (an isolated run), which a server
+/// database's driver ignores.
 #[derive(Clone)]
 pub struct Target<'a> {
     pub config: &'a ConnectionConfig,
@@ -71,6 +73,7 @@ pub struct Target<'a> {
     pub tunnel: Option<Arc<Tunnel>>,
     pub purpose: Purpose,
     pub create_file: bool,
+    pub own_file_only: bool,
 }
 
 impl std::fmt::Debug for Target<'_> {
@@ -81,6 +84,7 @@ impl std::fmt::Debug for Target<'_> {
             .field("tunnel", &self.tunnel)
             .field("purpose", &self.purpose)
             .field("create_file", &self.create_file)
+            .field("own_file_only", &self.own_file_only)
             .finish()
     }
 }
@@ -135,8 +139,9 @@ mod tests {
     #[test]
     fn target_debug_hides_the_password() {
         let config = ConnectionConfig::default();
-        let t = Target { config: &config, password: Some("hunter2"), tunnel: None, purpose: Purpose::Query, create_file: false };
+        let t = Target { config: &config, password: Some("hunter2"), tunnel: None, purpose: Purpose::Query, create_file: false, own_file_only: true };
         let shown = format!("{t:?}");
         assert!(!shown.contains("hunter2") && shown.contains("<redacted>") && shown.contains("Query"), "{shown}");
+        assert!(shown.contains("own_file_only: true"), "{shown}");
     }
 }

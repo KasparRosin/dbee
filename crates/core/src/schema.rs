@@ -58,7 +58,8 @@ pub struct ColumnInfo {
     /// Postgres computes the value (`attgenerated`, `attidentity = 'a'`).
     #[serde(default)]
     pub generated: Generated,
-    /// A column the engine keeps out of sight (a SQLite hidden column); the grid does not list it.
+    /// A column the engine keeps out of sight (a SQLite hidden column): the grid, sort, filters and
+    /// copies leave it out, and a page reads it only when it is part of the row key.
     #[serde(default)]
     pub hidden: bool,
 }
@@ -136,6 +137,29 @@ impl TableInfo {
 
     pub fn column(&self, name: &str) -> Option<&ColumnInfo> {
         self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// The columns the grid shows, and that sort, filters, copies and the value view know: every
+    /// column but the hidden ones. The one place that decides what is visible.
+    pub fn visible_columns(&self) -> impl Iterator<Item = &ColumnInfo> {
+        self.columns.iter().filter(|c| !c.hidden)
+    }
+
+    /// The visible column named `name`.
+    pub fn visible_column(&self, name: &str) -> Option<&ColumnInfo> {
+        self.visible_columns().find(|c| c.name == name)
+    }
+
+    /// The columns a page reads: the visible ones in order, then the row key's columns that are
+    /// not visible (a SQLite rowid), which the page keeps for its edits.
+    pub fn page_columns(&self) -> Vec<&ColumnInfo> {
+        let mut page: Vec<&ColumnInfo> = self.visible_columns().collect();
+        for key in self.row_key().unwrap_or_default() {
+            if !page.iter().any(|c| c.name == key.name) {
+                page.push(key);
+            }
+        }
+        page
     }
 
     /// The foreign key that includes `column`.
@@ -248,6 +272,25 @@ mod tests {
         }
         t.kind = RelKind::PartitionedTable;
         assert!(t.row_key().is_some());
+    }
+
+    #[test]
+    fn hidden_columns_are_left_out_and_a_page_reads_the_key_too() {
+        let mut t = table("main", "notes");
+        t.columns.insert(0, ColumnInfo { hidden: true, ..col("rowid", true) });
+        t.columns.push(ColumnInfo { hidden: true, ..col("rank", false) });
+        assert_eq!(t.visible_columns().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "email", "nick"]);
+        assert!(t.visible_column("rowid").is_none() && t.visible_column("rank").is_none());
+        assert_eq!(t.visible_column("email").map(|c| c.name.as_str()), Some("email"));
+        assert!(t.column("rowid").is_some(), "the catalog keeps every column");
+        // A page reads what shows, then the key's hidden columns; never another hidden one.
+        assert_eq!(names(t.page_columns()), ["id", "email", "nick"]);
+        t.primary_key = vec!["rowid".into()];
+        assert_eq!(names(t.page_columns()), ["id", "email", "nick", "rowid"]);
+        t.primary_key = vec!["email".into(), "rowid".into()];
+        assert_eq!(names(t.page_columns()), ["id", "email", "nick", "rowid"]);
+        t.primary_key = vec!["id".into()];
+        assert_eq!(names(t.page_columns()), ["id", "email", "nick"]);
     }
 
     #[test]

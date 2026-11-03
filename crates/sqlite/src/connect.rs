@@ -337,7 +337,10 @@ mod tests {
         let file = scratch_file("poisoned");
         let _ = std::fs::remove_file(&file);
         let config = ConnectionConfig { kind: DbKind::Sqlite, file: Some(file.clone()), ..ConnectionConfig::default() };
-        let conn = connect(Target { config: &config, password: None, tunnel: None, purpose: Purpose::Browse, create_file: true }).await.unwrap();
+        let conn =
+            connect(Target { config: &config, password: None, tunnel: None, purpose: Purpose::Browse, create_file: true, own_file_only: false })
+                .await
+                .unwrap();
         // A call that panics with the session locked, its message kept out of the test's output.
         let shared = Arc::clone(conn.shared.as_ref().unwrap());
         let hook = std::panic::take_hook();

@@ -25,7 +25,16 @@ async fn open(s: &Server, db: &TestDb, read_only: bool) -> MySqlConnection {
         read_only,
         ..ConnectionConfig::default()
     };
-    match connect(Target { config: &config, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false }).await {
+    match connect(Target {
+        config: &config,
+        password: Some(&db.password),
+        tunnel: None,
+        purpose: Purpose::Browse,
+        create_file: false,
+        own_file_only: false,
+    })
+    .await
+    {
         Ok(c) => c,
         Err(e) => panic!("connect to {} failed: {e}", s.name),
     }

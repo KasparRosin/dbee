@@ -21,7 +21,7 @@ fn seeded() -> TestTarget {
 
 async fn open_file(file: &Path, create_file: bool) -> SqliteConnection {
     let c = config(file);
-    let t = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file };
+    let t = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file, own_file_only: false };
     connect(t).await.unwrap_or_else(|e| panic!("open {}: {e}", file.display()))
 }
 

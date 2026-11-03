@@ -154,6 +154,22 @@ fn page_details() {
     assert_eq!(count_sql(Dialect::Postgres, &orders(), &c).unwrap(), "SELECT count(*) FROM \"shop\".\"orders\" WHERE \"id\" > CAST('5' AS bigint)");
 }
 #[test]
+fn a_hidden_key_is_read_after_the_columns_and_never_sorted_or_filtered_on() {
+    let hidden = |c: ColumnInfo| ColumnInfo { hidden: true, ..c };
+    let t = table_of("main", "notes", vec![hidden(ci("rowid", "INTEGER", 'N')), ci("body", "TEXT", 'S'), hidden(ci("rank", "", 'U'))], &["rowid"]);
+    assert_eq!(
+        page_sql(Dialect::Sqlite, &t, &Condition::None, None, 0).unwrap(),
+        "SELECT \"body\", \"rowid\" FROM \"main\".\"notes\" ORDER BY \"rowid\" LIMIT 101 OFFSET 0"
+    );
+    let by = |column: &str| Sort { column: column.into(), dir: SortDir::Asc };
+    assert!(page_sql(Dialect::Sqlite, &t, &Condition::None, Some(&by("body")), 0).unwrap().contains("ORDER BY \"body\" ASC, \"rowid\" LIMIT"));
+    for column in ["rowid", "rank"] {
+        assert_eq!(page_sql(Dialect::Sqlite, &t, &Condition::None, Some(&by(column)), 0), Err(SqlError::UnknownColumn(column.into())));
+        let c = Condition::Filters(vec![f(column, Op::Eq, "1")]);
+        assert_eq!(where_sql(Dialect::Sqlite, &c, &t), Err(SqlError::UnknownColumn(column.into())));
+    }
+}
+#[test]
 fn edit_statements() {
     assert_eq!(
         update_sql(

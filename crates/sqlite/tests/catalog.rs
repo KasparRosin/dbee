@@ -17,7 +17,7 @@ fn tr(name: &str) -> TableRef {
 
 async fn open_file(file: &Path, create_file: bool) -> SqliteConnection {
     let c = ConnectionConfig { name: "test sqlite".into(), kind: DbKind::Sqlite, file: Some(file.to_path_buf()), ..ConnectionConfig::default() };
-    let t = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Browse, create_file };
+    let t = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Browse, create_file, own_file_only: false };
     connect(t).await.unwrap_or_else(|e| panic!("open {}: {e}", file.display()))
 }
 

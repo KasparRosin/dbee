@@ -147,7 +147,8 @@ pub struct Sort {
     pub dir: SortDir,
 }
 
-/// The condition without the `WHERE` keyword, or `None` when nothing restricts the rows.
+/// The condition without the `WHERE` keyword, or `None` when nothing restricts the rows. A filter
+/// row names a visible column.
 pub fn where_sql(d: Dialect, cond: &Condition, table: &TableInfo) -> Result<Option<String>, SqlError> {
     match cond {
         Condition::None => Ok(None),
@@ -177,7 +178,7 @@ fn raw_sql(d: Dialect, raw: &str) -> Result<Option<String>, SqlError> {
 }
 
 fn filter_sql(d: Dialect, filter: &Filter, table: &TableInfo) -> Result<Option<String>, SqlError> {
-    let column = table.column(&filter.column).ok_or_else(|| SqlError::UnknownColumn(filter.column.clone()))?;
+    let column = table.visible_column(&filter.column).ok_or_else(|| SqlError::UnknownColumn(filter.column.clone()))?;
     let name = d.ident(&column.name)?;
     if !filter.op.takes_value() {
         return Ok(Some(format!("{name} {}", filter.op.symbol())));

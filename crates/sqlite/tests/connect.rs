@@ -17,7 +17,7 @@ fn config(file: &Path, read_only: bool) -> ConnectionConfig {
 }
 
 fn target(c: &ConnectionConfig) -> Target<'_> {
-    Target { config: c, password: None, tunnel: None, purpose: Purpose::Browse, create_file: false }
+    Target { config: c, password: None, tunnel: None, purpose: Purpose::Browse, create_file: false, own_file_only: false }
 }
 
 /// A fresh copy of the SQLite seed, removed when dropped.

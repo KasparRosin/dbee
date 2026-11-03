@@ -27,7 +27,16 @@ async fn open(s: &Server, password: &str, read_only: bool) -> PgConnection {
         read_only,
         ..ConnectionConfig::default()
     };
-    match connect(Target { config: &config, password: Some(password), tunnel: None, purpose: Purpose::Browse, create_file: false }).await {
+    match connect(Target {
+        config: &config,
+        password: Some(password),
+        tunnel: None,
+        purpose: Purpose::Browse,
+        create_file: false,
+        own_file_only: false,
+    })
+    .await
+    {
         Ok(c) => c,
         Err(e) => panic!("connect to {} failed: {e}", s.name),
     }

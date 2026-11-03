@@ -517,7 +517,14 @@ async fn open_connection(driver: &dyn Driver, config: &ConnectionConfig, env: &S
         None => None,
         Some(ssh) => Some(Arc::new(Tunnel::open(ssh, env, &creds.ssh, creds.trust.as_deref()).await.map_err(|e| ssh_error(&e))?)),
     };
-    let target = Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file: false };
+    let target = Target {
+        config,
+        password: creds.password.as_deref(),
+        tunnel: tunnel.clone(),
+        purpose: Purpose::Browse,
+        create_file: false,
+        own_file_only: false,
+    };
     match driver.connect(target).await {
         Ok(conn) => Ok(Opened { conn, tunnel }),
         Err(e) => {
@@ -1139,7 +1146,14 @@ mod tests {
             ..ConnectionConfig::default()
         };
         let driver = driver_for(&dbee_drivers::all(), config.kind).unwrap();
-        let target = || Target { config: &config, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false };
+        let target = || Target {
+            config: &config,
+            password: Some(&db.password),
+            tunnel: None,
+            purpose: Purpose::Browse,
+            create_file: false,
+            own_file_only: false,
+        };
         let conn = driver.connect(target()).await.unwrap();
         // No load can answer within no time at all: the first poll only sends the query.
         let started = Instant::now();

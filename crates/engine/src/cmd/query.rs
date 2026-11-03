@@ -229,7 +229,8 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
     let (conn, opened) = match via {
         Via::Open(conn) => (conn, false),
         Via::Connect { driver, config, password, tunnel } => {
-            let target = Target { config: &config, password: password.as_deref(), tunnel, purpose: Purpose::Query, create_file: false };
+            let target =
+                Target { config: &config, password: password.as_deref(), tunnel, purpose: Purpose::Query, create_file: false, own_file_only: false };
             // A connect that is stopped is dropped: nothing ran on it yet.
             tokio::select! {
                 connected = driver.connect(target) => match connected {

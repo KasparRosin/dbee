@@ -245,9 +245,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             note(&mut top, tags, &why, info.and_then(|i| i.no_edit_reason.as_deref()));
             top.add_space(2.0);
         }
-        // The filter bar: the table's columns from the schema, else the page's.
+        // The filter bar: the table's visible columns from the schema, else the page's.
         let columns: Vec<(&str, &str)> = match (info, tab.data.as_deref()) {
-            (Some(i), _) => i.columns.iter().map(|c| (c.name.as_str(), c.type_sql.as_str())).collect(),
+            (Some(i), _) => i.visible_columns().map(|c| (c.name.as_str(), c.type_sql.as_str())).collect(),
             (None, Some(d)) => d.columns.iter().map(|c| (c.name.as_str(), c.type_label.as_str())).collect(),
             (None, None) => Vec::new(),
         };

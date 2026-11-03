@@ -3,8 +3,8 @@
 //!
 //! - User schemas first: `public` first and open, or without `public` the first user schema
 //!   open, the others closed. Each lists its tables, views and materialized views, each kind
-//!   with its own icon ([`crate::icons`]). A table's chevron shows its columns with their types,
-//!   and a key icon on primary and foreign key columns.
+//!   with its own icon ([`crate::icons`]). A table's chevron shows its visible columns with their
+//!   types, and a key icon on primary and foreign key columns.
 //! - The system schemas (`pg_catalog`, `information_schema`, `pg_toast…`) sit in one group at the
 //!   bottom, closed, and each closed inside it.
 //! - The filter keeps the tables whose name or `schema.name` contains it, ignoring case; while it
@@ -333,7 +333,7 @@ impl Tree {
             let expanded = self.expanded.contains(&info.table);
             rows.push(Row::Table { s, t, open: expanded, system }, format!("tree-table-{}.{}", schema.name, info.table.name));
             if expanded {
-                for (c, col) in info.columns.iter().enumerate() {
+                for (c, col) in info.visible_columns().enumerate() {
                     rows.push(Row::Column { s, t, c, system }, format!("tree-column-{}.{}.{}", schema.name, info.table.name, col.name));
                 }
             }
@@ -586,7 +586,7 @@ fn draw_row(
         }
         Row::Column { s, t: ti, c, .. } => {
             let Some(info) = catalog.schemas.get(s).and_then(|x| x.tables.get(ti)) else { return Click::None };
-            let Some(col) = info.columns.get(c) else { return Click::None };
+            let Some(col) = info.visible_columns().nth(c) else { return Click::None };
             let key = if info.primary_key.contains(&col.name) {
                 Some("primary")
             } else if info.fk_for(&col.name).is_some() {
