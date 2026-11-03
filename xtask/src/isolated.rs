@@ -21,6 +21,9 @@
 //! server's port and the sshd's, on `127.0.0.1` and on `localhost`, and `127.0.0.1:1` for error
 //! demos. Without a readable `env.json` it is `127.0.0.1:1` alone, and a warning says so. dbee
 //! refuses every other target of a test, an open or a reconnect before any network I/O.
+//! [`DIRS_VAR`] lists the only folders a database file may lie in ([`allowed_dirs`]): the
+//! throwaway home and `target/`. While it is set, dbee also keeps a connection's SQL from opening
+//! any other file (SQLite's `ATTACH` and `VACUUM INTO`).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -62,6 +65,15 @@ pub fn parse_args(args: &[&str]) -> Result<Options, String> {
 /// The child's variable with the allowed targets, `host:port,host:port` (read by dbee's
 /// `main.rs`).
 pub const ALLOW_VAR: &str = "DBEE_ALLOW_TARGETS";
+
+/// The child's variable with the folders a database file may lie in, joined as the system joins
+/// paths (read by dbee's `main.rs`).
+pub const DIRS_VAR: &str = "DBEE_ALLOW_DIRS";
+
+/// The folders an isolated run's database files may lie in: its throwaway `home` and `target/`.
+pub fn allowed_dirs(root: &Path, home: &Path) -> Vec<PathBuf> {
+    vec![home.to_path_buf(), root.join("target")]
+}
 
 /// Port 1, where nothing listens: a connection error to show, always allowed.
 const ERROR_DEMO: (&str, u16) = ("127.0.0.1", 1);
@@ -173,6 +185,8 @@ pub fn command(root: &Path, port: u16, exe: &Path, rest: &[String], allowed: &[(
         .env("DBEE_SECRET_STORE", "memory")
         .env("DBEE_CLIPBOARD", "memory")
         .env(ALLOW_VAR, allow_list(allowed))
+        // A folder whose path holds the separator cannot be listed: then no folder is allowed.
+        .env(DIRS_VAR, std::env::join_paths(allowed_dirs(root, &home)).unwrap_or_default())
         .env_remove("SSH_AUTH_SOCK")
         .env_remove("DBEE_CONTROL_PORT");
     c
@@ -194,11 +208,12 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), String> {
         );
     }
     eprintln!(
-        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{}, connections only to {}",
+        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{}, connections only to {}, files only in {}",
         home.display(),
         if testdb.is_some() { "with the test servers' SSH key and host" } else { "no test servers" },
         o.port,
-        allow_list(&allowed)
+        allow_list(&allowed),
+        allowed_dirs(root, &home).iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
     );
     let status = command(root, o.port, &exe, &o.rest, &allowed).status().map_err(|e| format!("{}: {e}", exe.display()))?;
     if status.success() { Ok(()) } else { Err(format!("dbee exited with {status}")) }
@@ -288,6 +303,9 @@ mod tests {
         assert_eq!(env_of(&c, "SSH_AUTH_SOCK"), Some(None), "the agent socket is removed");
         assert_eq!(env_of(&c, "DBEE_SECRET_STORE"), Some(Some(OsStr::new("memory"))));
         assert_eq!(env_of(&c, "DBEE_CONTROL_PORT"), Some(None));
+        let dirs = std::env::join_paths([home.clone(), root.join("target")]).unwrap();
+        assert_eq!(env_of(&c, DIRS_VAR), Some(Some(dirs.as_os_str())), "files only in the throwaway home and target/");
+        assert_eq!(DIRS_VAR, "DBEE_ALLOW_DIRS");
         let args: Vec<&OsStr> = c.get_args().collect();
         assert_eq!(args, vec![OsStr::new("--control"), OsStr::new("7979"), OsStr::new("--x")]);
         assert_eq!(c.get_current_dir(), Some(root));

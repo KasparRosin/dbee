@@ -22,8 +22,9 @@
 //! UI thread; writes (`connection.save`, `savePassword`) run on the caller's thread with the
 //! saved-connection change they belong to.
 //!
-//! An isolated run's list of allowed targets ([`crate::allowed`]) is checked by test, open and
-//! reconnect before anything else touches the network.
+//! An isolated run's allowed targets and folders ([`crate::allowed`]) are checked by test, open
+//! and reconnect before the connection is tried; while it has allowed folders, the connections'
+//! SQL may open no file but their database's own (`dbee_driver::Target::own_file_only`).
 //!
 //! Connections open through the session's driver for the config's database type
 //! ([`SessionOptions::drivers`](crate::SessionOptions::drivers)); test, open and reconnect refuse
@@ -54,7 +55,7 @@ use serde::Deserialize as _;
 use serde_json::json;
 
 use super::{CommandSpec, LOST, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
-use crate::allowed::check_target;
+use crate::allowed;
 use crate::state::{Connected, Credentials, server_text};
 use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
 
@@ -213,15 +214,14 @@ fn parse_config(params: &Json, key: &str) -> Result<Option<ConnectionConfig>, En
     ConnectionConfig::deserialize(v).map(Some).map_err(|e| bad(format!("`{key}` is not a connection: {e}")))
 }
 
-/// `config` for a command that connects or saves: it must name its `host` (so a bare `{}` can
-/// never reach the default `localhost:5432`) and be valid.
+/// `config` for a command that connects or saves: a server's must name its `host` (so a bare `{}`
+/// can never reach the default `localhost:5432`), and it must be valid (a file's names its file).
 fn connect_config(params: &Json) -> Result<Option<ConnectionConfig>, EngineError> {
-    if let Some(v) = params.get("config").filter(|v| !v.is_null())
-        && !v.get("host").is_some_and(Json::is_string)
-    {
+    let names_host = params.get("config").is_some_and(|v| v.get("host").is_some_and(Json::is_string));
+    let Some(config) = parse_config(params, "config")? else { return Ok(None) };
+    if !config.kind.uses_file() && !names_host {
         return Err(bad("`config` must name its `host`"));
     }
-    let Some(config) = parse_config(params, "config")? else { return Ok(None) };
     config.validate().map_err(|e| bad(format!("`config`: {e}")))?;
     Ok(Some(config))
 }
@@ -511,20 +511,28 @@ impl Opened {
     }
 }
 
-/// Opens the tunnel (when the config has one) and a connection through it with `driver`.
-async fn open_connection(driver: &dyn Driver, config: &ConnectionConfig, env: &SshEnv, creds: &Credentials) -> Result<Opened, EngineError> {
+/// Whether this run may reach `config` (an isolated run's allowed targets and folders,
+/// [`allowed`]); `Ok` says whether the connection's SQL may open no file but its database's own.
+fn may_reach(s: &Session, config: &ConnectionConfig) -> Result<bool, EngineError> {
+    allowed::check(s.allowed_targets.as_deref(), s.allowed_dirs.as_deref(), config)?;
+    Ok(s.allowed_dirs.is_some())
+}
+
+/// Opens the tunnel (when the config has one) and a connection through it with `driver`; with
+/// `own_file_only`, one whose SQL may open no file but its database's own.
+async fn open_connection(
+    driver: &dyn Driver,
+    config: &ConnectionConfig,
+    own_file_only: bool,
+    env: &SshEnv,
+    creds: &Credentials,
+) -> Result<Opened, EngineError> {
     let tunnel = match &config.ssh {
         None => None,
         Some(ssh) => Some(Arc::new(Tunnel::open(ssh, env, &creds.ssh, creds.trust.as_deref()).await.map_err(|e| ssh_error(&e))?)),
     };
-    let target = Target {
-        config,
-        password: creds.password.as_deref(),
-        tunnel: tunnel.clone(),
-        purpose: Purpose::Browse,
-        create_file: false,
-        own_file_only: false,
-    };
+    let target =
+        Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file: false, own_file_only };
     match driver.connect(target).await {
         Ok(conn) => Ok(Opened { conn, tunnel }),
         Err(e) => {
@@ -587,10 +595,11 @@ fn catalog_error(e: CatalogLoad) -> EngineError {
 async fn connect_and_load(
     driver: &dyn Driver,
     config: &ConnectionConfig,
+    own_file_only: bool,
     env: &SshEnv,
     creds: &Credentials,
 ) -> Result<(Opened, Catalog), EngineError> {
-    let opened = open_connection(driver, config, env, creds).await?;
+    let opened = open_connection(driver, config, own_file_only, env, creds).await?;
     match load_catalog_within(opened.conn.as_ref(), CATALOG_TIMEOUT).await {
         Ok(catalog) => Ok((opened, catalog)),
         Err(e) => {
@@ -765,14 +774,14 @@ fn ssh_key(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 /// screen and the lists stay as they are. A trusted unknown host key is learned.
 fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = target_config(s, params)?;
-    check_target(s.allowed_targets.as_deref(), &config)?;
+    let own_file_only = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let creds = given(params)?;
     let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(TEST, async move {
         let creds = fill_from_store(creds, store, &config, allowed).await;
-        let result = match open_connection(driver.as_ref(), &config, &env, &creds).await {
+        let result = match open_connection(driver.as_ref(), &config, own_file_only, &env, &creds).await {
             Ok(opened) => {
                 let info = opened.conn.info();
                 let r = json!({ "server": server_text(info), "via": opened.via(), "warnings": info.warnings });
@@ -807,7 +816,7 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         return Err(EngineError::Busy("a connection is being opened".into()));
     }
     let mut config = target_config(s, params)?;
-    check_target(s.allowed_targets.as_deref(), &config)?;
+    let own_file_only = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let typed = given(params)?;
     let keep = p::bool_or(params, "savePassword", false)?;
@@ -818,7 +827,7 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(OPEN, async move {
         let creds = fill_from_store(typed.clone(), store, &config, allowed).await;
-        let result = connect_and_load(driver.as_ref(), &config, &env, &creds).await;
+        let result = connect_and_load(driver.as_ref(), &config, own_file_only, &env, &creds).await;
         let typed = keep.then_some(typed);
         let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds, result, typed));
         apply
@@ -908,14 +917,14 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     creds.ssh.passphrase = answers.ssh.passphrase.or(creds.ssh.passphrase);
     creds.trust = answers.trust.or(creds.trust);
     let config = c.config.clone();
-    check_target(s.allowed_targets.as_deref(), &config)?;
+    let own_file_only = may_reach(s, &config)?;
     let old = Arc::clone(&c.browse);
     let driver = driver_for(&s.drivers, config.kind)?;
     let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(RECONNECT, async move {
         let creds = fill_from_store(creds, store, &config, allowed).await;
-        let result = connect_and_load(driver.as_ref(), &config, &env, &creds).await;
+        let result = connect_and_load(driver.as_ref(), &config, own_file_only, &env, &creds).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, &old, creds, result));
         apply
     });

@@ -41,8 +41,10 @@ pub fn update_sql(d: Dialect, table: &TableInfo, key: &[(&ColumnInfo, &str)], ch
     Ok(format!("UPDATE {} SET {} WHERE {}", d.table(&table.table)?, sets.join(", "), key_sql(d, key)?))
 }
 
+/// `INSERT` of `values`. A column that is not visible is left out: the engine fills it (a rowid).
 pub fn insert_sql(d: Dialect, table: &TableInfo, values: &[(&ColumnInfo, &NewValue)]) -> Result<String, SqlError> {
     let target = d.table(&table.table)?;
+    let values: Vec<&(&ColumnInfo, &NewValue)> = values.iter().filter(|(c, _)| table.visible_column(&c.name).is_some()).collect();
     if values.is_empty() {
         return Ok(d.insert_defaults(&target));
     }

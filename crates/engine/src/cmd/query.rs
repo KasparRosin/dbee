@@ -172,7 +172,7 @@ enum Via {
     /// The session's query connection.
     Open(Arc<dyn Connection>),
     /// None yet: the job opens one as the browse connection was opened.
-    Connect { driver: Arc<dyn Driver>, config: Box<ConnectionConfig>, password: Option<String>, tunnel: Option<Arc<Tunnel>> },
+    Connect { driver: Arc<dyn Driver>, config: Box<ConnectionConfig>, password: Option<String>, tunnel: Option<Arc<Tunnel>>, own_file_only: bool },
 }
 
 /// Why a run stopped early: at statement `statement` (0-based), with the byte offset in the tab
@@ -228,9 +228,9 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
     }
     let (conn, opened) = match via {
         Via::Open(conn) => (conn, false),
-        Via::Connect { driver, config, password, tunnel } => {
+        Via::Connect { driver, config, password, tunnel, own_file_only } => {
             let target =
-                Target { config: &config, password: password.as_deref(), tunnel, purpose: Purpose::Query, create_file: false, own_file_only: false };
+                Target { config: &config, password: password.as_deref(), tunnel, purpose: Purpose::Query, create_file: false, own_file_only };
             // A connect that is stopped is dropped: nothing ran on it yet.
             tokio::select! {
                 connected = driver.connect(target) => match connected {
@@ -520,6 +520,7 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             config: Box::new(c.config.clone()),
             password: c.credentials.password.clone(),
             tunnel: c.tunnel.clone(),
+            own_file_only: s.allowed_dirs.is_some(),
         },
     };
     let generation = Arc::downgrade(&c.browse);
@@ -643,7 +644,7 @@ mod tests {
         let db = dbee_testkit::require_testdb!();
         let home = dbee_testkit::temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
         let ssh = SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None };
-        let options = SessionOptions { config_dir: None, secrets: None, ssh, notify: None, allowed_targets: None, drivers: dbee_drivers::all() };
+        let options = SessionOptions { ssh, drivers: dbee_drivers::all(), ..SessionOptions::default() };
         let mut s = Session::new(options).unwrap();
         let pg14 = db.server("pg14").unwrap();
         let config = ConnectionConfig {
@@ -682,8 +683,13 @@ mod tests {
             ..ConnectionConfig::default()
         };
         let driver = driver_for(&dbee_drivers::all(), config.kind).unwrap();
-        let via =
-            || Via::Connect { driver: Arc::clone(&driver), config: Box::new(config.clone()), password: Some(db.password.clone()), tunnel: None };
+        let via = || Via::Connect {
+            driver: Arc::clone(&driver),
+            config: Box::new(config.clone()),
+            password: Some(db.password.clone()),
+            tunnel: None,
+            own_file_only: false,
+        };
         let text = "select repeat('x', 60) as a; select repeat('y', 60) as b; select 'z' as c".to_owned();
         let ranges = lexer::statements(Dialect::Postgres, &text);
         let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();

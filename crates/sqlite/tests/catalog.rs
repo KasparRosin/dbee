@@ -90,8 +90,9 @@ async fn shop_tables_with_keys() {
     assert_eq!(ship.foreign_keys[0].columns, ["order_id", "line_no"]);
     assert_eq!(ship.foreign_keys[0].target_columns, ["order_id", "line_no"]);
     assert_eq!(ship.foreign_keys[0].target, tr("order_items"));
+    // No key of its own: keyed by its rowid.
     let no_key = table(&cat, "no_key");
-    assert!(no_key.row_key().is_none() && no_key.primary_key.is_empty() && no_key.unique_keys.is_empty());
+    assert_eq!((no_key.primary_key.clone(), no_key.unique_keys.len()), (strings(&["rowid"]), 0));
     assert_eq!(table(&cat, "events").kind, RelKind::Table);
     for view in ["order_totals", "customer_counts"] {
         let v = table(&cat, view);
@@ -180,7 +181,7 @@ async fn classes_as_a_query_gives_them() {
         let query: Vec<(&str, &str, &str, TypeClass)> =
             r.columns.iter().map(|c| (c.name.as_str(), c.base_type.as_str(), c.type_label.as_str(), c.class)).collect();
         let catalog: Vec<(&str, &str, &str, TypeClass)> =
-            t.columns.iter().map(|c| (c.name.as_str(), c.base_type.as_str(), c.type_sql.as_str(), c.class)).collect();
+            t.visible_columns().map(|c| (c.name.as_str(), c.base_type.as_str(), c.type_sql.as_str(), c.class)).collect();
         // A view's column over an expression has no declared type in either.
         assert_eq!(query, catalog, "{}", t.table.name);
         compared += 1;
@@ -264,8 +265,10 @@ async fn odd_identifiers_survive() {
     let fk = odd.fk_for("Other Ödd id").expect("fk");
     assert_eq!((fk.target.clone(), fk.target_columns.clone()), (tr("Other Ödd"), strings(&["id"])));
     assert_eq!(table(&cat, "Other Ödd").primary_key, ["id"]);
-    // A real column named rowid.
-    assert_eq!(names(&table(&cat, "rowid_taken").columns, |c| &c.name), ["rowid", "note"]);
+    // A real column named rowid: the key takes the next name.
+    let taken = table(&cat, "rowid_taken");
+    assert_eq!(taken.columns.iter().map(|c| (c.name.as_str(), c.hidden)).collect::<Vec<_>>(), [("_rowid_", true), ("rowid", false), ("note", false)]);
+    assert_eq!(taken.primary_key, ["_rowid_"]);
 }
 
 #[tokio::test]
@@ -295,4 +298,70 @@ async fn names_with_quotes_and_brackets_survive() {
     let bracket = table(&cat, "brack]et [x");
     assert_eq!(bracket.primary_key, ["k"]);
     assert_eq!(bracket.fk_for("it's id").map(|f| (f.target.clone(), f.target_columns.clone())), Some((tr("it's"), strings(&["id"]))));
+}
+
+#[tokio::test]
+async fn a_table_without_a_key_is_keyed_by_a_hidden_rowid() {
+    let (_seed, conn) = seeded().await;
+    let cat = load(&conn).await;
+    let notes = table(&cat, "notes_nokey");
+    let rowid = &notes.columns[0];
+    assert_eq!(
+        (rowid.name.as_str(), rowid.class, rowid.hidden, rowid.not_null, rowid.has_default, rowid.generated),
+        ("rowid", TypeClass::Number, true, true, true, Generated::No)
+    );
+    assert_eq!(names(&notes.columns, |c| &c.name), ["rowid", "title", "body"]);
+    assert_eq!(notes.visible_columns().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["title", "body"]);
+    assert_eq!((notes.primary_key.clone(), notes.no_edit_reason.clone()), (strings(&["rowid"]), None));
+    assert_eq!(notes.row_key().map(|k| k.len()), Some(1));
+}
+
+#[tokio::test]
+async fn which_tables_get_the_rowid_and_why_the_others_take_no_edits() {
+    let (_file, conn) = Fresh::with(
+        "CREATE TABLE plain (a TEXT); \
+         CREATE TABLE cased (\"ROWID\" TEXT, \"_Rowid_\" TEXT); \
+         CREATE TABLE every_name (RowId TEXT, \"_ROWID_\" TEXT, Oid TEXT); \
+         CREATE TABLE nullable_unique (a TEXT UNIQUE, b TEXT); \
+         CREATE TABLE strict_unique (a TEXT NOT NULL UNIQUE, b TEXT); \
+         CREATE TABLE int_key (id INTEGER PRIMARY KEY, b TEXT); \
+         CREATE TABLE text_key (k TEXT PRIMARY KEY, b TEXT); \
+         CREATE TABLE no_rowid (k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID; \
+         CREATE TABLE generated (a INTEGER, rowid INTEGER AS (a * 2)); \
+         CREATE VIEW plain_view AS SELECT a FROM plain; \
+         CREATE VIRTUAL TABLE docs USING fts5(title, body)",
+    )
+    .await;
+    let cat = load(&conn).await;
+    let shape = |name: &str| {
+        let t = table(&cat, name);
+        let columns: Vec<String> = t.columns.iter().map(|c| if c.hidden { format!("({})", c.name) } else { c.name.clone() }).collect();
+        (columns, t.primary_key.clone(), t.row_key().map(|k| k.iter().map(|c| c.name.clone()).collect::<Vec<_>>()))
+    };
+    let s = |v: &[&str]| strings(v);
+    assert_eq!(shape("plain"), (s(&["(rowid)", "a"]), s(&["rowid"]), Some(s(&["rowid"]))));
+    // The names are compared ignoring case, as SQLite reads them.
+    assert_eq!(shape("cased"), (s(&["(oid)", "ROWID", "_Rowid_"]), s(&["oid"]), Some(s(&["oid"]))));
+    // A generated column takes its name too.
+    assert_eq!(shape("generated"), (s(&["(_rowid_)", "a", "rowid"]), s(&["_rowid_"]), Some(s(&["_rowid_"]))));
+    // A unique key whose columns may be NULL is no key.
+    assert_eq!(shape("nullable_unique"), (s(&["(rowid)", "a", "b"]), s(&["rowid"]), Some(s(&["rowid"]))));
+    // A table with a key of its own keeps it.
+    assert_eq!(shape("strict_unique"), (s(&["a", "b"]), s(&[]), Some(s(&["a"]))));
+    assert_eq!(shape("int_key"), (s(&["id", "b"]), s(&["id"]), Some(s(&["id"]))));
+    assert_eq!(shape("text_key"), (s(&["k", "b"]), s(&["k"]), Some(s(&["k"]))));
+    assert_eq!(shape("no_rowid"), (s(&["k", "v"]), s(&["k"]), Some(s(&["k"]))));
+    for name in ["plain", "cased", "generated", "nullable_unique", "strict_unique", "int_key", "text_key", "no_rowid"] {
+        assert_eq!(table(&cat, name).no_edit_reason, None, "{name}");
+    }
+    // Columns that take every name of the row id: no key, and the reason in plain words.
+    assert_eq!(shape("every_name"), (s(&["RowId", "_ROWID_", "Oid"]), s(&[]), None));
+    let why = table(&cat, "every_name").no_edit_reason.clone().unwrap_or_default();
+    assert!(why.starts_with("This table has no key, and its columns use every name SQLite gives the row id (rowid, _rowid_, oid)"), "{why}");
+    // A view is read-only as on every engine; a virtual table says why it is.
+    assert_eq!(shape("plain_view"), (s(&["a"]), s(&[]), None));
+    assert_eq!(table(&cat, "plain_view").no_edit_reason, None);
+    assert_eq!(shape("docs"), (s(&["title", "body", "(docs)", "(rank)"]), s(&[]), None));
+    let why = table(&cat, "docs").no_edit_reason.clone().unwrap_or_default();
+    assert!(why.starts_with("This is a virtual table") && why.contains("query tab"), "{why}");
 }

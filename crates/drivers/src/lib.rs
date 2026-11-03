@@ -9,7 +9,7 @@ use dbee_driver::Drivers;
 
 /// Every driver dbee ships.
 pub fn all() -> Drivers {
-    Drivers::new(vec![Arc::new(dbee_pg::PgDriver), Arc::new(dbee_mysql::MySqlDriver)])
+    Drivers::new(vec![Arc::new(dbee_pg::PgDriver), Arc::new(dbee_mysql::MySqlDriver), Arc::new(dbee_sqlite::SqliteDriver)])
 }
 
 #[cfg(test)]
@@ -31,11 +31,10 @@ mod tests {
     }
 
     #[test]
-    fn postgres_mysql_and_mariadb_have_their_drivers() {
-        for kind in [DbKind::Postgres, DbKind::MySql, DbKind::MariaDb] {
+    fn every_database_type_has_its_driver() {
+        for kind in DbKind::ALL {
             assert!(all().for_kind(kind).is_some(), "{kind:?}");
-            assert!(all().kinds().contains(&kind), "{kind:?}");
         }
-        assert!(all().for_kind(DbKind::Sqlite).is_none(), "SQLite's driver comes in M2.14");
+        assert_eq!(all().kinds(), DbKind::ALL);
     }
 }

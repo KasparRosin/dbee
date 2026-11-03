@@ -591,6 +591,7 @@ fn window_keystrokes(db: &TestDb, text: &str, keys: usize) -> (Duration, Duratio
         ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
         notify: None,
         allowed_targets: None,
+        allowed_dirs: None,
         drivers: dbee_drivers::all(),
     })
     .unwrap();
@@ -704,6 +705,7 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
         ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
         notify: None,
         allowed_targets: None,
+        allowed_dirs: None,
         drivers: dbee_drivers::all(),
     })
     .unwrap();

@@ -8,10 +8,17 @@
 //! view over a dropped table, a virtual table whose module is missing) is listed without columns.
 //! Results are text as SQLite prints them: flags `1` and `0`, numbers in decimal.
 //!
+//! **The rowid key.** An ordinary table without a primary key or a NOT NULL unique key is keyed by
+//! its rowid: a hidden leading column named by the first of `rowid`, `_rowid_` and `oid` that no
+//! column takes (ignoring ASCII case, as SQLite does). A table whose columns take all three, and a
+//! virtual table, get no key and say why ([`NO_ROW_ID`], [`VIRTUAL`]). Views and `WITHOUT ROWID`
+//! tables (which always have a primary key) get none.
+//!
 //! Limits: a catalog must never be truncated, so the queries run with `CATALOG_LIMITS`.
 
 use std::collections::HashMap;
 
+use dbee_core::TypeClass;
 use dbee_core::cell::Cell;
 use dbee_core::schema::{Catalog, ColumnInfo, Generated, RelKind, TableRef};
 use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
@@ -30,7 +37,18 @@ const SCHEMA: &str = "main";
 /// The name dbee gives a table's primary key.
 const PRIMARY_KEY: &str = "primary key";
 
-const RELATIONS: &str = "SELECT type, name FROM main.sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'";
+/// The names SQLite gives a rowid table's row id, in the order dbee picks one for the key.
+const ROW_ID_NAMES: [&str; 3] = ["rowid", "_rowid_", "oid"];
+
+/// Why a table without a key whose columns take every name of the row id takes no edits.
+const NO_ROW_ID: &str = "This table has no key, and its columns use every name SQLite gives the row id (rowid, _rowid_, oid), so the grid can't tell its rows apart; use a query tab to change it.";
+
+/// Why a virtual table takes no edits.
+const VIRTUAL: &str = "This is a virtual table, whose module decides what a write does, so the grid doesn't edit it; use a query tab to change it.";
+
+/// A virtual table, like a view, has no root page of its own.
+const RELATIONS: &str =
+    "SELECT type, name, coalesce(rootpage, 0) = 0 FROM main.sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'";
 
 /// `sqlite_stat1` exists once `ANALYZE` ran.
 const HAS_STAT1: &str = "SELECT count(*) FROM main.sqlite_schema WHERE type = 'table' AND name = 'sqlite_stat1'";
@@ -62,6 +80,10 @@ struct Relation {
     kind: RelKind,
     /// SQLite could read its columns.
     read: bool,
+    /// A virtual table: its module serves the rows.
+    is_virtual: bool,
+    /// Why the grid takes no edits of it, when the catalog knows.
+    no_edit_reason: Option<&'static str>,
     /// The columns as declared, each with its place in the primary key (0: none).
     columns: Vec<(ColumnInfo, u32)>,
     /// The unique keys: an index's name, and its columns in key order.
@@ -83,6 +105,13 @@ impl Relation {
     /// The column named `name` as SQLite finds it, ignoring ASCII case: its own spelling.
     fn column(&self, name: &str) -> Option<&str> {
         self.columns.iter().map(|(c, _)| c.name.as_str()).find(|c| c.eq_ignore_ascii_case(name))
+    }
+
+    /// A primary key, or a unique key whose columns are all NOT NULL (as `TableInfo::row_key`
+    /// reads them).
+    fn has_key(&self) -> bool {
+        let not_null = |name: &String| self.columns.iter().any(|(c, _)| c.name == *name && c.not_null);
+        self.columns.iter().any(|(_, at)| *at > 0) || self.unique.iter().any(|(_, columns)| columns.iter().all(not_null))
     }
 
     /// Column `seq` (0-based) of the primary key.
@@ -107,7 +136,8 @@ fn rows(s: &mut Session, running: &Running) -> Result<CatalogBuilder, DbError> {
             "view" => RelKind::View,
             _ => return Err(bad("relation type")),
         };
-        relations.push(relation(s, running, owned(&row, 1, "relation name")?, kind)?);
+        let is_virtual = kind == RelKind::Table && flag(&row, 2, "virtual table")?;
+        relations.push(relation(s, running, owned(&row, 1, "relation name")?, kind, is_virtual)?);
     }
     let unread = relations.iter().filter(|r| !r.read).count();
     if unread > 0 {
@@ -118,7 +148,8 @@ fn rows(s: &mut Session, running: &Running) -> Result<CatalogBuilder, DbError> {
     catalog.schema(SCHEMA);
     for r in &relations {
         let estimated_rows = if r.kind == RelKind::Table { estimates.get(&r.table.name.to_ascii_lowercase()).copied() } else { None };
-        catalog.table(TableRow { table: r.table.clone(), kind: r.kind, estimated_rows, no_edit_reason: None });
+        let no_edit_reason = r.no_edit_reason.map(str::to_owned);
+        catalog.table(TableRow { table: r.table.clone(), kind: r.kind, estimated_rows, no_edit_reason });
         for (i, (column, key)) in r.columns.iter().enumerate() {
             let position = u32::try_from(i).map_err(|_| bad("column position"))?;
             catalog.column(ColumnRow { table: r.table.clone(), position, column: column.clone() });
@@ -142,10 +173,19 @@ fn rows(s: &mut Session, running: &Running) -> Result<CatalogBuilder, DbError> {
 }
 
 /// The relation `name` of `kind`, with what the pragmas say of it.
-fn relation(s: &mut Session, running: &Running, name: String, kind: RelKind) -> Result<Relation, DbError> {
+fn relation(s: &mut Session, running: &Running, name: String, kind: RelKind, is_virtual: bool) -> Result<Relation, DbError> {
     let quoted = literal(&name)?;
     let table = TableRef { schema: SCHEMA.into(), name };
-    let mut r = Relation { table, kind, read: false, columns: Vec::new(), unique: Vec::new(), foreign: Vec::new() };
+    let mut r = Relation {
+        table,
+        kind,
+        read: false,
+        is_virtual,
+        no_edit_reason: is_virtual.then_some(VIRTUAL),
+        columns: Vec::new(),
+        unique: Vec::new(),
+        foreign: Vec::new(),
+    };
     let xinfo = format!("SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo({quoted}, 'main')");
     let columns = match query(s, running, &xinfo) {
         Ok(rows) => rows,
@@ -207,7 +247,27 @@ fn relation(s: &mut Session, running: &Running, name: String, kind: RelKind) -> 
             to: nullable(&row, 4, "referenced column")?.map(str::to_owned),
         });
     }
+    if !r.is_virtual && !r.has_key() {
+        match ROW_ID_NAMES.into_iter().find(|name| r.column(name).is_none()) {
+            Some(name) => r.columns.insert(0, (row_id(name), 1)),
+            None => r.no_edit_reason = Some(NO_ROW_ID),
+        }
+    }
     Ok(r)
+}
+
+/// The row id of a table keyed by it, as the column `name`: hidden, and filled by SQLite.
+fn row_id(name: &str) -> ColumnInfo {
+    ColumnInfo {
+        name: name.into(),
+        type_sql: "INTEGER".into(),
+        base_type: "INTEGER".into(),
+        class: TypeClass::Number,
+        not_null: true,
+        has_default: true,
+        generated: Generated::No,
+        hidden: true,
+    }
 }
 
 /// `r`'s foreign keys, their table and columns as SQLite resolves them: the target table and its
@@ -314,6 +374,8 @@ mod tests {
             table: TableRef { schema: SCHEMA.into(), name: "Parent".into() },
             kind: RelKind::Table,
             read: true,
+            is_virtual: false,
+            no_edit_reason: None,
             columns: vec![(column("A"), 2), (column("b"), 1)],
             unique: Vec::new(),
             foreign: Vec::new(),
@@ -329,6 +391,8 @@ mod tests {
             table: TableRef { schema: SCHEMA.into(), name: "child".into() },
             kind: RelKind::Table,
             read: true,
+            is_virtual: false,
+            no_edit_reason: None,
             columns: vec![(column("x"), 0), (column("y"), 0)],
             unique: Vec::new(),
             foreign: vec![

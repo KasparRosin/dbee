@@ -18,8 +18,9 @@ dbee-sql = { workspace = true }
 dbee-config = { workspace = true }
 dbee-driver = { workspace = true }
 tokio = { workspace = true }
-# column_decltype: a result column's declared type, which gives its class.
-rusqlite = { workspace = true, features = ["column_decltype"] }
+# column_decltype: a result column's declared type, which gives its class. hooks: the authorizer
+# that refuses ATTACH (and so VACUUM INTO) in an isolated run.
+rusqlite = { workspace = true, features = ["column_decltype", "hooks"] }
 log = { workspace = true }
 
 [dev-dependencies]

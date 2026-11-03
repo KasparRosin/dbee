@@ -290,7 +290,7 @@ fn open_returns_the_connection_server_and_tables() {
         assert!(tables > 10, "the seed has the shop tables: {r}");
         let c = s.state().connected.as_ref().unwrap();
         assert_eq!(c.catalog.table_count() as u64, tables);
-        assert!(c.catalog.table(&dbee_core::TableRef { schema: "shop".into(), name: "orders".into() }).is_some(), "{}", t.name());
+        assert!(c.catalog.table(&dbee_core::TableRef { schema: t.schema("shop").into(), name: "orders".into() }).is_some(), "{}", t.name());
         assert!(!c.lost);
         // The recent list was written to the connections file.
         let file = std::fs::read_to_string(s.home.home.join("config").join(dbee_config::store::FILE)).unwrap();
@@ -305,6 +305,10 @@ fn open_returns_the_connection_server_and_tables() {
 fn missing_password_needs_password() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file asks for no password.
+        if t.is_file() {
+            continue;
+        }
         assert_eq!(open_err(config_for(&t)).code(), "needsPassword", "{}", t.name());
     }
 }
@@ -313,6 +317,10 @@ fn missing_password_needs_password() {
 fn wrong_password_is_an_auth_error() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file asks for no password.
+        if t.is_file() {
+            continue;
+        }
         let mut s = session();
         let e = run_err(&mut s, "connection.open", json!({ "config": config_for(&t), "password": "not-the-password" }));
         assert_eq!(e.code(), "auth", "{}: {e}", t.name());
@@ -325,6 +333,10 @@ fn wrong_password_is_an_auth_error() {
 fn password_in_params_beats_the_stored_one() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file asks for no password.
+        if t.is_file() {
+            continue;
+        }
         let mut s = session();
         let id = save(&mut s, config_for(&t), Some("stale".into()));
         let e = run_err(&mut s, "connection.open", json!({ "id": id }));
@@ -358,6 +370,10 @@ fn save_password_on_open_of_a_saved_connection_turns_saving_on() {
 fn save_password_on_open_of_an_ad_hoc_config_stores_nothing() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file asks for no password.
+        if t.is_file() {
+            continue;
+        }
         let mut s = session();
         let r = open(&mut s, json!({ "config": config_for(&t), "password": pw(), "savePassword": true }));
         assert_eq!(r["secretsSaved"], false, "{r}");
@@ -383,6 +399,10 @@ fn open_or_err_after_close(s: &mut TestSession, params: Json) -> EngineError {
 fn stored_password_goes_only_to_its_own_server() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file asks for no password.
+        if t.is_file() {
+            continue;
+        }
         let mut s = session();
         let saved = ConnectionConfig { id: "shop".into(), ..config_for(&t) };
         save(&mut s, saved.clone(), Some(pw()));
@@ -555,8 +575,8 @@ fn schema_refresh_reloads_and_keeps_tabs() {
         let table = unique("t_refresh");
         let guard = scratch_table(t, &table, "CREATE TABLE {t} (id int)");
         let r = s.run_blocking("schema.refresh", json!({}), T);
-        let found =
-            s.state().connected.as_ref().unwrap().catalog.table(&dbee_core::TableRef { schema: "scratch".into(), name: table.clone() }).is_some();
+        let scratch = dbee_core::TableRef { schema: t.schema("scratch").into(), name: table.clone() };
+        let found = s.state().connected.as_ref().unwrap().catalog.table(&scratch).is_some();
         drop(guard);
         let r = r.unwrap();
         assert!(found, "{}: the refreshed catalog has the new table", t.name());
@@ -723,6 +743,10 @@ impl SecretStore for BrokenStore {
 fn without_a_secret_store_dbee_asks_each_time() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file asks for no password.
+        if t.is_file() {
+            continue;
+        }
         let mut s = session_adjusted(|o| o.secrets = None);
         assert_eq!(s.inspect()["secretStore"], Json::Null);
         let id = save(&mut s, config_for(&t), Some(pw()));
@@ -740,6 +764,10 @@ fn without_a_secret_store_dbee_asks_each_time() {
 fn a_failing_secret_store_is_not_fatal() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file asks for no password.
+        if t.is_file() {
+            continue;
+        }
         let mut s = session_adjusted(|o| o.secrets = Some(Arc::new(BrokenStore)));
         let id = save(&mut s, config_for(&t), Some(pw()));
         assert_eq!(s.state().store.saved.len(), 1, "the connection is saved without its password");
@@ -913,4 +941,81 @@ fn known_hosts_that_cannot_be_read_or_written_say_so() {
     let e = run_err(&mut s, "connection.open", json!({ "config": c, "password": pw(), "trustHostKey": fp }));
     assert_eq!((e.code(), e.data()["reason"].as_str()), ("ssh", Some("knownHosts")), "{e}");
     assert!(e.to_string().contains("known_hosts cannot be read"), "{e}");
+}
+
+/// A folder of its own under `target/`, removed when dropped.
+struct Folder(std::path::PathBuf);
+
+impl Drop for Folder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn isolated_runs_refuse_files_outside_allowed_dirs() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(dbee_testkit::TestTarget::is_file) {
+        let file = t.file().unwrap().to_path_buf();
+        let folder = file.parent().unwrap().to_path_buf();
+        let other = Folder(dbee_testkit::repo_root().join("target").join("testkit").join("allowed").join(unique("other")));
+        std::fs::create_dir_all(&other.0).unwrap();
+        let params = |path: &std::path::Path| json!({ "config": ConnectionConfig { file: Some(path.to_path_buf()), ..config_for(&t) } });
+        let mut refused = vec![
+            std::path::PathBuf::from("/etc/hosts"),
+            file.clone(),
+            other.0.join("..").join("..").join(file.strip_prefix(other.0.parent().unwrap().parent().unwrap()).unwrap()),
+        ];
+        #[cfg(unix)]
+        {
+            // A link in an allowed folder to a file outside it is refused.
+            std::os::unix::fs::symlink("/etc/hosts", other.0.join("hosts.sqlite")).unwrap();
+            std::os::unix::fs::symlink(&file, other.0.join("seed.sqlite")).unwrap();
+            refused.extend([other.0.join("hosts.sqlite"), other.0.join("seed.sqlite")]);
+        }
+        {
+            // Only `other` is allowed: the seed copy lies outside it.
+            let mut s = session_adjusted(|o| o.allowed_dirs = Some(vec![other.0.clone()]));
+            for path in &refused {
+                for id in ["connection.test", "connection.open"] {
+                    let e = s.execute(id, params(path)).unwrap_err();
+                    assert_eq!(e.code(), "config", "{id} {}: {e}", path.display());
+                    assert_eq!(e.to_string(), format!("this isolated run may only open files in its own folders; {} is not in them", path.display()));
+                    assert!(!s.busy(), "{id} started a job");
+                }
+            }
+            assert_eq!(s.inspect()["screen"], "connections");
+        }
+        {
+            // The copy's folder allowed: it opens.
+            let mut s = session_adjusted(|o| o.allowed_dirs = Some(vec![folder.clone()]));
+            s.run_blocking("connection.test", params(&file), T).unwrap();
+            open(&mut s, params(&file));
+            assert_eq!(open_table(&mut s, t.schema("shop"), "customers")["rows"], 100);
+        }
+        // No list: no limit.
+        let mut s = session();
+        open(&mut s, params(&file));
+    }
+}
+
+#[test]
+fn a_file_is_named_by_its_path_not_a_host() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(dbee_testkit::TestTarget::is_file) {
+        let mut s = session();
+        // No host, port, user or database: the type and the file are the settings.
+        let file = json!({ "kind": kind_of(&t), "file": t.file().unwrap() });
+        s.run_blocking("connection.test", json!({ "config": file }), T).unwrap();
+        open(&mut s, json!({ "config": file }));
+        s.run_blocking("connection.close", json!({}), T).unwrap();
+        let e = run_err(&mut s, "connection.open", json!({ "config": { "kind": kind_of(&t) } }));
+        assert_eq!(
+            (e.code(), e.to_string().as_str()),
+            ("badParams", "bad params for `connection.open`: `config`: invalid connection settings: file is empty")
+        );
+        // A server's settings must still name its host.
+        let e = run_err(&mut s, "connection.test", json!({ "config": { "port": 1 } }));
+        assert!(e.to_string().contains("`config` must name its `host`"), "{e}");
+    }
 }

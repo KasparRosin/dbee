@@ -31,7 +31,7 @@ fn on_each_table(mut test: impl FnMut(&TestTarget, &str, &mut TestSession)) {
         println!("on {}", t.name());
         let (name, _drop) = make_table(&t);
         let mut s = connected_to(&t);
-        assert_eq!(open_table(&mut s, "scratch", &name)["rows"], 2);
+        assert_eq!(open_table(&mut s, t.schema("scratch"), &name)["rows"], 2);
         test(&t, &name, &mut s);
     }
 }
@@ -102,7 +102,7 @@ fn copy_shows_staged_values() {
         assert_eq!(text(&r), "1\tZed\t{\"a\": 1, \"b\": 2}\t\n2\t\t\t\n3\tNew\t\t");
         assert_eq!(r["rows"], 3);
         // Nothing was written.
-        assert_eq!(q(t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "Ann");
+        assert_eq!(q(t, &format!("SELECT name FROM {}.{name} WHERE id = 1", t.schema("scratch"))), "Ann");
     });
 }
 
@@ -121,7 +121,7 @@ fn value_view_labels() {
             ),
         );
         let mut s = connected_to(&t);
-        open_table(&mut s, "scratch", &name);
+        open_table(&mut s, t.schema("scratch"), &name);
         // A JSON string holding JSON, written by dbee: its backslashes are text on every engine.
         set_cell(&mut s, 0, "js", r#""{\"a\":1}""#);
         apply(&mut s);
@@ -217,7 +217,7 @@ fn value_view_truncates_huge_values() {
         if !t.full_seed() {
             return;
         }
-        assert_eq!(run(s, "table.open", json!({ "schema": "shop", "table": "big_cell" }))["rows"], 1);
+        assert_eq!(run(s, "table.open", json!({ "schema": t.schema("shop"), "table": "big_cell" }))["rows"], 1);
         run(s, "selection.set", json!({ "anchor": [0, 1] }));
         let started = std::time::Instant::now();
         let v = s.value_view().unwrap();
@@ -287,7 +287,7 @@ fn selection_follows_the_grid() {
         }
         let (name, _drop) = make_table(&t);
         let mut s = connected_to(&t);
-        open_table(&mut s, "scratch", &name);
+        open_table(&mut s, t.schema("scratch"), &name);
         // Nothing selected: copy is disabled.
         assert_eq!(s.execute("copy.selection", json!({ "format": "tsv" })).unwrap_err().code(), "disabled");
         // A selection on a new row goes when that row does.
@@ -329,16 +329,17 @@ fn refused(s: &mut Session, format: &str) -> String {
 fn the_cap_bounds_the_copied_text() {
     let _db = require_testdb!();
     assert_eq!(COPY_MAX_BYTES, 8 * 1024 * 1024);
-    for_each_engine(|_, s| {
+    for_each_engine(|t, s| {
+        let x = |n: usize| t.repeat_sql("'x'", n as u64);
         // TSV of `a`, `b`, `c` is `<a>\ty\t`: three bytes more than `a`.
-        query_all(s, &format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES - 3));
+        query_all(s, &format!("select {} as a, 'y' as b, null as c", x(COPY_MAX_BYTES - 3)));
         let r = copy(s, "tsv");
         assert_eq!((text(&r).len(), r["rows"].clone(), r["columns"].clone()), (COPY_MAX_BYTES, json!(1), json!(3)));
         // One byte more of text: refused, though the cells alone fit.
-        query_all(s, &format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES - 2));
+        query_all(s, &format!("select {} as a, 'y' as b, null as c", x(COPY_MAX_BYTES - 2)));
         assert_eq!(refused(s, "tsv"), "the copy as TSV would pass the 8 MiB a copy can take (0 of the selected rows fit); select fewer rows");
         // Cells over the cap are refused before anything is rendered, in every format.
-        query_all(s, &format!("select repeat('x', {}) as a, 'y' as b, null as c", COPY_MAX_BYTES));
+        query_all(s, &format!("select {} as a, 'y' as b, null as c", x(COPY_MAX_BYTES)));
         for format in ["tsv", "tsvHeader", "csv", "json", "markdown"] {
             assert_eq!(
                 refused(s, format),
@@ -359,22 +360,44 @@ fn escaping_nulls_and_names_count_toward_the_cap() {
         // JSON writes a control character as six bytes: `[\n  {"a": "` + 6k + `"}\n]` is 6k + 15.
         // The control characters are in the statement's text, which every engine takes.
         let k = (COPY_MAX_BYTES - 15) / 6;
-        query_all(s, &format!("select repeat('\u{1}', {k}) as a"));
+        let times = |text: &str, n: usize| t.repeat_sql(text, n as u64);
+        query_all(s, &format!("select {} as a", times("'\u{1}'", k)));
         assert_eq!(text(&copy(s, "json")).len(), 6 * k + 15, "{}", t.name());
-        query_all(s, &format!("select repeat('\u{1}', {}) as a", k + 1));
+        query_all(s, &format!("select {} as a", times("'\u{1}'", k + 1)));
         assert_eq!(refused(s, "json"), "the copy as JSON would pass the 8 MiB a copy can take (0 of the selected rows fit); select fewer rows");
         // Markdown writes a line break as `<br>`: `| a |\n|---|\n| ` + 4k + ` |` is 4k + 16.
         let k = (COPY_MAX_BYTES - 16) / 4;
-        query_all(s, &format!("select repeat('\n', {k}) as a"));
+        query_all(s, &format!("select {} as a", times("'\n'", k)));
         assert_eq!(text(&copy(s, "markdown")).len(), COPY_MAX_BYTES);
-        query_all(s, &format!("select repeat('\n', {}) as a", k + 1));
+        query_all(s, &format!("select {} as a", times("'\n'", k + 1)));
         assert!(refused(s, "markdown").starts_with("the copy as Markdown would pass"));
         // 10,000 rows of 300 NULLs hold no cell text, but as JSON every NULL names its column.
         let nulls: Vec<String> = (1..=300).map(|i| format!("null as c{i:03}")).collect();
-        query_all(s, &format!("select {} from shop.big_rows where id <= 10000", nulls.join(", ")));
+        query_all(s, &format!("select {} from {}.big_rows where id <= 10000", nulls.join(", "), t.schema("shop")));
         let why = refused(s, "json");
         assert!(why.starts_with("the copy as JSON would pass the 8 MiB a copy can take (") && why.contains(" of the selected rows fit)"), "{why}");
         // As TSV they are tabs: 299 a row, and the line breaks between rows.
         assert_eq!(text(&copy(s, "tsv")).len(), 10_000 * 299 + 9_999);
+    });
+}
+
+#[test]
+fn copy_and_value_view_skip_the_hidden_key() {
+    let _db = require_testdb!();
+    for_sqlite(|t, s| {
+        open_table(s, t.schema("shop"), "notes_nokey");
+        let r = run(s, "selection.all", json!({}));
+        assert_eq!((r["rows"].clone(), r["columns"].clone()), (json!(3), json!(2)));
+        assert_eq!(text(&copy(s, "tsvHeader")), "title\tbody\nfirst\ta note\nsecond\tanother note\nsecond\tanother note");
+        for format in ["csv", "json", "markdown"] {
+            let copied = copy(s, format);
+            assert!(!text(&copied).contains("rowid"), "{format}: {}", text(&copied));
+        }
+        run(s, "selection.set", json!({ "anchor": [0, 0] }));
+        assert_eq!(run(s, "value.show", json!({}))["column"], "title");
+        assert_eq!(s.inspect()["value"]["column"], "title");
+        run(s, "selection.set", json!({ "anchor": [0, 1] }));
+        assert_eq!(s.value_view().map(|v| v.column), Some("body".to_owned()));
+        assert_eq!(s.execute("selection.set", json!({ "anchor": [0, 2] })).unwrap_err().code(), "badParams", "no third column");
     });
 }

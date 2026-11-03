@@ -170,6 +170,17 @@ fn a_hidden_key_is_read_after_the_columns_and_never_sorted_or_filtered_on() {
     }
 }
 #[test]
+fn an_insert_never_writes_a_hidden_column() {
+    let t = table_of("main", "notes", vec![ColumnInfo { hidden: true, ..ci("rowid", "INTEGER", 'N') }, ci("body", "TEXT", 'S')], &["rowid"]);
+    let (rowid, body) = (&t.columns[0], &t.columns[1]);
+    let text = |v: &str| NewValue::Text(v.into());
+    assert_eq!(
+        insert_sql(Dialect::Sqlite, &t, &[(rowid, &text("7")), (body, &text("b"))]).unwrap(),
+        "INSERT INTO \"main\".\"notes\" (\"body\") VALUES ('b')"
+    );
+    assert_eq!(insert_sql(Dialect::Sqlite, &t, &[(rowid, &text("7"))]).unwrap(), "INSERT INTO \"main\".\"notes\" DEFAULT VALUES");
+}
+#[test]
 fn edit_statements() {
     assert_eq!(
         update_sql(

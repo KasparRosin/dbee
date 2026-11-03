@@ -1137,6 +1137,7 @@ dependencies = [
  "dbee-driver",
  "dbee-mysql",
  "dbee-pg",
+ "dbee-sqlite",
 ]
 
 [[package]]

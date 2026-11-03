@@ -37,15 +37,23 @@ fn last_payload(rows: u64) -> String {
 fn opens_first_page_of_100() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        let r = s.run_blocking("table.open", json!({"schema":"shop","table":"orders"}), T).unwrap();
+        let r = s.run_blocking("table.open", json!({ "schema": t.schema("shop"), "table": "orders" }), T).unwrap();
         assert_eq!((r["rows"].as_u64(), r["hasNext"].as_bool()), (Some(100), Some(true)));
         assert_eq!(s.inspect()["active"], r["tab"]);
         assert_eq!(s.inspect()["table"]["name"], "orders");
         let d = read(s);
         assert_eq!((rows(&d), d["page"].as_u64(), d["hasNext"].as_bool()), (100, Some(0), Some(true)));
         // The columns come from the catalog, with their types; rows in primary key order.
-        let info = s.state().connected.as_ref().unwrap().catalog.table(&TableRef { schema: "shop".into(), name: "orders".into() }).cloned().unwrap();
-        let typed: Vec<Json> = info.columns.iter().map(|c| json!(c.column())).collect();
+        let info = s
+            .state()
+            .connected
+            .as_ref()
+            .unwrap()
+            .catalog
+            .table(&TableRef { schema: t.schema("shop").into(), name: "orders".into() })
+            .cloned()
+            .unwrap();
+        let typed: Vec<Json> = info.visible_columns().map(|c| json!(c.column())).collect();
         assert_eq!(d["columns"].as_array(), Some(&typed), "{}", t.name());
         assert_eq!((&d["columns"][0]["name"], &d["columns"][0]["class"]), (&json!("id"), &json!("number")));
         assert_eq!((cell(&d, 0, "id"), cell(&d, 99, "id")), (Some("1"), Some("100")));
@@ -56,7 +64,7 @@ fn opens_first_page_of_100() {
         assert_eq!((rows(&w), cell(&w, 0, "id")), (2, Some("99")));
         assert_eq!(rows(&run(s, "table.read", json!({ "offset": 1000 }))), 0);
         // A table the catalog does not have.
-        assert_eq!(s.execute("table.open", json!({ "schema": "shop", "table": "nope" })).unwrap_err().code(), "badParams");
+        assert_eq!(s.execute("table.open", json!({ "schema": t.schema("shop"), "table": "nope" })).unwrap_err().code(), "badParams");
         assert_eq!(s.state().tabs.len(), 1);
     });
 }
@@ -75,8 +83,8 @@ fn page_columns_carry_postgres_type_names() {
 #[test]
 fn day_scenario_filters() {
     let _db = require_testdb!();
-    for_each_engine(|_, s| {
-        open_table(s, "shop", "orders");
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
         let filters = json!([
             { "column": "dealer_id", "op": "eq", "value": "42" },
             { "column": "status", "op": "eq", "value": "completed" },
@@ -113,7 +121,7 @@ fn day_scenario_filters() {
 fn filters_on_mysql() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        open_table(s, "shop", "customers");
+        open_table(s, t.schema("shop"), "customers");
         let found = |s: &mut TestSession, op: &str, value: &str| -> Vec<String> {
             run(s, "table.setFilters", json!({ "filters": [{ "column": "name", "op": op, "value": value }] }));
             let d = read(s);
@@ -135,8 +143,8 @@ fn filters_on_mysql() {
 #[test]
 fn typing_in_the_filter_bar_journals_one_entry() {
     let _db = require_testdb!();
-    for_each_engine(|_, s| {
-        open_table(s, "shop", "customers");
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "customers");
         for value in ["C", "Cu", "Customer 7"] {
             run(s, "table.setFilters", json!({ "filters": [{ "column": "name", "op": "eq", "value": value }], "apply": false }));
         }
@@ -144,7 +152,7 @@ fn typing_in_the_filter_bar_journals_one_entry() {
         run(s, "table.setFilters", json!({ "apply": true }));
         let tail: Vec<(String, Json)> = s.journal().iter().rev().take(4).rev().cloned().collect();
         let expected = vec![
-            ("table.open".to_string(), json!({ "schema": "shop", "table": "customers" })),
+            ("table.open".to_string(), json!({ "schema": t.schema("shop"), "table": "customers" })),
             ("table.setFilters".to_string(), json!({ "filters": [{ "column": "name", "op": "eq", "value": "Customer 7" }], "apply": false })),
             ("table.setFilters".to_string(), json!({ "raw": "id < 3", "apply": false })),
             ("table.setFilters".to_string(), json!({ "apply": true })),
@@ -157,14 +165,15 @@ fn typing_in_the_filter_bar_journals_one_entry() {
 fn hostile_filter_value_is_just_a_value() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        open_table(s, "shop", "customers");
-        for evil in ["x'); DROP TABLE shop.customers; --", "x\\'); DROP TABLE shop.customers; -- \\"] {
+        open_table(s, t.schema("shop"), "customers");
+        let shop = t.schema("shop");
+        for evil in [format!("x'); DROP TABLE {shop}.customers; --"), format!("x\\'); DROP TABLE {shop}.customers; -- \\")] {
             let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "name", "op": "eq", "value": evil }] }));
             assert_eq!(r["rows"], 0, "{}: {evil}", t.name());
             let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "name", "op": "like", "value": evil }] }));
             assert_eq!(r["rows"], 0, "{}: {evil}", t.name());
         }
-        assert_eq!(q(t, "SELECT count(*) FROM shop.customers"), "500");
+        assert_eq!(q(t, &format!("SELECT count(*) FROM {shop}.customers")), "500");
     });
 }
 
@@ -172,7 +181,7 @@ fn hostile_filter_value_is_just_a_value() {
 fn bad_condition_sets_tab_error_and_keeps_tab() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        open_table(s, "shop", "orders");
+        open_table(s, t.schema("shop"), "orders");
         let e = run_err(s, "table.setFilters", json!({ "raw": "nope = 1", "rawMode": true }));
         assert_eq!(e.code(), "server", "{}: {e}", t.name());
         let tab = s.inspect()["table"].clone();
@@ -192,7 +201,7 @@ fn bad_condition_sets_tab_error_and_keeps_tab() {
             json!({ "filters": [{ "column": "nope", "op": "eq", "value": "1" }] }),
             json!({ "filters": [{ "column": "id", "op": "between", "value": "1" }] }),
             json!({ "filters": [{ "column": "id", "op": "in", "value": " , " }] }),
-            json!({ "raw": "true; drop table shop.orders", "rawMode": true }),
+            json!({ "raw": format!("true; drop table {}.orders", t.schema("shop")), "rawMode": true }),
             json!({ "filters": "id = 1" }),
         ] {
             let e = s.execute("table.setFilters", bad.clone()).unwrap_err();
@@ -225,7 +234,7 @@ fn paging_on_a_million_rows() {
     for_each_engine(|t, s| {
         let n = t.big_rows();
         let last = last_page(n);
-        open_table(s, "shop", "big_rows");
+        open_table(s, t.schema("shop"), "big_rows");
         let r = page(s, json!("next"));
         assert_eq!((r["page"].as_u64(), r["rows"].as_u64(), r["hasNext"].as_bool()), (Some(1), Some(100), Some(true)));
         assert_eq!(first_id(s), 101);
@@ -263,7 +272,7 @@ fn sort_desc_then_none() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
         let n = t.big_rows();
-        open_table(s, "shop", "big_rows");
+        open_table(s, t.schema("shop"), "big_rows");
         page(s, json!("next"));
         run(s, "table.sort", json!({ "column": "id", "dir": "desc" }));
         assert_eq!(first_id(s), n as i64);
@@ -292,7 +301,7 @@ fn count_estimate_then_exact() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
         let n = t.big_rows();
-        open_table(s, "shop", "big_rows");
+        open_table(s, t.schema("shop"), "big_rows");
         let Outcome::Started(job) = s.execute("table.count", json!({})).unwrap() else { panic!("table.count starts a job") };
         let total = s.inspect()["table"]["total"].clone();
         let estimate = total.get("estimate").or_else(|| total.get("counting").and_then(|c| c.get("estimate"))).and_then(Json::as_u64);
@@ -307,7 +316,7 @@ fn count_estimate_then_exact() {
         assert_eq!(s.inspect()["table"]["total"], json!({ "counting": { "estimate": null } }));
         assert_eq!(s.wait(job, T).unwrap()["total"], json!({ "exact": 10 }));
         // A view has no estimate.
-        open_table(s, "shop", "order_totals");
+        open_table(s, t.schema("shop"), "order_totals");
         let Outcome::Started(job) = s.execute("table.count", json!({})).unwrap() else { panic!("table.count starts a job") };
         assert_eq!(s.inspect()["table"]["total"], json!({ "counting": { "estimate": null } }));
         assert_eq!(s.wait(job, T).unwrap()["total"], json!({ "exact": 500 }));
@@ -317,15 +326,15 @@ fn count_estimate_then_exact() {
 #[test]
 fn follow_foreign_key() {
     let _db = require_testdb!();
-    for_each_engine(|_, s| {
-        let orders = open_table(s, "shop", "orders")["tab"].clone();
+    for_each_engine(|t, s| {
+        let orders = open_table(s, t.schema("shop"), "orders")["tab"].clone();
         let c = cell(&read(s), 0, "customer_id").unwrap().to_owned();
         let r = run(s, "table.followForeignKey", json!({ "row": 0, "column": "customer_id" }));
         assert_eq!(r["rows"], 1);
         let i = s.inspect();
         assert_ne!(i["active"], orders);
         assert_eq!(i["active"], r["tab"]);
-        assert_eq!((i["table"]["schema"].as_str(), i["table"]["name"].as_str()), (Some("shop"), Some("customers")));
+        assert_eq!((i["table"]["schema"].as_str(), i["table"]["name"].as_str()), (Some(t.schema("shop")), Some("customers")));
         assert_eq!(i["table"]["filters"], json!([{ "column": "id", "op": "eq", "value": c }]));
         assert_eq!(cell(&read(s), 0, "id"), Some(c.as_str()));
         assert_eq!(s.state().tabs.len(), 2);
@@ -343,8 +352,8 @@ fn follow_foreign_key() {
 #[test]
 fn follow_composite_foreign_key() {
     let _db = require_testdb!();
-    for_each_engine(|_, s| {
-        open_table(s, "shop", "shipments");
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "shipments");
         let d = read(s);
         let (order, line) = (cell(&d, 0, "order_id").unwrap().to_owned(), cell(&d, 0, "line_no").unwrap().to_owned());
         let r = run(s, "table.followForeignKey", json!({ "row": 0, "column": "line_no" }));
@@ -361,18 +370,20 @@ fn follow_composite_foreign_key() {
 fn follow_null_reference_is_an_error() {
     let _db = require_testdb!();
     for t in engine_targets() {
-        let (parent, child) = (unique("t_fk_parent"), unique("t_fk_child"));
-        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS scratch.{child}"), format!("TABLE IF EXISTS scratch.{parent}")]);
+        let (sc, parent, child) = (t.schema("scratch"), unique("t_fk_parent"), unique("t_fk_child"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{child}"), format!("TABLE IF EXISTS {sc}.{parent}")]);
+        // A foreign key names its table without a schema where the engine takes none in it.
+        let referenced = if t.kind().info().one_schema.is_some() { parent.clone() } else { format!("{sc}.{parent}") };
         q(
             &t,
             &format!(
-                "CREATE TABLE scratch.{parent} (id int PRIMARY KEY); INSERT INTO scratch.{parent} VALUES (1);
-                 CREATE TABLE scratch.{child} (id int PRIMARY KEY, parent_id int, FOREIGN KEY (parent_id) REFERENCES scratch.{parent} (id));
-                 INSERT INTO scratch.{child} VALUES (1, NULL), (2, 1);"
+                "CREATE TABLE {sc}.{parent} (id int PRIMARY KEY); INSERT INTO {sc}.{parent} VALUES (1);
+                 CREATE TABLE {sc}.{child} (id int PRIMARY KEY, parent_id int, FOREIGN KEY (parent_id) REFERENCES {referenced} (id));
+                 INSERT INTO {sc}.{child} VALUES (1, NULL), (2, 1);"
             ),
         );
         let mut s = connected_to(&t);
-        open_table(&mut s, "scratch", &child);
+        open_table(&mut s, t.schema("scratch"), &child);
         let e = s.execute("table.followForeignKey", json!({ "row": 0, "column": "parent_id" })).unwrap_err();
         assert_eq!(e.code(), "badParams");
         assert!(e.to_string().contains("no reference: the value is NULL"), "{e}");
@@ -385,8 +396,8 @@ fn follow_null_reference_is_an_error() {
 #[test]
 fn next_goes_on_from_the_page_asked_for() {
     let _db = require_testdb!();
-    for_each_engine(|_, s| {
-        open_table(s, "shop", "big_rows");
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "big_rows");
         // The page shown is the only page of its filter …
         let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "le", "value": "50" }] }));
         assert_eq!((r["rows"].as_u64(), r["hasNext"].as_bool()), (Some(50), Some(false)));
@@ -406,7 +417,7 @@ fn next_stops_at_the_last_counted_page() {
     for_each_engine(|t, s| {
         let n = t.big_rows();
         let last = last_page(n);
-        open_table(s, "shop", "big_rows");
+        open_table(s, t.schema("shop"), "big_rows");
         assert_eq!(run(s, "table.count", json!({}))["total"], json!({ "exact": n }));
         assert_eq!(page(s, json!(last))["page"], last - 1);
         // The first "next" asks for the last page; the second, before it shows, stays there.
@@ -423,8 +434,8 @@ fn next_stops_at_the_last_counted_page() {
 #[test]
 fn stale_page_results_are_ignored() {
     let _db = require_testdb!();
-    for_each_engine(|_, s| {
-        open_table(s, "shop", "big_rows");
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "big_rows");
         let Outcome::Started(a) = s.execute("table.page", json!({ "to": "next" })).unwrap() else { panic!("a job") };
         // Until it arrives, the rows and their page are the ones from before.
         let d = read(s);
@@ -452,26 +463,28 @@ fn views_and_keyless_tables_are_read_only() {
     for t in engine_targets() {
         {
             let mut s = connected_to(&t);
-            open_table(&mut s, "shop", "order_totals");
+            open_table(&mut s, t.schema("shop"), "order_totals");
             let d = read(&mut s);
             assert_eq!((d["editable"].as_bool(), d["notEditableReason"].as_str()), (Some(false), Some("views are read-only")));
             // A materialized view where the engine has them, else a plain view.
-            open_table(&mut s, "shop", "customer_counts");
+            open_table(&mut s, t.schema("shop"), "customer_counts");
             let why = read(&mut s)["notEditableReason"].as_str().unwrap_or_default().to_owned();
             assert!(["views are read-only", "materialized views are read-only"].contains(&why.as_str()), "{}: {why}", t.name());
-            open_table(&mut s, "shop", "no_key");
+            // A table without a key takes no edits, unless the engine keys its rows by a row id.
+            let keyless = if t.kind().info().keyless_tables_editable { None } else { Some("no primary key or unique not-null key") };
+            open_table(&mut s, t.schema("shop"), "no_key");
             let d = read(&mut s);
-            assert_eq!((d["editable"].as_bool(), d["notEditableReason"].as_str()), (Some(false), Some("no primary key or unique not-null key")));
-            open_table(&mut s, "shop", "events");
-            assert_eq!(read(&mut s)["notEditableReason"], "no primary key or unique not-null key");
-            open_table(&mut s, "shop", "customers");
+            assert_eq!((d["editable"].as_bool(), d["notEditableReason"].as_str()), (Some(keyless.is_none()), keyless), "{}", t.name());
+            open_table(&mut s, t.schema("shop"), "events");
+            assert_eq!(read(&mut s)["notEditableReason"].as_str(), keyless);
+            open_table(&mut s, t.schema("shop"), "customers");
             assert_eq!(read(&mut s)["editable"], true);
             assert_eq!(s.inspect()["table"]["editable"], true);
         }
         let mut s = session();
         let config = dbee_config::ConnectionConfig { read_only: true, ..config_for(&t) };
         open(&mut s, json!({ "config": config, "password": pw() }));
-        open_table(&mut s, "shop", "customers");
+        open_table(&mut s, t.schema("shop"), "customers");
         let d = read(&mut s);
         assert_eq!((d["editable"].as_bool(), d["notEditableReason"].as_str()), (Some(false), Some("read-only connection")), "{}", t.name());
     }
@@ -488,7 +501,7 @@ fn myisam_table_reports_why_it_is_read_only() {
             return;
         }
         seen += 1;
-        open_table(s, "shop", "audit_log");
+        open_table(s, t.schema("shop"), "audit_log");
         let why = summary(s)["noEditReason"].as_str().unwrap_or_default().to_owned();
         assert!(why.starts_with("The MyISAM table engine can't undo a write"), "{}: {}", t.name(), summary(s));
         assert_eq!((&summary(s)["editable"], summary(s)["notEditableReason"].as_str()), (&json!(false), Some(why.as_str())));
@@ -504,7 +517,7 @@ fn myisam_table_reports_why_it_is_read_only() {
             assert_eq!((e.code(), e.data()["why"].as_str()), ("disabled", Some(why.as_str())), "{}: {id}", t.name());
         }
         // A table that can undo has no such reason.
-        open_table(s, "shop", "customers");
+        open_table(s, t.schema("shop"), "customers");
         assert_eq!(summary(s)["noEditReason"], Json::Null);
     });
     assert!(seen > 0, "the MySQL seed's servers have shop.audit_log");
@@ -514,7 +527,7 @@ fn myisam_table_reports_why_it_is_read_only() {
 fn reconnect_forgets_the_loads_and_counts_it_cut_off() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        open_table(s, "shop", "orders");
+        open_table(s, t.schema("shop"), "orders");
         let slow = json!({ "raw": t.slow_condition_sql(2), "rawMode": true });
         let Outcome::Started(load) = s.execute("table.setFilters", slow).unwrap() else { panic!("a job") };
         let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
@@ -541,7 +554,7 @@ fn reconnect_forgets_the_loads_and_counts_it_cut_off() {
 fn a_failed_count_leaves_a_newer_count_alone() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        open_table(s, "shop", "orders");
+        open_table(s, t.schema("shop"), "orders");
         run(s, "table.setFilters", json!({ "raw": t.slow_condition_sql(2), "rawMode": true }));
         // `last` counts first; its count is cancelled while a newer count waits behind it.
         let Outcome::Started(last) = s.execute("table.page", json!({ "to": "last" })).unwrap() else { panic!("a job") };
@@ -564,7 +577,7 @@ fn typed_filters_survive_a_lost_connection() {
         if t.is_file() {
             return;
         }
-        open_table(s, "shop", "orders");
+        open_table(s, t.schema("shop"), "orders");
         kill_dbee_connections(t, s);
         let typed = json!([{ "column": "id", "op": "eq", "value": "5" }]);
         let e = run_err(s, "table.setFilters", json!({ "filters": typed }));
@@ -580,7 +593,7 @@ fn typed_filters_survive_a_lost_connection() {
 fn page_after_connection_killed_reports_connection_lost() {
     let _db = require_testdb!();
     for_each_engine_exclusive(|t, s| {
-        open_table(s, "shop", "orders");
+        open_table(s, t.schema("shop"), "orders");
         // A file cannot lose its connection.
         if t.is_file() {
             return;
@@ -604,7 +617,7 @@ fn odd_identifiers_open_filter_sort_follow() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
         let name = t.kind().info().odd_table;
-        assert_eq!(open_table(s, "odd", name)["rows"], 4);
+        assert_eq!(open_table(s, t.schema("odd"), name)["rows"], 4);
         let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "Total $", "op": "gt", "value": "1" }] }));
         assert_eq!(r["rows"], 2);
         run(s, "table.sort", json!({ "column": "lower UPPER", "dir": "asc" }));
@@ -621,7 +634,7 @@ fn odd_identifiers_open_filter_sort_follow() {
         let r = run(s, "table.followForeignKey", json!({ "row": 0, "column": "Other Ödd id" }));
         assert_eq!(r["rows"], 1);
         let tab = &s.inspect()["table"];
-        assert_eq!((tab["schema"].as_str(), tab["name"].as_str()), (Some("odd"), Some("Other Ödd")));
+        assert_eq!((tab["schema"].as_str(), tab["name"].as_str()), (Some(t.schema("odd")), Some("Other Ödd")));
         assert_eq!(cell(&read(s), 0, "id"), Some(target.as_str()));
         run(s, "table.sort", json!({ "column": "Label", "dir": "desc" }));
         run(s, "table.count", json!({}));
@@ -632,7 +645,7 @@ fn odd_identifiers_open_filter_sort_follow() {
 fn json_string_keeps_its_quotes() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        open_table(s, "shop", "orders");
+        open_table(s, t.schema("shop"), "orders");
         let d = read(s);
         let meta = cell(&d, 0, "meta").unwrap();
         assert!(meta.starts_with('"'), "{}: {meta}", t.name());
@@ -650,7 +663,7 @@ fn twenty_megabyte_cell_loads() {
             return;
         }
         let started = Instant::now();
-        assert_eq!(open_table(s, "shop", "big_cell")["rows"], 1);
+        assert_eq!(open_table(s, t.schema("shop"), "big_cell")["rows"], 1);
         assert!(started.elapsed() < Duration::from_secs(10), "{}: {:?}", t.name(), started.elapsed());
         let d = read(s);
         assert_eq!(cell(&d, 0, "t").unwrap().chars().count(), 20_000_000);
@@ -667,16 +680,17 @@ fn a_page_cut_by_the_byte_cap_says_so() {
         }
         let name = unique("t_page_cap");
         // 14 values of 20,000,000 characters: 280 MB, past a page's 256 MiB of cell text.
-        let inserts: String = (1..=14).map(|i| format!("INSERT INTO scratch.{name} VALUES ({i}, REPEAT('x', 20000000));")).collect();
+        let (sc, x) = (t.schema("scratch"), t.repeat_sql("'x'", 20_000_000));
+        let inserts: String = (1..=14).map(|i| format!("INSERT INTO {sc}.{name} VALUES ({i}, {x});")).collect();
         let _drop = scratch_table(&t, &name, &format!("CREATE TABLE {{t}} (id int PRIMARY KEY, v {}); {inserts}", t.kind().info().long_text_type));
         let mut s = connected_to(&t);
         // 13 values fit (260 MB); the 14th is read but not kept.
-        assert_eq!(open_table(&mut s, "scratch", &name)["rows"], 13, "{}", t.name());
+        assert_eq!(open_table(&mut s, t.schema("scratch"), &name)["rows"], 13, "{}", t.name());
         assert_eq!(s.inspect()["table"]["pageComplete"], false, "the page was cut");
         let d = run(&mut s, "table.read", json!({ "limit": 0 }));
         assert_eq!((d["pageComplete"].as_bool(), d["hasNext"].as_bool()), (Some(false), Some(false)));
         // A page under the cap is whole, and so is a full page followed by more rows.
-        open_table(&mut s, "shop", "orders");
+        open_table(&mut s, t.schema("shop"), "orders");
         assert_eq!(s.inspect()["table"]["pageComplete"], true);
         assert_eq!(run(&mut s, "table.read", json!({ "limit": 0 }))["pageComplete"], true);
     }
@@ -686,7 +700,7 @@ fn a_page_cut_by_the_byte_cap_says_so() {
 fn cancel_stops_a_slow_page() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        open_table(s, "shop", "orders");
+        open_table(s, t.schema("shop"), "orders");
         // Nothing runs: nothing to cancel.
         assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": false }));
         let slow = json!({ "raw": t.slow_condition_sql(30), "rawMode": true });
@@ -732,10 +746,10 @@ fn table_commands_need_a_table_tab() {
 fn browses_on_every_server() {
     let _db = require_testdb!();
     for_each_engine(|t: &TestTarget, s| {
-        open_table(s, "shop", "orders");
+        open_table(s, t.schema("shop"), "orders");
         let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "status", "op": "in", "value": "paid, completed" }] }));
         assert_eq!(r["rows"], 100, "{}", t.name());
-        let n: u64 = q(t, "SELECT count(*) FROM shop.orders WHERE status IN ('paid', 'completed')").parse().unwrap();
+        let n: u64 = q(t, &format!("SELECT count(*) FROM {}.orders WHERE status IN ('paid', 'completed')", t.schema("shop"))).parse().unwrap();
         assert_eq!(page(s, json!("last"))["total"], json!({ "exact": n }), "{}", t.name());
         assert_eq!(read(s)["rows"].as_array().map(Vec::len), Some((n - 1) as usize % 100 + 1), "{}", t.name());
         run(s, "table.followForeignKey", json!({ "row": 0, "column": "customer_id" }));
@@ -748,7 +762,7 @@ fn browses_on_every_server() {
 fn next_page_on_a_million_rows_is_fast() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        open_table(s, "shop", "big_rows");
+        open_table(s, t.schema("shop"), "big_rows");
         let mut times: Vec<Duration> = (0..20)
             .map(|_| {
                 let started = Instant::now();

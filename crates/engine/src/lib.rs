@@ -186,6 +186,10 @@ pub struct SessionOptions {
     /// `connection.reconnect` may reach (an isolated run's test servers); `None` is no limit.
     /// See [`allowed`].
     pub allowed_targets: Option<Vec<(String, u16)>>,
+    /// The only folders a file database may lie in (an isolated run's home and `target/`), checked
+    /// as the targets are; `None` is no limit. While set, a connection's SQL may open no file but
+    /// its database's own (`dbee_driver::Target::own_file_only`). See [`allowed`].
+    pub allowed_dirs: Option<Vec<PathBuf>>,
     /// The drivers connections open with (the app's are `dbee_drivers::all()`). A database type
     /// none of them opens is refused with `disabled`.
     pub drivers: Drivers,
@@ -199,6 +203,7 @@ impl std::fmt::Debug for SessionOptions {
             .field("ssh", &self.ssh)
             .field("notify", &self.notify.is_some())
             .field("allowed_targets", &self.allowed_targets)
+            .field("allowed_dirs", &self.allowed_dirs)
             .field("drivers", &self.drivers)
             .finish()
     }
@@ -239,6 +244,7 @@ pub struct Session {
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) ssh: SshEnv,
     pub(crate) allowed_targets: Option<Vec<(String, u16)>>,
+    pub(crate) allowed_dirs: Option<Vec<PathBuf>>,
     pub(crate) drivers: Drivers,
     /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
     /// decides to commit (one Apply runs at a time).
@@ -270,6 +276,7 @@ impl Session {
             secrets: o.secrets,
             ssh: o.ssh,
             allowed_targets: o.allowed_targets,
+            allowed_dirs: o.allowed_dirs,
             drivers: o.drivers,
             apply_gate: None,
             journal: Vec::new(),

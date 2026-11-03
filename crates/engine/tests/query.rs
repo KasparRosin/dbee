@@ -62,7 +62,8 @@ fn run_all_gives_one_result_per_statement() {
         assert_eq!(r["shown"], 2);
         assert_eq!(names(&results[2]), ["c"]);
         let typed = (&results[2]["columns"][0]["class"], &results[2]["columns"][0]["baseType"]);
-        assert_eq!(typed, (&json!("number"), &json!(t.kind().info().int_literal_type)), "{}: a single statement's columns are typed", t.name());
+        let info = t.kind().info();
+        assert_eq!(typed, (&json!(info.int_literal_class), &json!(info.int_literal_type)), "{}: a single statement's columns are typed", t.name());
         let b = text.find("select 2").unwrap();
         assert_eq!((results[1]["start"].as_u64(), results[1]["end"].as_u64()), (Some(b as u64), Some(b as u64 + 13)), "{}", results[1]);
         // The tab keeps them all; the state holds the rows.
@@ -200,7 +201,7 @@ fn error_position_counts_characters_before_it() {
 fn results_capped_with_count() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        tab(s, "select id as n from shop.big_rows where id <= 25000 order by id");
+        tab(s, &format!("select id as n from {}.big_rows where id <= 25000 order by id", t.schema("shop")));
         let r = run(s, "query.run", json!({}));
         let result = &r["results"][0];
         assert_eq!(
@@ -219,25 +220,33 @@ fn results_capped_with_count() {
 fn statements_without_rows_report_rows_affected() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        let name = unique("t_query");
-        let _drop = Scratch(t, vec![format!("TABLE IF EXISTS scratch.{name}")]);
-        tab(
-            s,
-            &format!("create table scratch.{name} (id int);\ninsert into scratch.{name} values (1), (2), (3);\nselect count(*) from scratch.{name}"),
-        );
+        let (sc, name) = (t.schema("scratch"), unique("t_query"));
+        let _drop = Scratch(t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        tab(s, &format!("create table {sc}.{name} (id int);\ninsert into {sc}.{name} values (1), (2), (3);\nselect count(*) from {sc}.{name}"));
         let r = run(s, "query.run", json!({}));
         let results = r["results"].as_array().unwrap();
         assert_eq!(results.len(), 3, "{r}");
         assert_eq!((results[1]["rowsAffected"].as_u64(), results[1]["columns"].as_array().map(Vec::len)), (Some(3), Some(0)), "{r}");
         // Auto-commit: every statement is written at once.
-        assert_eq!(q(t, &format!("SELECT count(*) FROM scratch.{name}")), "3");
+        assert_eq!(q(t, &format!("SELECT count(*) FROM {sc}.{name}")), "3");
     });
 }
 
 /// Waits until a statement whose text holds `marker` runs (the first run also opens the query
-/// connection).
+/// connection). A file lists no statements: its run gets a moment to start.
 fn until_running(t: &TestTarget, marker: &str) {
-    until_sql(t, &t.running_with_sql(marker), "1", "the statement to run");
+    if t.lists_running_statements() {
+        until_sql(t, &t.running_with_sql(marker), "1", "the statement to run");
+    } else {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// The server no longer runs a statement whose text holds `marker` (a file lists none).
+fn stopped_running(t: &TestTarget, marker: &str) {
+    if t.lists_running_statements() {
+        assert_eq!(q(t, &t.running_with_sql(marker)), "0", "{}", t.name());
+    }
 }
 
 #[test]
@@ -267,17 +276,17 @@ fn cancel_stops_a_long_query() {
 fn cancel_stops_the_statements_after_it() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        let name = unique("t_query");
+        let (sc, name) = (t.schema("scratch"), unique("t_query"));
         let _drop = scratch_table(t, &name, "CREATE TABLE {t} (id int)");
         let m = marker();
-        tab(s, &format!("select 1; {}; insert into scratch.{name} values (1)", slow_with(t, &m)));
+        tab(s, &format!("select 1; {}; insert into {sc}.{name} values (1)", slow_with(t, &m)));
         let job = start(s, json!({}));
         until_running(t, &m);
         run(s, "query.cancel", json!({}));
         let e = s.wait(job, Duration::from_secs(5)).unwrap_err();
         assert_eq!((e.code(), e.data()["statement"].as_u64()), ("cancelled", Some(1)), "{}: {e} {}", t.name(), e.data());
         assert_eq!(shown(s)["results"].as_array().map(Vec::len), Some(1));
-        assert_eq!(q(t, &format!("SELECT count(*) FROM scratch.{name}")), "0", "the run stopped at the cancelled statement");
+        assert_eq!(q(t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "the run stopped at the cancelled statement");
     });
 }
 
@@ -303,26 +312,32 @@ fn second_run_while_running_is_busy() {
 fn query_connection_is_separate_from_browse() {
     let _db = require_testdb!();
     for t in engine_targets() {
-        let name = unique("t_query");
+        let (sc, name) = (t.schema("scratch"), unique("t_query"));
         let _drop = scratch_table(&t, &name, "CREATE TABLE {t} (id int PRIMARY KEY, name text); INSERT INTO {t} VALUES (1, 'a'), (2, 'b')");
         let mut s = connected_to(&t);
         // A transaction left open in the query tab, with a row written in it.
-        let query = tab(&mut s, &format!("BEGIN;\ninsert into scratch.{name} values (99, 'open')"));
+        let query = tab(&mut s, &format!("BEGIN;\ninsert into {sc}.{name} values (99, 'open')"));
         run(&mut s, "query.run", json!({}));
-        // The table tab works on the browse connection, and its Apply commits at once.
-        open_table(&mut s, "scratch", &name);
+        // The table tab works on the browse connection; where two sessions can write at once (a
+        // SQLite file has one writer), its Apply commits beside the open transaction.
+        open_table(&mut s, sc, &name);
         assert_eq!(run(&mut s, "table.page", json!({ "to": "next" }))["rows"], 2);
-        set_cell(&mut s, 0, "name", "applied");
-        assert_eq!(apply(&mut s)["written"], 1);
-        assert_eq!(q(&t, &format!("SELECT CONCAT(id, ':', name) FROM scratch.{name} ORDER BY id")), "1:applied\n2:b", "{}", t.name());
+        let first = if t.kind().info().parallel_writes {
+            set_cell(&mut s, 0, "name", "applied");
+            assert_eq!(apply(&mut s)["written"], 1);
+            "applied"
+        } else {
+            "a"
+        };
+        assert_eq!(q(&t, &format!("SELECT CONCAT(id, ':', name) FROM {sc}.{name} ORDER BY id")), format!("1:{first}\n2:b"), "{}", t.name());
         // The query tab's transaction is still open: its row is not there for others.
         run(&mut s, "tab.activate", json!({ "tab": query }));
-        run(&mut s, "query.setText", json!({ "text": format!("select count(*) from scratch.{name}") }));
+        run(&mut s, "query.setText", json!({ "text": format!("select count(*) from {sc}.{name}") }));
         assert_eq!(run(&mut s, "query.run", json!({}))["results"][0]["rows"], 1);
         assert_eq!(first_value(&s).as_deref(), Some("3"), "the query connection sees its own row");
         run(&mut s, "query.setText", json!({ "text": "ROLLBACK" }));
         run(&mut s, "query.run", json!({}));
-        assert_eq!(q(&t, &format!("SELECT count(*) FROM scratch.{name} WHERE id = 99")), "0");
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name} WHERE id = 99")), "0");
     }
 }
 
@@ -330,12 +345,12 @@ fn query_connection_is_separate_from_browse() {
 fn read_only_refuses_insert() {
     let _db = require_testdb!();
     for t in engine_targets() {
-        let name = unique("t_query_ro");
+        let (sc, name) = (t.schema("scratch"), unique("t_query_ro"));
         let _drop = scratch_table(&t, &name, "CREATE TABLE {t} (id int)");
         let mut s = session();
         let config = dbee_config::ConnectionConfig { read_only: true, ..config_for(&t) };
         open(&mut s, json!({ "config": config, "password": pw() }));
-        tab(&mut s, &format!("insert into scratch.{name} values (1)"));
+        tab(&mut s, &format!("insert into {sc}.{name} values (1)"));
         let e = run_fails(&mut s, json!({}));
         assert_eq!(e.code(), "readOnly", "{}: {e}", t.name());
         assert_eq!(shown(&s)["error"]["code"], "readOnly");
@@ -343,7 +358,7 @@ fn read_only_refuses_insert() {
         run(&mut s, "query.setText", json!({ "text": sql }));
         run(&mut s, "query.run", json!({}));
         assert_eq!(first_value(&s).as_deref(), Some(on), "{}", t.name());
-        assert_eq!(q(&t, &format!("SELECT count(*) FROM scratch.{name}")), "0");
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0");
     }
 }
 
@@ -367,7 +382,7 @@ fn disconnect_during_query_cancels_it() {
         until_running(t, &m);
         run(s, "connection.close", json!({ "force": true }));
         assert!(s.wait_idle(Duration::from_secs(5)), "the query was not cancelled");
-        assert_eq!(q(t, &t.running_with_sql(&m)), "0", "{}", t.name());
+        stopped_running(t, &m);
         let results = s.pump();
         assert_eq!(results, vec![(job, Ok(json!({ "ignored": true })))]);
         assert_eq!(s.inspect()["screen"], "connections");
@@ -386,7 +401,7 @@ fn closing_running_tab_ignores_result() {
         assert!(s.wait_idle(Duration::from_secs(5)), "closing the tab did not cancel its query");
         assert_eq!(s.pump(), vec![(job, Ok(json!({ "ignored": true })))]);
         assert!(s.state().tabs.is_empty());
-        assert_eq!(q(t, &t.running_with_sql(&m)), "0", "{}", t.name());
+        stopped_running(t, &m);
         // The query connection goes on with the next run.
         tab(s, "select 1 as one");
         assert_eq!(names(&run(s, "query.run", json!({}))["results"][0]), ["one"]);
@@ -404,7 +419,7 @@ fn reconnect_during_query_stops_it() {
         run(s, "connection.reconnect", json!({}));
         assert_eq!(shown(s)["running"], Json::Null, "the run died with its connection");
         assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap(), json!({ "ignored": true }));
-        assert_eq!(q(t, &t.running_with_sql(&m)), "0", "{}", t.name());
+        stopped_running(t, &m);
         run(s, "query.setText", json!({ "text": "select 2 as two" }));
         assert_eq!(names(&run(s, "query.run", json!({}))["results"][0]), ["two"]);
     });
@@ -439,7 +454,7 @@ fn lost_query_connection_is_opened_again() {
         assert_eq!((&i["error"]["message"], &i["error"]["code"], &i["running"]), (&json!(lost), &json!("connectionLost"), &Json::Null), "{i}");
         // The session is not lost: the browse connection works on.
         assert_eq!(s.inspect()["connection"]["lost"], false);
-        open_table(s, "shop", "customers");
+        open_table(s, t.schema("shop"), "customers");
         // The next run opens a new query connection.
         let query = s.state().tabs[0].id().0;
         run(s, "tab.activate", json!({ "tab": query }));
@@ -495,8 +510,8 @@ fn query_commands_need_a_query_tab_and_a_connection() {
         assert_eq!(s.execute("query.run", json!({})).unwrap_err().data()["why"], "not connected");
     }
     // One session at a time (see `common`).
-    for_each_engine(|_, s| {
-        open_table(s, "shop", "customers");
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "customers");
         for id in ["query.run", "query.cancel", "query.showResult"] {
             assert_eq!(s.execute(id, json!({ "index": 0 })).unwrap_err().data()["why"], "no query tab is active", "{id}");
         }
@@ -613,7 +628,7 @@ fn a_nul_in_a_statement_runs_where_the_engine_takes_it() {
                 "{text:?}"
             );
         };
-        let name = unique("t_nul");
+        let (sc, name) = (t.schema("scratch"), unique("t_nul"));
         let _drop = scratch_table(t, &name, "CREATE TABLE {t} (id int PRIMARY KEY); INSERT INTO {t} VALUES (1), (2)");
         tab(s, "select 1");
         // Outside a string literal no engine takes it: MySQL runs `DELETE … <NUL>  ` as if the NUL
@@ -622,11 +637,11 @@ fn a_nul_in_a_statement_runs_where_the_engine_takes_it() {
         for text in [
             "select 1;\nselect 2 -- a comment\u{0}\n + 1".to_owned(),
             "select 1;\nselect 2\u{0} + 1".to_owned(),
-            format!("select 1;\ndelete from scratch.{name} \u{0}   "),
+            format!("select 1;\ndelete from {sc}.{name} \u{0}   "),
         ] {
             refused(s, &text);
         }
-        assert_eq!(q(t, &format!("SELECT count(*) FROM scratch.{name}")), "2", "{}", t.name());
+        assert_eq!(q(t, &format!("SELECT count(*) FROM {sc}.{name}")), "2", "{}", t.name());
         // Inside a string literal: a character where the engine takes it.
         let text = "select 1;\nselect 'a\u{0}b' as v";
         if !s.state().dialect().statement_may_hold_nul() {
@@ -637,4 +652,49 @@ fn a_nul_in_a_statement_runs_where_the_engine_takes_it() {
         run(s, "query.run", json!({}));
         assert_eq!(first_value(s).as_deref(), Some("a\u{0}b"), "{}", t.name());
     });
+}
+
+#[test]
+fn an_isolated_run_lets_sql_open_no_other_file() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let folder = t.file().unwrap().parent().unwrap().to_path_buf();
+        let (other, copy) = (folder.join(format!("{}.sqlite", unique("attached"))), folder.join(format!("{}.sqlite", unique("vacuumed"))));
+        let _gone = Removed(vec![other.clone(), copy.clone()]);
+        let literal = |path: &std::path::Path| dbee_sql::Dialect::Sqlite.literal(&path.display().to_string()).unwrap();
+        let (attach, vacuum) = (format!("ATTACH {} AS other", literal(&other)), format!("VACUUM INTO {}", literal(&copy)));
+        {
+            let mut s = session_adjusted(|o| o.allowed_dirs = Some(vec![folder.clone()]));
+            open(&mut s, json!({ "config": config_for(&t) }));
+            tab(&mut s, "select 1");
+            for sql in [&attach, &vacuum] {
+                run(&mut s, "query.setText", json!({ "text": sql }));
+                let e = run_fails(&mut s, json!({}));
+                assert_eq!((e.code(), e.data()["serverCode"].as_str()), ("server", Some("23")), "{sql}: {e}");
+                assert!(e.data()["hint"].as_str().is_some_and(|h| h.contains("ATTACH")), "{sql}: {}", e.data());
+            }
+            assert!(!other.exists() && !copy.exists(), "no file was made");
+            // The file's own SQL runs.
+            run(&mut s, "query.setText", json!({ "text": format!("select count(*) from {}.orders", t.schema("shop")) }));
+            run(&mut s, "query.run", json!({}));
+            assert_eq!(first_value(&s), Some(ORDERS_COUNT.to_string()));
+        }
+        // A normal run runs both (ATTACH opens a file that is there; an empty one is a database).
+        std::fs::write(&other, "").unwrap();
+        let mut s = connected_to(&t);
+        tab(&mut s, &format!("{attach}; CREATE TABLE other.o (a INTEGER); DETACH other; {vacuum}"));
+        run(&mut s, "query.run", json!({}));
+        assert!(other.is_file() && copy.is_file(), "{}", t.name());
+    }
+}
+
+/// Removes the files it names when the test ends, also when it fails.
+struct Removed(Vec<std::path::PathBuf>);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }

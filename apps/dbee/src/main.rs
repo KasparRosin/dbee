@@ -13,6 +13,9 @@
 //! - `DBEE_NO_PREFS` keeps no connections file and no log file.
 //! - `DBEE_ALLOW_TARGETS` (`host:port,…`, set by `cargo xtask run-isolated`) limits connections
 //!   to those targets ([`SessionOptions::allowed_targets`]).
+//! - `DBEE_ALLOW_DIRS` (folders joined as the system joins paths, set by `cargo xtask
+//!   run-isolated`) limits database files to those folders, and keeps SQL from opening other files
+//!   ([`SessionOptions::allowed_dirs`]).
 //! - SSH uses `~/.ssh` and the OS agent ([`SshEnv::from_os`]).
 //! - The session opens connections with every driver dbee ships (`dbee_drivers::all()`).
 //!
@@ -127,10 +130,21 @@ fn allowed_targets(env: Option<OsString>) -> Option<Vec<(String, u16)>> {
     Some(text.split(',').filter_map(entry).collect())
 }
 
+/// `DBEE_ALLOW_DIRS` (folders joined as the system joins paths, set by `cargo xtask
+/// run-isolated`): the only folders this run's database files may lie in. Unset is no limit; set,
+/// it fails closed: an empty value allows no folder.
+fn allowed_dirs(env: Option<OsString>) -> Option<Vec<PathBuf>> {
+    Some(std::env::split_paths(&env?).filter(|p| !p.as_os_str().is_empty()).collect())
+}
+
 fn session_options(notify: Arc<dyn Fn() + Send + Sync>) -> SessionOptions {
     let allowed_targets = allowed_targets(std::env::var_os("DBEE_ALLOW_TARGETS"));
     if let Some(list) = &allowed_targets {
         log::info!("this run may connect only to {} allowed target(s) (DBEE_ALLOW_TARGETS)", list.len());
+    }
+    let allowed_dirs = allowed_dirs(std::env::var_os("DBEE_ALLOW_DIRS"));
+    if let Some(list) = &allowed_dirs {
+        log::info!("this run may open files only in {} allowed folder(s) (DBEE_ALLOW_DIRS)", list.len());
     }
     SessionOptions {
         config_dir: config_dir().filter(|_| prefs_enabled()),
@@ -138,6 +152,7 @@ fn session_options(notify: Arc<dyn Fn() + Send + Sync>) -> SessionOptions {
         ssh: SshEnv::from_os(),
         notify: Some(notify),
         allowed_targets,
+        allowed_dirs,
         drivers: dbee_drivers::all(),
     }
 }
@@ -310,6 +325,15 @@ mod start_tests {
         // Set but empty or malformed: nothing is allowed, never everything.
         assert_eq!(allowed_targets(Some("".into())), Some(vec![]));
         assert_eq!(allowed_targets(Some("x,h:0,h:99999,:5,h:p,127.0.0.1:1".into())), Some(vec![t("127.0.0.1", 1)]));
+    }
+
+    #[test]
+    fn allowed_dirs_come_from_the_environment_and_fail_closed() {
+        assert_eq!(allowed_dirs(None), None, "a normal run has no limit");
+        let joined = std::env::join_paths(["/repo/target", "/repo/target/isolated/7979/home"]).unwrap();
+        assert_eq!(allowed_dirs(Some(joined)), Some(vec![PathBuf::from("/repo/target"), PathBuf::from("/repo/target/isolated/7979/home")]));
+        // Set but empty: no folder is allowed, never every one.
+        assert_eq!(allowed_dirs(Some("".into())), Some(vec![]));
     }
 
     #[test]

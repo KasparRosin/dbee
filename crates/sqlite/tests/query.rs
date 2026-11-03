@@ -364,7 +364,7 @@ async fn a_name_that_is_not_utf8_never_panics() {
     assert_eq!(c.scalar_u64("SELECT count(*) FROM odd_bytes").await.unwrap(), 1);
     let catalog = c.load_catalog().await.unwrap();
     let t = catalog.table(&dbee_core::TableRef { schema: "main".into(), name: "odd_bytes".into() }).unwrap();
-    assert_eq!(t.columns.iter().map(|c| (c.name.as_str(), c.type_sql.as_str())).collect::<Vec<_>>(), [("a\u{FFFD}", "T\u{FFFD}")]);
+    assert_eq!(t.visible_columns().map(|c| (c.name.as_str(), c.type_sql.as_str())).collect::<Vec<_>>(), [("a\u{FFFD}", "T\u{FFFD}")]);
     assert!(!c.is_closed());
 }
 
@@ -431,4 +431,49 @@ async fn a_comment_after_a_write_keeps_its_count() {
     ok(&c, "CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1), (2)", QUERY_LIMITS).await;
     assert_eq!(ok(&c, "UPDATE t SET a = a + 1; -- c", QUERY_LIMITS).await.rows_affected, Some(2));
     assert_eq!(ok(&c, "DELETE FROM t WHERE a = 3 /* c */", QUERY_LIMITS).await.rows_affected, Some(1));
+}
+
+#[tokio::test]
+async fn sql_opens_no_other_file_when_the_run_allows_only_its_own() {
+    let dir = repo_root().join("target").join("testkit").join("sqlite-driver").join(unique("own-file"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("own.sqlite");
+    let c = config(&file);
+    let confined = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file: true, own_file_only: true };
+    let conn = connect(confined).await.unwrap();
+    ok(&conn, "CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1)", QUERY_LIMITS).await;
+    let at = |name: &str| dbee_sql::Dialect::Sqlite.literal(&dir.join(name).display().to_string()).unwrap();
+    let uri = |name: &str| dbee_sql::Dialect::Sqlite.literal(&format!("file:{}?mode=rwc", dir.join(name).display())).unwrap();
+    // Every ATTACH and every VACUUM INTO, whatever the name; a plain VACUUM attaches a database of
+    // its own, so it goes too.
+    for sql in [
+        format!("ATTACH {} AS other", at("other.sqlite")),
+        format!("ATTACH {} AS other", uri("uri.sqlite")),
+        "ATTACH '' AS other".to_owned(),
+        "ATTACH ':memory:' AS other".to_owned(),
+        format!("VACUUM INTO {}", at("copy.sqlite")),
+        format!("VACUUM main INTO {}", uri("copy-uri.sqlite")),
+        "VACUUM".to_owned(),
+    ] {
+        let e = conn.run(&sql, QUERY_LIMITS).await.unwrap_err();
+        let DbError::Server(s) = &e else { panic!("{sql}: {e}") };
+        assert_eq!(s.code, "23", "{sql}: {e}");
+        assert!(s.hint.as_deref().is_some_and(|h| h.contains("ATTACH") && h.contains("VACUUM")), "{sql}: {:?}", s.hint);
+    }
+    let mut files: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    files.sort();
+    assert_eq!(files, ["own.sqlite"], "no other file was made");
+    assert_eq!(ok(&conn, "SELECT a FROM t", QUERY_LIMITS).await.rows, [[some("1")]], "the file's own SQL runs");
+    drop(conn);
+    // A run that allows any file: both reach other files (ATTACH one that is there, as the file
+    // was opened without leave to make files).
+    std::fs::write(dir.join("other.sqlite"), "").unwrap();
+    let open = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file: false, own_file_only: false };
+    let conn = connect(open).await.unwrap();
+    ok(&conn, &format!("ATTACH {} AS other; CREATE TABLE other.o (b INTEGER); DETACH other", at("other.sqlite")), QUERY_LIMITS).await;
+    ok(&conn, &format!("VACUUM INTO {}", at("copy.sqlite")), QUERY_LIMITS).await;
+    ok(&conn, "VACUUM", QUERY_LIMITS).await;
+    assert!(dir.join("other.sqlite").is_file() && dir.join("copy.sqlite").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -880,3 +880,25 @@ fn a_filter_without_a_value_is_muted_left_out_and_not_counted() {
     assert!(ui.tag("filter-0-unapplied").is_none());
     assert_eq!(ui.value(&format!("tab-{tab}")), "orders [1]");
 }
+
+#[test]
+fn a_table_keyed_by_its_rowid_shows_no_rowid() {
+    let db = dbee_testkit::require_testdb!();
+    let seed = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = seed.file().map(std::path::Path::to_path_buf);
+    let config = dbee_config::ConnectionConfig { name: "sqlite".into(), kind: dbee_config::DbKind::Sqlite, file, ..Default::default() };
+    let mut ui = Ui::connected_with(db, Setup { config: Some(config), ..Setup::default() });
+    ui.open("main", "notes_nokey");
+    ui.until("the rows", |ui| ui.table()["rows"] == 3);
+    assert_eq!(ui.ids_with("grid-header-"), ["grid-header-0", "grid-header-1"]);
+    assert_eq!((ui.value("grid-header-0")["name"].clone(), ui.value("grid-header-1")["name"].clone()), (json!("title"), json!("body")));
+    assert_eq!(ui.value("grid-header-0")["key"], Json::Null, "no key column shows");
+    assert_eq!(ui.value("grid-cell-1-0")["text"], "second");
+    // The tree lists the visible columns only.
+    ui.click("tree-expand-main.notes_nokey");
+    let i = ui.inspect();
+    assert!(tag_in(&i, "tree-column-main.notes_nokey.title").is_some(), "{:?}", ids(&i));
+    assert!(tag_in(&i, "tree-column-main.notes_nokey.rowid").is_none(), "{:?}", ids(&i));
+    // The table takes edits, by the rowid it does not show.
+    assert_eq!(ui.document()["table"]["editable"], true);
+}

@@ -151,6 +151,7 @@ fn options() -> SessionOptions {
         ssh: SshEnv::default(),
         notify: None,
         allowed_targets: None,
+        allowed_dirs: None,
         drivers: dbee_driver::Drivers::default(),
     }
 }

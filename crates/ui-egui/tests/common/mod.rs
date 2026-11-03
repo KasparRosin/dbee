@@ -101,6 +101,7 @@ impl Ui {
             ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
             notify: None,
             allowed_targets: None,
+            allowed_dirs: None,
             drivers: dbee_drivers::all(),
         })
         .unwrap();

@@ -83,7 +83,7 @@ fn quick_search_finds_orders() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
         let r = s.run_blocking("quickSearch.find", json!({ "query": "ord" }), T).unwrap();
-        assert_eq!(r[0]["schema"], "shop", "{}: {r}", t.name());
+        assert_eq!(r[0]["schema"], t.schema("shop"), "{}: {r}", t.name());
         assert_eq!(r[0]["table"], "orders", "{r}");
         assert_eq!(r[0]["kind"], "table");
         let limited = s.run_blocking("quickSearch.find", json!({ "query": "o", "limit": 3 }), T).unwrap();
@@ -96,15 +96,16 @@ fn quick_search_finds_orders() {
 #[test]
 fn inspect_catalog_and_table() {
     let _db = require_testdb!();
-    for_each_engine(|_, s| {
+    for_each_engine(|t, s| {
+        let shop = t.schema("shop");
         let all = s.run_blocking("schema.inspect", json!({}), T).unwrap();
         assert!(all["schemas"].as_array().is_some_and(|a| !a.is_empty()), "{all}");
-        let t = s.run_blocking("schema.inspect", json!({ "schema": "shop", "table": "orders" }), T).unwrap();
-        assert_eq!(t["table"]["name"], "orders");
-        assert!(t["columns"].as_array().is_some_and(|a| !a.is_empty()));
-        let one = s.run_blocking("schema.inspect", json!({ "schema": "shop" }), T).unwrap();
-        assert_eq!(one["name"], "shop");
-        assert_eq!(s.run_blocking("schema.inspect", json!({ "schema": "shop", "table": "nope" }), T).unwrap_err().code(), "badParams");
+        let orders = s.run_blocking("schema.inspect", json!({ "schema": shop, "table": "orders" }), T).unwrap();
+        assert_eq!(orders["table"]["name"], "orders");
+        assert!(orders["columns"].as_array().is_some_and(|a| !a.is_empty()));
+        let one = s.run_blocking("schema.inspect", json!({ "schema": shop }), T).unwrap();
+        assert_eq!(one["name"], shop);
+        assert_eq!(s.run_blocking("schema.inspect", json!({ "schema": shop, "table": "nope" }), T).unwrap_err().code(), "badParams");
         assert_eq!(s.run_blocking("schema.inspect", json!({ "table": "orders" }), T).unwrap_err().code(), "badParams");
     });
 }
@@ -123,7 +124,7 @@ fn refresh_sees_new_table() {
         let u = unique("t_inspect");
         let guard = scratch_table(t, &u, "CREATE TABLE {t} (id int)");
         let refreshed = s.run_blocking("schema.refresh", json!({}), T);
-        let inspected = s.run_blocking("schema.inspect", json!({ "schema": "scratch", "table": u }), T);
+        let inspected = s.run_blocking("schema.inspect", json!({ "schema": t.schema("scratch"), "table": u }), T);
         let found = s.run_blocking("quickSearch.find", json!({ "query": u }), T);
         drop(guard);
         refreshed.unwrap();

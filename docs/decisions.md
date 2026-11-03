@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-11-03 · **Change:** minor (rusqlite with the bundled SQLite)
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-11-03 · **Change:** minor (SQLite tables without a key are edited by rowid; isolated runs keep SQLite to their folders)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -152,3 +152,16 @@ Significant decisions, newest last. Add an entry for every significant dependenc
   - `PRAGMA quick_check(1)` reads the whole file (about 150 ms for 65 MB). Opening reads `sqlite_schema` instead, which still refuses a file that is not a database or whose schema is damaged; damage elsewhere shows when it is read. A path that is no regular file is refused before it is opened (a FIFO would wait for a writer), the open is bounded by the 15 s connect timeout, and the file is closed on a blocking thread, since closing can write (a WAL checkpoint, a rollback).
   - SQLite ends a transaction itself when an interrupt stops a write in it, and may when a write fails with `SQLITE_FULL`, `IOERR`, `BUSY` or `NOMEM`; a `BEGIN IMMEDIATE` that fails (a locked or a read-only file) starts none. The apply session therefore has its own rollback step (by default it sends `ROLLBACK`): SQLite's reads in the same call whether a transaction is open, and when none is, there is nothing to undo, as on the other engines, and no lost connection.
 - **Why:** SQLite in the binary means no system library to find, and the same SQLite on every platform. rusqlite is the established binding; dbee uses it as a library.
+
+## 2026-11-03: SQLite tables without a key are edited by their rowid; isolated runs keep SQLite to their own folders
+
+- **Decision:** An ordinary SQLite table (not a view, a virtual table or a `WITHOUT ROWID` table, which always has a primary key) with no primary key and no NOT NULL unique key is keyed by its rowid. The catalog lists the rowid as a hidden leading column, named by the first of `rowid`, `_rowid_` and `oid` that no column takes (ignoring ASCII case, as SQLite does), and the page reads it beside the visible columns; the grid, sort, filters, copies and the value view never show it, and an insert never writes it. A table whose columns take all three names, and a virtual table, take no edits and say why.
+- **Known limit:** SQLite's `VACUUM` may change the rowids of a table without an `INTEGER PRIMARY KEY` (SQLite's documentation of `VACUUM` says so). An edit staged before another process vacuums the file could then find a different row; Apply's one-row rule only catches a row that is gone. Not handled; it is on the security review's list.
+- **Decision:** An isolated run (`cargo xtask run-isolated`) lists its folders in `DBEE_ALLOW_DIRS`: its throwaway home and `target/`. A file database outside them is refused like a server outside the allowed targets, once the path is resolved (links followed, `..` gone; a file not there yet by its folder). While the session has allowed folders, `Target::own_file_only` asks the driver to keep SQL from opening other files; SQLite's driver installs an authorizer that refuses every `ATTACH` (the `hooks` feature of `rusqlite`). Normal runs keep `ATTACH` and `VACUUM INTO`.
+- **Facts measured (SQLite 3.53.2):**
+  - `VACUUM INTO '<path>'` reaches the authorizer as an `ATTACH` of that path, and a plain `VACUUM` as an `ATTACH` of `''` (its temporary database). Refusing `ATTACH` refuses all three, whatever the name, a `file:` URI and `:memory:` included, with `SQLITE_AUTH` (23); no file is made. dbee's message adds a hint that the run lets SQL open no other file.
+  - `SQLITE_LIMIT_ATTACHED` = 0 also refuses all three, as "too many attached databases - max 0"; the authorizer was chosen for its clear code and because it is SQLite's documented way to keep SQL from what it may not do.
+  - `ATTACH` opens with the main file's flags, so on a file dbee opened without leave to make one it opens only a file that is there.
+  - `load_extension()` is off: "not authorized". The modules compiled in are `dbstat`, `fts3`, `fts4`, `fts5` and `rtree`, which read only the databases on the connection.
+  - `PRAGMA temp_store_directory` still moves SQLite's temporary files to another folder; left for the security review.
+- **Why:** The spec counts `rowid` as a real key within an edit session (Kaspar's call, 2026-10-28). The isolation rule must hold on every path into a file, and parsing paths is where it would leak, so the driver refuses the statements, not paths.

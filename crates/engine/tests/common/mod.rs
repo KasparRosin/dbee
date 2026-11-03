@@ -84,6 +84,7 @@ fn session_with(home: TempHome, exclusive: bool, adjust: impl FnOnce(&mut Sessio
         ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
         notify: None,
         allowed_targets: None,
+        allowed_dirs: None,
         drivers: dbee_drivers::all(),
     };
     adjust(&mut options);
@@ -287,11 +288,11 @@ pub fn for_each_engine_exclusive(mut f: impl FnMut(&TestTarget, &mut TestSession
     }
 }
 
-/// [`for_each_engine`] for the SQLite target only, once its kind has a driver.
-pub fn for_sqlite(mut f: impl FnMut(&mut TestSession)) {
+/// [`for_each_engine`] for the targets that are files (the SQLite seed copy).
+pub fn for_sqlite(mut f: impl FnMut(&TestTarget, &mut TestSession)) {
     for t in engine_targets().into_iter().filter(TestTarget::is_file) {
         let mut s = connected_to(&t);
-        f(&mut s);
+        f(&t, &mut s);
     }
 }
 
@@ -329,10 +330,12 @@ impl Drop for Scratch<'_> {
     }
 }
 
-/// `scratch.<name>` made by `ddl` (which names it `{t}`), dropped with the guard.
+/// `scratch.<name>` (on a kind with one schema, in that one) made by `ddl` (which names it `{t}`),
+/// dropped with the guard.
 pub fn scratch_table<'a>(t: &'a TestTarget, name: &str, ddl: &str) -> Scratch<'a> {
-    let guard = Scratch(t, vec![format!("TABLE IF EXISTS scratch.{name}")]);
-    q(t, &ddl.replace("{t}", &format!("scratch.{name}")));
+    let table = format!("{}.{name}", t.schema("scratch"));
+    let guard = Scratch(t, vec![format!("TABLE IF EXISTS {table}")]);
+    q(t, &ddl.replace("{t}", &table));
     guard
 }
 

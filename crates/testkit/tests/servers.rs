@@ -150,6 +150,19 @@ fn sqlite_copies_are_independent() {
 }
 
 #[test]
+fn sql_on_a_file_has_the_shape_of_the_servers_clients() {
+    let t = dbee_testkit::targets_of(&[Kind::Sqlite]).pop().unwrap();
+    // Every statement in turn, each row a line, the values separated by `|`, NULL empty.
+    let out =
+        t.sql("CREATE TABLE t (a INTEGER, b TEXT); INSERT INTO t VALUES (1, 'x'), (2, NULL); SELECT a, b FROM t ORDER BY a; SELECT 0.5, X'0AFF'");
+    assert_eq!(out.as_deref(), Ok("1|x\n2|\n0.5|X'0AFF'\n"));
+    assert!(t.sql("SELECT nope").is_err_and(|e| e.contains("no such column")));
+    // Its one schema holds every schema of the seed.
+    assert_eq!((t.schema("shop"), t.schema("scratch")), ("main", "main"));
+    assert_eq!(t.sql(&format!("SELECT count(*) FROM {}.customers", t.schema("shop"))).as_deref(), Ok("500\n"));
+}
+
+#[test]
 fn targets_cover_every_engine() {
     require_testdb!();
     let all = targets();
@@ -165,7 +178,7 @@ fn targets_cover_every_engine() {
         match t.kind().id() {
             "postgres" => assert_eq!(sleep, "SELECT pg_sleep(30)"),
             "mysql" | "mariadb" => assert_eq!(sleep, "SELECT SLEEP(30)"),
-            _ => assert!(sleep.starts_with("WITH RECURSIVE") && sleep.contains("1000000000"), "{sleep}"),
+            _ => assert!(sleep.starts_with("SELECT (SELECT count(*) FROM (WITH RECURSIVE") && sleep.contains("75000000"), "{sleep}"),
         }
         let full = !t.server().is_some_and(|s| !s.full_seed);
         assert_eq!(t.big_rows(), if full { 1_000_000 } else { 30_000 }, "{}", t.name());

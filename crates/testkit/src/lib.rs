@@ -69,9 +69,30 @@ pub struct KindInfo {
     /// A `WHERE` condition that holds and takes about `secs` seconds once per statement, whatever
     /// the number of rows: a slow page or count.
     slow_condition_sql: fn(u32) -> String,
+    /// The one schema of a kind that has only one: every schema of the seed (`shop`, `odd`,
+    /// `many`, `scratch`) is this one (SQLite's `main`). `None` keeps the seed's names.
+    pub one_schema: Option<&'static str>,
     /// The seed's table of odd names in schema `odd`: quotes, a space, and a character outside
     /// ASCII (MySQL names hold no emoji).
     pub odd_table: &'static str,
+    /// A table without a key still takes edits, by the row id the engine gives every row.
+    pub keyless_tables_editable: bool,
+    /// Two sessions can each hold a write transaction at once (a SQLite file has one writer at a
+    /// time).
+    pub parallel_writes: bool,
+    /// The engine refuses a value longer than its column's length (`varchar(10)`, `char(2)`).
+    pub enforces_lengths: bool,
+    /// Makes the table `{t}` (first argument) a copy of `source`, keyed by its `id` where the
+    /// engine can add a key to a copy (else by its row id).
+    copy_table_sql: fn(&str, &str) -> String,
+    /// A column definition `<column> date` that refuses text that is no date (the engine's own
+    /// date type does; else a CHECK).
+    date_column_sql: fn(&str) -> String,
+    /// `count` times the one-character string literal given (`repeat('x', 3)`).
+    repeat_sql: fn(&str, u64) -> String,
+    /// A condition that holds while the condition given does not, and fails its statement with
+    /// [`KindInfo::failing_error`] once it does.
+    failing_when_sql: fn(&str) -> String,
     /// The type a scratch table gives a text that may be 20 MB long.
     pub long_text_type: &'static str,
     /// The type a scratch table gives a JSON document.
@@ -104,10 +125,11 @@ pub struct KindInfo {
     pub plain_json_label: &'static str,
     /// whether that JSON type keeps an object's keys sorted (else as written);
     pub json_sorts_keys: bool,
-    /// the type of an integer literal in a query (`select 3`);
+    /// the class and the type of an integer literal in a query (`select 3`);
+    pub int_literal_class: &'static str,
     pub int_literal_type: &'static str,
-    /// the start of the error of a scalar subquery that returns two rows.
-    pub subquery_rows_error: &'static str,
+    /// the start of the error of [`KindInfo::failing_when_sql`] once its condition holds.
+    pub failing_error: &'static str,
 }
 
 /// How a [`CommitGate`] holds a COMMIT, from before the update it commits starts.
@@ -143,7 +165,15 @@ impl Kind {
                 client: Some(Client::Psql),
                 sleep_sql: |secs| format!("SELECT pg_sleep({secs})"),
                 slow_condition_sql: |secs| format!("(SELECT true FROM pg_sleep({secs}))"),
+                one_schema: None,
                 odd_table: "Odd \"Name\" 🐝",
+                keyless_tables_editable: false,
+                parallel_writes: true,
+                enforces_lengths: true,
+                copy_table_sql: copy_keyed_by_id,
+                date_column_sql: |c| format!("{c} date"),
+                repeat_sql: |text, n| format!("repeat({text}, {n})"),
+                failing_when_sql: two_rows_when,
                 long_text_type: "text",
                 json_type: "jsonb",
                 // dbee connects with application_name `dbee`; the two-argument terminate (Postgres
@@ -177,8 +207,9 @@ impl Kind {
                 json_type_label: "jsonb",
                 plain_json_label: "json",
                 json_sorts_keys: true,
+                int_literal_class: "number",
                 int_literal_type: "int4",
-                subquery_rows_error: "more than one row returned by a subquery used as an expression",
+                failing_error: "more than one row returned by a subquery used as an expression",
             },
             Kind::MySql => &KindInfo { product: "MySQL", id: "mysql", client: Some(Client::MySql("mysql")), ..MYSQL },
             // MariaDB 10.11 has no `transaction_read_only`.
@@ -195,7 +226,7 @@ impl Kind {
                 int_literal_type: "int",
                 ..MYSQL
             },
-            // SQLite has no sleep: a count to 10⁹, which runs far longer than any test waits.
+            // SQLite has no sleep: a count that takes about that long, at least on this machine.
             Kind::Sqlite => &KindInfo {
                 id: "sqlite",
                 product: "SQLite",
@@ -203,13 +234,20 @@ impl Kind {
                 user: "",
                 database: "",
                 client: None,
-                sleep_sql: |_| "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 1000000000) SELECT count(*) FROM c".into(),
-                slow_condition_sql: |_| {
-                    "(WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 1000000000) SELECT count(*) FROM c) > 0".into()
-                },
+                sleep_sql: |secs| format!("SELECT (SELECT count(*) FROM ({}))", sqlite_count(secs)),
+                slow_condition_sql: |secs| format!("(SELECT count(*) FROM ({})) > 0", sqlite_count(secs)),
+                one_schema: Some("main"),
                 odd_table: "Odd \"Name\" 🐝",
+                keyless_tables_editable: true,
+                parallel_writes: false,
+                enforces_lengths: false,
+                // SQLite adds no key to a table once it is made: the copy is keyed by its rowid.
+                copy_table_sql: |t, source| format!("CREATE TABLE {t} AS SELECT * FROM {source}"),
+                date_column_sql: |c| format!("{c} date CHECK ({c} IS date({c}))"),
+                repeat_sql: |text, n| format!("printf('%.*c', {n}, {text})"),
+                failing_when_sql: |cond| format!("json(CASE WHEN {cond} THEN 'not JSON' ELSE '1' END) IS NOT NULL"),
                 long_text_type: "TEXT",
-                json_type: "TEXT",
+                json_type: "JSON",
                 dbee_connections_sql: None,
                 kill_sql: |_| String::new(),
                 slow_updates_sql: |_, _| (String::new(), String::new()),
@@ -219,12 +257,14 @@ impl Kind {
                 connection_id_sql: "",
                 running_with_sql: |_| String::new(),
                 slow_update_running_sql: |_| String::new(),
-                // Measured with its driver (M2.13).
-                json_type_label: "",
-                plain_json_label: "",
+                // Measured with its driver (M2.13): a column labels its declared type, and an
+                // expression has none.
+                json_type_label: "JSON",
+                plain_json_label: "JSON",
                 json_sorts_keys: false,
+                int_literal_class: "other",
                 int_literal_type: "",
-                subquery_rows_error: "",
+                failing_error: "malformed JSON",
             },
         }
     }
@@ -250,7 +290,15 @@ const MYSQL: KindInfo = KindInfo {
     sleep_sql: |secs| format!("SELECT SLEEP({secs})"),
     // A sleep in the WHERE clause or a subquery runs once per row; a derived table runs once.
     slow_condition_sql: |secs| format!("EXISTS (SELECT 1 FROM (SELECT SLEEP({secs}) AS z) AS d)"),
+    one_schema: None,
     odd_table: "Odd \"Name\" é",
+    keyless_tables_editable: false,
+    parallel_writes: true,
+    enforces_lengths: true,
+    copy_table_sql: copy_keyed_by_id,
+    date_column_sql: |c| format!("{c} date"),
+    repeat_sql: |text, n| format!("repeat({text}, {n})"),
+    failing_when_sql: two_rows_when,
     long_text_type: "LONGTEXT",
     json_type: "JSON",
     // The tests' own client connects over the socket (host `localhost`); dbee comes over TCP, so
@@ -279,9 +327,27 @@ const MYSQL: KindInfo = KindInfo {
     json_type_label: "json",
     plain_json_label: "json",
     json_sorts_keys: true,
+    int_literal_class: "number",
     int_literal_type: "bigint",
-    subquery_rows_error: "Subquery returns more than 1 row",
+    failing_error: "Subquery returns more than 1 row",
 };
+
+/// [`KindInfo::copy_table_sql`] for an engine that adds a key to a copy.
+fn copy_keyed_by_id(t: &str, source: &str) -> String {
+    format!("CREATE TABLE {t} AS SELECT * FROM {source}; ALTER TABLE {t} ADD PRIMARY KEY (id)")
+}
+
+/// [`KindInfo::failing_when_sql`] by a scalar subquery that returns two rows once `cond` holds.
+fn two_rows_when(cond: &str) -> String {
+    format!("(SELECT 1 UNION ALL SELECT 1 WHERE {cond}) > 0")
+}
+
+/// A count SQLite steps through in about `secs` seconds: 2.5 million rows a second, as measured
+/// on a busy development machine (2026-11-03).
+fn sqlite_count(secs: u32) -> String {
+    let rows = u64::from(secs).saturating_mul(2_500_000);
+    format!("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < {rows}) SELECT i FROM c")
+}
 
 /// The test servers, as `env.json` describes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -819,13 +885,14 @@ impl TestTarget {
         self.file().is_some()
     }
 
-    /// A query that runs about `secs` seconds, for cancel tests (on SQLite much longer).
+    /// A query that runs about `secs` seconds, for cancel tests (on SQLite a count, whose time
+    /// depends on the machine).
     pub fn sleep_sql(&self, secs: u32) -> String {
         (self.kind.info().sleep_sql)(secs)
     }
 
     /// A `WHERE` condition that holds and takes about `secs` seconds once per statement (on
-    /// SQLite much longer).
+    /// SQLite a count, as for [`TestTarget::sleep_sql`]).
     pub fn slow_condition_sql(&self, secs: u32) -> String {
         (self.kind.info().slow_condition_sql)(secs)
     }
@@ -912,13 +979,78 @@ impl TestTarget {
         self.server().is_some() && self.kind.info().commit_wait.is_some()
     }
 
-    /// Runs `sql` on the target's server as [`sql`] does; a file has no client here.
+    /// Runs `sql` on the target as [`sql`] does: on a server with its kind's client, on a file
+    /// with a connection of the test's own.
     pub fn sql(&self, sql: &str) -> Result<String, String> {
-        match self.server() {
-            Some(server) => crate::sql(server, sql),
-            None => Err(format!("{}: no client for a file", self.name())),
+        match &self.place {
+            Place::Server(server) => crate::sql(server, sql),
+            Place::File(path) => sqlite_sql(path, sql),
         }
     }
+
+    /// Where the seed's schema `seed` (`shop`, `odd`, `many`, `scratch`) is on this target: that
+    /// schema, or the kind's one schema ([`KindInfo::one_schema`]).
+    pub fn schema(&self, seed: &'static str) -> &'static str {
+        self.kind.info().one_schema.unwrap_or(seed)
+    }
+
+    /// The server lists the statements that run on it, through its client; a file has neither.
+    pub fn lists_running_statements(&self) -> bool {
+        self.server().is_some()
+    }
+
+    /// SQL that makes `t` a copy of `source`, keyed by its `id` ([`KindInfo::copy_table_sql`]).
+    pub fn copy_table_sql(&self, t: &str, source: &str) -> String {
+        (self.kind.info().copy_table_sql)(t, source)
+    }
+
+    /// A date column named `column` that refuses text that is no date.
+    pub fn date_column_sql(&self, column: &str) -> String {
+        (self.kind.info().date_column_sql)(column)
+    }
+
+    /// `count` times the one-character string literal `text`.
+    pub fn repeat_sql(&self, text: &str, count: u64) -> String {
+        (self.kind.info().repeat_sql)(text, count)
+    }
+
+    /// A condition that holds while `cond` does not, and fails its statement with
+    /// [`KindInfo::failing_error`] once `cond` holds.
+    pub fn failing_when_sql(&self, cond: &str) -> String {
+        (self.kind.info().failing_when_sql)(cond)
+    }
+}
+
+/// Runs `sql` on the SQLite file at `path` with a connection of its own, every statement in turn,
+/// in [`sql`]'s shape: one line per row, the values separated by `|`, NULL as an empty value, reals
+/// as SQLite prints them and blobs as `X'…'`. Waits up to 5 s for a file dbee has locked.
+fn sqlite_sql(path: &Path, sql: &str) -> Result<String, String> {
+    use rusqlite::fallible_iterator::FallibleIterator as _;
+    use rusqlite::types::ValueRef;
+    let fail = |e: rusqlite::Error| format!("{}: {e}", path.display());
+    let conn = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(fail)?;
+    conn.busy_timeout(Duration::from_secs(5)).map_err(fail)?;
+    let mut out = String::new();
+    let mut batch = rusqlite::Batch::new(&conn, sql);
+    while let Some(mut statement) = batch.next().map_err(fail)? {
+        let width = statement.column_count();
+        let mut rows = statement.raw_query();
+        while let Some(row) = rows.next().map_err(fail)? {
+            let mut values = Vec::with_capacity(width);
+            for i in 0..width {
+                values.push(match row.get_ref(i).map_err(fail)? {
+                    ValueRef::Null => String::new(),
+                    ValueRef::Integer(n) => n.to_string(),
+                    ValueRef::Real(x) => conn.query_row("SELECT CAST(?1 AS TEXT)", [x], |r| r.get(0)).map_err(fail)?,
+                    ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                    ValueRef::Blob(b) => format!("X'{}'", b.iter().map(|byte| format!("{byte:02X}")).collect::<String>()),
+                });
+            }
+            out.push_str(&values.join("|"));
+            out.push('\n');
+        }
+    }
+    Ok(out)
 }
 
 impl Drop for TestTarget {

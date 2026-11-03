@@ -17,12 +17,12 @@ use serde_json::json;
 /// <json>)` with 3 rows, ids 1 to 3. Made before the session connects, so the catalog has it.
 fn make_table(t: &TestTarget) -> (String, Scratch<'_>) {
     let name = unique("t_edit");
-    let json = t.kind().info().json_type;
+    let (json, shipped_at) = (t.kind().info().json_type, t.date_column_sql("shipped_at"));
     let guard = scratch_table(
         t,
         &name,
         &format!(
-            "CREATE TABLE {{t}} (id int PRIMARY KEY, name text, total numeric(12,2), shipped_at date, flag bool, doc {json});
+            "CREATE TABLE {{t}} (id int PRIMARY KEY, name text, total numeric(12,2), {shipped_at}, flag bool, doc {json});
              INSERT INTO {{t}} VALUES
                  (1, 'Alice', 10.50, '2025-01-02', true, '{{\"a\": 1}}'),
                  (2, 'Bob', 20.00, '2025-02-03', false, '[1, 2]'),
@@ -39,7 +39,7 @@ fn opened(t: &TestTarget, name: &str) -> TestSession {
 
 fn opened_rows(t: &TestTarget, name: &str, rows: u64) -> TestSession {
     let mut s = connected_to(t);
-    let r = open_table(&mut s, "scratch", name);
+    let r = open_table(&mut s, t.schema("scratch"), name);
     assert_eq!(r["rows"], rows, "{}: {r}", t.name());
     s
 }
@@ -93,6 +93,7 @@ fn why(e: &EngineError) -> String {
 fn day_scenario_two_changes_one_apply() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         let r = set_cell(s, 0, "name", "Ann");
         assert_eq!((r["staged"].as_bool(), r["count"].as_u64()), (Some(true), Some(1)), "{r}");
         run(s, "cell.clear", json!({ "row": 0, "column": "shipped_at" }));
@@ -100,10 +101,10 @@ fn day_scenario_two_changes_one_apply() {
         assert_eq!(staged(s, 0, 1), Some(json!("Ann")));
         assert_eq!(staged(s, 0, 3), Some(Json::Null), "clearing a date stages NULL");
         // Nothing is written before Apply.
-        assert_eq!(q(t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "Alice");
+        assert_eq!(q(t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "Alice");
         let r = apply(s);
         assert_eq!(r["written"], 1, "both changes are one row: {r}");
-        assert_eq!(q(t, &format!("SELECT CONCAT(name, '|', {}) FROM scratch.{name} WHERE id = 1", yn("shipped_at IS NULL"))), "Ann|t");
+        assert_eq!(q(t, &format!("SELECT CONCAT(name, '|', {}) FROM {sc}.{name} WHERE id = 1", yn("shipped_at IS NULL"))), "Ann|t");
         // The edits are gone and the page shows what was written.
         assert_eq!(count(s), 0);
         let d = read(s);
@@ -117,6 +118,7 @@ fn day_scenario_two_changes_one_apply() {
 fn clearing_rules() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         run(s, "cell.clear", json!({ "row": 0, "column": "total" }));
         assert_eq!(staged(s, 0, 2), Some(Json::Null), "a number clears to NULL");
         run(s, "cell.clear", json!({ "row": 1, "column": "name" }));
@@ -130,7 +132,7 @@ fn clearing_rules() {
         assert_eq!(count(s), 5);
         apply(s);
         let cols = ["total IS NULL", "name = ''", "name IS NULL", "flag IS NULL", "doc IS NULL"].map(yn).join(", '|', ");
-        let rows = q(t, &format!("SELECT CONCAT(id, '|', {cols}) FROM scratch.{name} ORDER BY id"));
+        let rows = q(t, &format!("SELECT CONCAT(id, '|', {cols}) FROM {sc}.{name} ORDER BY id"));
         assert_eq!(rows, "1|t|f|f|t|t\n2|f|t|f|f|f\n3|f|f|t|t|t", "{}", t.name());
     });
 }
@@ -139,6 +141,7 @@ fn clearing_rules() {
 fn a_json_boolean_stages_the_engines_own_spelling() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         let (yes, no) = s.state().dialect().bool_literals();
         set_cell(s, 1, "flag", true);
         set_cell(s, 2, "flag", false);
@@ -151,7 +154,7 @@ fn a_json_boolean_stages_the_engines_own_spelling() {
         assert_eq!((staged(s, 0, 2), staged(s, 0, 1)), (Some(json!("12.5")), Some(json!("true"))));
         apply(s);
         let flag = "CASE WHEN flag IS NULL THEN 'null' WHEN flag THEN 'true' ELSE 'false' END";
-        assert_eq!(rows_of(t, &format!("SELECT CONCAT({flag}, ':', name) FROM scratch.{name} ORDER BY id")), "true:true,true:Bob,false:Cy");
+        assert_eq!(rows_of(t, &format!("SELECT CONCAT({flag}, ':', name) FROM {sc}.{name} ORDER BY id")), "true:true,true:Bob,false:Cy");
     });
 }
 
@@ -159,6 +162,7 @@ fn a_json_boolean_stages_the_engines_own_spelling() {
 fn a_json_boolean_keeps_its_text_outside_bool_columns() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         set_cell(s, 0, "name", true);
         set_cell(s, 1, "doc", true);
         assert_eq!(
@@ -169,7 +173,7 @@ fn a_json_boolean_keeps_its_text_outside_bool_columns() {
         apply(s);
         // As text a JSON true is `true`; a JSON string would be `"true"`.
         let doc = s.state().dialect().as_text("doc");
-        assert_eq!(q(t, &format!("SELECT CONCAT(name, '|', {doc}) FROM scratch.{name} WHERE id IN (1, 2) ORDER BY id")), "true|{\"a\": 1}\nBob|true");
+        assert_eq!(q(t, &format!("SELECT CONCAT(name, '|', {doc}) FROM {sc}.{name} WHERE id IN (1, 2) ORDER BY id")), "true|{\"a\": 1}\nBob|true");
     });
 }
 
@@ -177,6 +181,7 @@ fn a_json_boolean_keeps_its_text_outside_bool_columns() {
 fn failed_apply_writes_nothing_and_marks_the_row() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         set_cell(s, 0, "name", "ok");
         set_cell(s, 1, "shipped_at", "not a date");
         let e = run_err(s, "edit.apply", json!({}));
@@ -184,7 +189,7 @@ fn failed_apply_writes_nothing_and_marks_the_row() {
         assert!(e.to_string().contains("nothing was written"), "{e}");
         assert_eq!((e.data()["row"].as_u64(), e.data()["column"].as_u64()), (Some(1), Some(3)), "{}", e.data());
         // Neither change was written: the good one rolled back with the bad one.
-        let both = format!("SELECT CONCAT(name, '|', shipped_at) FROM scratch.{name} WHERE id IN (1, 2) ORDER BY id");
+        let both = format!("SELECT CONCAT(name, '|', shipped_at) FROM {sc}.{name} WHERE id IN (1, 2) ORDER BY id");
         assert_eq!(q(t, &both), "Alice|2025-01-02\nBob|2025-02-03");
         let table = summary(s);
         assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["column"].as_u64()), (Some(1), Some(3)), "{table}");
@@ -204,6 +209,7 @@ fn failed_apply_writes_nothing_and_marks_the_row() {
 fn add_and_delete_rows() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         assert_eq!(run(s, "row.add", json!({}))["row"], 3);
         assert_eq!(run(s, "row.add", json!({}))["row"], 4);
         set_cell(s, 4, "id", "11");
@@ -224,7 +230,7 @@ fn add_and_delete_rows() {
         }
         let r = apply(s);
         assert_eq!(r["written"], 2, "{r}");
-        assert_eq!(rows_of(t, &format!("SELECT CONCAT(id, ':', COALESCE(name, '')) FROM scratch.{name} ORDER BY id")), "1:Alice,3:Cy,10:new");
+        assert_eq!(rows_of(t, &format!("SELECT CONCAT(id, ':', COALESCE(name, '')) FROM {sc}.{name} ORDER BY id")), "1:Alice,3:Cy,10:new");
         // The page loads again with the new row in it.
         let d = read(s);
         assert_eq!(d["rows"].as_array().map(Vec::len), Some(3));
@@ -236,6 +242,7 @@ fn add_and_delete_rows() {
 fn undo_redo_and_reset() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         assert_eq!(why(&refused(s, "edit.undo", json!({}))), "nothing to undo");
         assert_eq!(why(&refused(s, "edit.redo", json!({}))), "nothing to redo");
         assert_eq!(why(&refused(s, "edit.reset", json!({}))), "no staged changes");
@@ -259,7 +266,7 @@ fn undo_redo_and_reset() {
         // Undoing everything leaves no staged change, and nothing reached the database.
         while s.execute("edit.undo", json!({})).is_ok() {}
         assert_eq!(count(s), 0);
-        assert_eq!(rows_of(t, &format!("SELECT name FROM scratch.{name} ORDER BY id")), "Alice,Bob,Cy");
+        assert_eq!(rows_of(t, &format!("SELECT name FROM {sc}.{name} ORDER BY id")), "Alice,Bob,Cy");
     });
 }
 
@@ -275,7 +282,8 @@ fn editing_value_back_unstages() {
         // NULL onto a NULL cell, or the same text again, stages nothing.
         run(s, "cell.setNull", json!({ "row": 2, "column": "shipped_at" }));
         set_cell(s, 2, "doc", Json::Null);
-        set_cell(s, 1, "total", "20.00");
+        let total = cell(&read(s), 1, "total").unwrap().to_owned();
+        set_cell(s, 1, "total", total);
         assert_eq!(count(s), 0, "{}", t.name());
         // Values are text, a number is taken as its text; other shapes are refused.
         set_cell(s, 1, "total", 21);
@@ -298,6 +306,7 @@ fn editing_value_back_unstages() {
 fn a_nul_in_a_value_is_written_where_the_engine_takes_it() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         let value = "nul\u{0}x";
         if !s.state().dialect().statement_may_hold_nul() {
             let e = refused(s, "cell.edit", json!({ "row": 0, "column": "name", "value": value }));
@@ -313,7 +322,7 @@ fn a_nul_in_a_value_is_written_where_the_engine_takes_it() {
         set_cell(s, row, "id", "4");
         set_cell(s, row, "name", "a\\b\u{0}");
         assert_eq!(apply(s)["written"], 2, "{}", t.name());
-        assert_eq!(q(t, &format!("SELECT LENGTH(name) FROM scratch.{name} WHERE id IN (1, 4) ORDER BY id")), "5\n4");
+        assert_eq!(q(t, &format!("SELECT LENGTH(name) FROM {sc}.{name} WHERE id IN (1, 4) ORDER BY id")), "5\n4");
         let d = read(s);
         assert_eq!((cell(&d, 0, "name"), cell(&d, 3, "name")), (Some(value), Some("a\\b\u{0}")), "{}", t.name());
         // A filter finds it by the same value.
@@ -330,17 +339,20 @@ fn read_only_and_keyless_refuse() {
             let mut s = session();
             let config = dbee_config::ConnectionConfig { read_only: true, ..config_for(&t) };
             open(&mut s, json!({ "config": config, "password": pw() }));
-            open_table(&mut s, "shop", "customers");
+            open_table(&mut s, t.schema("shop"), "customers");
             for (id, params) in [("cell.edit", edit.clone()), ("cell.setNull", edit.clone()), ("cell.clear", edit.clone()), ("row.add", json!({}))] {
                 let e = refused(&mut s, id, params);
                 assert_eq!((e.code(), why(&e).as_str()), ("disabled", "read-only connection"), "{}: {id}", t.name());
             }
         }
         let mut s = connected_to(&t);
-        open_table(&mut s, "shop", "no_key");
-        let e = refused(&mut s, "cell.edit", edit.clone());
-        assert_eq!((e.code(), why(&e).as_str()), ("disabled", "no primary key or unique not-null key"));
-        open_table(&mut s, "shop", "order_totals");
+        // A table without a key takes no edits, unless the engine keys its rows by a row id.
+        if !t.kind().info().keyless_tables_editable {
+            open_table(&mut s, t.schema("shop"), "no_key");
+            let e = refused(&mut s, "cell.edit", edit.clone());
+            assert_eq!((e.code(), why(&e).as_str()), ("disabled", "no primary key or unique not-null key"));
+        }
+        open_table(&mut s, t.schema("shop"), "order_totals");
         assert_eq!(why(&refused(&mut s, "row.add", json!({}))), "views are read-only");
         let infos = s.commands();
         for id in ["cell.edit", "cell.setNull", "cell.clear", "row.add", "row.delete", "edit.apply", "edit.reset", "edit.undo", "edit.redo"] {
@@ -357,6 +369,7 @@ fn read_only_and_keyless_refuse() {
 fn paging_with_staged_edits_is_disabled() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         set_cell(s, 0, "name", "x");
         for (id, params) in [
             ("table.page", json!({ "to": "next" })),
@@ -387,7 +400,7 @@ fn paging_with_staged_edits_is_disabled() {
         set_cell(s, 0, "name", "y");
         run(s, "tab.close", json!({ "force": true }));
         assert!(s.state().tabs.is_empty());
-        assert_eq!(q(t, &format!("SELECT name FROM scratch.{name} WHERE id = 2")), "Bob", "closing drops the edits unwritten");
+        assert_eq!(q(t, &format!("SELECT name FROM {sc}.{name} WHERE id = 2")), "Bob", "closing drops the edits unwritten");
     });
 }
 
@@ -395,6 +408,7 @@ fn paging_with_staged_edits_is_disabled() {
 fn second_apply_while_running_is_busy() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         let row = run(s, "row.add", json!({}))["row"].clone();
         run(s, "cell.edit", json!({ "row": row, "column": "id", "value": "10" }));
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
@@ -405,7 +419,7 @@ fn second_apply_while_running_is_busy() {
         assert_eq!(why(&refused(s, "cell.edit", json!({ "row": 0, "column": "name", "value": "x" }))), "apply in progress");
         assert_eq!(why(&refused(s, "edit.reset", json!({}))), "apply in progress");
         assert_eq!(s.wait(job, T).unwrap()["written"], 1);
-        assert_eq!(q(t, &format!("SELECT count(*) FROM scratch.{name} WHERE id = 10")), "1", "written once");
+        assert_eq!(q(t, &format!("SELECT count(*) FROM {sc}.{name} WHERE id = 10")), "1", "written once");
         assert_eq!((count(s), &summary(s)["applying"]), (0, &Json::Null));
     });
 }
@@ -414,8 +428,9 @@ fn second_apply_while_running_is_busy() {
 fn editing_one_column_leaves_exotic_types_unchanged() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        let sc = t.schema("scratch");
         let name = unique("t_exotic");
-        let _drop = scratch_table(&t, &name, "CREATE TABLE {t} AS SELECT * FROM shop.all_types; ALTER TABLE {t} ADD PRIMARY KEY (id)");
+        let _drop = scratch_table(&t, &name, &t.copy_table_sql("{t}", &format!("{}.all_types", t.schema("shop"))));
         let mut s = opened(&t, &name);
         // Every column but `note`, as the server's own client prints it.
         let d = s.state().dialect();
@@ -423,7 +438,7 @@ fn editing_one_column_leaves_exotic_types_unchanged() {
         let note = col(&before, "note");
         let names: Vec<&str> = before["columns"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str()).filter(|n| *n != "note").collect();
         let others: Vec<String> = names.iter().map(|n| d.ident(n).unwrap()).collect();
-        let others = format!("SELECT {} FROM scratch.{name} ORDER BY id", others.join(", "));
+        let others = format!("SELECT {} FROM {sc}.{name} ORDER BY id", others.join(", "));
         let before_server = q(&t, &others);
         for row in 0..3 {
             set_cell(&mut s, row, "note", format!("edited 🐝 it's \"{row}\""));
@@ -450,6 +465,7 @@ fn editing_one_column_leaves_zero_date_unchanged() {
     let _db = require_testdb!();
     let mut seen = 0;
     for t in engine_targets() {
+        let sc = t.schema("scratch");
         let mut s = connected_to(&t);
         let legacy = TableRef { schema: "shop".into(), name: "legacy_dates".into() };
         if s.state().connected.as_ref().unwrap().catalog.table(&legacy).is_none() {
@@ -457,16 +473,16 @@ fn editing_one_column_leaves_zero_date_unchanged() {
         }
         seen += 1;
         let name = unique("t_zero");
-        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS scratch.{name}")]);
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
         // The server's loose mode lets the copy take the zero dates, as the seed's did.
         q(
             &t,
             &format!(
-                "SET SESSION sql_mode = ''; CREATE TABLE scratch.{name} LIKE shop.legacy_dates; INSERT INTO scratch.{name} SELECT * FROM shop.legacy_dates"
+                "SET SESSION sql_mode = ''; CREATE TABLE {sc}.{name} LIKE shop.legacy_dates; INSERT INTO {sc}.{name} SELECT * FROM shop.legacy_dates"
             ),
         );
         run(&mut s, "schema.refresh", json!({}));
-        assert_eq!(open_table(&mut s, "scratch", &name)["rows"], 3);
+        assert_eq!(open_table(&mut s, sc, &name)["rows"], 3);
         let shown = |s: &mut TestSession| {
             let d = read(s);
             (0..2).map(|i| (cell(&d, i, "d").map(str::to_owned), cell(&d, i, "dt").map(str::to_owned))).collect::<Vec<_>>()
@@ -476,7 +492,7 @@ fn editing_one_column_leaves_zero_date_unchanged() {
         set_cell(&mut s, 0, "name", "edited");
         set_cell(&mut s, 1, "name", "also");
         assert_eq!(apply(&mut s)["written"], 2, "{}", t.name());
-        let rows = q(&t, &format!("SELECT CONCAT(id, '|', name, '|', CAST(d AS CHAR), '|', CAST(dt AS CHAR)) FROM scratch.{name} ORDER BY id"));
+        let rows = q(&t, &format!("SELECT CONCAT(id, '|', name, '|', CAST(d AS CHAR), '|', CAST(dt AS CHAR)) FROM {sc}.{name} ORDER BY id"));
         assert_eq!(
             rows,
             "1|edited|0000-00-00|0000-00-00 00:00:00\n2|also|2025-01-00|2025-01-00 00:00:00\n3|ordinary|2025-01-02|2025-01-02 03:04:05",
@@ -492,16 +508,17 @@ fn editing_one_column_leaves_zero_date_unchanged() {
 fn odd_table_edit_round_trip() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        let sc = t.schema("scratch");
         let odd = t.kind().info().odd_table;
         let name = format!("{} {odd}", unique("t_odd"));
         let mut s = connected_to(&t);
         let d = s.state().dialect();
-        let quoted = d.table(&TableRef { schema: "scratch".into(), name: name.clone() }).unwrap();
-        let source = d.table(&TableRef { schema: "odd".into(), name: odd.into() }).unwrap();
+        let quoted = d.table(&TableRef { schema: sc.into(), name: name.clone() }).unwrap();
+        let source = d.table(&TableRef { schema: t.schema("odd").into(), name: odd.into() }).unwrap();
         let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {quoted}")]);
-        q(&t, &format!("CREATE TABLE {quoted} AS SELECT * FROM {source}; ALTER TABLE {quoted} ADD PRIMARY KEY (id)"));
+        q(&t, &t.copy_table_sql(&quoted, &source));
         run(&mut s, "schema.refresh", json!({}));
-        assert_eq!(open_table(&mut s, "scratch", &name)["rows"], 4);
+        assert_eq!(open_table(&mut s, sc, &name)["rows"], 4);
         set_cell(&mut s, 0, "lower UPPER", "it's \"edited\" 🐝");
         set_cell(&mut s, 1, "Total $", "99.5");
         let row = run(&mut s, "row.add", json!({}))["row"].as_u64().unwrap() as usize;
@@ -534,12 +551,14 @@ fn connection_lost_during_apply_keeps_the_edits() {
         if t.is_file() {
             continue;
         }
+        let sc = t.schema("scratch");
         let (name, mut drop) = make_table(&t);
-        let (slow, cleanup) = t.slow_updates_sql(&name, 2);
+        // Long enough to act while it runs, also on a busy machine.
+        let (slow, cleanup) = t.slow_updates_sql(&name, 5);
         q(&t, &slow);
         drop.1.insert(0, cleanup);
         let mut s = connected_exclusive_to(&t);
-        open_table(&mut s, "scratch", &name);
+        open_table(&mut s, sc, &name);
         set_cell(&mut s, 0, "name", "lost");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
         until_sql(&t, &t.slow_update_running_sql(&name), "1", "the Apply's update to run");
@@ -560,15 +579,15 @@ fn connection_lost_during_apply_keeps_the_edits() {
         assert!(enabled("edit.reset") && enabled("edit.undo"), "lost: reset and undo stay enabled");
         assert!(!enabled("cell.edit") && !enabled("edit.apply"));
         // Nothing was retried, and the server rolled the transaction back with the connection.
-        assert_eq!(q(&t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "Alice");
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "Alice");
         run(&mut s, "connection.reconnect", json!({}));
         assert_eq!(count(&s), 1);
         // Applying again could write twice: it asks first.
         let e = refused(&mut s, "edit.apply", json!({}));
         assert_eq!((e.code(), e.data()["what"].as_str(), e.to_string().as_str()), ("needsConfirm", Some("applyAfterUnknownOutcome"), UNKNOWN));
-        assert_eq!(q(&t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "Alice");
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "Alice");
         assert_eq!(run(&mut s, "edit.apply", json!({ "force": true }))["written"], 1);
-        assert_eq!(q(&t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "lost");
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "lost");
     }
 }
 
@@ -576,8 +595,14 @@ fn connection_lost_during_apply_keeps_the_edits() {
 fn reconnect_during_apply_marks_the_outcome_unknown() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file lists no statements: nothing tells when the Apply's update runs.
+        if !t.lists_running_statements() {
+            continue;
+        }
+        let sc = t.schema("scratch");
         let (name, mut drop) = make_table(&t);
-        let (slow, cleanup) = t.slow_updates_sql(&name, 2);
+        // Long enough for the reconnect to land while it runs, also on a busy machine.
+        let (slow, cleanup) = t.slow_updates_sql(&name, 5);
         q(&t, &slow);
         drop.1.insert(0, cleanup);
         let mut s = opened(&t, &name);
@@ -594,7 +619,7 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
         assert_eq!(count(&s), 1);
         assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }));
         assert_eq!(count(&s), 1);
-        assert_eq!(q(&t, &format!("SELECT name FROM scratch.{name} WHERE id = 2")), "Bob", "{}: the reconnect cancelled it", t.name());
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 2")), "Bob", "{}: the reconnect cancelled it", t.name());
         assert_eq!(table["failed"]["message"], UNKNOWN);
         assert_eq!((&table["outcomeUnknown"], &read(&mut s)["outcomeUnknown"]), (&json!(true), &json!(true)), "the UI can see why Apply asks");
         let e = refused(&mut s, "edit.apply", json!({}));
@@ -613,7 +638,7 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
         assert_eq!((cell(&d, 1, "name"), &d["outcomeUnknown"]), (Some("Bob"), &json!(false)));
         set_cell(&mut s, 1, "name", "again");
         assert_eq!(apply(&mut s)["written"], 1);
-        assert_eq!(q(&t, &format!("SELECT name FROM scratch.{name} WHERE id = 2")), "again");
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 2")), "again");
     }
 }
 
@@ -621,8 +646,14 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
 fn table_cancel_never_cancels_an_apply() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // A file lists no statements: nothing tells when the Apply's update runs.
+        if !t.lists_running_statements() {
+            continue;
+        }
+        let sc = t.schema("scratch");
         let (name, mut drop) = make_table(&t);
-        let (slow, cleanup) = t.slow_updates_sql(&name, 2);
+        // Long enough to act while it runs, also on a busy machine.
+        let (slow, cleanup) = t.slow_updates_sql(&name, 5);
         q(&t, &slow);
         drop.1.insert(0, cleanup);
         let mut s = opened(&t, &name);
@@ -631,14 +662,14 @@ fn table_cancel_never_cancels_an_apply() {
         until_sql(&t, &t.slow_update_running_sql(&name), "1", "the Apply's update to run");
         // Another tab's page load waits behind the Apply on the browse connection; cancelling it
         // would cancel the Apply's statement instead.
-        let Outcome::Started(load) = s.execute("table.open", json!({ "schema": "scratch", "table": name })).unwrap() else {
+        let Outcome::Started(load) = s.execute("table.open", json!({ "schema": sc, "table": name })).unwrap() else {
             panic!("table.open starts a job")
         };
         let e = refused(&mut s, "table.cancel", json!({}));
         assert_eq!((e.code(), e.to_string().as_str()), ("busy", "busy: apply in progress"));
         assert_eq!(s.wait(apply, T).unwrap()["written"], 1, "{}", t.name());
         assert_eq!(s.wait(load, T).unwrap()["rows"], 3);
-        assert_eq!(q(&t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "kept");
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "kept");
     }
 }
 
@@ -646,9 +677,10 @@ fn table_cancel_never_cancels_an_apply() {
 fn reset_undo_redo_work_when_the_tab_is_no_longer_editable() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         set_cell(s, 0, "name", "a");
         set_cell(s, 1, "name", "b");
-        q(t, &format!("DROP TABLE scratch.{name}"));
+        q(t, &format!("DROP TABLE {sc}.{name}"));
         run(s, "schema.refresh", json!({}));
         let gone = "the table is no longer in the schema";
         assert_eq!(summary(s)["notEditableReason"], gone);
@@ -666,10 +698,10 @@ fn reset_undo_redo_work_when_the_tab_is_no_longer_editable() {
 #[test]
 fn edits_follow_the_tab_they_were_made_in() {
     let _db = require_testdb!();
-    on_each_table(|_, name, s| {
+    on_each_table(|t, name, s| {
         let first = s.inspect()["active"].clone();
         set_cell(s, 0, "name", "first tab");
-        open_table(s, "scratch", name);
+        open_table(s, t.schema("scratch"), name);
         assert_eq!(count(s), 0, "a new tab has its own edits");
         set_cell(s, 2, "name", "second tab");
         assert_eq!(run(s, "edit.undo", json!({}))["count"], 0);
@@ -690,13 +722,18 @@ fn edits_follow_the_tab_they_were_made_in() {
 fn over_long_values_are_refused_not_cut() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        // An engine that keeps values of any length has nothing to refuse.
+        if !t.kind().info().enforces_lengths {
+            continue;
+        }
+        let sc = t.schema("scratch");
         let name = unique("t_long");
         let _drop = scratch_table(
             &t,
             &name,
             "CREATE TABLE {t} (id int PRIMARY KEY, v varchar(10), c char(2)); INSERT INTO {t} VALUES (1, 'abcdefghij', 'ab');",
         );
-        let row = || q(&t, &format!("SELECT CONCAT(id, '|', v, '|', c) FROM scratch.{name} ORDER BY id"));
+        let row = || q(&t, &format!("SELECT CONCAT(id, '|', v, '|', c) FROM {sc}.{name} ORDER BY id"));
         let before = row();
         let mut s = opened_rows(&t, &name, 1);
         let on = t.name();
@@ -724,7 +761,7 @@ fn over_long_values_are_refused_not_cut() {
         set_cell(&mut s, new, "id", "2");
         set_cell(&mut s, new, "c", "abc");
         assert_eq!(run_err(&mut s, "edit.apply", json!({})).code(), "server", "{on}");
-        assert_eq!(q(&t, &format!("SELECT count(*) FROM scratch.{name}")), "1", "{on}: no row was added");
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "1", "{on}: no row was added");
         run(&mut s, "edit.reset", json!({}));
         // Values that fit are written.
         set_cell(&mut s, 0, "v", "xyz");
@@ -738,12 +775,13 @@ fn over_long_values_are_refused_not_cut() {
 fn table_cancel_stops_an_apply_that_waits_for_a_lock() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        let sc = t.schema("scratch");
         // A file has no other session to hold a lock.
         let Some(server) = t.server() else { continue };
         let (name, _drop) = make_table(&t);
         let mut s = opened(&t, &name);
         // Another session holds row 1, so the Apply's first UPDATE waits.
-        let lock = dbee_testkit::hold(server, &format!("SELECT id FROM scratch.{name} WHERE id = 1 FOR UPDATE")).unwrap();
+        let lock = dbee_testkit::hold(server, &format!("SELECT id FROM {sc}.{name} WHERE id = 1 FOR UPDATE")).unwrap();
         set_cell(&mut s, 0, "name", "waited");
         set_cell(&mut s, 1, "name", "also");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
@@ -763,10 +801,10 @@ fn table_cancel_stops_an_apply_that_waits_for_a_lock() {
         assert_eq!((count(&s), &table["applying"], &table["outcomeUnknown"]), (2, &Json::Null, &json!(false)), "every edit is kept: {table}");
         assert_eq!(s.inspect()["connection"]["lost"], false);
         drop(lock);
-        assert_eq!(rows_of(&t, &format!("SELECT name FROM scratch.{name} ORDER BY id")), "Alice,Bob,Cy", "nothing was written");
+        assert_eq!(rows_of(&t, &format!("SELECT name FROM {sc}.{name} ORDER BY id")), "Alice,Bob,Cy", "nothing was written");
         // With the lock gone, the same edits apply on the same connection.
         assert_eq!(apply(&mut s)["written"], 2);
-        assert_eq!(rows_of(&t, &format!("SELECT name FROM scratch.{name} ORDER BY id")), "waited,also,Cy");
+        assert_eq!(rows_of(&t, &format!("SELECT name FROM {sc}.{name} ORDER BY id")), "waited,also,Cy");
     }
 }
 
@@ -776,6 +814,7 @@ fn table_cancel_stops_an_apply_that_waits_for_a_lock() {
 fn table_cancel_waits_for_an_apply_that_is_committing() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        let sc = t.schema("scratch");
         // A COMMIT held from outside: not on a file, nor on MySQL, which has no lock that holds a
         // COMMIT but not the update before it (MariaDB's backup stage stands in for the family).
         if !t.can_hold_commit() {
@@ -786,7 +825,7 @@ fn table_cancel_waits_for_an_apply_that_is_committing() {
         // taken only once no other test's session can be waiting on one.
         let mut s = connected_exclusive_to(&t);
         let mut gate = t.commit_gate(&name).unwrap();
-        open_table(&mut s, "scratch", &name);
+        open_table(&mut s, sc, &name);
         set_cell(&mut s, 0, "name", "committed");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
         gate.until_committing().unwrap();
@@ -796,7 +835,7 @@ fn table_cancel_waits_for_an_apply_that_is_committing() {
         std::thread::sleep(Duration::from_millis(500));
         drop(gate);
         assert_eq!(s.wait(job, T).unwrap()["written"], 1, "{}: no cancel request reached the COMMIT", t.name());
-        assert_eq!(q(&t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "committed");
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "committed");
         assert_eq!(count(&s), 0);
     }
 }
@@ -805,15 +844,16 @@ fn table_cancel_waits_for_an_apply_that_is_committing() {
 fn a_page_that_does_not_load_after_the_write_says_the_changes_were_written() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
         // A condition that holds while one row is named Ann or Bob, and fails on every engine once
-        // two are: its subquery then returns more than one row.
-        let raw = format!("(SELECT id FROM scratch.{name} WHERE name IN ('Ann', 'Bob')) > 0");
+        // two are.
+        let raw = t.failing_when_sql(&format!("(SELECT count(*) FROM {sc}.{name} WHERE name IN ('Ann', 'Bob')) > 1"));
         assert_eq!(run(s, "table.setFilters", json!({ "raw": raw, "rawMode": true }))["rows"], 3);
         set_cell(s, 0, "name", "Ann");
         let r = apply(s);
         assert_eq!(r["written"], 1, "{r}");
-        assert!(r["reloadError"].as_str().is_some_and(|e| e.starts_with(t.kind().info().subquery_rows_error)), "{}: {r}", t.name());
-        assert_eq!(q(t, &format!("SELECT name FROM scratch.{name} WHERE id = 1")), "Ann");
+        assert!(r["reloadError"].as_str().is_some_and(|e| e.starts_with(t.kind().info().failing_error)), "{}: {r}", t.name());
+        assert_eq!(q(t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "Ann");
         let table = summary(s);
         let error = table["error"].as_str().unwrap_or_default();
         assert!(error.starts_with("The changes were written (1 row), but the page did not load again: "), "{table}");
@@ -826,6 +866,7 @@ fn a_page_that_does_not_load_after_the_write_says_the_changes_were_written() {
 fn generated_columns_cannot_be_edited() {
     let _db = require_testdb!();
     for t in engine_targets() {
+        let sc = t.schema("scratch");
         let name = unique("t_generated");
         let _drop = scratch_table(
             &t,
@@ -850,7 +891,7 @@ fn generated_columns_cannot_be_edited() {
         set_cell(&mut s, new as usize, "id", "3");
         set_cell(&mut s, new as usize, "a", "5");
         assert_eq!(apply(&mut s)["written"], 2);
-        assert_eq!(rows_of(&t, &format!("SELECT CONCAT(id, ':', a, ':', twice) FROM scratch.{name} ORDER BY id")), "1:7:14,2:2:4,3:5:10");
+        assert_eq!(rows_of(&t, &format!("SELECT CONCAT(id, ':', a, ':', twice) FROM {sc}.{name} ORDER BY id")), "1:7:14,2:2:4,3:5:10");
     }
 }
 
@@ -1085,4 +1126,68 @@ fn filters_on_length_types_compare_as_postgres_does() {
             assert!(plan.contains("Index") && !plan.contains("Seq Scan"), "{on}: {cond}: {plan}");
         }
     }
+}
+
+/// The names of a `table.read` result's columns.
+fn column_names(read: &Json) -> Vec<String> {
+    read["columns"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap_or_default().to_owned()).collect()
+}
+
+#[test]
+fn sqlite_table_without_key_is_edited_by_rowid() {
+    let _db = require_testdb!();
+    for_sqlite(|t, s| {
+        let main = t.schema("shop");
+        open_table(s, main, "notes_nokey");
+        let d = read(s);
+        assert_eq!(column_names(&d), ["title", "body"], "the rowid is not a column of the tab");
+        assert_eq!((d["editable"].as_bool(), &summary(s)["noEditReason"]), (Some(true), &Json::Null));
+        // Rows 1 and 2 are alike but for their rowid: each is edited on its own.
+        set_cell(s, 1, "body", "changed");
+        assert_eq!(apply(s)["written"], 1);
+        let all = format!("SELECT rowid, title, body FROM {main}.notes_nokey ORDER BY rowid");
+        assert_eq!(q(t, &all), "1|first|a note\n2|second|changed\n3|second|another note");
+        assert_eq!(cell(&read(s), 1, "body"), Some("changed"));
+        run(s, "row.delete", json!({ "rows": [2] }));
+        assert_eq!(apply(s)["written"], 1);
+        assert_eq!(q(t, &all), "1|first|a note\n2|second|changed");
+        // A new row is written without a rowid; the page reads its rowid back, so it edits too.
+        let row = run(s, "row.add", json!({}))["row"].as_u64().unwrap() as usize;
+        set_cell(s, row, "title", "third");
+        assert_eq!(apply(s)["written"], 1);
+        let d = read(s);
+        assert_eq!((rows(&d), cell(&d, 2, "title"), cell(&d, 2, "body")), (3, Some("third"), None));
+        set_cell(s, 2, "body", "edited again");
+        assert_eq!(apply(s)["written"], 1);
+        assert_eq!(q(t, &format!("SELECT title, body FROM {main}.notes_nokey ORDER BY rowid")), "first|a note\nsecond|changed\nthird|edited again");
+        // The key is no column to edit, sort or filter by.
+        for (id, params) in [
+            ("cell.edit", json!({ "row": 0, "column": "rowid", "value": "9" })),
+            ("table.sort", json!({ "column": "rowid" })),
+            ("table.setFilters", json!({ "filters": [{ "column": "rowid", "op": "eq", "value": "1" }] })),
+        ] {
+            assert_eq!(refused(s, id, params).code(), "badParams", "{id}");
+        }
+    });
+}
+
+#[test]
+fn rowid_alias_skips_a_real_rowid_column() {
+    let _db = require_testdb!();
+    for_sqlite(|t, s| {
+        let main = t.schema("odd");
+        open_table(s, main, "rowid_taken");
+        let d = read(s);
+        assert_eq!(column_names(&d), ["rowid", "note"], "the real rowid column is shown, the key is not");
+        // The real column edits, sorts and filters like any other; the rows are found by `_rowid_`.
+        set_cell(s, 0, "rowid", "R1");
+        set_cell(s, 1, "note", "edited");
+        assert_eq!(apply(s)["written"], 2);
+        assert_eq!(q(t, &format!("SELECT _rowid_, rowid, note FROM {main}.rowid_taken ORDER BY _rowid_")), "1|R1|first\n2|r2|edited");
+        run(s, "table.sort", json!({ "column": "rowid", "dir": "desc" }));
+        assert_eq!(cell(&read(s), 0, "rowid"), Some("r2"));
+        let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "rowid", "op": "eq", "value": "R1" }] }));
+        assert_eq!(r["rows"], 1);
+        assert_eq!(cell(&read(s), 0, "note"), Some("first"));
+    });
 }

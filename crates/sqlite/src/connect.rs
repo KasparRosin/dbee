@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use dbee_driver::{CONNECT_TIMEOUT, DbError, ServerInfo, Target};
 use rusqlite::ffi::ErrorCode;
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{InterruptHandle, OpenFlags};
 use tokio::runtime::Handle;
 
@@ -25,7 +26,9 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// read-only one also runs `PRAGMA query_only = ON`, which keeps it from temporary tables too. A
 /// read of `sqlite_schema` turns a file that is not a database, or one whose schema is damaged,
 /// into [`DbError::Connect`] naming the file; damage elsewhere shows when it is read. A file the
-/// system lets dbee read only opens read-only, and says so. All of it within [`CONNECT_TIMEOUT`].
+/// system lets dbee read only opens read-only, and says so. With `t.own_file_only`, SQL may open
+/// no other file: every `ATTACH` is refused, and with it `VACUUM`, which attaches the file it
+/// writes. All of it within [`CONNECT_TIMEOUT`].
 /// The file is opened by its absolute path, so a name that starts with `file:` is a file name,
 /// never a URI.
 pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
@@ -35,9 +38,9 @@ pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
     let file = cfg.file.as_deref().ok_or_else(|| DbError::Connect("no file is set".into()))?;
     let path = std::path::absolute(file).map_err(|e| DbError::Connect(format!("{}: {e}", file.display())))?;
     let shown = path.display().to_string();
-    let (read_only, create) = (cfg.read_only, t.create_file);
+    let (read_only, create, own_file_only) = (cfg.read_only, t.create_file, t.own_file_only);
     // An open that outlives the timeout closes its file on its own blocking thread when it ends.
-    let opening = runtime.spawn_blocking(move || open(&path, read_only, create));
+    let opening = runtime.spawn_blocking(move || open(&path, read_only, create, own_file_only));
     let opened = match tokio::time::timeout(CONNECT_TIMEOUT, opening).await {
         Ok(Ok(opened)) => opened,
         Ok(Err(_)) => Err(DbError::Other("opening the file stopped unexpectedly".into())),
@@ -54,7 +57,7 @@ pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
 
 /// Open the file at `path` and set its session up, on the calling (blocking) thread; the
 /// connection, its interrupt handle, and whether it is read-only.
-fn open(path: &Path, read_only: bool, create: bool) -> Result<(rusqlite::Connection, InterruptHandle, bool), DbError> {
+fn open(path: &Path, read_only: bool, create: bool, own_file_only: bool) -> Result<(rusqlite::Connection, InterruptHandle, bool), DbError> {
     let shown = path.display();
     if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
         return Err(DbError::Connect(format!("{shown} is not a file")));
@@ -76,6 +79,13 @@ fn open(path: &Path, read_only: bool, create: bool) -> Result<(rusqlite::Connect
         Some(ErrorCode::DatabaseCorrupt) => DbError::Connect(format!("{shown} is damaged: {e}")),
         _ => DbError::Connect(format!("{shown}: {e}")),
     };
+    if own_file_only {
+        conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Attach { .. } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .map_err(setup)?;
+    }
     conn.execute_batch("PRAGMA foreign_keys = ON").map_err(setup)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(setup)?;
     conn.query_row("SELECT count(*) FROM main.sqlite_schema", [], |_| Ok(())).map_err(setup)?;
@@ -321,12 +331,12 @@ mod tests {
     fn opening_sets_the_session_up() {
         let file = scratch_file("open-setup");
         let _ = std::fs::remove_file(&file);
-        assert_eq!(open(&file, false, false).err(), Some(DbError::Connect(format!("no file at {}", file.display()))));
-        let (conn, _, read_only) = open(&file, false, true).unwrap();
+        assert_eq!(open(&file, false, false, false).err(), Some(DbError::Connect(format!("no file at {}", file.display()))));
+        let (conn, _, read_only) = open(&file, false, true, false).unwrap();
         let pragma = |name: &str| conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get::<_, i64>(0)).unwrap();
         assert_eq!((pragma("foreign_keys"), pragma("busy_timeout"), pragma("query_only"), read_only), (1, 5000, 0, false));
         drop(conn);
-        let (ro, _, read_only) = open(&file, true, false).unwrap();
+        let (ro, _, read_only) = open(&file, true, false, false).unwrap();
         assert_eq!((ro.query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0)).unwrap(), read_only), (1, true));
         drop(ro);
         let _ = std::fs::remove_file(&file);
