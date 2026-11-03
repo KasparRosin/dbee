@@ -17,7 +17,7 @@ fn tr(name: &str) -> TableRef {
 
 async fn open_file(file: &Path, create_file: bool) -> SqliteConnection {
     let c = ConnectionConfig { name: "test sqlite".into(), kind: DbKind::Sqlite, file: Some(file.to_path_buf()), ..ConnectionConfig::default() };
-    let t = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Browse, create_file, own_file_only: false };
+    let t = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Browse, create_file, allowed_dirs: None };
     connect(t).await.unwrap_or_else(|e| panic!("open {}: {e}", file.display()))
 }
 
@@ -364,4 +364,20 @@ async fn which_tables_get_the_rowid_and_why_the_others_take_no_edits() {
     assert_eq!(shape("docs"), (s(&["title", "body", "(docs)", "(rank)"]), s(&[]), None));
     let why = table(&cat, "docs").no_edit_reason.clone().unwrap_or_default();
     assert!(why.starts_with("This is a virtual table") && why.contains("query tab"), "{why}");
+}
+
+#[tokio::test]
+async fn a_foreign_key_to_a_keyless_table_names_no_hidden_column() {
+    let (_file, conn) = Fresh::with(
+        "CREATE TABLE parent (a TEXT); \
+         CREATE TABLE implicit (p REFERENCES parent); \
+         CREATE TABLE named (p REFERENCES parent (a))",
+    )
+    .await;
+    let cat = load(&conn).await;
+    // A key that names no columns references the parent's declared key, which a keyless table has
+    // none of (SQLite calls it a mismatch): it is left out, never pointed at the hidden rowid.
+    assert!(table(&cat, "implicit").foreign_keys.is_empty(), "{:?}", table(&cat, "implicit").foreign_keys);
+    let named = &table(&cat, "named").foreign_keys;
+    assert_eq!(named.iter().map(|f| (f.target.clone(), f.target_columns.clone())).collect::<Vec<_>>(), [(tr("parent"), strings(&["a"]))]);
 }

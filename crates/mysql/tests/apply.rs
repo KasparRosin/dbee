@@ -31,7 +31,7 @@ async fn open(s: &Server, db: &TestDb, read_only: bool) -> MySqlConnection {
         tunnel: None,
         purpose: Purpose::Browse,
         create_file: false,
-        own_file_only: false,
+        allowed_dirs: None,
     })
     .await
     {

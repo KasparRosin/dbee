@@ -162,6 +162,11 @@ impl DbKind {
     pub const fn uses_file(self) -> bool {
         matches!(self.info().settings, Settings::File { .. })
     }
+
+    /// Its connections may go through an SSH tunnel.
+    pub const fn takes_ssh(self) -> bool {
+        matches!(self.info().settings, Settings::Server { ssh: true, .. })
+    }
 }
 
 impl From<DbKind> for &'static str {
@@ -288,10 +293,17 @@ impl ConnectionConfig {
         }
     }
 
-    /// A file type needs a file. A server type needs a host and a port, and for SSH a host, a port and a user.
+    /// A file type needs a file and takes no SSH tunnel. A server type needs a host and a port, and
+    /// for SSH (where its type takes it) a host, a port and a user.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_for(self.kind.info().settings)
+    }
+
+    /// [`ConnectionConfig::validate`] for a type whose settings are `settings`.
+    fn validate_for(&self, settings: Settings) -> Result<(), ConfigError> {
         let bad = |m: &str| Err(ConfigError::Invalid(m.to_string()));
-        let ssh_allowed = match self.kind.info().settings {
+        let ssh_allowed = match settings {
+            Settings::File { .. } if self.ssh.is_some() => return bad("a database file has no SSH tunnel"),
             Settings::File { .. } => {
                 return match &self.file {
                     Some(f) if !f.as_os_str().is_empty() => Ok(()),
@@ -300,13 +312,16 @@ impl ConnectionConfig {
             }
             Settings::Server { ssh, .. } => ssh,
         };
+        if self.ssh.is_some() && !ssh_allowed {
+            return bad("this database type takes no SSH tunnel");
+        }
         if self.host.trim().is_empty() {
             return bad("host is empty");
         }
         if self.port == 0 {
             return bad("port must not be 0");
         }
-        if let Some(ssh) = self.ssh.as_ref().filter(|_| ssh_allowed) {
+        if let Some(ssh) = &self.ssh {
             if ssh.host.trim().is_empty() {
                 return bad("SSH host is empty");
             }
@@ -469,4 +484,19 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn new_id() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("{nanos:x}-{:x}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_type_without_ssh_refuses_a_tunnel() {
+        let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password };
+        let c = ConnectionConfig { ssh: Some(ssh), ..ConnectionConfig::default() };
+        assert_eq!(c.validate_for(Settings::Server { tls: true, ssh: true }), Ok(()));
+        let refused = c.validate_for(Settings::Server { tls: true, ssh: false });
+        assert_eq!(refused, Err(ConfigError::Invalid("this database type takes no SSH tunnel".into())));
+        assert_eq!(ConnectionConfig { ssh: None, ..c }.validate_for(Settings::Server { tls: true, ssh: false }), Ok(()));
+    }
 }

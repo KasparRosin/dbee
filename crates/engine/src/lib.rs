@@ -186,9 +186,9 @@ pub struct SessionOptions {
     /// `connection.reconnect` may reach (an isolated run's test servers); `None` is no limit.
     /// See [`allowed`].
     pub allowed_targets: Option<Vec<(String, u16)>>,
-    /// The only folders a file database may lie in (an isolated run's home and `target/`), checked
-    /// as the targets are; `None` is no limit. While set, a connection's SQL may open no file but
-    /// its database's own (`dbee_driver::Target::own_file_only`). See [`allowed`].
+    /// The only folders a file database may lie in (an isolated run's home and `target/`); `None`
+    /// is no limit. They go to the driver (`dbee_driver::Target::allowed_dirs`), which checks the
+    /// file inside its open and keeps the connection's SQL from other files. See [`allowed`].
     pub allowed_dirs: Option<Vec<PathBuf>>,
     /// The drivers connections open with (the app's are `dbee_drivers::all()`). A database type
     /// none of them opens is refused with `disabled`.

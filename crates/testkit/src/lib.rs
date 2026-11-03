@@ -250,7 +250,15 @@ impl Kind {
                 json_type: "JSON",
                 dbee_connections_sql: None,
                 kill_sql: |_| String::new(),
-                slow_updates_sql: |_, _| (String::new(), String::new()),
+                // A trigger cannot hold a WITH clause, so the count goes in a view the trigger reads.
+                slow_updates_sql: |t, secs| {
+                    let sql = format!(
+                        "CREATE VIEW main.{t}_slow AS SELECT count(*) AS n FROM ({});
+                         CREATE TRIGGER main.{t}_slow_update BEFORE UPDATE ON {t} BEGIN SELECT n FROM {t}_slow; END;",
+                        sqlite_count(secs)
+                    );
+                    (sql, format!("TRIGGER IF EXISTS main.{t}_slow_update; DROP VIEW IF EXISTS main.{t}_slow"))
+                },
                 row_lock_waits_sql: |_| String::new(),
                 commit_wait: None,
                 read_only_sql: ("PRAGMA query_only", "1"),

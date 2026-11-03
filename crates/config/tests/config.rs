@@ -269,6 +269,14 @@ fn sqlite_needs_a_file() {
 }
 
 #[test]
+fn a_database_file_has_no_ssh_tunnel() {
+    let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password };
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ssh: Some(ssh.clone()), ..Default::default() };
+    assert_eq!(c.validate(), Err(ConfigError::Invalid("a database file has no SSH tunnel".into())));
+    assert!(ConnectionConfig { kind: DbKind::Postgres, ssh: Some(ssh), ..Default::default() }.validate().is_ok());
+}
+
+#[test]
 fn sqlite_display_name_is_the_file() {
     let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ..Default::default() };
     assert_eq!(c.display_name(), "shop.sqlite");

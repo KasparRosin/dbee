@@ -2,7 +2,7 @@
 //! database; the connection, whose calls run on blocking threads, and the canceller that
 //! interrupts the call running on it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -15,6 +15,9 @@ use tokio::runtime::Handle;
 
 use crate::query::NamesChecked;
 
+/// The pragmas that set a folder SQLite makes its own files in.
+const FOLDER_PRAGMAS: [&str; 2] = ["temp_store_directory", "data_store_directory"];
+
 /// How long a statement waits for a file another connection has locked.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -26,9 +29,11 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// read-only one also runs `PRAGMA query_only = ON`, which keeps it from temporary tables too. A
 /// read of `sqlite_schema` turns a file that is not a database, or one whose schema is damaged,
 /// into [`DbError::Connect`] naming the file; damage elsewhere shows when it is read. A file the
-/// system lets dbee read only opens read-only, and says so. With `t.own_file_only`, SQL may open
-/// no other file: every `ATTACH` is refused, and with it `VACUUM`, which attaches the file it
-/// writes. All of it within [`CONNECT_TIMEOUT`].
+/// system lets dbee read only opens read-only, and says so. With `t.allowed_dirs` (an isolated
+/// run), the file must lie in one of those folders ([`dbee_driver::allowed_file`]), and the path
+/// that check resolved is the one opened; SQL may then open no other file: every `ATTACH` is
+/// refused, and with it `VACUUM`, which attaches the file it writes, and the pragmas that move
+/// SQLite's temporary files. All of it within [`CONNECT_TIMEOUT`].
 /// The file is opened by its absolute path, so a name that starts with `file:` is a file name,
 /// never a URI.
 pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
@@ -38,9 +43,9 @@ pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
     let file = cfg.file.as_deref().ok_or_else(|| DbError::Connect("no file is set".into()))?;
     let path = std::path::absolute(file).map_err(|e| DbError::Connect(format!("{}: {e}", file.display())))?;
     let shown = path.display().to_string();
-    let (read_only, create, own_file_only) = (cfg.read_only, t.create_file, t.own_file_only);
+    let (read_only, create, allowed) = (cfg.read_only, t.create_file, t.allowed_dirs.map(<[PathBuf]>::to_vec));
     // An open that outlives the timeout closes its file on its own blocking thread when it ends.
-    let opening = runtime.spawn_blocking(move || open(&path, read_only, create, own_file_only));
+    let opening = runtime.spawn_blocking(move || open(&path, read_only, create, allowed.as_deref()));
     let opened = match tokio::time::timeout(CONNECT_TIMEOUT, opening).await {
         Ok(Ok(opened)) => opened,
         Ok(Err(_)) => Err(DbError::Other("opening the file stopped unexpectedly".into())),
@@ -55,10 +60,16 @@ pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
     Ok(SqliteConnection { shared: Some(Arc::new(shared)), running, info, turn: tokio::sync::Mutex::new(()), runtime })
 }
 
-/// Open the file at `path` and set its session up, on the calling (blocking) thread; the
-/// connection, its interrupt handle, and whether it is read-only.
-fn open(path: &Path, read_only: bool, create: bool, own_file_only: bool) -> Result<(rusqlite::Connection, InterruptHandle, bool), DbError> {
-    let shown = path.display();
+/// Open the file at `given` (checked against `allowed` first, when there are allowed folders) and
+/// set its session up, on the calling (blocking) thread; the connection, its interrupt handle, and
+/// whether it is read-only.
+fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>) -> Result<(rusqlite::Connection, InterruptHandle, bool), DbError> {
+    let shown = given.display();
+    let path = match allowed {
+        Some(dirs) => dbee_driver::allowed_file(dirs, given)?,
+        None => given.to_path_buf(),
+    };
+    let path = path.as_path();
     if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
         return Err(DbError::Connect(format!("{shown} is not a file")));
     }
@@ -79,9 +90,12 @@ fn open(path: &Path, read_only: bool, create: bool, own_file_only: bool) -> Resu
         Some(ErrorCode::DatabaseCorrupt) => DbError::Connect(format!("{shown} is damaged: {e}")),
         _ => DbError::Connect(format!("{shown}: {e}")),
     };
-    if own_file_only {
+    if allowed.is_some() {
         conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
             AuthAction::Attach { .. } => Authorization::Deny,
+            AuthAction::Pragma { pragma_name, pragma_value: Some(_) } if FOLDER_PRAGMAS.iter().any(|p| pragma_name.eq_ignore_ascii_case(p)) => {
+                Authorization::Deny
+            }
             _ => Authorization::Allow,
         }))
         .map_err(setup)?;
@@ -331,12 +345,12 @@ mod tests {
     fn opening_sets_the_session_up() {
         let file = scratch_file("open-setup");
         let _ = std::fs::remove_file(&file);
-        assert_eq!(open(&file, false, false, false).err(), Some(DbError::Connect(format!("no file at {}", file.display()))));
-        let (conn, _, read_only) = open(&file, false, true, false).unwrap();
+        assert_eq!(open(&file, false, false, None).err(), Some(DbError::Connect(format!("no file at {}", file.display()))));
+        let (conn, _, read_only) = open(&file, false, true, None).unwrap();
         let pragma = |name: &str| conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get::<_, i64>(0)).unwrap();
         assert_eq!((pragma("foreign_keys"), pragma("busy_timeout"), pragma("query_only"), read_only), (1, 5000, 0, false));
         drop(conn);
-        let (ro, _, read_only) = open(&file, true, false, false).unwrap();
+        let (ro, _, read_only) = open(&file, true, false, None).unwrap();
         assert_eq!((ro.query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0)).unwrap(), read_only), (1, true));
         drop(ro);
         let _ = std::fs::remove_file(&file);
@@ -347,10 +361,9 @@ mod tests {
         let file = scratch_file("poisoned");
         let _ = std::fs::remove_file(&file);
         let config = ConnectionConfig { kind: DbKind::Sqlite, file: Some(file.clone()), ..ConnectionConfig::default() };
-        let conn =
-            connect(Target { config: &config, password: None, tunnel: None, purpose: Purpose::Browse, create_file: true, own_file_only: false })
-                .await
-                .unwrap();
+        let conn = connect(Target { config: &config, password: None, tunnel: None, purpose: Purpose::Browse, create_file: true, allowed_dirs: None })
+            .await
+            .unwrap();
         // A call that panics with the session locked, its message kept out of the test's output.
         let shared = Arc::clone(conn.shared.as_ref().unwrap());
         let hook = std::panic::take_hook();

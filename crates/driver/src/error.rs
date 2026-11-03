@@ -63,6 +63,8 @@ pub enum DbError {
     ReadOnly { message: String },
     /// Statement `statement` (0-based) of an apply did not change exactly one row.
     RowNotFound { statement: usize },
+    /// The run may not reach it: a file outside an isolated run's allowed folders.
+    NotAllowed(String),
     /// Anything else.
     Other(String),
 }
@@ -80,6 +82,7 @@ impl DbError {
             DbError::Cancelled => "cancelled",
             DbError::ReadOnly { .. } => "readOnly",
             DbError::RowNotFound { .. } => "rowNotFound",
+            DbError::NotAllowed(_) => "config",
             DbError::Other(_) => "other",
         }
     }
@@ -110,7 +113,7 @@ impl std::fmt::Display for DbError {
                 "change {} did not match exactly one row (it may have been changed or deleted since it was loaded), so nothing was written",
                 statement.saturating_add(1)
             ),
-            DbError::Other(m) => write!(f, "{m}"),
+            DbError::NotAllowed(m) | DbError::Other(m) => write!(f, "{m}"),
         }
     }
 }
@@ -179,6 +182,7 @@ mod tests {
             (DbError::Cancelled, "cancelled"),
             (DbError::ReadOnly { message: "m".into() }, "readOnly"),
             (DbError::RowNotFound { statement: 0 }, "rowNotFound"),
+            (DbError::NotAllowed("m".into()), "config"),
             (DbError::Other("m".into()), "other"),
         ];
         for (e, code) in all {

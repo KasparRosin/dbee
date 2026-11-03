@@ -122,7 +122,7 @@ impl Form {
             None if self.kind.uses_file() => 0,
             None => return Err("The port must be a number from 1 to 65535.".into()),
         };
-        let ssh = if self.ssh_on {
+        let ssh = if self.ssh_on && self.kind.takes_ssh() {
             let port = parse_port(&self.ssh_port).ok_or("The SSH port must be a number from 1 to 65535.")?;
             Some(SshConfig { host: self.ssh_host.trim().into(), port, user: self.ssh_user.trim().into(), auth: self.ssh_auth() })
         } else {

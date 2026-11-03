@@ -28,7 +28,7 @@ fn config(s: &Server) -> ConnectionConfig {
 
 async fn open_for(s: &Server, db: &TestDb, purpose: Purpose) -> MySqlConnection {
     let c = config(s);
-    match connect(Target { config: &c, password: Some(&db.password), tunnel: None, purpose, create_file: false, own_file_only: false }).await {
+    match connect(Target { config: &c, password: Some(&db.password), tunnel: None, purpose, create_file: false, allowed_dirs: None }).await {
         Ok(conn) => conn,
         Err(e) => panic!("connect to {} failed: {e}", s.name),
     }

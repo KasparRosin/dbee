@@ -943,12 +943,13 @@ fn known_hosts_that_cannot_be_read_or_written_say_so() {
     assert!(e.to_string().contains("known_hosts cannot be read"), "{e}");
 }
 
-/// A folder of its own under `target/`, removed when dropped.
+/// A folder (or a file) of its own under `target/`, removed when dropped.
 struct Folder(std::path::PathBuf);
 
 impl Drop for Folder {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -973,18 +974,21 @@ fn isolated_runs_refuse_files_outside_allowed_dirs() {
             std::os::unix::fs::symlink(&file, other.0.join("seed.sqlite")).unwrap();
             refused.extend([other.0.join("hosts.sqlite"), other.0.join("seed.sqlite")]);
         }
+        let missing = folder.join(format!("{}.sqlite", unique("never")));
+        refused.push(missing.clone());
         {
-            // Only `other` is allowed: the seed copy lies outside it.
+            // Only `other` is allowed: the seed copy lies outside it. The driver refuses the file
+            // inside its open, so the job fails, and nothing was opened or made.
             let mut s = session_adjusted(|o| o.allowed_dirs = Some(vec![other.0.clone()]));
             for path in &refused {
                 for id in ["connection.test", "connection.open"] {
-                    let e = s.execute(id, params(path)).unwrap_err();
+                    let e = run_err(&mut s, id, params(path));
                     assert_eq!(e.code(), "config", "{id} {}: {e}", path.display());
                     assert_eq!(e.to_string(), format!("this isolated run may only open files in its own folders; {} is not in them", path.display()));
-                    assert!(!s.busy(), "{id} started a job");
                 }
             }
-            assert_eq!(s.inspect()["screen"], "connections");
+            assert_eq!((&s.inspect()["screen"], &s.inspect()["connection"]), (&json!("connections"), &Json::Null));
+            assert!(!missing.exists(), "no file was made");
         }
         {
             // The copy's folder allowed: it opens.
@@ -992,6 +996,22 @@ fn isolated_runs_refuse_files_outside_allowed_dirs() {
             s.run_blocking("connection.test", params(&file), T).unwrap();
             open(&mut s, params(&file));
             assert_eq!(open_table(&mut s, t.schema("shop"), "customers")["rows"], 100);
+        }
+        #[cfg(unix)]
+        {
+            // The query connection, which opens on the first run, is checked as well: a link that
+            // pointed inside when the browse connection opened, and out by then, is refused.
+            let link = folder.join(format!("{}.sqlite", unique("link")));
+            let _gone = Folder(link.clone());
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            let mut s = session_adjusted(|o| o.allowed_dirs = Some(vec![folder.clone()]));
+            open(&mut s, params(&link));
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
+            run(&mut s, "tab.newQuery", json!({ "text": "select 1" }));
+            let e = run_err(&mut s, "query.run", json!({}));
+            assert_eq!(e.code(), "config", "{e}");
+            assert!(e.to_string().starts_with("this isolated run may only open files in its own folders; "), "{e}");
         }
         // No list: no limit.
         let mut s = session();
@@ -1017,5 +1037,26 @@ fn a_file_is_named_by_its_path_not_a_host() {
         // A server's settings must still name its host.
         let e = run_err(&mut s, "connection.test", json!({ "config": { "port": 1 } }));
         assert!(e.to_string().contains("`config` must name its `host`"), "{e}");
+    }
+}
+
+#[test]
+fn an_isolated_run_opens_no_tunnel_for_a_file() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(dbee_testkit::TestTarget::is_file) {
+        let folder = t.file().unwrap().parent().unwrap().to_path_buf();
+        let mut s = session_adjusted(|o| {
+            o.allowed_targets = Some(vec![("127.0.0.1".into(), 1)]);
+            o.allowed_dirs = Some(vec![folder.clone()]);
+        });
+        // The file lies in an allowed folder, but the SSH server is no allowed target.
+        let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password };
+        let config = ConnectionConfig { ssh: Some(ssh), ..config_for(&t) };
+        for id in ["connection.test", "connection.open", "connection.save"] {
+            let e = s.execute(id, json!({ "config": config, "sshPassword": "pw" })).unwrap_err();
+            assert_eq!(e.code(), "badParams", "{id}: {e}");
+            assert!(e.to_string().contains("a database file has no SSH tunnel"), "{id}: {e}");
+            assert!(!s.busy(), "{id} started a job");
+        }
     }
 }

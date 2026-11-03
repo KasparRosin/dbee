@@ -37,7 +37,7 @@ async fn conn(s: &Server, db: &TestDb) -> PgConnection {
         tunnel: None,
         purpose: Purpose::Browse,
         create_file: false,
-        own_file_only: false,
+        allowed_dirs: None,
     })
     .await
     {

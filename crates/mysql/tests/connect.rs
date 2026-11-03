@@ -50,7 +50,7 @@ fn config(s: &Server, mode: SslMode) -> ConnectionConfig {
 }
 
 fn target<'a>(c: &'a ConnectionConfig, password: Option<&'a str>) -> Target<'a> {
-    Target { config: c, password, tunnel: None, purpose: Purpose::Browse, create_file: false, own_file_only: false }
+    Target { config: c, password, tunnel: None, purpose: Purpose::Browse, create_file: false, allowed_dirs: None }
 }
 
 async fn open_as(c: &ConnectionConfig, password: &str, purpose: Purpose) -> MySqlConnection {
@@ -771,8 +771,7 @@ async fn connect_fake(port: u16) -> Result<MySqlConnection, DbError> {
 }
 
 async fn connect_fake_as(c: &ConnectionConfig) -> Result<MySqlConnection, DbError> {
-    connect(Target { config: c, password: Some(FAKE_PASSWORD), tunnel: None, purpose: Purpose::Query, create_file: false, own_file_only: false })
-        .await
+    connect(Target { config: c, password: Some(FAKE_PASSWORD), tunnel: None, purpose: Purpose::Query, create_file: false, allowed_dirs: None }).await
 }
 
 fn holds_password(payloads: &[Vec<u8>]) -> bool {
@@ -1039,7 +1038,7 @@ async fn setup_statements(purpose: Purpose) -> Vec<String> {
         fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0), answer_as_mariadb).await;
     let c = fake_config(port);
     let conn =
-        connect(Target { config: &c, password: Some(FAKE_PASSWORD), tunnel: None, purpose, create_file: false, own_file_only: false }).await.unwrap();
+        connect(Target { config: &c, password: Some(FAKE_PASSWORD), tunnel: None, purpose, create_file: false, allowed_dirs: None }).await.unwrap();
     drop(conn);
     let got = server.await.unwrap();
     got.iter().filter(|p| p.first() == Some(&0x03)).map(|p| String::from_utf8_lossy(&p[1..]).into_owned()).collect()

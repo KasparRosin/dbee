@@ -114,10 +114,10 @@ impl Relation {
         self.columns.iter().any(|(_, at)| *at > 0) || self.unique.iter().any(|(_, columns)| columns.iter().all(not_null))
     }
 
-    /// Column `seq` (0-based) of the primary key.
+    /// Column `seq` (0-based) of the declared primary key; the rowid dbee keys a table by is none.
     fn key_column(&self, seq: u32) -> Option<&str> {
         let at = seq.checked_add(1)?;
-        self.columns.iter().find(|(_, key)| *key == at).map(|(c, _)| c.name.as_str())
+        self.columns.iter().find(|(c, key)| *key == at && !c.hidden).map(|(c, _)| c.name.as_str())
     }
 }
 

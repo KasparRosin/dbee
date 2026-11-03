@@ -17,7 +17,7 @@ fn config(file: &Path, read_only: bool) -> ConnectionConfig {
 }
 
 fn target(c: &ConnectionConfig) -> Target<'_> {
-    Target { config: c, password: None, tunnel: None, purpose: Purpose::Browse, create_file: false, own_file_only: false }
+    Target { config: c, password: None, tunnel: None, purpose: Purpose::Browse, create_file: false, allowed_dirs: None }
 }
 
 /// A fresh copy of the SQLite seed, removed when dropped.
@@ -389,4 +389,33 @@ fn the_file_is_closed_off_the_dropping_thread() {
         assert!(Instant::now() < deadline, "the file was never closed");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[tokio::test]
+async fn a_file_outside_the_allowed_folders_is_never_opened_or_made() {
+    let (allowed, outside) = (Scratch::new(), Scratch::new());
+    let folders = [allowed.0.clone()];
+    async fn open(c: &ConnectionConfig, folders: &[PathBuf], create_file: bool) -> Result<SqliteConnection, DbError> {
+        connect(Target { create_file, allowed_dirs: Some(folders), ..target(c) }).await
+    }
+    // Inside: opened, made when asked.
+    let made = config(&allowed.path("made.sqlite"), false);
+    assert!(open(&made, &folders, true).await.is_ok());
+    assert!(allowed.path("made.sqlite").is_file());
+    // Outside, or a link out of the folder: refused before anything is opened, and nothing is made.
+    let mut refused = vec![outside.path("new.sqlite"), allowed.0.join("..").join(outside.0.file_name().unwrap()).join("other.sqlite")];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.path("linked.sqlite"), allowed.path("link.sqlite")).unwrap();
+        refused.push(allowed.path("link.sqlite"));
+    }
+    for path in &refused {
+        let e = open(&config(path, false), &folders, true).await.err().unwrap_or_else(|| panic!("{} opened", path.display()));
+        assert_eq!(e.code(), "config", "{}: {e}", path.display());
+        assert!(e.to_string().starts_with("this isolated run may only open files in its own folders; "), "{e}");
+    }
+    assert_eq!(std::fs::read_dir(&outside.0).unwrap().count(), 0, "nothing was made outside");
+    // Without allowed folders, no limit.
+    let free = config(&outside.path("free.sqlite"), false);
+    assert!(connect(Target { create_file: true, ..target(&free) }).await.is_ok());
 }

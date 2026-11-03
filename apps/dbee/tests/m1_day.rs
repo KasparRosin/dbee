@@ -110,6 +110,7 @@ impl App {
             .env("DBEE_SECRET_STORE", "memory")
             .env("DBEE_CLIPBOARD", "memory")
             .env("DBEE_ALLOW_TARGETS", allowed(db))
+            .env("DBEE_ALLOW_DIRS", std::env::join_paths([home.to_path_buf(), root.join("target")]).unwrap())
             .env_remove("SSH_AUTH_SOCK")
             .env_remove("DBEE_CONTROL_PORT")
             .spawn()

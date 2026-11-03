@@ -21,7 +21,7 @@ fn seeded() -> TestTarget {
 
 async fn open_file(file: &Path, create_file: bool) -> SqliteConnection {
     let c = config(file);
-    let t = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file, own_file_only: false };
+    let t = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file, allowed_dirs: None };
     connect(t).await.unwrap_or_else(|e| panic!("open {}: {e}", file.display()))
 }
 
@@ -439,14 +439,20 @@ async fn sql_opens_no_other_file_when_the_run_allows_only_its_own() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("own.sqlite");
     let c = config(&file);
-    let confined = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file: true, own_file_only: true };
+    let folders = [dir.clone()];
+    let confined = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file: true, allowed_dirs: Some(&folders) };
     let conn = connect(confined).await.unwrap();
     ok(&conn, "CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1)", QUERY_LIMITS).await;
     let at = |name: &str| dbee_sql::Dialect::Sqlite.literal(&dir.join(name).display().to_string()).unwrap();
     let uri = |name: &str| dbee_sql::Dialect::Sqlite.literal(&format!("file:{}?mode=rwc", dir.join(name).display())).unwrap();
     // Every ATTACH and every VACUUM INTO, whatever the name; a plain VACUUM attaches a database of
-    // its own, so it goes too.
+    // its own, so it goes too, as do the pragmas that move SQLite's own files to another folder.
+    let elsewhere = dbee_sql::Dialect::Sqlite.literal(&dir.join("tmp").display().to_string()).unwrap();
+    std::fs::create_dir_all(dir.join("tmp")).unwrap();
     for sql in [
+        format!("PRAGMA temp_store_directory = {elsewhere}"),
+        format!("PRAGMA Temp_Store_Directory({elsewhere})"),
+        format!("PRAGMA data_store_directory = {elsewhere}"),
         format!("ATTACH {} AS other", at("other.sqlite")),
         format!("ATTACH {} AS other", uri("uri.sqlite")),
         "ATTACH '' AS other".to_owned(),
@@ -460,15 +466,17 @@ async fn sql_opens_no_other_file_when_the_run_allows_only_its_own() {
         assert_eq!(s.code, "23", "{sql}: {e}");
         assert!(s.hint.as_deref().is_some_and(|h| h.contains("ATTACH") && h.contains("VACUUM")), "{sql}: {:?}", s.hint);
     }
+    // Reading where the temporary files go sets nothing.
+    ok(&conn, "PRAGMA temp_store_directory", QUERY_LIMITS).await;
     let mut files: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     files.sort();
-    assert_eq!(files, ["own.sqlite"], "no other file was made");
+    assert_eq!(files, ["own.sqlite", "tmp"], "no other file was made");
     assert_eq!(ok(&conn, "SELECT a FROM t", QUERY_LIMITS).await.rows, [[some("1")]], "the file's own SQL runs");
     drop(conn);
     // A run that allows any file: both reach other files (ATTACH one that is there, as the file
     // was opened without leave to make files).
     std::fs::write(dir.join("other.sqlite"), "").unwrap();
-    let open = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file: false, own_file_only: false };
+    let open = Target { config: &c, password: None, tunnel: None, purpose: Purpose::Query, create_file: false, allowed_dirs: None };
     let conn = connect(open).await.unwrap();
     ok(&conn, &format!("ATTACH {} AS other; CREATE TABLE other.o (b INTEGER); DETACH other", at("other.sqlite")), QUERY_LIMITS).await;
     ok(&conn, &format!("VACUUM INTO {}", at("copy.sqlite")), QUERY_LIMITS).await;

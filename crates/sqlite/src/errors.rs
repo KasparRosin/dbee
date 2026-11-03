@@ -23,10 +23,8 @@ const CODE_LABEL: &str = "SQLite error";
 
 pub(crate) const PARAMETERS: &str = "the statement has parameters (such as ?), which dbee does not fill";
 
-/// The hint of `SQLITE_AUTH`, which only the authorizer of a connection whose SQL may open no other
-/// file gives.
-const OWN_FILE_ONLY: &str =
-    "This run lets SQL open no file but this database's own, so ATTACH is refused, and VACUUM, which attaches the file it writes.";
+/// The hint of `SQLITE_AUTH`, which only the authorizer of an isolated run's connection gives.
+const OWN_FILE_ONLY: &str = "This isolated run lets SQL open no other file, so ATTACH and VACUUM are refused.";
 
 /// `e`, from running the statement at byte `start` of `sql`, the text the caller ran; a syntax
 /// error's offset becomes a character position in `sql`.
@@ -114,7 +112,7 @@ mod tests {
         // Refused by the authorizer of a run whose SQL may open no other file: the hint says why.
         let hint = |e: DbError| if let DbError::Server(s) = e { s.hint } else { None };
         let refused = hint(from_sqlite(failure(ffi::SQLITE_AUTH, "not authorized")));
-        assert!(refused.is_some_and(|h| h.contains("ATTACH") && h.contains("VACUUM")));
+        assert_eq!(refused.as_deref(), Some("This isolated run lets SQL open no other file, so ATTACH and VACUUM are refused."));
         assert_eq!(hint(unique), None);
     }
 

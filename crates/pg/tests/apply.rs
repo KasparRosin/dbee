@@ -33,7 +33,7 @@ async fn open(s: &Server, password: &str, read_only: bool) -> PgConnection {
         tunnel: None,
         purpose: Purpose::Browse,
         create_file: false,
-        own_file_only: false,
+        allowed_dirs: None,
     })
     .await
     {

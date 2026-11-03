@@ -37,7 +37,7 @@ fn config(s: &Server, mode: SslMode) -> ConnectionConfig {
 }
 
 fn target<'a>(c: &'a ConnectionConfig, password: Option<&'a str>) -> Target<'a> {
-    Target { config: c, password, tunnel: None, purpose: Purpose::Browse, create_file: false, own_file_only: false }
+    Target { config: c, password, tunnel: None, purpose: Purpose::Browse, create_file: false, allowed_dirs: None }
 }
 
 async fn open(c: &ConnectionConfig, db: &TestDb) -> PgConnection {
@@ -158,7 +158,7 @@ async fn through_ssh_tunnel() {
             tunnel: Some(Arc::clone(&t)),
             purpose: Purpose::Browse,
             create_file: false,
-            own_file_only: false,
+            allowed_dirs: None,
         })
         .await
         .unwrap();
@@ -172,7 +172,7 @@ async fn through_ssh_tunnel() {
             tunnel: Some(Arc::clone(&t)),
             purpose: Purpose::Browse,
             create_file: false,
-            own_file_only: false,
+            allowed_dirs: None,
         })
         .await
         .unwrap();
@@ -186,7 +186,7 @@ async fn through_ssh_tunnel() {
                     tunnel: None,
                     purpose: Purpose::Browse,
                     create_file: false,
-                    own_file_only: false
+                    allowed_dirs: None
                 })
                 .await
             ),
@@ -278,7 +278,7 @@ async fn cancel_stops_pg_sleep() {
             tunnel: Some(Arc::clone(&t)),
             purpose: Purpose::Browse,
             create_file: false,
-            own_file_only: false,
+            allowed_dirs: None,
         })
         .await
         .unwrap();

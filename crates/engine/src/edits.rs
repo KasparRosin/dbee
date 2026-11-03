@@ -186,8 +186,9 @@ impl Edits {
     /// The statements that write the edits in `dialect`, each with its grid row: updates, then
     /// inserts, then deletes. `hidden` holds the page's key columns the grid does not show, row for
     /// row with `data`. `NoKey` when the table has no row key or a loaded row lacks its key value,
-    /// `UnknownColumn` when a staged column is not in both the page and `info`, or a key column in
-    /// neither the page nor `hidden`.
+    /// `UnknownColumn` when a staged column is not a visible column of both the page and `info`, or
+    /// a key column is not where `info` says it is: a visible one in the page, a hidden one beside
+    /// it (so a catalog refreshed since the page loaded never takes one for the other).
     pub fn statements(&self, dialect: Dialect, info: &TableInfo, data: &ResultSet, hidden: &ResultSet) -> Result<Vec<(usize, String)>, SqlError> {
         if self.is_empty() {
             return Ok(Vec::new());
@@ -195,14 +196,14 @@ impl Edits {
         let key = info.row_key().ok_or(SqlError::NoKey)?;
         let column = |col: usize| -> Result<&ColumnInfo, SqlError> {
             let name = &data.columns.get(col).ok_or_else(|| SqlError::UnknownColumn(format!("#{col}")))?.name;
-            info.column(name).ok_or_else(|| SqlError::UnknownColumn(name.clone()))
+            info.visible_column(name).ok_or_else(|| SqlError::UnknownColumn(name.clone()))
         };
-        // A loaded row's value of the column `name`, from the page or beside it.
+        // A loaded row's value of the key column `name`: in the page when it is visible, else
+        // beside it.
         let loaded = |row: usize, name: &str| -> Option<&Cell> {
-            [data, hidden].into_iter().find_map(|page| {
-                let at = page.columns.iter().position(|c| c.name == name)?;
-                Some(page.rows.get(row).and_then(|values| values.get(at)).unwrap_or(&None))
-            })
+            let page = if info.visible_column(name).is_some() { data } else { hidden };
+            let at = page.columns.iter().position(|c| c.name == name)?;
+            Some(page.rows.get(row).and_then(|values| values.get(at)).unwrap_or(&None))
         };
         let key_of = |row: usize| -> Result<Vec<(&ColumnInfo, &str)>, SqlError> {
             if row >= data.rows.len() {
@@ -621,6 +622,32 @@ mod tests {
         let mut gone = hidden.clone();
         gone.rows[1][0] = None;
         assert_eq!(e.statements(Dialect::Sqlite, &i, &d, &gone), Err(SqlError::NoKey));
+    }
+
+    #[test]
+    fn a_key_that_went_out_of_sight_is_refused() {
+        let cell = |v: &str| Some(v.to_owned());
+        let hide = |c: ColumnInfo| ColumnInfo { hidden: true, ..c };
+        // Loaded while the table had a real column `rowid`, so its key was the hidden `_rowid_`.
+        let (real, note) = (col("rowid", "TEXT", "TEXT", 'S'), col("note", "TEXT", "TEXT", 'S'));
+        let d = ResultSet { columns: vec![real.column(), note.column()], rows: vec![vec![cell("1"), cell("a")]], ..ResultSet::default() };
+        let hidden = ResultSet {
+            columns: vec![hide(col("_rowid_", "INTEGER", "INTEGER", 'N')).column()],
+            rows: vec![vec![cell("7")]],
+            ..ResultSet::default()
+        };
+        // Then the column went, and the refreshed catalog keys the table by the hidden `rowid`: the
+        // old column's values must not stand in for it.
+        let refreshed =
+            TableInfo { columns: vec![hide(col("rowid", "INTEGER", "INTEGER", 'N')), note.clone()], primary_key: vec!["rowid".into()], ..info() };
+        let mut e = Edits::default();
+        e.stage(&d, 0, 1, text("b"), None).unwrap();
+        assert_eq!(e.statements(Dialect::Sqlite, &refreshed, &d, &hidden), Err(SqlError::UnknownColumn("rowid".into())));
+        // A cell staged on the old column names no visible column any more.
+        let by_note = TableInfo { primary_key: vec!["note".into()], ..refreshed };
+        let mut e = Edits::default();
+        e.stage(&d, 0, 0, text("2"), None).unwrap();
+        assert_eq!(e.statements(Dialect::Sqlite, &by_note, &d, &hidden), Err(SqlError::UnknownColumn("rowid".into())));
     }
 
     #[test]

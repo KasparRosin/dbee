@@ -1,6 +1,7 @@
 //! The interface every database driver implements, and that the engine holds without naming a
 //! driver: [`Driver`] opens a [`Connection`], whose [`Cancel`] stops what runs on it.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -63,9 +64,10 @@ pub enum Purpose {
 
 /// Where and how to connect. `password` is the database password (never stored in `config`);
 /// `tunnel` is the open SSH tunnel when `config.ssh` is set; `create_file` lets a file database
-/// make its file when it does not exist yet; `own_file_only` keeps the connection's SQL from
-/// opening or making any file but the database's own (an isolated run), which a server
-/// database's driver ignores.
+/// make its file when it does not exist yet. `allowed_dirs`, in an isolated run, are the only
+/// folders a database file may lie in: a file driver checks its file against them inside its
+/// open ([`crate::allowed_file`]) and opens the path that check resolved, and then keeps the
+/// connection's SQL from opening or making any other file. A server database's driver ignores it.
 #[derive(Clone)]
 pub struct Target<'a> {
     pub config: &'a ConnectionConfig,
@@ -73,7 +75,7 @@ pub struct Target<'a> {
     pub tunnel: Option<Arc<Tunnel>>,
     pub purpose: Purpose,
     pub create_file: bool,
-    pub own_file_only: bool,
+    pub allowed_dirs: Option<&'a [PathBuf]>,
 }
 
 impl std::fmt::Debug for Target<'_> {
@@ -84,7 +86,7 @@ impl std::fmt::Debug for Target<'_> {
             .field("tunnel", &self.tunnel)
             .field("purpose", &self.purpose)
             .field("create_file", &self.create_file)
-            .field("own_file_only", &self.own_file_only)
+            .field("allowed_dirs", &self.allowed_dirs)
             .finish()
     }
 }
@@ -139,9 +141,17 @@ mod tests {
     #[test]
     fn target_debug_hides_the_password() {
         let config = ConnectionConfig::default();
-        let t = Target { config: &config, password: Some("hunter2"), tunnel: None, purpose: Purpose::Query, create_file: false, own_file_only: true };
+        let dirs = [PathBuf::from("/run/allowed")];
+        let t = Target {
+            config: &config,
+            password: Some("hunter2"),
+            tunnel: None,
+            purpose: Purpose::Query,
+            create_file: false,
+            allowed_dirs: Some(&dirs),
+        };
         let shown = format!("{t:?}");
         assert!(!shown.contains("hunter2") && shown.contains("<redacted>") && shown.contains("Query"), "{shown}");
-        assert!(shown.contains("own_file_only: true"), "{shown}");
+        assert!(shown.contains("/run/allowed"), "{shown}");
     }
 }

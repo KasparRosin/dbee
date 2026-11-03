@@ -41,6 +41,7 @@
 //! carry command ids and job labels, never SQL text.
 
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use dbee_config::ConnectionConfig;
@@ -172,7 +173,13 @@ enum Via {
     /// The session's query connection.
     Open(Arc<dyn Connection>),
     /// None yet: the job opens one as the browse connection was opened.
-    Connect { driver: Arc<dyn Driver>, config: Box<ConnectionConfig>, password: Option<String>, tunnel: Option<Arc<Tunnel>>, own_file_only: bool },
+    Connect {
+        driver: Arc<dyn Driver>,
+        config: Box<ConnectionConfig>,
+        password: Option<String>,
+        tunnel: Option<Arc<Tunnel>>,
+        allowed_dirs: Option<Vec<PathBuf>>,
+    },
 }
 
 /// Why a run stopped early: at statement `statement` (0-based), with the byte offset in the tab
@@ -228,9 +235,15 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
     }
     let (conn, opened) = match via {
         Via::Open(conn) => (conn, false),
-        Via::Connect { driver, config, password, tunnel, own_file_only } => {
-            let target =
-                Target { config: &config, password: password.as_deref(), tunnel, purpose: Purpose::Query, create_file: false, own_file_only };
+        Via::Connect { driver, config, password, tunnel, allowed_dirs } => {
+            let target = Target {
+                config: &config,
+                password: password.as_deref(),
+                tunnel,
+                purpose: Purpose::Query,
+                create_file: false,
+                allowed_dirs: allowed_dirs.as_deref(),
+            };
             // A connect that is stopped is dropped: nothing ran on it yet.
             tokio::select! {
                 connected = driver.connect(target) => match connected {
@@ -520,7 +533,7 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             config: Box::new(c.config.clone()),
             password: c.credentials.password.clone(),
             tunnel: c.tunnel.clone(),
-            own_file_only: s.allowed_dirs.is_some(),
+            allowed_dirs: s.allowed_dirs.clone(),
         },
     };
     let generation = Arc::downgrade(&c.browse);
@@ -688,7 +701,7 @@ mod tests {
             config: Box::new(config.clone()),
             password: Some(db.password.clone()),
             tunnel: None,
-            own_file_only: false,
+            allowed_dirs: None,
         };
         let text = "select repeat('x', 60) as a; select repeat('y', 60) as b; select 'z' as c".to_owned();
         let ranges = lexer::statements(Dialect::Postgres, &text);

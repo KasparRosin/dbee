@@ -54,6 +54,16 @@ fn on_each_table(mut test: impl FnMut(&TestTarget, &str, &mut TestSession)) {
     }
 }
 
+/// Waits until the Apply's update of `name` runs (slowed by [`TestTarget::slow_updates_sql`]). A
+/// file lists no statements: its update gets a moment to start.
+fn until_update_runs(t: &TestTarget, name: &str) {
+    if t.lists_running_statements() {
+        until_sql(t, &t.slow_update_running_sql(name), "1", "the Apply's update to run");
+    } else {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// `sql`'s rows, joined by `,`.
 fn rows_of(t: &TestTarget, sql: &str) -> String {
     q(t, sql).lines().collect::<Vec<_>>().join(",")
@@ -561,7 +571,7 @@ fn connection_lost_during_apply_keeps_the_edits() {
         open_table(&mut s, sc, &name);
         set_cell(&mut s, 0, "name", "lost");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        until_sql(&t, &t.slow_update_running_sql(&name), "1", "the Apply's update to run");
+        until_update_runs(&t, &name);
         kill_dbee_connections(&t, &s);
         let e = s.wait(job, T).unwrap_err();
         assert_eq!(e.code(), "connectionLost", "{}: {e}", t.name());
@@ -595,10 +605,6 @@ fn connection_lost_during_apply_keeps_the_edits() {
 fn reconnect_during_apply_marks_the_outcome_unknown() {
     let _db = require_testdb!();
     for t in engine_targets() {
-        // A file lists no statements: nothing tells when the Apply's update runs.
-        if !t.lists_running_statements() {
-            continue;
-        }
         let sc = t.schema("scratch");
         let (name, mut drop) = make_table(&t);
         // Long enough for the reconnect to land while it runs, also on a busy machine.
@@ -608,7 +614,7 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
         let mut s = opened(&t, &name);
         set_cell(&mut s, 1, "name", "cut off");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        until_sql(&t, &t.slow_update_running_sql(&name), "1", "the Apply's update to run");
+        until_update_runs(&t, &name);
         run(&mut s, "connection.reconnect", json!({}));
         // The Apply ran on the connection the reconnect let go: its result will be ignored, so the
         // tab cannot know what it wrote.
@@ -646,10 +652,6 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
 fn table_cancel_never_cancels_an_apply() {
     let _db = require_testdb!();
     for t in engine_targets() {
-        // A file lists no statements: nothing tells when the Apply's update runs.
-        if !t.lists_running_statements() {
-            continue;
-        }
         let sc = t.schema("scratch");
         let (name, mut drop) = make_table(&t);
         // Long enough to act while it runs, also on a busy machine.
@@ -659,7 +661,7 @@ fn table_cancel_never_cancels_an_apply() {
         let mut s = opened(&t, &name);
         set_cell(&mut s, 0, "name", "kept");
         let Outcome::Started(apply) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        until_sql(&t, &t.slow_update_running_sql(&name), "1", "the Apply's update to run");
+        until_update_runs(&t, &name);
         // Another tab's page load waits behind the Apply on the browse connection; cancelling it
         // would cancel the Apply's statement instead.
         let Outcome::Started(load) = s.execute("table.open", json!({ "schema": sc, "table": name })).unwrap() else {
@@ -1189,5 +1191,44 @@ fn rowid_alias_skips_a_real_rowid_column() {
         let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "rowid", "op": "eq", "value": "R1" }] }));
         assert_eq!(r["rows"], 1);
         assert_eq!(cell(&read(s), 0, "note"), Some("first"));
+    });
+}
+
+#[test]
+fn a_virtual_table_shows_its_columns_and_takes_no_edits() {
+    let _db = require_testdb!();
+    for_sqlite(|t, s| {
+        let (sc, name) = (t.schema("scratch"), unique("t_docs"));
+        let _drop = Scratch(t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        q(t, &format!("CREATE VIRTUAL TABLE {sc}.{name} USING fts5(title, body); INSERT INTO {sc}.{name} VALUES ('a title', 'a body')"));
+        run(s, "schema.refresh", json!({}));
+        assert_eq!(open_table(s, sc, &name)["rows"], 1);
+        let d = read(s);
+        assert_eq!(column_names(&d), ["title", "body"], "its hidden columns are not shown");
+        assert_eq!((cell(&d, 0, "title"), cell(&d, 0, "body")), (Some("a title"), Some("a body")));
+        let Some(Tab::Table(tab)) = s.state().active_tab() else { panic!("a table tab is active") };
+        assert!(tab.hidden.columns.is_empty(), "the page read no hidden column: {:?}", tab.hidden.columns);
+        let reason = d["notEditableReason"].as_str().unwrap_or_default().to_owned();
+        assert!(d["editable"] == false && reason.starts_with("This is a virtual table"), "{d}");
+        assert_eq!(summary(s)["noEditReason"], reason.as_str());
+        let e = refused(s, "cell.edit", json!({ "row": 0, "column": "title", "value": "x" }));
+        assert_eq!((e.code(), why(&e)), ("disabled", reason));
+    });
+}
+
+#[test]
+fn a_sorted_page_of_a_rowid_table_edits_the_rows_it_shows() {
+    let _db = require_testdb!();
+    for_sqlite(|t, s| {
+        let main = t.schema("shop");
+        open_table(s, main, "notes_nokey");
+        run(s, "table.sort", json!({ "column": "body", "dir": "desc" }));
+        // "another note" twice (rowids 2 and 3, the hidden key breaking the tie), then "a note" (1).
+        let d = read(s);
+        assert_eq!((cell(&d, 0, "body"), cell(&d, 2, "body")), (Some("another note"), Some("a note")));
+        set_cell(s, 0, "title", "shown first");
+        set_cell(s, 2, "title", "shown last");
+        assert_eq!(apply(s)["written"], 2);
+        assert_eq!(q(t, &format!("SELECT rowid, title FROM {main}.notes_nokey ORDER BY rowid")), "1|shown last\n2|shown first\n3|second");
     });
 }
