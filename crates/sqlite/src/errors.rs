@@ -12,8 +12,10 @@ enum Becomes {
     ReadOnly,
 }
 
-/// The primary result codes dbee acts on. Every other code is the server's error with its
-/// extended code, `SQLITE_BUSY` (the file is locked past the busy timeout) among them.
+/// The result codes dbee acts on, matched exactly. Every other code is the server's error with its
+/// extended code: `SQLITE_BUSY` (the file is locked past the busy timeout) among them, and the
+/// extended codes of `SQLITE_READONLY` (the file moved, a lock it cannot take), which say more
+/// than that the connection is read-only.
 const CODES: &[(c_int, Becomes)] = &[(ffi::SQLITE_INTERRUPT, Becomes::Cancelled), (ffi::SQLITE_READONLY, Becomes::ReadOnly)];
 
 /// What the text shows before the code: `no such column: x (SQLite error 1)`.
@@ -46,7 +48,7 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
 /// The error of result code `extended` (an extended code, or a primary one) with SQLite's
 /// `message`.
 fn from_code(extended: c_int, message: String, position: Option<u32>) -> DbError {
-    match CODES.iter().find(|(code, _)| *code == primary(extended)).map(|(_, becomes)| *becomes) {
+    match CODES.iter().find(|(code, _)| *code == extended).map(|(_, becomes)| *becomes) {
         Some(Becomes::Cancelled) => DbError::Cancelled,
         Some(Becomes::ReadOnly) => DbError::ReadOnly { message },
         None => DbError::Server(Box::new(ServerError {
@@ -91,8 +93,9 @@ mod tests {
     fn result_codes_dbee_acts_on() {
         assert_eq!(from_sqlite(failure(ffi::SQLITE_INTERRUPT, "interrupted")), DbError::Cancelled);
         assert_eq!(from_sqlite(failure(ffi::SQLITE_READONLY, "attempt to write")), DbError::ReadOnly { message: "attempt to write".into() });
-        // Extended codes count by their primary code.
-        assert_eq!(from_sqlite(failure(ffi::SQLITE_READONLY_DBMOVED, "moved")).code(), "readOnly");
+        // An extended code says more than "read-only": the file moved, a lock it cannot take.
+        let moved = from_sqlite(failure(ffi::SQLITE_READONLY_DBMOVED, "attempt to write a readonly database"));
+        assert_eq!((moved.code(), moved.to_string().as_str()), ("server", "attempt to write a readonly database (SQLite error 1032)"));
         let busy = from_sqlite(failure(ffi::SQLITE_BUSY, "database is locked"));
         assert_eq!((busy.code(), busy.to_string().as_str()), ("server", "database is locked (SQLite error 5)"));
         let unique = from_sqlite(failure(ffi::SQLITE_CONSTRAINT_UNIQUE, "UNIQUE constraint failed: t.a"));

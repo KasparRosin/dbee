@@ -293,3 +293,100 @@ async fn a_dropped_connection_stops_its_statement() {
     // A canceller that outlives its connection sends nothing.
     canceller.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn opening_reads_the_schema_not_the_whole_file() {
+    let dir = Scratch::new();
+    let p = dir.path("damaged.sqlite");
+    let c = config(&p, false);
+    let conn = SqliteDriver.connect(Target { create_file: true, ..target(&c) }).await.unwrap();
+    let rows = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200) SELECT zeroblob(2000) FROM n";
+    conn.run(&format!("CREATE TABLE t (b BLOB); INSERT INTO t {rows}"), QUERY_LIMITS).await.unwrap();
+    drop(conn);
+    // Damage the last page, which holds rows, not the schema.
+    let mut bytes = std::fs::read(&p).unwrap();
+    let len = bytes.len();
+    assert!(len > 64 * 4096, "{len}");
+    bytes[len - 4096..].fill(0xA5);
+    std::fs::write(&p, &bytes).unwrap();
+    // Opening reads the schema only, so it opens; the damage shows where the rows are read.
+    let conn = open(&c).await;
+    let e = conn.scalar_u64("SELECT sum(length(b)) FROM t").await.unwrap_err();
+    assert!(matches!(&e, DbError::Server(s) if s.code == "11"), "{e:?}");
+    assert_eq!(scalar(&conn, "SELECT count(*) FROM sqlite_schema").await, 1);
+}
+
+#[tokio::test]
+async fn a_locked_file_at_open_is_a_connect_error_naming_it() {
+    let seed = seeded();
+    let holder = open(&config(seed.file().unwrap(), false)).await;
+    holder.run("BEGIN EXCLUSIVE", QUERY_LIMITS).await.unwrap();
+    let started = Instant::now();
+    let e = connect(target(&config(seed.file().unwrap(), false))).await.unwrap_err();
+    assert!(started.elapsed() >= Duration::from_millis(4_500), "the busy timeout: {:?}", started.elapsed());
+    assert_eq!(e.code(), "connect", "{e}");
+    assert!(e.to_string().contains(&format!("{}: database is locked", seed.file().unwrap().display())), "{e}");
+    holder.run("ROLLBACK", QUERY_LIMITS).await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_path_that_is_no_file_is_refused_at_once() {
+    let dir = Scratch::new();
+    let fifo = dir.path("fifo.sqlite");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    for read_only in [true, false] {
+        let started = Instant::now();
+        // Opened, a FIFO would wait for a writer.
+        let e = tokio::time::timeout(Duration::from_secs(5), connect(target(&config(&fifo, read_only)))).await.expect("refused at once").unwrap_err();
+        assert!(e.code() == "connect" && e.to_string().contains(&format!("{} is not a file", fifo.display())), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+    let e = connect(target(&config(&dir.0, false))).await.unwrap_err();
+    assert!(e.to_string().contains("is not a file"), "{e}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_write_protected_file_is_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let seed = seeded();
+    let file = seed.file().unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    // Asked for read-write, SQLite opens it read-only, and says so.
+    let conn = open(&config(file, false)).await;
+    assert!(conn.info().read_only);
+    assert_eq!(conn.run("UPDATE orders SET status = 'new'", QUERY_LIMITS).await.unwrap_err().code(), "readOnly");
+    assert_eq!(scalar(&conn, "PRAGMA query_only").await, 1);
+    assert_eq!(scalar(&conn, "SELECT count(*) FROM orders").await, dbee_testkit::ORDERS_COUNT);
+}
+
+#[test]
+fn the_file_is_closed_off_the_dropping_thread() {
+    // One blocking thread, kept busy below, so a close sent to it waits where the test can see it.
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).max_blocking_threads(1).enable_all().build().unwrap();
+    let dir = Scratch::new();
+    let p = dir.path("wal.sqlite");
+    let c = config(&p, false);
+    let conn = rt.block_on(async {
+        let conn = connect(Target { create_file: true, ..target(&c) }).await.unwrap();
+        conn.run("PRAGMA journal_mode = WAL", QUERY_LIMITS).await.unwrap();
+        conn.run("CREATE TABLE t (a INTEGER)", QUERY_LIMITS).await.unwrap();
+        conn
+    });
+    // The last close of a WAL file checkpoints it and deletes the WAL: writes on the closing thread.
+    let wal = dir.path("wal.sqlite-wal");
+    assert!(wal.exists());
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let busy = rt.spawn_blocking(move || wait.recv());
+    // Dropped on a thread with no runtime, as the UI's.
+    std::thread::spawn(move || drop(conn)).join().unwrap();
+    assert!(wal.exists(), "the file was closed on the dropping thread");
+    go.send(()).unwrap();
+    rt.block_on(busy).unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while wal.exists() {
+        assert!(Instant::now() < deadline, "the file was never closed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

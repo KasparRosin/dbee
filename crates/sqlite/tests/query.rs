@@ -358,7 +358,7 @@ async fn a_name_that_is_not_utf8_never_panics() {
         let r =
             if typed { c.run("SELECT * FROM odd_bytes", QUERY_LIMITS).await } else { c.run_untyped("SELECT * FROM odd_bytes", QUERY_LIMITS).await };
         let e = r.unwrap_err();
-        assert!(e.code() == "other" && e.to_string().contains("UTF-8"), "{e}");
+        assert!(e.code() == "other" && e.to_string().contains("UTF-8") && e.to_string().contains("odd_bytes"), "{e}");
     }
     // What needs no column name still works, and so does the catalog.
     assert_eq!(c.scalar_u64("SELECT count(*) FROM odd_bytes").await.unwrap(), 1);
@@ -366,4 +366,69 @@ async fn a_name_that_is_not_utf8_never_panics() {
     let t = catalog.table(&dbee_core::TableRef { schema: "main".into(), name: "odd_bytes".into() }).unwrap();
     assert_eq!(t.columns.iter().map(|c| (c.name.as_str(), c.type_sql.as_str())).collect::<Vec<_>>(), [("a\u{FFFD}", "T\u{FFFD}")]);
     assert!(!c.is_closed());
+}
+
+/// Makes `file` hold a table `name` whose column name and declared type are not UTF-8, through a
+/// connection of its own; the schema's version moves on, as any schema change moves it.
+async fn craft_odd_bytes(file: &Path, name: &str) {
+    let c = open_file(file, true).await;
+    for sql in [
+        format!("CREATE TABLE {name} (a INTEGER)"),
+        "PRAGMA writable_schema = ON".to_owned(),
+        format!(
+            "UPDATE sqlite_schema SET sql = 'CREATE TABLE {name} (' || CAST(X'61FF' AS TEXT) || ' ' || CAST(X'54FF' AS TEXT) || ')' WHERE name = '{name}'"
+        ),
+        "PRAGMA writable_schema = OFF".to_owned(),
+    ] {
+        ok(&c, &sql, QUERY_LIMITS).await;
+    }
+    let version = c.scalar_u64("PRAGMA schema_version").await.unwrap();
+    ok(&c, &format!("PRAGMA schema_version = {}", version + 1), QUERY_LIMITS).await;
+}
+
+#[tokio::test]
+async fn the_names_check_runs_again_after_a_schema_change_or_an_attach() {
+    let (fresh, c) = Fresh::new().await;
+    ok(&c, "CREATE TABLE plain (a INTEGER)", QUERY_LIMITS).await;
+    assert_eq!(ok(&c, "SELECT a FROM plain", QUERY_LIMITS).await.columns[0].name, "a");
+    // Another connection changes the schema: the next statement checks again.
+    craft_odd_bytes(&fresh.0, "odd_main").await;
+    let e = c.run("SELECT a FROM plain", QUERY_LIMITS).await.unwrap_err();
+    assert!(e.code() == "other" && e.to_string().contains("odd_main"), "{e}");
+    // A file attached later is checked too, and named with its database.
+    let (_clean, d) = Fresh::new().await;
+    ok(&d, "CREATE TABLE plain (a INTEGER)", QUERY_LIMITS).await;
+    assert_eq!(ok(&d, "SELECT a FROM plain", QUERY_LIMITS).await.rows_seen, 0);
+    let (other, _o) = Fresh::new().await;
+    craft_odd_bytes(&other.0, "odd_other").await;
+    let attach = format!("ATTACH {} AS other", dbee_sql::Dialect::Sqlite.literal(&other.0.display().to_string()).unwrap());
+    ok(&d, &attach, QUERY_LIMITS).await;
+    let e = d.run("SELECT a FROM plain", QUERY_LIMITS).await.unwrap_err();
+    assert!(e.code() == "other" && e.to_string().contains("other.odd_other"), "{e}");
+    ok(&d, "DETACH other", QUERY_LIMITS).await;
+    assert_eq!(ok(&d, "SELECT a FROM plain", QUERY_LIMITS).await.columns[0].name, "a");
+}
+
+#[tokio::test]
+async fn a_trigger_body_is_one_statement_as_sqlite_reads_it() {
+    let (_file, c) = Fresh::new().await;
+    let text = "CREATE TABLE tl (a INTEGER); \
+                CREATE TRIGGER tl_t AFTER INSERT ON tl BEGIN \
+                    UPDATE tl SET a = a + 1 WHERE rowid = new.rowid; \
+                    SELECT CASE WHEN new.a > 100 THEN RAISE(ABORT, 'too big') END; \
+                END; \
+                INSERT INTO tl VALUES (1); \
+                SELECT a FROM tl";
+    let r = ok(&c, text, QUERY_LIMITS).await;
+    assert_eq!(r.rows, [[some("2")]]);
+    let e = c.run("INSERT INTO tl VALUES (101)", QUERY_LIMITS).await.unwrap_err();
+    assert!(e.to_string().contains("too big"), "{e}");
+}
+
+#[tokio::test]
+async fn a_comment_after_a_write_keeps_its_count() {
+    let (_file, c) = Fresh::new().await;
+    ok(&c, "CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1), (2)", QUERY_LIMITS).await;
+    assert_eq!(ok(&c, "UPDATE t SET a = a + 1; -- c", QUERY_LIMITS).await.rows_affected, Some(2));
+    assert_eq!(ok(&c, "DELETE FROM t WHERE a = 3 /* c */", QUERY_LIMITS).await.rows_affected, Some(1));
 }

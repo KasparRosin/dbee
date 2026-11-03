@@ -17,9 +17,9 @@ use dbee_core::schema::{Catalog, ColumnInfo, Generated, RelKind, TableRef};
 use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
 use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError};
 use dbee_sql::Dialect;
-use rusqlite::{Connection, ffi};
+use rusqlite::ffi;
 
-use crate::connect::{Running, SqliteConnection};
+use crate::connect::{Running, Session, SqliteConnection};
 use crate::errors;
 use crate::query::{Columns, run_text};
 use crate::values;
@@ -60,6 +60,8 @@ impl SqliteConnection {
 struct Relation {
     table: TableRef,
     kind: RelKind,
+    /// SQLite could read its columns.
+    read: bool,
     /// The columns as declared, each with its place in the primary key (0: none).
     columns: Vec<(ColumnInfo, u32)>,
     /// The unique keys: an index's name, and its columns in key order.
@@ -91,21 +93,25 @@ impl Relation {
 }
 
 /// A catalog query's rows; a result cut by the limits is an error.
-fn query(c: &Connection, running: &Running, sql: &str) -> Result<Vec<Vec<Cell>>, DbError> {
-    Ok(require_complete(run_text(c, running, sql, CATALOG_LIMITS, Columns::Unnamed)?)?.rows)
+fn query(s: &mut Session, running: &Running, sql: &str) -> Result<Vec<Vec<Cell>>, DbError> {
+    Ok(require_complete(run_text(s, running, sql, CATALOG_LIMITS, Columns::Unnamed)?)?.rows)
 }
 
 /// The catalog's rows.
-fn rows(c: &Connection, running: &Running) -> Result<CatalogBuilder, DbError> {
-    let estimates = estimates(c, running)?;
+fn rows(s: &mut Session, running: &Running) -> Result<CatalogBuilder, DbError> {
+    let estimates = estimates(s, running)?;
     let mut relations = Vec::new();
-    for row in query(c, running, RELATIONS)? {
+    for row in query(s, running, RELATIONS)? {
         let kind = match text(&row, 0, "relation type")? {
             "table" => RelKind::Table,
             "view" => RelKind::View,
             _ => return Err(bad("relation type")),
         };
-        relations.push(relation(c, running, owned(&row, 1, "relation name")?, kind)?);
+        relations.push(relation(s, running, owned(&row, 1, "relation name")?, kind)?);
+    }
+    let unread = relations.iter().filter(|r| !r.read).count();
+    if unread > 0 {
+        log::info!("sqlite: catalog: {unread} relations listed without columns, which SQLite could not read (SQLite error 1)");
     }
     let by_name: HashMap<String, usize> = relations.iter().enumerate().map(|(i, r)| (r.table.name.to_ascii_lowercase(), i)).collect();
     let mut catalog = CatalogBuilder::new(&[]);
@@ -136,15 +142,17 @@ fn rows(c: &Connection, running: &Running) -> Result<CatalogBuilder, DbError> {
 }
 
 /// The relation `name` of `kind`, with what the pragmas say of it.
-fn relation(c: &Connection, running: &Running, name: String, kind: RelKind) -> Result<Relation, DbError> {
+fn relation(s: &mut Session, running: &Running, name: String, kind: RelKind) -> Result<Relation, DbError> {
     let quoted = literal(&name)?;
-    let mut r = Relation { table: TableRef { schema: SCHEMA.into(), name }, kind, columns: Vec::new(), unique: Vec::new(), foreign: Vec::new() };
+    let table = TableRef { schema: SCHEMA.into(), name };
+    let mut r = Relation { table, kind, read: false, columns: Vec::new(), unique: Vec::new(), foreign: Vec::new() };
     let xinfo = format!("SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo({quoted}, 'main')");
-    let columns = match query(c, running, &xinfo) {
+    let columns = match query(s, running, &xinfo) {
         Ok(rows) => rows,
         Err(e) if errors::is_code(&e, ffi::SQLITE_ERROR) => return Ok(r),
         Err(e) => return Err(e),
     };
+    r.read = true;
     for row in &columns {
         let declared = owned(row, 1, "column type")?;
         // hidden: 1 a virtual table's hidden column, 2 a virtual generated column, 3 a stored one.
@@ -168,7 +176,7 @@ fn relation(c: &Connection, running: &Running, name: String, kind: RelKind) -> R
     }
     let mut key_index = false;
     let mut unique = Vec::new();
-    for row in query(c, running, &format!("SELECT name, origin FROM pragma_index_list({quoted}, 'main')"))? {
+    for row in query(s, running, &format!("SELECT name, origin FROM pragma_index_list({quoted}, 'main')"))? {
         match text(&row, 1, "index origin")? {
             "pk" => key_index = true,
             "u" => unique.push(owned(&row, 0, "index name")?),
@@ -178,7 +186,7 @@ fn relation(c: &Connection, running: &Running, name: String, kind: RelKind) -> R
     // SQLite numbers them in the order written (`…_1`, `…_2`, `…_10`): shorter names first.
     unique.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     for index in unique {
-        let parts = query(c, running, &format!("SELECT name FROM pragma_index_info({}, 'main') ORDER BY seqno", literal(&index)?))?;
+        let parts = query(s, running, &format!("SELECT name FROM pragma_index_info({}, 'main') ORDER BY seqno", literal(&index)?))?;
         let columns = parts.iter().map(|row| nullable(row, 0, "key column").map(|n| n.map(str::to_owned))).collect::<Result<Option<Vec<_>>, _>>()?;
         // A part that is an expression has no name: the key is not one of columns.
         if let Some(columns) = columns.filter(|c| !c.is_empty()) {
@@ -190,7 +198,7 @@ fn relation(c: &Connection, running: &Running, name: String, kind: RelKind) -> R
     if let (Some((rowid, _)), None, false) = (key.next(), key.next(), key_index) {
         rowid.has_default = true;
     }
-    for row in query(c, running, &format!("SELECT id, seq, \"table\", \"from\", \"to\" FROM pragma_foreign_key_list({quoted}, 'main')"))? {
+    for row in query(s, running, &format!("SELECT id, seq, \"table\", \"from\", \"to\" FROM pragma_foreign_key_list({quoted}, 'main')"))? {
         r.foreign.push(ForeignPart {
             id: number(&row, 0, "foreign key id")?,
             seq: number(&row, 1, "foreign key position")?,
@@ -241,13 +249,13 @@ fn foreign_keys(r: &Relation, relations: &[Relation], by_name: &HashMap<String, 
 /// Each table's row estimate from `sqlite_stat1`, by its name in lowercase, when `ANALYZE` made
 /// that table. A `stat` starts with the rows of the table or of the index, which a partial index
 /// has fewer of: the largest counts.
-fn estimates(c: &Connection, running: &Running) -> Result<HashMap<String, u64>, DbError> {
+fn estimates(s: &mut Session, running: &Running) -> Result<HashMap<String, u64>, DbError> {
     let mut out = HashMap::new();
-    let present = query(c, running, HAS_STAT1)?;
+    let present = query(s, running, HAS_STAT1)?;
     if present.first().map(|row| number::<u64>(row, 0, "sqlite_stat1")).transpose()? != Some(1) {
         return Ok(out);
     }
-    for row in query(c, running, STAT1)? {
+    for row in query(s, running, STAT1)? {
         let (Some(table), Some(stat)) = (nullable(&row, 0, "stat1 table")?, nullable(&row, 1, "stat1 stat")?) else { continue };
         let Some(rows) = stat.split_ascii_whitespace().next().and_then(|n| n.parse::<u64>().ok()) else { continue };
         let most = out.entry(table.to_ascii_lowercase()).or_insert(0);
@@ -305,6 +313,7 @@ mod tests {
         let parent = Relation {
             table: TableRef { schema: SCHEMA.into(), name: "Parent".into() },
             kind: RelKind::Table,
+            read: true,
             columns: vec![(column("A"), 2), (column("b"), 1)],
             unique: Vec::new(),
             foreign: Vec::new(),
@@ -319,6 +328,7 @@ mod tests {
         let child = Relation {
             table: TableRef { schema: SCHEMA.into(), name: "child".into() },
             kind: RelKind::Table,
+            read: true,
             columns: vec![(column("x"), 0), (column("y"), 0)],
             unique: Vec::new(),
             foreign: vec![

@@ -7,15 +7,12 @@ use dbee_sql::Dialect;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Statement};
 
-use crate::connect::{Running, SqliteConnection};
+use crate::connect::{Running, Session, SqliteConnection};
 use crate::errors::{self, PARAMETERS};
 use crate::values::{self, CellText};
 
 /// SQLite ends a statement at a NUL outside a string literal, and runs the part before it.
 const NUL: &str = "the statement holds a NUL character (U+0000), which SQLite would take as its end";
-
-/// rusqlite cannot read a result column's name or declared type that is not UTF-8.
-const NOT_UTF8: &str = "the database has a name or a type that is not valid UTF-8, so dbee cannot show this result";
 
 /// What a result's columns carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,12 +55,12 @@ impl SqliteConnection {
     async fn run_as(&self, sql: &str, limits: Limits, columns: Columns) -> Result<ResultSet, DbError> {
         let _turn = self.lock().await?;
         let sql = sql.to_owned();
-        self.blocking(move |c, running| run_text(c, running, &sql, limits, columns)).await
+        self.blocking(move |s, running| run_text(s, running, &sql, limits, columns)).await
     }
 }
 
-/// Run every statement of `sql` on `c` in turn, as [`SqliteConnection::run`] describes.
-pub(crate) fn run_text(c: &Connection, running: &Running, sql: &str, limits: Limits, columns: Columns) -> Result<ResultSet, DbError> {
+/// Run every statement of `sql` on `s` in turn, as [`SqliteConnection::run`] describes.
+pub(crate) fn run_text(s: &mut Session, running: &Running, sql: &str, limits: Limits, columns: Columns) -> Result<ResultSet, DbError> {
     if sql.contains('\0') {
         return Err(DbError::Other(NUL.into()));
     }
@@ -73,7 +70,7 @@ pub(crate) fn run_text(c: &Connection, running: &Running, sql: &str, limits: Lim
         if running.interrupted() {
             return Err(DbError::Cancelled);
         }
-        let result = statement(c, sql, range.start, range.end, limits, columns)?;
+        let result = statement(s, running, sql, range.start, range.end, limits, columns)?;
         affected = result.rows_affected.or(affected);
         if !result.columns.is_empty() || kept.as_ref().is_none_or(|k| k.columns.is_empty()) {
             // A result with rows outranks one without.
@@ -86,15 +83,28 @@ pub(crate) fn run_text(c: &Connection, running: &Running, sql: &str, limits: Lim
 }
 
 /// Prepare and step the statement at bytes `start..end` of `sql`.
-fn statement(c: &Connection, sql: &str, start: usize, end: usize, limits: Limits, columns: Columns) -> Result<ResultSet, DbError> {
+fn statement(
+    s: &mut Session,
+    running: &Running,
+    sql: &str,
+    start: usize,
+    end: usize,
+    limits: Limits,
+    columns: Columns,
+) -> Result<ResultSet, DbError> {
     let failed = |e: rusqlite::Error| errors::in_text(e, sql, start);
     let text = sql.get(start..end).ok_or_else(|| DbError::Other("the statement is not in the text".into()))?;
+    let c = &s.conn;
     let mut st = c.prepare(text).map_err(failed)?;
     if st.parameter_count() > 0 {
         return Err(DbError::Other(PARAMETERS.into()));
     }
-    if columns != Columns::Unnamed && st.column_count() > 0 && !names_are_utf8(c)? {
-        return Err(DbError::Other(NOT_UTF8.into()));
+    if columns != Columns::Unnamed && st.column_count() > 0 {
+        s.names.check(c)?;
+    }
+    // SQLite drops an interrupt that comes before the first step, as no statement runs yet.
+    if running.interrupted() {
+        return Err(DbError::Cancelled);
     }
     let changes_before = c.total_changes();
     let mut reals = Reals { conn: c, cast: None };
@@ -134,6 +144,10 @@ fn statement(c: &Connection, sql: &str, start: usize, end: usize, limits: Limits
         set.rows.push(cells.into_iter().map(|cell| cell.map(CellText::into_string)).collect());
     }
     drop(rows);
+    // A write may change a schema without a new schema version (`writable_schema`).
+    if !st.readonly() {
+        s.names.forget();
+    }
     set.columns = match described {
         Some(named) => named,
         None => describe(&st, columns)?,
@@ -157,32 +171,75 @@ fn describe(st: &Statement<'_>, columns: Columns) -> Result<Vec<Column>, DbError
     }
 }
 
-/// Whether every name and type in the schemas of the connection's databases is valid UTF-8, which
-/// a result's column names and declared types come from (the rest from the statement's own text).
-/// SQLite keeps them as bytes, unchecked; rusqlite panics on one that is not UTF-8.
-fn names_are_utf8(c: &Connection) -> Result<bool, DbError> {
-    let mut databases = Vec::new();
-    for_each_row(c, "SELECT name FROM pragma_database_list", |row| {
-        databases.push(String::from_utf8_lossy(row.get_ref(0)?.as_bytes().unwrap_or_default()).into_owned());
+/// The databases whose schemas were last found to hold only UTF-8 names and types: each one's
+/// name, file and schema version. A result's column names and declared types come from those
+/// schemas (the rest from the statement's own text); SQLite keeps them as bytes, unchecked, and
+/// rusqlite panics on one that is not UTF-8.
+#[derive(Debug, Default)]
+pub(crate) struct NamesChecked(Option<Vec<(String, String, i64)>>);
+
+impl NamesChecked {
+    /// Refuse a result while a schema holds a name or a type that is not UTF-8, naming its table.
+    /// The schemas are read again only when a database or its schema version changed.
+    fn check(&mut self, c: &Connection) -> Result<(), DbError> {
+        let databases = databases(c)?;
+        if self.0.as_ref() == Some(&databases) {
+            return Ok(());
+        }
+        for (database, _, _) in &databases {
+            if let Some(table) = not_utf8(c, database)? {
+                let table = if database == "main" { table } else { format!("{database}.{table}") };
+                return Err(DbError::Other(format!(
+                    "the table {table} has a name or a type that is not valid UTF-8, so dbee cannot show this result"
+                )));
+            }
+        }
+        self.0 = Some(databases);
+        Ok(())
+    }
+
+    fn forget(&mut self) {
+        self.0 = None;
+    }
+}
+
+/// Each database on the connection: its name, its file and its schema version.
+fn databases(c: &Connection) -> Result<Vec<(String, String, i64)>, DbError> {
+    let mut listed = Vec::new();
+    for_each_row(c, "SELECT name, file FROM pragma_database_list", |row| {
+        listed.push((lossy(row.get_ref(0)?), lossy(row.get_ref(1)?)));
         Ok(true)
     })?;
-    for database in databases {
-        let schema = Dialect::Sqlite.ident(&database).map_err(|e| DbError::Other(format!("a database name cannot be used: {e}")))?;
-        let utf8 = for_each_row(c, &format!("SELECT name, tbl_name, sql FROM {schema}.sqlite_schema"), |row| {
-            for i in 0..3 {
-                if let ValueRef::Text(bytes) = row.get_ref(i)?
-                    && std::str::from_utf8(bytes).is_err()
-                {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        })?;
-        if !utf8 {
-            return Ok(false);
-        }
+    let mut out = Vec::with_capacity(listed.len());
+    for (name, file) in listed {
+        let schema = Dialect::Sqlite.ident(&name).map_err(|e| DbError::Other(format!("a database name cannot be used: {e}")))?;
+        let version = c.query_row(&format!("PRAGMA {schema}.schema_version"), [], |row| row.get::<_, i64>(0)).map_err(errors::from_sqlite)?;
+        out.push((name, file, version));
     }
-    Ok(true)
+    Ok(out)
+}
+
+/// The table of the first entry of `database`'s schema with a name or text that is not UTF-8.
+fn not_utf8(c: &Connection, database: &str) -> Result<Option<String>, DbError> {
+    let schema = Dialect::Sqlite.ident(database).map_err(|e| DbError::Other(format!("a database name cannot be used: {e}")))?;
+    let mut found = None;
+    for_each_row(c, &format!("SELECT name, tbl_name, sql FROM {schema}.sqlite_schema"), |row| {
+        for i in 0..3 {
+            if let ValueRef::Text(bytes) = row.get_ref(i)?
+                && std::str::from_utf8(bytes).is_err()
+            {
+                found = Some(lossy(row.get_ref(1)?));
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })?;
+    Ok(found)
+}
+
+/// A text value with each invalid sequence replaced; any other value as nothing.
+fn lossy(v: ValueRef<'_>) -> String {
+    String::from_utf8_lossy(v.as_bytes().unwrap_or_default()).into_owned()
 }
 
 /// Run `sql` and call `f` on each row until it returns false; false when it did.
@@ -221,6 +278,24 @@ impl Reals<'_> {
             Some(cast) => cast,
             None => self.cast.insert(self.conn.prepare("SELECT CAST(?1 AS TEXT)")?),
         };
-        cast.query_row([x], |row| Ok(String::from_utf8_lossy(row.get_ref(0)?.as_bytes().unwrap_or_default()).into_owned()))
+        cast.query_row([x], |row| Ok(lossy(row.get_ref(0)?)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_interrupt_before_the_first_step_runs_nothing() {
+        let mut s = Session::new(Connection::open_in_memory().unwrap());
+        let running = Running::new(s.conn.get_interrupt_handle());
+        let _call = running.start();
+        assert!(running.interrupt());
+        let sql = "CREATE TABLE never (a INTEGER)";
+        assert_eq!(statement(&mut s, &running, sql, 0, sql.len(), QUERY_LIMITS, Columns::Typed).err(), Some(DbError::Cancelled));
+        // SQLite cleared its own interrupt at the prepare: only dbee's mark kept the step from running.
+        let made = s.conn.query_row("SELECT count(*) FROM sqlite_schema WHERE name = 'never'", [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(made, 0);
     }
 }

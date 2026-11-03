@@ -138,6 +138,7 @@ mod tests {
             // The rules' order: INT first, so a POINT is an integer and a CHARINT too.
             ("POINT", Integer),
             ("CHARINT", Integer),
+            ("FLOATING POINT", Integer),
             ("VARCHAR(255)", Text),
             ("NCHAR(55)", Text),
             ("CLOB", Text),

@@ -153,7 +153,7 @@ async fn columns_types_defaults_and_generated() {
     assert_eq!(has_default("order_items", "order_id"), Some(false), "part of a key of two columns");
     // A stored generated column, and a table whose key is not the rowid.
     let (_file, fresh) = Fresh::with(
-        "CREATE TABLE g (a INTEGER, b TEXT GENERATED ALWAYS AS (a || 'x') STORED, c INT PRIMARY KEY); \
+        "CREATE TABLE g (a INTEGER, b TEXT GENERATED ALWAYS AS (a || 'x') STORED, c INT PRIMARY KEY, d INTEGER AS (a * 2) VIRTUAL); \
          CREATE TABLE w (k TEXT PRIMARY KEY, v) WITHOUT ROWID",
     )
     .await;
@@ -161,8 +161,9 @@ async fn columns_types_defaults_and_generated() {
     let g = table(&cat, "g");
     assert_eq!(
         g.columns.iter().map(|c| (c.name.as_str(), c.generated)).collect::<Vec<_>>(),
-        [("a", Generated::No), ("b", Generated::Expression), ("c", Generated::No)]
+        [("a", Generated::No), ("b", Generated::Expression), ("c", Generated::No), ("d", Generated::Expression)]
     );
+    assert!(g.columns.iter().all(|c| !c.hidden), "a generated column is no hidden one");
     assert_eq!((g.primary_key.clone(), g.column("c").map(|c| c.has_default)), (strings(&["c"]), Some(false)), "INT is no rowid alias");
     let w = table(&cat, "w");
     assert_eq!((w.primary_key.clone(), w.column("k").map(|c| (c.has_default, c.not_null))), (strings(&["k"]), Some((false, true))));
@@ -277,4 +278,21 @@ async fn three_hundred_tables_load_quickly() {
     assert!(took < Duration::from_secs(2), "{took:?}");
     assert!((1..=300).all(|i| cat.table(&tr(&format!("t_{i:03}"))).is_some_and(|t| t.primary_key == ["id"])));
     println!("catalog of {} relations in {took:?}", cat.table_count());
+}
+
+#[tokio::test]
+async fn names_with_quotes_and_brackets_survive() {
+    let (_file, conn) = Fresh::with(
+        "CREATE TABLE \"it's\" (id INTEGER PRIMARY KEY, \"a]b\" TEXT NOT NULL UNIQUE, \"q'r\" INTEGER REFERENCES \"it's\"); \
+         CREATE TABLE \"brack]et [x\" (k TEXT PRIMARY KEY, \"it's id\" INTEGER REFERENCES \"IT'S\" (ID)) WITHOUT ROWID",
+    )
+    .await;
+    let cat = load(&conn).await;
+    let quoted = table(&cat, "it's");
+    assert_eq!(names(&quoted.columns, |c| &c.name), ["id", "a]b", "q'r"]);
+    assert_eq!((quoted.primary_key.clone(), quoted.unique_keys.clone()), (strings(&["id"]), vec![strings(&["a]b"])]));
+    assert_eq!(quoted.fk_for("q'r").map(|f| (f.target.clone(), f.target_columns.clone())), Some((tr("it's"), strings(&["id"]))));
+    let bracket = table(&cat, "brack]et [x");
+    assert_eq!(bracket.primary_key, ["k"]);
+    assert_eq!(bracket.fk_for("it's id").map(|f| (f.target.clone(), f.target_columns.clone())), Some((tr("it's"), strings(&["id"]))));
 }

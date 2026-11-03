@@ -192,3 +192,21 @@ async fn a_gate_cancels_an_apply_until_it_commits() {
     assert!(gate.committing() && !gate.cancel());
     assert_eq!(rows(&r).await, ["1:one:1.5", "2:z:2.5"]);
 }
+
+#[tokio::test]
+async fn one_row_is_the_rows_the_statement_itself_changed() {
+    let (_seed, w, r) = with_table().await;
+    sql(&w, "CREATE TABLE apply_log (id INTEGER PRIMARY KEY, note TEXT)").await;
+    let trigger = format!(
+        "CREATE TRIGGER apply_logged AFTER UPDATE ON {TABLE} BEGIN INSERT INTO apply_log (note) VALUES ('a'); INSERT INTO apply_log (note) VALUES ('b'); END"
+    );
+    sql(&w, &trigger).await;
+    // The trigger's two rows are not the statement's.
+    let written = apply(&w, &[format!("UPDATE {TABLE} SET name = 'uno' WHERE id = 1")]).await.map_err(|e| e.to_string());
+    assert_eq!(written, Ok(1));
+    assert_eq!(w.scalar_u64("SELECT count(*) FROM apply_log").await, Ok(2));
+    // A cell set to the value it holds still changes its row.
+    let same = apply(&w, &[format!("UPDATE {TABLE} SET name = 'two' WHERE id = 2")]).await.map_err(|e| e.to_string());
+    assert_eq!(same, Ok(1));
+    assert_eq!(rows(&r).await, ["1:uno:1.5", "2:two:2.5"]);
+}

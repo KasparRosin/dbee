@@ -24,7 +24,7 @@ impl ApplySession for Locked<'_> {
 
     async fn execute(&mut self, sql: &str) -> Result<Option<u64>, DbError> {
         let sql = sql.to_owned();
-        self.conn.blocking(move |c, running| run_text(c, running, &sql, NO_ROWS, Columns::Unnamed).map(|r| r.rows_affected)).await
+        self.conn.blocking(move |s, running| run_text(s, running, &sql, NO_ROWS, Columns::Unnamed).map(|r| r.rows_affected)).await
     }
 
     /// SQLite ends the transaction itself when an interrupt stops a write, and may when a write
@@ -32,7 +32,9 @@ impl ApplySession for Locked<'_> {
     /// started one. Whether one is open is read in the same call as the `ROLLBACK`.
     async fn rollback(&mut self) -> Result<(), DbError> {
         self.conn
-            .blocking(|c, running| if c.is_autocommit() { Ok(()) } else { run_text(c, running, "ROLLBACK", NO_ROWS, Columns::Unnamed).map(drop) })
+            .blocking(
+                |s, running| if s.conn.is_autocommit() { Ok(()) } else { run_text(s, running, "ROLLBACK", NO_ROWS, Columns::Unnamed).map(drop) },
+            )
             .await
     }
 
