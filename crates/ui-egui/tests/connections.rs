@@ -986,3 +986,154 @@ fn a_drop_while_a_dialog_shows_or_a_connect_runs_is_let_go() {
     }
     assert_eq!(ui.document()["screen"], "connections", "the file was not kept for later");
 }
+
+// ---- the database list -----------------------------------------------------------------------
+
+/// A new form of `server`'s type at the app's first window size, its host, port, user and
+/// password typed in, the Database field left empty.
+fn form_for(db: &TestDb, server: &dbee_testkit::Server) -> Ui {
+    let info = server.kind.info();
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click(&format!("conn-kind-{}", info.id));
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", &server.port.to_string());
+    ui.replace("conn-user", info.user);
+    ui.click("conn-password");
+    ui.text(&db.password);
+    ui
+}
+
+/// The database list's items, in order: (automation id, name).
+fn listed(i: &Json) -> Vec<(String, String)> {
+    ids(i)
+        .into_iter()
+        .filter(|id| id.starts_with("conn-database-item-"))
+        .map(|id| {
+            let name = tag_in(i, &id).unwrap()["value"].as_str().unwrap().to_string();
+            (id, name)
+        })
+        .collect()
+}
+
+/// The rects of every widget of the form and the side bar but the list's items and the message
+/// under the buttons.
+fn form_rects(i: &Json) -> Vec<(String, [f64; 4])> {
+    let varies = ["conn-error", "conn-result", "conn-note"];
+    ids(i)
+        .into_iter()
+        .filter(|id| id.starts_with("conn-") && !varies.contains(&id.as_str()) && !id.starts_with("conn-database-item-"))
+        .map(|id| {
+            let r = rect(&tag_in(i, &id).unwrap());
+            (id, r)
+        })
+        .collect()
+}
+
+#[test]
+fn database_list_fills_the_field() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = form_for(db, pg14_server(db));
+    assert_eq!(ui.value("conn-database"), "");
+    assert_eq!(ui.value("conn-database-list"), "List…");
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| !listed(&ui.inspect()).is_empty());
+    ui.frame();
+    let i = ui.inspect();
+    let names: Vec<String> = listed(&i).into_iter().map(|(_, n)| n).collect();
+    assert!(names.contains(&"dbee".to_string()) && names.contains(&"postgres".to_string()), "{names:?}");
+    assert!(!names.iter().any(|n| n.starts_with("template")), "{names:?}");
+    assert_eq!(ui.value("conn-database-list"), "List…", "it no longer lists");
+    let (item, _) = listed(&i).into_iter().find(|(_, n)| n == "dbee").unwrap();
+    ui.click(&item);
+    assert_eq!(ui.value("conn-database"), "dbee");
+    assert!(listed(&ui.inspect()).is_empty(), "the list closed");
+    // Typing works as before.
+    ui.click("conn-database");
+    ui.text("_x");
+    assert_eq!(ui.value("conn-database"), "dbee_x");
+    // The list ran as the form's job and left nothing behind: no journal entry, no connection.
+    let journal = ui.ok("engine.journal", json!({}));
+    assert!(journal.as_array().unwrap().iter().all(|e| e["command"] != "connection.listDatabases"), "{journal}");
+    assert_eq!((ui.document()["screen"].clone(), ui.document()["jobs"].clone()), (json!("connections"), json!([])));
+}
+
+#[test]
+fn sqlite_form_has_no_database_list() {
+    let mut ui = cards();
+    ui.click("conn-kind-sqlite");
+    assert!(ui.tag("conn-database-list").is_none() && ui.tag("conn-database").is_none());
+    // Every server type has one, beside its Database field.
+    for kind in DbKind::ALL.into_iter().filter(|k| matches!(k.info().settings, Settings::Server { .. })) {
+        ui.click("conn-change-engine");
+        ui.click(&format!("conn-kind-{}", kind.id()));
+        let i = ui.inspect();
+        let (field, button) = (rect(&tag_in(&i, "conn-database").unwrap()), rect(&tag_in(&i, "conn-database-list").unwrap()));
+        assert!(field[0] + field[2] <= button[0] && (field[1] - button[1]).abs() < 0.5 && field[3] == button[3], "{kind:?}: {field:?} {button:?}");
+    }
+}
+
+/// A MySQL list at the app's first window: under the field, the server's own databases last, and
+/// the form stays where it was. Escape or a click elsewhere closes it.
+#[test]
+fn a_mysql_list_opens_under_the_field_without_moving_the_form() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = form_for(db, db.server("mysql80").unwrap());
+    let before = form_rects(&ui.inspect());
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| !listed(&ui.inspect()).is_empty());
+    ui.frame();
+    let i = ui.inspect();
+    let names: Vec<String> = listed(&i).into_iter().map(|(_, n)| n).collect();
+    assert_eq!(names, ["many", "odd", "scratch", "shop", "information_schema", "mysql", "performance_schema", "sys"]);
+    let field = rect(&tag_in(&i, "conn-database").unwrap());
+    let first = rect(&tag_in(&i, "conn-database-item-0").unwrap());
+    assert!(first[1] >= field[1] + field[3] && first[1] - (field[1] + field[3]) < 12.0, "under the field: {field:?} {first:?}");
+    assert!(first[0] >= field[0] - 1.0 && first[0] < field[0] + 12.0, "from its left edge: {field:?} {first:?}");
+    assert_eq!(form_rects(&i), before, "the list moved the form");
+    // The button closes an open list rather than listing again.
+    ui.click("conn-database-list");
+    assert!(listed(&ui.inspect()).is_empty() && ui.document()["jobs"] == json!([]), "the button closes it");
+    ui.click("conn-database-list");
+    ui.until("the list again", |ui| !listed(&ui.inspect()).is_empty());
+    ui.key("Escape");
+    ui.frame();
+    assert!(listed(&ui.inspect()).is_empty(), "Escape closes it");
+    ui.click("conn-database-list");
+    ui.until("the list again", |ui| !listed(&ui.inspect()).is_empty());
+    ui.click("conn-name");
+    ui.frame();
+    assert!(listed(&ui.inspect()).is_empty(), "a click elsewhere closes it");
+    assert_eq!(ui.value("conn-database"), "", "nothing was chosen");
+}
+
+/// While it lists, the button says so and waits; so it does while a test runs. Its error goes
+/// under the buttons, as Test's does.
+#[test]
+fn the_database_list_button_shows_that_it_lists() {
+    let silent = Silent::start();
+    let mut ui = ui();
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", &silent.port.to_string());
+    ui.click("conn-database-list");
+    ui.until("the listing", |ui| ui.value("conn-database-list") == "Listing…");
+    assert_eq!(ui.tag("conn-database-list").unwrap()["enabled"], false);
+    // A second click starts nothing; Test still can.
+    ui.click("conn-database-list");
+    assert!(ui.tag("conn-test").unwrap().get("enabled").is_none());
+    let d = ui.document();
+    assert_eq!(d["jobs"].as_array().unwrap().len(), 1, "{d}");
+    assert_eq!(d["jobs"][0]["label"], "connection.listDatabases", "{d}");
+    drop(silent);
+    ui.until("the listing to fail", |ui| ui.tag("conn-error").is_some());
+    assert_eq!(ui.value("conn-database-list"), "List…");
+    assert!(ui.tag("conn-database-list").unwrap().get("enabled").is_none());
+    // A test that runs disables it.
+    let silent = Silent::start();
+    ui.replace("conn-port", &silent.port.to_string());
+    ui.click("conn-test");
+    ui.until("the running test", |ui| ui.value("conn-test") == "Testing…");
+    assert_eq!(ui.tag("conn-database-list").unwrap()["enabled"], false);
+    drop(silent);
+    ui.until("the test to fail", |ui| ui.value("conn-test") == "Test");
+    assert!(ui.tag("conn-database-list").unwrap().get("enabled").is_none());
+}

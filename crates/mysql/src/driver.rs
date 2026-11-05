@@ -8,6 +8,7 @@ use dbee_core::{Catalog, ResultSet};
 use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbFuture, Driver, Limits, ServerInfo, Target};
 use dbee_sql::Dialect;
 
+use crate::catalog;
 use crate::connect::{self, MySqlConnection};
 
 /// The driver for the MySQL family: MySQL and MariaDB.
@@ -24,6 +25,10 @@ impl Driver for MySqlDriver {
             let conn: Arc<dyn Connection> = Arc::new(connect::connect(target).await?);
             Ok(conn)
         })
+    }
+
+    fn list_databases<'a>(&'a self, target: Target<'a>) -> DbFuture<'a, Vec<String>> {
+        Box::pin(catalog::list_databases(target))
     }
 }
 

@@ -25,6 +25,11 @@
 //!   buttons are disabled and say so, and a double-click on a card does nothing. A `needs…`
 //!   answer opens a dialog ([`crate::dialogs`]) that runs the command again; other errors show
 //!   under the buttons with the server's message.
+//! - A server type's Database field has a list button: it runs `connection.listDatabases` with
+//!   the form's settings, as Test runs, and says so while it lists (disabled then, and while a
+//!   test or connect runs). The names open under the field; choosing one fills it in. A list
+//!   that comes after the form changed its server (the type, host, port, user, TLS or SSH
+//!   settings, another connection, Change engine) is dropped.
 //! - The file pickers ("Change…" for the key, "Choose…" for the CA file, "Choose…" and "New file…"
 //!   for a database file) run rfd on a thread of their own and send the path back; a picker that
 //!   cannot open leaves a note in its row ([`crate::picker`]). After New file…, every test and
@@ -62,6 +67,7 @@ pub(crate) const OPEN: &str = "connection.open";
 pub(crate) const TEST: &str = "connection.test";
 pub(crate) const SAVE: &str = "connection.save";
 pub(crate) const PARSE_URL: &str = "connection.parseUrl";
+pub(crate) const LIST_DATABASES: &str = "connection.listDatabases";
 const SSH_KEY: &str = "connection.sshKey";
 const DELETE: &str = "connection.delete";
 const DUPLICATE: &str = "connection.duplicate";
@@ -108,6 +114,46 @@ pub(crate) struct KeyLine {
     pub pending: Option<(JobId, SshAuth)>,
 }
 
+/// The Database field's list of the server's databases.
+#[derive(Debug, Default)]
+pub(crate) struct DatabaseList {
+    /// The `connection.listDatabases` job the list waits for.
+    pub pending: Option<JobId>,
+    /// What the last listing gave.
+    pub names: Vec<String>,
+    /// The list shows, under the field.
+    pub open: bool,
+}
+
+impl DatabaseList {
+    /// The outcome of the listing `job` (`None`: it ended before any job started) is the one the
+    /// list waits for; it then waits no more.
+    fn takes(&mut self, job: Option<JobId>) -> bool {
+        match job {
+            None => true,
+            Some(job) if self.pending == Some(job) => {
+                self.pending = None;
+                true
+            }
+            Some(_) => false,
+        }
+    }
+}
+
+/// Where a config goes: the server, the login, TLS and the tunnel, which a database list is of.
+fn server_of(c: &ConnectionConfig) -> (DbKind, &str, u16, &str, SslMode, Option<&std::path::Path>, Option<&SshConfig>) {
+    (c.kind, &c.host, c.port, &c.user, c.ssl_mode, c.ca_file.as_deref(), c.ssh.as_ref())
+}
+
+/// The form still goes to the server a listing ran with `params` for.
+fn same_server(params: &Json, form: &Form) -> bool {
+    let then = params.get("config").and_then(|c| serde_json::from_value::<ConnectionConfig>(c.clone()).ok());
+    match (then, form.to_config()) {
+        (Some(then), Ok(now)) => server_of(&then) == server_of(&now),
+        _ => false,
+    }
+}
+
 /// What the right side shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -129,6 +175,8 @@ pub(crate) struct ConnScreen {
     pub message: Option<Message>,
     pub key: KeyLine,
     pub picker: Option<Picker>,
+    /// The Database field's list.
+    pub databases: DatabaseList,
     /// The session has a secret store (`document.inspect`'s `secretStore`).
     pub has_store: bool,
 }
@@ -144,6 +192,7 @@ impl ConnScreen {
             message: None,
             key: KeyLine::default(),
             picker: None,
+            databases: DatabaseList::default(),
             has_store,
         }
     }
@@ -155,12 +204,13 @@ impl ConnScreen {
         self.forget_shown();
     }
 
-    /// The form shows another connection, or another type: its message and key line are gone, and
-    /// a late result of what ran before does not show.
+    /// The form shows another connection, or another type: its message, key line and database
+    /// list are gone, and a late result of what ran before does not show.
     fn forget_shown(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.message = None;
         self.key.for_auth = None;
+        self.databases = DatabaseList::default();
     }
 
     /// Loads `c` into the form, its type fixed when it was opened from the saved list or Recent
@@ -211,18 +261,21 @@ pub(crate) fn error_text(e: &EngineError) -> String {
 
 // ---- results ---------------------------------------------------------------------------------
 
-/// A form job started (`app.start` with [`Origin::Form`]): Test and Connect now show it runs.
+/// A form job started (`app.start` with [`Origin::Form`]): Test and Connect, or the database
+/// list's button, now show it runs.
 pub(crate) fn started(app: &mut DbeeApp, job: JobId, command: &str) {
-    let kind = match command {
-        TEST => Running::Test,
-        OPEN => Running::Connect,
-        _ => return,
-    };
-    app.view.conn.running = Some((job, kind));
+    let conn = &mut app.view.conn;
+    match command {
+        TEST => conn.running = Some((job, Running::Test)),
+        OPEN => conn.running = Some((job, Running::Connect)),
+        LIST_DATABASES => conn.databases.pending = Some(job),
+        _ => {}
+    }
 }
 
 /// The outcome of a form command (`job` when it ran as one). A result for a connection the
-/// form no longer shows is dropped.
+/// form no longer shows is dropped; so is a database list the form no longer waits for (Change
+/// engine) or whose server it no longer names.
 pub(crate) fn form_done(
     app: &mut DbeeApp,
     command: &'static str,
@@ -237,7 +290,11 @@ pub(crate) fn form_done(
     {
         conn.running = None;
     }
-    if generation != conn.generation {
+    let listing = command == LIST_DATABASES;
+    if listing && !conn.databases.takes(job) {
+        return;
+    }
+    if generation != conn.generation || (listing && !same_server(&params, &conn.form)) {
         return;
     }
     match result {
@@ -249,6 +306,18 @@ pub(crate) fn form_done(
                 conn.message = Some(Message { kind: Kind::Result, text: "Saved.".into() });
             }
             TEST => conn.message = Some(Message { kind: Kind::Result, text: test_text(&v) }),
+            LIST_DATABASES => {
+                let names: Vec<String> = v
+                    .get("databases")
+                    .and_then(Json::as_array)
+                    .map(|a| a.iter().filter_map(Json::as_str).map(str::to_owned).collect())
+                    .unwrap_or_default();
+                if names.is_empty() {
+                    conn.message = Some(Message { kind: Kind::Note, text: "No databases to list.".into() });
+                }
+                conn.databases.open = !names.is_empty();
+                conn.databases.names = names;
+            }
             OPEN => {
                 conn.message = None;
                 // The file is there now.
@@ -391,6 +460,10 @@ pub(crate) enum Act {
     Test,
     ConnectForm,
     Save,
+    /// The Database field's list button: list the server's databases.
+    ListDatabases,
+    /// A name chosen from the Database field's list.
+    ChooseDatabase(String),
     FillFromUrl,
     Pick(Pick),
     StopPicking,
@@ -452,7 +525,10 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
                 conn.step = Step::Form;
             }
         }
-        Act::ChangeEngine if !app.view.conn.form.engine_fixed && !busy => app.view.conn.step = Step::Engines,
+        Act::ChangeEngine if !app.view.conn.form.engine_fixed && !busy => {
+            app.view.conn.step = Step::Engines;
+            app.view.conn.databases = DatabaseList::default();
+        }
         Act::ChangeEngine => {}
         Act::Load(c) => app.view.conn.load(&c, true),
         Act::Connect(c) => {
@@ -478,6 +554,15 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
         Act::ConnectForm if !busy => run_form(app, OPEN),
         Act::Test | Act::ConnectForm => {}
         Act::Save => run_form(app, SAVE),
+        Act::ListDatabases if !busy && app.view.conn.databases.pending.is_none() => {
+            app.view.conn.databases.open = false;
+            run_form(app, LIST_DATABASES);
+        }
+        Act::ListDatabases => {}
+        Act::ChooseDatabase(name) => {
+            app.view.conn.form.database = name;
+            app.view.conn.databases.open = false;
+        }
         Act::FillFromUrl => {
             let kinds = url_kinds(&app.view.conn.form, &app.session.kinds());
             app.view.dialog = Some(Dialog::fill_from_url(kinds));
@@ -489,8 +574,8 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
     }
 }
 
-/// Runs `command` (save, test or open) on the form's connection; a form that is not usable says
-/// why under the buttons and runs nothing.
+/// Runs `command` (save, test, open or the database list) on the form's connection; a form that
+/// is not usable says why under the buttons and runs nothing.
 fn run_form(app: &mut DbeeApp, command: &'static str) {
     let conn = &mut app.view.conn;
     conn.message = None;
@@ -994,6 +1079,114 @@ mod tests {
         until(&mut app, &ctx, "the workspace again", |app| app.session.state().screen == dbee_engine::Screen::Workspace);
         assert_eq!(opens(&app).len(), 2);
         assert!(opens(&app)[1].get("createFile").is_none(), "{:?}", opens(&app));
+    }
+
+    /// A listing started now, as job `n`, with the form's params; returns them and the generation.
+    fn listing(app: &mut DbeeApp, n: u64) -> (Json, u64) {
+        let params = json!({ "config": app.view.conn.form.to_config().unwrap() });
+        started(app, dbee_engine::JobId(n), LIST_DATABASES);
+        (params, app.view.conn.generation)
+    }
+
+    fn listed(names: &[&str]) -> Result<Json, EngineError> {
+        Ok(json!({ "databases": names }))
+    }
+
+    #[test]
+    fn a_late_database_list_is_dropped_when_the_form_changed() {
+        let (mut app, _home) = app_with_drivers();
+        let ctx = egui::Context::default();
+        apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
+        let job = |n| Some(dbee_engine::JobId(n));
+        // The form as it was at the click: the list opens.
+        let (params, generation) = listing(&mut app, 1);
+        assert_eq!(app.view.conn.databases.pending, job(1));
+        form_done(&mut app, LIST_DATABASES, params, generation, job(1), listed(&["dbee", "shop"]));
+        let list = &app.view.conn.databases;
+        assert!(list.open && list.pending.is_none() && list.names == ["dbee", "shop"], "{list:?}");
+        // Another host, port, user, TLS mode, CA file or tunnel since the click: dropped, errors too.
+        let changes: [fn(&mut Form); 6] = [
+            |f| f.host = "elsewhere".into(),
+            |f| f.port = "6543".into(),
+            |f| f.user = "ann".into(),
+            |f| f.ssl_mode = SslMode::Require,
+            |f| f.ca_file = Some(PathBuf::from("/x/ca.pem")),
+            |f| {
+                f.ssh_on = true;
+                f.ssh_host = "jump".into();
+                f.ssh_user = "ann".into();
+            },
+        ];
+        for (n, change) in (2..).zip(changes) {
+            apply(&mut app, Act::New, &ctx);
+            apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
+            let (params, generation) = listing(&mut app, n);
+            change(&mut app.view.conn.form);
+            form_done(&mut app, LIST_DATABASES, params.clone(), generation, job(n), listed(&["dbee"]));
+            assert!(!app.view.conn.databases.open && app.view.conn.databases.pending.is_none(), "change {n}");
+            let refused = Err(EngineError::Db { code: "connect", message: "refused".into(), data: json!({}) });
+            started(&mut app, dbee_engine::JobId(100 + n), LIST_DATABASES);
+            form_done(&mut app, LIST_DATABASES, params, generation, job(100 + n), refused);
+            assert_eq!(app.view.conn.message, None, "change {n}");
+        }
+        // Another type, or Change engine (back to the same type): dropped too.
+        apply(&mut app, Act::New, &ctx);
+        apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
+        let (params, generation) = listing(&mut app, 20);
+        apply(&mut app, Act::ChangeEngine, &ctx);
+        apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
+        assert!(app.view.conn.databases.pending.is_none(), "Change engine forgets the listing");
+        form_done(&mut app, LIST_DATABASES, params, generation, job(20), listed(&["dbee"]));
+        assert!(!app.view.conn.databases.open);
+        let (params, generation) = listing(&mut app, 21);
+        apply(&mut app, Act::ChangeEngine, &ctx);
+        apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
+        assert_eq!(app.view.conn.form.kind, DbKind::MySql);
+        form_done(&mut app, LIST_DATABASES, params, generation, job(21), listed(&["dbee"]));
+        assert!(!app.view.conn.databases.open && app.view.conn.databases.pending.is_none());
+        let (params, generation) = listing(&mut app, 23);
+        fill_from_url(&mut app, &json!({ "kind": "mariadb" }));
+        form_done(&mut app, LIST_DATABASES, params, generation, job(23), listed(&["dbee"]));
+        assert!(!app.view.conn.databases.open && app.view.conn.databases.pending.is_none(), "a URL of another type");
+        // Typing a database or a password since the click is no change of server.
+        let (params, generation) = listing(&mut app, 22);
+        app.view.conn.form.database = "sh".into();
+        app.view.conn.form.password = "typed".into();
+        form_done(&mut app, LIST_DATABASES, params, generation, job(22), listed(&["shop"]));
+        assert!(app.view.conn.databases.open);
+    }
+
+    #[test]
+    fn a_server_that_lists_nothing_says_so() {
+        let (mut app, _home) = app_with_drivers();
+        let ctx = egui::Context::default();
+        apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
+        let (params, generation) = listing(&mut app, 1);
+        form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(1)), listed(&[]));
+        assert!(!app.view.conn.databases.open);
+        assert_eq!(app.view.conn.message, Some(Message { kind: Kind::Note, text: "No databases to list.".into() }));
+        // A choice fills the field and closes the list.
+        let (params, generation) = listing(&mut app, 2);
+        form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(2)), listed(&["shop"]));
+        assert!(app.view.conn.databases.open);
+        apply(&mut app, Act::ChooseDatabase("shop".into()), &ctx);
+        assert_eq!((app.view.conn.form.database.as_str(), app.view.conn.databases.open), ("shop", false));
+    }
+
+    #[test]
+    fn many_names_scroll_in_a_list_of_bounded_height() {
+        let (mut app, _home) = app_with_drivers();
+        let ctx = egui::Context::default();
+        apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
+        let names: Vec<String> = (0..500).map(|n| format!("db{n:03}")).collect();
+        app.view.conn.databases = DatabaseList { pending: None, names, open: true };
+        for _ in 0..3 {
+            frame(&mut app, &ctx);
+        }
+        let drawn: Vec<Rect> = (0..500).filter_map(|n| app.tags().rect(&format!("conn-database-item-{n}"))).collect();
+        assert!(app.tags().value("conn-database-item-0") == Some(&Json::from("db000")) && drawn.len() < 20, "{} drawn", drawn.len());
+        let (top, bottom) = (drawn[0].top(), drawn.iter().map(|r| r.bottom()).fold(0.0, f32::max));
+        assert!(bottom - top <= 260.0, "{top} … {bottom}");
     }
 
     #[test]

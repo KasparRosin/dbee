@@ -735,6 +735,7 @@ fn connection_commands_are_registered() {
         "connection.parseUrl",
         "connection.sshKey",
         "connection.test",
+        "connection.listDatabases",
         "connection.open",
         "connection.openFile",
     ] {
@@ -1343,4 +1344,128 @@ fn open_file_while_connected_is_refused_as_open_is() {
         assert_eq!(s.inspect(), before, "the connection and its staged edit stay");
         assert_eq!(summary(&s)["edits"]["count"], 1, "{}", summary(&s));
     }
+}
+
+// ---- the database list -----------------------------------------------------------------------
+
+const LIST: &str = "connection.listDatabases";
+
+/// The database the seed is in on `t`'s server: the kind's test database or, with none (MySQL's
+/// servers, whose databases are the seed's schemas), `shop`.
+fn seeded_database(t: &TestTarget) -> &'static str {
+    let info = t.kind().info();
+    if info.database.is_empty() { t.schema("shop") } else { info.database }
+}
+
+/// The names of a `connection.listDatabases` result.
+fn names(r: &Json) -> Vec<&str> {
+    r["databases"].as_array().unwrap_or_else(|| panic!("no list: {r}")).iter().map(|d| d.as_str().unwrap()).collect()
+}
+
+#[test]
+fn list_databases_for_an_unsaved_form() {
+    let _db = require_testdb!();
+    let mut s = session();
+    let r = s.run_blocking(LIST, json!({ "config": pg14_config(), "password": pw() }), T).unwrap();
+    assert!(r["databases"].as_array().unwrap().iter().any(|d| d == "dbee"), "{r}");
+    // Every server lists the database its seed is in, also with none typed: Postgres reads the list
+    // through its default database (the one named like the user), as a test connects.
+    for t in engine_targets().into_iter().filter(|t| !t.is_file()) {
+        let config = ConnectionConfig { database: String::new(), ..config_for(&t) };
+        let r = s.run_blocking(LIST, json!({ "config": config, "password": pw() }), T).unwrap();
+        assert!(names(&r).contains(&seeded_database(&t)), "{}: {r}", t.name());
+        // Without a password, the server's refusal asks for one, as Test's does.
+        assert_eq!(run_err(&mut s, LIST, json!({ "config": config })).code(), "needsPassword", "{}", t.name());
+    }
+    // It leaves the session as it was: nothing opened, nothing used, nothing journaled (its params
+    // can carry a password).
+    assert_eq!(s.inspect()["screen"], "connections");
+    assert_eq!(s.inspect()["connection"], Json::Null);
+    assert!(s.state().store.recent.is_empty() && s.state().store.saved.is_empty());
+    assert!(s.journal().iter().all(|(id, _)| id != LIST), "{:?}", s.journal());
+    assert!(!s.busy());
+    assert_secret_hidden(&s, &pw());
+}
+
+#[test]
+fn list_databases_respects_allowed_targets() {
+    let _db = require_testdb!();
+    let params = json!({ "config": pg14_config(), "password": pw() });
+    {
+        // Not on the list: refused before any job, as connection.test is.
+        let mut s = session_adjusted(|o| o.allowed_targets = Some(vec![("127.0.0.1".into(), 1)]));
+        let e = s.execute(LIST, params.clone()).unwrap_err();
+        assert_eq!(e.code(), "config", "{e}");
+        assert!(e.to_string().contains("this isolated run may only connect to the test servers"), "{e}");
+        assert!(!s.busy());
+        // Through a tunnel, the SSH server's target counts.
+        let tunnelled = json!({ "config": via_ssh(SshAuth::Key { path: None }), "password": pw() });
+        assert_eq!(s.execute(LIST, tunnelled).unwrap_err().code(), "config");
+        assert!(!s.busy());
+    }
+    let mut s = session_adjusted(|o| o.allowed_targets = Some(vec![("127.0.0.1".into(), pg14().port)]));
+    assert!(names(&s.run_blocking(LIST, params, T).unwrap()).contains(&"dbee"));
+}
+
+#[test]
+fn a_file_type_has_no_database_list() {
+    let mut s = session();
+    for kind in dbee_config::DbKind::ALL.into_iter().filter(|k| matches!(k.info().settings, Settings::File { .. })) {
+        let with_file = ConnectionConfig { kind, file: Some("/nowhere/shop.db".into()), host: String::new(), port: 0, ..ConnectionConfig::default() };
+        let without = ConnectionConfig { file: None, ..with_file.clone() };
+        for config in [with_file, without] {
+            let e = s.execute(LIST, json!({ "config": config })).unwrap_err();
+            assert_eq!(e.code(), "badParams", "{e}");
+            let want = format!("{} opens one database file, so there are no databases to list.", kind.label());
+            assert!(matches!(&e, EngineError::BadParams { msg, .. } if *msg == want), "{e}");
+        }
+    }
+    assert!(!s.busy());
+    for params in [json!({}), json!({ "config": {} }), json!({ "config": refused_config("x"), "password": 5 })] {
+        assert_eq!(s.execute(LIST, params.clone()).unwrap_err().code(), "badParams", "{params}");
+    }
+    assert_eq!(run_err(&mut s, LIST, json!({ "config": refused_config("refused") })).code(), "connect");
+}
+
+/// Through the test sshd to a MySQL server, which it reaches as `mysql80:3306`.
+#[test]
+fn list_databases_through_ssh() {
+    let db = require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let server = mysql.server().unwrap();
+    let mut s = session_in(temp_home(Some(&db.keys.plain), None));
+    let config = via_ssh_to(server, &config_for(&mysql), SshAuth::Key { path: None });
+    // An unknown host key asks first, and the trusted one is learned.
+    let e = run_err(&mut s, LIST, json!({ "config": config, "password": pw() }));
+    assert_eq!(e.code(), "needsHostKey", "{e}");
+    let trust = e.data()["fingerprint"].as_str().unwrap().to_owned();
+    let r = s.run_blocking(LIST, json!({ "config": config, "password": pw(), "trustHostKey": trust }), T).unwrap();
+    assert!(names(&r).contains(&"shop") && names(&r).last() == Some(&"sys"), "{r}");
+    assert!(std::fs::read_to_string(s.home.ssh_dir().join("known_hosts")).unwrap().contains(&sshd_entry()));
+}
+
+/// The list opens a connection of its own: it works while connected to another server, and the
+/// open connection, its tabs and the lists stay as they were. A saved connection's stored password
+/// is used as Test uses it.
+#[test]
+fn listing_leaves_the_session_as_it_is() {
+    let db = require_testdb!();
+    let mut s = connected();
+    s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
+    let before = (s.inspect()["connection"].clone(), s.inspect()["tabs"].clone(), s.state().store.clone());
+    let catalog = Arc::clone(&s.state().connected.as_ref().unwrap().catalog);
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let r = s.run_blocking(LIST, json!({ "config": config_for(&mysql), "password": pw() }), T).unwrap();
+    assert!(names(&r).contains(&"shop"), "{r}");
+    assert_eq!((s.inspect()["connection"].clone(), s.inspect()["tabs"].clone(), s.state().store.clone()), before);
+    let c = s.state().connected.as_ref().unwrap();
+    assert!(Arc::ptr_eq(&catalog, &c.catalog) && !c.lost, "the open connection is as it was");
+    assert_eq!(run(&mut s, "query.run", json!({}))["results"].as_array().map(Vec::len), Some(1), "the query tab still runs");
+    assert_eq!(s.inspect()["screen"], "workspace");
+    // The saved pg14's id: its stored password.
+    let saved = s.state().store.saved[0].clone();
+    assert!(names(&s.run_blocking(LIST, json!({ "config": saved }), T).unwrap()).contains(&"dbee"));
+    // Another host under that id gets no password, so it asks for one.
+    let elsewhere = ConnectionConfig { port: pgnew().port, ..saved };
+    assert_eq!(run_err(&mut s, LIST, json!({ "config": elsewhere })).code(), "needsPassword");
 }

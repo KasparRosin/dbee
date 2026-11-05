@@ -443,3 +443,32 @@ async fn failed_transaction_is_flagged() {
         assert_eq!(conn.scalar_u64("SELECT 7").await, Ok(7));
     }
 }
+
+/// The databases a connection may open, through the database the settings name or, with none,
+/// the server's default (the one named like the user, `postgres` here). The listing connection is
+/// gone once the list is read.
+#[tokio::test]
+async fn pg_lists_databases() {
+    let db = require_testdb!();
+    let listing = "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname";
+    let still_open = format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND query = '{listing}'");
+    for s in postgres(db) {
+        for database in ["", "dbee"] {
+            let c = ConnectionConfig { database: database.into(), ..config(s, SslMode::Prefer) };
+            let names = PgDriver.list_databases(target(&c, Some(&db.password))).await.unwrap();
+            assert!(names.contains(&"dbee".to_string()) && names.contains(&"postgres".to_string()), "{} {database:?}: {names:?}", s.name);
+            assert!(!names.iter().any(|n| n.starts_with("template")), "{}: {names:?}", s.name);
+            assert!(names.is_sorted(), "{}: {names:?}", s.name);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while dbee_testkit::psql(s, &still_open).unwrap().trim() != "0" {
+                assert!(Instant::now() < deadline, "{}: the listing connection is still open", s.name);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        // A database that is not there is the server's error, as for a connect.
+        let missing = ConnectionConfig { database: "no_such_database".into(), ..config(s, SslMode::Prefer) };
+        let e = PgDriver.list_databases(target(&missing, Some(&db.password))).await.unwrap_err();
+        assert!(e.to_string().contains("no_such_database"), "{e}");
+        assert_eq!(PgDriver.list_databases(target(&config(s, SslMode::Prefer), Some("nope"))).await.unwrap_err().code(), "auth");
+    }
+}

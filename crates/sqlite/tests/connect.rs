@@ -102,6 +102,19 @@ async fn missing_file_is_not_created() {
     assert!(!deeper.exists() && !dir.path("gone").exists());
 }
 
+/// A file is one database: there is no list, and listing opens and makes nothing.
+#[tokio::test]
+async fn a_file_lists_no_databases() {
+    let seed = seeded();
+    assert_eq!(SqliteDriver.list_databases(target(&config(seed.file().unwrap(), false))).await, Ok(Vec::new()));
+    let dir = Scratch::new();
+    let p = dir.path("nope.sqlite");
+    let missing = config(&p, false);
+    let asked = Target { create_file: true, ..target(&missing) };
+    assert_eq!(SqliteDriver.list_databases(asked).await, Ok(Vec::new()));
+    assert!(!p.exists());
+}
+
 #[tokio::test]
 async fn new_file_is_created_when_asked() {
     let dir = Scratch::new();

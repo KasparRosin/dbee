@@ -12,13 +12,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use dbee_config::ConnectionConfig;
 use dbee_core::cell::{Cell, ResultSet};
 use dbee_core::schema::{Catalog, ColumnInfo, Generated, RelKind, TableRef};
 use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
-use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError};
+use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError, Target};
 use dbee_sql::Dialect;
 
-use crate::connect::MySqlConnection;
+use crate::connect::{self, MySqlConnection};
 use crate::flavor::Flavor;
 use crate::values::{TypeFacts, class_of};
 
@@ -150,6 +151,21 @@ fn generated(extra: &str) -> Generated {
 fn default_schema(listed: &[String], configured: Option<&str>) -> Option<String> {
     let configured = configured?;
     listed.iter().find(|name| *name == configured).or_else(|| listed.first()).cloned()
+}
+
+/// `names` with the server's own databases last, each group in the order given.
+fn system_last(mut names: Vec<String>) -> Vec<String> {
+    names.sort_by_key(|name| SYSTEM_SCHEMAS.contains(&name.as_str()));
+    names
+}
+
+/// The databases the server shows the user, its own last, through a connection with no database,
+/// whatever `target` names. The connection closes once they are read.
+pub async fn list_databases(target: Target<'_>) -> Result<Vec<String>, DbError> {
+    let config = ConnectionConfig { database: String::new(), ..target.config.clone() };
+    let conn = connect::connect(Target { config: &config, ..target }).await?;
+    let listed = conn.catalog_query("SHOW DATABASES").await?;
+    Ok(system_last(listed.rows.iter().map(|row| owned(row, 0, "database name")).collect::<Result<_, _>>()?))
 }
 
 impl MySqlConnection {
@@ -333,6 +349,15 @@ fn add_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_servers_own_databases_go_last_in_the_order_given() {
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        let given = names(&["information_schema", "many", "mysql", "odd", "performance_schema", "shop", "sys", "MySQL_backup"]);
+        let want = names(&["many", "odd", "shop", "MySQL_backup", "information_schema", "mysql", "performance_schema", "sys"]);
+        assert_eq!(system_last(given), want);
+        assert_eq!(system_last(Vec::new()), Vec::<String>::new());
+    }
 
     #[test]
     fn flags_as_information_schema_spells_them() {

@@ -14,9 +14,9 @@ use dbee_core::cell::Cell;
 use dbee_core::cell::{ResultSet, TypeClass};
 use dbee_core::schema::{Catalog, ColumnInfo, Generated, RelKind, TableRef};
 use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
-use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError};
+use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError, Target};
 
-use crate::connect::PgConnection;
+use crate::connect::{self, PgConnection};
 use crate::query;
 
 /// Postgres's own schemas, listed after the user's.
@@ -122,6 +122,17 @@ fn estimate(s: &str) -> Option<u64> {
 
 async fn run(conn: &PgConnection, sql: &str) -> Result<ResultSet, DbError> {
     require_complete(query::run_untyped(conn, sql, CATALOG_LIMITS).await?)
+}
+
+/// The databases a connection can open: templates and those that take no connections left out.
+const DATABASES_SQL: &str = "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname";
+
+/// The server's databases, by name, read through the database `target` names; with none, the
+/// default one, as every connect (the one named like the user). The connection closes once they
+/// are read.
+pub async fn list_databases(target: Target<'_>) -> Result<Vec<String>, DbError> {
+    let conn = connect::connect(target).await?;
+    run(&conn, DATABASES_SQL).await?.rows.iter().map(|row| owned(row, 0, "database name")).collect()
 }
 
 /// Load every schema, relation, column and key. User schemas come first by name, then

@@ -17,12 +17,13 @@ use std::path::{Path, PathBuf};
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
-    Align, Button, Checkbox, CornerRadius, FontId, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, UiBuilder,
-    pos2, vec2,
+    Align, Button, Checkbox, CornerRadius, FontId, Frame, Label, Layout, Margin, Popup, PopupCloseBehavior, Rect, RectAlign, RichText, ScrollArea,
+    Sense, Stroke, TextEdit, UiBuilder, pos2, vec2,
 };
 
 use crate::automation::Tags;
 use crate::connections::{Act, ConnScreen, Kind, Running, line_galley, tilde};
+use crate::filter_bar;
 use crate::picker::Pick;
 use crate::theme::{RADIUS, TOKENS, connection_color};
 
@@ -38,6 +39,10 @@ const MESSAGE_H: f32 = 52.0;
 const FOOTER_H: f32 = 32.0 + 6.0 + 6.0 + MESSAGE_H;
 /// Fill from URL and Change engine, side by side.
 const SIDE_BUTTON_W: f32 = 128.0;
+/// The Database field's list button.
+const LIST_BUTTON_W: f32 = 84.0;
+/// The most of the Database field's list that shows; more names scroll.
+const LIST_H: f32 = 240.0;
 
 /// The SSH login choices of the form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,7 +435,7 @@ pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: 
         name_row(ui, &mut conn.form, tags, w);
         match conn.form.kind.info().settings {
             Settings::Server { tls, ssh } => {
-                server_rows(ui, conn, tags, w);
+                server_rows(ui, conn, tags, acts, w);
                 if tls {
                     tls_rows(ui, conn, tags, acts, w);
                 }
@@ -510,7 +515,7 @@ fn name_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
 }
 
 /// Host and port, user and password, "Save passwords", and the database.
-fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, w: f32) {
+fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let t = TOKENS;
     let has_store = conn.has_store;
     let f = &mut conn.form;
@@ -563,7 +568,66 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, w: f32
     });
     ui.add_space(4.0);
 
-    column(ui, w, "Database", |ui| text_field(ui, tags, "conn-database", &mut f.database, ""));
+    database_row(ui, conn, tags, acts, w);
+}
+
+/// The database, and beside it the button that lists the server's databases (not while a test,
+/// a connect or a listing runs). The names open under the field, over the rows below, and
+/// choosing one fills it in; Escape or a click elsewhere closes them.
+fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    let listing = conn.databases.pending.is_some();
+    let can_list = conn.running.is_none() && !listing;
+    let ConnScreen { form, databases, .. } = conn;
+    column(ui, w, "Database", |ui| {
+        ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let field_w = w - LIST_BUTTON_W - 6.0;
+            let field = ui.add(
+                TextEdit::singleline(&mut form.database)
+                    .id(field_id("conn-database"))
+                    .desired_width(field_w)
+                    .min_size(vec2(0.0, FIELD_H))
+                    .margin(Margin::symmetric(6, 5)),
+            );
+            tags.tag_value("conn-database", &field, form.database.as_str());
+            let label = if listing { "Listing…" } else { "List…" };
+            let button = ui
+                .add_enabled(can_list, Button::new(label).min_size(vec2(LIST_BUTTON_W, FIELD_H)))
+                .on_hover_text("Choose from the server's databases");
+            tags.tag_value("conn-database-list", &button, label);
+            if button.clicked() {
+                if databases.open {
+                    databases.open = false;
+                } else {
+                    acts.push(Act::ListDatabases);
+                }
+            }
+            let names = &databases.names;
+            Popup::from_response(&field)
+                .open_bool(&mut databases.open)
+                .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                .align(RectAlign::BOTTOM_START)
+                .width(field_w)
+                .show(|ui| {
+                    ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
+                    ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]).show_rows(
+                        ui,
+                        filter_bar::ITEM_H,
+                        names.len(),
+                        |ui, rows| {
+                            for (n, name) in names.iter().enumerate().skip(rows.start).take(rows.len()) {
+                                let r = filter_bar::item(ui, *name == form.database, name);
+                                // A popup's first frame is a sizing pass, which reads every widget as disabled.
+                                tags.tag_value_as(&format!("conn-database-item-{n}"), &r, name.as_str(), true);
+                                if r.clicked() {
+                                    acts.push(Act::ChooseDatabase(name.clone()));
+                                }
+                            }
+                        },
+                    );
+                });
+        });
+    });
 }
 
 /// SSL mode and CA file.

@@ -592,6 +592,30 @@ async fn the_trait_canceller_stops_sleep() {
     }
 }
 
+/// The server's databases, its own after the user's: listed without a database, whatever the
+/// settings name, also one that is not there; through the tunnel too.
+#[tokio::test]
+async fn mysql_lists_databases_system_last() {
+    let db = require_testdb!();
+    let home = temp_home(None, Some(&db.sshd.known_hosts_line));
+    let t = tunnel(db, &home).await;
+    let system = ["mysql", "information_schema", "performance_schema", "sys"];
+    for s in mysql_servers(db) {
+        let direct = ["", "shop", "no_such_database"].map(|database| ConnectionConfig { database: database.into(), ..config(s, SslMode::Prefer) });
+        let tunnelled = tunnelled(s, db, SslMode::Prefer);
+        for c in direct.iter().chain([&tunnelled]) {
+            let tunnel = c.ssh.as_ref().map(|_| Arc::clone(&t));
+            let names = MySqlDriver.list_databases(Target { tunnel, ..target(c, Some(&db.password)) }).await.unwrap();
+            let at = |name: &str| names.iter().position(|n| n == name).unwrap_or_else(|| panic!("{}: no {name} in {names:?}", s.name));
+            for user in ["many", "odd", "scratch", "shop"] {
+                assert!(system.iter().all(|own| at(user) < at(own)), "{} {:?}: {names:?}", s.name, c.database);
+            }
+        }
+        assert_eq!(MySqlDriver.list_databases(target(&config(s, SslMode::Prefer), Some("nope"))).await.unwrap_err().code(), "auth", "{}", s.name);
+    }
+    t.close().await;
+}
+
 // ---------------------------------------------------------------------------------------------
 // The fake server: packets as MySQL's protocol documentation describes them
 // ---------------------------------------------------------------------------------------------

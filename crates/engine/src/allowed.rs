@@ -1,10 +1,10 @@
 //! The connection guard of isolated runs (`cargo xtask run-isolated`): `connection.test`,
-//! `connection.open` and `connection.reconnect` refuse a target the run may not reach before any
-//! network I/O. A server is checked by its target ([`crate::SessionOptions::allowed_targets`]),
-//! and so is any SSH server a config names. A file database's file is checked by its driver
-//! inside the open, against the session's allowed folders (`dbee_driver::Target::allowed_dirs`,
-//! [`crate::SessionOptions::allowed_dirs`]), so no filesystem read runs here. Without a list there
-//! is no limit (a normal run).
+//! `connection.listDatabases`, `connection.open` and `connection.reconnect` refuse a target the
+//! run may not reach before any network I/O. A server is checked by its target
+//! ([`crate::SessionOptions::allowed_targets`]), and so is any SSH server a config names. A file
+//! database's file is checked by its driver inside the open, against the session's allowed
+//! folders (`dbee_driver::Target::allowed_dirs`, [`crate::SessionOptions::allowed_dirs`]), so no
+//! filesystem read runs here. Without a list there is no limit (a normal run).
 //!
 //! The target is the database's `host:port`, or with an SSH tunnel the SSH server's (the database
 //! host behind it is resolved by the sshd). Hosts are compared lowercased and literally: no name

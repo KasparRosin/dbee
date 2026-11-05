@@ -1,6 +1,6 @@
 //! Connection commands: the saved and recent list (save, delete, duplicate), URL parsing, the
-//! SSH key preview, test, open, opening a database file and saving the open connection,
-//! reconnect, close, and the schema refresh.
+//! SSH key preview, test, the server's database list, open, opening a database file and saving
+//! the open connection, reconnect, close, and the schema refresh.
 //!
 //! Secrets (the database password, the SSH password and the key passphrase) come from the
 //! params first (`password`, `sshPassword`, `sshPassphrase`; an empty string counts as not
@@ -19,18 +19,20 @@
 //! kept only in the store and in the crate-private [`Connected::credentials`] (for reconnects),
 //! never in the config, the connections file, `inspect()`, `Debug`, logs, errors or the journal
 //! (the journal drops secret params by key, and `connection.parseUrl`, whose URL may carry a
-//! password, is not journaled). Store reads run in the job, so a slow keyring never holds up the
-//! UI thread; writes (`connection.save`, `savePassword`) run on the caller's thread with the
-//! saved-connection change they belong to.
+//! password, is not journaled; nor are `connection.test` and `connection.listDatabases`). Store
+//! reads run in the job, so a slow keyring never holds up the UI thread; writes
+//! (`connection.save`, `savePassword`) run on the caller's thread with the saved-connection
+//! change they belong to.
 //!
-//! An isolated run's allowed targets ([`crate::allowed`]) are checked by test, open and reconnect
-//! before anything touches the network. Its allowed folders go to the driver
+//! An isolated run's allowed targets ([`crate::allowed`]) are checked by test, the database list,
+//! open and reconnect before anything touches the network. Its allowed folders go to the driver
 //! (`dbee_driver::Target::allowed_dirs`): a file driver checks its file inside the open, so the
 //! refusal is the job's error (`config`), and keeps the connection's SQL from other files.
 //!
 //! Connections open through the session's driver for the config's database type
-//! ([`SessionOptions::drivers`](crate::SessionOptions::drivers)); test, open and reconnect refuse
-//! a type without one (`disabled`, "this build has no MySQL driver") before any job starts.
+//! ([`SessionOptions::drivers`](crate::SessionOptions::drivers)); test, the database list, open
+//! and reconnect refuse a type without one (`disabled`, "this build has no MySQL driver") before
+//! any job starts.
 //!
 //! Connecting is a job: the tunnel, the browse connection and, for open and reconnect, the
 //! catalog, whose load is bounded ([`CATALOG_TIMEOUT`]: past it, it is cancelled, the connection
@@ -52,7 +54,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SslMode, new_id, parse_url};
 use dbee_core::Catalog;
-use dbee_driver::{Cancel, Connection, DbError, Driver, Drivers, Purpose, Target};
+use dbee_driver::{CONNECT_TIMEOUT, Cancel, Connection, DbError, Driver, Drivers, Purpose, Target};
 use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
@@ -69,6 +71,7 @@ const DUPLICATE: &str = "connection.duplicate";
 const PARSE_URL: &str = "connection.parseUrl";
 const SSH_KEY: &str = "connection.sshKey";
 const TEST: &str = "connection.test";
+const LIST_DATABASES: &str = "connection.listDatabases";
 const OPEN: &str = "connection.open";
 const OPEN_FILE: &str = "connection.openFile";
 const SAVE_OPEN: &str = "connection.saveOpen";
@@ -156,6 +159,17 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         undoable: false,
     },
     CommandSpec {
+        id: LIST_DATABASES,
+        label: "List Databases",
+        menu: &[],
+        shortcut: None,
+        params: "{config, password?, sshPassword?, sshPassphrase?, trustHostKey?}",
+        enabled: always,
+        run: list_databases,
+        journal: false,
+        undoable: false,
+    },
+    CommandSpec {
         id: OPEN,
         label: "Connect",
         menu: &["File"],
@@ -228,6 +242,9 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// After a timed-out catalog load is cancelled, how long it gets to end before it is given up.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// The longest a database list may take: the connect, then a read bounded as a catalog's is.
+const LIST_TIMEOUT: Duration = CONNECT_TIMEOUT.saturating_add(CATALOG_TIMEOUT);
 
 // ---- params ----------------------------------------------------------------------------------
 
@@ -587,6 +604,35 @@ async fn open_connection(
     }
 }
 
+/// The databases `driver` lists on `config`'s server, through the tunnel when there is one (closed
+/// again afterwards), within [`LIST_TIMEOUT`]; with why a host key the user trusted was not saved,
+/// when it was not.
+async fn list_on(
+    driver: &dyn Driver,
+    config: &ConnectionConfig,
+    allowed_dirs: Option<&[PathBuf]>,
+    env: &SshEnv,
+    creds: &Credentials,
+) -> Result<(Vec<String>, Option<String>), EngineError> {
+    let tunnel = open_tunnel(config, env, creds).await?;
+    let target =
+        Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file: false, allowed_dirs };
+    let listed = tokio::time::timeout(LIST_TIMEOUT, driver.list_databases(target)).await;
+    let unsaved = unsaved_host_key(tunnel.as_ref());
+    if let Some(t) = tunnel {
+        t.close().await;
+    }
+    match listed {
+        Ok(Ok(names)) => Ok((names, unsaved)),
+        Ok(Err(e)) => Err(connect_error(e, creds)),
+        Err(_) => Err(EngineError::Db {
+            code: "timeout",
+            message: format!("the server did not list its databases within {} s", LIST_TIMEOUT.as_secs()),
+            data: json!({}),
+        }),
+    }
+}
+
 /// Why a bounded catalog load gave no catalog.
 enum CatalogLoad {
     Failed(DbError),
@@ -858,6 +904,35 @@ fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             let (r, unsaved) = result?;
             tell(s, unsaved);
             Ok(r)
+        });
+        apply
+    });
+    Ok(Outcome::Started(job))
+}
+
+/// `{config, password?, sshPassword?, sshPassphrase?, trustHostKey?}` → a job returning
+/// `{databases}`: the names the server lists, for the connection form's Database field to choose
+/// from. `config` is the form's, saved or not; the secrets, the prompts and an isolated run's
+/// targets are as for [`test`]. It connects (through the tunnel when there is one), reads the list
+/// and closes again, and leaves the session as it is, connected or not. Not journaled: its params
+/// can carry a password. A type whose connection is one database file is refused.
+fn list_databases(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    if let Some(kind) = parse_config(params, "config")?.map(|c| c.kind).filter(|k| k.uses_file()) {
+        return Err(bad(format!("{} opens one database file, so there are no databases to list.", kind.label())));
+    }
+    let config = connect_config(params)?.ok_or_else(|| bad("`config` is required (a connection object)"))?;
+    let allowed_dirs = may_reach(s, &config)?;
+    let driver = driver_for(&s.drivers, config.kind)?;
+    let creds = given(params)?;
+    let allowed = stored_reuse(s, &config);
+    let (env, store) = (s.ssh.clone(), s.secrets.clone());
+    let job = s.spawn_job(LIST_DATABASES, async move {
+        let creds = fill_from_store(creds, store, &config, allowed).await;
+        let result = list_on(driver.as_ref(), &config, allowed_dirs.as_deref(), &env, &creds).await;
+        let apply: Apply = Box::new(move |s: &mut Session| {
+            let (databases, unsaved) = result?;
+            tell(s, unsaved);
+            Ok(json!({ "databases": databases }))
         });
         apply
     });

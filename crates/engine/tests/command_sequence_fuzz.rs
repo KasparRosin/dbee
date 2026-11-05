@@ -60,6 +60,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("connection.parseUrl", &[("url", Hint::Custom(url))]),
     ("connection.sshKey", &[("config", CONFIG)]),
     ("connection.test", CONNECT),
+    ("connection.listDatabases", LIST_DATABASES),
     ("connection.open", OPEN),
     ("connection.openFile", &[("path", FILE_PATH), ("password", Hint::Text)]),
     ("connection.saveOpen", &[]),
@@ -170,6 +171,8 @@ const CONNECT: &[(&str, Hint)] = &[
     ("sshPassphrase", Hint::Text),
     ("trustHostKey", FINGERPRINT),
 ];
+const LIST_DATABASES: &[(&str, Hint)] =
+    &[("config", CONFIG), ("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text), ("trustHostKey", FINGERPRINT)];
 const OPEN: &[(&str, Hint)] = &[
     ("id", MAYBE_ID),
     ("config", CONFIG),

@@ -25,6 +25,10 @@ impl Driver for PgDriver {
             Ok(conn)
         })
     }
+
+    fn list_databases<'a>(&'a self, target: Target<'a>) -> DbFuture<'a, Vec<String>> {
+        Box::pin(catalog::list_databases(target))
+    }
 }
 
 impl Connection for PgConnection {

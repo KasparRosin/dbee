@@ -97,6 +97,13 @@ pub trait Driver: Send + Sync + 'static {
     /// The connection types this driver opens.
     fn kinds(&self) -> &'static [DbKind];
     fn connect<'a>(&'a self, target: Target<'a>) -> DbFuture<'a, Arc<dyn Connection>>;
+
+    /// The databases of the server `target` reaches, to choose one from: it connects as the
+    /// driver's list needs, reads them and closes the connection. A driver whose connection is
+    /// one database lists none.
+    fn list_databases<'a>(&'a self, _target: Target<'a>) -> DbFuture<'a, Vec<String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }
 
 /// An open connection. Operations on it never interleave; dropping the last handle closes it.
@@ -136,6 +143,27 @@ mod tests {
         assert_eq!(PAGE_LIMITS, Limits { max_rows: 101, max_bytes: 256 * 1024 * 1024 });
         assert_eq!(CATALOG_LIMITS, Limits { max_rows: 5_000_000, max_bytes: 512 * 1024 * 1024 });
         assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(15));
+    }
+
+    /// A driver that opens nothing and says nothing about its databases.
+    struct Silent;
+
+    impl Driver for Silent {
+        fn kinds(&self) -> &'static [DbKind] {
+            &[DbKind::Sqlite]
+        }
+
+        fn connect<'a>(&'a self, _target: Target<'a>) -> DbFuture<'a, Arc<dyn Connection>> {
+            Box::pin(async { Err(DbError::Other("opens nothing".into())) })
+        }
+    }
+
+    #[test]
+    fn a_driver_lists_no_databases_unless_it_says_how() {
+        use futures_util::FutureExt as _;
+        let config = ConnectionConfig::default();
+        let target = Target { config: &config, password: None, tunnel: None, purpose: Purpose::Browse, create_file: false, allowed_dirs: None };
+        assert_eq!(Silent.list_databases(target).now_or_never(), Some(Ok(Vec::new())));
     }
 
     #[test]

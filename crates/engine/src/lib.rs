@@ -182,8 +182,9 @@ pub struct SessionOptions {
     pub ssh: SshEnv,
     /// Called from a worker thread after each job result, so the UI can wake up and pump.
     pub notify: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// The only `(host, port)` targets `connection.test`, `connection.open` and
-    /// `connection.reconnect` may reach (an isolated run's test servers); `None` is no limit.
+    /// The only `(host, port)` targets `connection.test`, `connection.listDatabases`,
+    /// `connection.open` and `connection.reconnect` may reach (an isolated run's test servers);
+    /// `None` is no limit.
     /// See [`allowed`].
     pub allowed_targets: Option<Vec<(String, u16)>>,
     /// The only folders a file database may lie in (an isolated run's home and `target/`); `None`

@@ -76,7 +76,7 @@ const ARROW_W: f32 = 10.0;
 const ARROW_GAP: f32 = 4.0;
 const CHOICE_PAD: f32 = 7.0;
 /// A list item's height, the gap between items and the room left and right of an item's text.
-const ITEM_H: f32 = 24.0;
+pub(crate) const ITEM_H: f32 = 24.0;
 pub(crate) const ITEM_GAP: f32 = 2.0;
 const ITEM_PAD: f32 = 8.0;
 
