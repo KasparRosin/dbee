@@ -31,14 +31,16 @@
 //! job is never dropped or aborted.
 //!
 //! **The database a run starts in.** On a dialect with `USE`, a tab with a database of its own
-//! makes it current first. The engine keeps the database the query connection is in
-//! ([`CurrentDatabase`]): the settings' when the connection opens, each `USE` it sends, and after
-//! every run that reached the server, what the dialect's read gives (`SELECT DATABASE()`), on the
-//! query connection, after the run's own results are in. A run that was stopped after sending a
-//! statement of its text, a lost connection and a failed read leave it unknown: it is never
-//! guessed. After a run that got past its `USE`, the tab's database becomes that one, so a `USE`
-//! in the text sticks to the tab; the next run's `USE` keeps every tab in its own. A tab with
-//! none starts where the connection is ([`crate::Connected::starts_in`]).
+//! makes it current first, unless the query connection is known to be there already (a `USE`
+//! also clears MySQL's warnings, which a `SHOW WARNINGS` of its own run would then miss). The
+//! engine keeps the database the query connection is in ([`CurrentDatabase`]): the settings'
+//! when the connection opens, each `USE` it sends, and where the driver says each statement that
+//! succeeded left it (`ResultSet::database_after`; MySQL's server reports it in its OK packets).
+//! It sends no statement of its own to find out. A failed or stopped statement moves nothing.
+//! When the driver cannot tell, the database is no longer known: it is never guessed. After a run
+//! that got past its `USE`, the tab's database becomes that one, so a `USE` in the text sticks to
+//! the tab; the next run's `USE` keeps every tab in its own. A tab with none starts where the
+//! connection is ([`crate::Connected::starts_in`]).
 //!
 //! **Errors** keep the server's message, code, meaning, detail and hint ([`QueryError`]); the
 //! position the server gives (characters into the statement) becomes a byte offset into the tab
@@ -209,12 +211,9 @@ struct Ran {
     failure: Option<Failure>,
     /// The database the connection is in after the run.
     current: CurrentDatabase,
-    /// The tab's `USE` went through, or it had none: its statements were reached.
+    /// The tab's `USE` went through, or it needed none: its statements were reached.
     past_use: bool,
 }
-
-/// What the read of the current database keeps: one short value.
-const READ_LIMITS: Limits = Limits { max_rows: 1, max_bytes: 1024 };
 
 /// The byte offset in `text` of 1-based character `chars` of the statement at `range`, as the
 /// server counts error positions; at the end of the input and past it, the statement's end.
@@ -235,10 +234,10 @@ fn text_bytes(result: &ResultSet) -> usize {
 struct RunSetup {
     /// Sent before the first statement: the tab's database, and its `USE`.
     use_database: Option<(String, String)>,
-    /// What the statements are checked with before they are sent (a NUL the server cannot take),
-    /// and what reads the current database after them.
+    /// What the statements are checked with before they are sent (a NUL the server cannot take);
+    /// whether a statement can move the connection to another database.
     dialect: Dialect,
-    /// The database the session's query connection is in, when the run uses it.
+    /// The database the connection the run uses is in when it starts.
     current: CurrentDatabase,
 }
 
@@ -267,10 +266,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
             // A connect that is stopped is dropped: nothing ran on it yet.
             tokio::select! {
                 connected = driver.connect(target) => match connected {
-                    Ok(conn) => {
-                        ran.current = CurrentDatabase::of_settings(&config);
-                        (conn, true)
-                    }
+                    Ok(conn) => (conn, true),
                     Err(error) => {
                         ran.failure = Some(Failure { statement: 0, error, position: None });
                         return ran;
@@ -283,13 +279,10 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
             }
         }
     };
-    // What went to the server: the `USE`, and statements of the text.
-    let mut sent_use = false;
-    let mut sent_text = false;
+    let moves = setup.dialect.has_use_database();
     if let Some((name, sql)) = setup.use_database {
-        sent_use = true;
         match run_one(conn.as_ref(), &sql, Limits { max_rows: 0, max_bytes: 0 }, &stop).await {
-            Ok(_) => ran.current = CurrentDatabase::Known(Some(name)),
+            Ok(_) => ran.current = CurrentDatabase::known(Some(name)),
             Err(error) => {
                 let error = match error {
                     DbError::Server(mut e) => {
@@ -319,9 +312,9 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                 break;
             }
             let limits = Limits { max_rows: if left == 0 { 0 } else { RUN_LIMITS.max_rows }, max_bytes: left };
-            sent_text = true;
             match run_one(conn.as_ref(), sql, limits, &stop).await {
                 Ok(result) => {
+                    ran.current = ran.current.after(&result.database_after, moves);
                     left = left.saturating_sub(text_bytes(&result));
                     ran.outcomes.push(StatementOutcome { range, result: Arc::new(result) });
                 }
@@ -336,31 +329,8 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
             }
         }
     }
-    let lost = conn.is_closed() || ran.failure.as_ref().is_some_and(|f| f.error == DbError::ConnectionLost);
-    let stopped = stop.is_set() || ran.failure.as_ref().is_some_and(|f| f.error == DbError::Cancelled);
-    ran.current = if lost || (stopped && sent_text) {
-        CurrentDatabase::Unknown
-    } else if stopped || !(sent_use || sent_text) {
-        ran.current
-    } else {
-        match setup.dialect.current_database_sql() {
-            Some(sql) => read_current(conn.as_ref(), sql, &stop).await,
-            None => ran.current,
-        }
-    };
     ran.conn = Some((conn, opened));
     ran
-}
-
-/// The database `conn` is in, by `sql`, the dialect's read; unknown when the read fails.
-async fn read_current(conn: &dyn Connection, sql: &str, stop: &Stop) -> CurrentDatabase {
-    match run_one(conn, sql, READ_LIMITS, stop).await {
-        Ok(result) if result.complete => match result.rows.first().and_then(|row| row.first()) {
-            Some(cell) => CurrentDatabase::Known(cell.clone()),
-            None => CurrentDatabase::Unknown,
-        },
-        _ => CurrentDatabase::Unknown,
-    }
 }
 
 /// Runs one statement. When the run is stopped meanwhile, the cancel request goes out and the
@@ -522,11 +492,8 @@ fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran
         c.query_database = current.clone();
     }
     let Some(Tab::Query(q)) = s.state.tab_mut(tab) else { return Ok(ignored()) };
-    if has_use
-        && past_use
-        && let CurrentDatabase::Known(database) = current
-    {
-        q.database = database;
+    if has_use && past_use && current.known {
+        q.database = current.database;
     }
     q.running = None;
     q.results = outcomes;
@@ -575,14 +542,15 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if ranges.is_empty() {
         return Err(disabled(NOTHING_TO_RUN));
     }
-    let use_database = match database {
-        Some(name) => dialect.use_database(&name).map_err(|e| bad(format!("the tab's database: {e}")))?.map(|sql| (name, sql)),
-        None => None,
-    };
     // A closed browse connection or tunnel marks the session lost.
     s.browse()?;
     let c = s.state.connected.as_mut().ok_or_else(|| disabled(NOT_CONNECTED))?;
-    let setup = RunSetup { use_database, dialect, current: c.query_database.clone() };
+    let current = if c.query.is_some() { c.query_database.clone() } else { CurrentDatabase::of_settings(&c.config) };
+    let use_database = match database.filter(|name| !current.is(name)) {
+        Some(name) => dialect.use_database(&name).map_err(|e| bad(format!("the tab's database: {e}")))?.map(|sql| (name, sql)),
+        None => None,
+    };
+    let setup = RunSetup { use_database, dialect, current };
     if c.query.as_ref().is_some_and(|q| q.is_closed()) {
         log::info!("query: the query connection has closed; this run fails, and the next opens a new one");
         c.query = None;
@@ -778,7 +746,7 @@ mod tests {
         let ranges = lexer::statements(Dialect::Postgres, &text);
         let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();
         // 100 bytes for the run: the second result does not fit in what the first left, the third does.
-        let setup = || RunSetup { use_database: None, dialect: Dialect::Postgres, current: CurrentDatabase::Unknown };
+        let setup = || RunSetup { use_database: None, dialect: Dialect::Postgres, current: CurrentDatabase::default() };
         let ran = run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), 100).await;
         assert!(ran.failure.is_none());
         assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (1, 1, true)]);

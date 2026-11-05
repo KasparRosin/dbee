@@ -54,6 +54,21 @@ pub struct ResultSet {
     pub rows_seen: u64,
     pub complete: bool,
     pub rows_affected: Option<u64>,
+    /// The database the connection is in after the statement, as far as the driver can tell.
+    #[serde(skip)]
+    pub database_after: DatabaseAfter,
+}
+
+/// The database a connection is in after a statement, as its driver tells it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DatabaseAfter {
+    /// The driver cannot tell: neither it nor the server keeps track of it.
+    #[default]
+    Untold,
+    /// The server keeps track, and the statement left it where it was.
+    Unchanged,
+    /// The statement made this database current, or left none (`None`).
+    Changed(Option<String>),
 }
 
 #[cfg(test)]
@@ -64,7 +79,7 @@ mod tests {
     fn untyped_and_serde_shape() {
         let c = Column::untyped("a");
         assert_eq!((c.base_type.as_str(), c.class), ("", TypeClass::Other));
-        let rs = ResultSet { columns: vec![c], rows: vec![vec![None, Some("x".into())]], rows_seen: 1, complete: true, rows_affected: None };
+        let rs = ResultSet { columns: vec![c], rows: vec![vec![None, Some("x".into())]], rows_seen: 1, complete: true, ..ResultSet::default() };
         let j = serde_json::to_value(&rs).unwrap();
         assert_eq!(j["rowsSeen"], 1);
         assert_eq!(j["columns"][0]["baseType"], "");

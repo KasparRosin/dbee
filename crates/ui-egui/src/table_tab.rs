@@ -361,6 +361,7 @@ mod tests {
             rows_seen: 3,
             complete: true,
             rows_affected: None,
+            database_after: Default::default(),
         }
     }
 

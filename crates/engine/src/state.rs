@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
-use dbee_core::{Catalog, ResultSet, TableRef};
+use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
 use dbee_driver::{Connection, Meaning, ServerInfo};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
@@ -57,8 +57,7 @@ pub struct Connected {
     /// once it was lost).
     pub(crate) query: Option<Arc<dyn Connection>>,
     /// The database the query connection is in, while it is open: the settings' when it opens,
-    /// each `USE` the engine sends, then what the dialect's read gives after each run that
-    /// reached the server.
+    /// each `USE` the engine sends, then where the driver says each statement left it.
     pub(crate) query_database: CurrentDatabase,
     /// The query run in progress: one at a time, since the query connection runs one statement at
     /// a time and a cancel request hits whatever runs on it.
@@ -87,28 +86,45 @@ impl std::fmt::Debug for Connected {
     }
 }
 
-/// What the engine knows of the database a connection is in. It is never guessed.
+/// What the engine knows of the database a connection is in, or none. It is never guessed: once
+/// a statement may have moved it unseen, `known` is false and `database` the last one known.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum CurrentDatabase {
-    /// Not known: a read of it failed, or a run that may have changed it was stopped.
-    #[default]
-    Unknown,
-    /// This database, or none.
-    Known(Option<String>),
+pub struct CurrentDatabase {
+    pub database: Option<String>,
+    pub known: bool,
 }
 
 impl CurrentDatabase {
+    /// Known to be `database`, or none.
+    pub fn known(database: Option<String>) -> CurrentDatabase {
+        CurrentDatabase { database, known: true }
+    }
+
     /// The settings' database, as a connection opened with `config` starts in it.
     pub fn of_settings(config: &ConnectionConfig) -> CurrentDatabase {
-        CurrentDatabase::Known(Some(config.database.clone()).filter(|d| !d.is_empty()))
+        CurrentDatabase::known(Some(config.database.clone()).filter(|d| !d.is_empty()))
+    }
+
+    /// Known to be `name`.
+    pub fn is(&self, name: &str) -> bool {
+        self.known && self.database.as_deref() == Some(name)
+    }
+
+    /// Where a statement that succeeded leaves it, by the driver's `report`, on a dialect where a
+    /// statement can move it (`moves`): where the driver says; where it was, when the driver says
+    /// it stayed; not known any more, when the driver cannot tell.
+    pub(crate) fn after(self, report: &DatabaseAfter, moves: bool) -> CurrentDatabase {
+        match report {
+            _ if !moves => self,
+            DatabaseAfter::Changed(database) => CurrentDatabase::known(database.clone()),
+            DatabaseAfter::Unchanged => self,
+            DatabaseAfter::Untold => CurrentDatabase { known: false, ..self },
+        }
     }
 
     /// `{database, known}`: the name or null, and whether the engine knows it.
     pub fn summary(&self) -> Json {
-        match self {
-            CurrentDatabase::Unknown => json!({ "database": null, "known": false }),
-            CurrentDatabase::Known(d) => json!({ "database": d, "known": true }),
-        }
+        json!({ "database": self.database, "known": self.known })
     }
 }
 
@@ -117,7 +133,7 @@ impl Connected {
     /// else the query connection's while it is open, or the settings' before it opens.
     pub fn starts_in(&self, q: &QueryTab) -> CurrentDatabase {
         match (&q.database, &self.query) {
-            (Some(name), _) => CurrentDatabase::Known(Some(name.clone())),
+            (Some(name), _) => CurrentDatabase::known(Some(name.clone())),
             (None, Some(_)) => self.query_database.clone(),
             (None, None) => CurrentDatabase::of_settings(&self.config),
         }
@@ -203,10 +219,10 @@ pub struct QueryTab {
     pub shown: usize,
     /// Why the last run stopped early: an error, or a cancel.
     pub error: Option<QueryError>,
-    /// The database each run starts in, made current first with the dialect's `USE`. After a
-    /// run that got past it, it becomes the database the query connection is then in, so a `USE`
-    /// in the text sticks to the tab. `None` runs in the query connection's current database
-    /// ([`Connected::starts_in`]).
+    /// The database each run starts in, made current first with the dialect's `USE` when the query
+    /// connection is not known to be there already. After a run that got past it, it becomes the
+    /// database the driver says the run left the connection in, so a `USE` in the text sticks to
+    /// the tab. `None` runs in the query connection's current database ([`Connected::starts_in`]).
     pub database: Option<String>,
 }
 
@@ -537,5 +553,26 @@ impl State {
         let id = TabId(self.next_tab);
         self.next_tab = self.next_tab.saturating_add(1);
         id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_database_follows_what_the_driver_tells() {
+        let shop = || CurrentDatabase::known(Some("shop".into()));
+        assert_eq!(shop().after(&DatabaseAfter::Changed(Some("many".into())), true), CurrentDatabase::known(Some("many".into())));
+        assert_eq!(shop().after(&DatabaseAfter::Changed(None), true), CurrentDatabase::known(None));
+        assert_eq!(shop().after(&DatabaseAfter::Unchanged, true), shop());
+        // A driver that cannot tell: no longer known, the last one kept for what it is.
+        let unknown = shop().after(&DatabaseAfter::Untold, true);
+        assert_eq!(unknown, CurrentDatabase { database: Some("shop".into()), known: false });
+        assert!(!unknown.is("shop") && shop().is("shop"));
+        assert_eq!(unknown.summary(), json!({ "database": "shop", "known": false }));
+        // Where no statement can move it, nothing does.
+        assert_eq!(shop().after(&DatabaseAfter::Untold, false), shop());
+        assert_eq!(shop().after(&DatabaseAfter::Changed(Some("many".into())), false), shop());
     }
 }

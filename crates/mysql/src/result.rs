@@ -1,9 +1,10 @@
 //! The server's answer to a command: OK and ERR packets, and result sets with their rows.
 
-use dbee_core::ResultSet;
+use dbee_core::{DatabaseAfter, ResultSet};
 use dbee_driver::{DbError, Limits};
 use mysql_common::constants::{CapabilityFlags, StatusFlags};
 use mysql_common::io::ParseBuf;
+use mysql_common::packets::session_state_change::SessionStateChange;
 use mysql_common::packets::{CommonOkPacket, OkPacket, OkPacketDeserializer, OkPacketKind, OldEofPacket, ResultSetTerminator};
 
 use crate::column::parse_column;
@@ -23,28 +24,43 @@ pub(crate) fn parse_ok<K: OkPacketKind>(payload: &[u8], caps: CapabilityFlags) -
     ParseBuf(payload).parse::<OkPacketDeserializer<'_, K>>(caps).map(OkPacketDeserializer::into_inner).map_err(|_| malformed("OK packet"))
 }
 
+/// The database an OK packet says the statement made current (`SESSION_TRACK_SCHEMA`), the
+/// inner `None` for none; `None` when it says nothing of it. Session state that does not decode,
+/// and entries of other kinds, are passed over.
+pub(crate) fn schema_change(ok: &OkPacket<'_>) -> Option<Option<String>> {
+    let entries = ok.session_state_info().ok()?;
+    entries.iter().rev().find_map(|entry| match entry.decode() {
+        Ok(SessionStateChange::Schema(schema)) => Some(Some(schema.as_str().into_owned()).filter(|name| !name.is_empty())),
+        _ => None,
+    })
+}
+
 /// Read the answer to a command: an OK packet, an ERR packet, or result sets, as many as the
 /// server says follow (`SERVER_MORE_RESULTS_EXISTS`). The result holds the last result set's
 /// typed columns and rows, values as text ([`CellText`], counted against the caps before it is
 /// built), and the affected rows of the last OK packet (matched rows, as dbee logs in with
 /// `CLIENT_FOUND_ROWS`), `None` when no OK packet came. An ERR packet ends it with its error.
 /// Rows past `limits` are read but not kept. MariaDB's extended metadata is in each column
-/// definition when `extended_metadata` was agreed.
+/// definition when `extended_metadata` was agreed. When the server reports the current
+/// database (`tracks_schema`), the result says where the command left it.
 pub(crate) async fn read_result(
     p: &mut Packets,
     caps: CapabilityFlags,
     flavor: Flavor,
     extended_metadata: bool,
+    tracks_schema: bool,
     limits: Limits,
 ) -> Result<ResultSet, DbError> {
     let mut kept: Option<ResultSet> = None;
     let mut affected = None;
+    let mut moved = None;
     loop {
         let first = p.read().await?;
         let status = match first.first() {
             Some(0x00) => {
                 let ok = parse_ok::<CommonOkPacket>(&first, caps)?;
                 affected = Some(ok.affected_rows());
+                moved = schema_change(&ok).or(moved);
                 ok.status_flags()
             }
             Some(0xFF) => return Err(errors::from_err_packet(&first, caps, flavor)),
@@ -52,8 +68,9 @@ pub(crate) async fn read_result(
             _ => {
                 // The new result set replaces the one kept: no need to hold both.
                 drop(kept.take());
-                let (set, status) = read_rows(p, &first, caps, flavor, extended_metadata, limits).await?;
+                let (set, status, schema) = read_rows(p, &first, caps, flavor, extended_metadata, limits).await?;
                 kept = Some(set);
+                moved = schema.or(moved);
                 status
             }
         };
@@ -63,11 +80,17 @@ pub(crate) async fn read_result(
     }
     let mut result = kept.unwrap_or(ResultSet { complete: true, ..ResultSet::default() });
     result.rows_affected = affected;
+    result.database_after = match (tracks_schema, moved) {
+        (false, _) => DatabaseAfter::Untold,
+        (true, None) => DatabaseAfter::Unchanged,
+        (true, Some(database)) => DatabaseAfter::Changed(database),
+    };
     Ok(result)
 }
 
 /// One result set after its column count `first`: the column definitions, then the rows until
-/// the terminator, whose status says whether more results follow.
+/// the terminator, whose status says whether more results follow, and which may report a change
+/// of database ([`schema_change`]).
 async fn read_rows(
     p: &mut Packets,
     first: &[u8],
@@ -75,7 +98,7 @@ async fn read_rows(
     flavor: Flavor,
     extended_metadata: bool,
     limits: Limits,
-) -> Result<(ResultSet, StatusFlags), DbError> {
+) -> Result<(ResultSet, StatusFlags, Option<Option<String>>), DbError> {
     let count = match lenenc_int(first) {
         Some((n, [])) if (1..=MAX_COLUMNS).contains(&n) => usize::try_from(n).map_err(|_| malformed("column count"))?,
         _ => return Err(malformed("column count")),
@@ -108,7 +131,7 @@ async fn read_rows(
             // A row starting 0xFE has a first value of 16 MiB or more, so it is that long too.
             Some(0xFE) if packet.len() < CHUNK => {
                 let end = if old_eof { parse_ok::<OldEofPacket>(&packet, caps)? } else { parse_ok::<ResultSetTerminator>(&packet, caps)? };
-                return Ok((set, end.status_flags()));
+                return Ok((set, end.status_flags(), schema_change(&end)));
             }
             _ => {}
         }
@@ -165,8 +188,8 @@ mod tests {
 
     /// Every parser of mysql_common's that reads server bytes, on `payload`, with `caps`.
     fn parse_everything(payload: &[u8], caps: CapabilityFlags) {
-        let _ = parse_ok::<CommonOkPacket>(payload, caps);
-        let _ = parse_ok::<ResultSetTerminator>(payload, caps);
+        let _ = parse_ok::<CommonOkPacket>(payload, caps).map(|ok| schema_change(&ok));
+        let _ = parse_ok::<ResultSetTerminator>(payload, caps).map(|ok| schema_change(&ok));
         let _ = parse_ok::<OldEofPacket>(payload, caps);
         let _ = errors::from_err_packet(payload, caps, Flavor::MySql);
         let _ = parse_column(payload, false);
@@ -192,6 +215,7 @@ mod tests {
         column.extend_from_slice(&[0x0C, 45, 0, 0, 4, 0, 0, 0xFD, 0, 0, 0, 0, 0]);
         vec![
             vec![0x00, 1, 0, 2, 0, 0, 0],
+            ok_with_state(&schema_entry("many")),
             vec![0xFE, 0, 0, 2, 0, 0, 0],
             vec![0xFE, 0, 0, 2, 0],
             [&[0xFF, 0x7A, 0x04][..], b"#42S02Table 'x' doesn't exist"].concat(),
@@ -221,7 +245,7 @@ mod tests {
             caps in caps_dbee_uses(),
             head in prop_oneof![Just(0x00u8), Just(0x01), Just(0x03), Just(0xFB), Just(0xFC), Just(0xFD), Just(0xFE), Just(0xFF), any::<u8>()],
             random in prop::collection::vec(any::<u8>(), 0..80),
-            which in 0usize..7,
+            which in 0usize..8,
             edits in prop::collection::vec((0usize..64, any::<u8>()), 0..5),
             cut in 0usize..64,
         ) {
@@ -244,15 +268,71 @@ mod tests {
         let caps = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF | CapabilityFlags::CLIENT_TRANSACTIONS;
         let v = valid_packets();
         assert_eq!(parse_ok::<CommonOkPacket>(&v[0], caps).unwrap().affected_rows(), 1);
-        assert!(parse_ok::<ResultSetTerminator>(&v[1], caps).unwrap().status_flags().contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT));
-        assert!(parse_ok::<OldEofPacket>(&v[2], caps).unwrap().status_flags().contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT));
-        assert_eq!(errors::from_err_packet(&v[3], caps, Flavor::MySql).to_string(), "Table 'x' doesn't exist (MySQL error 1146)");
-        let switch = ParseBuf(&v[4]).parse::<mysql_common::packets::AuthSwitchRequest>(()).unwrap();
+        assert_eq!(schema_change(&parse_ok::<CommonOkPacket>(&v[1], TRACKING).unwrap()), Some(Some("many".to_owned())));
+        assert!(parse_ok::<ResultSetTerminator>(&v[2], caps).unwrap().status_flags().contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT));
+        assert!(parse_ok::<OldEofPacket>(&v[3], caps).unwrap().status_flags().contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT));
+        assert_eq!(errors::from_err_packet(&v[4], caps, Flavor::MySql).to_string(), "Table 'x' doesn't exist (MySQL error 1146)");
+        let switch = ParseBuf(&v[5]).parse::<mysql_common::packets::AuthSwitchRequest>(()).unwrap();
         assert_eq!((switch.auth_plugin().as_bytes(), &switch.plugin_data()[..20]), (&b"caching_sha2_password"[..], &b"0123456789abcdefghij"[..]));
-        assert_eq!(ParseBuf(&v[5]).parse::<mysql_common::packets::AuthMoreData>(()).unwrap().data(), b"-----BEGIN PUBLIC KEY-----");
-        assert_eq!(parse_column(&v[6], false).unwrap().name, "name");
+        assert_eq!(ParseBuf(&v[6]).parse::<mysql_common::packets::AuthMoreData>(()).unwrap().data(), b"-----BEGIN PUBLIC KEY-----");
+        assert_eq!(parse_column(&v[7], false).unwrap().name, "name");
         // The parsers check the header byte.
-        assert!(parse_ok::<CommonOkPacket>(&v[1], caps).is_err() && parse_ok::<ResultSetTerminator>(&v[0], caps).is_err());
+        assert!(parse_ok::<CommonOkPacket>(&v[2], caps).is_err() && parse_ok::<ResultSetTerminator>(&v[0], caps).is_err());
+    }
+
+    /// The capabilities of a session whose OK packets carry session state.
+    const TRACKING: CapabilityFlags = CapabilityFlags::CLIENT_PROTOCOL_41
+        .union(CapabilityFlags::CLIENT_DEPRECATE_EOF)
+        .union(CapabilityFlags::CLIENT_TRANSACTIONS)
+        .union(CapabilityFlags::CLIENT_SESSION_TRACK);
+
+    /// An OK packet (no rows, autocommit, no warnings, no info) whose session state is `state`.
+    fn ok_with_state(state: &[u8]) -> Vec<u8> {
+        let changed = (StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_SESSION_STATE_CHANGED).bits().to_le_bytes();
+        [&[0x00, 0, 0][..], &changed, &[0, 0, 0], &[state.len() as u8], state].concat()
+    }
+
+    /// A session state entry of type `SESSION_TRACK_SCHEMA` naming `name`.
+    fn schema_entry(name: &str) -> Vec<u8> {
+        let data = [&[name.len() as u8][..], name.as_bytes()].concat();
+        [&[0x01, data.len() as u8][..], &data].concat()
+    }
+
+    #[test]
+    fn an_ok_packet_says_which_database_a_statement_made_current() {
+        let change = |state: &[u8]| schema_change(&parse_ok::<CommonOkPacket>(&ok_with_state(state), TRACKING).unwrap());
+        assert_eq!(change(&schema_entry("many")), Some(Some("many".to_owned())));
+        assert_eq!(change(&schema_entry("")), Some(None), "an empty name: no database");
+        // A system variable entry first (type 0x00: `autocommit`, `ON`), then the schema.
+        let variable = [&[0x00, 14, 10][..], b"autocommit", &[2], b"ON"].concat();
+        assert_eq!(change(&[variable.clone(), schema_entry("odd")].concat()), Some(Some("odd".to_owned())));
+        assert_eq!(change(&variable), None, "no schema entry: nothing said of it");
+        // Without session tracking the same flags carry no state: nothing is said.
+        let plain = parse_ok::<CommonOkPacket>(&[0x00, 0, 0, 2, 0, 0, 0], TRACKING).unwrap();
+        assert_eq!(schema_change(&plain), None);
+    }
+
+    #[test]
+    fn a_malformed_session_state_is_passed_over() {
+        let ok = |state: &[u8]| parse_ok::<CommonOkPacket>(&ok_with_state(state), TRACKING).map(|ok| schema_change(&ok));
+        // An entry longer than the block, a schema name longer than its entry, an entry cut off
+        // after its type, and an unknown type: the packet parses, and no database is reported.
+        for state in [&[0x01, 9, 4][..], &[0x01, 2, 9, b'a'], &[0x01], &[0x7F, 1, 0]] {
+            assert_eq!(ok(state), Ok(None), "{state:?}");
+        }
+        // A good entry after one that does not decode is still read.
+        assert_eq!(ok(&[&[0x01, 2, 9, b'a'][..], &schema_entry("many")].concat()), Ok(Some(Some("many".to_owned()))));
+    }
+
+    #[tokio::test]
+    async fn a_result_says_where_the_statement_left_the_connection() {
+        let read = |payload: Vec<u8>, tracks: bool| async move {
+            let (mut p, _) = packets(frame(&payload, 0));
+            read_result(&mut p, TRACKING, Flavor::MySql, false, tracks, dbee_driver::QUERY_LIMITS).await.unwrap().database_after
+        };
+        assert_eq!(read(ok_with_state(&schema_entry("many")), true).await, DatabaseAfter::Changed(Some("many".into())));
+        assert_eq!(read(vec![0x00, 0, 0, 2, 0, 0, 0], true).await, DatabaseAfter::Unchanged);
+        assert_eq!(read(ok_with_state(&schema_entry("many")), false).await, DatabaseAfter::Untold, "a session that does not track tells nothing");
     }
 
     /// `VAR_STRING`, the type of a `VARCHAR` result.
@@ -286,7 +366,7 @@ mod tests {
 
     async fn read(input: Vec<u8>, limits: Limits) -> Result<ResultSet, DbError> {
         let (mut p, _) = packets(input);
-        read_result(&mut p, CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF, Flavor::MySql, false, limits).await
+        read_result(&mut p, CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF, Flavor::MySql, false, false, limits).await
     }
 
     #[tokio::test]
@@ -314,7 +394,7 @@ mod tests {
         let small = Limits { max_rows: 100, max_bytes: 10 };
         let read = |input: Vec<u8>, limits: Limits| async move {
             let (mut p, _) = packets(input);
-            read_result(&mut p, caps, Flavor::MySql, false, limits).await
+            read_result(&mut p, caps, Flavor::MySql, false, false, limits).await
         };
         // The name's 6 bytes count with the cells': the second row does not fit in 10.
         let r = read(result_set("abcdef", &["xyz", "xyz"]), small).await.unwrap();

@@ -10,7 +10,6 @@ pub(crate) const RULES: Rules = Rules {
     ilike: ILike::Native,
     insert_defaults: InsertDefaults::DefaultValues,
     use_database: None,
-    current_database: None,
     // The protocol carries statements as C strings.
     text_holds_nul: false,
     bool_literals: ("t", "f"),

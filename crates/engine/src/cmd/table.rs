@@ -999,6 +999,7 @@ mod tests {
             rows_seen: 101,
             complete: true,
             rows_affected: Some(101),
+            database_after: Default::default(),
         };
         let typed = vec![Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into(), class: TypeClass::Number }];
         let (page, more, complete) = page_data(rs.clone(), typed.clone());
@@ -1026,6 +1027,7 @@ mod tests {
             rows_seen: 3,
             complete: true,
             rows_affected: None,
+            database_after: Default::default(),
         };
         let (shown, hidden) = split_hidden(rs.clone(), 1);
         assert_eq!((shown.columns, shown.rows), (vec![Column::untyped("body")], vec![vec![cell("a")], vec![cell("b")], vec![]]));

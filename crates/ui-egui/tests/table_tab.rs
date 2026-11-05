@@ -628,7 +628,7 @@ fn grid_frame_within_budget() {
         .collect();
     let rows = (0..10_000).map(|r| (0..20).map(|c| Some(if r == 3 && c == 2 { huge.clone() } else { format!("value {r}.{c}") })).collect()).collect();
     let state = State {
-        rows: ResultSet { columns, rows, rows_seen: 10_000, complete: true, rows_affected: None },
+        rows: ResultSet { columns, rows, rows_seen: 10_000, complete: true, ..ResultSet::default() },
         grid: GridState::default(),
         tags: Tags::default(),
         selection: None,

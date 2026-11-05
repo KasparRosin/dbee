@@ -11,7 +11,6 @@ pub(crate) const RULES: Rules = Rules {
     ilike: ILike::LowerLike,
     insert_defaults: InsertDefaults::EmptyLists,
     use_database: Some("USE {}"),
-    current_database: Some("SELECT DATABASE()"),
     // Measured on MySQL 5.7, 8.0 and 26.10 and MariaDB 10.11 and 13.0: a NUL inside a string
     // literal is a character. Outside one, a NUL followed by more text (a comment too) is a syntax
     // error, one in a /* */ comment is ignored, and one followed only by spaces ends the

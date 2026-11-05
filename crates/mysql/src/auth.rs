@@ -26,14 +26,16 @@ const CHARSET: u8 = 45;
 
 /// The capabilities dbee asks for, of those the server offers; `CLIENT_SSL` and
 /// `CLIENT_CONNECT_WITH_DB` are added when used. `CLIENT_MULTI_RESULTS` lets a `CALL` return
-/// result sets; several statements in one text stay refused.
+/// result sets; several statements in one text stay refused. `CLIENT_SESSION_TRACK` lets OK
+/// packets say which database a statement made current.
 const WANTED: CapabilityFlags = CapabilityFlags::CLIENT_PROTOCOL_41
     .union(CapabilityFlags::CLIENT_SECURE_CONNECTION)
     .union(CapabilityFlags::CLIENT_PLUGIN_AUTH)
     .union(CapabilityFlags::CLIENT_FOUND_ROWS)
     .union(CapabilityFlags::CLIENT_TRANSACTIONS)
     .union(CapabilityFlags::CLIENT_MULTI_RESULTS)
-    .union(CapabilityFlags::CLIENT_DEPRECATE_EOF);
+    .union(CapabilityFlags::CLIENT_DEPRECATE_EOF)
+    .union(CapabilityFlags::CLIENT_SESSION_TRACK);
 
 /// The MariaDB capability dbee asks a MariaDB server for, when it offers it: the extended
 /// metadata, which tells a JSON column from a text one.

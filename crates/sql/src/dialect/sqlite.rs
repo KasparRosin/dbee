@@ -11,7 +11,6 @@ pub(crate) const RULES: Rules = Rules {
     ilike: ILike::LowerLike,
     insert_defaults: InsertDefaults::DefaultValues,
     use_database: None,
-    current_database: None,
     // Its prepare stops at a NUL, so text after one would be cut off unseen.
     text_holds_nul: false,
     bool_literals: ("1", "0"),

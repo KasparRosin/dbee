@@ -47,8 +47,6 @@ pub(crate) struct Rules {
     pub insert_defaults: InsertDefaults,
     /// The statement that makes a database current, `{}` standing for its quoted name.
     pub use_database: Option<&'static str>,
-    /// The query that reads the current database: one row of one value, NULL for none.
-    pub current_database: Option<&'static str>,
     /// Statement text may hold a NUL character inside a string literal; outside one no engine
     /// takes it ([`Dialect::misplaced_nul`]). The literals dbee writes still never carry one as a
     /// raw byte: [`StringLiteral::HexForBackslash`] writes such a value as hex.
@@ -356,12 +354,6 @@ impl Dialect {
         self.rules().use_database.is_some()
     }
 
-    /// The query that reads the database a connection is in, on engines that have one: one row
-    /// of one value, NULL for none.
-    pub fn current_database_sql(self) -> Option<&'static str> {
-        self.rules().current_database
-    }
-
     /// Statement text may hold a NUL character inside a string literal ([`Rules::text_holds_nul`]),
     /// so a value with one can be written.
     pub fn statement_may_hold_nul(self) -> bool {
@@ -642,7 +634,6 @@ mod tests {
     #[test]
     fn use_database_only_on_mysql() {
         assert_eq!(Dialect::ALL.map(Dialect::has_use_database), [false, true, false]);
-        assert_eq!(Dialect::ALL.map(Dialect::current_database_sql), [None, Some("SELECT DATABASE()"), None]);
         assert_eq!(Dialect::MySql.use_database("shop").unwrap(), Some("USE `shop`".to_string()));
         assert_eq!(Dialect::MySql.use_database("a`b").unwrap(), Some("USE `a``b`".to_string()));
         assert_eq!(Dialect::Postgres.use_database("shop").unwrap(), None);

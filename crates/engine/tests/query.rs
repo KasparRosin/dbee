@@ -671,10 +671,10 @@ fn a_typed_use_sticks_to_its_tab_and_no_other() {
     });
 }
 
-/// A run stopped after its text went to the server may have moved the connection: the engine
-/// does not know where it is, and says so, rather than guess.
+/// A run stopped part-way keeps what the server reported for the statements that ran: the
+/// `USE many` before the cancelled one moved the connection, and the tab with it.
 #[test]
-fn a_stopped_run_leaves_the_database_unknown() {
+fn a_stopped_run_keeps_what_the_server_reported() {
     let _db = require_testdb!();
     with_use(|t, s| {
         let (key, m) = (unique("dbee_lock"), marker());
@@ -685,12 +685,70 @@ fn a_stopped_run_leaves_the_database_unknown() {
         run(s, "query.cancel", json!({}));
         assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap_err().code(), "cancelled", "{}", t.name());
         drop(held);
-        assert_eq!(shown(s)["database"], Json::Null, "{}", t.name());
-        assert_eq!(starts_in(s), (Json::Null, json!(false)), "{}", t.name());
-        // The next run that reaches the server reads it again.
-        run(s, "query.setText", json!({ "text": "SELECT 1" }));
-        run(s, "query.run", json!({}));
+        assert_eq!(shown(s)["database"], "many", "{}", t.name());
         assert_eq!(starts_in(s), (json!("many"), json!(true)), "{}", t.name());
+    });
+}
+
+/// The second value of the first row of the active query tab's shown result.
+fn second_value(s: &Session) -> Option<String> {
+    let Some(Tab::Query(t)) = s.state().active_tab() else { panic!("a query tab is active") };
+    t.shown_result()?.result.rows.first()?.get(1)?.clone()
+}
+
+/// The statements the query connection's session has sent the server so far (`Questions`).
+fn questions(s: &mut Session) -> u64 {
+    run(s, "query.setText", json!({ "text": "SHOW SESSION STATUS LIKE 'Questions'" }));
+    run(s, "query.run", json!({}));
+    second_value(s).and_then(|v| v.parse().ok()).expect("a count of questions")
+}
+
+/// The engine follows the database through what the server reports: a typed `USE` moves its
+/// tab with no statement of the engine's own, and a tab already where its database is sends no
+/// `USE` before its run.
+#[test]
+fn a_typed_use_moves_its_tab_with_no_extra_statement() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let moved = tab(s, "");
+        let before = questions(s);
+        run(s, "query.setText", json!({ "text": "USE many" }));
+        run(s, "query.run", json!({}));
+        assert_eq!(shown(s)["database"], "many", "{}", t.name());
+        tab(s, "");
+        let after = questions(s);
+        assert_eq!(after - before, 2, "{}: the typed USE and this count, nothing else", t.name());
+        assert_eq!(shown(s)["database"], "many", "{}: a tab with none starts where the connection is", t.name());
+        run(s, "tab.activate", json!({ "tab": moved }));
+        let again = questions(s);
+        assert_eq!(again - after, 1, "{}: the connection is in many already: no USE first", t.name());
+    });
+}
+
+/// A warning outlives its run: nothing of the engine's runs between it and a `SHOW WARNINGS` of
+/// its own, in a tab with a database or without one.
+#[test]
+fn show_warnings_as_its_own_run_sees_the_last_runs_warning() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let name = unique("t_warn");
+        let _drop = scratch_table(t, &name, "CREATE TABLE {t} (v TINYINT)");
+        for schema in [Some("scratch"), None] {
+            let insert = match schema {
+                Some(_) => format!("INSERT IGNORE INTO {name} VALUES (300)"),
+                None => format!("INSERT IGNORE INTO scratch.{name} VALUES (300)"),
+            };
+            let mut params = json!({ "text": insert });
+            if let Some(schema) = schema {
+                params["schema"] = json!(schema);
+            }
+            run(s, "tab.newQuery", params);
+            run(s, "query.run", json!({}));
+            run(s, "query.setText", json!({ "text": "SHOW WARNINGS" }));
+            run(s, "query.run", json!({}));
+            let warning = shown(s)["results"][0]["rows"].as_u64();
+            assert_eq!(warning, Some(1), "{} ({schema:?}): the INSERT's warning is still there", t.name());
+        }
     });
 }
 

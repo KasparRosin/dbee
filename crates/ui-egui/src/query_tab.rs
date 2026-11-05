@@ -798,25 +798,22 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
         icons::chevron(p, arrow, if enabled { t.text_muted } else { t.border }, true);
         let none = format!("No {one} chosen");
         let unknown = format!("{} not known", capitalized(one));
-        let (text, ink) = match &chip.database {
-            CurrentDatabase::Known(Some(name)) if enabled => (name.as_str(), t.text),
-            CurrentDatabase::Known(Some(name)) => (name.as_str(), t.text_muted),
-            CurrentDatabase::Known(None) => (none.as_str(), t.text_muted),
-            CurrentDatabase::Unknown => (unknown.as_str(), t.text_muted),
+        let shown = chip.database.database.as_deref().filter(|_| chip.database.known);
+        let (text, ink) = match shown {
+            Some(name) if enabled => (name, t.text),
+            Some(name) => (name, t.text_muted),
+            None if chip.database.known => (none.as_str(), t.text_muted),
+            None => (unknown.as_str(), t.text_muted),
         };
         let left = icon.right() + 6.0;
         let g = line_galley(ui, text, FontId::proportional(12.5), ink, (arrow.left() - 4.0 - left).max(1.0));
         ui.painter().galley(pos2(left, rect.center().y - g.size().y / 2.0), g, ink);
-        let hover = match &chip.database {
-            CurrentDatabase::Known(Some(name)) => format!("The next run starts in the {one} {name}. Click to choose another."),
-            CurrentDatabase::Known(None) => format!("No {one} is chosen for this tab. Click to choose one."),
-            CurrentDatabase::Unknown => {
-                format!("Which {one} the next run starts in is not known: a run was stopped, or reading it failed. Click to choose one.")
-            }
-        };
-        let shown = match &chip.database {
-            CurrentDatabase::Known(Some(name)) => Some(name.as_str()),
-            CurrentDatabase::Known(None) | CurrentDatabase::Unknown => None,
+        let hover = match shown {
+            Some(name) => format!("The next run starts in the {one} {name}. Click to choose another."),
+            None if chip.database.known => format!("No {one} is chosen for this tab. Click to choose one."),
+            None => format!(
+                "Which {one} the next run starts in is not known: the server does not say where a statement leaves the connection. Click to choose one."
+            ),
         };
         let r = match &chip.why_not {
             Some(why) => r.on_disabled_hover_text(format!("Choose the {one}: not now, {why}")),
@@ -1213,6 +1210,7 @@ mod tests {
             rows_seen: seen,
             complete,
             rows_affected: Some(seen),
+            database_after: Default::default(),
         };
         assert_eq!(rows_text(&rs(3, 3, true)), "3 rows");
         assert_eq!(rows_text(&rs(1, 1, true)), "1 row");

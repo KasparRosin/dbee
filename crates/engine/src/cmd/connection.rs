@@ -879,7 +879,7 @@ fn apply_open(
         lost: false,
         browse: conn,
         query: None,
-        query_database: CurrentDatabase::Unknown,
+        query_database: CurrentDatabase::default(),
         query_run: None,
         tunnel,
         credentials,

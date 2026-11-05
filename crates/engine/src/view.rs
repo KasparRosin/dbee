@@ -318,6 +318,7 @@ mod tests {
             rows_seen: 2,
             complete: true,
             rows_affected: None,
+            database_after: Default::default(),
         };
         let mut q = QueryTab::new(TabId(1), "q".into(), String::new());
         q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs) });

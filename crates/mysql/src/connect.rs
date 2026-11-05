@@ -83,6 +83,8 @@ pub(crate) struct Session {
     tls: Option<Arc<ClientConfig>>,
     /// The password went out encrypted with the server's RSA key.
     used_server_key: bool,
+    /// The server reports, in its OK packets, the database each statement makes current.
+    tracks_schema: bool,
 }
 
 impl Session {
@@ -118,7 +120,15 @@ impl Session {
         let used_server_key = auth::login(&mut packets, &greeting, who, caps, mariadb, config.is_some(), key).await?;
         packets.set_max(MAX_PAYLOAD);
         let extended_metadata = mariadb.contains(MariadbCapabilities::MARIADB_CLIENT_EXTENDED_METADATA);
-        Ok(Session { packets, caps, flavor: Flavor::from_version(&greeting.version), extended_metadata, tls: config, used_server_key })
+        Ok(Session {
+            packets,
+            caps,
+            flavor: Flavor::from_version(&greeting.version),
+            extended_metadata,
+            tls: config,
+            used_server_key,
+            tracks_schema: false,
+        })
     }
 
     /// Run `sql` as one `COM_QUERY` and read the answer, within `limits`.
@@ -128,7 +138,7 @@ impl Session {
         command.push(Command::COM_QUERY as u8);
         command.extend_from_slice(sql.as_bytes());
         self.packets.write(&command).await?;
-        result::read_result(&mut self.packets, self.caps, self.flavor, self.extended_metadata, limits).await
+        result::read_result(&mut self.packets, self.caps, self.flavor, self.extended_metadata, self.tracks_schema, limits).await
     }
 
     /// Say goodbye (`COM_QUIT`); the server closes the connection.
@@ -199,8 +209,10 @@ fn server_key(cfg: &ConnectionConfig, tunnel: bool) -> ServerKey {
 ///
 /// After the login (as `utf8mb4_general_ci`, with `CLIENT_FOUND_ROWS`), the session runs `SET
 /// NAMES utf8mb4`; a browse connection also makes its `sql_mode` strict, turns backslash
-/// escapes off and autocommit on; a read-only connection runs `SET SESSION TRANSACTION READ
-/// ONLY`, which the flavor's variable must then confirm. In `prefer` mode a failed TLS handshake
+/// escapes off and autocommit on; a query connection turns `session_track_schema` on where the
+/// server can report it (it then says in each OK packet which database a statement made
+/// current; a server without it leaves that untold); a read-only connection runs `SET SESSION
+/// TRANSACTION READ ONLY`, which the flavor's variable must then confirm. In `prefer` mode a failed TLS handshake
 /// is tried again without TLS, as libpq does.
 pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     // The timeouts need a runtime; without one they would panic.
@@ -296,6 +308,16 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     if purpose == Purpose::Browse {
         session.query(BROWSE_SQL_MODE, QUERY_LIMITS).await?;
         session.query(BROWSE_AUTOCOMMIT, QUERY_LIMITS).await?;
+    }
+    if purpose == Purpose::Query && session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK) {
+        session.tracks_schema = match session.query("SET SESSION session_track_schema = ON", QUERY_LIMITS).await {
+            Ok(_) => true,
+            Err(DbError::Server(_)) => {
+                log::info!("mysql: the server cannot report the current database; dbee leaves it untold");
+                false
+            }
+            Err(e) => return Err(e),
+        };
     }
     if read_only {
         session.query("SET SESSION TRANSACTION READ ONLY", QUERY_LIMITS).await?;
