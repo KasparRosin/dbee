@@ -36,8 +36,9 @@
 //! engine keeps the database the query connection is in ([`CurrentDatabase`]): the settings'
 //! when the connection opens, each `USE` it sends, and where the driver says each statement that
 //! succeeded left it (`ResultSet::database_after`; MySQL's server reports it in its OK packets).
-//! It sends no statement of its own to find out. A failed or stopped statement moves nothing.
-//! When the driver cannot tell, the database is no longer known: it is never guessed. After a run
+//! It sends no statement of its own to find out. A statement the server answered with an error
+//! moves nothing; one that ended any other way (cancelled, or lost) may have, so the database is
+//! no longer known, as when the driver cannot tell: it is never guessed. After a run
 //! that got past its `USE`, the tab's database becomes that one, so a `USE` in the text sticks to
 //! the tab; the next run's `USE` keeps every tab in its own. A tab with none starts where the
 //! connection is ([`crate::Connected::starts_in`]).
@@ -46,8 +47,9 @@
 //! position the server gives (characters into the statement) becomes a byte offset into the tab
 //! text.
 //!
-//! **Stale results** (see [`super`]): a run whose tab closed, or whose connection was closed or
-//! replaced, is `{"ignored": true}` and changes nothing.
+//! **Stale results** (see [`super`]): a run whose connection was closed or replaced is
+//! `{"ignored": true}` and changes nothing. A run whose tab closed is ignored too, but the session
+//! keeps its query connection, and where the run left it.
 //!
 //! None of these commands is journaled: a replay would run the SQL again, writes included. Logs
 //! carry command ids and job labels, never SQL text.
@@ -173,9 +175,14 @@ fn busy(s: &Session) -> Option<String> {
         _ => None,
     });
     Some(match title {
-        Some(title) => format!("a query is running in {title}"),
+        Some(title) => running_in(title),
         None => "a cancelled query is still stopping".into(),
     })
+}
+
+/// Why a command waits for the run of the tab titled `title`.
+fn running_in(title: &str) -> String {
+    format!("a query is running in {title}")
 }
 
 // ---- the job ---------------------------------------------------------------------------------
@@ -284,6 +291,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
         match run_one(conn.as_ref(), &sql, Limits { max_rows: 0, max_bytes: 0 }, &stop).await {
             Ok(_) => ran.current = CurrentDatabase::known(Some(name)),
             Err(error) => {
+                ran.current = ran.current.after_failure(&error, moves);
                 let error = match error {
                     DbError::Server(mut e) => {
                         e.message = format!("the tab's database `{name}`: {}", e.message);
@@ -319,6 +327,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                     ran.outcomes.push(StatementOutcome { range, result: Arc::new(result) });
                 }
                 Err(error) => {
+                    ran.current = ran.current.after_failure(&error, moves);
                     let position = match &error {
                         DbError::Server(s) => s.position.and_then(|chars| byte_position(&text, &range, chars)),
                         _ => None,
@@ -457,6 +466,9 @@ fn same_connection(generation: &Weak<dyn Connection>, conn: &Arc<dyn Connection>
     Weak::as_ptr(generation).cast::<()>() == Arc::as_ptr(conn).cast::<()>()
 }
 
+/// Applies a run: first to the session's query connection, also when the run's tab has closed
+/// (the connection the job opened, and where the run left it), then to the tab, when it is still
+/// open and running this job.
 fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran: Ran) -> Result<Json, EngineError> {
     let me = s.applying_job();
     // The session's connection is still the one the run started on: not closed, not replaced.
@@ -465,33 +477,27 @@ fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran
     if me.is_some() && c.query_run.as_ref().map(|run| run.job) == me {
         c.query_run = None;
     }
-    let fresh = match &ran.conn {
-        // Opened by the job: it becomes the session's query connection.
-        Some((conn, true)) if c.query.is_none() => Some(Arc::clone(conn)),
-        Some((conn, false)) if !c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, conn)) => return Ok(ignored()),
-        _ => None,
-    };
-    if !matches!(s.state.tab(tab), Some(Tab::Query(q)) if me.is_some() && q.running == me) {
-        return Ok(ignored());
-    }
-    if let Some(conn) = fresh
-        && let Some(c) = s.state.connected.as_mut()
-    {
-        c.query = Some(conn);
-    }
     let Ran { conn, outcomes, failure, current, past_use } = ran;
+    match &conn {
+        // Opened by the job: it becomes the session's query connection.
+        Some((used, true)) if c.query.is_none() => c.query = Some(Arc::clone(used)),
+        Some((used, false)) if !c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, used)) => return Ok(ignored()),
+        _ => {}
+    }
+    if let Some((used, _)) = &conn
+        && c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, used))
+    {
+        c.query_database = current.clone();
+    }
     let error = failure.map(|f| {
         let e = failed(s, conn.as_ref().map(|(conn, _)| conn), &f);
         (query_error(&e, &f), run_error(e, &f))
     });
     let has_use = s.state.dialect().has_use_database();
-    if let Some(c) = s.state.connected.as_mut()
-        && let Some((used, _)) = &conn
-        && c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, used))
-    {
-        c.query_database = current.clone();
-    }
     let Some(Tab::Query(q)) = s.state.tab_mut(tab) else { return Ok(ignored()) };
+    if me.is_none() || q.running != me {
+        return Ok(ignored());
+    }
     if has_use && past_use && current.known {
         q.database = current.database;
     }
@@ -611,7 +617,8 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 
 /// `{tab?, database}` → `{tab, database}`: the database the query tab's runs start in (default:
 /// the active tab); `null` for none, which starts where the query connection is. A name is any
-/// the dialect can write in its `USE`. A run that gets past it sets it to where it ends.
+/// the dialect can write in its `USE`. A run that gets past it sets it to where it ends, so it is
+/// `Busy` while the tab runs.
 fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let dialect = s.state.dialect();
     let tab = match p::opt_tab_id(params, "tab")? {
@@ -634,6 +641,9 @@ fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> 
         _ => return Err(bad("`database` is required: a database's name, or null for none")),
     };
     let Some(Tab::Query(q)) = s.state.tab_mut(tab) else { return Err(disabled(NO_QUERY_TAB)) };
+    if q.running.is_some() {
+        return Err(EngineError::Busy(running_in(&q.title)));
+    }
     q.database = database;
     Ok(Outcome::Done(json!({ "tab": tab, "database": q.database })))
 }

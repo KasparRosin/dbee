@@ -671,10 +671,11 @@ fn a_typed_use_sticks_to_its_tab_and_no_other() {
     });
 }
 
-/// A run stopped part-way keeps what the server reported for the statements that ran: the
-/// `USE many` before the cancelled one moved the connection, and the tab with it.
+/// A cancelled statement may have moved the connection before its kill landed: where the
+/// connection is is no longer known after it, though the server reported the `USE many` before
+/// it. A tab with a database then sends its `USE` first.
 #[test]
-fn a_stopped_run_keeps_what_the_server_reported() {
+fn a_cancelled_statement_leaves_the_database_not_known() {
     let _db = require_testdb!();
     with_use(|t, s| {
         let (key, m) = (unique("dbee_lock"), marker());
@@ -685,8 +686,85 @@ fn a_stopped_run_keeps_what_the_server_reported() {
         run(s, "query.cancel", json!({}));
         assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap_err().code(), "cancelled", "{}", t.name());
         drop(held);
-        assert_eq!(shown(s)["database"], "many", "{}", t.name());
-        assert_eq!(starts_in(s), (json!("many"), json!(true)), "{}", t.name());
+        assert_eq!(shown(s)["database"], Json::Null, "{}: the tab keeps its own", t.name());
+        assert_eq!(starts_in(s), (json!("many"), json!(false)), "{}", t.name());
+        run(s, "query.setDatabase", json!({ "database": "odd" }));
+        run(s, "query.setText", json!({ "text": "SELECT DATABASE()" }));
+        run(s, "query.run", json!({}));
+        assert_eq!(first_value(s).as_deref(), Some("odd"), "{}", t.name());
+        tab(s, "");
+        assert_eq!(starts_in(s), (json!("odd"), json!(true)), "{}: the tab's USE made it known again", t.name());
+    });
+}
+
+/// Closing a tab stops its run, whose result is then ignored; but the `USE many` it ran moved the
+/// query connection, and the engine still takes note: another tab's run does not skip its `USE`.
+#[test]
+fn a_run_whose_tab_closed_still_says_where_it_left_the_connection() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let shop = run(s, "tab.newQuery", json!({ "text": "SELECT DATABASE()", "schema": "shop" }))["tab"].clone();
+        run(s, "query.run", json!({}));
+        assert_eq!(first_value(s).as_deref(), Some("shop"));
+        let (key, m) = (unique("dbee_lock"), marker());
+        let held = t.hold_lock(&key).unwrap();
+        tab(s, &format!("USE many; SELECT '{m}' AS tag FROM DUAL WHERE {}", t.waits_for_lock_sql(&key)));
+        let job = start(s, json!({}));
+        until_running(t, &m);
+        run(s, "tab.close", json!({ "force": true }));
+        drop(held);
+        assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }), "{}", t.name());
+        // Its statement was cancelled, or ended first: either way the connection is not in shop.
+        tab(s, "");
+        assert_eq!(starts_in(s).0, json!("many"), "{}", t.name());
+        run(s, "tab.activate", json!({ "tab": shop }));
+        assert_eq!(starts_in(s), (json!("shop"), json!(true)), "{}", t.name());
+        run(s, "query.run", json!({}));
+        assert_eq!(first_value(s).as_deref(), Some("shop"), "{}: the run went where its tab said", t.name());
+    });
+}
+
+/// A tab's database waits for the tab's run, which sets it when it ends: `query.setDatabase` is
+/// busy meanwhile. Another tab's can be set.
+#[test]
+fn a_running_tab_keeps_its_database_until_the_run_ends() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let other = run(s, "tab.newQuery", json!({ "text": "SELECT DATABASE()", "schema": "shop" }))["tab"].clone();
+        let (key, m) = (unique("dbee_lock"), marker());
+        let held = t.hold_lock(&key).unwrap();
+        let text = format!("SELECT '{m}' AS tag FROM DUAL WHERE {}", t.waits_for_lock_sql(&key));
+        run(s, "tab.newQuery", json!({ "text": text, "schema": "shop" }));
+        let job = start(s, json!({}));
+        until_running(t, &m);
+        let e = s.execute("query.setDatabase", json!({ "database": "odd" })).unwrap_err();
+        assert_eq!((e.code(), e.to_string().as_str()), ("busy", "busy: a query is running in Query 2"), "{}", t.name());
+        assert_eq!(run(s, "query.setDatabase", json!({ "tab": other, "database": "odd" }))["database"], "odd");
+        drop(held);
+        s.wait(job, T).unwrap();
+        assert_eq!(shown(s)["database"], "shop", "{}", t.name());
+        assert_eq!(run(s, "query.setDatabase", json!({ "database": "odd" }))["database"], "odd", "{}: the run has ended", t.name());
+    });
+}
+
+/// Every MySQL and MariaDB server reports a drop of the current database as a move to none:
+/// the tab and the connection are then in no database, and say so.
+#[test]
+fn dropping_the_current_database_leaves_none() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        for statement in ["DROP DATABASE", "drop schema"] {
+            let name = unique("dbee_dropped");
+            let _drop = Scratch(t, vec![format!("DATABASE IF EXISTS {name}")]);
+            q(t, &format!("CREATE DATABASE {name}"));
+            run(s, "tab.newQuery", json!({ "text": format!("{statement} {name}"), "schema": name }));
+            run(s, "query.run", json!({}));
+            assert_eq!(shown(s)["database"], Json::Null, "{}: {statement}", t.name());
+            assert_eq!(starts_in(s), (Json::Null, json!(true)), "{}: {statement}: the chip names no database", t.name());
+            run(s, "query.setText", json!({ "text": "SELECT DATABASE()" }));
+            run(s, "query.run", json!({}));
+            assert_eq!(first_value(s), None, "{}: {statement}", t.name());
+        }
     });
 }
 

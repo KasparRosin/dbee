@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
 use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
-use dbee_driver::{Connection, Meaning, ServerInfo};
+use dbee_driver::{Connection, DbError, Meaning, ServerInfo};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
@@ -121,6 +121,18 @@ impl CurrentDatabase {
             DatabaseAfter::Changed(database) => CurrentDatabase::known(database.clone()),
             DatabaseAfter::Unchanged => self,
             DatabaseAfter::Untold => CurrentDatabase { known: false, ..self },
+        }
+    }
+
+    /// Where a statement that failed with `error` leaves it, on a dialect where a statement can
+    /// move it (`moves`): where it was, after an error the server answered with; not known any
+    /// more after any other end, a cancel among them (its kill can land just after the statement
+    /// took effect, and the server's error then hides the change).
+    pub(crate) fn after_failure(self, error: &DbError, moves: bool) -> CurrentDatabase {
+        match error {
+            _ if !moves => self,
+            DbError::Server(_) | DbError::ReadOnly { .. } => self,
+            _ => CurrentDatabase { known: false, ..self },
         }
     }
 
@@ -576,5 +588,29 @@ mod tests {
         // Where no statement can move it, nothing does.
         assert_eq!(shop().after(&DatabaseAfter::Untold, false), shop());
         assert_eq!(shop().after(&DatabaseAfter::Changed(Some("many".into())), false), shop());
+    }
+
+    #[test]
+    fn a_failed_statement_moves_it_only_as_far_as_not_known() {
+        let shop = || CurrentDatabase::known(Some("shop".into()));
+        let unknown = CurrentDatabase { database: Some("shop".into()), known: false };
+        let refused = DbError::Server(Box::new(dbee_driver::ServerError {
+            code: "1049".into(),
+            code_label: None,
+            message: "Unknown database 'gone'".into(),
+            detail: None,
+            hint: None,
+            position: None,
+            meaning: None,
+        }));
+        // The server answered with an error: the statement did nothing.
+        assert_eq!(shop().after_failure(&refused, true), shop());
+        assert_eq!(shop().after_failure(&DbError::ReadOnly { message: "read-only".into() }, true), shop());
+        // A cancel: a kill that lands as a `USE` finishes is answered with an error after the
+        // change. A lost connection, or an answer that broke: the outcome is unknown too.
+        for error in [DbError::Cancelled, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
+            assert_eq!(shop().after_failure(&error, true), unknown, "{error:?}");
+            assert_eq!(shop().after_failure(&error, false), shop(), "{error:?}: where no statement can move it");
+        }
     }
 }

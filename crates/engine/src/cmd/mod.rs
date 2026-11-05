@@ -10,7 +10,9 @@
 //! (`Session::is_current_browse`, or `Arc::ptr_eq` on the query connection). When not, because
 //! the tab closed or the connection was closed or replaced while the job ran, it changes nothing
 //! and returns `Ok(`[`ignored()`]`)`: never an error, and never a `Needs` prompt, since nobody is
-//! waiting for that answer any more. The check comes before the job's own error is mapped.
+//! waiting for that answer any more. The check comes before the job's own error is mapped. The
+//! one exception is a query run whose tab closed: what it did to the query connection is kept
+//! (see [`query`]).
 
 pub mod connection;
 pub mod edit;
