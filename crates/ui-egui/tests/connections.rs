@@ -189,6 +189,43 @@ fn every_row_of_a_server_form_is_in_view_at_the_default_window() {
 }
 
 #[test]
+fn the_title_row_stays_in_the_card_at_the_smallest_window() {
+    // The app's smallest window.
+    let mut ui = Ui::fresh(egui::vec2(640.0, 420.0));
+    let check = |ui: &mut Ui, what: &str| {
+        let i = ui.inspect();
+        let card = rect(&tag_in(&i, "conn-card").unwrap());
+        let row: Vec<(&str, [f64; 4])> = ["conn-title", "conn-kind", "conn-change-engine", "conn-fill-url"]
+            .into_iter()
+            .filter_map(|id| tag_in(&i, id).map(|t| (id, rect(&t))))
+            .collect();
+        assert!(row.len() >= 2, "{what}: {row:?}");
+        for (id, r) in &row {
+            let inside = r[2] > 0.0 && r[0] >= card[0] && r[1] >= card[1] && r[0] + r[2] <= card[0] + card[2] && r[1] + r[3] <= card[1] + card[3];
+            assert!(inside, "{what}: {id} {r:?} is not inside the card {card:?}");
+        }
+        for (n, (a, ra)) in row.iter().enumerate() {
+            for (b, rb) in &row[n + 1..] {
+                let apart = ra[0] + ra[2] <= rb[0] || rb[0] + rb[2] <= ra[0] || ra[1] + ra[3] <= rb[1] || rb[1] + rb[3] <= ra[1];
+                assert!(apart, "{what}: {a} {ra:?} overlaps {b} {rb:?}");
+            }
+        }
+        i
+    };
+    let i = check(&mut ui, "the cards");
+    // The engine cards wrap, inside the card.
+    let card = rect(&tag_in(&i, "conn-card").unwrap());
+    let [postgres, sqlite] = ["conn-kind-postgres", "conn-kind-sqlite"].map(|id| rect(&tag_in(&i, id).unwrap()));
+    assert!(sqlite[1] > postgres[1], "{postgres:?} {sqlite:?}");
+    assert!(postgres[0] >= card[0] && sqlite[0] + sqlite[2] <= card[0] + card[2], "{card:?} {postgres:?} {sqlite:?}");
+    ui.click("conn-kind-postgres");
+    check(&mut ui, "PostgreSQL");
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-sqlite");
+    check(&mut ui, "SQLite");
+}
+
+#[test]
 fn switching_to_mysql_sets_its_port() {
     let mut ui = cards();
     ui.click("conn-new");

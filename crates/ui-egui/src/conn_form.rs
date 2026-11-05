@@ -353,35 +353,67 @@ fn side_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, enable
     r.clicked()
 }
 
+/// The narrowest the title gets before the type and Change engine move to a row of their own.
+const TITLE_MIN_W: f32 = 160.0;
+
+/// `text` in `font`, cut to `width` with "…" (then the whole text shows on hover), in a slot of
+/// that width, on its left or its `right`; tagged `id` with `value`.
+fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, font): (&str, FontId), value: &str, width: f32, right: bool) {
+    let t = TOKENS;
+    let galley = line_galley(ui, text, font, t.text, width);
+    let elided = galley.elided;
+    let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
+    let x = if right { rect.right() - galley.size().x } else { rect.left() };
+    ui.painter().galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, t.text);
+    let r = if elided { r.on_hover_text(text) } else { r };
+    tags.tag_value(id, &r, value);
+}
+
 /// The title row, `w` wide: the form's title on the left; at the right end Fill from URL when
 /// `url` (a type the form can take has a URL), and on the `form`, left of it, the database type
-/// and Change engine (unless the type is fixed; not while a test or connect runs).
+/// and Change engine (unless the type is fixed; not while a test or connect runs). When they
+/// would leave the title less than [`TITLE_MIN_W`], the type and Change engine take a row of their
+/// own under it, Change engine under Fill from URL.
 pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let t = TOKENS;
+    let kind_font = FontId::proportional(15.0);
+    let change = form && !conn.form.engine_fixed;
+    // As wide as the widest type's name, so the layout is the same whichever type the form has.
+    let kind_w = DbKind::ALL.iter().map(|k| line_galley(ui, k.label(), kind_font.clone(), t.text, w).size().x).fold(0.0, f32::max).min(w / 3.0);
+    let spacing = ui.spacing().item_spacing.x;
+    let buttons = f32::from(u8::from(url) + u8::from(change)) * (SIDE_BUTTON_W + spacing);
+    let one_row = form && TITLE_MIN_W + GAP + kind_w + buttons <= w;
+    let kind = |ui: &mut egui::Ui, tags: &mut Tags, width: f32, right: bool| {
+        row_text(ui, tags, "conn-kind", (conn.form.kind.label(), kind_font.clone()), conn.form.kind.id(), width, right);
+    };
+    let change_engine = |ui: &mut egui::Ui, tags: &mut Tags, acts: &mut Vec<Act>| {
+        if change && side_button(ui, tags, "conn-change-engine", "Change engine", conn.running.is_none()) {
+            acts.push(Act::ChangeEngine);
+        }
+    };
     ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::right_to_left(Align::Center), |ui| {
         if url && side_button(ui, tags, "conn-fill-url", "Fill from URL…", true) {
             acts.push(Act::FillFromUrl);
         }
-        if form {
-            let fixed = conn.form.engine_fixed;
-            if !fixed && side_button(ui, tags, "conn-change-engine", "Change engine", conn.running.is_none()) {
-                acts.push(Act::ChangeEngine);
-            }
-            let kind = conn.form.kind;
-            let galley = line_galley(ui, kind.label(), FontId::proportional(15.0), t.text, w / 3.0);
-            let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x, 30.0), Sense::hover());
-            ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.text);
-            tags.tag_value("conn-kind", &r, kind.id());
+        if one_row {
+            change_engine(ui, tags, acts);
+            kind(ui, tags, kind_w, true);
         }
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             let title = conn.form.title();
             let width = ui.available_width().max(1.0);
-            let galley = line_galley(ui, &title, FontId::proportional(19.0), t.text, width);
-            let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
-            ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.text);
-            tags.tag_value("conn-title", &r, title.as_str());
+            row_text(ui, tags, "conn-title", (&title, FontId::proportional(19.0)), &title, width, false);
         });
     });
+    if form && !one_row {
+        ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::right_to_left(Align::Center), |ui| {
+            change_engine(ui, tags, acts);
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let width = ui.available_width().max(1.0);
+                kind(ui, tags, width, false);
+            });
+        });
+    }
 }
 
 /// The fields, `w` wide, then the footer at the bottom of the room left: the fields scroll when

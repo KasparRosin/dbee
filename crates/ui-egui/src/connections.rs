@@ -752,6 +752,7 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
                         });
                     });
                 });
+            tags.tag("conn-card", &card.response);
             // The connection's colour as a strip across the top of the card.
             if let Some(color) = connection_color(conn.form.color) {
                 let r = card.response.rect;
@@ -767,11 +768,12 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
 
 /// An engine card's height.
 const ENGINE_H: f32 = 104.0;
-/// The narrowest an engine card gets before the cards wrap.
-const ENGINE_MIN_W: f32 = 120.0;
+/// The narrowest an engine card gets before the cards wrap: two in a row still fit the smallest
+/// window.
+const ENGINE_MIN_W: f32 = 110.0;
 
-/// The engine cards, `w` wide: one per database type, as many in a row as fit; those of `kinds`
-/// can be chosen.
+/// The engine cards, `w` wide: one per database type, as many in a row as fit, scrolling when the
+/// window is short; those of `kinds` can be chosen.
 fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     ui.add_space(4.0);
     ui.label(RichText::new("Choose a database").size(15.0));
@@ -779,15 +781,18 @@ fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<
     let gap = 8.0;
     let per_row = (((w + gap) / (ENGINE_MIN_W + gap)).floor() as usize).clamp(1, DbKind::ALL.len());
     let card_w = (w - gap * (per_row as f32 - 1.0)) / per_row as f32;
-    for row in DbKind::ALL.chunks(per_row) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for kind in row {
-                engine_card(ui, *kind, kinds.contains(kind), card_w, tags, acts);
-            }
-        });
-        ui.add_space(gap - ui.spacing().item_spacing.y);
-    }
+    ScrollArea::vertical().id_salt("conn-engines").auto_shrink([false, true]).show(ui, |ui| {
+        ui.set_width(w);
+        for row in DbKind::ALL.chunks(per_row) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for kind in row {
+                    engine_card(ui, *kind, kinds.contains(kind), card_w, tags, acts);
+                }
+            });
+            ui.add_space(gap - ui.spacing().item_spacing.y);
+        }
+    });
 }
 
 /// The card of the database type `kind`, `w` wide: its name, and "Upcoming" in the corner when
