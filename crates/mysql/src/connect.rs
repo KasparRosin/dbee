@@ -83,7 +83,8 @@ pub(crate) struct Session {
     tls: Option<Arc<ClientConfig>>,
     /// The password went out encrypted with the server's RSA key.
     used_server_key: bool,
-    /// The server reports, in its OK packets, the database each statement makes current.
+    /// The server reports, in its OK packets, the database each statement makes current. Off for
+    /// good once a statement names `session_track`: it may have turned the reports off.
     tracks_schema: bool,
 }
 
@@ -133,6 +134,9 @@ impl Session {
 
     /// Run `sql` as one `COM_QUERY` and read the answer, within `limits`.
     pub(crate) async fn query(&mut self, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
+        if names_session_track(sql) {
+            self.tracks_schema = false;
+        }
         self.packets.reset();
         let mut command = Vec::with_capacity(sql.len().saturating_add(1));
         command.push(Command::COM_QUERY as u8);
@@ -207,12 +211,20 @@ fn server_key(cfg: &ConnectionConfig, tunnel: bool) -> ServerKey {
 
 /// Open a connection on the caller's tokio runtime.
 ///
+/// `sql` names `session_track` in any case: it may change what the server reports, so the
+/// session stops trusting its reports of the database.
+fn names_session_track(sql: &str) -> bool {
+    const NAME: &[u8] = b"session_track";
+    sql.as_bytes().windows(NAME.len()).any(|w| w.eq_ignore_ascii_case(NAME))
+}
+
 /// After the login (as `utf8mb4_general_ci`, with `CLIENT_FOUND_ROWS`), the session runs `SET
 /// NAMES utf8mb4`; a browse connection also makes its `sql_mode` strict, turns backslash
 /// escapes off and autocommit on; a query connection turns `session_track_schema` on where the
 /// server can report it (it then says in each OK packet which database a statement made
-/// current; a server without it leaves that untold); a read-only connection runs `SET SESSION
-/// TRANSACTION READ ONLY`, which the flavor's variable must then confirm. In `prefer` mode a failed TLS handshake
+/// current; a server without it leaves that untold, as does the session after a statement of
+/// the user's that names `session_track`); a read-only connection runs `SET SESSION TRANSACTION
+/// READ ONLY`, which the flavor's variable must then confirm. In `prefer` mode a failed TLS handshake
 /// is tried again without TLS, as libpq does.
 pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     // The timeouts need a runtime; without one they would panic.
@@ -419,7 +431,44 @@ impl MySqlConnection {
 
 #[cfg(test)]
 mod tests {
+    use dbee_core::DatabaseAfter;
+
     use super::*;
+    use crate::result::tests::{TRACKING, ok_with_state, schema_entry};
+    use crate::wire::tests::{frame, packets};
+
+    /// A session that tracks the database, whose server answers each query with an OK packet
+    /// saying it made `many` current.
+    fn tracking_session(queries: usize) -> Session {
+        let input = (0..queries).map(|_| frame(&ok_with_state(&schema_entry("many")), 1)).collect::<Vec<_>>().concat();
+        let (packets, _) = packets(input);
+        Session { packets, caps: TRACKING, flavor: Flavor::MySql, extended_metadata: false, tls: None, used_server_key: false, tracks_schema: true }
+    }
+
+    #[tokio::test]
+    async fn a_run_that_names_session_track_ends_the_trust_for_the_connections_life() {
+        let mut s = tracking_session(4);
+        let moved = DatabaseAfter::Changed(Some("many".into()));
+        assert_eq!(s.query("USE many", QUERY_LIMITS).await.unwrap().database_after, moved);
+        // It may have turned the tracker off: the server's word no longer counts, for this run and
+        // every later one, in any case.
+        assert_eq!(s.query("SET SESSION_TRACK_SCHEMA = OFF", QUERY_LIMITS).await.unwrap().database_after, DatabaseAfter::Untold);
+        assert_eq!(s.query("USE many", QUERY_LIMITS).await.unwrap().database_after, DatabaseAfter::Untold);
+        assert_eq!(s.query("SELECT 1", QUERY_LIMITS).await.unwrap().database_after, DatabaseAfter::Untold);
+        // A new connection is trusted again.
+        let mut fresh = tracking_session(1);
+        assert_eq!(fresh.query("USE many", QUERY_LIMITS).await.unwrap().database_after, moved);
+    }
+
+    #[test]
+    fn session_track_is_found_in_any_case_and_nowhere_else() {
+        for sql in ["SET SESSION session_track_schema = OFF", "set @@SESSION_TRACK_SCHEMA = 0", "select 1 -- Session_Track"] {
+            assert!(names_session_track(sql), "{sql}");
+        }
+        for sql in ["", "SELECT 1", "session track", "session_trac", "sessiön_track"] {
+            assert!(!names_session_track(sql), "{sql}");
+        }
+    }
 
     #[test]
     fn the_servers_key_follows_the_tls_mode_the_tunnel_and_the_option() {

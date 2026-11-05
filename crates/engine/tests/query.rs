@@ -725,6 +725,33 @@ fn a_typed_use_moves_its_tab_with_no_extra_statement() {
     });
 }
 
+/// A run that names `session_track` may have turned the server's reports off: dbee no longer
+/// trusts them on that connection, so a tab's `USE` goes before every run again, and a `USE`
+/// typed in another tab the server no longer reports cannot leave a tab in the wrong database.
+/// A new connection is trusted again.
+#[test]
+fn a_run_that_may_turn_tracking_off_ends_the_trust_in_it() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let first = run(s, "tab.newQuery", json!({ "text": "SET SESSION session_track_schema = OFF", "schema": "shop" }))["tab"].clone();
+        run(s, "query.run", json!({}));
+        run(s, "tab.newQuery", json!({ "text": "USE many", "schema": "shop" }));
+        run(s, "query.run", json!({}));
+        run(s, "tab.activate", json!({ "tab": first }));
+        run(s, "query.setText", json!({ "text": "SELECT DATABASE()" }));
+        run(s, "query.run", json!({}));
+        assert_eq!(first_value(s).as_deref(), Some("shop"), "{}: the run starts in its tab's database", t.name());
+        tab(s, "");
+        assert_eq!(starts_in(s).1, json!(false), "{}: where the connection is is not known", t.name());
+        // A new query connection reports again.
+        run(s, "connection.reconnect", json!({}));
+        run(s, "tab.activate", json!({ "tab": first }));
+        run(s, "query.run", json!({}));
+        tab(s, "");
+        assert_eq!(starts_in(s), (json!("shop"), json!(true)), "{}", t.name());
+    });
+}
+
 /// A warning outlives its run: nothing of the engine's runs between it and a `SHOW WARNINGS` of
 /// its own, in a tab with a database or without one.
 #[test]

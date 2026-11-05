@@ -57,7 +57,9 @@ pub struct Connected {
     /// once it was lost).
     pub(crate) query: Option<Arc<dyn Connection>>,
     /// The database the query connection is in, while it is open: the settings' when it opens,
-    /// each `USE` the engine sends, then where the driver says each statement left it.
+    /// each `USE` the engine sends, then where the driver says each statement left it. MySQL's
+    /// driver takes that from the server's session tracking, and stops trusting it on a connection
+    /// after a run that names `session_track`.
     pub(crate) query_database: CurrentDatabase,
     /// The query run in progress: one at a time, since the query connection runs one statement at
     /// a time and a cancel request hits whatever runs on it.

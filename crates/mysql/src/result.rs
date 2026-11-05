@@ -180,7 +180,7 @@ fn parse_row(payload: &[u8], count: usize) -> Result<Vec<Option<&[u8]>>, DbError
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use proptest::prelude::*;
 
     use super::*;
@@ -281,19 +281,19 @@ mod tests {
     }
 
     /// The capabilities of a session whose OK packets carry session state.
-    const TRACKING: CapabilityFlags = CapabilityFlags::CLIENT_PROTOCOL_41
+    pub(crate) const TRACKING: CapabilityFlags = CapabilityFlags::CLIENT_PROTOCOL_41
         .union(CapabilityFlags::CLIENT_DEPRECATE_EOF)
         .union(CapabilityFlags::CLIENT_TRANSACTIONS)
         .union(CapabilityFlags::CLIENT_SESSION_TRACK);
 
     /// An OK packet (no rows, autocommit, no warnings, no info) whose session state is `state`.
-    fn ok_with_state(state: &[u8]) -> Vec<u8> {
+    pub(crate) fn ok_with_state(state: &[u8]) -> Vec<u8> {
         let changed = (StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_SESSION_STATE_CHANGED).bits().to_le_bytes();
         [&[0x00, 0, 0][..], &changed, &[0, 0, 0], &[state.len() as u8], state].concat()
     }
 
     /// A session state entry of type `SESSION_TRACK_SCHEMA` naming `name`.
-    fn schema_entry(name: &str) -> Vec<u8> {
+    pub(crate) fn schema_entry(name: &str) -> Vec<u8> {
         let data = [&[name.len() as u8][..], name.as_bytes()].concat();
         [&[0x01, data.len() as u8][..], &data].concat()
     }
