@@ -9,6 +9,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::*;
+use dbee_engine::cmd::query::QUERY_SESSION_LOST;
 use dbee_engine::{EngineError, JobId, Json, Meaning, Outcome, Session, Tab};
 use dbee_testkit::{ORDERS_COUNT, TestTarget, require_testdb, unique};
 use serde_json::json;
@@ -467,6 +468,37 @@ fn lost_query_connection_is_opened_again() {
         assert_eq!(shown(s)["results"].as_array().map(Vec::len), Some(1));
         assert_eq!(s.inspect()["connection"]["lost"], false);
         assert_ne!(query_connection_id(t, s), fresh);
+    });
+}
+
+/// The query connection is lost under a run whose tab then closes: the run is ignored, and the
+/// next run says the session was lost, rather than run on a new one as if nothing happened (a
+/// `COMMIT` there would succeed with nothing to commit).
+#[test]
+fn a_closed_tabs_lost_query_connection_is_told_to_the_next_run() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        // A file cannot lose its connection.
+        if t.is_file() {
+            return;
+        }
+        let first = tab(s, "BEGIN");
+        run(s, "query.run", json!({}));
+        let id = query_connection_id(t, s);
+        let (key, m) = (unique("dbee_lock"), marker());
+        let held = t.hold_lock(&key).unwrap();
+        tab(s, &format!("SELECT '{m}' AS tag FROM {}.orders WHERE {} LIMIT 1", t.schema("shop"), t.waits_for_lock_sql(&key)));
+        let job = start(s, json!({}));
+        until_running(t, &m);
+        t.kill_connection(&id).unwrap();
+        run(s, "tab.close", json!({ "force": true }));
+        drop(held);
+        assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }), "{}", t.name());
+        run(s, "tab.activate", json!({ "tab": first }));
+        run(s, "query.setText", json!({ "text": "COMMIT" }));
+        let e = run_fails(s, json!({}));
+        assert_eq!((e.code(), e.to_string().as_str()), ("connectionLost", QUERY_SESSION_LOST), "{}", t.name());
+        assert_eq!(s.inspect()["connection"]["lost"], false, "{}", t.name());
     });
 }
 

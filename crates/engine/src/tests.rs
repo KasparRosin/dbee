@@ -11,7 +11,7 @@ use serde_json::json;
 
 use crate::cmd::{self, CommandSpec, p};
 use crate::edits::UNKNOWN_OUTCOME;
-use crate::state::{PageView, Tab, TableTab, Total};
+use crate::state::{CurrentDatabase, PageView, QueryRun, Tab, TableTab, Total};
 use crate::{EngineError, Json, Outcome, Session, SessionOptions, TabId};
 
 /// `test.panic` changes the state, then panics; `test.panicEnabled` panics in its `enabled`;
@@ -618,6 +618,28 @@ fn panicking_job_becomes_internal() {
     assert_eq!(e.data()["command"], "test.sleepJob");
     assert!(!s.busy());
     assert_eq!(s.state().tabs.len(), 1);
+}
+
+/// A query run whose result was never applied (its future or its `Apply` panicked) may have
+/// moved the query connection: once it has ended, where the connection is is not known. Another
+/// job's end leaves it alone.
+#[test]
+fn a_query_run_left_unapplied_leaves_the_database_not_known() {
+    let home = dbee_testkit::temp_home(None, None);
+    let config = dbee_config::ConnectionConfig { kind: dbee_config::DbKind::Sqlite, file: Some(home.home.join("t.sqlite")), ..Default::default() };
+    let mut s = Session::new(SessionOptions { drivers: dbee_drivers::all(), ..options() }).unwrap();
+    s.run_blocking("connection.open", json!({ "config": config, "createFile": true }), Duration::from_secs(30)).unwrap();
+    let shop = || CurrentDatabase::known(Some("shop".into()));
+    let (run, other) = (crate::JobId(901), crate::JobId(902));
+    let c = s.state.connected.as_mut().unwrap();
+    c.query_database = shop();
+    c.query_run = Some(QueryRun { job: run, stop: Arc::default() });
+    s.job_ended(other);
+    let c = s.state.connected.as_ref().unwrap();
+    assert_eq!((c.query_run.as_ref().map(|r| r.job), &c.query_database), (Some(run), &shop()), "another job's end");
+    s.job_ended(run);
+    let c = s.state.connected.as_ref().unwrap();
+    assert_eq!((c.query_run.as_ref().map(|r| r.job), &c.query_database), (None, &CurrentDatabase { known: false, ..shop() }));
 }
 
 #[test]

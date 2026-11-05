@@ -557,12 +557,14 @@ impl Session {
 
     /// No marker outlives its job: once `job`'s result was applied, or dropped because the job's
     /// future or its `Apply` panicked (and the state was put back with the markers it had), every
-    /// marker that still names it is cleared.
+    /// marker that still names it is cleared. A query run whose marker is still there was not
+    /// applied, so where it left the query connection is not known.
     fn job_ended(&mut self, job: JobId) {
         if let Some(c) = self.state.connected.as_mut()
             && c.query_run.as_ref().is_some_and(|run| run.job == job)
         {
             c.query_run = None;
+            c.query_database.known = false;
         }
         for tab in &mut self.state.tabs {
             match tab {

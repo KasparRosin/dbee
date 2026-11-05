@@ -48,8 +48,10 @@
 //! text.
 //!
 //! **Stale results** (see [`super`]): a run whose connection was closed or replaced is
-//! `{"ignored": true}` and changes nothing. A run whose tab closed is ignored too, but the session
-//! keeps its query connection, and where the run left it.
+//! `{"ignored": true}` and changes nothing. A run whose tab closed is ignored too, but the engine
+//! keeps where it left the query connection, and the connection the run opened unless it was
+//! lost. A query connection the session had is kept even when the run lost it, so the next run
+//! says it was lost.
 //!
 //! None of these commands is journaled: a replay would run the SQL again, writes included. Logs
 //! carry command ids and job labels, never SQL text.
@@ -467,10 +469,11 @@ fn same_connection(generation: &Weak<dyn Connection>, conn: &Arc<dyn Connection>
 }
 
 /// Applies a run: first to the session's query connection, also when the run's tab has closed
-/// (the connection the job opened, and where the run left it), then to the tab, when it is still
-/// open and running this job.
+/// (where the run left it, and the connection the job opened), then to the tab, when it is still
+/// open and running this job (its results, and its error, which lets a lost query connection go).
 fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran: Ran) -> Result<Json, EngineError> {
     let me = s.applying_job();
+    let for_tab = matches!(s.state.tab(tab), Some(Tab::Query(q)) if me.is_some() && q.running == me);
     // The session's connection is still the one the run started on: not closed, not replaced.
     let Some(c) = s.state.connected.as_mut().filter(|c| same_connection(generation, &c.browse)) else { return Ok(ignored()) };
     // The run is over (clearing the marker of a job that ended is not applying its result).
@@ -479,8 +482,9 @@ fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran
     }
     let Ran { conn, outcomes, failure, current, past_use } = ran;
     match &conn {
-        // Opened by the job: it becomes the session's query connection.
-        Some((used, true)) if c.query.is_none() => c.query = Some(Arc::clone(used)),
+        // Opened by the job: it becomes the session's query connection. Without the tab, a lost
+        // one is dropped: no open tab ever ran on it.
+        Some((used, true)) if c.query.is_none() && (for_tab || !used.is_closed()) => c.query = Some(Arc::clone(used)),
         Some((used, false)) if !c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, used)) => return Ok(ignored()),
         _ => {}
     }
@@ -489,15 +493,15 @@ fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran
     {
         c.query_database = current.clone();
     }
+    if !for_tab {
+        return Ok(ignored());
+    }
     let error = failure.map(|f| {
         let e = failed(s, conn.as_ref().map(|(conn, _)| conn), &f);
         (query_error(&e, &f), run_error(e, &f))
     });
     let has_use = s.state.dialect().has_use_database();
     let Some(Tab::Query(q)) = s.state.tab_mut(tab) else { return Ok(ignored()) };
-    if me.is_none() || q.running != me {
-        return Ok(ignored());
-    }
     if has_use && past_use && current.known {
         q.database = current.database;
     }
