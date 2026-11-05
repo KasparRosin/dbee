@@ -830,11 +830,22 @@ fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 /// connection whose settings match the saved ones ([`reuse`]); that turns its `saveSecrets` on
 /// (in the file) and stores them. For an unsaved config nothing is stored.
 fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    not_opening(s)?;
+    let config = target_config(s, params)?;
+    let create_file = create_file(params, &config)?;
+    start_open(s, config, create_file, params)
+}
+
+/// `Busy` while a connection is being opened: one open at a time.
+fn not_opening(s: &Session) -> Result<(), EngineError> {
     if s.jobs.is_running_label(OPEN) {
         return Err(EngineError::Busy("a connection is being opened".into()));
     }
-    let mut config = target_config(s, params)?;
-    let create_file = create_file(params, &config)?;
+    Ok(())
+}
+
+/// The open job of [`open`] for `config`, with the secrets and `savePassword` that `params` give.
+fn start_open(s: &mut Session, mut config: ConnectionConfig, create_file: bool, params: &Json) -> Result<Outcome, EngineError> {
     let allowed_dirs = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let typed = given(params)?;
