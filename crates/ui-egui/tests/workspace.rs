@@ -44,6 +44,29 @@ impl Ui {
     fn active(&mut self) -> u64 {
         self.document()["active"].as_u64().expect("a tab is active")
     }
+
+    /// Ctrl+P, `query` typed, and Enter on the best match.
+    fn quick_choose(&mut self, query: &str) {
+        self.ctrl("P");
+        self.text(query);
+        self.frame();
+        self.key("Enter");
+    }
+
+    /// The open connection's id, if one is open.
+    fn connection_id(&mut self) -> Option<String> {
+        self.document()["connection"]["id"].as_str().map(str::to_string)
+    }
+}
+
+/// A window at the app's first size connected to pg14, with the newest Postgres saved (with the
+/// test servers' password) as "pgnew"; and pgnew's id.
+fn with_pgnew(db: &TestDb) -> (Ui, String) {
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let pgnew = server_config(db.server("pgnew").unwrap());
+    let id = ui.execute("connection.save", json!({ "config": pgnew, "password": db.password }))["id"].as_str().unwrap().to_string();
+    ui.frame();
+    (ui, id)
 }
 
 #[test]
@@ -134,6 +157,133 @@ fn enter_opens_the_hit_for_the_text_typed_in_the_same_frame() {
     ui.frame();
     ui.until("the customers tab", |ui| ui.document()["table"]["name"] == "customers");
     assert_eq!(ui.document()["table"]["schema"], "shop");
+}
+
+#[test]
+fn ctrl_p_switches_connection() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, pgnew) = with_pgnew(db);
+    let pg14 = ui.connection_id().unwrap();
+    ui.ctrl("P");
+    ui.text("pg");
+    ui.frame();
+    // Tables and connections in one list, every row as high and as wide as the others (of the
+    // first ten: at this size the twentieth is cut by the window's bottom edge).
+    let i = ui.inspect();
+    let rows: Vec<Json> = (0..20).filter_map(|n| tag_in(&i, &format!("qs-item-{n}"))).collect();
+    let rects: Vec<Vec<f64>> = rows.iter().take(10).map(|r| r["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect()).collect();
+    assert!(rects.iter().all(|r| r[0] == rects[0][0] && r[2] == rects[0][2] && r[3] == 28.0), "{rects:?}");
+    let pgnew_row = (0..rows.len()).find(|n| tag_in(&i, &format!("qs-item-{n}-kind")).is_some()).expect("a connection hit");
+    assert!(pgnew_row < 10, "among the rows compared: {rows:?}");
+    assert_eq!(rows[pgnew_row]["value"], "pgnew");
+    assert_eq!(tag_in(&i, &format!("qs-item-{pgnew_row}-kind")).unwrap()["value"], "PostgreSQL");
+    assert!(rows.iter().any(|r| r["value"].as_str().is_some_and(|v| v.starts_with("pg_catalog."))), "table hits too: {rows:?}");
+    assert!(!rows.iter().any(|r| r["value"] == "pg14"), "the open connection is left out");
+    ui.key("Escape");
+    ui.quick_choose("pgnew");
+    ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
+    assert!(ui.tag("qs-input").is_none(), "the search closed");
+    // And back, which now lists pg14.
+    ui.quick_choose("pg14");
+    ui.until("connected to pg14", |ui| ui.connection_id().as_deref() == Some(pg14.as_str()) && ui.document()["screen"] == "workspace");
+}
+
+#[test]
+fn switching_with_unsaved_query_text_asks_first() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, pgnew) = with_pgnew(db);
+    let pg14 = ui.connection_id().unwrap();
+    ui.ctrl("T");
+    ui.execute("query.setText", json!({ "text": "select 1" }));
+    ui.quick_choose("pgnew");
+    assert_eq!(ui.inspect()["dialog"], "confirm", "the query text would be lost");
+    assert_eq!(ui.value("dialog-text"), "Disconnect from pg14? The text of 1 query tab will be lost.");
+    ui.click("dialog-cancel");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"]["id"].clone()), (json!("workspace"), json!(pg14)), "Cancel keeps pg14 open: {d}");
+    assert_eq!((d["tabs"].as_array().map(Vec::len), d["query"]["text"].clone()), (Some(1), json!("select 1")), "{d}");
+    // Close anyway closes pg14 and connects to pgnew.
+    ui.quick_choose("pgnew");
+    assert_eq!(ui.inspect()["dialog"], "confirm");
+    ui.click("dialog-ok");
+    ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
+    assert_eq!(ui.document()["tabs"], json!([]));
+}
+
+#[test]
+fn switching_with_staged_edits_asks_first_and_cancel_keeps_them() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, _) = with_pgnew(db);
+    let pg14 = ui.connection_id().unwrap();
+    ui.open("shop", "customers");
+    ui.execute("cell.edit", json!({ "row": 0, "column": "name", "value": "Switched" }));
+    ui.quick_choose("pgnew");
+    assert_eq!(ui.inspect()["dialog"], "confirm", "the staged edits would be lost");
+    assert_eq!(ui.value("dialog-text"), "Disconnect from pg14? The staged changes of 1 table tab will be lost.");
+    ui.click("dialog-cancel");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    assert_eq!(ui.connection_id(), Some(pg14), "Cancel keeps pg14 open");
+    assert_eq!(ui.table()["edits"]["count"], 1, "and the staged edit");
+    // The switch was dropped: a later disconnect connects nowhere.
+    ui.execute("connection.close", json!({ "force": true }));
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"].clone(), d["jobs"].clone()), (json!("connections"), Json::Null, json!([])), "{d}");
+}
+
+#[test]
+fn ctrl_p_without_a_stored_password_asks_as_a_double_click_does() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let config = ConnectionConfig { name: "pg14 no password".into(), ..pg14(db) };
+    let bare = ui.execute("connection.save", json!({ "config": config }))["id"].as_str().unwrap().to_string();
+    // The screen, the dialog and the form the connect asks over.
+    let asked = |ui: &mut Ui| {
+        ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+        let d = ui.document();
+        (d["screen"].clone(), d["connection"].clone(), ui.value("dialog-text"), ui.value("dialog-save"), ui.value("conn-name"), ui.value("conn-host"))
+    };
+    // From the workspace: pg14 closes, and the form connects.
+    ui.quick_choose("no password");
+    let by_search = asked(&mut ui);
+    assert_eq!((by_search.0.clone(), by_search.4.clone()), (json!("connections"), json!("pg14 no password")), "{by_search:?}");
+    ui.click("dialog-cancel");
+    ui.double_click(&format!("conn-saved-{bare}"));
+    assert_eq!(asked(&mut ui), by_search, "a double-click on the card asks the same");
+    ui.click("dialog-cancel");
+    // On the connection screen.
+    ui.quick_choose("no password");
+    assert_eq!(asked(&mut ui), by_search);
+    ui.text(&db.password);
+    ui.click("dialog-ok");
+    ui.until("connected", |ui| ui.connection_id().as_deref() == Some(bare.as_str()) && ui.document()["screen"] == "workspace");
+}
+
+#[test]
+fn ctrl_p_on_the_connection_screen_lists_and_opens_connections() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::window(Setup { size: APP_SIZE, ..Setup::default() });
+    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
+    ui.execute("connection.save", json!({ "config": ConnectionConfig { name: "Shop live".into(), color: ConnectionColor::Red, ..pg14(db) } }));
+    ui.frame();
+    ui.ctrl("P");
+    assert!(visible(&ui.tag("qs-input")), "Ctrl+P opens the quick search on the connection screen");
+    ui.frame();
+    assert_eq!((ui.value("qs-item-0"), ui.value("qs-item-1")), (json!("pg14"), json!("Shop live")), "every saved connection, connections only");
+    assert!(ui.tag("qs-item-2").is_none());
+    ui.text("zzz");
+    ui.frame();
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == "No connection matches."));
+    ui.key("Escape");
+    ui.quick_choose("pg14");
+    ui.until("connected to pg14", |ui| ui.connection_id().as_deref() == Some(id.as_str()) && ui.document()["screen"] == "workspace");
 }
 
 #[test]

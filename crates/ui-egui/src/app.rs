@@ -11,8 +11,11 @@
 //!    selection opens one ([`crate::editors`]); then the keyboard shortcuts run
 //!    ([`crate::shortcuts`]; the value panel's copy first), before any widget sees the keys (not
 //!    while a dialog or the quick search is open: the quick search handles its own keys);
-//! 5. the screen is drawn, tagging its widgets ([`crate::automation`]), then the dialog, if any
-//!    ([`crate::dialogs`]); then the cell editor's key acts, on the text it has now;
+//! 5. a connection chosen in the quick search connects once the one open has closed
+//!    ([`connections::switch_pending`]); the screen is drawn, tagging its widgets
+//!    ([`crate::automation`]), then the quick search over it while it is open
+//!    ([`crate::quick_search`]), then the dialog, if any ([`crate::dialogs`]); then the cell
+//!    editor's key acts, on the text it has now;
 //! 6. the session's UI requests (dialogs, notices) are taken, to show from the next frame.
 //!
 //! While a job runs the window repaints every 100 ms, so waits time out and progress shows even
@@ -512,6 +515,7 @@ impl DbeeApp {
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
+        connections::switch_pending(self);
         match self.session.state().screen {
             Screen::Connections => {
                 self.view.work.leave();

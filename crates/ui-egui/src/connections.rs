@@ -34,6 +34,9 @@
 //!   field, a click elsewhere or a dialog closes it. A list that
 //!   comes after the form changed its server (the type, host, port, user, TLS, SSH or the type's
 //!   options, another connection, Change engine) or left the screen is dropped.
+//! - Ctrl+P (the quick search) finds the saved connections here too; choosing one connects as a
+//!   double-click on its card does. Chosen over the workspace, it does so once the open
+//!   connection has closed through `connection.close` and its questions ([`switch_to`]).
 //! - The file pickers ("Change…" for the key, "Choose…" for the CA file, "Choose…" and "New file…"
 //!   for a database file) run rfd on a thread of their own and send the path back; a picker that
 //!   cannot open leaves a note in its row ([`crate::picker`]). After New file…, every test and
@@ -198,6 +201,9 @@ pub(crate) struct ConnScreen {
     pub databases: DatabaseList,
     /// The session has a secret store (`document.inspect`'s `secretStore`).
     pub has_store: bool,
+    /// The saved connection chosen in the quick search while another was open: it connects once
+    /// `connection.close` closed that one ([`switch_pending`]).
+    pub switch: Option<String>,
 }
 
 impl ConnScreen {
@@ -213,6 +219,7 @@ impl ConnScreen {
             picker: None,
             databases: DatabaseList::default(),
             has_store,
+            switch: None,
         }
     }
 
@@ -458,6 +465,49 @@ pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json) {
     app.view.conn.message = None;
 }
 
+/// The quick search chose the saved connection `id`: with none open it connects as a
+/// double-click on its card does; else `connection.close` runs first, with its questions, and the
+/// connect follows once it closed ([`switch_pending`]).
+pub(crate) fn switch_to(app: &mut DbeeApp, id: &str) {
+    if app.session.state().connected.is_none() {
+        connect_saved(app, id);
+        return;
+    }
+    app.view.conn.switch = Some(id.to_string());
+    app.start("connection.close", json!({}), Origin::Menu);
+    switch_pending(app);
+}
+
+/// Each frame: a switch waits while a dialog (the close's question) shows; then it connects if
+/// the connection closed, and is dropped if it did not (Cancel, an error), so the open connection
+/// and its tabs stay as they were.
+pub(crate) fn switch_pending(app: &mut DbeeApp) {
+    if app.view.dialog.is_some() {
+        return;
+    }
+    let Some(id) = app.view.conn.switch.take() else { return };
+    if app.session.state().connected.is_none() {
+        connect_saved(app, &id);
+    }
+}
+
+/// Connects to the saved connection `id` as a double-click on its card does: it loads into the
+/// form, which connects (not while a test or connect runs).
+fn connect_saved(app: &mut DbeeApp, id: &str) {
+    match app.session.state().store.get(id).cloned() {
+        Some(c) => apply_connect(app, &c),
+        None => app.notice("That connection is not saved any more.".into()),
+    }
+}
+
+/// [`Act::Connect`]: loads `c` into the form and connects, unless a test or connect runs.
+fn apply_connect(app: &mut DbeeApp, c: &ConnectionConfig) {
+    if app.view.conn.running.is_none() {
+        app.view.conn.load(c, true);
+        run_form(app, OPEN);
+    }
+}
+
 /// Deletes the saved connection `id` (the user confirmed); the form empties when it showed it.
 pub(crate) fn delete(app: &mut DbeeApp, id: &str) {
     match app.run(DELETE, json!({ "id": id })) {
@@ -505,8 +555,8 @@ pub(crate) enum Act {
 pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     tick(app, &ctx);
-    if app.view.dialog.is_some() {
-        // The dialog has the keyboard: its Enter and Escape are its own.
+    if app.view.dialog.is_some() || app.view.quick.open {
+        // The dialog or the quick search has the keyboard: its Enter and Escape are its own.
         app.view.conn.databases.open = false;
     }
     let mut acts = Vec::new();
@@ -565,13 +615,8 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
         }
         Act::ChangeEngine => {}
         Act::Load(c) => app.view.conn.load(&c, true),
-        Act::Connect(c) => {
-            // While a test or connect runs, a double-click starts nothing more.
-            if !busy {
-                app.view.conn.load(&c, true);
-                run_form(app, OPEN);
-            }
-        }
+        // While a test or connect runs, a double-click starts nothing more.
+        Act::Connect(c) => apply_connect(app, &c),
         Act::Duplicate(id) => match app.run(DUPLICATE, json!({ "id": id })) {
             Ok(dbee_engine::Outcome::Done(v)) => {
                 let copy = v.get("id").and_then(Json::as_str).and_then(|id| app.session.state().store.get(id)).cloned();

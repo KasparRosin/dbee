@@ -2,7 +2,7 @@
 //! (`engine.commands`, the menus) and run the same way, through [`DbeeApp::run`] or
 //! `engine.execute`; they are not journaled.
 //!
-//! - `ui.quickSearch` (Ctrl+P): opens the quick search over the workspace → `{open: true}`.
+//! - `ui.quickSearch` (Ctrl+P): opens the quick search over either screen → `{open: true}`.
 //! - `ui.toggleValuePanel`: hides or shows the value panel → `{visible}`.
 //! - `clipboard.copy {format}` (Ctrl+C `tsv`, Ctrl+Shift+C `tsvHeader`, the grid's menu): runs
 //!   `copy.selection`, puts its text on the clipboard and shows "Copied n rows" →
@@ -11,7 +11,7 @@
 //!   (`COPY_MAX_BYTES`) is `Disabled` with the engine's reason, which a shortcut or the menu shows
 //!   as a notice.
 
-use dbee_engine::{CommandInfo, EngineError, Json, Outcome, cmd};
+use dbee_engine::{CommandInfo, EngineError, Json, Outcome};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -38,7 +38,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params: "{} -> {open}",
         enabled: |app| match &app.view.dialog {
             Some(_) => Err("a dialog is open; close it first".into()),
-            None => cmd::needs_db(app.session()),
+            None => Ok(()),
         },
         run: quick_search,
     },

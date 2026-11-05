@@ -1,12 +1,15 @@
-//! `schema.inspect` and `quickSearch.find`: read the session's catalog, no database work.
+//! `schema.inspect` and `quickSearch.find`: read the session's catalog and saved connections,
+//! no database work.
 //!
-//! The catalog is the one loaded on connect and by `schema.refresh`; both commands are
-//! read-only and need a connection that is not lost.
+//! The catalog is the one loaded on connect and by `schema.refresh`. Both commands are read-only.
+//! `schema.inspect` needs a connection that is not lost; `quickSearch.find` runs without one too,
+//! and then finds saved connections only.
 
 use serde_json::json;
 
-use super::{CommandSpec, bad, needs_db, p};
-use crate::{EngineError, Json, Outcome, Session, fuzzy};
+use super::{CommandSpec, always, bad, needs_db, p};
+use crate::fuzzy::{self, Found};
+use crate::{EngineError, Json, Outcome, Session};
 
 const INSPECT: &str = "schema.inspect";
 const FIND: &str = "quickSearch.find";
@@ -32,7 +35,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         menu: &[],
         shortcut: None,
         params: "{query, limit?}",
-        enabled: needs_db,
+        enabled: always,
         run: quick_find,
         journal: false,
         undoable: false,
@@ -62,14 +65,24 @@ fn inspect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     value.map(Outcome::Done).map_err(|e| bad(format!("cannot serialize: {e}")))
 }
 
-/// `{query, limit?}` → `[{schema, table, kind}]`, best first.
+/// `{query, limit?}` → the hits, best first: `{hit: "table", schema, table, kind}` for the open
+/// connection's tables (none while not connected or lost), `kind` being the relation's, and
+/// `{hit: "connection", id, name, dbKind, kindLabel, color}` for the saved connections but the
+/// open one, `name` being the display name.
 fn quick_find(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let query = p::str(params, "query")?;
     let limit = p::opt_usize(params, "limit")?.unwrap_or(DEFAULT_LIMIT);
-    let Some(c) = s.state.connected.as_ref() else { return Err(bad("not connected")) };
-    let hits: Vec<Json> = fuzzy::find(&c.catalog, query, limit)
+    let open = s.state.connected.as_ref();
+    let catalog = open.filter(|c| !c.lost).map(|c| &*c.catalog);
+    let hits: Vec<Json> = fuzzy::search(catalog, &s.state.store.saved, open.map(|c| c.config.id.as_str()), query, limit)
         .into_iter()
-        .map(|h| json!({ "schema": h.table.schema, "table": h.table.name, "kind": h.kind }))
+        .map(|found| match found {
+            Found::Table(h) => json!({ "hit": "table", "schema": h.table.schema, "table": h.table.name, "kind": h.kind }),
+            Found::Connection(h) => {
+                let info = h.config.kind.info();
+                json!({ "hit": "connection", "id": h.config.id, "name": h.name, "dbKind": info.id, "kindLabel": info.label, "color": h.config.color })
+            }
+        })
         .collect();
     Ok(Outcome::Done(Json::Array(hits)))
 }

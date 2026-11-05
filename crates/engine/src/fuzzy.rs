@@ -1,11 +1,13 @@
-//! Fuzzy scoring for the quick search (Ctrl+P) and [`find`], which ranks a catalog's tables.
+//! Fuzzy scoring for the quick search (Ctrl+P): [`find`] ranks a catalog's tables,
+//! [`find_connections`] the saved connections, and [`search`] mixes the two.
 //!
 //! A query matches when its characters occur in the candidate in order (case-insensitively).
 //! The score rewards a match at the start or after `.` or `_`, consecutive characters and an
 //! exact match, and penalises skipped characters. Work is linear in the candidate's length
-//! (a candidate is cut at [`MAX_CANDIDATE`] characters), so 1,000 tables rank in well under a
-//! millisecond.
+//! (a candidate is cut at [`MAX_CANDIDATE`] characters), so 1,000 tables and 100 connections
+//! rank in well under a millisecond.
 
+use dbee_config::ConnectionConfig;
 use dbee_core::{Catalog, RelKind, TableRef};
 
 /// Characters of a candidate looked at; a table name is at most 63 bytes, so this only bounds
@@ -111,4 +113,72 @@ pub fn find<'a>(catalog: &'a Catalog, query: &str, limit: usize) -> Vec<Hit<'a>>
     });
     hits.truncate(limit);
     hits
+}
+
+/// One ranked saved connection.
+#[derive(Clone, Debug)]
+pub struct ConnectionHit<'a> {
+    pub config: &'a ConnectionConfig,
+    /// Its display name ([`ConnectionConfig::display_name`]), which the query was scored on.
+    pub name: String,
+    pub score: u32,
+}
+
+/// The best `limit` of the `saved` connections for `query`, scored on their display names: by
+/// score, then shorter name, then list order. The one whose id is `open` is left out; none is
+/// when `open` is `None` or empty.
+pub fn find_connections<'a>(saved: &'a [ConnectionConfig], open: Option<&str>, query: &str, limit: usize) -> Vec<ConnectionHit<'a>> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let query = query.trim();
+    let open = open.filter(|id| !id.is_empty());
+    let mut hits: Vec<ConnectionHit<'a>> = saved
+        .iter()
+        .filter(|c| open != Some(c.id.as_str()))
+        .filter_map(|c| {
+            let name = c.display_name();
+            score(query, &name).map(|score| ConnectionHit { config: c, name, score })
+        })
+        .collect();
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.chars().count().cmp(&b.name.chars().count())));
+    hits.truncate(limit);
+    hits
+}
+
+/// One quick-search result.
+#[derive(Clone, Debug)]
+pub enum Found<'a> {
+    Table(Hit<'a>),
+    Connection(ConnectionHit<'a>),
+}
+
+impl Found<'_> {
+    fn score(&self) -> u32 {
+        match self {
+            Found::Table(h) => h.score,
+            Found::Connection(h) => h.score,
+        }
+    }
+
+    /// The length of the name that was scored, in characters.
+    fn name_len(&self) -> usize {
+        match self {
+            Found::Table(h) => h.table.name.chars().count(),
+            Found::Connection(h) => h.name.chars().count(),
+        }
+    }
+}
+
+/// The quick search: the best `limit` of `catalog`'s tables ([`find`]; none without a catalog)
+/// and of the `saved` connections but `open` ([`find_connections`]), by score, then shorter name.
+/// Each kind keeps its own order on a tie, and a table comes before a connection.
+pub fn search<'a>(catalog: Option<&'a Catalog>, saved: &'a [ConnectionConfig], open: Option<&str>, query: &str, limit: usize) -> Vec<Found<'a>> {
+    let tables = catalog.map(|c| find(c, query, limit)).unwrap_or_default();
+    let connections = find_connections(saved, open, query, limit);
+    let mut all: Vec<Found<'a>> = tables.into_iter().map(Found::Table).chain(connections.into_iter().map(Found::Connection)).collect();
+    // Stable, so the lists' own orders break the last ties.
+    all.sort_by(|a, b| b.score().cmp(&a.score()).then_with(|| a.name_len().cmp(&b.name_len())));
+    all.truncate(limit);
+    all
 }

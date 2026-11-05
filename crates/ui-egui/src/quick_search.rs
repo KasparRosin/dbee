@@ -1,25 +1,31 @@
 //! The quick search (Ctrl+P, `ui.quickSearch`): a modal near the top of the window with a query
-//! field and up to [`LIMIT`] tables, best first, from `quickSearch.find` (the engine's fuzzy
-//! ranking over the catalog).
+//! field and up to [`LIMIT`] results, best first, from `quickSearch.find` (the engine's fuzzy
+//! ranking): the open connection's tables and the saved connections but the open one, or only
+//! the saved connections on the connection screen. A table shows its kind's icon and
+//! `schema.name`; a connection its colour as a dot, its name and its database type's label.
 //!
 //! The field has the keyboard while it is open: typing narrows the list, ArrowDown and ArrowUp
-//! move the highlighted result, Enter opens it in a table tab (`table.open`, through
-//! [`DbeeApp::start`]), and Escape or a click outside closes the search. It counts as a dialog for
-//! the app's other shortcuts, which do not fire while it is open. Closing it gives the keyboard
-//! back to the widget that had it when the search opened, so a text field keeps its own keys
-//! (Ctrl+A, Ctrl+Z, …).
+//! move the highlighted result, Enter or a click chooses it, and Escape or a click outside closes
+//! the search. A table opens in a table tab (`table.open`, through [`DbeeApp::start`]); a
+//! connection connects as a double-click on its card does ([`connections::switch_to`]), after
+//! the open connection closes through `connection.close` with its questions. It counts as a
+//! dialog for the app's other shortcuts, which do not fire while it is open. Closing it gives the
+//! keyboard back to the widget that had it when the search opened, so a text field keeps its own
+//! keys (Ctrl+A, Ctrl+Z, …).
 //!
-//! The results are asked for once per query text and catalog, not per frame; Enter acts on the
-//! results for the text as it is after this frame's typing (a paste and Enter in one frame open
-//! the pasted name's best match). A dialog closes the search and cannot be opened over one, so
+//! The results are asked for once per query text, catalog and saved list, not per frame; Enter
+//! acts on the results for the text as it is after this frame's typing (a paste and Enter in one
+//! frame open the pasted name's best match). A dialog closes the search and cannot be opened over one, so
 //! the search never takes a dialog's Enter or Escape. The window draws it over the screen it
 //! opened on, and it closes when the window shows another screen or another connection.
 //!
-//! Automation ids: `qs-input` (value: the query) and `qs-item-<n>` (value: `schema.table`), `n`
-//! from 0, best first.
+//! Automation ids: `qs-input` (value: the query) and `qs-item-<n>` (value: `schema.table`, or a
+//! connection's name), `n` from 0, best first, with `qs-item-<n>-kind` (value: the database
+//! type's label) on a connection's row.
 
 use std::sync::Arc;
 
+use dbee_config::{ConnectionColor, ConnectionConfig};
 use dbee_core::{Catalog, RelKind, TableRef};
 use dbee_engine::{Json, Outcome, Screen, State};
 use egui::{Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Modifiers, Rect, Sense, Stroke, TextEdit, pos2, vec2};
@@ -28,8 +34,8 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
-use crate::connections::line_galley;
-use crate::theme::{RADIUS, TOKENS};
+use crate::connections::{self, line_galley};
+use crate::theme::{RADIUS, TOKENS, connection_color};
 use crate::tree::kind_icon;
 
 /// The most results shown.
@@ -40,12 +46,82 @@ const WIDTH: f32 = 560.0;
 const TOP: f32 = 56.0;
 /// A result row.
 const ITEM_H: f32 = 28.0;
+/// The radius of a connection's colour dot, where a table's icon is.
+const DOT_R: f32 = 5.0;
 
-/// One table found.
+/// One result.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Hit {
-    table: TableRef,
-    kind: RelKind,
+enum Hit {
+    Table {
+        table: TableRef,
+        kind: RelKind,
+    },
+    /// A saved connection: its id, display name, database type's label and colour.
+    Connection {
+        id: String,
+        name: String,
+        label: String,
+        color: ConnectionColor,
+    },
+}
+
+impl Hit {
+    /// One of `quickSearch.find`'s hits; `None` for a kind of hit this window does not show.
+    fn from_json(item: &Json) -> Option<Hit> {
+        let text = |k: &str| item.get(k).and_then(Json::as_str).map(str::to_owned);
+        match item.get("hit").and_then(Json::as_str)? {
+            "table" => {
+                let kind = item.get("kind").cloned().and_then(|k| serde_json::from_value::<RelKind>(k).ok()).unwrap_or(RelKind::Table);
+                Some(Hit::Table { table: TableRef { schema: text("schema")?, name: text("table")? }, kind })
+            }
+            "connection" => {
+                let color = item.get("color").cloned().and_then(|c| serde_json::from_value::<ConnectionColor>(c).ok()).unwrap_or_default();
+                Some(Hit::Connection { id: text("id")?, name: text("name")?, label: text("kindLabel").unwrap_or_default(), color })
+            }
+            _ => None,
+        }
+    }
+
+    /// Its automation value: `schema.table`, or the connection's name.
+    fn value(&self) -> String {
+        match self {
+            Hit::Table { table, .. } => table.display(),
+            Hit::Connection { name, .. } => name.clone(),
+        }
+    }
+}
+
+/// What results were found for: the catalog searched (none while not connected or lost), the
+/// open connection, the saved connections and the query.
+struct FoundFor {
+    tables: Option<Arc<Catalog>>,
+    open: Option<String>,
+    saved: Vec<ConnectionConfig>,
+    query: String,
+}
+
+impl FoundFor {
+    fn now(state: &State, query: &str) -> FoundFor {
+        let open = state.connected.as_ref();
+        FoundFor {
+            tables: open.filter(|c| !c.lost).map(|c| Arc::clone(&c.catalog)),
+            open: open.map(|c| c.config.id.clone()),
+            saved: state.store.saved.clone(),
+            query: query.to_string(),
+        }
+    }
+
+    /// The results found for `self` still hold in `state` for `query`.
+    fn holds(&self, state: &State, query: &str) -> bool {
+        let open = state.connected.as_ref();
+        let tables = open.filter(|c| !c.lost).map(|c| &c.catalog);
+        let same_tables = match (&self.tables, tables) {
+            (Some(had), Some(now)) => Arc::ptr_eq(had, now),
+            (None, None) => true,
+            _ => false,
+        };
+        same_tables && self.query == query && self.open.as_deref() == open.map(|c| c.config.id.as_str()) && self.saved == state.store.saved
+    }
 }
 
 /// Where the search opened: the screen and the open connection's id. It closes when either
@@ -69,8 +145,10 @@ pub(crate) struct QuickSearch {
     hits: Vec<Hit>,
     /// Why there are no results to show (the command failed), if it failed.
     error: Option<String>,
-    /// What `hits` were found for: the catalog and the query.
-    found_for: Option<(Arc<Catalog>, String)>,
+    /// What `hits` were found for.
+    found_for: Option<FoundFor>,
+    /// The open connection's tables are searched (connected, not lost), as `hits` were found.
+    tables: bool,
 }
 
 impl std::fmt::Debug for QuickSearch {
@@ -121,38 +199,26 @@ const INPUT: &str = "qs-input";
 enum Act {
     None,
     Close,
-    Open(TableRef),
+    Open(Hit),
     /// Enter: open the highlighted result for the text as it is now.
     Enter,
 }
 
-/// Asks `quickSearch.find` for the query when it or the catalog changed.
+/// Asks `quickSearch.find` for the query when it, the catalog or the saved connections changed.
 fn find(app: &mut DbeeApp) {
-    let catalog = app.session.state().connected.as_ref().map(|c| Arc::clone(&c.catalog));
     let qs = &app.view.quick;
-    let fresh = match (&qs.found_for, &catalog) {
-        (Some((had, query)), Some(now)) => Arc::ptr_eq(had, now) && *query == qs.query,
-        _ => false,
-    };
-    if fresh {
+    if qs.found_for.as_ref().is_some_and(|f| f.holds(app.session.state(), &qs.query)) {
         return;
     }
-    let query = qs.query.clone();
-    let result = app.run("quickSearch.find", json!({ "query": query, "limit": LIMIT }));
+    let found_for = FoundFor::now(app.session.state(), &qs.query);
+    let result = app.run("quickSearch.find", json!({ "query": found_for.query, "limit": LIMIT }));
     let qs = &mut app.view.quick;
-    qs.found_for = catalog.map(|c| (c, query));
+    qs.tables = found_for.tables.is_some();
+    qs.found_for = Some(found_for);
     qs.hits.clear();
     qs.error = None;
     match result {
-        Ok(Outcome::Done(Json::Array(items))) => {
-            for item in items {
-                let text = |k: &str| item.get(k).and_then(Json::as_str).map(str::to_owned);
-                let kind = item.get("kind").cloned().and_then(|k| serde_json::from_value::<RelKind>(k).ok()).unwrap_or(RelKind::Table);
-                if let (Some(schema), Some(name)) = (text("schema"), text("table")) {
-                    qs.hits.push(Hit { table: TableRef { schema, name }, kind });
-                }
-            }
-        }
+        Ok(Outcome::Done(Json::Array(items))) => qs.hits.extend(items.iter().filter_map(Hit::from_json)),
         Ok(_) => qs.error = Some("The search gave no list.".into()),
         Err(e) => qs.error = Some(crate::app::notice_text(&e)),
     }
@@ -198,20 +264,24 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
     let open = match act {
         Act::None => return,
         Act::Close => None,
-        Act::Open(table) => Some(table),
+        Act::Open(hit) => Some(hit),
         Act::Enter => {
             // The results for the text typed this frame, not those drawn.
             find(app);
             let qs = &app.view.quick;
             match qs.hits.get(qs.selected) {
-                Some(hit) => Some(hit.table.clone()),
+                Some(hit) => Some(hit.clone()),
                 None => return,
             }
         }
     };
     close(app, ctx, Refocus::NextFrame);
-    if let Some(table) = open {
-        app.start("table.open", json!({ "schema": table.schema, "table": table.name }), Origin::Menu);
+    match open {
+        Some(Hit::Table { table, .. }) => {
+            app.start("table.open", json!({ "schema": table.schema, "table": table.name }), Origin::Menu);
+        }
+        Some(Hit::Connection { id, .. }) => connections::switch_to(app, &id),
+        None => {}
     }
 }
 
@@ -246,7 +316,7 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
         let field = ui.add(
             TextEdit::singleline(&mut qs.query)
                 .id(egui::Id::new(INPUT))
-                .hint_text("Find a table by name")
+                .hint_text(if qs.tables { "Find a table or connection by name" } else { "Find a connection by name" })
                 .desired_width(WIDTH)
                 .font(FontId::proportional(16.0))
                 .margin(Margin::symmetric(8, 6)),
@@ -263,7 +333,8 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
         if let Some(e) = &qs.error {
             ui.label(egui::RichText::new(e.as_str()).color(t.danger));
         } else if qs.hits.is_empty() {
-            ui.label(egui::RichText::new("No table matches.").color(t.text_muted));
+            let none = if qs.tables { "No table or connection matches." } else { "No connection matches." };
+            ui.label(egui::RichText::new(none).color(t.text_muted));
         }
         for (n, hit) in qs.hits.iter().enumerate() {
             let (rect, r) = ui.allocate_exact_size(vec2(WIDTH, ITEM_H), Sense::click());
@@ -276,17 +347,40 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
             };
             let p = ui.painter();
             p.rect_filled(rect, CornerRadius::same(RADIUS), fill);
-            let (icon, color) = kind_icon(hit.kind);
-            icon(p, Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0)), color);
-            let schema = line_galley(ui, &format!("{}.", hit.table.schema), FontId::proportional(14.0), t.text_muted, WIDTH * 0.4);
+            let mark = pos2(rect.left() + 16.0, rect.center().y);
             let x = rect.left() + 32.0;
-            let schema_w = schema.size().x;
-            p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);
-            let name = line_galley(ui, &hit.table.name, FontId::proportional(14.0), t.text, (rect.right() - 8.0 - x - schema_w).max(1.0));
-            p.galley(pos2(x + schema_w, rect.center().y - name.size().y / 2.0), name, t.text);
-            tags.tag_value_as(&format!("qs-item-{n}"), &r, hit.table.display(), true);
+            let font = FontId::proportional(14.0);
+            match hit {
+                Hit::Table { table, kind } => {
+                    let (icon, color) = kind_icon(*kind);
+                    icon(p, Rect::from_center_size(mark, vec2(16.0, 16.0)), color);
+                    let schema = line_galley(ui, &format!("{}.", table.schema), font.clone(), t.text_muted, WIDTH * 0.4);
+                    let schema_w = schema.size().x;
+                    p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);
+                    let name = line_galley(ui, &table.name, font, t.text, (rect.right() - 8.0 - x - schema_w).max(1.0));
+                    p.galley(pos2(x + schema_w, rect.center().y - name.size().y / 2.0), name, t.text);
+                }
+                Hit::Connection { name, label, color, .. } => {
+                    match connection_color(*color) {
+                        Some(c) => {
+                            p.circle_filled(mark, DOT_R, c);
+                        }
+                        // No colour: a ring, as in the form, dark enough for the highlight.
+                        None => {
+                            p.circle_stroke(mark, DOT_R - 0.75, Stroke::new(1.5, t.text_muted));
+                        }
+                    }
+                    let kind = line_galley(ui, label, font.clone(), t.text_muted, WIDTH * 0.3);
+                    let kind_x = rect.right() - 8.0 - kind.size().x;
+                    let name = line_galley(ui, name, font, t.text, (kind_x - 12.0 - x).max(1.0));
+                    p.galley(pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
+                    p.galley(pos2(kind_x, rect.center().y - kind.size().y / 2.0), kind, t.text_muted);
+                    tags.tag_value_as(&format!("qs-item-{n}-kind"), &r, label.as_str(), true);
+                }
+            }
+            tags.tag_value_as(&format!("qs-item-{n}"), &r, hit.value(), true);
             if r.clicked() {
-                act = Act::Open(hit.table.clone());
+                act = Act::Open(hit.clone());
             }
         }
     });

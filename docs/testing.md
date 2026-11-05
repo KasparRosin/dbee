@@ -1,6 +1,6 @@
 # Testing
 
-> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-11-05 · **Change:** minor (§4: the database list keeps to the allowed targets too)
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-11-05 · **Change:** minor (§6: the quick search timing with saved connections)
 
 ```sh
 cargo xtask testdb up                                         # start the Docker test servers (§3); ci does it when Docker answers
@@ -123,7 +123,7 @@ Today: `tree_filter_1000_tables_within_a_frame` (`crates/ui-egui/tests/workspace
 
 `wide_result_frames` (`crates/ui-egui/tests/query_tab.rs`) times a frame with a result of 50, 100, 300 and 1,664 columns over 10,000 rows (NULLs, then short texts) in view. It measures the whole window without an AccessKit tree, unchanged and scrolling, and the kittest frame. It reports and sets no budget: such a frame grows with the columns ([`gaps.md`](gaps.md)).
 
-Elsewhere: `filter_1000_tables_within_a_frame` (`crates/core`), `quick_search_1000_tables_within_a_frame` (`crates/engine/tests/schema.rs`, budget 2 ms) and `next_page_on_a_million_rows_is_fast` (`crates/engine/tests/table.rs`).
+Elsewhere: `filter_1000_tables_within_a_frame` (`crates/core`), `quick_search_1000_tables_within_a_frame` and `quick_search_with_connections_within_budget` (1,000 tables and 100 saved connections; both `crates/engine/tests/schema.rs`, budget 2 ms) and `next_page_on_a_million_rows_is_fast` (`crates/engine/tests/table.rs`).
 
 Two guards against a frozen window run with the normal tests: `twenty_megabyte_cells_keep_frames_under_250_ms` (`crates/ui-egui/tests/table_tab.rs`) and `no_copy_freezes_the_window` (`crates/ui-egui/tests/clipboard.rs`, a copy of a 10,000-row result or of a row whose escaping passes the limit takes less than a second, in each format).
 

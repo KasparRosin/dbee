@@ -1,14 +1,16 @@
 //! `schema.inspect`, `quickSearch.find` and the fuzzy scoring behind it. The command tests run on
-//! every engine and need the Docker test servers (`cargo xtask testdb up`); the scoring and the
-//! 1,000-table timing do not.
+//! every engine and need the Docker test servers (`cargo xtask testdb up`); the scoring, the
+//! saved connections without a connection and the timings do not.
 
 mod common;
 
 use std::time::Instant;
 
 use common::*;
+use dbee_config::{ConnectionColor, ConnectionConfig, DbKind};
 use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef, TypeClass};
-use dbee_engine::fuzzy::{find, score};
+use dbee_engine::Json;
+use dbee_engine::fuzzy::{Found, find, find_connections, score, search};
 use dbee_testkit::{require_testdb, unique};
 use serde_json::json;
 
@@ -36,6 +38,16 @@ fn table(schema: &str, name: &str, kind: RelKind) -> TableInfo {
 
 fn schema(name: &str, system: bool, tables: &[&str]) -> SchemaInfo {
     SchemaInfo { name: name.into(), system, tables: tables.iter().map(|t| table(name, t, RelKind::Table)).collect() }
+}
+
+/// A saved server connection named `name` with id `id`, never opened (nothing listens on port 1).
+fn saved(id: &str, name: &str) -> ConnectionConfig {
+    ConnectionConfig { id: id.into(), name: name.into(), host: "127.0.0.1".into(), port: 1, user: "nobody".into(), ..ConnectionConfig::default() }
+}
+
+/// The hits of `r` (a `quickSearch.find` result) that are of kind `hit`.
+fn hits_of(r: &Json, hit: &str) -> Vec<Json> {
+    r.as_array().unwrap().iter().filter(|h| h["hit"] == hit).cloned().collect()
 }
 
 #[test]
@@ -83,6 +95,7 @@ fn quick_search_finds_orders() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
         let r = s.run_blocking("quickSearch.find", json!({ "query": "ord" }), T).unwrap();
+        assert_eq!(r[0]["hit"], "table", "{}: {r}", t.name());
         assert_eq!(r[0]["schema"], t.schema("shop"), "{}: {r}", t.name());
         assert_eq!(r[0]["table"], "orders", "{r}");
         assert_eq!(r[0]["kind"], "table");
@@ -91,6 +104,122 @@ fn quick_search_finds_orders() {
         let e = s.run_blocking("quickSearch.find", json!({}), T).unwrap_err();
         assert_eq!(e.code(), "badParams");
     });
+}
+
+#[test]
+fn table_hits_keep_their_fields() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let r = s.run_blocking("quickSearch.find", json!({ "query": "order_totals" }), T).unwrap();
+        // `kind` is the relation's kind, as before connections were found too.
+        assert_eq!(r[0], json!({ "hit": "table", "schema": t.schema("shop"), "table": "order_totals", "kind": "view" }), "{}: {r}", t.name());
+    });
+}
+
+#[test]
+fn quick_search_lists_saved_connections() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let shop = save(s, ConnectionConfig { color: ConnectionColor::Green, ..saved("", "Shop live") }, None);
+        let open = s.inspect()["connection"]["id"].as_str().unwrap().to_string();
+        let r = s.run_blocking("quickSearch.find", json!({ "query": "shop" }), T).unwrap();
+        let want = json!({ "hit": "connection", "id": shop, "name": "Shop live", "dbKind": "postgres", "kindLabel": "PostgreSQL", "color": "green" });
+        assert_eq!(hits_of(&r, "connection"), [want], "{}: {r}", t.name());
+        // The open connection, saved under the target's name, is left out; its tables are found.
+        let r = s.run_blocking("quickSearch.find", json!({ "query": t.name() }), T).unwrap();
+        assert!(hits_of(&r, "connection").iter().all(|h| h["id"] != open.as_str()), "{}: {r}", t.name());
+        let r = s.run_blocking("quickSearch.find", json!({ "query": "orders" }), T).unwrap();
+        assert_eq!(r[0]["table"], "orders", "{r}");
+    });
+}
+
+#[test]
+fn quick_search_on_the_connection_screen_lists_connections_only() {
+    let mut s = session();
+    assert_eq!(s.run_blocking("quickSearch.find", json!({ "query": "pg" }), T).unwrap(), json!([]), "nothing saved, nothing found");
+    let pg = save(&mut s, saved("", "pg staging"), None);
+    save(&mut s, saved("", "mysql box"), None);
+    let r = s.run_blocking("quickSearch.find", json!({ "query": "pg" }), T).unwrap();
+    assert!(r.as_array().is_some_and(|a| !a.is_empty() && a.iter().all(|h| h["hit"] == "connection")), "{r}");
+    assert_eq!(r[0]["id"], pg.as_str(), "{r}");
+    assert_eq!(s.run_blocking("quickSearch.find", json!({ "query": "zzz" }), T).unwrap(), json!([]));
+}
+
+#[test]
+fn a_file_connection_is_found_by_its_file_name() {
+    let mut s = session();
+    let file = ConnectionConfig {
+        kind: DbKind::Sqlite,
+        file: Some("/nowhere/inventory.sqlite".into()),
+        host: String::new(),
+        port: 0,
+        ..ConnectionConfig::default()
+    };
+    let id = save(&mut s, file, None);
+    let r = s.run_blocking("quickSearch.find", json!({ "query": "invent" }), T).unwrap();
+    let want = json!({ "hit": "connection", "id": id, "name": "inventory.sqlite", "dbKind": "sqlite", "kindLabel": "SQLite", "color": "none" });
+    assert_eq!(r, json!([want]));
+}
+
+#[test]
+fn quick_search_while_lost_lists_connections_only() {
+    let _db = require_testdb!();
+    for_each_engine_exclusive(|t, s| {
+        // A file cannot lose its connection.
+        if t.is_file() {
+            return;
+        }
+        let other = save(s, saved("", "orders replica"), None);
+        let before = s.run_blocking("quickSearch.find", json!({ "query": "orders" }), T).unwrap();
+        assert!(!hits_of(&before, "table").is_empty(), "{}: {before}", t.name());
+        kill_dbee_connections(t, s);
+        let e = run_err(s, "table.open", json!({ "schema": t.schema("shop"), "table": "orders" }));
+        assert_eq!(e.code(), "connectionLost", "{}: {e}", t.name());
+        let r = s.run_blocking("quickSearch.find", json!({ "query": "orders" }), T).unwrap();
+        assert_eq!(hits_of(&r, "table"), Vec::<Json>::new(), "{}: no tables while lost: {r}", t.name());
+        assert_eq!(hits_of(&r, "connection").iter().map(|h| h["id"].clone()).collect::<Vec<_>>(), [json!(other)], "{r}");
+    });
+}
+
+#[test]
+fn connections_are_scored_by_their_display_names() {
+    let file = ConnectionConfig { id: "f".into(), kind: DbKind::Sqlite, file: Some("/data/inventory.db".into()), ..ConnectionConfig::default() };
+    let unnamed =
+        ConnectionConfig { id: "u".into(), user: "ann".into(), host: "db.example".into(), database: "shop".into(), ..ConnectionConfig::default() };
+    let list = [saved("a", "Shop live"), saved("b", "Shop staging"), file, unnamed];
+    let names = |hits: Vec<dbee_engine::fuzzy::ConnectionHit<'_>>| hits.into_iter().map(|h| h.name).collect::<Vec<_>>();
+    assert_eq!(names(find_connections(&list, None, "shop", 20)), ["Shop live", "Shop staging", "ann@db.example/shop"]);
+    assert_eq!(names(find_connections(&list, None, "invent", 20)), ["inventory.db"], "a file without a name by its file name");
+    // The open connection is left out by its id; no id, or an empty one, leaves none out.
+    assert_eq!(names(find_connections(&list, Some("a"), "shop", 20)), ["Shop staging", "ann@db.example/shop"]);
+    assert_eq!(find_connections(&list, Some(""), "shop", 20).len(), 3);
+    assert_eq!(find_connections(&list, Some("nope"), "shop", 20).len(), 3);
+    assert_eq!(names(find_connections(&list, None, "shop", 1)), ["Shop live"]);
+    assert!(find_connections(&list, None, "shop", 0).is_empty());
+}
+
+#[test]
+fn search_mixes_tables_and_connections_by_score() {
+    let c = Catalog { schemas: vec![schema("shop", false, &["orders", "shop_orders"])], default_schema: None };
+    let list = [saved("a", "orders"), saved("b", "Orders archive")];
+    let names = |found: Vec<Found<'_>>| {
+        found
+            .into_iter()
+            .map(|f| match f {
+                Found::Table(h) => format!("table {}", h.table.name),
+                Found::Connection(h) => format!("connection {}", h.name),
+            })
+            .collect::<Vec<_>>()
+    };
+    // A tie (the same name) puts the table first; a weaker match comes after a better one of
+    // either kind.
+    assert_eq!(
+        names(search(Some(&c), &list, None, "orders", 20)),
+        ["table orders", "connection orders", "connection Orders archive", "table shop_orders"]
+    );
+    assert_eq!(names(search(Some(&c), &list, None, "orders", 3)).len(), 3);
+    assert_eq!(names(search(None, &list, Some("a"), "orders", 20)), ["connection Orders archive"], "no catalog: connections only");
+    assert!(search(Some(&c), &list, None, "orders", 0).is_empty());
 }
 
 #[test]
@@ -111,10 +240,9 @@ fn inspect_catalog_and_table() {
 }
 
 #[test]
-fn needs_a_connection() {
+fn inspect_needs_a_connection() {
     let mut s = session();
     assert_eq!(s.execute("schema.inspect", json!({})).unwrap_err().code(), "disabled");
-    assert_eq!(s.execute("quickSearch.find", json!({ "query": "a" })).unwrap_err().code(), "disabled");
 }
 
 #[test]
@@ -133,14 +261,19 @@ fn refresh_sees_new_table() {
     });
 }
 
+/// 1,000 tables in two schemas, the system one last.
+fn thousand_tables() -> Catalog {
+    let names: Vec<String> =
+        (0..1000).map(|i| format!("{}_{}_{i}", ["orders", "users", "items", "product_records", "audit"][i % 5], ["a", "bb", "ccc"][i % 3])).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    Catalog { schemas: vec![schema("shop", false, &refs[..800]), schema("pg_catalog", true, &refs[800..])], default_schema: None }
+}
+
 /// No server: the command runs this same `find` on the session's catalog.
 #[test]
 #[ignore = "timing; run with --ignored --nocapture"]
 fn quick_search_1000_tables_within_a_frame() {
-    let names: Vec<String> =
-        (0..1000).map(|i| format!("{}_{}_{i}", ["orders", "users", "items", "product_records", "audit"][i % 5], ["a", "bb", "ccc"][i % 3])).collect();
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let c = Catalog { schemas: vec![schema("shop", false, &refs[..800]), schema("pg_catalog", true, &refs[800..])], default_schema: None };
+    let c = thousand_tables();
     let mut times = Vec::new();
     for q in ["ord", "usr", "pr_rec", "zzz", "o", "shop.it"] {
         for _ in 0..20 {
@@ -153,5 +286,37 @@ fn quick_search_1000_tables_within_a_frame() {
     times.sort();
     let median = times[times.len() / 2];
     println!("quick search over 1000 tables: median {median:?}, max {:?}", times[times.len() - 1]);
+    assert!(median.as_secs_f64() < 0.002, "median {median:?} is over 2 ms");
+}
+
+/// No server: the command runs this same `search` on the session's catalog and saved list.
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn quick_search_with_connections_within_budget() {
+    let c = thousand_tables();
+    let list: Vec<ConnectionConfig> = (0..100)
+        .map(|i| match i % 5 {
+            // A file connection without a name is scored on its file name.
+            4 => ConnectionConfig {
+                id: format!("c{i}"),
+                kind: DbKind::Sqlite,
+                file: Some(format!("/data/orders_{i}.sqlite").into()),
+                ..ConnectionConfig::default()
+            },
+            k => saved(&format!("c{i}"), &format!("{} {i}", ["Shop live", "pg staging", "orders replica", "analytics"][k])),
+        })
+        .collect();
+    let mut times = Vec::new();
+    for q in ["ord", "usr", "pr_rec", "zzz", "o", "shop.it", "shop live", "stag"] {
+        for _ in 0..20 {
+            let t = Instant::now();
+            let hits = search(Some(&c), &list, Some("c0"), q, 20);
+            times.push(t.elapsed());
+            std::hint::black_box(hits);
+        }
+    }
+    times.sort();
+    let median = times[times.len() / 2];
+    println!("quick search over 1000 tables and 100 connections: median {median:?}, max {:?}", times[times.len() - 1]);
     assert!(median.as_secs_f64() < 0.002, "median {median:?} is over 2 ms");
 }
