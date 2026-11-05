@@ -2,7 +2,8 @@
 //! [`find_connections`] the saved connections, and [`search`] mixes the two.
 //!
 //! A query matches when its characters occur in the candidate in order (case-insensitively).
-//! The score rewards a match at the start or after `.` or `_`, consecutive characters and an
+//! The score rewards a match at the start of a word (the start, or after `.`, `_`, a space or
+//! `-`: a table's words follow `_`, a connection name's a space), consecutive characters and an
 //! exact match, and penalises skipped characters. Work is linear in the candidate's length
 //! (a candidate is cut at [`MAX_CANDIDATE`] characters), so 1,000 tables and 100 connections
 //! rank in well under a millisecond.
@@ -47,7 +48,7 @@ pub fn score(query: &str, candidate: &str) -> Option<u32> {
             total += MATCH;
             if prev.is_none() {
                 total += BOUNDARY + START;
-            } else if matches!(prev, Some('.' | '_')) {
+            } else if matches!(prev, Some('.' | '_' | ' ' | '-')) {
                 total += BOUNDARY;
             }
             if last_match == Some(i.wrapping_sub(1)) && i > 0 {

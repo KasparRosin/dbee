@@ -199,6 +199,21 @@ fn connections_are_scored_by_their_display_names() {
 }
 
 #[test]
+fn a_space_or_a_dash_starts_a_word() {
+    // A connection's name is free text: its words follow a space or a dash, as a table's follow `_`.
+    assert!(score("live", "Shop live") > score("live", "delivery"));
+    assert!(score("stag", "pg staging") > score("stag", "pg_stat_gssapi"));
+    assert!(score("dev", "shop-dev") > score("dev", "shop_devices"));
+    let c = Catalog { schemas: vec![schema("shop", false, &["delivery"]), schema("pg_catalog", true, &["pg_stat_gssapi"])], default_schema: None };
+    let list = [saved("a", "Shop live"), saved("b", "pg staging")];
+    let first = |q: &str| match search(Some(&c), &list, None, q, 20).into_iter().next() {
+        Some(Found::Connection(h)) => h.name,
+        other => panic!("{q}: a connection comes first, not {other:?}"),
+    };
+    assert_eq!((first("live"), first("stag")), ("Shop live".to_string(), "pg staging".to_string()));
+}
+
+#[test]
 fn search_mixes_tables_and_connections_by_score() {
     let c = Catalog { schemas: vec![schema("shop", false, &["orders", "shop_orders"])], default_schema: None };
     let list = [saved("a", "orders"), saved("b", "Orders archive")];
