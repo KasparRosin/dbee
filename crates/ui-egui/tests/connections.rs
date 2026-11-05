@@ -1163,3 +1163,42 @@ fn the_database_list_takes_the_keyboard() {
     ui.frame();
     assert_eq!(ui.value("conn-database"), "shop");
 }
+
+/// The keyboard leaving the list closes it, so Enter does what it does where the keyboard went.
+/// The list opens with the keyboard in its field; Tab goes to its button, then past the list.
+#[test]
+fn tab_takes_the_keyboard_out_of_the_list() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = form_for(db, db.server("mysql80").unwrap());
+    let before = ui.value("conn-ssl");
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| !listed(&ui.inspect()).is_empty());
+    ui.key("Tab");
+    ui.frame();
+    assert!(!listed(&ui.inspect()).is_empty(), "on its button the list stays");
+    ui.key("Tab");
+    ui.key("Enter");
+    ui.frame();
+    assert!(listed(&ui.inspect()).is_empty(), "the list closed");
+    assert_eq!(ui.value("conn-database"), "", "nothing was picked");
+    assert_ne!(ui.value("conn-ssl"), before, "Enter pressed the first SSL choice, where Tab went");
+    assert_eq!((ui.document()["screen"].clone(), ui.document()["jobs"].clone()), (json!("connections"), json!([])));
+}
+
+/// Typing in the field closes the list, and Enter connects with the text typed.
+#[test]
+fn typing_in_the_field_closes_the_list_and_enter_connects_with_the_text() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = form_for(db, db.server("mysql80").unwrap());
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| !listed(&ui.inspect()).is_empty());
+    ui.text("shop");
+    ui.frame();
+    assert!(listed(&ui.inspect()).is_empty(), "typing closed it");
+    assert_eq!(ui.value("conn-database"), "shop");
+    ui.key("Enter");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    let journal = ui.ok("engine.journal", json!({}));
+    let open = journal.as_array().unwrap().iter().find(|e| e["command"] == "connection.open").cloned().unwrap();
+    assert_eq!(open["params"]["config"]["database"], "shop", "{open}");
+}

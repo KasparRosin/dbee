@@ -28,10 +28,12 @@
 //! - A server type's Database field has a list button: it runs `connection.listDatabases` with
 //!   the form's settings, as Test runs, and says so while it lists (disabled then, and while a
 //!   test or connect runs). The names open under the field; a click or Enter on the highlighted
-//!   one (Down and Up move it) fills the field in, and Escape closes the list, as does an edit of
-//!   the server's fields. A list that comes after the form changed its server (the type, host,
-//!   port, user, TLS, SSH or the type's options, another connection, Change engine) or left the
-//!   screen is dropped.
+//!   one (Down and Up move it) fills the field in, and Escape closes the list. When it opens, the
+//!   field takes the keyboard if no widget has it. It takes those keys only while the keyboard is
+//!   on the field, on its button or nowhere: the keyboard going to another widget, typing in the
+//!   field, a click elsewhere or a dialog closes it. A list that
+//!   comes after the form changed its server (the type, host, port, user, TLS, SSH or the type's
+//!   options, another connection, Change engine) or left the screen is dropped.
 //! - The file pickers ("Change…" for the key, "Choose…" for the CA file, "Choose…" and "New file…"
 //!   for a database file) run rfd on a thread of their own and send the path back; a picker that
 //!   cannot open leaves a note in its row ([`crate::picker`]). After New file…, every test and
@@ -128,14 +130,15 @@ pub(crate) struct DatabaseList {
     pub open: bool,
     /// The name Enter picks, which Down and Up move.
     pub highlight: usize,
-    /// The form's server part ([`Form::server_part`]) the open list is of: an edit of it closes
-    /// the list.
-    pub shown_for: Option<Form>,
+    /// The list's button as last drawn: the keyboard on it keeps the list open.
+    pub button: Option<egui::Id>,
     /// The list's scroll offset and the height in view, as last drawn.
     pub offset: f32,
     pub view_h: f32,
     /// Scroll the highlighted name into view when the list is next drawn.
     pub reveal: bool,
+    /// The list just opened: the Database field takes the keyboard if no widget has it.
+    pub take_keyboard: bool,
 }
 
 impl DatabaseList {
@@ -340,8 +343,8 @@ pub(crate) fn form_done(
                 }
                 let list = &mut conn.databases;
                 list.highlight = names.iter().position(|n| *n == conn.form.database).unwrap_or(0);
-                list.shown_for = Some(conn.form.server_part());
                 list.reveal = true;
+                list.take_keyboard = true;
                 list.open = !names.is_empty();
                 list.names = names;
             }
@@ -502,6 +505,10 @@ pub(crate) enum Act {
 pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     tick(app, &ctx);
+    if app.view.dialog.is_some() {
+        // The dialog has the keyboard: its Enter and Escape are its own.
+        app.view.conn.databases.open = false;
+    }
     let mut acts = Vec::new();
     {
         let DbeeApp { session, view, tags, .. } = app;
@@ -1216,11 +1223,14 @@ mod tests {
         assert_eq!((app.view.conn.form.database.as_str(), app.view.conn.databases.open), ("shop", false));
     }
 
-    /// A MySQL form whose list holds `names`, open as a listing's result opens it.
+    /// A MySQL form for `127.0.0.1:1`, which refuses at once, whose list holds `names`, open as a
+    /// listing's result opens it.
     fn open_list(names: &[String]) -> (DbeeApp, TempHome, egui::Context) {
         let (mut app, home) = app_with_drivers();
         let ctx = egui::Context::default();
         apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
+        app.view.conn.form.host = "127.0.0.1".into();
+        app.view.conn.form.port = "1".into();
         let (params, generation) = listing(&mut app, 1);
         form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(1)), Ok(json!({ "databases": names })));
         assert!(app.view.conn.databases.open);
@@ -1254,37 +1264,54 @@ mod tests {
         assert_eq!(app.session.journal().len(), 0, "Enter picked a name and connected nowhere");
     }
 
+    /// The list keeps the keys only while the keyboard is on the Database field, on the list's
+    /// button or nowhere (a click on the button leaves no widget focused).
     #[test]
-    fn an_edit_of_the_server_closes_an_open_list() {
+    fn the_keyboard_elsewhere_closes_the_list() {
         let names = ["many".to_string(), "shop".to_string()];
-        let changes: [fn(&mut Form); 9] = [
-            |f| f.host.push('x'),
-            |f| f.port = "3307".into(),
-            |f| f.user.push('x'),
-            |f| f.password.push('x'),
-            |f| f.ssl_mode = SslMode::Require,
-            |f| f.ca_file = Some(PathBuf::from("/x/ca.pem")),
-            |f| f.ssh_on = true,
-            |f| f.ssh_host.push('x'),
-            |f| {
-                f.options.insert(dbee_config::ALLOW_PUBLIC_KEY.id.into(), "true".into());
-            },
-        ];
-        for (n, change) in changes.into_iter().enumerate() {
+        for elsewhere in ["conn-host", "conn-port", "conn-user", "conn-password", "conn-name"] {
             let (mut app, _home, ctx) = open_list(&names);
             frame(&mut app, &ctx);
-            assert!(!drawn_items(&app, 2).is_empty(), "change {n}: the list shows");
-            change(&mut app.view.conn.form);
-            frame(&mut app, &ctx);
-            assert!(!app.view.conn.databases.open && drawn_items(&app, 2).is_empty(), "change {n}");
+            ctx.memory_mut(|m| m.request_focus(conn_form::field_id(elsewhere)));
+            frame_with(&mut app, &ctx, vec![key(Key::ArrowDown)]);
+            let list = &app.view.conn.databases;
+            assert!(!list.open && list.highlight == 0 && drawn_items(&app, 2).is_empty(), "{elsewhere}");
         }
-        // The database, the name and the colour are no change of server.
         let (mut app, _home, ctx) = open_list(&names);
-        app.view.conn.form.database.push('s');
-        app.view.conn.form.name.push('s');
-        app.view.conn.form.color = dbee_config::ConnectionColor::Red;
         frame(&mut app, &ctx);
-        assert!(app.view.conn.databases.open && drawn_items(&app, 2) == [0, 1]);
+        let button = app.view.conn.databases.button.expect("the button was drawn");
+        let field = conn_form::field_id("conn-database");
+        assert_eq!(ctx.memory(|m| m.focused()), Some(field), "the field takes the keyboard when the list opens");
+        for on in [None, Some(field), Some(button)] {
+            ctx.memory_mut(|m| match on {
+                Some(id) => m.request_focus(id),
+                None => m.surrender_focus(field),
+            });
+            frame_with(&mut app, &ctx, vec![key(Key::ArrowDown)]);
+            assert!(app.view.conn.databases.open && app.view.conn.databases.highlight == 1, "{on:?}");
+            frame_with(&mut app, &ctx, vec![key(Key::ArrowUp)]);
+        }
+        // Typing in the Database field closes it, and the text stays.
+        ctx.memory_mut(|m| m.request_focus(conn_form::field_id("conn-database")));
+        frame_with(&mut app, &ctx, vec![egui::Event::Text("sh".into())]);
+        frame(&mut app, &ctx);
+        assert!(!app.view.conn.databases.open && drawn_items(&app, 2).is_empty());
+        assert_eq!(app.view.conn.form.database, "sh");
+    }
+
+    /// A dialog over the form closes the list, which then takes none of its keys.
+    #[test]
+    fn a_dialog_keeps_its_keys_from_the_list() {
+        let names = ["many".to_string(), "shop".to_string()];
+        let (mut app, _home, ctx) = open_list(&names);
+        frame(&mut app, &ctx);
+        let rerun = dialogs::Rerun { command: TEST, params: json!({}), origin: Origin::Form(app.view.conn.generation) };
+        app.view.dialog = Some(Dialog::Confirm { message: "Go on?".into(), rerun });
+        frame_with(&mut app, &ctx, vec![key(Key::ArrowDown)]);
+        assert!(!app.view.conn.databases.open && app.view.conn.databases.highlight == 0, "the list closed and took no key");
+        frame_with(&mut app, &ctx, vec![key(Key::Escape)]);
+        assert!(app.view.dialog.is_none(), "Escape reached the dialog");
+        assert_eq!(app.view.conn.form.database, "");
     }
 
     #[test]

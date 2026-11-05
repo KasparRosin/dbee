@@ -251,25 +251,6 @@ impl Form {
         self.create_file = false;
     }
 
-    /// What a list of the server's databases depends on: the type, the server, the login (the
-    /// password too), TLS, the tunnel and the type's options; not the database, the name or the
-    /// colour.
-    pub(crate) fn server_part(&self) -> Form {
-        Form {
-            id: String::new(),
-            name: String::new(),
-            file: None,
-            create_file: false,
-            engine_fixed: false,
-            color: ConnectionColor::None,
-            show_password: false,
-            database: String::new(),
-            read_only: false,
-            save_secrets: false,
-            ..self.clone()
-        }
-    }
-
     /// The type's option `id` is on.
     pub(crate) fn option_on(&self, id: &str) -> bool {
         self.options.get(id).is_some_and(|v| v == "true")
@@ -302,7 +283,7 @@ fn column<R>(ui: &mut egui::Ui, width: f32, label: &str, add: impl FnOnce(&mut e
 const FORM_FIELDS: [&str; 9] =
     ["conn-name", "conn-host", "conn-port", "conn-user", "conn-password", "conn-database", "conn-ssh-host", "conn-ssh-port", "conn-ssh-user"];
 
-fn field_id(id: &str) -> egui::Id {
+pub(crate) fn field_id(id: &str) -> egui::Id {
     egui::Id::new(("dbee-form", id))
 }
 
@@ -443,6 +424,9 @@ pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool
 /// The fields, `w` wide, then the footer at the bottom of the room left: the fields scroll when
 /// they need more. Enter in one of them connects.
 pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    if conn.databases.open && keyboard_left(ui, &conn.databases) {
+        conn.databases.open = false;
+    }
     if conn.databases.open {
         list_keys(ui, &mut conn.databases, acts);
     }
@@ -593,6 +577,12 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
     database_row(ui, conn, tags, acts, w);
 }
 
+/// The keyboard is on a widget other than the Database field and the list's button. On none at
+/// all it has not left: a click on the button leaves no widget with it.
+fn keyboard_left(ui: &egui::Ui, list: &DatabaseList) -> bool {
+    ui.ctx().memory(|m| m.focused()).is_some_and(|id| id != field_id("conn-database") && Some(id) != list.button)
+}
+
 /// The open database list's keys, taken before the fields see them, as the quick search takes its
 /// own: Down and Up move the highlight (it stays at the ends), Enter picks the highlighted name,
 /// Escape closes the list.
@@ -610,6 +600,8 @@ fn list_keys(ui: &egui::Ui, list: &mut DatabaseList, acts: &mut Vec<Act>) {
         return;
     }
     if down > 0 || up > 0 {
+        // egui would also move the keyboard to the widget above or below.
+        ui.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
         let last = list.names.len().saturating_sub(1);
         list.highlight = list.highlight.saturating_add(down).saturating_sub(up).min(last);
         list.reveal = true;
@@ -635,8 +627,9 @@ fn reveal_offset(n: usize, offset: f32, view_h: f32) -> f32 {
 
 /// The database, and beside it the button that lists the server's databases (not while a test,
 /// a connect or a listing runs). The names open under the field, over the rows below; a click
-/// or Enter on the highlighted one fills it in. Escape, a click elsewhere or an edit of the
-/// server's fields closes them.
+/// or Enter on the highlighted one fills it in. Escape, a click elsewhere or typing in the field
+/// closes them. The names take no keyboard focus: Down and Up move through them, and when they
+/// open the field takes the keyboard if no widget has it.
 fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let listing = conn.databases.pending.is_some();
     let can_list = conn.running.is_none() && !listing;
@@ -653,20 +646,24 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
                     .margin(Margin::symmetric(6, 5)),
             );
             tags.tag_value("conn-database", &field, form.database.as_str());
+            if field.changed() {
+                databases.open = false;
+            }
+            if std::mem::take(&mut databases.take_keyboard) && databases.open && ui.memory(|m| m.focused()).is_none() {
+                field.request_focus();
+            }
             let label = if listing { "Listing…" } else { "List…" };
             let button = ui
                 .add_enabled(can_list, Button::new(label).min_size(vec2(LIST_BUTTON_W, FIELD_H)))
                 .on_hover_text("Choose from the server's databases");
             tags.tag_value("conn-database-list", &button, label);
+            databases.button = Some(button.id);
             if button.clicked() {
                 if databases.open {
                     databases.open = false;
                 } else {
                     acts.push(Act::ListDatabases);
                 }
-            }
-            if databases.open && databases.shown_for.as_ref() != Some(&form.server_part()) {
-                databases.open = false;
             }
             let DatabaseList { names, open, highlight, offset, view_h, reveal, .. } = databases;
             let mut scroll = ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]);
@@ -677,13 +674,14 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
             Popup::from_response(&field)
                 .open_bool(open)
                 .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                .sense(Sense::CLICK)
                 .align(RectAlign::BOTTOM_START)
                 .width(field_w)
                 .show(|ui| {
                     ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
                     let shown = scroll.show_rows(ui, filter_bar::ITEM_H, names.len(), |ui, rows| {
                         for (n, name) in names.iter().enumerate().skip(rows.start).take(rows.len()) {
-                            let r = filter_bar::item(ui, n == *highlight, name);
+                            let r = filter_bar::item_sensing(ui, n == *highlight, name, Sense::CLICK);
                             // A popup's first frame is a sizing pass, which reads every widget as disabled.
                             tags.tag_value_as(&format!("conn-database-item-{n}"), &r, name.as_str(), true);
                             if r.clicked() {

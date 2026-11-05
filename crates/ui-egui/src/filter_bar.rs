@@ -275,10 +275,16 @@ fn choice<R>(
 /// as wide as the list or its text, whether hovered, pressed or not, so the list never moves
 /// under the pointer.
 pub(crate) fn item(ui: &mut egui::Ui, selected: bool, text: &str) -> Response {
+    item_sensing(ui, selected, text, Sense::click())
+}
+
+/// [`item`] sensing `sense`: `Sense::CLICK` for a list the keyboard moves through by its own
+/// keys, whose items take no focus.
+pub(crate) fn item_sensing(ui: &mut egui::Ui, selected: bool, text: &str, sense: Sense) -> Response {
     let t = TOKENS;
     let galley = ui.painter().layout_no_wrap(text.to_string(), TextStyle::Button.resolve(ui.style()), t.text);
     let width = ui.available_width().max(galley.size().x + 2.0 * ITEM_PAD);
-    let (rect, r) = ui.allocate_exact_size(vec2(width, ITEM_H), Sense::click());
+    let (rect, r) = ui.allocate_exact_size(vec2(width, ITEM_H), sense);
     let fill = if selected {
         t.selection
     } else if r.hovered() {
