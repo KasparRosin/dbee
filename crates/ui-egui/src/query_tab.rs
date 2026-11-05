@@ -97,7 +97,7 @@ use crate::automation::Tags;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{RADIUS, SqlSyntax, TOKENS, sql_syntax};
-use crate::tree::{is_system, thousands};
+use crate::tree::thousands;
 use crate::{DbeeApp, filter_bar, icons};
 
 /// The automation ids.
@@ -823,6 +823,10 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
             None => r.on_hover_text(hover),
         };
         tags.tag_value_as(DATABASE, &r, shown, enabled);
+        if !enabled {
+            // egui closes a popup that is not drawn: no list while the chip waits.
+            return;
+        }
         Popup::menu(&r).width(CHIP_W).show(|ui| {
             ui.add(Label::new(RichText::new(many).size(11.5).color(t.text_muted)).selectable(false));
             ScrollArea::vertical().max_height(CHIP_LIST_H).show(ui, |ui| {
@@ -1048,7 +1052,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         if let Some(c) = session.state().connected.as_ref().filter(|c| c.dialect.has_use_database()) {
             let chip = Chip {
                 database: c.starts_in(q),
-                choices: c.catalog.schemas.iter().filter(|s| !is_system(s)).map(|s| s.name.as_str()).collect(),
+                choices: c.catalog.schemas.iter().filter(|s| !s.system).map(|s| s.name.as_str()).collect(),
                 word: c.dialect.schema_word(),
                 why_not: can_set_database(session)
                     .err()

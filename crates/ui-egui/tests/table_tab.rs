@@ -488,6 +488,12 @@ fn operator_note_on_mysql() {
         ui.until("the page", |ui| ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
         ui.click("filter-0-op");
         ui.frame();
+        // An operator without a note has no hover: resting on it draws no more text.
+        let is_null = ui.rect("filter-0-op-isNull").expect("the operators are listed");
+        ui.hover(is_null.center());
+        let before = ui.texts().len();
+        ui.rest(is_null.center());
+        assert_eq!(ui.texts().len(), before, "{}: no hover on `is null`", t.name());
         let like = ui.rect("filter-0-op-like").expect("the operators are listed");
         ui.rest(like.center());
         let shown = ui.texts().into_iter().any(|(_, g)| g.text().contains("collation"));

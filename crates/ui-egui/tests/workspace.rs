@@ -288,6 +288,11 @@ fn the_tree_says_databases_on_mysql_and_schemas_on_postgres() {
         let group = ui.harness.state().tags().rect("tree-system").expect("the system group is drawn");
         let texts: Vec<String> = ui.texts().iter().filter(|(r, _)| group.contains(r.center())).map(|(_, g)| g.text().to_string()).collect();
         assert!(ui.text_in(group, label).is_some(), "{server}: {texts:?}");
+        // The refresh button's hover says the word too.
+        let refresh = ui.harness.state().tags().rect("tree-refresh").expect("the refresh button is drawn");
+        ui.rest(refresh.center());
+        let hover = if server == "pg14" { "Refresh the schemas" } else { "Refresh the databases" };
+        assert!(ui.texts().iter().any(|(_, g)| g.text() == hover), "{server}: no `{hover}`");
     }
 }
 

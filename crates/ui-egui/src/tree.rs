@@ -6,15 +6,17 @@
 //!   the others closed, in the catalog's order. Each lists its tables, views and materialized
 //!   views, each kind with its own icon ([`crate::icons`]). A table's chevron shows its visible
 //!   columns with their types, and a key icon on primary and foreign key columns.
-//! - The system schemas (`pg_catalog`, `information_schema`, `pg_toast…`) sit in one group at the
-//!   bottom, closed, and each closed inside it.
+//! - The system schemas, those the catalog marks (Postgres's `pg_catalog` and
+//!   `information_schema`, MySQL's `mysql`, `sys`, …), sit in one group at the bottom, closed, and
+//!   each closed inside it.
 //! - The texts name schemas with the engine's word (`Dialect::schema_word`): on MySQL the group
 //!   reads "System databases".
 //! - The filter keeps the tables whose name or `schema.name` contains it, ignoring case; while it
 //!   is typed every schema with a match shows open, the system group too.
 //! - A click selects a table, a double-click opens it ([`TreeAct::Open`]); a click on a schema
 //!   selects it and opens or closes it; a click on the system group opens or closes it. A new
-//!   query tab opens on the selection's schema ([`Tree::selected_schema`]).
+//!   query tab opens on the selection's schema ([`Tree::selected_schema`]). A selection the
+//!   catalog no longer holds (after a refresh or a reconnect) is forgotten.
 //!
 //! **Speed.** A catalog can hold thousands of tables, and the tree must stay within a frame. The
 //! rows are built once per catalog, filter and open/closed state ([`Tree`] caches them, keyed by
@@ -98,6 +100,16 @@ enum Selected {
     Schema(String),
 }
 
+impl Selected {
+    /// `catalog` still holds it.
+    fn is_in(&self, catalog: &Catalog) -> bool {
+        match self {
+            Selected::Table(t) => catalog.table(t).is_some(),
+            Selected::Schema(name) => catalog.schemas.iter().any(|s| s.name == *name),
+        }
+    }
+}
+
 impl std::fmt::Debug for Tree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tree").field("filter", &self.filter).field("selected", &self.selected).finish_non_exhaustive()
@@ -153,17 +165,11 @@ struct Names {
     lower: Vec<Vec<(String, String)>>,
 }
 
-/// A system schema: `pg_catalog`, `information_schema` (the catalog marks them) or a TOAST
-/// schema.
-pub fn is_system(s: &SchemaInfo) -> bool {
-    s.system || s.name.starts_with("pg_toast")
-}
-
 /// The user schemas of `catalog` in the order the tree lists them: the default schema first,
 /// then the others in catalog order.
 fn user_schemas(catalog: &Catalog) -> impl Iterator<Item = usize> + '_ {
     let first = |x: &SchemaInfo| catalog.default_schema.as_deref() == Some(x.name.as_str());
-    let users = move |default: bool| catalog.schemas.iter().enumerate().filter(move |(_, x)| !is_system(x) && first(x) == default);
+    let users = move |default: bool| catalog.schemas.iter().enumerate().filter(move |(_, x)| !x.system && first(x) == default);
     users(true).chain(users(false)).map(|(s, _)| s)
 }
 
@@ -217,9 +223,10 @@ pub fn thousands(n: u64) -> String {
 }
 
 impl Tree {
-    /// The schema of what is selected: the selected schema, or the selected table's.
-    pub fn selected_schema(&self) -> Option<&str> {
-        match self.selected.as_ref()? {
+    /// The schema of what is selected, while `catalog` holds it: the selected schema, or the
+    /// selected table's.
+    pub fn selected_schema(&self, catalog: &Catalog) -> Option<&str> {
+        match self.selected.as_ref().filter(|s| s.is_in(catalog))? {
             Selected::Table(t) => Some(t.schema.as_str()),
             Selected::Schema(s) => Some(s.as_str()),
         }
@@ -284,7 +291,14 @@ impl Tree {
     fn rows(&mut self, catalog: &Arc<Catalog>) -> &Rows {
         let rows = match self.rows.take() {
             Some(r) if Arc::ptr_eq(&r.catalog, catalog) && r.filter == self.filter && r.shape == self.shape => r,
-            _ => self.build(catalog),
+            Some(r) if Arc::ptr_eq(&r.catalog, catalog) => self.build(catalog),
+            _ => {
+                // Another catalog: a selection it no longer holds goes.
+                if self.selected.as_ref().is_some_and(|s| !s.is_in(catalog)) {
+                    self.selected = None;
+                }
+                self.build(catalog)
+            }
         };
         self.rows.insert(rows)
     }
@@ -324,7 +338,7 @@ impl Tree {
                 self.schema_rows(&mut rows, catalog, &shown, s, false, open);
             }
         }
-        let system: Vec<usize> = catalog.schemas.iter().enumerate().filter(|(s, x)| is_system(x) && visible(*s)).map(|(s, _)| s).collect();
+        let system: Vec<usize> = catalog.schemas.iter().enumerate().filter(|(s, x)| x.system && visible(*s)).map(|(s, _)| s).collect();
         if !system.is_empty() {
             let open = filtering || self.system_open;
             rows.push(Row::System { open, schemas: system.len() }, "tree-system".into());
@@ -385,6 +399,7 @@ enum Click {
 pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &mut Tree, tags: &mut Tags) -> Vec<TreeAct> {
     let t = TOKENS;
     let mut acts = Vec::new();
+    let many = dialect.schema_word().1.to_lowercase();
     ui.horizontal(|ui| {
         let width = (ui.available_width() - 34.0).max(60.0);
         let r = ui.add(
@@ -408,8 +423,8 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
             Refresh::Disabled(_) => icons::refresh(ui.painter(), icon_rect, t.border),
         }
         let r = match &tree.refresh {
-            Refresh::Ready => r.on_hover_text("Refresh the schema"),
-            Refresh::Running => r.on_hover_text("Refreshing the schema…"),
+            Refresh::Ready => r.on_hover_text(format!("Refresh the {many}")),
+            Refresh::Running => r.on_hover_text(format!("Refreshing the {many}…")),
             Refresh::Disabled(why) => r.on_hover_text(format!("Cannot refresh: {why}")),
         };
         tags.tag_value_as("tree-refresh", &r, "Refresh", enabled);
@@ -433,7 +448,6 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     let mut click = Click::None;
     let selected = tree.selected.clone();
     let pending = tags.scroll_pending().map(str::to_owned);
-    let many = dialect.schema_word().1.to_lowercase();
     let rows = tree.rows(catalog);
     if rows.list.is_empty() {
         let text = if filtering { "No table matches the filter.".to_owned() } else { format!("This connection has no {many} dbee can show.") };
@@ -687,14 +701,22 @@ mod tests {
     fn system_schemas_sit_closed_in_one_group_at_the_bottom() {
         let c = catalog();
         let mut tree = Tree::default();
-        // Without `public`, the first user schema starts open and the others closed.
+        // Without a default schema, the first user schema starts open and the others closed. The
+        // catalog's flag makes a schema the system's, not its name.
         assert_eq!(
             ids(&mut tree, &c),
-            ["tree-schema-shop", "tree-table-shop.orders", "tree-table-shop.order_totals", "tree-schema-audit", "tree-system"]
+            [
+                "tree-schema-shop",
+                "tree-table-shop.orders",
+                "tree-table-shop.order_totals",
+                "tree-schema-audit",
+                "tree-schema-pg_toast_temp",
+                "tree-system"
+            ]
         );
         tree.toggle_system();
         let rows = ids(&mut tree, &c);
-        assert_eq!(&rows[4..], ["tree-system", "tree-schema-information_schema", "tree-schema-pg_catalog", "tree-schema-pg_toast_temp"]);
+        assert_eq!(&rows[5..], ["tree-system", "tree-schema-information_schema", "tree-schema-pg_catalog"]);
         tree.toggle_schema(&c, "pg_catalog", true);
         assert!(ids(&mut tree, &c).contains(&"tree-table-pg_catalog.pg_class".to_string()));
         tree.toggle_schema(&c, "shop", false);
@@ -712,14 +734,22 @@ mod tests {
         let mut tree = Tree::default();
         assert_eq!(
             ids(&mut tree, &plain),
-            ["tree-schema-shop", "tree-table-shop.orders", "tree-table-shop.order_totals", "tree-schema-public", "tree-schema-audit", "tree-system"]
+            [
+                "tree-schema-shop",
+                "tree-table-shop.orders",
+                "tree-table-shop.order_totals",
+                "tree-schema-public",
+                "tree-schema-audit",
+                "tree-schema-pg_toast_temp",
+                "tree-system"
+            ]
         );
         c.default_schema = Some("audit".into());
         let c = Arc::new(c);
         let mut tree = Tree::default();
         assert_eq!(
             ids(&mut tree, &c),
-            ["tree-schema-audit", "tree-table-audit.log", "tree-schema-shop", "tree-schema-public", "tree-system"],
+            ["tree-schema-audit", "tree-table-audit.log", "tree-schema-shop", "tree-schema-public", "tree-schema-pg_toast_temp", "tree-system"],
             "the default schema first and open, the other user schemas closed"
         );
         // A typed filter opens every schema with a match.
@@ -730,17 +760,44 @@ mod tests {
         }
         tree.filter.clear();
         tree.toggle_schema(&c, "audit", false);
-        assert_eq!(ids(&mut tree, &c), ["tree-schema-audit", "tree-schema-shop", "tree-schema-public", "tree-system"]);
+        assert_eq!(ids(&mut tree, &c), ["tree-schema-audit", "tree-schema-shop", "tree-schema-public", "tree-schema-pg_toast_temp", "tree-system"]);
     }
 
     #[test]
     fn the_selection_names_a_schema() {
+        let c = catalog();
         let mut tree = Tree::default();
-        assert_eq!(tree.selected_schema(), None);
+        assert_eq!(tree.selected_schema(&c), None);
         tree.selected = Some(Selected::Table(TableRef { schema: "shop".into(), name: "orders".into() }));
-        assert_eq!(tree.selected_schema(), Some("shop"), "a table's schema");
+        assert_eq!(tree.selected_schema(&c), Some("shop"), "a table's schema");
         tree.selected = Some(Selected::Schema("audit".into()));
-        assert_eq!(tree.selected_schema(), Some("audit"));
+        assert_eq!(tree.selected_schema(&c), Some("audit"));
+    }
+
+    #[test]
+    fn a_selection_the_catalog_lost_is_forgotten() {
+        let c = catalog();
+        let orders = TableRef { schema: "shop".into(), name: "orders".into() };
+        let mut tree = Tree { selected: Some(Selected::Table(orders.clone())), ..Tree::default() };
+        ids(&mut tree, &c);
+        assert_eq!(tree.selected_schema(&c), Some("shop"));
+        // A refresh without the table: asked of that catalog, the selection names nothing, and
+        // once the rows are built for it, it is gone.
+        let mut lost = (*c).clone();
+        lost.schemas.iter_mut().for_each(|s| s.tables.retain(|t| t.table != orders));
+        let lost = Arc::new(lost);
+        assert_eq!(tree.selected_schema(&lost), None);
+        ids(&mut tree, &lost);
+        assert_eq!(tree.selected, None);
+        // A schema too; one still there is kept.
+        tree.selected = Some(Selected::Schema("audit".into()));
+        let refreshed = Arc::new((*lost).clone());
+        ids(&mut tree, &refreshed);
+        assert_eq!(tree.selected_schema(&refreshed), Some("audit"));
+        let mut without = (*refreshed).clone();
+        without.schemas.retain(|s| s.name != "audit");
+        ids(&mut tree, &Arc::new(without));
+        assert_eq!(tree.selected, None);
     }
 
     #[test]

@@ -520,14 +520,24 @@ fn mysql_query_tab_shows_and_changes_its_database() {
     assert_eq!(ui.query()["database"], "many");
     assert_eq!(ui.value("query-database"), "many");
     assert!(ui.tag("query-database-shop").is_none(), "the list closed");
-    // While the tab runs, the chip waits.
-    ui.execute("query.setText", json!({ "text": mysql.sleep_sql(2) }));
-    ui.click("query-run");
+    // While the tab runs, the chip waits, and its list goes: a run started with the list open
+    // (Ctrl+Enter reaches it) holds on a lock until the test lets it go.
+    let key = unique("dbee_lock");
+    let held = mysql.hold_lock(&key).unwrap();
+    ui.execute("query.setText", json!({ "text": format!("SELECT 1 FROM DUAL WHERE {}", mysql.waits_for_lock_sql(&key)) }));
+    ui.click("query-database");
+    ui.frame();
+    assert!(ui.tag("query-database-shop").is_some(), "the list is open");
+    ui.ctrl("Enter");
     ui.until("the run to start", |ui| !ui.query()["running"].is_null());
     ui.frame();
     assert!(!ui.enabled("query-database"), "disabled while the tab runs");
+    let listed: Vec<String> = ids(&ui.inspect()).into_iter().filter(|id| id.starts_with("query-database-")).collect();
+    assert!(listed.is_empty(), "no list while the tab runs: {listed:?}");
+    drop(held);
     ui.ran();
     assert!(ui.enabled("query-database"));
+    assert!(ui.tag("query-database-shop").is_none(), "the list stays closed");
     assert_eq!(ui.query()["error"], Json::Null, "the run in `many` went through");
 }
 
@@ -553,6 +563,12 @@ fn a_new_query_tab_opens_on_the_trees_selection() {
         ui.ctrl("T");
         ui.frame();
         assert_eq!(ui.query()["database"], "odd");
+        // A table clicked after a database wins: its own database.
+        ui.click("tree-schema-odd");
+        ui.click("tree-table-many.t_001");
+        ui.click("tab-new");
+        ui.frame();
+        assert_eq!(ui.query()["database"], "many");
         // + on a selected table.
         ui.click("tree-schema-shop");
         ui.click("tree-table-shop.customers");
@@ -571,6 +587,37 @@ fn a_new_query_tab_opens_on_the_trees_selection() {
     ui.frame();
     assert_eq!(ui.query()["database"], "shop", "nothing selected: the settings' database");
     assert_eq!(ui.value("query-database"), "shop");
+}
+
+/// Drops `scratch.<name>` on `server` when the test ends, also when it fails.
+struct DropAfter<'a>(&'a dbee_testkit::Server, String);
+
+impl Drop for DropAfter<'_> {
+    fn drop(&mut self) {
+        let _ = dbee_testkit::sql(self.0, &format!("DROP TABLE IF EXISTS scratch.{}", self.1));
+    }
+}
+
+/// A selected table that a refresh no longer finds is forgotten: a new query tab gets nothing
+/// from it.
+#[test]
+fn a_selection_gone_after_a_refresh_gives_a_new_tab_nothing() {
+    let db = dbee_testkit::require_testdb!();
+    let server = db.server("mysql80").unwrap();
+    let name = unique("t_sel");
+    let _drop = DropAfter(server, name.clone());
+    dbee_testkit::mysql(server, &format!("CREATE TABLE scratch.{name} (id INT PRIMARY KEY)")).unwrap();
+    let mysql = dbee_testkit::target(server);
+    let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+    ui.click("tree-schema-scratch");
+    ui.click(&format!("tree-table-scratch.{name}"));
+    dbee_testkit::mysql(server, &format!("DROP TABLE scratch.{name}")).unwrap();
+    ui.click("tree-refresh");
+    ui.ok("engine.wait", json!({}));
+    ui.until("the refreshed tree", |ui| ui.tag(&format!("tree-table-scratch.{name}")).is_none());
+    ui.click("tab-new");
+    ui.frame();
+    assert_eq!(ui.query()["database"], Json::Null, "nothing selected any more, and no database in the settings");
 }
 
 /// No chip where the engine has no `USE`: Postgres and SQLite.

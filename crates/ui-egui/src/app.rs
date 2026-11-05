@@ -345,11 +345,12 @@ impl DbeeApp {
 
     /// `params` of a command the user started, with what the tree has selected where the command
     /// takes it: a new query tab (from a shortcut, the menu or `+` alike) opens on the selected
-    /// schema, or the selected table's, unless `params` name one. The engine uses it where the
-    /// dialect has `USE`.
+    /// schema, or the selected table's, while the catalog holds it, unless `params` name one. The
+    /// engine uses it where the dialect has `USE`.
     fn with_selection(&self, command: &str, mut params: Json) -> Json {
         if command == NEW_QUERY
-            && let Some(schema) = self.view.work.tree.selected_schema()
+            && let Some(c) = self.session.state().connected.as_ref()
+            && let Some(schema) = self.view.work.tree.selected_schema(&c.catalog)
             && let Some(p) = params.as_object_mut()
         {
             p.entry("schema").or_insert_with(|| Json::from(schema));
