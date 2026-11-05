@@ -318,6 +318,16 @@ pub fn until_sql(t: &TestTarget, sql: &str, want: &str, what: &str) {
     }
 }
 
+/// Waits until a statement whose text holds `marker` runs on `t`'s server. A file lists no
+/// statements: its statement gets a moment to start.
+pub fn until_running(t: &TestTarget, marker: &str) {
+    if t.lists_running_statements() {
+        until_sql(t, &t.running_with_sql(marker), "1", "the statement to run");
+    } else {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// Drops the scratch objects it names (`TABLE IF EXISTS scratch.t`) on its target when the test
 /// ends, also when it fails.
 pub struct Scratch<'a>(pub &'a TestTarget, pub Vec<String>);

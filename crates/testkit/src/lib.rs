@@ -115,9 +115,12 @@ pub struct KindInfo {
     pub connection_id_sql: &'static str,
     /// Counts dbee's statements running now whose text holds `marker`.
     running_with_sql: fn(&str) -> String,
-    /// Counts dbee's updates of `scratch.<table>` that sleep in [`KindInfo::slow_updates_sql`]'s
-    /// trigger now.
-    slow_update_running_sql: fn(&str) -> String,
+    /// Takes the advisory lock named by the argument until the session's transaction ends (on
+    /// MySQL, until the session does), as a [`hold`] runs it.
+    take_lock_sql: fn(&str) -> String,
+    /// A `WHERE` condition that holds once it can take that lock, waiting for it once per
+    /// statement whatever the number of rows: a page or count that cannot end while it is held.
+    waits_for_lock_sql: fn(&str) -> String,
     /// What the engine shows for this kind (expected values of its tests):
     /// the type label of a column made with [`KindInfo::json_type`], and of `shop.big_cell.j`;
     pub json_type_label: &'static str,
@@ -199,11 +202,8 @@ impl Kind {
                 running_with_sql: |m| {
                     format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND state = 'active' AND query LIKE '%{m}%'")
                 },
-                slow_update_running_sql: |t| {
-                    format!(
-                        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND wait_event = 'PgSleep' AND query LIKE 'UPDATE \"scratch\".\"{t}\"%'"
-                    )
-                },
+                take_lock_sql: |key| format!("SELECT pg_advisory_xact_lock(hashtext('{key}'))"),
+                waits_for_lock_sql: |key| format!("(SELECT true FROM pg_advisory_xact_lock_shared(hashtext('{key}')))"),
                 json_type_label: "jsonb",
                 plain_json_label: "json",
                 json_sorts_keys: true,
@@ -264,7 +264,8 @@ impl Kind {
                 read_only_sql: ("PRAGMA query_only", "1"),
                 connection_id_sql: "",
                 running_with_sql: |_| String::new(),
-                slow_update_running_sql: |_| String::new(),
+                take_lock_sql: |_| String::new(),
+                waits_for_lock_sql: |_| String::new(),
                 // Measured with its driver (M2.13): a column labels its declared type, and an
                 // expression has none.
                 json_type_label: "JSON",
@@ -327,11 +328,9 @@ const MYSQL: KindInfo = KindInfo {
     read_only_sql: ("SELECT @@SESSION.transaction_read_only", "1"),
     connection_id_sql: "SELECT CONNECTION_ID()",
     running_with_sql: |m| format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{m}%' AND ID <> CONNECTION_ID()"),
-    slow_update_running_sql: |t| {
-        format!(
-            "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%@dbee_slow_{t} =%' AND STATE = 'User sleep' AND ID <> CONNECTION_ID()"
-        )
-    },
+    take_lock_sql: |key| format!("SELECT GET_LOCK('{key}', 0)"),
+    // Taken and given back at once, in a derived table, which runs once.
+    waits_for_lock_sql: |key| format!("EXISTS (SELECT 1 FROM (SELECT GET_LOCK('{key}', 60) + RELEASE_LOCK('{key}') AS z) AS d)"),
     json_type_label: "json",
     plain_json_label: "json",
     json_sorts_keys: true,
@@ -927,10 +926,18 @@ impl TestTarget {
         (self.kind.info().running_with_sql)(marker)
     }
 
-    /// A query that counts dbee's updates of `scratch.<table>` sleeping in the trigger of
-    /// [`TestTarget::slow_updates_sql`].
-    pub fn slow_update_running_sql(&self, table: &str) -> String {
-        (self.kind.info().slow_update_running_sql)(table)
+    /// A session of its own ([`hold`]) that holds the advisory lock `key` until dropped, so a
+    /// statement with [`TestTarget::waits_for_lock_sql`] cannot end meanwhile unless it is
+    /// cancelled. Not on a file, which has no other session.
+    pub fn hold_lock(&self, key: &str) -> Result<Held, String> {
+        let server = self.server().ok_or_else(|| format!("{}: a file has no other session to hold a lock", self.name()))?;
+        hold(server, &(self.kind.info().take_lock_sql)(key))
+    }
+
+    /// A `WHERE` condition that holds, and waits once per statement while [`TestTarget::hold_lock`]
+    /// holds the lock `key`.
+    pub fn waits_for_lock_sql(&self, key: &str) -> String {
+        (self.kind.info().waits_for_lock_sql)(key)
     }
 
     /// Ends the server's connection `id` (from [`KindInfo::connection_id_sql`]) and waits (up to

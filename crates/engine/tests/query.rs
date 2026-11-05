@@ -232,16 +232,6 @@ fn statements_without_rows_report_rows_affected() {
     });
 }
 
-/// Waits until a statement whose text holds `marker` runs (the first run also opens the query
-/// connection). A file lists no statements: its run gets a moment to start.
-fn until_running(t: &TestTarget, marker: &str) {
-    if t.lists_running_statements() {
-        until_sql(t, &t.running_with_sql(marker), "1", "the statement to run");
-    } else {
-        std::thread::sleep(Duration::from_millis(500));
-    }
-}
-
 /// The server no longer runs a statement whose text holds `marker` (a file lists none).
 fn stopped_running(t: &TestTarget, marker: &str) {
     if t.lists_running_statements() {

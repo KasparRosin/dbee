@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use dbee_core::TableRef;
 use dbee_engine::{EngineError, Json, Outcome, Session};
-use dbee_testkit::{TestTarget, require_testdb, unique};
+use dbee_testkit::{Held, TestTarget, require_testdb, unique};
 use serde_json::json;
 
 fn first_id(s: &mut Session) -> i64 {
@@ -31,6 +31,18 @@ fn last_page(rows: u64) -> u64 {
 fn last_payload(rows: u64) -> String {
     let n = rows.to_string();
     format!("payload {}", ("9".repeat(n.len() - 1)).max(n))
+}
+
+/// A raw condition that holds for every row and, on a server, waits while [`hold_gate`] holds the
+/// lock `key`: a load or count with it cannot end by itself meanwhile. A file has no other session
+/// to hold one: its condition takes about 2 s instead.
+fn gated(t: &TestTarget, key: &str) -> String {
+    if t.is_file() { t.slow_condition_sql(2) } else { t.waits_for_lock_sql(key) }
+}
+
+/// Holds the lock that [`gated`] waits for, until dropped; nothing on a file.
+fn hold_gate(t: &TestTarget, key: &str) -> Option<Held> {
+    t.server().map(|_| t.hold_lock(key).unwrap())
 }
 
 #[test]
@@ -528,12 +540,14 @@ fn reconnect_forgets_the_loads_and_counts_it_cut_off() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
         open_table(s, t.schema("shop"), "orders");
-        let slow = json!({ "raw": t.slow_condition_sql(2), "rawMode": true });
-        let Outcome::Started(load) = s.execute("table.setFilters", slow).unwrap() else { panic!("a job") };
+        let key = unique("dbee_gate");
+        let gate = hold_gate(t, &key);
+        let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": gated(t, &key), "rawMode": true })).unwrap() else {
+            panic!("a job")
+        };
         let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
         let tab = s.inspect()["table"].clone();
         assert_eq!((tab["loading"].as_u64(), &tab["total"]), (Some(load.0), &json!({ "counting": { "estimate": null } })));
-        std::thread::sleep(Duration::from_millis(300));
         run(s, "connection.reconnect", json!({}));
         // Both jobs ran on the connection the reconnect let go: nothing is loading or counting any
         // more, the tab is back to the rows it shows, and there is nothing to cancel.
@@ -543,6 +557,7 @@ fn reconnect_forgets_the_loads_and_counts_it_cut_off() {
             (&Json::Null, &Json::Null, &json!("unknown"), &json!("none"))
         );
         assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": false }));
+        drop(gate);
         assert_eq!(s.wait(load, T).unwrap(), json!({ "ignored": true }));
         assert_eq!(s.wait(count, T).unwrap(), json!({ "ignored": true }));
         assert_eq!((&s.inspect()["table"]["loading"], &s.inspect()["table"]["total"]), (&Json::Null, &json!("unknown")));
@@ -555,15 +570,18 @@ fn a_failed_count_leaves_a_newer_count_alone() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
         open_table(s, t.schema("shop"), "orders");
-        run(s, "table.setFilters", json!({ "raw": t.slow_condition_sql(2), "rawMode": true }));
+        let key = unique("dbee_gate");
+        run(s, "table.setFilters", json!({ "raw": gated(t, &key), "rawMode": true }));
+        let gate = hold_gate(t, &key);
         // `last` counts first; its count is cancelled while a newer count waits behind it.
         let Outcome::Started(last) = s.execute("table.page", json!({ "to": "last" })).unwrap() else { panic!("a job") };
-        std::thread::sleep(Duration::from_millis(300));
+        until_running(t, &key);
         assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
         let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
         assert_eq!(s.wait(last, T).unwrap_err().code(), "cancelled", "{}", t.name());
         let tab = s.inspect()["table"].clone();
         assert_eq!((&tab["total"], tab["counting"].as_u64()), (&json!({ "counting": { "estimate": null } }), Some(count.0)));
+        drop(gate);
         assert_eq!(s.wait(count, T).unwrap()["total"], json!({ "exact": 5000 }));
         assert_eq!(s.inspect()["table"]["counting"], Json::Null);
     });

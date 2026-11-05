@@ -10,7 +10,7 @@ use std::time::Duration;
 use common::*;
 use dbee_core::TableRef;
 use dbee_engine::{EngineError, Json, Outcome, Session, Tab};
-use dbee_testkit::{TestTarget, require_testdb, unique};
+use dbee_testkit::{Held, TestTarget, require_testdb, unique};
 use serde_json::json;
 
 /// `scratch.<u> (id int PK, name text, total numeric(12,2), shipped_at date, flag bool, doc
@@ -54,11 +54,26 @@ fn on_each_table(mut test: impl FnMut(&TestTarget, &str, &mut TestSession)) {
     }
 }
 
-/// Waits until the Apply's update of `name` runs (slowed by [`TestTarget::slow_updates_sql`]). A
-/// file lists no statements: its update gets a moment to start.
-fn until_update_runs(t: &TestTarget, name: &str) {
+/// Keeps the Apply's update of row `id` of `scratch.<name>` from ending by itself: on a server,
+/// another session holds the row until the returned guard drops, so the update waits for it. A
+/// file has no other session: a trigger makes its updates count for about 2 s instead (longer on a
+/// busy machine), and `scratch` drops it.
+fn hold_row(t: &TestTarget, scratch: &mut Scratch<'_>, name: &str, id: u32) -> Option<Held> {
+    let Some(server) = t.server() else {
+        let (slow, cleanup) = t.slow_updates_sql(name, 2);
+        q(t, &slow);
+        scratch.1.insert(0, cleanup);
+        return None;
+    };
+    let sql = format!("SELECT id FROM {}.{name} WHERE id = {id} FOR UPDATE", t.schema("scratch"));
+    Some(dbee_testkit::hold(server, &sql).unwrap())
+}
+
+/// Waits until the Apply's update waits for the row [`hold_row`] holds. A file lists no
+/// statements: its slow update gets a moment to start.
+fn until_update_waits(t: &TestTarget, name: &str) {
     if t.lists_running_statements() {
-        until_sql(t, &t.slow_update_running_sql(name), "1", "the Apply's update to run");
+        until_sql(t, &t.row_lock_waits_sql(name), "1", "the Apply's update to wait for the row");
     } else {
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -562,16 +577,13 @@ fn connection_lost_during_apply_keeps_the_edits() {
             continue;
         }
         let sc = t.schema("scratch");
-        let (name, mut drop) = make_table(&t);
-        // Long enough to act while it runs, also on a busy machine.
-        let (slow, cleanup) = t.slow_updates_sql(&name, 5);
-        q(&t, &slow);
-        drop.1.insert(0, cleanup);
+        let (name, mut scratch) = make_table(&t);
+        let lock = hold_row(&t, &mut scratch, &name, 1);
         let mut s = connected_exclusive_to(&t);
         open_table(&mut s, sc, &name);
         set_cell(&mut s, 0, "name", "lost");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        until_update_runs(&t, &name);
+        until_update_waits(&t, &name);
         kill_dbee_connections(&t, &s);
         let e = s.wait(job, T).unwrap_err();
         assert_eq!(e.code(), "connectionLost", "{}: {e}", t.name());
@@ -588,6 +600,7 @@ fn connection_lost_during_apply_keeps_the_edits() {
         let enabled = |id: &str| infos.iter().find(|c| c.id == id).is_some_and(|c| c.enabled);
         assert!(enabled("edit.reset") && enabled("edit.undo"), "lost: reset and undo stay enabled");
         assert!(!enabled("cell.edit") && !enabled("edit.apply"));
+        drop(lock);
         // Nothing was retried, and the server rolled the transaction back with the connection.
         assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "Alice");
         run(&mut s, "connection.reconnect", json!({}));
@@ -606,15 +619,12 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
     let _db = require_testdb!();
     for t in engine_targets() {
         let sc = t.schema("scratch");
-        let (name, mut drop) = make_table(&t);
-        // Long enough for the reconnect to land while it runs, also on a busy machine.
-        let (slow, cleanup) = t.slow_updates_sql(&name, 5);
-        q(&t, &slow);
-        drop.1.insert(0, cleanup);
+        let (name, mut scratch) = make_table(&t);
+        let lock = hold_row(&t, &mut scratch, &name, 2);
         let mut s = opened(&t, &name);
         set_cell(&mut s, 1, "name", "cut off");
         let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        until_update_runs(&t, &name);
+        until_update_waits(&t, &name);
         run(&mut s, "connection.reconnect", json!({}));
         // The Apply ran on the connection the reconnect let go: its result will be ignored, so the
         // tab cannot know what it wrote.
@@ -625,6 +635,7 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
         assert_eq!(count(&s), 1);
         assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }));
         assert_eq!(count(&s), 1);
+        drop(lock);
         assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 2")), "Bob", "{}: the reconnect cancelled it", t.name());
         assert_eq!(table["failed"]["message"], UNKNOWN);
         assert_eq!((&table["outcomeUnknown"], &read(&mut s)["outcomeUnknown"]), (&json!(true), &json!(true)), "the UI can see why Apply asks");
@@ -653,15 +664,12 @@ fn table_cancel_never_cancels_an_apply() {
     let _db = require_testdb!();
     for t in engine_targets() {
         let sc = t.schema("scratch");
-        let (name, mut drop) = make_table(&t);
-        // Long enough to act while it runs, also on a busy machine.
-        let (slow, cleanup) = t.slow_updates_sql(&name, 5);
-        q(&t, &slow);
-        drop.1.insert(0, cleanup);
+        let (name, mut scratch) = make_table(&t);
+        let lock = hold_row(&t, &mut scratch, &name, 1);
         let mut s = opened(&t, &name);
         set_cell(&mut s, 0, "name", "kept");
         let Outcome::Started(apply) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        until_update_runs(&t, &name);
+        until_update_waits(&t, &name);
         // Another tab's page load waits behind the Apply on the browse connection; cancelling it
         // would cancel the Apply's statement instead.
         let Outcome::Started(load) = s.execute("table.open", json!({ "schema": sc, "table": name })).unwrap() else {
@@ -669,6 +677,7 @@ fn table_cancel_never_cancels_an_apply() {
         };
         let e = refused(&mut s, "table.cancel", json!({}));
         assert_eq!((e.code(), e.to_string().as_str()), ("busy", "busy: apply in progress"));
+        drop(lock);
         assert_eq!(s.wait(apply, T).unwrap()["written"], 1, "{}", t.name());
         assert_eq!(s.wait(load, T).unwrap()["rows"], 3);
         assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "kept");
