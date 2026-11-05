@@ -545,6 +545,24 @@ fn may_reach(s: &Session, config: &ConnectionConfig) -> Result<Option<Vec<PathBu
     Ok(s.allowed_dirs.clone())
 }
 
+/// The tunnel `config` goes through, opened with `creds`: `None` when it has none or its type
+/// takes none.
+async fn open_tunnel(config: &ConnectionConfig, env: &SshEnv, creds: &Credentials) -> Result<Option<Arc<Tunnel>>, EngineError> {
+    match config.ssh.as_ref().filter(|_| config.kind.takes_ssh()) {
+        None => Ok(None),
+        Some(ssh) => Ok(Some(Arc::new(Tunnel::open(ssh, env, &creds.ssh, creds.trust.as_deref()).await.map_err(|e| ssh_error(&e))?))),
+    }
+}
+
+/// A driver's failure to reach the database, as the engine reports it: a refused login without a
+/// password asks for one.
+fn connect_error(e: DbError, creds: &Credentials) -> EngineError {
+    match e {
+        DbError::Auth { .. } if creds.password.is_none() => EngineError::Needs { need: Need::Password, message: e.to_string() },
+        other => db_error(&other),
+    }
+}
+
 /// Opens the tunnel (when the config has one and its type takes one) and a connection through it
 /// with `driver`, which checks a file against `allowed_dirs` (an isolated run's folders) and makes
 /// a missing one only with `create_file`.
@@ -556,10 +574,7 @@ async fn open_connection(
     env: &SshEnv,
     creds: &Credentials,
 ) -> Result<Opened, EngineError> {
-    let tunnel = match config.ssh.as_ref().filter(|_| config.kind.takes_ssh()) {
-        None => None,
-        Some(ssh) => Some(Arc::new(Tunnel::open(ssh, env, &creds.ssh, creds.trust.as_deref()).await.map_err(|e| ssh_error(&e))?)),
-    };
+    let tunnel = open_tunnel(config, env, creds).await?;
     let target = Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file, allowed_dirs };
     match driver.connect(target).await {
         Ok(conn) => Ok(Opened { conn, tunnel }),
@@ -567,10 +582,7 @@ async fn open_connection(
             if let Some(t) = &tunnel {
                 t.close().await;
             }
-            Err(match e {
-                DbError::Auth { .. } if creds.password.is_none() => EngineError::Needs { need: Need::Password, message: e.to_string() },
-                other => db_error(&other),
-            })
+            Err(connect_error(e, creds))
         }
     }
 }
