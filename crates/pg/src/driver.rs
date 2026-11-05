@@ -26,8 +26,11 @@ impl Driver for PgDriver {
         })
     }
 
-    fn list_databases<'a>(&'a self, target: Target<'a>) -> DbFuture<'a, Vec<String>> {
-        Box::pin(catalog::list_databases(target))
+    fn list_connection<'a>(&'a self, target: Target<'a>) -> DbFuture<'a, Option<Arc<dyn Connection>>> {
+        Box::pin(async move {
+            let conn: Arc<dyn Connection> = Arc::new(catalog::list_connection(target).await?);
+            Ok(Some(conn))
+        })
     }
 }
 
@@ -62,6 +65,10 @@ impl Connection for PgConnection {
 
     fn load_catalog(&self) -> DbFuture<'_, Catalog> {
         Box::pin(catalog::load_catalog(self))
+    }
+
+    fn list_databases(&self) -> DbFuture<'_, Vec<String>> {
+        Box::pin(catalog::list_databases(self))
     }
 
     fn apply<'a>(&'a self, statements: &'a [String], gate: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>> {

@@ -10,6 +10,7 @@
 //! real catalog reaches, instead of the 10,000-row query cap: a database with a few hundred
 //! tables already has more columns than that.
 
+use dbee_config::ConnectionConfig;
 use dbee_core::cell::Cell;
 use dbee_core::cell::{ResultSet, TypeClass};
 use dbee_core::schema::{Catalog, ColumnInfo, Generated, RelKind, TableRef};
@@ -127,12 +128,31 @@ async fn run(conn: &PgConnection, sql: &str) -> Result<ResultSet, DbError> {
 /// The databases a connection can open: templates and those that take no connections left out.
 const DATABASES_SQL: &str = "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname";
 
-/// The server's databases, by name, read through the database `target` names; with none, the
-/// default one, as every connect (the one named like the user). The connection closes once they
-/// are read.
-pub async fn list_databases(target: Target<'_>) -> Result<Vec<String>, DbError> {
-    let conn = connect::connect(target).await?;
-    run(&conn, DATABASES_SQL).await?.rows.iter().map(|row| owned(row, 0, "database name")).collect()
+/// The database the list is read through when the server has none named like the user.
+const FALLBACK_DATABASE: &str = "postgres";
+
+/// The connect failed because its database does not exist (SQLSTATE `3D000`).
+fn no_such_database(e: &DbError) -> bool {
+    matches!(e, DbError::Server(s) if s.code == "3D000")
+}
+
+/// A connection to read the server's databases through: to its default database (the one named
+/// like the user), whatever `target` names, or when there is none such, to `postgres`.
+pub async fn list_connection(target: Target<'_>) -> Result<PgConnection, DbError> {
+    let through = |database: &str| ConnectionConfig { database: database.into(), ..target.config.clone() };
+    let default = through("");
+    match connect::connect(Target { config: &default, ..target.clone() }).await {
+        Err(e) if no_such_database(&e) => {
+            let fallback = through(FALLBACK_DATABASE);
+            connect::connect(Target { config: &fallback, ..target }).await
+        }
+        reached => reached,
+    }
+}
+
+/// The server's databases, by name.
+pub async fn list_databases(conn: &PgConnection) -> Result<Vec<String>, DbError> {
+    run(conn, DATABASES_SQL).await?.rows.iter().map(|row| owned(row, 0, "database name")).collect()
 }
 
 /// Load every schema, relation, column and key. User schemas come first by name, then
@@ -215,6 +235,26 @@ pub async fn catalog_rows(conn: &PgConnection) -> Result<CatalogBuilder, DbError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_missing_database_falls_back() {
+        let server = |code: &str| {
+            let e = dbee_driver::ServerError {
+                code: code.into(),
+                code_label: Some("SQLSTATE"),
+                message: "m".into(),
+                detail: None,
+                hint: None,
+                position: None,
+                meaning: None,
+            };
+            DbError::Server(Box::new(e))
+        };
+        assert!(no_such_database(&server("3D000")));
+        for e in [server("28P01"), server("42501"), DbError::Auth { message: "m".into() }, DbError::Connect("3D000".into())] {
+            assert!(!no_such_database(&e), "{e:?}");
+        }
+    }
 
     #[test]
     fn booleans_as_postgres_prints_them() {

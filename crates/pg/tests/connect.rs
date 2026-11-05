@@ -444,31 +444,63 @@ async fn failed_transaction_is_flagged() {
     }
 }
 
-/// The databases a connection may open, through the database the settings name or, with none,
-/// the server's default (the one named like the user, `postgres` here). The listing connection is
-/// gone once the list is read.
+/// The server's databases, read through the connection the driver opens for the list.
+async fn listed(c: &ConnectionConfig, password: &str) -> Result<Vec<String>, DbError> {
+    let conn = PgDriver.list_connection(target(c, Some(password))).await?.expect("Postgres has a database list");
+    conn.list_databases().await
+}
+
+/// The databases a connection may open, read through the server's default database (the one
+/// named like the user, `postgres` here) whatever the settings name: nothing, a database, half a
+/// name, one that is not there.
 #[tokio::test]
 async fn pg_lists_databases() {
     let db = require_testdb!();
-    let listing = "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname";
-    let still_open = format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND query = '{listing}'");
     for s in postgres(db) {
-        for database in ["", "dbee"] {
+        for database in ["", "dbee", "sh", "no_such_database"] {
             let c = ConnectionConfig { database: database.into(), ..config(s, SslMode::Prefer) };
-            let names = PgDriver.list_databases(target(&c, Some(&db.password))).await.unwrap();
+            let names = listed(&c, &db.password).await.unwrap_or_else(|e| panic!("{} {database:?}: {e}", s.name));
             assert!(names.contains(&"dbee".to_string()) && names.contains(&"postgres".to_string()), "{} {database:?}: {names:?}", s.name);
             assert!(!names.iter().any(|n| n.starts_with("template")), "{}: {names:?}", s.name);
             assert!(names.is_sorted(), "{}: {names:?}", s.name);
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while dbee_testkit::psql(s, &still_open).unwrap().trim() != "0" {
-                assert!(Instant::now() < deadline, "{}: the listing connection is still open", s.name);
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
         }
-        // A database that is not there is the server's error, as for a connect.
-        let missing = ConnectionConfig { database: "no_such_database".into(), ..config(s, SslMode::Prefer) };
-        let e = PgDriver.list_databases(target(&missing, Some(&db.password))).await.unwrap_err();
-        assert!(e.to_string().contains("no_such_database"), "{e}");
-        assert_eq!(PgDriver.list_databases(target(&config(s, SslMode::Prefer), Some("nope"))).await.unwrap_err().code(), "auth");
+        assert_eq!(listed(&config(s, SslMode::Prefer), "nope").await.unwrap_err().code(), "auth", "{}", s.name);
+    }
+}
+
+/// Drops a role made for a test when the test ends, also when it fails.
+struct Role<'a>(&'a Server, String);
+
+impl Drop for Role<'_> {
+    fn drop(&mut self) {
+        let _ = dbee_testkit::psql(self.0, &format!("DROP ROLE IF EXISTS {}", self.1));
+    }
+}
+
+/// A user without a database of its own name lists through `postgres`. The listing connection is
+/// gone once it is dropped.
+#[tokio::test]
+async fn pg_lists_through_postgres_when_the_default_database_is_missing() {
+    let db = require_testdb!();
+    const PASSWORD: &str = "dbee-list-pw";
+    for s in postgres(db) {
+        let role = Role(s, unique("dbee_list"));
+        dbee_testkit::psql(s, &format!("CREATE ROLE {} LOGIN PASSWORD '{PASSWORD}'", role.1)).unwrap();
+        let c = ConnectionConfig { user: role.1.clone(), database: String::new(), ..config(s, SslMode::Prefer) };
+        // Its own database is not there, so a connect without a database fails.
+        let e = connect(target(&c, Some(PASSWORD))).await.err().unwrap();
+        assert!(matches!(&e, DbError::Server(e) if e.code == "3D000"), "{}: {e:?}", s.name);
+        let conn = PgDriver.list_connection(target(&c, Some(PASSWORD))).await.unwrap().unwrap();
+        let current = conn.run_untyped("SELECT current_database()", QUERY_LIMITS).await.unwrap();
+        assert_eq!(current.rows[0][0].as_deref(), Some("postgres"), "{}", s.name);
+        let names = conn.list_databases().await.unwrap();
+        assert!(names.contains(&"dbee".to_string()) && names.contains(&"postgres".to_string()), "{}: {names:?}", s.name);
+        drop(conn);
+        let sessions = format!("SELECT count(*) FROM pg_stat_activity WHERE usename = '{}'", role.1);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while dbee_testkit::psql(s, &sessions).unwrap().trim() != "0" {
+            assert!(Instant::now() < deadline, "{}: the listing connection is still open", s.name);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }

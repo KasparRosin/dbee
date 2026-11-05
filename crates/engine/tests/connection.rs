@@ -1368,8 +1368,7 @@ fn list_databases_for_an_unsaved_form() {
     let mut s = session();
     let r = s.run_blocking(LIST, json!({ "config": pg14_config(), "password": pw() }), T).unwrap();
     assert!(r["databases"].as_array().unwrap().iter().any(|d| d == "dbee"), "{r}");
-    // Every server lists the database its seed is in, also with none typed: Postgres reads the list
-    // through its default database (the one named like the user), as a test connects.
+    // Every server lists the database its seed is in, whatever the field holds.
     for t in engine_targets().into_iter().filter(|t| !t.is_file()) {
         let config = ConnectionConfig { database: String::new(), ..config_for(&t) };
         let r = s.run_blocking(LIST, json!({ "config": config, "password": pw() }), T).unwrap();
@@ -1398,13 +1397,39 @@ fn list_databases_respects_allowed_targets() {
         assert_eq!(e.code(), "config", "{e}");
         assert!(e.to_string().contains("this isolated run may only connect to the test servers"), "{e}");
         assert!(!s.busy());
-        // Through a tunnel, the SSH server's target counts.
-        let tunnelled = json!({ "config": via_ssh(SshAuth::Key { path: None }), "password": pw() });
-        assert_eq!(s.execute(LIST, tunnelled).unwrap_err().code(), "config");
-        assert!(!s.busy());
     }
     let mut s = session_adjusted(|o| o.allowed_targets = Some(vec![("127.0.0.1".into(), pg14().port)]));
     assert!(names(&s.run_blocking(LIST, params, T).unwrap()).contains(&"dbee"));
+    // Through a tunnel, the SSH server's target counts, not the database host behind it (`pg14:5432`,
+    // which the sshd resolves).
+    let db = db();
+    let config = via_ssh(SshAuth::Key { path: None });
+    let tunnelled = json!({ "config": config, "password": pw() });
+    let home = || temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
+    {
+        let behind = (config.host.clone(), config.port);
+        let mut s = session_in_adjusted(home(), |o| o.allowed_targets = Some(vec![behind]));
+        let e = s.execute(LIST, tunnelled.clone()).unwrap_err();
+        assert!(e.code() == "config" && e.to_string().contains("the SSH server"), "{e}");
+        assert!(!s.busy());
+    }
+    let mut s = session_in_adjusted(home(), |o| o.allowed_targets = Some(vec![("127.0.0.1".into(), db.sshd.port)]));
+    assert!(names(&s.run_blocking(LIST, tunnelled, T).unwrap()).contains(&"dbee"), "only the SSH server is allowed, and it lists");
+}
+
+/// The Database field may hold anything when the list is asked for: Postgres still lists, through
+/// the server's default database.
+#[test]
+fn a_half_typed_database_still_lists() {
+    let _db = require_testdb!();
+    let mut s = session();
+    for server in [pg14(), pgnew()] {
+        for database in ["sh", "no_such_database"] {
+            let config = ConnectionConfig { database: database.into(), ..server_config(server) };
+            let r = s.run_blocking(LIST, json!({ "config": config, "password": pw() }), T).unwrap();
+            assert!(names(&r).contains(&"dbee") && names(&r).contains(&"postgres"), "{} {database:?}: {r}", server.name);
+        }
+    }
 }
 
 #[test]

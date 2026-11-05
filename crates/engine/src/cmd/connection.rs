@@ -54,7 +54,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SslMode, new_id, parse_url};
 use dbee_core::Catalog;
-use dbee_driver::{CONNECT_TIMEOUT, Cancel, Connection, DbError, Driver, Drivers, Purpose, Target};
+use dbee_driver::{Cancel, Connection, DbError, DbFuture, Driver, Drivers, Purpose, Target};
 use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
@@ -242,9 +242,6 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// After a timed-out catalog load is cancelled, how long it gets to end before it is given up.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
-
-/// The longest a database list may take: the connect, then a read bounded as a catalog's is.
-const LIST_TIMEOUT: Duration = CONNECT_TIMEOUT.saturating_add(CATALOG_TIMEOUT);
 
 // ---- params ----------------------------------------------------------------------------------
 
@@ -604,9 +601,10 @@ async fn open_connection(
     }
 }
 
-/// The databases `driver` lists on `config`'s server, through the tunnel when there is one (closed
-/// again afterwards), within [`LIST_TIMEOUT`]; with why a host key the user trusted was not saved,
-/// when it was not.
+/// The databases `driver` lists on `config`'s server, through the tunnel when there is one, with
+/// why a host key the user trusted was not saved, when it was not. The driver's connect is bounded
+/// by its own timeout and the read by [`CATALOG_TIMEOUT`], past which it is cancelled as a catalog
+/// read is. The connection, then the tunnel, close before this returns.
 async fn list_on(
     driver: &dyn Driver,
     config: &ConnectionConfig,
@@ -617,45 +615,52 @@ async fn list_on(
     let tunnel = open_tunnel(config, env, creds).await?;
     let target =
         Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file: false, allowed_dirs };
-    let listed = tokio::time::timeout(LIST_TIMEOUT, driver.list_databases(target)).await;
+    let listed = match driver.list_connection(target).await {
+        Ok(None) => Ok(Vec::new()),
+        Ok(Some(conn)) => read_within(conn.as_ref(), CATALOG_TIMEOUT, conn.list_databases()).await.map_err(|e| match e {
+            CatalogLoad::Failed(e) => db_error(&e),
+            CatalogLoad::TimedOut => EngineError::Db {
+                code: "timeout",
+                message: format!("the server did not list its databases within {} s", CATALOG_TIMEOUT.as_secs()),
+                data: json!({}),
+            },
+        }),
+        Err(e) => Err(connect_error(e, creds)),
+    };
     let unsaved = unsaved_host_key(tunnel.as_ref());
     if let Some(t) = tunnel {
         t.close().await;
     }
-    match listed {
-        Ok(Ok(names)) => Ok((names, unsaved)),
-        Ok(Err(e)) => Err(connect_error(e, creds)),
-        Err(_) => Err(EngineError::Db {
-            code: "timeout",
-            message: format!("the server did not list its databases within {} s", LIST_TIMEOUT.as_secs()),
-            data: json!({}),
-        }),
-    }
+    listed.map(|names| (names, unsaved))
 }
 
-/// Why a bounded catalog load gave no catalog.
+/// Why a bounded catalog read (the catalog, the database list) gave nothing.
 enum CatalogLoad {
     Failed(DbError),
     /// It took longer than its limit; it was cancelled, and the connection must be discarded.
     TimedOut,
 }
 
-/// The connection's catalog, bounded by `limit`. Past it the statement is cancelled through the
-/// connection's `Cancel` and the load gets [`CANCEL_GRACE`] to end (its result is discarded
-/// either way); then it is `TimedOut`, and the caller discards the connection.
-async fn load_catalog_within(conn: &dyn Connection, limit: Duration) -> Result<Catalog, CatalogLoad> {
-    let mut load = conn.load_catalog();
-    match tokio::time::timeout(limit, &mut load).await {
+/// `read`, a catalog read on `conn`, bounded by `limit`. Past it the statement is cancelled
+/// through the connection's `Cancel` and the read gets [`CANCEL_GRACE`] to end (its result is
+/// discarded either way); then it is `TimedOut`, and the caller discards the connection.
+async fn read_within<T>(conn: &dyn Connection, limit: Duration, mut read: DbFuture<'_, T>) -> Result<T, CatalogLoad> {
+    match tokio::time::timeout(limit, &mut read).await {
         Ok(result) => result.map_err(CatalogLoad::Failed),
         Err(_) => {
-            log::info!("the catalog did not load within {} s; cancelling it", limit.as_secs());
+            log::info!("a catalog read did not end within {} s; cancelling it", limit.as_secs());
             if conn.canceller().cancel().await.is_err() {
                 log::info!("the cancel request was not delivered");
             }
-            let _ = tokio::time::timeout(CANCEL_GRACE, &mut load).await;
+            let _ = tokio::time::timeout(CANCEL_GRACE, &mut read).await;
             Err(CatalogLoad::TimedOut)
         }
     }
+}
+
+/// The connection's catalog, bounded by `limit` ([`read_within`]).
+async fn load_catalog_within(conn: &dyn Connection, limit: Duration) -> Result<Catalog, CatalogLoad> {
+    read_within(conn, limit, conn.load_catalog()).await
 }
 
 /// A refresh whose catalog load timed out: its connection was discarded and the session is lost,

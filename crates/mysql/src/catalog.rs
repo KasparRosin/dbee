@@ -159,18 +159,22 @@ fn system_last(mut names: Vec<String>) -> Vec<String> {
     names
 }
 
-/// The databases the server shows the user, its own last, through a connection with no database,
-/// whatever `target` names. The connection closes once they are read.
-pub async fn list_databases(target: Target<'_>) -> Result<Vec<String>, DbError> {
+/// A connection to read the server's databases through: one with no database, whatever `target`
+/// names.
+pub async fn list_connection(target: Target<'_>) -> Result<MySqlConnection, DbError> {
     let config = ConnectionConfig { database: String::new(), ..target.config.clone() };
-    let conn = connect::connect(Target { config: &config, ..target }).await?;
-    let listed = conn.catalog_query("SHOW DATABASES").await?;
-    Ok(system_last(listed.rows.iter().map(|row| owned(row, 0, "database name")).collect::<Result<_, _>>()?))
+    connect::connect(Target { config: &config, ..target }).await
 }
 
 impl MySqlConnection {
     async fn catalog_query(&self, sql: &str) -> Result<ResultSet, DbError> {
         require_complete(self.run_untyped(sql, CATALOG_LIMITS).await?)
+    }
+
+    /// The databases the server shows the user, its own last.
+    pub async fn list_databases(&self) -> Result<Vec<String>, DbError> {
+        let listed = self.catalog_query("SHOW DATABASES").await?;
+        Ok(system_last(listed.rows.iter().map(|row| owned(row, 0, "database name")).collect::<Result<_, _>>()?))
     }
 
     /// Load every database, table, view, column and key, or only the database the settings

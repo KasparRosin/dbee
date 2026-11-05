@@ -98,11 +98,11 @@ pub trait Driver: Send + Sync + 'static {
     fn kinds(&self) -> &'static [DbKind];
     fn connect<'a>(&'a self, target: Target<'a>) -> DbFuture<'a, Arc<dyn Connection>>;
 
-    /// The databases of the server `target` reaches, to choose one from: it connects as the
-    /// driver's list needs, reads them and closes the connection. A driver whose connection is
-    /// one database lists none.
-    fn list_databases<'a>(&'a self, _target: Target<'a>) -> DbFuture<'a, Vec<String>> {
-        Box::pin(async { Ok(Vec::new()) })
+    /// A connection to read the server's databases through ([`Connection::list_databases`]),
+    /// opened as the driver's list needs, whatever database `target` names. `None` for a driver
+    /// whose connection is one database, which has no list.
+    fn list_connection<'a>(&'a self, _target: Target<'a>) -> DbFuture<'a, Option<Arc<dyn Connection>>> {
+        Box::pin(async { Ok(None) })
     }
 }
 
@@ -122,6 +122,11 @@ pub trait Connection: Send + Sync + 'static {
     /// The first cell of the first row as an unsigned integer (a count).
     fn scalar_u64<'a>(&'a self, sql: &'a str) -> DbFuture<'a, u64>;
     fn load_catalog(&self) -> DbFuture<'_, Catalog>;
+    /// The databases of the server this connection reached, by name, to choose one from. A
+    /// connection that is one database lists none.
+    fn list_databases(&self) -> DbFuture<'_, Vec<String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     /// All or nothing; each statement must change exactly one row. Stops before COMMIT if `gate` is cancelled.
     fn apply<'a>(&'a self, statements: &'a [String], gate: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>>;
 }
@@ -163,7 +168,7 @@ mod tests {
         use futures_util::FutureExt as _;
         let config = ConnectionConfig::default();
         let target = Target { config: &config, password: None, tunnel: None, purpose: Purpose::Browse, create_file: false, allowed_dirs: None };
-        assert_eq!(Silent.list_databases(target).now_or_never(), Some(Ok(Vec::new())));
+        assert!(matches!(Silent.list_connection(target).now_or_never(), Some(Ok(None))));
     }
 
     #[test]

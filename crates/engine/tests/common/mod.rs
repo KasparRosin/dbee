@@ -107,6 +107,11 @@ pub fn session_adjusted(adjust: impl FnOnce(&mut SessionOptions)) -> TestSession
     session_with(temp_home(None, None), false, adjust)
 }
 
+/// A session on `home` whose options `adjust` changes.
+pub fn session_in_adjusted(home: TempHome, adjust: impl FnOnce(&mut SessionOptions)) -> TestSession {
+    session_with(home, false, adjust)
+}
+
 /// A session that no other test of this binary runs beside; needed by [`kill_dbee_connections`].
 pub fn exclusive_session() -> TestSession {
     session_with(temp_home(None, None), true, |_| {})
