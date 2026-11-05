@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::*;
-use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SshConfig};
+use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SshConfig, SslMode};
 use dbee_driver::Drivers;
 use dbee_testkit::{TempHome, TestDb, temp_home};
 use serde_json::{Value as Json, json};
@@ -289,6 +289,83 @@ fn cards_name_the_type() {
     assert_eq!(ui.value(&format!("{file}-kind")), "SQLite");
     let pg = ui.save(&silent_config(1), None);
     assert_eq!(ui.value(&format!("{pg}-kind")), "PostgreSQL");
+}
+
+#[test]
+fn the_filter_finds_what_the_cards_show() {
+    let mut ui = cards();
+    let maria = ui.save(&server_of(DbKind::MariaDb, "Shop"), None);
+    // A file connection saved with a server's leftover host.
+    let file = ui.save(&ConnectionConfig { host: "localhost".into(), ..file_of("/data/files/orders.sqlite", "Orders") }, None);
+    ui.click("conn-filter");
+    for (q, shown) in [
+        ("mariadb", [true, false]),
+        ("data/files", [false, true]),
+        ("sqlite", [false, true]),
+        ("127.0.0.1", [true, false]),
+        ("localhost", [false, false]),
+    ] {
+        ui.replace("conn-filter", q);
+        let i = ui.inspect();
+        assert_eq!([tag_in(&i, &maria).is_some(), tag_in(&i, &file).is_some()], shown, "filter {q:?}");
+    }
+}
+
+#[test]
+fn a_saved_config_holds_only_what_its_type_uses() {
+    let mut ui = cards();
+    // A SQLite connection saved with a server's leftovers, then saved again from the form.
+    let leftovers =
+        ConnectionConfig { host: "localhost".into(), user: "ann".into(), ssl_mode: SslMode::Require, ..file_of("/data/shop.sqlite", "Shop file") };
+    let card = ui.save(&leftovers, None);
+    ui.click(&card);
+    ui.click("conn-save");
+    let list = ui.execute("connection.list", json!({}));
+    let saved = &list["saved"][0];
+    assert_eq!((&saved["host"], &saved["port"], &saved["user"], &saved["sslMode"]), (&json!(""), &json!(0), &json!(""), &json!("prefer")), "{saved}");
+    assert_eq!(saved["file"], "/data/shop.sqlite");
+    // Its copy made a PostgreSQL connection keeps no file, and no MySQL option it once had.
+    ui.right_click(&card);
+    ui.click("conn-menu-duplicate");
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-mysql");
+    ui.click("conn-option-allowPublicKey");
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "db.example");
+    ui.replace("conn-port", "5432");
+    ui.click("conn-save");
+    let id = ui.saved_id("Shop file (copy)");
+    let list = ui.execute("connection.list", json!({}));
+    let copy = list["saved"].as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).unwrap().clone();
+    assert_eq!((&copy["kind"], &copy["host"], &copy["file"]), (&json!("postgres"), &json!("db.example"), &Json::Null), "{copy}");
+    assert!(copy.get("options").is_none(), "{copy}");
+}
+
+#[test]
+fn only_a_connection_opened_from_the_list_has_its_type_fixed() {
+    let mut ui = ui();
+    ui.click("conn-name");
+    ui.text("Mid edit");
+    ui.click("conn-save");
+    assert!(ui.tag("conn-change-engine").is_some(), "saved during this edit, its type can still change");
+    // Saving after Change engine changes the saved connection's type.
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-mariadb");
+    ui.click("conn-save");
+    let id = ui.saved_id("Mid edit");
+    let list = ui.execute("connection.list", json!({}));
+    assert_eq!(list["saved"].as_array().unwrap().len(), 1, "{list}");
+    assert_eq!((&list["saved"][0]["kind"], &list["saved"][0]["port"]), (&json!("mariadb"), &json!(3306)), "{list}");
+    // Opened from the list, its type is fixed.
+    let card = format!("conn-saved-{id}");
+    ui.click(&card);
+    assert!(ui.tag("conn-change-engine").is_none());
+    // A duplicate is a new connection.
+    ui.right_click(&card);
+    ui.click("conn-menu-duplicate");
+    assert_eq!(ui.value("conn-name"), "Mid edit (copy)");
+    assert!(ui.tag("conn-change-engine").is_some());
 }
 
 #[test]

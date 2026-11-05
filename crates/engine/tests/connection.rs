@@ -997,8 +997,28 @@ fn isolated_runs_refuse_files_outside_allowed_dirs() {
                     assert_eq!(e.to_string(), format!("this isolated run may only open files in its own folders; {} is not in them", path.display()));
                 }
             }
+            // Asked to make a file, it makes none outside them either, also behind a folder that
+            // links out.
+            let mut asked = vec![missing.clone()];
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&folder, other.0.join("out")).unwrap();
+                asked.push(other.0.join("out").join(format!("{}.sqlite", unique("made"))));
+            }
+            for path in &asked {
+                for id in ["connection.test", "connection.open"] {
+                    let mut p = params(path);
+                    p["createFile"] = json!(true);
+                    let e = run_err(&mut s, id, p);
+                    assert_eq!(e.code(), "config", "{id} {}: {e}", path.display());
+                }
+            }
             assert_eq!((&s.inspect()["screen"], &s.inspect()["connection"]), (&json!("connections"), &Json::Null));
             assert!(!missing.exists(), "no file was made");
+            for path in &asked {
+                let behind = folder.join(path.file_name().unwrap());
+                assert!(!behind.exists(), "no file was made behind the link: {}", behind.display());
+            }
         }
         {
             // The copy's folder allowed: it opens.
@@ -1084,6 +1104,12 @@ fn create_file_makes_a_missing_file_only_when_asked() {
         assert!(!file.exists(), "{id}: nothing is made unasked");
         let e = s.execute(id, json!({ "config": config, "createFile": "yes" })).unwrap_err();
         assert_eq!(e.code(), "badParams", "{id}: {e}");
+        // A read-only connection makes no file: refused before anything runs, in plain words.
+        let read_only = json!({ "kind": "sqlite", "file": file, "readOnly": true });
+        let e = s.execute(id, json!({ "config": read_only, "createFile": true })).unwrap_err();
+        assert_eq!(e.code(), "badParams", "{id}: {e}");
+        assert!(e.to_string().ends_with(": A read-only connection can't make a new file. Untick Read-only for the first connect."), "{id}: {e}");
+        assert!(!file.exists() && !s.busy(), "{id}");
         s.run_blocking(id, json!({ "config": config, "createFile": true }), T).unwrap();
         assert!(file.is_file(), "{id}: an empty file, which SQLite takes as an empty database");
         if id == "connection.open" {

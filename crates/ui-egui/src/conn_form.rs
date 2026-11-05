@@ -57,8 +57,11 @@ pub(crate) struct Form {
     pub kind: DbKind,
     /// A file type's database file.
     pub file: Option<PathBuf>,
-    /// New file… chose `file`: the next test or open asks for it to be made.
+    /// New file… chose `file`: every test and connect asks for it to be made, until a connect
+    /// succeeds.
     pub create_file: bool,
+    /// Opened from the saved list or Recent: its database type is fixed text (design E2).
+    pub engine_fixed: bool,
     pub color: ConnectionColor,
     pub host: String,
     pub port: String,
@@ -128,6 +131,7 @@ impl Form {
             kind: c.kind,
             file: c.file.clone(),
             create_file: false,
+            engine_fixed: false,
             color: c.color,
             host: c.host.clone(),
             port: if c.port == 0 { String::new() } else { c.port.to_string() },
@@ -158,13 +162,22 @@ impl Form {
         }
     }
 
-    /// The connection the form describes, or why it is not usable yet.
+    /// The connection the form describes, or why it is not usable yet. It holds only what its
+    /// type's settings use: a server's host, port, user and database (the TLS fields when it takes
+    /// TLS, the tunnel when it takes one), a file type's file; and of the options, the type's own
+    /// and those no type of this build knows. The form keeps the rest for a switch back.
     pub(crate) fn to_config(&self) -> Result<ConnectionConfig, String> {
-        let port = match parse_port(&self.port) {
-            Some(p) => p,
-            None if self.kind.uses_file() => 0,
-            None => return Err("The port must be a number from 1 to 65535.".into()),
+        let settings = self.kind.info().settings;
+        let (server, tls) = match settings {
+            Settings::Server { tls, .. } => (true, tls),
+            Settings::File { .. } => (false, false),
         };
+        let port = match parse_port(&self.port) {
+            Some(p) if server => p,
+            _ if !server => 0,
+            _ => return Err("The port must be a number from 1 to 65535.".into()),
+        };
+        let text = |s: &str| if server { s.trim().to_string() } else { String::new() };
         let ssh = if self.ssh_on && self.kind.takes_ssh() {
             let port = parse_port(&self.ssh_port).ok_or("The SSH port must be a number from 1 to 65535.")?;
             Some(SshConfig { host: self.ssh_host.trim().into(), port, user: self.ssh_user.trim().into(), auth: self.ssh_auth() })
@@ -175,18 +188,18 @@ impl Form {
             id: self.id.clone(),
             name: self.name.trim().into(),
             kind: self.kind,
-            file: self.file.clone(),
+            file: if server { None } else { self.file.clone() },
             color: self.color,
-            host: self.host.trim().into(),
+            host: text(&self.host),
             port,
-            user: self.user.trim().into(),
-            database: self.database.trim().into(),
-            ssl_mode: self.ssl_mode,
-            ca_file: self.ca_file.clone(),
+            user: text(&self.user),
+            database: text(&self.database),
+            ssl_mode: if tls { self.ssl_mode } else { SslMode::default() },
+            ca_file: if tls { self.ca_file.clone() } else { None },
             ssh,
             read_only: self.read_only,
             save_secrets: self.save_secrets,
-            options: self.options.clone(),
+            options: self.options_of_kind(),
         };
         config.validate().map_err(|e| e.to_string())?;
         Ok(config)
@@ -212,18 +225,25 @@ impl Form {
         }
     }
 
-    /// A saved or recent connection keeps its database type: the form shows it as fixed text.
-    pub(crate) fn engine_fixed(&self) -> bool {
-        !self.id.is_empty()
+    /// The options a config of the form's type keeps: the type's own, and keys no type of this
+    /// build knows (a later build's).
+    fn options_of_kind(&self) -> BTreeMap<String, String> {
+        let own = |id: &str| self.kind.info().options.iter().any(|o| o.id == id);
+        let known = |id: &str| DbKind::ALL.iter().any(|k| k.info().options.iter().any(|o| o.id == id));
+        self.options.iter().filter(|(id, _)| own(id) || !known(id)).map(|(id, v)| (id.clone(), v.clone())).collect()
     }
 
     /// Makes the form one of type `to`. Everything typed stays; a port that still holds the old
-    /// type's default becomes the new one's.
+    /// type's default becomes the new one's. Another type forgets New file….
     pub(crate) fn switch_kind(&mut self, to: DbKind) {
+        if to == self.kind {
+            return;
+        }
         if self.port.trim() == default_port(self.kind) {
             self.port = default_port(to);
         }
         self.kind = to;
+        self.create_file = false;
     }
 
     /// The type's option `id` is on.
@@ -343,7 +363,7 @@ pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool
             acts.push(Act::FillFromUrl);
         }
         if form {
-            let fixed = conn.form.engine_fixed();
+            let fixed = conn.form.engine_fixed;
             if !fixed && side_button(ui, tags, "conn-change-engine", "Change engine", conn.running.is_none()) {
                 acts.push(Act::ChangeEngine);
             }
@@ -782,5 +802,31 @@ mod tests {
         f.set_option(dbee_config::ALLOW_PUBLIC_KEY.id, false);
         assert!(!f.option_on(dbee_config::ALLOW_PUBLIC_KEY.id));
         assert_eq!(f.options.keys().collect::<Vec<_>>(), ["aLaterOption"], "unknown keys stay");
+    }
+
+    #[test]
+    fn a_config_holds_only_what_its_type_uses() {
+        let mut f = Form::new(true);
+        f.name = "Shop".into();
+        f.user = "ann".into();
+        f.database = "shop".into();
+        f.file = Some(PathBuf::from("/x/shop.sqlite"));
+        f.ca_file = Some(PathBuf::from("/x/ca.pem"));
+        f.ssl_mode = SslMode::Require;
+        f.options.insert(dbee_config::ALLOW_PUBLIC_KEY.id.into(), "true".into());
+        f.options.insert("aLaterOption".into(), "x".into());
+        f.switch_kind(DbKind::Sqlite);
+        let file = f.to_config().unwrap();
+        assert_eq!((file.host.as_str(), file.port, file.user.as_str(), file.database.as_str()), ("", 0, "", ""));
+        assert_eq!((file.ssl_mode, file.ca_file, file.ssh, file.file.as_deref()), (SslMode::default(), None, None, f.file.as_deref()));
+        assert_eq!(file.options.keys().collect::<Vec<_>>(), ["aLaterOption"], "another type's option goes, a later one stays");
+        f.switch_kind(DbKind::Postgres);
+        let server = f.to_config().unwrap();
+        assert_eq!((server.host.as_str(), server.user.as_str(), server.ssl_mode, server.file), ("localhost", "ann", SslMode::Require, None));
+        assert_eq!(server.ca_file.as_deref(), f.ca_file.as_deref());
+        assert_eq!(server.options.keys().collect::<Vec<_>>(), ["aLaterOption"]);
+        f.switch_kind(DbKind::MySql);
+        assert_eq!(f.to_config().unwrap().options.len(), 2, "MySQL keeps its own");
+        assert!(f.file.is_some() && f.options.len() == 2, "the form keeps everything for a switch back");
     }
 }

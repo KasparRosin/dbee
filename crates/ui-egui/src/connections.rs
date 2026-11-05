@@ -10,8 +10,10 @@
 //!   (not in the session's `kinds`) is greyed with "Upcoming" and cannot be chosen. A card, or a
 //!   URL (its scheme names the type), opens the form, and the title row gains the type and Change
 //!   engine, which goes back to the cards (the form keeps what was typed, and a port that still
-//!   holds the old type's default takes the new one's). A saved or recent connection opens
-//!   straight into the form, its type fixed; Fill from URL then takes that type's URLs only.
+//!   holds the old type's default takes the new one's; not while a test or connect runs). A
+//!   connection opened from the saved list or Recent opens straight into the form, its type fixed;
+//!   Fill from URL then takes that type's URLs only. One saved during the edit, or a Duplicate,
+//!   keeps Change engine.
 //! - The form ([`crate::conn_form`]) has the rows of the type's settings, then Save · Test ·
 //!   Connect at the bottom, and under them a reserved slot for the error or the test result.
 //!   Every row has a fixed height, so typing, a message or another login choice never moves the
@@ -25,8 +27,9 @@
 //!   under the buttons with the server's message.
 //! - The file pickers ("Change…" for the key, "Choose…" for the CA file, "Choose…" and "New file…"
 //!   for a database file) run rfd on a thread of their own and send the path back; a picker that
-//!   cannot open leaves a note in its row ([`crate::picker`]). New file… makes the next test or
-//!   connect ask for the file to be made (`createFile`), once.
+//!   cannot open leaves a note in its row ([`crate::picker`]). After New file…, every test and
+//!   connect asks for the file to be made (`createFile`) until a connect succeeds; Choose…,
+//!   another connection or another type forget it.
 //!
 //! The form (its fields, their validation, and drawing it) is [`crate::conn_form`]; this module
 //! draws the screen around it and acts on both.
@@ -152,20 +155,23 @@ impl ConnScreen {
         self.forget_shown();
     }
 
-    /// The form shows another connection: its message and key line are gone.
+    /// The form shows another connection, or another type: its message and key line are gone, and
+    /// a late result of what ran before does not show.
     fn forget_shown(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.message = None;
         self.key.for_auth = None;
     }
 
-    /// Loads `c` into the form. The same connection again keeps the typed password and what the
-    /// form shows under its buttons.
-    fn load(&mut self, c: &ConnectionConfig) {
+    /// Loads `c` into the form, its type fixed when it was opened from the saved list or Recent
+    /// (`fixed`). The same connection again keeps the typed password and what the form shows under
+    /// its buttons.
+    fn load(&mut self, c: &ConnectionConfig, fixed: bool) {
         let same = !c.id.is_empty() && c.id == self.form.id;
         let password = if same { std::mem::take(&mut self.form.password) } else { String::new() };
         self.form = Form::from_config(c);
         self.form.password = password;
+        self.form.engine_fixed = fixed;
         self.step = Step::Form;
         if same {
             self.key.for_auth = None;
@@ -245,6 +251,8 @@ pub(crate) fn form_done(
             TEST => conn.message = Some(Message { kind: Kind::Result, text: test_text(&v) }),
             OPEN => {
                 conn.message = None;
+                // The file is there now.
+                conn.form.create_file = false;
                 if let Some(note) = v.get("secretsNote").and_then(Json::as_str) {
                     app.notice(format!("The password was not saved: {note}"));
                 }
@@ -316,16 +324,18 @@ pub(crate) fn key_line_done(app: &mut DbeeApp, job: Option<JobId>, result: Resul
 /// The database types whose URLs can fill the form: those of the session's `kinds` that have a
 /// URL, and of them only the form's own once its type is fixed.
 pub(crate) fn url_kinds(form: &Form, kinds: &[DbKind]) -> Vec<DbKind> {
-    kinds.iter().copied().filter(|k| !k.info().url_schemes.is_empty() && (!form.engine_fixed() || *k == form.kind)).collect()
+    kinds.iter().copied().filter(|k| !k.info().url_schemes.is_empty() && (!form.engine_fixed || *k == form.kind)).collect()
 }
 
 /// Fills the form from `connection.parseUrl`'s result: the type its scheme names, and the parts
 /// the URL has. The form shows, past the engine cards.
 pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json) {
-    let form = &mut app.view.conn.form;
-    if let Some(kind) = parts.get("kind").and_then(Json::as_str).and_then(DbKind::from_id) {
-        form.switch_kind(kind);
+    let conn = &mut app.view.conn;
+    if let Some(kind) = parts.get("kind").and_then(Json::as_str).and_then(DbKind::from_id).filter(|k| *k != conn.form.kind) {
+        conn.form.switch_kind(kind);
+        conn.forget_shown();
     }
+    let form = &mut conn.form;
     let text = |k: &str| parts.get(k).and_then(Json::as_str).map(str::to_string);
     if let Some(v) = text("host") {
         form.host = v;
@@ -433,25 +443,31 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
     match act {
         Act::New => app.view.conn.new_connection(),
         Act::ChooseKind(kind) => {
-            if app.session.kinds().contains(&kind) {
-                app.view.conn.form.switch_kind(kind);
-                app.view.conn.step = Step::Form;
+            let conn = &mut app.view.conn;
+            if !conn.form.engine_fixed && app.session.kinds().contains(&kind) {
+                if kind != conn.form.kind {
+                    conn.form.switch_kind(kind);
+                    conn.forget_shown();
+                }
+                conn.step = Step::Form;
             }
         }
-        Act::ChangeEngine => app.view.conn.step = Step::Engines,
-        Act::Load(c) => app.view.conn.load(&c),
+        Act::ChangeEngine if !app.view.conn.form.engine_fixed && !busy => app.view.conn.step = Step::Engines,
+        Act::ChangeEngine => {}
+        Act::Load(c) => app.view.conn.load(&c, true),
         Act::Connect(c) => {
             // While a test or connect runs, a double-click starts nothing more.
             if !busy {
-                app.view.conn.load(&c);
+                app.view.conn.load(&c, true);
                 run_form(app, OPEN);
             }
         }
         Act::Duplicate(id) => match app.run(DUPLICATE, json!({ "id": id })) {
             Ok(dbee_engine::Outcome::Done(v)) => {
                 let copy = v.get("id").and_then(Json::as_str).and_then(|id| app.session.state().store.get(id)).cloned();
+                // A copy is a new connection: its type can still change.
                 if let Some(c) = copy {
-                    app.view.conn.load(&c);
+                    app.view.conn.load(&c, false);
                 }
             }
             Ok(_) => {}
@@ -488,11 +504,7 @@ fn run_form(app: &mut DbeeApp, command: &'static str) {
     // Only a server takes a password; one typed for another type stays in the form.
     let password = if config.kind.uses_file() { String::new() } else { conn.form.password.clone() };
     let typed = !password.is_empty();
-    // New file…: the next test or open asks for the file to be made, once.
-    let create_file = conn.form.create_file && command != SAVE;
-    if create_file {
-        conn.form.create_file = false;
-    }
+    let create_file = conn.form.create_file && config.kind.uses_file() && command != SAVE;
     let saved = !config.id.is_empty() && app.session.state().store.saved.iter().any(|c| c.id == config.id);
     let conn = &app.view.conn;
     let mut params = json!({ "config": config });
@@ -519,13 +531,21 @@ fn run_form(app: &mut DbeeApp, command: &'static str) {
 
 // ---- drawing ---------------------------------------------------------------------------------
 
-/// Whether `c` matches the filter `q` (lower case): its name, host, user, database or SSH host.
+/// Whether `c` matches the filter `q` (lower case) by what its card shows: its name and its type's
+/// label; a server's host, user, database and SSH host, or a file type's path.
 fn matches(c: &ConnectionConfig, q: &str) -> bool {
     if q.is_empty() {
         return true;
     }
-    let ssh_host = c.ssh.as_ref().map(|s| s.host.as_str()).unwrap_or_default();
-    [c.display_name().as_str(), c.host.as_str(), c.user.as_str(), c.database.as_str(), ssh_host].iter().any(|f| f.to_lowercase().contains(q))
+    let mut shown = vec![c.display_name(), c.kind.label().to_string()];
+    match c.kind.info().settings {
+        Settings::Server { .. } => {
+            shown.extend([c.host.clone(), c.user.clone(), c.database.clone()]);
+            shown.extend(c.ssh.as_ref().filter(|_| c.kind.takes_ssh()).map(|s| s.host.clone()));
+        }
+        Settings::File { .. } => shown.extend(c.file.as_ref().map(|f| f.display().to_string())),
+    }
+    shown.iter().any(|f| f.to_lowercase().contains(q))
 }
 
 /// `3 min ago` for a Unix time.
@@ -915,31 +935,52 @@ mod tests {
     }
 
     #[test]
-    fn new_file_makes_the_next_test_or_open_create_it_once() {
+    fn new_file_is_asked_for_until_a_connect_succeeds() {
         let (mut app, home) = app_with_drivers();
         let ctx = egui::Context::default();
         apply(&mut app, Act::ChooseKind(DbKind::Sqlite), &ctx);
         let file = home.home.join("new.sqlite");
-        let pick = |app: &mut DbeeApp, target: Pick, path: &std::path::Path| {
+        let pick = |app: &mut DbeeApp, target: Pick| {
             let (tx, picker) = Picker::for_test(target, app.view.conn.generation);
             app.view.conn.picker = Some(picker);
-            tx.send(Some(path.to_path_buf())).unwrap();
+            tx.send(Some(file.clone())).unwrap();
             frame(app, &ctx);
             assert!(app.view.conn.picker.is_none());
         };
-        // Choose… takes a file as it is; New file… asks for it to be made.
-        pick(&mut app, Pick::NewFile, &file);
-        pick(&mut app, Pick::File, &file);
-        assert_eq!((app.view.conn.form.file.as_deref(), app.view.conn.form.create_file), (Some(file.as_path()), false));
-        pick(&mut app, Pick::NewFile, &file);
-        assert_eq!((app.view.conn.form.file.as_deref(), app.view.conn.form.create_file), (Some(file.as_path()), true));
-        // Saving makes no file, and keeps the ask for the next test or open.
+        let asks = |app: &DbeeApp| app.view.conn.form.create_file;
+        // Choose… takes a file as it is; New file… asks for it to be made; another type forgets it.
+        pick(&mut app, Pick::NewFile);
+        pick(&mut app, Pick::File);
+        assert_eq!((app.view.conn.form.file.as_deref(), asks(&app)), (Some(file.as_path()), false));
+        pick(&mut app, Pick::NewFile);
+        assert!(asks(&app));
+        apply(&mut app, Act::ChangeEngine, &ctx);
+        apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
+        apply(&mut app, Act::ChangeEngine, &ctx);
+        apply(&mut app, Act::ChooseKind(DbKind::Sqlite), &ctx);
+        assert!(!asks(&app) && app.view.conn.form.file.is_some());
+        pick(&mut app, Pick::NewFile);
+        // Saving makes no file and keeps the ask.
         apply(&mut app, Act::Save, &ctx);
-        assert!(app.view.conn.form.create_file && !file.exists(), "{:?}", app.view.conn.message);
+        assert!(asks(&app) && !file.exists(), "{:?}", app.view.conn.message);
+        // Read-only: the engine refuses to make a file, and the form still asks.
+        app.view.conn.form.read_only = true;
         apply(&mut app, Act::ConnectForm, &ctx);
-        assert!(!app.view.conn.form.create_file, "asked once");
+        let refused = app.view.conn.message.clone().unwrap();
+        assert_eq!(
+            (refused.kind, refused.text.as_str()),
+            (Kind::Error, "A read-only connection can't make a new file. Untick Read-only for the first connect.")
+        );
+        assert!(asks(&app) && !file.exists());
+        // A test makes the file and still asks; the connect asks again, and that ends it.
+        app.view.conn.form.read_only = false;
+        apply(&mut app, Act::Test, &ctx);
+        until(&mut app, &ctx, "the test", |app| app.view.conn.running.is_none());
+        assert_eq!(app.view.conn.message.as_ref().map(|m| m.kind), Some(Kind::Result), "{:?}", app.view.conn.message);
+        assert!(file.is_file() && asks(&app));
+        apply(&mut app, Act::ConnectForm, &ctx);
         until(&mut app, &ctx, "the workspace", |app| app.session.state().screen == dbee_engine::Screen::Workspace);
-        assert!(file.is_file());
+        assert!(!asks(&app));
         assert_eq!(opens(&app).len(), 1);
         assert_eq!(opens(&app)[0]["createFile"], true, "{:?}", opens(&app));
         // The next connect opens the file as it is.
@@ -948,5 +989,30 @@ mod tests {
         until(&mut app, &ctx, "the workspace again", |app| app.session.state().screen == dbee_engine::Screen::Workspace);
         assert_eq!(opens(&app).len(), 2);
         assert!(opens(&app)[1].get("createFile").is_none(), "{:?}", opens(&app));
+    }
+
+    #[test]
+    fn a_saved_type_is_fixed_only_where_the_form_says_so() {
+        let (mut app, _home) = app_with_drivers();
+        let ctx = egui::Context::default();
+        apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
+        // Neither act moves a fixed type, whatever sends it.
+        app.view.conn.form.engine_fixed = true;
+        apply(&mut app, Act::ChangeEngine, &ctx);
+        assert_eq!(app.view.conn.step, Step::Form);
+        app.view.conn.step = Step::Engines;
+        apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
+        assert_eq!(app.view.conn.form.kind, DbKind::MySql);
+        // Another type forgets what showed under the buttons and the run it came from.
+        app.view.conn.form.engine_fixed = false;
+        app.view.conn.message = Some(Message { kind: Kind::Error, text: "MySQL said no".into() });
+        let generation = app.view.conn.generation;
+        apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
+        assert_eq!((app.view.conn.form.kind, &app.view.conn.message), (DbKind::Postgres, &None));
+        assert_ne!(app.view.conn.generation, generation);
+        // While a test or connect runs, the type stays.
+        app.view.conn.running = Some((dbee_engine::JobId(1), Running::Test));
+        apply(&mut app, Act::ChangeEngine, &ctx);
+        assert_eq!(app.view.conn.step, Step::Form);
     }
 }

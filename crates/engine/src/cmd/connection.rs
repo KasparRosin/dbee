@@ -740,6 +740,16 @@ fn duplicate(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Done(json!({ "id": copy.id })))
 }
 
+/// `params.createFile`, which a read-only `config` cannot take: a read-only connection makes no
+/// file.
+fn create_file(params: &Json, config: &ConnectionConfig) -> Result<bool, EngineError> {
+    let create = p::bool_or(params, "createFile", false)?;
+    if create && config.read_only {
+        return Err(bad("A read-only connection can't make a new file. Untick Read-only for the first connect."));
+    }
+    Ok(create)
+}
+
 /// `{url}` → `{kind, host, port, user, password, database, sslMode}`: the database type its scheme
 /// names, then the parts, each `null` when the URL lacks it. Not journaled.
 fn parse(_: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
@@ -777,14 +787,14 @@ fn ssh_key(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 /// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, createFile?}` → a job
 /// returning `{server, via, warnings}`: connects (through the tunnel when there is one), then
 /// closes. The screen and the lists stay as they are. A trusted unknown host key is learned.
-/// `createFile: true` makes a database file that is missing (an empty file, which SQLite takes as
-/// an empty database); an existing one opens as it is.
+/// `createFile: true` lets the file driver make a missing file; an existing one opens as it is. It
+/// is refused for a read-only connection ([`create_file`]).
 fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = target_config(s, params)?;
+    let create_file = create_file(params, &config)?;
     let allowed_dirs = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let creds = given(params)?;
-    let create_file = p::bool_or(params, "createFile", false)?;
     let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(TEST, async move {
@@ -824,11 +834,11 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         return Err(EngineError::Busy("a connection is being opened".into()));
     }
     let mut config = target_config(s, params)?;
+    let create_file = create_file(params, &config)?;
     let allowed_dirs = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let typed = given(params)?;
     let keep = p::bool_or(params, "savePassword", false)?;
-    let create_file = p::bool_or(params, "createFile", false)?;
     if config.id.is_empty() {
         config.id = new_id();
     }
