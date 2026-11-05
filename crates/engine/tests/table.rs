@@ -680,11 +680,24 @@ fn twenty_megabyte_cell_loads() {
         if !t.full_seed() {
             return;
         }
-        let started = Instant::now();
         assert_eq!(open_table(s, t.schema("shop"), "big_cell")["rows"], 1);
-        assert!(started.elapsed() < Duration::from_secs(10), "{}: {:?}", t.name(), started.elapsed());
         let d = read(s);
         assert_eq!(cell(&d, 0, "t").unwrap().chars().count(), 20_000_000);
+    });
+}
+
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn twenty_megabyte_cell_loads_within_ten_seconds() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        if !t.full_seed() {
+            return;
+        }
+        let started = Instant::now();
+        assert_eq!(open_table(s, t.schema("shop"), "big_cell")["rows"], 1);
+        println!("{}: a 20 MB cell loaded in {:?}", t.name(), started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(10), "{}: {:?}", t.name(), started.elapsed());
     });
 }
 
