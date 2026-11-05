@@ -8,16 +8,17 @@
 //! - Right, under the title row (the title, Fill from URL): a new connection starts with the
 //!   engine cards, one per database type ([`DbKind::ALL`]); a type this build has no driver for
 //!   (not in the session's `kinds`) is greyed with "Upcoming" and cannot be chosen. A card, or a
-//!   URL (its scheme names the type), opens the form with the type at its top and Change engine
-//!   beside it, which goes back to the cards (the form keeps what was typed, and a port that still
+//!   URL (its scheme names the type), opens the form, and the title row gains the type and Change
+//!   engine, which goes back to the cards (the form keeps what was typed, and a port that still
 //!   holds the old type's default takes the new one's). A saved or recent connection opens
 //!   straight into the form, its type fixed; Fill from URL then takes that type's URLs only.
 //! - The form ([`crate::conn_form`]) has the rows of the type's settings, then Save · Test ·
 //!   Connect at the bottom, and under them a reserved slot for the error or the test result.
 //!   Every row has a fixed height, so typing, a message or another login choice never moves the
 //!   form; only turning the SSH tunnel on or off does. The right side is as tall with the cards
-//!   as with the form. In a short window only the fields scroll: the title row, the type, the
-//!   buttons and the message slot stay in view.
+//!   as with the form. In a short window only the fields scroll: the title row, the buttons and
+//!   the message slot stay in view. At the app's first size (1100 × 720) every row of a server
+//!   form is in view while the SSH tunnel is off.
 //! - Test and Connect run as jobs (`connection.test`, `connection.open`); while one runs both
 //!   buttons are disabled and say so, and a double-click on a card does nothing. A `needs…`
 //!   answer opens a dialog ([`crate::dialogs`]) that runs the command again; other errors show
@@ -720,16 +721,13 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
                     ui.set_width(width + f32::from(SCROLL_GAP));
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         let url = !url_kinds(&conn.form, kinds).is_empty();
-                        conn_form::header(ui, conn, url, tags, acts, width);
+                        conn_form::header(ui, conn, url, conn.step == Step::Form, tags, acts, width);
                         let body_h = (ui.available_height() - VERSION_H).max(MIN_BODY_H);
                         ui.allocate_ui_with_layout(vec2(width + f32::from(SCROLL_GAP), body_h), Layout::top_down(Align::Min), |ui| {
                             ui.set_min_height(body_h);
                             match conn.step {
                                 Step::Engines => engines(ui, kinds, tags, acts, width),
-                                Step::Form => {
-                                    conn_form::engine_row(ui, conn, tags, acts, width);
-                                    conn_form::fields_and_footer(ui, conn, tags, acts, width);
-                                }
+                                Step::Form => conn_form::fields_and_footer(ui, conn, tags, acts, width),
                             }
                         });
                     });

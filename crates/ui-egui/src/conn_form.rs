@@ -1,7 +1,7 @@
 //! The connection form: its fields as typed ([`Form`]), turning them into a [`ConnectionConfig`]
 //! (port numbers, validation), and drawing it in parts, each of fixed height but the fields: the
-//! title row ([`header`]), the engine row ([`engine_row`]), then the fields, which scroll, and
-//! Save · Test · Connect with the message slot under them at the bottom ([`fields_and_footer`]).
+//! title row with the database type ([`header`]), then the fields, which scroll, and Save · Test ·
+//! Connect with the message slot under them at the bottom ([`fields_and_footer`]).
 //! The screen around it, with the engine cards a new connection starts with, is
 //! [`crate::connections`].
 //!
@@ -36,7 +36,7 @@ const ROW_H: f32 = LABEL_H + FIELD_H;
 const MESSAGE_H: f32 = 52.0;
 /// Save · Test · Connect and the message slot under them, with the space between.
 const FOOTER_H: f32 = 32.0 + 6.0 + 6.0 + MESSAGE_H;
-/// Fill from URL and Change engine, one above the other.
+/// Fill from URL and Change engine, side by side.
 const SIDE_BUTTON_W: f32 = 128.0;
 
 /// The SSH login choices of the form.
@@ -325,49 +325,43 @@ const GAP: f32 = 12.0;
 /// The port fields' width.
 const PORT_W: f32 = 110.0;
 
-/// `text` in `font` on the left of a row, `width` wide, tagged `id` with `value`.
-fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, text: &str, font: FontId, value: &str, width: f32) {
+/// A button of the title row, as wide as the other one beside it, tagged `id`; whether it was
+/// clicked.
+fn side_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, enabled: bool) -> bool {
+    let r = ui.add_enabled_ui(enabled, |ui| ui.add_sized(vec2(SIDE_BUTTON_W, FIELD_H), Button::new(label))).inner;
+    tags.tag(id, &r);
+    r.clicked()
+}
+
+/// The title row, `w` wide: the form's title on the left; at the right end Fill from URL when
+/// `url` (a type the form can take has a URL), and on the `form`, left of it, the database type
+/// and Change engine (unless the type is fixed; not while a test or connect runs).
+pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let t = TOKENS;
-    let galley = line_galley(ui, text, font, t.text, width);
-    let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
-    ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.text);
-    tags.tag_value(id, &r, value);
-}
-
-/// A button at the right end of a row, as wide as the other one above or below it, tagged `id`;
-/// whether it was clicked.
-fn side_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str) -> bool {
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        let r = ui.add_sized(vec2(SIDE_BUTTON_W, FIELD_H), Button::new(label));
-        tags.tag(id, &r);
-        r.clicked()
-    })
-    .inner
-}
-
-/// The title row, `w` wide: the form's title, and Fill from URL when `url` (a type the form can
-/// take has a URL).
-pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::left_to_right(Align::Center), |ui| {
-        let title = conn.form.title();
-        row_text(ui, tags, "conn-title", &title, FontId::proportional(19.0), &title, w - SIDE_BUTTON_W - GAP);
-        if url && side_button(ui, tags, "conn-fill-url", "Fill from URL…") {
+    ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::right_to_left(Align::Center), |ui| {
+        if url && side_button(ui, tags, "conn-fill-url", "Fill from URL…", true) {
             acts.push(Act::FillFromUrl);
         }
-    });
-    ui.add_space(4.0);
-}
-
-/// The engine row, `w` wide: the database type, and Change engine unless the type is fixed.
-pub(crate) fn engine_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let kind = conn.form.kind;
-    ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::left_to_right(Align::Center), |ui| {
-        row_text(ui, tags, "conn-kind", kind.label(), FontId::proportional(15.0), kind.id(), w - SIDE_BUTTON_W - GAP);
-        if !conn.form.engine_fixed() && side_button(ui, tags, "conn-change-engine", "Change engine") {
-            acts.push(Act::ChangeEngine);
+        if form {
+            let fixed = conn.form.engine_fixed();
+            if !fixed && side_button(ui, tags, "conn-change-engine", "Change engine", conn.running.is_none()) {
+                acts.push(Act::ChangeEngine);
+            }
+            let kind = conn.form.kind;
+            let galley = line_galley(ui, kind.label(), FontId::proportional(15.0), t.text, w / 3.0);
+            let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x, 30.0), Sense::hover());
+            ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.text);
+            tags.tag_value("conn-kind", &r, kind.id());
         }
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            let title = conn.form.title();
+            let width = ui.available_width().max(1.0);
+            let galley = line_galley(ui, &title, FontId::proportional(19.0), t.text, width);
+            let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
+            ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.text);
+            tags.tag_value("conn-title", &r, title.as_str());
+        });
     });
-    ui.add_space(4.0);
 }
 
 /// The fields, `w` wide, then the footer at the bottom of the room left: the fields scroll when
@@ -388,17 +382,14 @@ pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: 
                 if tls {
                     tls_rows(ui, conn, tags, acts, w);
                 }
-                read_only_row(ui, &mut conn.form, tags, w);
-                option_rows(ui, &mut conn.form, tags, w);
+                read_only_and_options(ui, &mut conn.form, tags, w);
                 if ssh {
-                    ui.add_space(6.0);
                     ssh_box(ui, conn, tags, acts, w);
                 }
             }
             Settings::File { .. } => {
                 file_row(ui, conn, tags, acts, w);
-                read_only_row(ui, &mut conn.form, tags, w);
-                option_rows(ui, &mut conn.form, tags, w);
+                read_only_and_options(ui, &mut conn.form, tags, w);
             }
         }
     });
@@ -580,26 +571,22 @@ fn file_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Ve
     ui.add_space(4.0);
 }
 
-/// Read-only.
-fn read_only_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
-    ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
+/// Read-only, then the type's own on/off settings, one check box each (`conn-option-<id>`), on
+/// one line while they fit.
+fn read_only_and_options(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
+    ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0 * GAP;
         let r = ui.checkbox(&mut f.read_only, "Read-only");
         tags.tag_value("conn-readonly", &r, f.read_only);
-    });
-}
-
-/// The type's own on/off settings, one check box each (`conn-option-<id>`).
-fn option_rows(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
-    for option in f.kind.info().options {
-        ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
+        for option in f.kind.info().options {
             let mut on = f.option_on(option.id);
             let r = ui.checkbox(&mut on, option.label);
             if r.changed() {
                 f.set_option(option.id, on);
             }
             tags.tag_value(&format!("conn-option-{}", option.id), &r, on);
-        });
-    }
+        }
+    });
 }
 
 /// The SSH tunnel: on or off, then host, port, user, the login and what it will use.

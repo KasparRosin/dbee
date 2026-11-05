@@ -1,7 +1,8 @@
 //! The connection screen driven through the control channel, one frame at a time in a kittest
 //! harness over [`DbeeApp::ui`]: the engine cards, the form for each database type, the saved
-//! and recent lists, the dialogs a connect asks for, and inline errors. Everything goes through control requests and automation ids, the way
-//! an agent drives the real window; assertions read `ui.inspect` and `document.inspect`.
+//! and recent lists, the dialogs a connect asks for, and inline errors. Everything goes through
+//! control requests and automation ids, the way an agent drives the real window; assertions read
+//! `ui.inspect` and `document.inspect`.
 //!
 //! Safety: every session keeps its connections file in a throwaway home, its secrets in a
 //! `MemoryStore` (or none), and reads SSH keys and `known_hosts` from `<temp home>/.ssh` with no
@@ -17,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::*;
-use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, SshAuth, SshConfig};
+use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SshConfig};
 use dbee_driver::Drivers;
 use dbee_testkit::{TempHome, TestDb, temp_home};
 use serde_json::{Value as Json, json};
@@ -149,17 +150,42 @@ fn new_connection_starts_with_the_engine_cards() {
     for id in ["conn-host", "conn-file", "conn-name", "conn-save", "conn-change-engine"] {
         assert!(tag_in(&i, id).is_none(), "{id} before an engine is chosen: {i}");
     }
-    // The cards and the form share the title row: choosing moves nothing of it.
+    // The cards and the form share the title row: choosing moves neither the title nor Fill from URL.
     let title = rect(&tag_in(&i, "conn-title").unwrap());
     let url = rect(&tag_in(&i, "conn-fill-url").unwrap());
     ui.click("conn-kind-postgres");
     let i = ui.inspect();
-    assert_eq!((rect(&tag_in(&i, "conn-title").unwrap()), rect(&tag_in(&i, "conn-fill-url").unwrap())), (title, url));
+    let now = rect(&tag_in(&i, "conn-title").unwrap());
+    assert_eq!(([now[0], now[1], now[3]], rect(&tag_in(&i, "conn-fill-url").unwrap())), ([title[0], title[1], title[3]], url));
     assert_eq!(tag_in(&i, "conn-kind").unwrap()["value"], "postgres");
     assert_eq!(tag_in(&i, "conn-port").unwrap()["value"], "5432");
-    // Change engine and Fill from URL are the same width, one above the other.
+    // The type and Change engine join the title row, left of Fill from URL and as wide as it.
     let change = rect(&tag_in(&i, "conn-change-engine").unwrap());
-    assert_eq!((change[0], change[2]), (url[0], url[2]), "{change:?} {url:?}");
+    let kind = rect(&tag_in(&i, "conn-kind").unwrap());
+    assert_eq!((change[1], change[2], change[3]), (url[1], url[2], url[3]), "{change:?} {url:?}");
+    assert!(kind[0] + kind[2] <= change[0] && change[0] + change[2] <= url[0], "{kind:?} {change:?} {url:?}");
+}
+
+#[test]
+fn every_row_of_a_server_form_is_in_view_at_the_default_window() {
+    for kind in DbKind::ALL {
+        let Settings::Server { ssh, .. } = kind.info().settings else { continue };
+        // The app's window when it starts.
+        let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+        ui.click(&format!("conn-kind-{}", kind.id()));
+        let i = ui.inspect();
+        // A check box in view is as tall as the one near the top of the form.
+        let whole = rect(&tag_in(&i, "conn-save-secrets").unwrap())[3];
+        let mut rows: Vec<String> = kind.info().options.iter().map(|o| format!("conn-option-{}", o.id)).collect();
+        rows.push("conn-readonly".into());
+        if ssh {
+            rows.push("conn-ssh-on".into());
+        }
+        for id in rows {
+            let tag = tag_in(&i, &id).unwrap_or_else(|| panic!("{kind:?}: no {id}"));
+            assert!(tag.get("visible").is_none() && rect(&tag)[3] == whole, "{kind:?}: {id} is not whole in view: {tag}");
+        }
+    }
 }
 
 #[test]
@@ -664,9 +690,7 @@ fn store_warning_shows_while_set() {
 
 #[test]
 fn typing_and_errors_do_not_move_the_layout() {
-    // Tall enough for every field with the SSH tunnel on: a click on a field then scrolls nothing.
-    let mut ui = Ui::fresh(egui::vec2(1200.0, 1000.0));
-    ui.click("conn-kind-postgres");
+    let mut ui = ui();
     ui.click("conn-ssh-on");
     // Every widget of the form and the side bar, but the message under the buttons, the cards and
     // the key file buttons, which only the Key login shows (in its fixed slot).
