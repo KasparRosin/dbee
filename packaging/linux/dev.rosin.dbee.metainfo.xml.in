@@ -46,6 +46,8 @@
   <provides>
     <binary>dbee</binary>
     <binary>dbee-cli</binary>
+    <mediatype>application/vnd.sqlite3</mediatype>
+    <mediatype>application/x-sqlite3</mediatype>
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>

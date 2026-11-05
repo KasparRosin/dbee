@@ -2,8 +2,9 @@
 //!
 //! - the menu bar at the top ([`crate::menu`]);
 //! - the status bar at the bottom: the connection's name on its colour (with `read-only` when the
-//!   session is), the server version, and the active tab's running job with a Cancel button.
-//!   When the connection is lost it says so, with a Reconnect button;
+//!   session is), the server version, Save connection while the saved list doesn't hold the
+//!   connection (one opened from a file, say), and the active tab's running job with a Cancel
+//!   button. When the connection is lost it says so, with a Reconnect button;
 //! - the schema tree on the left ([`crate::tree`]);
 //! - the value panel on the right, while it shows ([`crate::value_panel`]), with its toggle at the
 //!   right end of the status bar;
@@ -28,8 +29,8 @@
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
 //! `tab-new`; `status-connection` (value: the name, and `read-only`), `status-server`,
-//! `status-job` (value: what runs), `status-cancel`, `status-lost`, `status-reconnect`,
-//! `value-toggle`.
+//! `status-save`, `status-job` (value: what runs), `status-cancel`, `status-lost`,
+//! `status-reconnect`, `value-toggle`.
 
 use std::sync::Arc;
 
@@ -54,6 +55,8 @@ const STRIP_H: f32 = 36.0;
 const TAB_H: f32 = 30.0;
 /// The status bar's height.
 pub(crate) const STATUS_H: f32 = 30.0;
+/// The height of the status bar's buttons, as of the name on its colour.
+const STATUS_ITEM_H: f32 = 20.0;
 /// The widest a tab's title gets before it is cut.
 const TITLE_MAX: f32 = 200.0;
 
@@ -179,6 +182,7 @@ enum Act {
     NewQuery,
     Cancel(&'static str),
     Reconnect,
+    SaveOpen,
 }
 
 /// Draws the workspace and acts on it.
@@ -229,6 +233,9 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
             Act::Reconnect => {
                 app.start("connection.reconnect", json!({}), Origin::Menu);
             }
+            Act::SaveOpen => {
+                app.start("connection.saveOpen", json!({}), Origin::Menu);
+            }
         }
     }
     quick_search::show(app, &ctx);
@@ -242,6 +249,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let label = if c.info.read_only { format!("{name} · read-only") } else { name };
     let colour = connection_color(c.config.color);
     let server = dbee_engine::state::server_text(&c.info);
+    let saved = app.session.state().store.is_saved(&c.config.id);
     let lost = c.lost;
     let job = live_job(&app.session);
     let reconnecting = app.session.running("connection.reconnect");
@@ -258,18 +266,26 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
                 None => (t.border, t.text),
             };
             let galley = line_galley(ui, &label, FontId::proportional(12.5), text, 360.0);
-            let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x + 18.0, 20.0), Sense::hover());
+            let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x + 18.0, STATUS_ITEM_H), Sense::hover());
             ui.painter().rect_filled(rect, CornerRadius::same(RADIUS.saturating_mul(2)), fill);
             ui.painter().galley(pos2(rect.left() + 9.0, rect.center().y - galley.size().y / 2.0), galley, text);
             tags.tag_value("status-connection", &r, label.as_str());
             let r = ui.label(RichText::new(server.as_str()).size(12.0).color(t.text_muted));
             tags.tag_value("status-server", &r, server.as_str());
+            if !saved {
+                ui.add_space(8.0);
+                let r = status_button(ui, "Save connection", true).on_hover_text("Add this connection to the saved ones");
+                tags.tag_value("status-save", &r, "Save connection");
+                if r.clicked() {
+                    acts.push(Act::SaveOpen);
+                }
+            }
             if lost {
                 ui.add_space(8.0);
                 let r = ui.label(RichText::new("Connection lost").size(12.5).strong().color(t.danger));
                 tags.tag_value("status-lost", &r, "Connection lost");
                 let text = if reconnecting { "Reconnecting…" } else { "Reconnect" };
-                let r = ui.add_enabled(!reconnecting, egui::Button::new(RichText::new(text).size(12.0)).min_size(vec2(0.0, 20.0)));
+                let r = status_button(ui, text, !reconnecting);
                 tags.tag_value_as("status-reconnect", &r, text, !reconnecting);
                 if r.clicked() {
                     acts.push(Act::Reconnect);
@@ -280,7 +296,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
                 toggled = value_panel::toggle(ui, panel_open, tags);
                 let Some(job) = &job else { return };
                 if let Some(command) = job.cancel {
-                    let r = ui.add(egui::Button::new(RichText::new("Cancel").size(12.0)).min_size(vec2(0.0, 20.0)));
+                    let r = status_button(ui, "Cancel", true);
                     tags.tag_value("status-cancel", &r, "Cancel");
                     if r.clicked() {
                         acts.push(Act::Cancel(command));
@@ -293,6 +309,16 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
         });
     });
     toggled
+}
+
+/// A status bar button reading `text`, [`STATUS_ITEM_H`] tall: the bar's row keeps its height
+/// whether a button shows or not, so nothing in it moves when one comes or goes.
+fn status_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding.y = 0.0;
+        ui.add_enabled(enabled, egui::Button::new(RichText::new(text).size(12.0)).min_size(vec2(0.0, STATUS_ITEM_H)))
+    })
+    .inner
 }
 
 /// Dark or light text, whichever reads better on `fill`.

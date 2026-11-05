@@ -14,6 +14,7 @@
 
 mod common;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ use common::*;
 use dbee_config::{ConnectionColor, ConnectionConfig};
 use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef, TypeClass};
 use dbee_testkit::TestDb;
+use dbee_ui_egui::DbeeApp;
 use dbee_ui_egui::automation::Tags;
 use dbee_ui_egui::tree::{self, Tree};
 use egui_kittest::Harness;
@@ -597,6 +599,82 @@ fn status_bar_shows_colour_and_read_only() {
     let server = ui.value("status-server");
     assert!(server.as_str().is_some_and(|s| s.starts_with("PostgreSQL 14")), "{server}");
     assert!(ui.tag("status-reconnect").is_none(), "no Reconnect while the connection is fine");
+    assert!(ui.tag("status-save").is_none(), "no Save connection for a saved one");
+}
+
+/// A file dropped on the window, as eframe hands one over.
+#[derive(Debug)]
+struct Dropped(PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Err("the test reads no file".into())
+    }
+}
+
+/// One frame with `paths` dropped on the window.
+fn drop_files(ui: &mut Ui, paths: &[&Path]) {
+    for p in paths {
+        ui.harness.input_mut().dropped_files.push(Arc::new(Dropped(p.to_path_buf())));
+    }
+    ui.frame();
+}
+
+#[test]
+fn a_dropped_database_file_opens_unsaved_and_save_connection_saves_it() {
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap();
+    let mut ui = Ui::fresh(APP_SIZE);
+    // Of several files, the first opens.
+    drop_files(&mut ui, &[file, Path::new("/nonexistent/dbee-test/second.txt")]);
+    ui.until("the file to open", |ui| ui.document()["screen"] == "workspace");
+    let name = file.file_name().unwrap().to_str().unwrap();
+    assert_eq!(ui.value("status-connection"), name);
+    assert_eq!(ui.document()["connection"]["saved"], false);
+    assert!(visible(&ui.tag("status-save")), "{:?}", ids(&ui.inspect()));
+    assert!(ui.tag("notice").is_none(), "the second file is left alone");
+    let bar = |ui: &mut Ui| ["status-connection", "status-server", "value-toggle"].map(|id| ui.tag(id).map(|t| t["rect"].clone()));
+    let before = bar(&mut ui);
+    ui.click("status-save");
+    ui.until("the save", |ui| ui.tag("status-save").is_none());
+    assert_eq!(ui.document()["connection"]["saved"], true);
+    assert_eq!(bar(&mut ui), before, "the button fits the status bar: nothing moves when it goes");
+    let list = ui.execute("connection.list", json!({}));
+    assert_eq!((&list["saved"][0]["file"], &list["saved"][0]["id"]), (&json!(file), &ui.document()["connection"]["id"]), "{list}");
+}
+
+#[test]
+fn a_dropped_file_of_no_type_dbee_opens_says_which_do() {
+    let mut ui = Ui::fresh(APP_SIZE);
+    let notes = ui.home.home.join("notes.txt");
+    drop_files(&mut ui, &[&notes]);
+    ui.frame();
+    let notice = ui.value("notice");
+    let text = notice.as_str().unwrap_or_default();
+    assert!(text.starts_with("Can't open notes.txt: dbee opens ") && text.contains(".sqlite"), "{notice}");
+    assert_eq!(ui.document()["screen"], "connections");
+}
+
+#[test]
+fn the_file_the_command_line_names_opens_once_the_window_is_up() {
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap().to_path_buf();
+    let with_file = |path: PathBuf| -> MakeApp { Box::new(move |session, rx| DbeeApp::new(session, Some(rx)).with_file(path)) };
+    let mut ui = Ui::window(Setup { size: APP_SIZE, app: Some(with_file(file.clone())), ..Setup::default() });
+    ui.until("the file to open", |ui| ui.document()["screen"] == "workspace");
+    assert_eq!(ui.document()["connection"]["saved"], false);
+    assert!(visible(&ui.tag("status-save")));
+    // One that is not there: the plain error, and the window goes on.
+    let gone = ui.home.home.join("gone.sqlite");
+    let mut ui = Ui::window(Setup { size: APP_SIZE, app: Some(with_file(gone.clone())), ..Setup::default() });
+    ui.until("the error", |ui| ui.tag("notice").is_some());
+    let notice = ui.value("notice");
+    assert!(notice.as_str().is_some_and(|n| n.ends_with(&format!(": no file at {}", gone.display()))), "{notice}");
+    assert_eq!(ui.document()["screen"], "connections");
 }
 
 #[test]

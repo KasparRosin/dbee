@@ -154,6 +154,11 @@ impl ConnectionStore {
         self.saved.len() != before
     }
 
+    /// The saved list holds the connection with this id.
+    pub fn is_saved(&self, id: &str) -> bool {
+        self.saved.iter().any(|c| c.id == id)
+    }
+
     /// Saved first, then recent.
     pub fn get(&self, id: &str) -> Option<&ConnectionConfig> {
         self.saved.iter().find(|c| c.id == id).or_else(|| self.recent.iter().map(|r| &r.config).find(|c| c.id == id))

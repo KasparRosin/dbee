@@ -1,5 +1,6 @@
 //! Connection commands: the saved and recent list (save, delete, duplicate), URL parsing, the
-//! SSH key preview, test, open, reconnect, close, and the schema refresh.
+//! SSH key preview, test, open, opening a database file and saving the open connection,
+//! reconnect, close, and the schema refresh.
 //!
 //! Secrets (the database password, the SSH password and the key passphrase) come from the
 //! params first (`password`, `sshPassword`, `sshPassphrase`; an empty string counts as not
@@ -45,11 +46,11 @@
 //! apply; a job whose connection was closed or replaced meanwhile is ignored (`{"ignored": true}`,
 //! see [`super`]).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, SshAuth, SslMode, new_id, parse_url};
+use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SslMode, new_id, parse_url};
 use dbee_core::Catalog;
 use dbee_driver::{Cancel, Connection, DbError, Driver, Drivers, Purpose, Target};
 use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
@@ -69,6 +70,8 @@ const PARSE_URL: &str = "connection.parseUrl";
 const SSH_KEY: &str = "connection.sshKey";
 const TEST: &str = "connection.test";
 const OPEN: &str = "connection.open";
+const OPEN_FILE: &str = "connection.openFile";
+const SAVE_OPEN: &str = "connection.saveOpen";
 const RECONNECT: &str = "connection.reconnect";
 const REFRESH: &str = "schema.refresh";
 const CLOSE: &str = "connection.close";
@@ -160,6 +163,28 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         params: "{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?, createFile?}",
         enabled: not_connected,
         run: open,
+        journal: true,
+        undoable: false,
+    },
+    CommandSpec {
+        id: OPEN_FILE,
+        label: "Open Database File",
+        menu: &[],
+        shortcut: None,
+        params: "{path}",
+        enabled: not_connected,
+        run: open_file,
+        journal: true,
+        undoable: false,
+    },
+    CommandSpec {
+        id: SAVE_OPEN,
+        label: "Save Open Connection",
+        menu: &[],
+        shortcut: None,
+        params: "{}",
+        enabled: unsaved_open,
+        run: save_open,
         journal: true,
         undoable: false,
     },
@@ -613,10 +638,11 @@ async fn connect_and_load(
     }
 }
 
-/// `{connection, server, tables, warnings}` for an open or a reconnect.
-fn opened_json(c: &Connected) -> Json {
+/// `{connection, server, tables, warnings}` for an open or a reconnect; `saved` as
+/// [`Connected::summary`] takes it.
+fn opened_json(c: &Connected, saved: bool) -> Json {
     json!({
-        "connection": c.summary(),
+        "connection": c.summary(saved),
         "server": server_text(&c.info),
         "tables": c.catalog.table_count(),
         "warnings": c.info.warnings,
@@ -865,6 +891,81 @@ fn start_open(s: &mut Session, mut config: ConnectionConfig, create_file: bool, 
     Ok(Outcome::Started(job))
 }
 
+/// The types of `kinds` that open a file, with their file extensions, in `kinds` order.
+fn file_kinds(kinds: &[DbKind]) -> Vec<(DbKind, &'static [&'static str])> {
+    kinds
+        .iter()
+        .filter_map(|k| match k.info().settings {
+            Settings::File { extensions } => Some((*k, extensions)),
+            Settings::Server { .. } => None,
+        })
+        .collect()
+}
+
+/// The first of `kinds` whose extensions hold `path`'s, compared case-insensitively: on a shared
+/// extension the one listed first wins, as the first driver to claim a type wins it.
+fn first_with_extension<K: Copy>(kinds: &[(K, &[&str])], path: &Path) -> Option<K> {
+    let ext = path.extension()?.to_str()?;
+    kinds.iter().find(|(_, exts)| exts.iter().any(|e| e.eq_ignore_ascii_case(ext))).map(|(k, _)| *k)
+}
+
+/// Why `path` does not open: its name, and every extension of `kinds`, each once.
+fn no_file_type<K>(path: &Path, kinds: &[(K, &[&str])]) -> String {
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let mut exts: Vec<String> = Vec::new();
+    for e in kinds.iter().flat_map(|(_, e)| e.iter()) {
+        let e = format!(".{e}");
+        if !exts.contains(&e) {
+            exts.push(e);
+        }
+    }
+    match exts.split_last() {
+        None => format!("Can't open {name}: this build of dbee opens no database files."),
+        Some((last, [])) => format!("Can't open {name}: dbee opens {last} files."),
+        Some((last, rest)) => format!("Can't open {name}: dbee opens {} and {last} files.", rest.join(", ")),
+    }
+}
+
+/// `{path}` → a job as [`open`]'s: the file at `path` (a relative path is the current folder's),
+/// opened with the first of the session's types whose file extensions hold the path's
+/// ([`first_with_extension`]). The config is not saved and has no name, so the file's name shows
+/// ([`ConnectionConfig::display_name`]); the summary says `saved: false` until
+/// `connection.saveOpen`. It never makes a file. A path with none of those extensions is refused
+/// (`badParams`), naming the ones dbee opens.
+fn open_file(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    not_opening(s)?;
+    let path = Path::new(p::str(params, "path")?);
+    if path.as_os_str().is_empty() {
+        return Err(bad("`path` is empty"));
+    }
+    let files = file_kinds(&s.kinds());
+    let kind = first_with_extension(&files, path).ok_or_else(|| bad(no_file_type(path, &files)))?;
+    let file = std::path::absolute(path).map_err(|e| bad(format!("{}: {e}", path.display())))?;
+    let config = ConnectionConfig { kind, file: Some(file), host: String::new(), port: 0, ..ConnectionConfig::default() };
+    start_open(s, config, false, &json!({}))
+}
+
+/// A connection is open and the saved list doesn't hold it.
+fn unsaved_open(s: &Session) -> Result<(), String> {
+    match &s.state.connected {
+        None => Err(NOT_CONNECTED.into()),
+        Some(c) if s.state.store.is_saved(&c.config.id) => Err("the open connection is saved already".into()),
+        Some(_) => Ok(()),
+    }
+}
+
+/// `{}` → `{id}`: adds the open connection, which the saved list doesn't hold, to it as it was
+/// opened (its id, its settings, no name when it had none) and writes the file. No secret is
+/// stored.
+fn save_open(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
+    let config = s.state.connected.as_ref().map(|c| c.config.clone()).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    let mut store = s.state.store.clone();
+    store.upsert(config.clone());
+    store.save().map_err(|e| EngineError::Config(e.to_string()))?;
+    s.state.store = store;
+    Ok(Outcome::Done(json!({ "id": config.id })))
+}
+
 fn apply_open(
     s: &mut Session,
     mut config: ConnectionConfig,
@@ -895,7 +996,7 @@ fn apply_open(
         tunnel,
         credentials,
     };
-    let mut result = opened_json(&c);
+    let mut result = opened_json(&c, s.state.store.is_saved(&c.config.id));
     if let (Json::Object(map), Some(kept)) = (&mut result, kept) {
         map.insert("secretsSaved".into(), json!(kept.is_ok()));
         if let Err(note) = kept {
@@ -998,7 +1099,7 @@ fn apply_reconnect(
     c.tunnel = tunnel;
     c.credentials = credentials;
     c.lost = false;
-    let mut result = opened_json(c);
+    let mut result = opened_json(c, s.state.store.is_saved(&c.config.id));
     if query_reset && let Some(o) = result.as_object_mut() {
         // The query session (an open transaction, SETs, temporary tables) went with its connection.
         o.insert("querySessionReset".into(), Json::Bool(true));
@@ -1174,6 +1275,34 @@ mod tests {
                 assert!(r.ssh_password && r.passphrase, "TLS does not concern the tunnel: saved {was:?}, given {now:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_first_kind_with_the_extension_wins() {
+        let kinds: [(&str, &[&str]); 2] = [("first", &["db", "one"]), ("second", &["db", "two"])];
+        let kind = |path: &str| first_with_extension(&kinds, Path::new(path));
+        assert_eq!(kind("/x/a.db"), Some("first"), "a shared extension is the first kind's");
+        assert_eq!(kind("a.two"), Some("second"));
+        // Any letter case; only the last extension counts.
+        assert_eq!((kind("A.DB"), kind("a.Two"), kind("a.two.db")), (Some("first"), Some("second"), Some("first")));
+        // No extension, or another one.
+        for path in ["a.txt", "db", ".db", "a.db.txt", "a.", ""] {
+            assert_eq!(kind(path), None, "{path:?}");
+        }
+    }
+
+    #[test]
+    fn the_refusal_lists_the_extensions_dbee_opens() {
+        let notes = Path::new("/home/ann/notes.txt");
+        let one: [(u8, &[&str]); 1] = [(0, &["a"])];
+        assert_eq!(no_file_type(notes, &one), "Can't open notes.txt: dbee opens .a files.");
+        let two: [(u8, &[&str]); 2] = [(0, &["a"]), (1, &["b", "a"])];
+        assert_eq!(no_file_type(notes, &two), "Can't open notes.txt: dbee opens .a and .b files.", "each once");
+        assert_eq!(no_file_type(notes, &[(0u8, &["a", "b", "c"][..])]), "Can't open notes.txt: dbee opens .a, .b and .c files.");
+        assert_eq!(no_file_type(notes, &[] as &[(u8, &[&str])]), "Can't open notes.txt: this build of dbee opens no database files.");
+        // The types dbee knows, from their own data.
+        assert_eq!(no_file_type(notes, &file_kinds(&DbKind::ALL)), "Can't open notes.txt: dbee opens .sqlite, .sqlite3 and .db files.");
+        assert!(file_kinds(&DbKind::ALL).iter().all(|(k, _)| k.uses_file()));
     }
 
     #[test]

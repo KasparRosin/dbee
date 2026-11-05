@@ -3,7 +3,10 @@
 //! Frame order ([`DbeeApp::ui`]):
 //! 1. `session.pump()`: the results of finished jobs are applied;
 //! 2. the control replies that waited (for a job, idleness, input or a picture) are answered;
-//! 3. the control requests that arrived are handled ([`crate::control`]);
+//! 3. the control requests that arrived are handled ([`crate::control`]); then the file the
+//!    command line named ([`DbeeApp::with_file`]), in the first frame, or else the first file
+//!    dropped on the window opens (`connection.openFile`; a file of no type dbee opens shows the
+//!    refusal as a notice);
 //! 4. the open cell editor takes its keys and commits on a press outside it, or Enter over a
 //!    selection opens one ([`crate::editors`]); then the keyboard shortcuts run
 //!    ([`crate::shortcuts`]; the value panel's copy first), before any widget sees the keys (not
@@ -28,11 +31,13 @@
 //! bar, quick search) is [`crate::workspace`].
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use dbee_engine::{CommandInfo, EngineError, JobId, Json, Outcome, Screen, Session};
 use egui::{CornerRadius, Frame, Margin, RichText, vec2};
+use serde_json::json;
 
 use crate::automation::Tags;
 use crate::connections::{self, ConnScreen};
@@ -47,6 +52,9 @@ const APPLY: &str = "edit.apply";
 
 /// The command that opens a query tab.
 const NEW_QUERY: &str = "tab.newQuery";
+
+/// The command that opens a database file: one dropped on the window, or named on the command line.
+const OPEN_FILE: &str = "connection.openFile";
 
 /// How often a busy session repaints.
 const BUSY_REPAINT: Duration = Duration::from_millis(100);
@@ -106,6 +114,8 @@ pub struct DbeeApp {
     /// Keyboard events held back for the next frame: those after a cell editor's key in the same
     /// frame ([`crate::editors::before_frame`]).
     pub(crate) carry: Vec<egui::Event>,
+    /// The file to open in the first frame ([`DbeeApp::with_file`]).
+    file: Option<PathBuf>,
 }
 
 /// Where copied text goes ([`DbeeApp::with_clipboard`]).
@@ -220,7 +230,15 @@ impl DbeeApp {
             memory: None,
             themed: false,
             carry: Vec::new(),
+            file: None,
         }
+    }
+
+    /// This app opening the database file at `path` once the window is up
+    /// (`connection.openFile`): the file the command line names.
+    pub fn with_file(mut self, path: PathBuf) -> DbeeApp {
+        self.file = Some(path);
+        self
     }
 
     /// This app with copied text going to `clipboard` (the system clipboard by default).
@@ -323,6 +341,12 @@ impl DbeeApp {
             Some((_, shown)) => *shown = None,
             None => self.notice(text),
         }
+    }
+
+    /// Opens the database file at `path` as the user asked: dropped on the window, or named on the
+    /// command line. A refusal (a file of no type dbee opens, one that is not there) is a notice.
+    fn open_file(&mut self, path: &Path) {
+        self.start(OPEN_FILE, json!({ "path": path.to_string_lossy() }), Origin::Menu);
     }
 
     /// Runs command `id` for a shortcut; `query.run` with `current` gets the editor's cursor,
@@ -440,6 +464,10 @@ impl DbeeApp {
                 control::handle(self, &ctx, req);
             }
             self.control = Some(rx);
+        }
+        let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
+        if let Some(path) = self.file.take().or(dropped) {
+            self.open_file(&path);
         }
         // 4. The cell editor, then shortcuts, unless a dialog or the quick search is open.
         editors::before_frame(self, &ctx);

@@ -61,6 +61,8 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("connection.sshKey", &[("config", CONFIG)]),
     ("connection.test", CONNECT),
     ("connection.open", OPEN),
+    ("connection.openFile", &[("path", FILE_PATH)]),
+    ("connection.saveOpen", &[]),
     ("connection.reconnect", SECRETS),
     ("schema.refresh", &[]),
     ("schema.inspect", &[("schema", Hint::Text), ("table", Hint::Text)]),
@@ -177,6 +179,15 @@ const OPEN: &[(&str, Hint)] = &[
     ("trustHostKey", FINGERPRINT),
     ("savePassword", Hint::Bool),
 ];
+/// Database file paths that are never there (or a name without a type dbee opens), so the fuzz
+/// opens no file.
+const FILE_PATH: Hint = Hint::OneOf(&[
+    "/nonexistent/dbee-fuzz/a.sqlite",
+    "/nonexistent/dbee-fuzz/B.DB",
+    "/nonexistent/dbee-fuzz/notes.txt",
+    "/nonexistent/dbee-fuzz/noext",
+    "",
+]);
 const FINGERPRINT: Hint = Hint::OneOf(&["SHA256:AAAA", "SHA256:", "", "md5:00:11"]);
 
 fn config(r: &mut Rng, s: &Session) -> Json {

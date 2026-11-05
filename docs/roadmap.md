@@ -1,6 +1,6 @@
 # Roadmap: gates and milestones
 
-> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** major (M2 is three databases; import and export are M3) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** minor (the packages offer dbee for SQLite files) · **Target:** Beekeeper Studio 5.5.7
 
 The one-page summary is [`ROADMAP.md`](../ROADMAP.md) at the repository root. This page holds the detail behind it: the current focus, the alpha and beta gates, and the milestones.
 
@@ -37,7 +37,7 @@ Not defined yet: they follow M3, from the ranked list in [gaps.md](gaps.md) and 
 | M2 | Three databases | in progress |
 | M3 | Import and export | not started |
 
-The packages declare no file types for now: the `.sqlite` and `.sqlite3` associations (Linux desktop entry and AppStream data, macOS, Windows) come back with the SQLite engine.
+The packages offer dbee for SQLite files without taking the file type over: the Linux desktop entry and AppStream data list `application/vnd.sqlite3` and `application/x-sqlite3` (the user's settings pick the default), and the Windows installer adds dbee to the Open with list of `.sqlite` and `.sqlite3`. The macOS bundle declares no document types yet ([gaps.md](gaps.md) entry 17). On every platform a file named on the command line, or dropped on the window, opens.
 
 ## Measuring
 
@@ -47,6 +47,7 @@ Percentages and hours come from [target-app-parity.md](target-app-parity.md) and
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-05 | minor | The packages offer dbee for SQLite files (Linux MIME types, Windows Open with), never as the default; macOS not yet (gaps.md entry 17). |
 | 2026-10-28 | major | Milestones renumbered: M2 "Three databases" (driver interface, MySQL/MariaDB, SQLite) is in progress; "Import and export" is now M3. |
 | 2026-10-27 | trivial | Titled "gates and milestones", with a line on its role next to ROADMAP.md. |
 | 2026-10-27 | minor | Wording: M1's last check is a day of real use on the maintainer's own databases. |

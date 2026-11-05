@@ -45,7 +45,8 @@
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Kaspar Rosin and the dbee contributors. MIT OR Apache-2.0.</string>
 
-  <!-- No document types yet: dbee opens no files until its SQLite engine lands
-       (docs/roadmap.md). -->
+  <!-- No document types: Finder hands a document over in its open-documents event, which
+       winit doesn't pass on to dbee, so an "Open With dbee" would start dbee without the file
+       (docs/gaps.md). -->
 </dict>
 </plist>

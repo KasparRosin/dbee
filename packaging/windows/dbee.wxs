@@ -4,9 +4,9 @@
 
     wix build dbee.wxs -arch x64 -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
 
-  Per-machine install into Program Files, a Start Menu shortcut, an optional desktop shortcut
-  and App Paths (Win+R `dbee`). No file associations yet: dbee opens no files until its SQLite
-  engine lands (docs/roadmap.md).
+  Per-machine install into Program Files, a Start Menu shortcut, an optional desktop shortcut,
+  App Paths (Win+R `dbee`), and dbee in the Open with list of .sqlite and .sqlite3 files (never
+  their default).
 
   UpgradeCode is fixed for dbee (generated 2026-10-15): never change it, or upgrades
   install side by side instead of replacing the old version.
@@ -171,6 +171,17 @@
 
       <Component Id="DbeeCli">
         <File Id="DbeeCliExe" Source="$(var.BinDir)\dbee-cli.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- Open with: a ProgId whose open verb passes the file, listed under each extension's
+           OpenWithProgids. Nothing writes the extensions' own default value (WiX's ProgId and
+           Extension elements would), so dbee never takes a file type over. -->
+      <Component Id="SqliteOpenWith">
+        <RegistryValue Root="HKLM" Key="Software\Classes\dbee.sqlite" Value="SQLite database" Type="string" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\dbee.sqlite\shell\open\command"
+            Value="&quot;[INSTALLFOLDER]dbee.exe&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.sqlite\OpenWithProgids" Name="dbee.sqlite" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.sqlite3\OpenWithProgids" Name="dbee.sqlite" Value="" Type="string" />
       </Component>
 
       <!-- Persist both on and off, independently of the optional shortcut. AppSearch reads

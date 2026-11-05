@@ -5,6 +5,9 @@
 //! - `--control <port>` (or `DBEE_CONTROL_PORT`) serves the control channel on
 //!   `127.0.0.1:<port>` (`docs/control-protocol.md`). It listens before the window opens, so a
 //!   port in use stops the start: an agent must never drive another dbee by mistake.
+//! - The first argument that is no flag names a database file to open once the window is up
+//!   (`connection.openFile`): how a file manager's Open with hands dbee a file. A file of no type
+//!   dbee opens, or one that is not there, says so in the window.
 //! - `DBEE_SECRET_STORE=memory` keeps passwords in memory only; otherwise the OS keyring, and
 //!   without one none (a warning is logged and passwords are asked each time).
 //! - `DBEE_CLIPBOARD=memory` keeps every copy and cut in the app (a text field's too), never on
@@ -92,6 +95,20 @@ fn control_port(args: &[OsString], env: Option<OsString>) -> Result<Option<u16>,
         Some(v) => parse(&v).map(Some).map_err(|e| format!("DBEE_CONTROL_PORT: {e}")),
         None => Ok(None),
     }
+}
+
+/// The database file the command line names: the first argument that is no flag, nor the value
+/// of `--control`. Whether it is there, and of a type dbee opens, is `connection.openFile`'s to say.
+fn open_file(args: &[OsString]) -> Option<PathBuf> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--control" {
+            it.next();
+        } else if !a.to_string_lossy().starts_with('-') {
+            return Some(PathBuf::from(a));
+        }
+    }
+    None
 }
 
 /// `DBEE_SECRET_STORE=memory`.
@@ -228,6 +245,7 @@ fn main() -> ExitCode {
         }
     };
     let control = std::cell::Cell::new(control);
+    let file = std::cell::Cell::new(open_file(&args));
     let clipboard = clipboard(std::env::var_os("DBEE_CLIPBOARD"));
     if clipboard == Clipboard::Memory {
         log::info!("copies and cuts stay in the app for this run (DBEE_CLIPBOARD=memory)");
@@ -263,7 +281,11 @@ fn main() -> ExitCode {
                 let _ = window.set(cc.egui_ctx.clone());
                 let ctx = cc.egui_ctx.clone();
                 let session = Session::new(session_options(Arc::new(move || ctx.request_repaint())))?;
-                Ok(Box::new(DbeeApp::new(session, control.take()).with_clipboard(clipboard)))
+                let app = DbeeApp::new(session, control.take()).with_clipboard(clipboard);
+                Ok(Box::new(match file.take() {
+                    Some(path) => app.with_file(path),
+                    None => app,
+                }))
             }),
         )
     };
@@ -312,12 +334,24 @@ mod start_tests {
         assert_eq!(control_port(&args(&["--control", "7979"]), Some("7000".into())), Ok(Some(7979)));
         // An empty variable is unset.
         assert_eq!(control_port(&args(&[]), Some("".into())), Ok(None));
-        // Other arguments (a file the desktop asks dbee to open) are left alone.
+        // Other arguments (a file the desktop asks dbee to open, `open_file`) are left alone.
         assert_eq!(control_port(&args(&["/tmp/a.sqlite"]), None), Ok(None));
         for bad in [&["--control"][..], &["--control", "x"], &["--control", "70000"], &["--control", "0"], &["--control="], &["--control", "-1"]] {
             assert!(control_port(&args(bad), None).is_err(), "{bad:?}");
         }
         assert!(control_port(&args(&[]), Some("seven".into())).is_err());
+    }
+
+    #[test]
+    fn a_file_argument_opens_it() {
+        assert_eq!(open_file(&args(&["/tmp/a.sqlite"])), Some(PathBuf::from("/tmp/a.sqlite")));
+        assert_eq!(open_file(&args(&["--control", "7979"])), None);
+        assert_eq!(open_file(&args(&[])), None);
+        // Flags and the control port's value are no file; the first file is the one.
+        assert_eq!(open_file(&args(&["--control", "7979", "a.db", "b.db"])), Some(PathBuf::from("a.db")));
+        assert_eq!(open_file(&args(&["--control=7979", "-x", "--other", "a.db"])), Some(PathBuf::from("a.db")));
+        // Whether it is there, and a type dbee opens, is `connection.openFile`'s to say.
+        assert_eq!(open_file(&args(&["notes.txt"])), Some(PathBuf::from("notes.txt")));
     }
 
     #[test]
@@ -373,17 +407,33 @@ mod start_tests {
 
 #[cfg(test)]
 mod packaging_tests {
-    /// No platform offers dbee for files while no engine opens one. The `.sqlite` and `.sqlite3`
-    /// associations come back with the SQLite engine (docs/roadmap.md).
+    /// Linux and Windows offer dbee for SQLite files but never make it their default: the desktop
+    /// entry lists the MIME types (the user's settings pick the default) and takes one file, and
+    /// the installer adds dbee to the extensions' Open with list (`OpenWithProgids`), not their
+    /// default. macOS declares no document types while winit passes no Finder open event on
+    /// (docs/gaps.md).
     #[test]
-    fn no_platform_offers_dbee_for_files_yet() {
+    fn dbee_is_offered_for_database_files_but_takes_no_type_over() {
         let plist = include_str!("../../../packaging/macos/Info.plist.in");
         let wxs = include_str!("../../../packaging/windows/dbee.wxs");
         let desktop = include_str!("../../../packaging/linux/dev.rosin.dbee.desktop");
         let metainfo = include_str!("../../../packaging/linux/dev.rosin.dbee.metainfo.xml.in");
-        assert!(!plist.contains("CFBundleDocumentTypes"), "Info.plist.in declares document types");
-        assert!(!wxs.contains("OpenWithProgids") && !wxs.contains("FileAssociations"), "dbee.wxs declares file associations");
-        assert!(!desktop.lines().any(|l| l.starts_with("MimeType=")), "the desktop entry declares MIME types");
-        assert!(!metainfo.contains("<mediatype>"), "the AppStream metadata declares media types");
+        let lines: Vec<&str> = desktop.lines().collect();
+        assert!(lines.contains(&"MimeType=application/vnd.sqlite3;application/x-sqlite3;"), "{desktop}");
+        assert!(lines.contains(&"Exec=dbee %f"), "one file, as dbee opens the first: {desktop}");
+        for t in ["application/vnd.sqlite3", "application/x-sqlite3"] {
+            assert!(metainfo.contains(&format!("<mediatype>{t}</mediatype>")), "{t}");
+        }
+        assert!(wxs.contains(r#"Value="&quot;[INSTALLFOLDER]dbee.exe&quot; &quot;%1&quot;""#), "the open verb");
+        for ext in [".sqlite", ".sqlite3"] {
+            let key = format!(r"Software\Classes\{ext}\OpenWithProgids");
+            assert!(wxs.contains(&format!(r#"Key="{key}""#)), "{ext} lists dbee under Open with");
+        }
+        // No default: nothing writes an extension's own key, and no WiX element that does.
+        for line in wxs.lines().filter(|l| l.contains(r"Software\Classes\.")) {
+            assert!(line.contains("OpenWithProgids"), "{line}");
+        }
+        assert!(!wxs.contains("<ProgId") && !wxs.contains("<Extension"), "WiX's ProgId and Extension make dbee the default");
+        assert!(!plist.contains("CFBundleDocumentTypes"), "Finder's open event does not reach dbee yet");
     }
 }

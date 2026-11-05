@@ -153,10 +153,11 @@ impl Connected {
         }
     }
 
-    /// `{id, name, color, kind, host, port, database, user, ssh, readOnly, server, lost}`, as
+    /// `{id, name, color, kind, host, port, database, user, ssh, readOnly, server, lost, saved}`, as
     /// `inspect()` and `connection.open` show it: `kind` is the database type's id, `server`
-    /// the product and its version (`PostgreSQL 14.12`). Never a secret.
-    pub fn summary(&self) -> Json {
+    /// the product and its version (`PostgreSQL 14.12`), `saved` whether the saved list holds it
+    /// (`ConnectionStore::is_saved`, which the caller asks). Never a secret.
+    pub fn summary(&self, saved: bool) -> Json {
         let c = &self.config;
         json!({
             "id": c.id,
@@ -171,6 +172,7 @@ impl Connected {
             "readOnly": self.info.read_only,
             "server": server_text(&self.info),
             "lost": self.lost,
+            "saved": saved,
         })
     }
 }

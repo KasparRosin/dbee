@@ -9,14 +9,15 @@
 
 mod common;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use dbee_config::{ConnectionColor, ConnectionConfig, SecretError, SecretKind, SecretStore, SshAuth, SshConfig, SslMode};
+use dbee_config::{ConnectionColor, ConnectionConfig, SecretError, SecretKind, SecretStore, Settings, SshAuth, SshConfig, SslMode};
 use dbee_driver::Drivers;
-use dbee_engine::{EngineError, Json, Outcome, UiRequest};
-use dbee_testkit::{require_testdb, temp_home, unique};
+use dbee_engine::{EngineError, Json, Outcome, Session, UiRequest};
+use dbee_testkit::{TestTarget, require_testdb, temp_home, unique};
 use serde_json::json;
 
 /// Opening `config` with no password given and none saved.
@@ -233,7 +234,7 @@ fn summary_names_product_and_kind() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
         let c = s.state().connected.as_ref().unwrap();
-        let j = c.summary();
+        let j = c.summary(true);
         let info = t.kind().info();
         assert_eq!(j["kind"], info.id);
         let version = t.server().map_or("", |s| s.version.as_str());
@@ -723,10 +724,11 @@ fn connection_commands_are_registered() {
         "connection.sshKey",
         "connection.test",
         "connection.open",
+        "connection.openFile",
     ] {
         assert!(get(id).enabled, "{id} runs on the connection screen");
     }
-    for id in ["connection.reconnect", "schema.refresh", "connection.close"] {
+    for id in ["connection.reconnect", "schema.refresh", "connection.close", "connection.saveOpen"] {
         assert!(!get(id).enabled, "{id} needs a connection");
     }
 }
@@ -1121,5 +1123,174 @@ fn create_file_makes_a_missing_file_only_when_asked() {
         // An existing file opens as it is, asked or not.
         s.run_blocking("connection.test", json!({ "config": config, "createFile": true }), T).unwrap();
         s.run_blocking("connection.test", json!({ "config": config }), T).unwrap();
+    }
+}
+
+/// The file extensions of `t`'s database type.
+fn extensions(t: &TestTarget) -> &'static [&'static str] {
+    match kind_of(t).info().settings {
+        Settings::File { extensions } => extensions,
+        Settings::Server { .. } => panic!("{} is no file", t.name()),
+    }
+}
+
+/// `connection.openFile` of `path`.
+fn open_file(s: &mut Session, path: &Path) -> Json {
+    run(s, "connection.openFile", json!({ "path": path }))
+}
+
+#[test]
+fn open_file_is_unsaved_until_saved() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let file = t.file().unwrap();
+        let mut s = session();
+        let r = open_file(&mut s, file);
+        assert_eq!(s.inspect()["screen"], "workspace");
+        let c = &r["connection"];
+        assert_eq!((&c["kind"], &c["saved"]), (&json!(kind_of(&t)), &json!(false)), "{r}");
+        assert_eq!(c["name"], file.file_name().unwrap().to_str().unwrap(), "no name: the file's shows");
+        assert_eq!(s.inspect()["connection"]["saved"], false);
+        // Not saved; in Recent, as every open is.
+        let list = run(&mut s, "connection.list", json!({}));
+        assert_eq!(list["saved"], json!([]));
+        let recent = &list["recent"][0]["config"];
+        assert_eq!((&recent["file"], &recent["name"], &recent["id"]), (&json!(file), &json!(""), &c["id"]), "{list}");
+        let saved = run(&mut s, "connection.saveOpen", json!({}));
+        assert_eq!(saved["id"], c["id"]);
+        assert_eq!(s.inspect()["connection"]["saved"], true);
+        let list = run(&mut s, "connection.list", json!({}));
+        assert_eq!(list["saved"].as_array().map(Vec::len), Some(1), "{list}");
+        assert_eq!((&list["saved"][0]["id"], &list["saved"][0]["file"], &list["saved"][0]["kind"]), (&c["id"], &json!(file), &c["kind"]));
+        // In the connections file too.
+        let path = s.home.home.join("config").join(dbee_config::store::FILE);
+        let written: Json = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["saved"][0]["file"], json!(file));
+        let journal: Vec<&str> = s.journal().iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(journal, ["connection.openFile", "connection.saveOpen"]);
+        // Saved now: nothing left to save.
+        let e = s.execute("connection.saveOpen", json!({})).unwrap_err();
+        assert!(matches!(e, EngineError::Disabled { ref why, .. } if why == "the open connection is saved already"), "{e}");
+    }
+}
+
+#[test]
+fn open_file_finds_the_type_by_extension_in_any_case() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let file = t.file().unwrap();
+        let mut s = session();
+        for ext in extensions(&t) {
+            let upper = Folder(file.with_extension(ext.to_uppercase()));
+            std::fs::hard_link(file, &upper.0).unwrap();
+            let r = open_file(&mut s, &upper.0);
+            assert_eq!(r["connection"]["kind"], json!(kind_of(&t)), "{}", upper.0.display());
+            run(&mut s, "connection.close", json!({}));
+        }
+        // Another extension, or none: refused at once, with the list, and nothing runs.
+        for name in ["notes.txt", "notes"] {
+            let other = Folder(file.with_file_name(format!("{}-{name}", unique("other"))));
+            std::fs::hard_link(file, &other.0).unwrap();
+            let e = s.execute("connection.openFile", json!({ "path": other.0 })).unwrap_err();
+            assert_eq!(e.code(), "badParams", "{e}");
+            let EngineError::BadParams { msg, .. } = &e else { panic!("{e}") };
+            let shown = other.0.file_name().unwrap().to_str().unwrap();
+            assert!(msg.starts_with(&format!("Can't open {shown}: dbee opens ")), "{msg}");
+            assert!(extensions(&t).iter().all(|ext| msg.contains(&format!(".{ext}"))), "{msg}");
+            assert!(!s.busy() && s.inspect()["screen"] == "connections");
+        }
+        let e = s.execute("connection.openFile", json!({ "path": "" })).unwrap_err();
+        assert_eq!(e.code(), "badParams", "{e}");
+    }
+}
+
+#[test]
+fn open_file_makes_no_file() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let ext = extensions(&t)[0];
+        let folder = Folder(dbee_testkit::repo_root().join("target").join("testkit").join(unique("open-file")));
+        std::fs::create_dir_all(&folder.0).unwrap();
+        let mut s = session();
+        let missing = folder.0.join(format!("gone.{ext}"));
+        let e = run_err(&mut s, "connection.openFile", json!({ "path": missing }));
+        assert_eq!(e.code(), "connect", "{e}");
+        assert!(e.to_string().ends_with(&format!(": no file at {}", missing.display())), "{e}");
+        assert!(!missing.exists(), "nothing is made");
+        // A relative path is the current folder's, as a shell gives it; the error names it whole.
+        let name = format!("{}.{ext}", unique("relative"));
+        let e = run_err(&mut s, "connection.openFile", json!({ "path": name }));
+        assert!(e.to_string().ends_with(&format!(": no file at {}", std::env::current_dir().unwrap().join(&name).display())), "{e}");
+        assert!(!Path::new(&name).exists(), "nothing is made");
+        // A folder with a database file's name is no file.
+        let dir = folder.0.join(format!("a.{ext}"));
+        std::fs::create_dir(&dir).unwrap();
+        let e = run_err(&mut s, "connection.openFile", json!({ "path": dir }));
+        assert_eq!(e.code(), "connect", "{e}");
+        assert!(e.to_string().ends_with(&format!(": {} is not a file", dir.display())), "{e}");
+        assert_eq!(s.inspect()["screen"], "connections");
+    }
+}
+
+#[test]
+fn open_file_in_an_isolated_run_stays_in_its_folders() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let file = t.file().unwrap().to_path_buf();
+        let folder = file.parent().unwrap().to_path_buf();
+        let other = Folder(dbee_testkit::repo_root().join("target").join("testkit").join("allowed").join(unique("other")));
+        std::fs::create_dir_all(&other.0).unwrap();
+        let missing = folder.join(format!("{}.{}", unique("never"), extensions(&t)[0]));
+        {
+            // Only `other` is allowed: the driver refuses the file inside its open, and makes none.
+            let mut s = session_adjusted(|o| o.allowed_dirs = Some(vec![other.0.clone()]));
+            for path in [&file, &missing] {
+                let e = run_err(&mut s, "connection.openFile", json!({ "path": path }));
+                assert_eq!(e.code(), "config", "{}: {e}", path.display());
+                assert_eq!(e.to_string(), format!("this isolated run may only open files in its own folders; {} is not in them", path.display()));
+            }
+            assert!(!missing.exists(), "no file was made");
+            assert_eq!((&s.inspect()["screen"], &s.inspect()["connection"]), (&json!("connections"), &Json::Null));
+        }
+        // Its own folder: it opens.
+        let mut s = session_adjusted(|o| o.allowed_dirs = Some(vec![folder.clone()]));
+        open_file(&mut s, &file);
+        assert_eq!(s.inspect()["screen"], "workspace");
+    }
+}
+
+#[test]
+fn save_open_needs_an_unsaved_connection() {
+    let _db = require_testdb!();
+    let mut s = session();
+    let e = s.execute("connection.saveOpen", json!({})).unwrap_err();
+    assert!(matches!(e, EngineError::Disabled { ref why, .. } if why == "not connected"), "{e}");
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        // Opened from the saved list: saved already.
+        let mut s = connected_to(&t);
+        assert_eq!(s.inspect()["connection"]["saved"], true);
+        let before = run(&mut s, "connection.list", json!({}));
+        let e = s.execute("connection.saveOpen", json!({})).unwrap_err();
+        assert!(matches!(e, EngineError::Disabled { ref why, .. } if why == "the open connection is saved already"), "{e}");
+        assert_eq!(run(&mut s, "connection.list", json!({})), before);
+    }
+}
+
+#[test]
+fn open_file_while_connected_is_refused_as_open_is() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let file = t.file().unwrap();
+        let mut s = connected_to(&t);
+        open_table(&mut s, t.schema("shop"), "customers");
+        set_cell(&mut s, 0, "name", "staged");
+        let before = s.inspect();
+        let by_open = s.execute("connection.open", json!({ "config": config_for(&t) })).unwrap_err();
+        let by_file = s.execute("connection.openFile", json!({ "path": file })).unwrap_err();
+        for e in [&by_open, &by_file] {
+            assert!(matches!(e, EngineError::Disabled { why, .. } if why == "already connected; disconnect first"), "{e}");
+        }
+        assert_eq!(s.inspect(), before, "the connection and its staged edit stay");
+        assert_eq!(summary(&s)["edits"]["count"], 1, "{}", summary(&s));
     }
 }

@@ -491,7 +491,7 @@ impl Session {
     /// detail, and the running jobs. Never contains a secret.
     pub fn inspect(&self) -> Json {
         let st = &self.state;
-        let connection = st.connected.as_ref().map(Connected::summary);
+        let connection = st.connected.as_ref().map(|c| c.summary(st.store.is_saved(&c.config.id)));
         let active = st.active_tab();
         let query = match active {
             Some(Tab::Query(q)) => cmd::query::summary(q, st.connected.as_ref()),
