@@ -951,3 +951,38 @@ fn typed_password_stays_out_of_inspect_and_journal() {
     let file = std::fs::read_to_string(ui.home.home.join("config").join("connections.json")).unwrap();
     assert!(!file.contains("typed-secret-1"), "{file}");
 }
+
+#[test]
+fn a_drop_while_a_dialog_shows_or_a_connect_runs_is_let_go() {
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap();
+    let mut ui = cards();
+    let jobs = |ui: &mut Ui| ui.document()["jobs"].as_array().map_or(0, Vec::len);
+    // A dialog asks something: the file opens neither behind it nor once it closes.
+    ui.click("conn-fill-url");
+    assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
+    drop_files(&mut ui, &[file]);
+    ui.frame();
+    assert_eq!((jobs(&mut ui), ui.inspect()["dialog"].clone()), (0, json!("fillFromUrl")));
+    ui.click("dialog-cancel");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    assert_eq!((ui.document()["screen"].clone(), jobs(&mut ui)), (json!("connections"), 0));
+    // A connect runs: no second open, and no busy notice either.
+    let silent = Silent::start();
+    let params = json!({ "config": silent_config(silent.port) });
+    ui.ok("engine.execute", json!({ "command": "connection.open", "params": params, "wait": false }));
+    ui.frame();
+    assert_eq!(ui.document()["jobs"][0]["label"], "connection.open");
+    drop_files(&mut ui, &[file]);
+    ui.frame();
+    assert!(ui.tag("notice").is_none(), "{:?}", ui.tag("notice"));
+    assert_eq!(jobs(&mut ui), 1);
+    drop(silent);
+    ui.until("the silent connect to end", |ui| ui.document()["jobs"] == json!([]));
+    for _ in 0..3 {
+        ui.frame();
+    }
+    assert_eq!(ui.document()["screen"], "connections", "the file was not kept for later");
+}

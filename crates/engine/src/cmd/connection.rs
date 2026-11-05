@@ -171,7 +171,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Open Database File",
         menu: &[],
         shortcut: None,
-        params: "{path}",
+        params: "{path, password?}",
         enabled: not_connected,
         run: open_file,
         journal: true,
@@ -693,8 +693,15 @@ fn list(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// those the new settings still allow ([`reuse`] against the settings saved before) are kept
 /// while the others are forgotten; without `saveSecrets`, every stored one is forgotten.
 fn save(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
-    let mut config = connect_config(params)?.ok_or_else(|| bad("`config` is required (a connection object)"))?;
+    let config = connect_config(params)?.ok_or_else(|| bad("`config` is required (a connection object)"))?;
     let secrets = given(params)?;
+    let id = save_with_secrets(s, config, &secrets)?;
+    Ok(Outcome::Done(json!({ "id": id })))
+}
+
+/// What [`save`] does once it has its config and secrets: the saved list and the file, then the
+/// secret store as `saveSecrets` says. The config's id, a new one when it had none.
+fn save_with_secrets(s: &mut Session, mut config: ConnectionConfig, secrets: &Credentials) -> Result<String, EngineError> {
     if config.id.is_empty() {
         config.id = new_id();
     }
@@ -706,8 +713,8 @@ fn save(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if let Some(secret_store) = s.secrets.clone() {
         let ok = if config.save_secrets {
             let still = before.as_ref().map_or(Reuse::default(), |b| reuse(b, &config));
-            let forgot = forget_stale_secrets(secret_store.as_ref(), &config.id, still, &secrets);
-            store_secrets(secret_store.as_ref(), &config.id, &secrets) && forgot
+            let forgot = forget_stale_secrets(secret_store.as_ref(), &config.id, still, secrets);
+            store_secrets(secret_store.as_ref(), &config.id, secrets) && forgot
         } else {
             forget_secrets(secret_store.as_ref(), &config.id)
         };
@@ -715,7 +722,7 @@ fn save(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             secret_store_failed(s, "keep the connection's secrets");
         }
     }
-    Ok(Outcome::Done(json!({ "id": config.id })))
+    Ok(config.id)
 }
 
 /// `{id}` → `{id}`: removes the connection from the saved and recent lists, with its secrets.
@@ -891,58 +898,81 @@ fn start_open(s: &mut Session, mut config: ConnectionConfig, create_file: bool, 
     Ok(Outcome::Started(job))
 }
 
-/// The types of `kinds` that open a file, with their file extensions, in `kinds` order.
-fn file_kinds(kinds: &[DbKind]) -> Vec<(DbKind, &'static [&'static str])> {
+/// A database type that opens a file: its label and its file extensions.
+struct FileType<K> {
+    kind: K,
+    label: &'static str,
+    extensions: &'static [&'static str],
+}
+
+/// The types of `kinds` that open a file, in `kinds` order.
+fn file_types(kinds: &[DbKind]) -> Vec<FileType<DbKind>> {
     kinds
         .iter()
         .filter_map(|k| match k.info().settings {
-            Settings::File { extensions } => Some((*k, extensions)),
+            Settings::File { extensions } => Some(FileType { kind: *k, label: k.label(), extensions }),
             Settings::Server { .. } => None,
         })
         .collect()
 }
 
-/// The first of `kinds` whose extensions hold `path`'s, compared case-insensitively: on a shared
+/// The first of `types` whose extensions hold `path`'s, compared case-insensitively: on a shared
 /// extension the one listed first wins, as the first driver to claim a type wins it.
-fn first_with_extension<K: Copy>(kinds: &[(K, &[&str])], path: &Path) -> Option<K> {
+fn first_with_extension<K: Copy>(types: &[FileType<K>], path: &Path) -> Option<K> {
     let ext = path.extension()?.to_str()?;
-    kinds.iter().find(|(_, exts)| exts.iter().any(|e| e.eq_ignore_ascii_case(ext))).map(|(k, _)| *k)
+    types.iter().find(|t| t.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))).map(|t| t.kind)
 }
 
-/// Why `path` does not open: its name, and every extension of `kinds`, each once.
-fn no_file_type<K>(path: &Path, kinds: &[(K, &[&str])]) -> String {
+/// `a`, `a and b`, `a, b and c`; `a`, `a or b`, `a, b or c` with `or`.
+fn listed(items: &[String], and: &str) -> String {
+    match items.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} {and} {last}", rest.join(", ")),
+    }
+}
+
+/// Why `path` does not open: its name, every extension of `types` (each once), and where a file
+/// with another name opens.
+fn no_file_type<K>(path: &Path, types: &[FileType<K>]) -> String {
     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
     let mut exts: Vec<String> = Vec::new();
-    for e in kinds.iter().flat_map(|(_, e)| e.iter()) {
+    for e in types.iter().flat_map(|t| t.extensions.iter()) {
         let e = format!(".{e}");
         if !exts.contains(&e) {
             exts.push(e);
         }
     }
-    match exts.split_last() {
-        None => format!("Can't open {name}: this build of dbee opens no database files."),
-        Some((last, [])) => format!("Can't open {name}: dbee opens {last} files."),
-        Some((last, rest)) => format!("Can't open {name}: dbee opens {} and {last} files.", rest.join(", ")),
+    if exts.is_empty() {
+        return format!("Can't open {name}: this build of dbee opens no database files.");
     }
+    let labels: Vec<String> = types.iter().map(|t| t.label.to_string()).collect();
+    format!(
+        "Can't open {name}: dbee opens {} files. To open a file with another name, use New connection and choose {}.",
+        listed(&exts, "and"),
+        listed(&labels, "or")
+    )
 }
 
-/// `{path}` → a job as [`open`]'s: the file at `path` (a relative path is the current folder's),
-/// opened with the first of the session's types whose file extensions hold the path's
-/// ([`first_with_extension`]). The config is not saved and has no name, so the file's name shows
+/// `{path, password?}` → a job as [`open`]'s: the file at `path` (a relative path is the current
+/// folder's), opened with the first of the session's types whose file extensions hold the path's
+/// ([`first_with_extension`]), and the secrets the params give, as `connection.open` takes them. The
+/// config is not saved and has no name, so the file's name shows
 /// ([`ConnectionConfig::display_name`]); the summary says `saved: false` until
 /// `connection.saveOpen`. It never makes a file. A path with none of those extensions is refused
-/// (`badParams`), naming the ones dbee opens.
+/// (`badParams`), naming the ones dbee opens and where a file with another name opens.
 fn open_file(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     not_opening(s)?;
     let path = Path::new(p::str(params, "path")?);
     if path.as_os_str().is_empty() {
         return Err(bad("`path` is empty"));
     }
-    let files = file_kinds(&s.kinds());
-    let kind = first_with_extension(&files, path).ok_or_else(|| bad(no_file_type(path, &files)))?;
+    let types = file_types(&s.kinds());
+    let kind = first_with_extension(&types, path).ok_or_else(|| bad(no_file_type(path, &types)))?;
     let file = std::path::absolute(path).map_err(|e| bad(format!("{}: {e}", path.display())))?;
     let config = ConnectionConfig { kind, file: Some(file), host: String::new(), port: 0, ..ConnectionConfig::default() };
-    start_open(s, config, false, &json!({}))
+    config.validate().map_err(|e| bad(e.to_string()))?;
+    start_open(s, config, false, params)
 }
 
 /// A connection is open and the saved list doesn't hold it.
@@ -954,16 +984,14 @@ fn unsaved_open(s: &Session) -> Result<(), String> {
     }
 }
 
-/// `{}` → `{id}`: adds the open connection, which the saved list doesn't hold, to it as it was
-/// opened (its id, its settings, no name when it had none) and writes the file. No secret is
-/// stored.
+/// `{}` → `{id}`: saves the open connection, which the saved list doesn't hold, as `connection.save`
+/// would with the secrets it was opened with: its settings as opened (its id, no name when it had
+/// none), and with `saveSecrets` and a secret store its password and SSH secrets.
 fn save_open(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
-    let config = s.state.connected.as_ref().map(|c| c.config.clone()).ok_or_else(|| disabled(NOT_CONNECTED))?;
-    let mut store = s.state.store.clone();
-    store.upsert(config.clone());
-    store.save().map_err(|e| EngineError::Config(e.to_string()))?;
-    s.state.store = store;
-    Ok(Outcome::Done(json!({ "id": config.id })))
+    let c = s.state.connected.as_ref().ok_or_else(|| disabled(NOT_CONNECTED))?;
+    let (config, secrets) = (c.config.clone(), c.credentials.clone());
+    let id = save_with_secrets(s, config, &secrets)?;
+    Ok(Outcome::Done(json!({ "id": id })))
 }
 
 fn apply_open(
@@ -1277,9 +1305,13 @@ mod tests {
         }
     }
 
+    fn file_type<K>(kind: K, label: &'static str, extensions: &'static [&'static str]) -> FileType<K> {
+        FileType { kind, label, extensions }
+    }
+
     #[test]
     fn the_first_kind_with_the_extension_wins() {
-        let kinds: [(&str, &[&str]); 2] = [("first", &["db", "one"]), ("second", &["db", "two"])];
+        let kinds = [file_type("first", "First", &["db", "one"]), file_type("second", "Second", &["db", "two"])];
         let kind = |path: &str| first_with_extension(&kinds, Path::new(path));
         assert_eq!(kind("/x/a.db"), Some("first"), "a shared extension is the first kind's");
         assert_eq!(kind("a.two"), Some("second"));
@@ -1292,17 +1324,28 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_lists_the_extensions_dbee_opens() {
+    fn the_refusal_lists_the_extensions_and_where_other_files_open() {
         let notes = Path::new("/home/ann/notes.txt");
-        let one: [(u8, &[&str]); 1] = [(0, &["a"])];
-        assert_eq!(no_file_type(notes, &one), "Can't open notes.txt: dbee opens .a files.");
-        let two: [(u8, &[&str]); 2] = [(0, &["a"]), (1, &["b", "a"])];
-        assert_eq!(no_file_type(notes, &two), "Can't open notes.txt: dbee opens .a and .b files.", "each once");
-        assert_eq!(no_file_type(notes, &[(0u8, &["a", "b", "c"][..])]), "Can't open notes.txt: dbee opens .a, .b and .c files.");
-        assert_eq!(no_file_type(notes, &[] as &[(u8, &[&str])]), "Can't open notes.txt: this build of dbee opens no database files.");
-        // The types dbee knows, from their own data.
-        assert_eq!(no_file_type(notes, &file_kinds(&DbKind::ALL)), "Can't open notes.txt: dbee opens .sqlite, .sqlite3 and .db files.");
-        assert!(file_kinds(&DbKind::ALL).iter().all(|(k, _)| k.uses_file()));
+        let hint = |labels: &str| format!(" To open a file with another name, use New connection and choose {labels}.");
+        assert_eq!(no_file_type(notes, &[file_type(0, "A", &["a"])]), format!("Can't open notes.txt: dbee opens .a files.{}", hint("A")));
+        let two = [file_type(0, "A", &["a"]), file_type(1, "B", &["b", "a"])];
+        assert_eq!(no_file_type(notes, &two), format!("Can't open notes.txt: dbee opens .a and .b files.{}", hint("A or B")), "each once");
+        let three = [file_type(0, "A", &["a", "b", "c"]), file_type(1, "B", &[]), file_type(2, "C", &[])];
+        assert_eq!(no_file_type(notes, &three), format!("Can't open notes.txt: dbee opens .a, .b and .c files.{}", hint("A, B or C")));
+        assert_eq!(no_file_type(notes, &[] as &[FileType<u8>]), "Can't open notes.txt: this build of dbee opens no database files.");
+        // The types dbee knows, from their own data: every extension once, in order, and every label.
+        let types = file_types(&DbKind::ALL);
+        assert!(!types.is_empty() && types.iter().all(|t| t.kind.uses_file()));
+        let text = no_file_type(notes, &types);
+        let named: Vec<&str> = text.split_whitespace().filter(|w| w.starts_with('.')).map(|w| w.trim_end_matches(',')).collect();
+        let mut want: Vec<String> = Vec::new();
+        for e in types.iter().flat_map(|t| t.extensions.iter()).map(|e| format!(".{e}")) {
+            if !want.contains(&e) {
+                want.push(e);
+            }
+        }
+        assert_eq!(named, want, "{text}");
+        assert!(types.iter().all(|t| text.contains(t.label)), "{text}");
     }
 
     #[test]

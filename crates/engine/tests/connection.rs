@@ -676,15 +676,27 @@ fn reconnect_while_connected_replaces_the_connection() {
 #[test]
 fn a_second_open_while_one_runs_is_busy() {
     let _db = require_testdb!();
-    for t in engine_targets() {
+    let targets = engine_targets();
+    let file = targets.iter().find_map(TestTarget::file).expect("a file target");
+    for t in &targets {
         let mut s = session();
-        let id = save(&mut s, config_for(&t), Some(pw()));
+        let id = save(&mut s, config_for(t), Some(pw()));
         let Outcome::Started(job) = s.execute("connection.open", json!({ "id": id })).unwrap() else { panic!("open is a job") };
         let e = s.execute("connection.open", json!({ "id": id })).unwrap_err();
+        assert_eq!(e.code(), "busy", "{e}");
+        // Opening a file is one more open: busy too.
+        let e = s.execute("connection.openFile", json!({ "path": file })).unwrap_err();
         assert_eq!(e.code(), "busy", "{e}");
         s.wait(job, T).unwrap();
         assert_eq!(s.inspect()["screen"], "workspace");
     }
+    // And the other way round.
+    let mut s = session();
+    let Outcome::Started(job) = s.execute("connection.openFile", json!({ "path": file })).unwrap() else { panic!("openFile is a job") };
+    let e = s.execute("connection.open", json!({ "config": config_for(&targets[0]) })).unwrap_err();
+    assert_eq!(e.code(), "busy", "{e}");
+    s.wait(job, T).unwrap();
+    assert_eq!(s.inspect()["screen"], "workspace");
 }
 
 #[test]
@@ -1197,6 +1209,8 @@ fn open_file_finds_the_type_by_extension_in_any_case() {
             let shown = other.0.file_name().unwrap().to_str().unwrap();
             assert!(msg.starts_with(&format!("Can't open {shown}: dbee opens ")), "{msg}");
             assert!(extensions(&t).iter().all(|ext| msg.contains(&format!(".{ext}"))), "{msg}");
+            let hint = format!("To open a file with another name, use New connection and choose {}", kind_of(&t).label());
+            assert!(msg.contains(&hint), "{msg}");
             assert!(!s.busy() && s.inspect()["screen"] == "connections");
         }
         let e = s.execute("connection.openFile", json!({ "path": "" })).unwrap_err();
@@ -1222,12 +1236,25 @@ fn open_file_makes_no_file() {
         let e = run_err(&mut s, "connection.openFile", json!({ "path": name }));
         assert!(e.to_string().ends_with(&format!(": no file at {}", std::env::current_dir().unwrap().join(&name).display())), "{e}");
         assert!(!Path::new(&name).exists(), "nothing is made");
-        // A folder with a database file's name is no file.
+        // A folder with a database file's name is no file, with a trailing slash or without.
         let dir = folder.0.join(format!("a.{ext}"));
         std::fs::create_dir(&dir).unwrap();
-        let e = run_err(&mut s, "connection.openFile", json!({ "path": dir }));
-        assert_eq!(e.code(), "connect", "{e}");
-        assert!(e.to_string().ends_with(&format!(": {} is not a file", dir.display())), "{e}");
+        let slashed = |p: &Path| format!("{}/", p.display());
+        for path in [dir.display().to_string(), slashed(&dir)] {
+            let e = run_err(&mut s, "connection.openFile", json!({ "path": path }));
+            assert_eq!(e.code(), "connect", "{e}");
+            assert!(e.to_string().ends_with(&format!(": {path} is not a file")), "{e}");
+        }
+        // A trailing slash names a folder, also after a file's name or a missing one's: nothing opens
+        // or is made.
+        let file = folder.0.join(format!("b.{ext}"));
+        std::fs::hard_link(t.file().unwrap(), &file).unwrap();
+        for path in [slashed(&file), slashed(&missing)] {
+            let e = run_err(&mut s, "connection.openFile", json!({ "path": path }));
+            assert_eq!(e.code(), "connect", "{path}: {e}");
+            assert!(e.to_string().ends_with(&format!(": {path} is not a file")), "{e}");
+        }
+        assert!(!missing.exists(), "nothing is made");
         assert_eq!(s.inspect()["screen"], "connections");
     }
 }
@@ -1256,6 +1283,29 @@ fn open_file_in_an_isolated_run_stays_in_its_folders() {
         let mut s = session_adjusted(|o| o.allowed_dirs = Some(vec![folder.clone()]));
         open_file(&mut s, &file);
         assert_eq!(s.inspect()["screen"], "workspace");
+    }
+}
+
+#[test]
+fn save_open_keeps_the_password_as_the_forms_save_does() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| !t.is_file()) {
+        // Saving passwords on (the default): the password the connection was opened with is kept, and
+        // the next open asks for none.
+        let mut s = session();
+        open(&mut s, json!({ "config": config_for(&t), "password": pw() }));
+        let id = run(&mut s, "connection.saveOpen", json!({}))["id"].as_str().unwrap().to_owned();
+        assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), Some(pw()), "{}", t.name());
+        assert_secret_hidden(&s, &pw());
+        run(&mut s, "connection.close", json!({}));
+        open(&mut s, json!({ "id": id }));
+        // Off: no password is kept, so the next open asks.
+        let mut s = session();
+        open(&mut s, json!({ "config": ConnectionConfig { save_secrets: false, ..config_for(&t) }, "password": pw() }));
+        let id = run(&mut s, "connection.saveOpen", json!({}))["id"].as_str().unwrap().to_owned();
+        assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), None, "{}", t.name());
+        run(&mut s, "connection.close", json!({}));
+        assert_eq!(run_err(&mut s, "connection.open", json!({ "id": id })).code(), "needsPassword", "{}", t.name());
     }
 }
 

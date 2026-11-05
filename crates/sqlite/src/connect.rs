@@ -24,12 +24,13 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Open `t.config.file`: read-write, or read-only when the settings say so; a missing file is made
 /// only when `t.create_file` is set (and never read-only).
 ///
-/// A path that exists but is no regular file (a folder, a FIFO, a device) is refused before it is
-/// opened. The session then turns foreign keys on and waits [`BUSY_TIMEOUT`] for a locked file; a
-/// read-only one also runs `PRAGMA query_only = ON`, which keeps it from temporary tables too. A
-/// read of `sqlite_schema` turns a file that is not a database, or one whose schema is damaged,
-/// into [`DbError::Connect`] naming the file; damage elsewhere shows when it is read. A file the
-/// system lets dbee read only opens read-only, and says so. With `t.allowed_dirs` (an isolated
+/// A path that exists but is no regular file (a folder, a FIFO, a device), or that ends in a
+/// separator, is refused before it is opened. The session then turns foreign keys on and waits
+/// [`BUSY_TIMEOUT`] for a locked file; a read-only one also runs `PRAGMA query_only = ON`, which
+/// keeps it from temporary tables too. A read of `sqlite_schema` turns a file that is not a
+/// database, or one whose schema is damaged, into [`DbError::Connect`] naming the file; damage
+/// elsewhere shows when it is read. A file the system lets dbee read only opens read-only, and says
+/// so. With `t.allowed_dirs` (an isolated
 /// run), the file must lie in one of those folders ([`dbee_driver::allowed_file`]), and the path
 /// that check resolved is the one opened; SQL may then open no other file: every `ATTACH` is
 /// refused, and with it `VACUUM`, which attaches the file it writes, and the pragmas that move
@@ -60,6 +61,12 @@ pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
     Ok(SqliteConnection { shared: Some(Arc::new(shared)), running, info, turn: tokio::sync::Mutex::new(()), runtime })
 }
 
+/// `path` ends in a separator, so it names a folder. SQLite drops the separator, and would open (or
+/// make) the file before it.
+fn names_a_folder(path: &Path) -> bool {
+    path.as_os_str().as_encoded_bytes().last().is_some_and(|b| std::path::is_separator(char::from(*b)))
+}
+
 /// Open the file at `given` (checked against `allowed` first, when there are allowed folders) and
 /// set its session up, on the calling (blocking) thread; the connection, its interrupt handle, and
 /// whether it is read-only.
@@ -70,7 +77,7 @@ fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>
         None => given.to_path_buf(),
     };
     let path = path.as_path();
-    if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
+    if names_a_folder(given) || std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
         return Err(DbError::Connect(format!("{shown} is not a file")));
     }
     let mode = match (read_only, create) {
@@ -353,7 +360,16 @@ mod tests {
         let (ro, _, read_only) = open(&file, true, false, None).unwrap();
         assert_eq!((ro.query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0)).unwrap(), read_only), (1, true));
         drop(ro);
+        // A trailing separator names a folder: refused, not opened, nor made.
+        let slashed = PathBuf::from(format!("{}/", file.display()));
+        for create in [false, true] {
+            assert_eq!(open(&slashed, false, create, None).err(), Some(DbError::Connect(format!("{} is not a file", slashed.display()))));
+        }
         let _ = std::fs::remove_file(&file);
+        for create in [false, true] {
+            assert!(open(&slashed, false, create, None).is_err());
+            assert!(!file.exists(), "nothing is made");
+        }
     }
 
     #[tokio::test]

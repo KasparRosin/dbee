@@ -20,6 +20,7 @@
 //! time while a test of the binary takes the exclusive lock.
 #![allow(dead_code, reason = "each test binary uses some of these helpers")]
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc};
 use std::time::{Duration, Instant};
 
@@ -351,6 +352,28 @@ impl Ui {
     pub fn text_in(&self, within: egui::Rect, text: &str) -> Option<(egui::Rect, bool)> {
         self.texts().into_iter().find(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).map(|(r, g)| (r, g.elided))
     }
+}
+
+/// A file dropped on the window, as eframe hands one over.
+#[derive(Debug)]
+pub struct Dropped(pub PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Err("the test reads no file".into())
+    }
+}
+
+/// One frame with `paths` dropped on the window.
+pub fn drop_files(ui: &mut Ui, paths: &[&Path]) {
+    for p in paths {
+        ui.harness.input_mut().dropped_files.push(Arc::new(Dropped(p.to_path_buf())));
+    }
+    ui.frame();
 }
 
 /// The settings for `t`: its server on `127.0.0.1` as the kind's user, on the kind's test

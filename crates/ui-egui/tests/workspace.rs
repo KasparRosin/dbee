@@ -602,28 +602,6 @@ fn status_bar_shows_colour_and_read_only() {
     assert!(ui.tag("status-save").is_none(), "no Save connection for a saved one");
 }
 
-/// A file dropped on the window, as eframe hands one over.
-#[derive(Debug)]
-struct Dropped(PathBuf);
-
-impl egui::DroppedFile for Dropped {
-    fn path(&self) -> &Path {
-        &self.0
-    }
-
-    fn bytes(&self) -> Result<Vec<u8>, String> {
-        Err("the test reads no file".into())
-    }
-}
-
-/// One frame with `paths` dropped on the window.
-fn drop_files(ui: &mut Ui, paths: &[&Path]) {
-    for p in paths {
-        ui.harness.input_mut().dropped_files.push(Arc::new(Dropped(p.to_path_buf())));
-    }
-    ui.frame();
-}
-
 #[test]
 fn a_dropped_database_file_opens_unsaved_and_save_connection_saves_it() {
     let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
@@ -656,6 +634,7 @@ fn a_dropped_file_of_no_type_dbee_opens_says_which_do() {
     let notice = ui.value("notice");
     let text = notice.as_str().unwrap_or_default();
     assert!(text.starts_with("Can't open notes.txt: dbee opens ") && text.contains(".sqlite"), "{notice}");
+    assert!(text.ends_with("To open a file with another name, use New connection and choose SQLite."), "{notice}");
     assert_eq!(ui.document()["screen"], "connections");
 }
 

@@ -6,7 +6,7 @@
 //! 3. the control requests that arrived are handled ([`crate::control`]); then the file the
 //!    command line named ([`DbeeApp::with_file`]), in the first frame, or else the first file
 //!    dropped on the window opens (`connection.openFile`; a file of no type dbee opens shows the
-//!    refusal as a notice);
+//!    refusal as a notice). A drop while a dialog shows or a connect runs is let go, not kept;
 //! 4. the open cell editor takes its keys and commits on a press outside it, or Enter over a
 //!    selection opens one ([`crate::editors`]); then the keyboard shortcuts run
 //!    ([`crate::shortcuts`]; the value panel's copy first), before any widget sees the keys (not
@@ -55,6 +55,9 @@ const NEW_QUERY: &str = "tab.newQuery";
 
 /// The command that opens a database file: one dropped on the window, or named on the command line.
 const OPEN_FILE: &str = "connection.openFile";
+
+/// The jobs that connect: while one runs, a dropped file is let go.
+const CONNECTING: [&str; 2] = ["connection.open", "connection.reconnect"];
 
 /// How often a busy session repaints.
 const BUSY_REPAINT: Duration = Duration::from_millis(100);
@@ -466,7 +469,8 @@ impl DbeeApp {
             self.control = Some(rx);
         }
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
-        if let Some(path) = self.file.take().or(dropped) {
+        let busy = self.view.dialog.is_some() || CONNECTING.iter().any(|c| self.session.running(c));
+        if let Some(path) = self.file.take().or(dropped.filter(|_| !busy)) {
             self.open_file(&path);
         }
         // 4. The cell editor, then shortcuts, unless a dialog or the quick search is open.

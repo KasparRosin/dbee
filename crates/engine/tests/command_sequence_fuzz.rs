@@ -61,7 +61,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("connection.sshKey", &[("config", CONFIG)]),
     ("connection.test", CONNECT),
     ("connection.open", OPEN),
-    ("connection.openFile", &[("path", FILE_PATH)]),
+    ("connection.openFile", &[("path", FILE_PATH), ("password", Hint::Text)]),
     ("connection.saveOpen", &[]),
     ("connection.reconnect", SECRETS),
     ("schema.refresh", &[]),
