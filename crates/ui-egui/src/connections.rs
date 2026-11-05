@@ -27,9 +27,11 @@
 //!   under the buttons with the server's message.
 //! - A server type's Database field has a list button: it runs `connection.listDatabases` with
 //!   the form's settings, as Test runs, and says so while it lists (disabled then, and while a
-//!   test or connect runs). The names open under the field; choosing one fills it in. A list
-//!   that comes after the form changed its server (the type, host, port, user, TLS or SSH
-//!   settings, another connection, Change engine) is dropped.
+//!   test or connect runs). The names open under the field; a click or Enter on the highlighted
+//!   one (Down and Up move it) fills the field in, and Escape closes the list, as does an edit of
+//!   the server's fields. A list that comes after the form changed its server (the type, host,
+//!   port, user, TLS, SSH or the type's options, another connection, Change engine) or left the
+//!   screen is dropped.
 //! - The file pickers ("Change…" for the key, "Choose…" for the CA file, "Choose…" and "New file…"
 //!   for a database file) run rfd on a thread of their own and send the path back; a picker that
 //!   cannot open leaves a note in its row ([`crate::picker`]). After New file…, every test and
@@ -43,11 +45,12 @@
 //! to). `ui.inspect` reports the field as masked with whether it is set; `Debug` and the logs
 //! never show it.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dbee_config::{ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
-use dbee_engine::{EngineError, JobId, Json, State};
+use dbee_engine::{EngineError, JobId, Json, Screen, State};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
     Align, Button, Color32, CornerRadius, FontId, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat,
@@ -123,6 +126,16 @@ pub(crate) struct DatabaseList {
     pub names: Vec<String>,
     /// The list shows, under the field.
     pub open: bool,
+    /// The name Enter picks, which Down and Up move.
+    pub highlight: usize,
+    /// The form's server part ([`Form::server_part`]) the open list is of: an edit of it closes
+    /// the list.
+    pub shown_for: Option<Form>,
+    /// The list's scroll offset and the height in view, as last drawn.
+    pub offset: f32,
+    pub view_h: f32,
+    /// Scroll the highlighted name into view when the list is next drawn.
+    pub reveal: bool,
 }
 
 impl DatabaseList {
@@ -140,9 +153,12 @@ impl DatabaseList {
     }
 }
 
-/// Where a config goes: the server, the login, TLS and the tunnel, which a database list is of.
-fn server_of(c: &ConnectionConfig) -> (DbKind, &str, u16, &str, SslMode, Option<&std::path::Path>, Option<&SshConfig>) {
-    (c.kind, &c.host, c.port, &c.user, c.ssl_mode, c.ca_file.as_deref(), c.ssh.as_ref())
+/// Where a config goes: the server, the login, TLS, the tunnel and the type's options, which a
+/// database list is of.
+type ServerOf<'a> = (DbKind, &'a str, u16, &'a str, SslMode, Option<&'a std::path::Path>, Option<&'a SshConfig>, &'a BTreeMap<String, String>);
+
+fn server_of(c: &ConnectionConfig) -> ServerOf<'_> {
+    (c.kind, &c.host, c.port, &c.user, c.ssl_mode, c.ca_file.as_deref(), c.ssh.as_ref(), &c.options)
 }
 
 /// The form still goes to the server a listing ran with `params` for.
@@ -213,6 +229,11 @@ impl ConnScreen {
         self.databases = DatabaseList::default();
     }
 
+    /// The workspace shows: the database list goes, so it never opens again on its own.
+    pub(crate) fn forget_list(&mut self) {
+        self.databases = DatabaseList::default();
+    }
+
     /// Loads `c` into the form, its type fixed when it was opened from the saved list or Recent
     /// (`fixed`). The same connection again keeps the typed password and what the form shows under
     /// its buttons.
@@ -275,7 +296,8 @@ pub(crate) fn started(app: &mut DbeeApp, job: JobId, command: &str) {
 
 /// The outcome of a form command (`job` when it ran as one). A result for a connection the
 /// form no longer shows is dropped; so is a database list the form no longer waits for (Change
-/// engine) or whose server it no longer names.
+/// engine), whose server it no longer names, or that comes when the form is not on screen (a
+/// connect succeeded meanwhile).
 pub(crate) fn form_done(
     app: &mut DbeeApp,
     command: &'static str,
@@ -284,6 +306,7 @@ pub(crate) fn form_done(
     job: Option<JobId>,
     result: Result<Json, EngineError>,
 ) {
+    let on_screen = app.session.state().screen == Screen::Connections && app.view.conn.step == Step::Form;
     let conn = &mut app.view.conn;
     if let (Some((running, _)), Some(job)) = (conn.running, job)
         && running == job
@@ -294,7 +317,7 @@ pub(crate) fn form_done(
     if listing && !conn.databases.takes(job) {
         return;
     }
-    if generation != conn.generation || (listing && !same_server(&params, &conn.form)) {
+    if generation != conn.generation || (listing && !(on_screen && same_server(&params, &conn.form))) {
         return;
     }
     match result {
@@ -315,8 +338,12 @@ pub(crate) fn form_done(
                 if names.is_empty() {
                     conn.message = Some(Message { kind: Kind::Note, text: "No databases to list.".into() });
                 }
-                conn.databases.open = !names.is_empty();
-                conn.databases.names = names;
+                let list = &mut conn.databases;
+                list.highlight = names.iter().position(|n| *n == conn.form.database).unwrap_or(0);
+                list.shown_for = Some(conn.form.server_part());
+                list.reveal = true;
+                list.open = !names.is_empty();
+                list.names = names;
             }
             OPEN => {
                 conn.message = None;
@@ -921,6 +948,7 @@ mod tests {
     use dbee_config::MemoryStore;
     use dbee_engine::{Session, SessionOptions};
     use dbee_testkit::{TempHome, temp_home};
+    use egui::Key;
 
     use super::*;
 
@@ -964,8 +992,18 @@ mod tests {
     }
 
     fn frame(app: &mut DbeeApp, ctx: &egui::Context) {
-        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 900.0))), ..egui::RawInput::default() };
+        frame_with(app, ctx, Vec::new());
+    }
+
+    /// A frame with `events` in its input.
+    fn frame_with(app: &mut DbeeApp, ctx: &egui::Context, events: Vec<egui::Event>) {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 900.0));
+        let raw = egui::RawInput { screen_rect: Some(screen), events, ..egui::RawInput::default() };
         ctx.run_ui(raw, |ui| app.ui(ui)).drop_without_applying_deltas();
+    }
+
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }
     }
 
     /// The form with the SSH tunnel on and a key line that says which key it uses.
@@ -1148,6 +1186,11 @@ mod tests {
         fill_from_url(&mut app, &json!({ "kind": "mariadb" }));
         form_done(&mut app, LIST_DATABASES, params, generation, job(23), listed(&["dbee"]));
         assert!(!app.view.conn.databases.open && app.view.conn.databases.pending.is_none(), "a URL of another type");
+        // The type's own options count too.
+        let (params, generation) = listing(&mut app, 24);
+        app.view.conn.form.options.insert(dbee_config::ALLOW_PUBLIC_KEY.id.into(), "true".into());
+        form_done(&mut app, LIST_DATABASES, params, generation, job(24), listed(&["dbee"]));
+        assert!(!app.view.conn.databases.open, "another option");
         // Typing a database or a password since the click is no change of server.
         let (params, generation) = listing(&mut app, 22);
         app.view.conn.form.database = "sh".into();
@@ -1173,20 +1216,123 @@ mod tests {
         assert_eq!((app.view.conn.form.database.as_str(), app.view.conn.databases.open), ("shop", false));
     }
 
-    #[test]
-    fn many_names_scroll_in_a_list_of_bounded_height() {
-        let (mut app, _home) = app_with_drivers();
+    /// A MySQL form whose list holds `names`, open as a listing's result opens it.
+    fn open_list(names: &[String]) -> (DbeeApp, TempHome, egui::Context) {
+        let (mut app, home) = app_with_drivers();
         let ctx = egui::Context::default();
         apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
+        let (params, generation) = listing(&mut app, 1);
+        form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(1)), Ok(json!({ "databases": names })));
+        assert!(app.view.conn.databases.open);
+        (app, home, ctx)
+    }
+
+    /// The items of the list drawn in the last frame: their indexes.
+    fn drawn_items(app: &DbeeApp, n: usize) -> Vec<usize> {
+        (0..n).filter(|i| app.tags().rect(&format!("conn-database-item-{i}")).is_some()).collect()
+    }
+
+    #[test]
+    fn many_names_scroll_in_a_list_of_bounded_height() {
         let names: Vec<String> = (0..500).map(|n| format!("db{n:03}")).collect();
-        app.view.conn.databases = DatabaseList { pending: None, names, open: true };
+        let (mut app, _home, ctx) = open_list(&names);
         for _ in 0..3 {
             frame(&mut app, &ctx);
         }
-        let drawn: Vec<Rect> = (0..500).filter_map(|n| app.tags().rect(&format!("conn-database-item-{n}"))).collect();
+        let drawn: Vec<Rect> = drawn_items(&app, 500).iter().filter_map(|i| app.tags().rect(&format!("conn-database-item-{i}"))).collect();
         assert!(app.tags().value("conn-database-item-0") == Some(&Json::from("db000")) && drawn.len() < 20, "{} drawn", drawn.len());
         let (top, bottom) = (drawn[0].top(), drawn.iter().map(|r| r.bottom()).fold(0.0, f32::max));
         assert!(bottom - top <= 260.0, "{top} … {bottom}");
+        // Down moves the highlight, and the list scrolls to keep it in view; Enter picks it.
+        frame_with(&mut app, &ctx, vec![key(Key::ArrowDown); 40]);
+        frame(&mut app, &ctx);
+        assert_eq!(app.view.conn.databases.highlight, 40);
+        assert!(drawn_items(&app, 500).contains(&40) && !drawn_items(&app, 500).contains(&0), "{:?}", drawn_items(&app, 500));
+        frame_with(&mut app, &ctx, vec![key(Key::ArrowUp); 3]);
+        frame_with(&mut app, &ctx, vec![key(Key::Enter)]);
+        assert_eq!((app.view.conn.form.database.as_str(), app.view.conn.databases.open), ("db037", false));
+        assert_eq!(app.session.journal().len(), 0, "Enter picked a name and connected nowhere");
+    }
+
+    #[test]
+    fn an_edit_of_the_server_closes_an_open_list() {
+        let names = ["many".to_string(), "shop".to_string()];
+        let changes: [fn(&mut Form); 9] = [
+            |f| f.host.push('x'),
+            |f| f.port = "3307".into(),
+            |f| f.user.push('x'),
+            |f| f.password.push('x'),
+            |f| f.ssl_mode = SslMode::Require,
+            |f| f.ca_file = Some(PathBuf::from("/x/ca.pem")),
+            |f| f.ssh_on = true,
+            |f| f.ssh_host.push('x'),
+            |f| {
+                f.options.insert(dbee_config::ALLOW_PUBLIC_KEY.id.into(), "true".into());
+            },
+        ];
+        for (n, change) in changes.into_iter().enumerate() {
+            let (mut app, _home, ctx) = open_list(&names);
+            frame(&mut app, &ctx);
+            assert!(!drawn_items(&app, 2).is_empty(), "change {n}: the list shows");
+            change(&mut app.view.conn.form);
+            frame(&mut app, &ctx);
+            assert!(!app.view.conn.databases.open && drawn_items(&app, 2).is_empty(), "change {n}");
+        }
+        // The database, the name and the colour are no change of server.
+        let (mut app, _home, ctx) = open_list(&names);
+        app.view.conn.form.database.push('s');
+        app.view.conn.form.name.push('s');
+        app.view.conn.form.color = dbee_config::ConnectionColor::Red;
+        frame(&mut app, &ctx);
+        assert!(app.view.conn.databases.open && drawn_items(&app, 2) == [0, 1]);
+    }
+
+    #[test]
+    fn the_highlight_starts_on_the_typed_name_and_escape_closes() {
+        let names: Vec<String> = ["many", "odd", "shop", "sys"].map(String::from).to_vec();
+        let (mut app, _home) = app_with_drivers();
+        let ctx = egui::Context::default();
+        apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
+        app.view.conn.form.database = "shop".into();
+        let (params, generation) = listing(&mut app, 1);
+        form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(1)), Ok(json!({ "databases": names })));
+        assert_eq!(app.view.conn.databases.highlight, 2);
+        // At the ends the highlight stays.
+        frame_with(&mut app, &ctx, vec![key(Key::ArrowDown); 5]);
+        assert_eq!(app.view.conn.databases.highlight, 3);
+        frame_with(&mut app, &ctx, vec![key(Key::ArrowUp); 9]);
+        assert_eq!(app.view.conn.databases.highlight, 0);
+        frame_with(&mut app, &ctx, vec![key(Key::Escape)]);
+        assert!(!app.view.conn.databases.open);
+        assert_eq!(app.view.conn.form.database, "shop", "nothing was chosen");
+    }
+
+    /// A listing that lands after a connect succeeded (here an agent's, not the form's) never
+    /// opens, and the workspace lets an open list go.
+    #[test]
+    fn a_list_that_lands_after_a_connect_never_opens() {
+        let (mut app, _home) = app_with_drivers();
+        let ctx = egui::Context::default();
+        apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
+        let (params, generation) = listing(&mut app, 1);
+        let seed = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+        let file = ConnectionConfig {
+            kind: DbKind::Sqlite,
+            file: seed.file().map(PathBuf::from),
+            host: String::new(),
+            port: 0,
+            ..ConnectionConfig::default()
+        };
+        app.session.run_blocking("connection.open", json!({ "config": file }), std::time::Duration::from_secs(30)).unwrap();
+        assert_eq!(app.session.state().screen, dbee_engine::Screen::Workspace);
+        form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(1)), listed(&["dbee"]));
+        assert!(!app.view.conn.databases.open && app.view.conn.databases.pending.is_none());
+        // A list open when the workspace showed is gone when the connection screen comes back.
+        app.view.conn.databases.open = true;
+        frame(&mut app, &ctx);
+        app.session.run_blocking("connection.close", json!({ "force": true }), std::time::Duration::from_secs(30)).unwrap();
+        frame(&mut app, &ctx);
+        assert!(!app.view.conn.databases.open && app.tags().rect("conn-database-item-0").is_none());
     }
 
     #[test]

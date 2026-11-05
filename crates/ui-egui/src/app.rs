@@ -510,7 +510,10 @@ impl DbeeApp {
                 self.view.panel.clear();
                 connections::screen(self, ui);
             }
-            Screen::Workspace => workspace::screen(self, ui),
+            Screen::Workspace => {
+                self.view.conn.forget_list();
+                workspace::screen(self, ui);
+            }
         }
         dialogs::show(self, ui.ctx());
         self.notices(ui);

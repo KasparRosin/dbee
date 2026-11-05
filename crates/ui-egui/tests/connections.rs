@@ -1059,7 +1059,7 @@ fn database_list_fills_the_field() {
 
 #[test]
 fn sqlite_form_has_no_database_list() {
-    let mut ui = cards();
+    let mut ui = Ui::fresh(APP_SIZE);
     ui.click("conn-kind-sqlite");
     assert!(ui.tag("conn-database-list").is_none() && ui.tag("conn-database").is_none());
     // Every server type has one, beside its Database field.
@@ -1111,7 +1111,8 @@ fn a_mysql_list_opens_under_the_field_without_moving_the_form() {
 #[test]
 fn the_database_list_button_shows_that_it_lists() {
     let silent = Silent::start();
-    let mut ui = ui();
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
     ui.replace("conn-host", "127.0.0.1");
     ui.replace("conn-port", &silent.port.to_string());
     ui.click("conn-database-list");
@@ -1136,4 +1137,29 @@ fn the_database_list_button_shows_that_it_lists() {
     drop(silent);
     ui.until("the test to fail", |ui| ui.value("conn-test") == "Test");
     assert!(ui.tag("conn-database-list").unwrap().get("enabled").is_none());
+}
+
+/// The open list takes Down, Up, Enter and Escape before the form's fields, as the quick search
+/// does: Enter picks the highlighted name rather than connecting.
+#[test]
+fn the_database_list_takes_the_keyboard() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = form_for(db, db.server("mysql80").unwrap());
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| !listed(&ui.inspect()).is_empty());
+    for key in ["ArrowDown", "ArrowDown", "ArrowUp"] {
+        ui.key(key);
+    }
+    ui.key("Enter");
+    ui.frame();
+    assert_eq!(ui.value("conn-database"), "odd");
+    assert!(listed(&ui.inspect()).is_empty(), "the list closed");
+    assert_eq!((ui.document()["screen"].clone(), ui.document()["jobs"].clone()), (json!("connections"), json!([])), "Enter connected nowhere");
+    // The highlight starts on the name the field holds.
+    ui.replace("conn-database", "shop");
+    ui.click("conn-database-list");
+    ui.until("the list again", |ui| !listed(&ui.inspect()).is_empty());
+    ui.key("Enter");
+    ui.frame();
+    assert_eq!(ui.value("conn-database"), "shop");
 }

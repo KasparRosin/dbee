@@ -17,12 +17,12 @@ use std::path::{Path, PathBuf};
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
-    Align, Button, Checkbox, CornerRadius, FontId, Frame, Label, Layout, Margin, Popup, PopupCloseBehavior, Rect, RectAlign, RichText, ScrollArea,
-    Sense, Stroke, TextEdit, UiBuilder, pos2, vec2,
+    Align, Button, Checkbox, CornerRadius, FontId, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect, RectAlign,
+    RichText, ScrollArea, Sense, Stroke, TextEdit, UiBuilder, pos2, vec2,
 };
 
 use crate::automation::Tags;
-use crate::connections::{Act, ConnScreen, Kind, Running, line_galley, tilde};
+use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
 use crate::filter_bar;
 use crate::picker::Pick;
 use crate::theme::{RADIUS, TOKENS, connection_color};
@@ -251,6 +251,25 @@ impl Form {
         self.create_file = false;
     }
 
+    /// What a list of the server's databases depends on: the type, the server, the login (the
+    /// password too), TLS, the tunnel and the type's options; not the database, the name or the
+    /// colour.
+    pub(crate) fn server_part(&self) -> Form {
+        Form {
+            id: String::new(),
+            name: String::new(),
+            file: None,
+            create_file: false,
+            engine_fixed: false,
+            color: ConnectionColor::None,
+            show_password: false,
+            database: String::new(),
+            read_only: false,
+            save_secrets: false,
+            ..self.clone()
+        }
+    }
+
     /// The type's option `id` is on.
     pub(crate) fn option_on(&self, id: &str) -> bool {
         self.options.get(id).is_some_and(|v| v == "true")
@@ -424,6 +443,9 @@ pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool
 /// The fields, `w` wide, then the footer at the bottom of the room left: the fields scroll when
 /// they need more. Enter in one of them connects.
 pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    if conn.databases.open {
+        list_keys(ui, &mut conn.databases, acts);
+    }
     let in_field = ui.ctx().memory(|m| m.focused()).is_some_and(|focused| FORM_FIELDS.iter().any(|id| field_id(id) == focused));
     if in_field && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         acts.push(Act::ConnectForm);
@@ -571,9 +593,50 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
     database_row(ui, conn, tags, acts, w);
 }
 
+/// The open database list's keys, taken before the fields see them, as the quick search takes its
+/// own: Down and Up move the highlight (it stays at the ends), Enter picks the highlighted name,
+/// Escape closes the list.
+fn list_keys(ui: &egui::Ui, list: &mut DatabaseList, acts: &mut Vec<Act>) {
+    let (down, up, enter, escape) = ui.input_mut(|i| {
+        (
+            i.count_and_consume_key(Modifiers::NONE, Key::ArrowDown),
+            i.count_and_consume_key(Modifiers::NONE, Key::ArrowUp),
+            i.consume_key(Modifiers::NONE, Key::Enter),
+            i.consume_key(Modifiers::NONE, Key::Escape),
+        )
+    });
+    if escape {
+        list.open = false;
+        return;
+    }
+    if down > 0 || up > 0 {
+        let last = list.names.len().saturating_sub(1);
+        list.highlight = list.highlight.saturating_add(down).saturating_sub(up).min(last);
+        list.reveal = true;
+    }
+    if enter && let Some(name) = list.names.get(list.highlight) {
+        acts.push(Act::ChooseDatabase(name.clone()));
+    }
+}
+
+/// The scroll offset that brings row `n` of a list into a view `view_h` tall, scrolled to
+/// `offset`, moving it as little as it can.
+fn reveal_offset(n: usize, offset: f32, view_h: f32) -> f32 {
+    let top = n as f32 * (filter_bar::ITEM_H + filter_bar::ITEM_GAP);
+    let bottom = top + filter_bar::ITEM_H;
+    if top < offset {
+        top
+    } else if bottom > offset + view_h {
+        bottom - view_h
+    } else {
+        offset
+    }
+}
+
 /// The database, and beside it the button that lists the server's databases (not while a test,
-/// a connect or a listing runs). The names open under the field, over the rows below, and
-/// choosing one fills it in; Escape or a click elsewhere closes them.
+/// a connect or a listing runs). The names open under the field, over the rows below; a click
+/// or Enter on the highlighted one fills it in. Escape, a click elsewhere or an edit of the
+/// server's fields closes them.
 fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let listing = conn.databases.pending.is_some();
     let can_list = conn.running.is_none() && !listing;
@@ -602,29 +665,34 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
                     acts.push(Act::ListDatabases);
                 }
             }
-            let names = &databases.names;
+            if databases.open && databases.shown_for.as_ref() != Some(&form.server_part()) {
+                databases.open = false;
+            }
+            let DatabaseList { names, open, highlight, offset, view_h, reveal, .. } = databases;
+            let mut scroll = ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]);
+            if std::mem::take(reveal) {
+                let view = if *view_h > 0.0 { *view_h } else { LIST_H };
+                scroll = scroll.vertical_scroll_offset(reveal_offset(*highlight, *offset, view));
+            }
             Popup::from_response(&field)
-                .open_bool(&mut databases.open)
+                .open_bool(open)
                 .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                 .align(RectAlign::BOTTOM_START)
                 .width(field_w)
                 .show(|ui| {
                     ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
-                    ScrollArea::vertical().max_height(LIST_H).auto_shrink([false, true]).show_rows(
-                        ui,
-                        filter_bar::ITEM_H,
-                        names.len(),
-                        |ui, rows| {
-                            for (n, name) in names.iter().enumerate().skip(rows.start).take(rows.len()) {
-                                let r = filter_bar::item(ui, *name == form.database, name);
-                                // A popup's first frame is a sizing pass, which reads every widget as disabled.
-                                tags.tag_value_as(&format!("conn-database-item-{n}"), &r, name.as_str(), true);
-                                if r.clicked() {
-                                    acts.push(Act::ChooseDatabase(name.clone()));
-                                }
+                    let shown = scroll.show_rows(ui, filter_bar::ITEM_H, names.len(), |ui, rows| {
+                        for (n, name) in names.iter().enumerate().skip(rows.start).take(rows.len()) {
+                            let r = filter_bar::item(ui, n == *highlight, name);
+                            // A popup's first frame is a sizing pass, which reads every widget as disabled.
+                            tags.tag_value_as(&format!("conn-database-item-{n}"), &r, name.as_str(), true);
+                            if r.clicked() {
+                                acts.push(Act::ChooseDatabase(name.clone()));
                             }
-                        },
-                    );
+                        }
+                    });
+                    *offset = shown.state.offset.y;
+                    *view_h = shown.inner_rect.height();
                 });
         });
     });
