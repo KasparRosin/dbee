@@ -5,7 +5,8 @@
 //! clipboard (egui's `CopyText`, which kittest hands back and which never reaches the system
 //! clipboard).
 //!
-//! Every window's session gets every driver dbee ships (`dbee_drivers::all()`).
+//! Every window's session gets every driver dbee ships (`dbee_drivers::all()`), unless its
+//! [`Setup`] gives fewer.
 //!
 //! Safety: every window keeps its connections file in a throwaway home, its secrets in a
 //! `MemoryStore` (or none), and reads SSH keys and `known_hosts` from `<temp home>/.ssh` with no
@@ -23,6 +24,7 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mps
 use std::time::{Duration, Instant};
 
 use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
+use dbee_driver::Drivers;
 use dbee_engine::{Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
 use dbee_testkit::{Server, TempHome, TestDb, temp_home, unique};
@@ -47,7 +49,7 @@ enum Hold {
 pub type MakeApp = Box<dyn FnOnce(Session, mpsc::Receiver<ControlRequest>) -> DbeeApp>;
 
 /// How a window is made. [`Setup::default`]: 1400 × 900, kittest's frame step, a new throwaway
-/// home, a memory secret store, a shared lock, the pg14 test server, `DbeeApp::new`.
+/// home, a memory secret store, a shared lock, the pg14 test server, every driver, `DbeeApp::new`.
 pub struct Setup {
     pub size: egui::Vec2,
     /// Seconds between frames on egui's clock; `None` is kittest's default.
@@ -60,12 +62,14 @@ pub struct Setup {
     pub exclusive: bool,
     /// What [`Ui::connected_with`] connects with; `None` is [`pg14`].
     pub config: Option<ConnectionConfig>,
+    /// The session's drivers; `None` is every driver dbee ships.
+    pub drivers: Option<Drivers>,
     pub app: Option<MakeApp>,
 }
 
 impl Default for Setup {
     fn default() -> Setup {
-        Setup { size: egui::vec2(1400.0, 900.0), step: None, home: None, secrets: true, exclusive: false, config: None, app: None }
+        Setup { size: egui::vec2(1400.0, 900.0), step: None, home: None, secrets: true, exclusive: false, config: None, drivers: None, app: None }
     }
 }
 
@@ -102,7 +106,7 @@ impl Ui {
             notify: None,
             allowed_targets: None,
             allowed_dirs: None,
-            drivers: dbee_drivers::all(),
+            drivers: setup.drivers.unwrap_or_else(dbee_drivers::all),
         })
         .unwrap();
         let (tx, rx) = mpsc::channel();

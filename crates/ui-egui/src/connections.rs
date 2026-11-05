@@ -1,24 +1,31 @@
-//! The connection screen: the saved and recent connections on the left, the connection form on
-//! the right ([`screen`]).
+//! The connection screen: the saved and recent connections on the left, the engine cards or the
+//! connection form on the right ([`screen`]).
 //!
-//! - Left: "New connection", a filter, then the SAVED and RECENT cards, each with its colour. A
-//!   single click loads a connection into the form, a double-click connects; right-click offers
-//!   Connect · Edit · Duplicate · Delete (Delete asks first: it deletes the saved passwords too).
-//! - Right: the form, one page: name and colour, host and port, user and password ("Save
-//!   passwords", off and disabled when there is no keyring), database, SSL mode and CA file,
-//!   read-only, the SSH tunnel (host, port, user, then Key · Agent · Password, with a line saying
-//!   what the login will use, from `connection.sshKey`), then Save · Test · Connect, and under
-//!   them a reserved slot for the error or the test result. Every row has a fixed height, so
-//!   typing, a message or another login choice never moves the form; only turning the SSH
-//!   tunnel on or off does. In a short window only the fields scroll: the title row, the buttons
-//!   and the message slot stay in view.
+//! - Left: "New connection", a filter, then the SAVED and RECENT cards, each with its colour, its
+//!   database type's label under the name. A single click loads a connection into the form, a
+//!   double-click connects; right-click offers Connect · Edit · Duplicate · Delete (Delete asks
+//!   first: it deletes the saved passwords too).
+//! - Right, under the title row (the title, Fill from URL): a new connection starts with the
+//!   engine cards, one per database type ([`DbKind::ALL`]); a type this build has no driver for
+//!   (not in the session's `kinds`) is greyed with "Upcoming" and cannot be chosen. A card, or a
+//!   URL (its scheme names the type), opens the form with the type at its top and Change engine
+//!   beside it, which goes back to the cards (the form keeps what was typed, and a port that still
+//!   holds the old type's default takes the new one's). A saved or recent connection opens
+//!   straight into the form, its type fixed; Fill from URL then takes that type's URLs only.
+//! - The form ([`crate::conn_form`]) has the rows of the type's settings, then Save · Test ·
+//!   Connect at the bottom, and under them a reserved slot for the error or the test result.
+//!   Every row has a fixed height, so typing, a message or another login choice never moves the
+//!   form; only turning the SSH tunnel on or off does. The right side is as tall with the cards
+//!   as with the form. In a short window only the fields scroll: the title row, the type, the
+//!   buttons and the message slot stay in view.
 //! - Test and Connect run as jobs (`connection.test`, `connection.open`); while one runs both
 //!   buttons are disabled and say so, and a double-click on a card does nothing. A `needs…`
 //!   answer opens a dialog ([`crate::dialogs`]) that runs the command again; other errors show
 //!   under the buttons with the server's message.
-//! - The file pickers ("Change…" for the key, "Choose…" for the CA file) run rfd on a thread of
-//!   their own and send the path back; a picker that cannot open leaves a note in its row
-//!   ([`crate::picker`]).
+//! - The file pickers ("Change…" for the key, "Choose…" for the CA file, "Choose…" and "New file…"
+//!   for a database file) run rfd on a thread of their own and send the path back; a picker that
+//!   cannot open leaves a note in its row ([`crate::picker`]). New file… makes the next test or
+//!   connect ask for the file to be made (`createFile`), once.
 //!
 //! The form (its fields, their validation, and drawing it) is [`crate::conn_form`]; this module
 //! draws the screen around it and acts on both.
@@ -30,7 +37,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dbee_config::{ConnectionConfig, SshAuth, SshConfig, SslMode};
+use dbee_config::{ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, JobId, Json, State};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
@@ -97,9 +104,18 @@ pub(crate) struct KeyLine {
     pub pending: Option<(JobId, SshAuth)>,
 }
 
+/// What the right side shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// The engine cards of a new connection.
+    Engines,
+    Form,
+}
+
 /// What only the connection screen keeps.
 #[derive(Debug)]
 pub(crate) struct ConnScreen {
+    pub step: Step,
     pub form: Form,
     /// Counts the connections the form has shown: a result for an earlier one is not shown.
     pub generation: u64,
@@ -116,6 +132,7 @@ pub(crate) struct ConnScreen {
 impl ConnScreen {
     pub(crate) fn new(has_store: bool) -> ConnScreen {
         ConnScreen {
+            step: Step::Engines,
             form: Form::new(has_store),
             generation: 0,
             filter: String::new(),
@@ -127,9 +144,10 @@ impl ConnScreen {
         }
     }
 
-    /// Shows a new, empty connection.
+    /// Shows a new, empty connection: the engine cards first.
     fn new_connection(&mut self) {
         self.form = Form::new(self.has_store);
+        self.step = Step::Engines;
         self.forget_shown();
     }
 
@@ -147,6 +165,7 @@ impl ConnScreen {
         let password = if same { std::mem::take(&mut self.form.password) } else { String::new() };
         self.form = Form::from_config(c);
         self.form.password = password;
+        self.step = Step::Form;
         if same {
             self.key.for_auth = None;
         } else {
@@ -293,9 +312,19 @@ pub(crate) fn key_line_done(app: &mut DbeeApp, job: Option<JobId>, result: Resul
     key.for_auth = Some(auth);
 }
 
-/// Fills the form from `connection.parseUrl`'s result: the parts the URL has.
+/// The database types whose URLs can fill the form: those of the session's `kinds` that have a
+/// URL, and of them only the form's own once its type is fixed.
+pub(crate) fn url_kinds(form: &Form, kinds: &[DbKind]) -> Vec<DbKind> {
+    kinds.iter().copied().filter(|k| !k.info().url_schemes.is_empty() && (!form.engine_fixed() || *k == form.kind)).collect()
+}
+
+/// Fills the form from `connection.parseUrl`'s result: the type its scheme names, and the parts
+/// the URL has. The form shows, past the engine cards.
 pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json) {
     let form = &mut app.view.conn.form;
+    if let Some(kind) = parts.get("kind").and_then(Json::as_str).and_then(DbKind::from_id) {
+        form.switch_kind(kind);
+    }
     let text = |k: &str| parts.get(k).and_then(Json::as_str).map(str::to_string);
     if let Some(v) = text("host") {
         form.host = v;
@@ -315,6 +344,7 @@ pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json) {
     if let Some(mode) = parts.get("sslMode").filter(|m| !m.is_null()).and_then(|m| serde_json::from_value::<SslMode>(m.clone()).ok()) {
         form.ssl_mode = mode;
     }
+    app.view.conn.step = Step::Form;
     app.view.conn.message = None;
 }
 
@@ -335,6 +365,10 @@ pub(crate) fn delete(app: &mut DbeeApp, id: &str) {
 /// What the user did on the screen this frame, applied once it is drawn.
 pub(crate) enum Act {
     New,
+    /// An engine card: the form for that type.
+    ChooseKind(DbKind),
+    /// Back to the engine cards.
+    ChangeEngine,
     Load(ConnectionConfig),
     /// A double-click or the menu's Connect: load, then connect.
     Connect(ConnectionConfig),
@@ -360,8 +394,9 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let mut acts = Vec::new();
     {
         let DbeeApp { session, view, tags, .. } = app;
+        let kinds = session.kinds();
         side(ui, session.state(), &mut view.conn, tags, &mut acts);
-        main(ui, &mut view.conn, tags, &mut acts);
+        main(ui, &mut view.conn, &kinds, tags, &mut acts);
     }
     for act in acts {
         apply(app, act, &ctx);
@@ -372,7 +407,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
 fn tick(app: &mut DbeeApp, ctx: &egui::Context) {
     picker::poll(&mut app.view.conn, ctx);
     let conn = &mut app.view.conn;
-    if !conn.form.ssh_on {
+    if !conn.form.ssh_on || !conn.form.kind.takes_ssh() || conn.step != Step::Form {
         return;
     }
     let want = conn.form.ssh_auth();
@@ -396,6 +431,13 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
     let busy = app.view.conn.running.is_some();
     match act {
         Act::New => app.view.conn.new_connection(),
+        Act::ChooseKind(kind) => {
+            if app.session.kinds().contains(&kind) {
+                app.view.conn.form.switch_kind(kind);
+                app.view.conn.step = Step::Form;
+            }
+        }
+        Act::ChangeEngine => app.view.conn.step = Step::Engines,
         Act::Load(c) => app.view.conn.load(&c),
         Act::Connect(c) => {
             // While a test or connect runs, a double-click starts nothing more.
@@ -419,7 +461,10 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
         Act::ConnectForm if !busy => run_form(app, OPEN),
         Act::Test | Act::ConnectForm => {}
         Act::Save => run_form(app, SAVE),
-        Act::FillFromUrl => app.view.dialog = Some(Dialog::fill_from_url()),
+        Act::FillFromUrl => {
+            let kinds = url_kinds(&app.view.conn.form, &app.session.kinds());
+            app.view.dialog = Some(Dialog::fill_from_url(kinds));
+        }
         Act::Pick(target) => picker::start(&mut app.view.conn, target, ctx),
         Act::StopPicking => picker::stop(&mut app.view.conn),
         Act::ClearCa => app.view.conn.form.ca_file = None,
@@ -439,8 +484,14 @@ fn run_form(app: &mut DbeeApp, command: &'static str) {
             return;
         }
     };
-    let password = conn.form.password.clone();
+    // Only a server takes a password; one typed for another type stays in the form.
+    let password = if config.kind.uses_file() { String::new() } else { conn.form.password.clone() };
     let typed = !password.is_empty();
+    // New file…: the next test or open asks for the file to be made, once.
+    let create_file = conn.form.create_file && command != SAVE;
+    if create_file {
+        conn.form.create_file = false;
+    }
     let saved = !config.id.is_empty() && app.session.state().store.saved.iter().any(|c| c.id == config.id);
     let conn = &app.view.conn;
     let mut params = json!({ "config": config });
@@ -456,6 +507,9 @@ fn run_form(app: &mut DbeeApp, command: &'static str) {
         // "Save passwords": a password typed for a saved connection is kept when it connects.
         if command == OPEN && keep && typed && saved {
             p.insert("savePassword".into(), json!(true));
+        }
+        if create_file {
+            p.insert("createFile".into(), json!(true));
         }
     }
     let generation = conn.generation;
@@ -597,8 +651,12 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     let text_w = rect.width() - 22.0;
     let name = c.display_name();
     p.galley(pos2(rect.left() + 16.0, rect.top() + 6.0), line_galley(ui, &name, FontId::proportional(14.0), t.text, text_w), t.text);
-    let mut sub = format!("{}@{}:{}/{}", c.user, c.host, c.port, c.database);
-    if c.ssh.is_some() {
+    let label = c.kind.label();
+    let mut sub = match c.kind.info().settings {
+        Settings::Server { .. } => format!("{label} · {}@{}:{}/{}", c.user, c.host, c.port, c.database),
+        Settings::File { .. } => format!("{label} · {}", c.file.as_ref().map(|f| tilde(&f.display().to_string())).unwrap_or_default()),
+    };
+    if c.ssh.is_some() && c.kind.takes_ssh() {
         sub.push_str(" · SSH");
     }
     if let Some(at) = used_at {
@@ -607,6 +665,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     p.galley(pos2(rect.left() + 16.0, rect.top() + 25.0), line_galley(ui, &sub, FontId::proportional(12.0), t.text_muted, text_w), t.text_muted);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
     tags.tag_value(id, &r, name.as_str());
+    tags.tag_value(&format!("{id}-kind"), &r, label);
     if r.clicked() {
         acts.push(Act::Load(c.clone()));
     }
@@ -634,22 +693,22 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     });
 }
 
-/// The height of everything in the form's card but its fields, as drawn: the card's margins and
-/// border, the title row with its spacing, Save · Test · Connect with their spacing, the message
-/// slot, and the version line under the card.
-const FIXED_H: f32 = 46.0 + 42.0 + 46.0 + conn_form::MESSAGE_H + 31.0;
+/// The version line under the card, with its spacing.
+const VERSION_H: f32 = 31.0;
+
+/// The least height of the card's body (the engine cards, or the form under the title row).
+const MIN_BODY_H: f32 = 240.0;
 
 /// Room for the fields' scroll bar, right of them.
 const SCROLL_GAP: i8 = 12;
 
-/// The right side: the form in a card. The fields scroll when the window is short; the title
-/// row, the buttons and the message slot under them stay in view.
-fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>) {
+/// The right side: the title row, then the engine cards or the form, in a card as tall as the
+/// window allows either way.
+fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>) {
     let t = TOKENS;
     egui::CentralPanel::default().frame(Frame::new().fill(t.bg).inner_margin(Margin::symmetric(24, 20))).show(ui, |ui| {
         // The card adds its margins and border to the form's width.
         let width = (ui.available_width() - 46.0).clamp(240.0, FORM_WIDTH);
-        let fields_h = (ui.available_height() - FIXED_H).max(120.0);
         ui.vertical_centered(|ui| {
             let card = Frame::new()
                 .fill(t.card)
@@ -660,9 +719,19 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Ve
                 .show(ui, |ui| {
                     ui.set_width(width + f32::from(SCROLL_GAP));
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                        conn_form::header(ui, conn, tags, acts, width);
-                        conn_form::fields(ui, conn, tags, acts, width, fields_h);
-                        conn_form::footer(ui, conn, tags, acts, width);
+                        let url = !url_kinds(&conn.form, kinds).is_empty();
+                        conn_form::header(ui, conn, url, tags, acts, width);
+                        let body_h = (ui.available_height() - VERSION_H).max(MIN_BODY_H);
+                        ui.allocate_ui_with_layout(vec2(width + f32::from(SCROLL_GAP), body_h), Layout::top_down(Align::Min), |ui| {
+                            ui.set_min_height(body_h);
+                            match conn.step {
+                                Step::Engines => engines(ui, kinds, tags, acts, width),
+                                Step::Form => {
+                                    conn_form::engine_row(ui, conn, tags, acts, width);
+                                    conn_form::fields_and_footer(ui, conn, tags, acts, width);
+                                }
+                            }
+                        });
                     });
                 });
             // The connection's colour as a strip across the top of the card.
@@ -676,6 +745,64 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Ve
             ui.label(RichText::new(format!("dbee {}", env!("CARGO_PKG_VERSION"))).small().color(t.text_muted));
         });
     });
+}
+
+/// An engine card's height.
+const ENGINE_H: f32 = 104.0;
+/// The narrowest an engine card gets before the cards wrap.
+const ENGINE_MIN_W: f32 = 120.0;
+
+/// The engine cards, `w` wide: one per database type, as many in a row as fit; those of `kinds`
+/// can be chosen.
+fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    ui.add_space(4.0);
+    ui.label(RichText::new("Choose a database").size(15.0));
+    ui.add_space(6.0);
+    let gap = 8.0;
+    let per_row = (((w + gap) / (ENGINE_MIN_W + gap)).floor() as usize).clamp(1, DbKind::ALL.len());
+    let card_w = (w - gap * (per_row as f32 - 1.0)) / per_row as f32;
+    for row in DbKind::ALL.chunks(per_row) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for kind in row {
+                engine_card(ui, *kind, kinds.contains(kind), card_w, tags, acts);
+            }
+        });
+        ui.add_space(gap - ui.spacing().item_spacing.y);
+    }
+}
+
+/// The card of the database type `kind`, `w` wide: its name, and "Upcoming" in the corner when
+/// it is not `available` (this build has no driver for it), greyed and not clickable.
+fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &mut Tags, acts: &mut Vec<Act>) {
+    let t = TOKENS;
+    let (rect, r) = ui.allocate_exact_size(vec2(w, ENGINE_H), if available { Sense::click() } else { Sense::hover() });
+    let fill = if !available {
+        t.card
+    } else if r.is_pointer_button_down_on() {
+        t.selection
+    } else if r.hovered() {
+        t.hover
+    } else {
+        t.card
+    };
+    let p = ui.painter();
+    p.rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    let color = if available { t.text } else { t.text_muted };
+    let name = line_galley(ui, kind.label(), FontId::proportional(16.0), color, w - 28.0);
+    p.galley(pos2(rect.left() + 14.0, rect.center().y - name.size().y / 2.0), name, color);
+    if !available {
+        let chip = line_galley(ui, "Upcoming", FontId::proportional(11.0), t.text_muted, w);
+        let size = vec2(chip.size().x + 12.0, 18.0);
+        let pill = Rect::from_min_size(pos2(rect.right() - 8.0 - size.x, rect.top() + 8.0), size);
+        p.rect_filled(pill, CornerRadius::same(RADIUS.saturating_mul(2)), t.panel);
+        p.galley(pos2(pill.left() + 6.0, pill.center().y - chip.size().y / 2.0), chip, t.text_muted);
+    }
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, available, kind.label()));
+    tags.tag_value_as(&format!("conn-kind-{}", kind.id()), &r, json!({ "label": kind.label(), "upcoming": !available }), available);
+    if available && r.clicked() {
+        acts.push(Act::ChooseKind(kind));
+    }
 }
 
 #[cfg(test)]
@@ -700,6 +827,34 @@ mod tests {
         (DbeeApp::new(session, None), home)
     }
 
+    /// [`app`] with every driver dbee ships.
+    fn app_with_drivers() -> (DbeeApp, TempHome) {
+        let home = temp_home(None, None);
+        let session = Session::new(SessionOptions {
+            config_dir: Some(home.home.join("config")),
+            secrets: Some(Arc::new(MemoryStore::default())),
+            drivers: dbee_drivers::all(),
+            ..SessionOptions::default()
+        })
+        .unwrap();
+        (DbeeApp::new(session, None), home)
+    }
+
+    /// Frames until `done` holds.
+    fn until(app: &mut DbeeApp, ctx: &egui::Context, what: &str, done: impl Fn(&DbeeApp) -> bool) {
+        let start = std::time::Instant::now();
+        while !done(app) {
+            assert!(start.elapsed() < std::time::Duration::from_secs(30), "gave up waiting for {what}");
+            frame(app, ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// The params of every `connection.open` in the session's journal, oldest first.
+    fn opens(app: &DbeeApp) -> Vec<Json> {
+        app.session.journal().iter().filter(|(id, _)| id == OPEN).map(|(_, params)| params.clone()).collect()
+    }
+
     fn frame(app: &mut DbeeApp, ctx: &egui::Context) {
         let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 900.0))), ..egui::RawInput::default() };
         ctx.run_ui(raw, |ui| app.ui(ui)).drop_without_applying_deltas();
@@ -708,6 +863,7 @@ mod tests {
     /// The form with the SSH tunnel on and a key line that says which key it uses.
     fn with_key_line(app: &mut DbeeApp) {
         let conn = &mut app.view.conn;
+        conn.step = Step::Form;
         conn.form.ssh_on = true;
         conn.key = KeyLine { for_auth: Some(conn.form.ssh_auth()), text: "Uses /k/id_ed25519".into(), path: None, pending: None };
     }
@@ -758,5 +914,41 @@ mod tests {
         frame(&mut app, &ctx);
         assert_eq!(app.view.conn.form.ca_file, None);
         assert!(app.view.conn.picker.is_none());
+    }
+
+    #[test]
+    fn new_file_makes_the_next_test_or_open_create_it_once() {
+        let (mut app, home) = app_with_drivers();
+        let ctx = egui::Context::default();
+        apply(&mut app, Act::ChooseKind(DbKind::Sqlite), &ctx);
+        let file = home.home.join("new.sqlite");
+        let pick = |app: &mut DbeeApp, target: Pick, path: &std::path::Path| {
+            let (tx, picker) = Picker::for_test(target, app.view.conn.generation);
+            app.view.conn.picker = Some(picker);
+            tx.send(Some(path.to_path_buf())).unwrap();
+            frame(app, &ctx);
+            assert!(app.view.conn.picker.is_none());
+        };
+        // Choose… takes a file as it is; New file… asks for it to be made.
+        pick(&mut app, Pick::NewFile, &file);
+        pick(&mut app, Pick::File, &file);
+        assert_eq!((app.view.conn.form.file.as_deref(), app.view.conn.form.create_file), (Some(file.as_path()), false));
+        pick(&mut app, Pick::NewFile, &file);
+        assert_eq!((app.view.conn.form.file.as_deref(), app.view.conn.form.create_file), (Some(file.as_path()), true));
+        // Saving makes no file, and keeps the ask for the next test or open.
+        apply(&mut app, Act::Save, &ctx);
+        assert!(app.view.conn.form.create_file && !file.exists(), "{:?}", app.view.conn.message);
+        apply(&mut app, Act::ConnectForm, &ctx);
+        assert!(!app.view.conn.form.create_file, "asked once");
+        until(&mut app, &ctx, "the workspace", |app| app.session.state().screen == dbee_engine::Screen::Workspace);
+        assert!(file.is_file());
+        assert_eq!(opens(&app).len(), 1);
+        assert_eq!(opens(&app)[0]["createFile"], true, "{:?}", opens(&app));
+        // The next connect opens the file as it is.
+        app.run("connection.close", json!({})).unwrap();
+        apply(&mut app, Act::ConnectForm, &ctx);
+        until(&mut app, &ctx, "the workspace again", |app| app.session.state().screen == dbee_engine::Screen::Workspace);
+        assert_eq!(opens(&app).len(), 2);
+        assert!(opens(&app)[1].get("createFile").is_none(), "{:?}", opens(&app));
     }
 }

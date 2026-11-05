@@ -1,13 +1,20 @@
 //! The connection form: its fields as typed ([`Form`]), turning them into a [`ConnectionConfig`]
-//! (port numbers, validation), and drawing it in three parts, each of fixed height but the
-//! fields: the title row ([`header`]), the fields ([`fields`], which scroll), and Save · Test ·
-//! Connect with the message slot under them ([`footer`]). The screen around it is
+//! (port numbers, validation), and drawing it in parts, each of fixed height but the fields: the
+//! title row ([`header`]), the engine row ([`engine_row`]), then the fields, which scroll, and
+//! Save · Test · Connect with the message slot under them at the bottom ([`fields_and_footer`]).
+//! The screen around it, with the engine cards a new connection starts with, is
 //! [`crate::connections`].
+//!
+//! The rows follow the database type's settings ([`dbee_config::KindInfo`]), never the type
+//! itself: a server type has host and port, user and password, the database, the SSL rows when
+//! it takes TLS and the SSH tunnel when it takes one; a file type has its file, with Choose… and
+//! New file…. Every type has the name and colour, Read-only, and its own on/off options as check
+//! boxes.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
+use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
     Align, Button, Checkbox, CornerRadius, FontId, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, UiBuilder,
@@ -26,7 +33,11 @@ const FIELD_H: f32 = 28.0;
 /// A field with its label.
 const ROW_H: f32 = LABEL_H + FIELD_H;
 /// The slot under the buttons for an error or a test result.
-pub(crate) const MESSAGE_H: f32 = 52.0;
+const MESSAGE_H: f32 = 52.0;
+/// Save · Test · Connect and the message slot under them, with the space between.
+const FOOTER_H: f32 = 32.0 + 6.0 + 6.0 + MESSAGE_H;
+/// Fill from URL and Change engine, one above the other.
+const SIDE_BUTTON_W: f32 = 128.0;
 
 /// The SSH login choices of the form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,9 +53,12 @@ pub(crate) struct Form {
     /// The saved connection this is, or empty for a new one.
     pub id: String,
     pub name: String,
-    /// Not editable in the form yet; kept so saving does not change it.
+    /// The database type, whose settings decide the rows.
     pub kind: DbKind,
+    /// A file type's database file.
     pub file: Option<PathBuf>,
+    /// New file… chose `file`: the next test or open asks for it to be made.
+    pub create_file: bool,
     pub color: ConnectionColor,
     pub host: String,
     pub port: String,
@@ -64,7 +78,7 @@ pub(crate) struct Form {
     pub ssh_auth: Auth,
     /// The key file chosen with "Change…"; `None` picks automatically.
     pub ssh_key: Option<PathBuf>,
-    /// Not editable in the form yet; kept so saving does not change them.
+    /// The type's own on/off settings, `"true"` when on; keys this build does not know are kept.
     pub options: BTreeMap<String, String>,
 }
 
@@ -77,6 +91,7 @@ impl std::fmt::Debug for Form {
             .field("port", &self.port)
             .field("user", &self.user)
             .field("password", &if self.password.is_empty() { "" } else { "<redacted>" })
+            .field("kind", &self.kind)
             .field("database", &self.database)
             .field("ssh_on", &self.ssh_on)
             .finish_non_exhaustive()
@@ -86,6 +101,11 @@ impl std::fmt::Debug for Form {
 /// A port as typed: a number from 1 to 65535.
 fn parse_port(text: &str) -> Option<u16> {
     text.trim().parse::<u16>().ok().filter(|p| *p > 0)
+}
+
+/// `kind`'s default port as the form shows it; empty for a type without one.
+fn default_port(kind: DbKind) -> String {
+    kind.default_port().map(|p| p.to_string()).unwrap_or_default()
 }
 
 impl Form {
@@ -107,9 +127,10 @@ impl Form {
             name: c.name.clone(),
             kind: c.kind,
             file: c.file.clone(),
+            create_file: false,
             color: c.color,
             host: c.host.clone(),
-            port: c.port.to_string(),
+            port: if c.port == 0 { String::new() } else { c.port.to_string() },
             user: c.user.clone(),
             password: String::new(),
             show_password: false,
@@ -171,14 +192,51 @@ impl Form {
         Ok(config)
     }
 
-    /// What the title line says.
+    /// What the title line says: the name; else "New connection", or for a saved one what the
+    /// connection cards call it (a file type's file name, a server's `user@host/database`).
     pub(crate) fn title(&self) -> String {
         if !self.name.trim().is_empty() {
             self.name.trim().to_string()
         } else if self.id.is_empty() {
             "New connection".into()
         } else {
-            format!("{}@{}/{}", self.user, self.host, self.database)
+            let c = ConnectionConfig {
+                kind: self.kind,
+                file: self.file.clone(),
+                user: self.user.clone(),
+                host: self.host.clone(),
+                database: self.database.clone(),
+                ..ConnectionConfig::default()
+            };
+            c.display_name()
+        }
+    }
+
+    /// A saved or recent connection keeps its database type: the form shows it as fixed text.
+    pub(crate) fn engine_fixed(&self) -> bool {
+        !self.id.is_empty()
+    }
+
+    /// Makes the form one of type `to`. Everything typed stays; a port that still holds the old
+    /// type's default becomes the new one's.
+    pub(crate) fn switch_kind(&mut self, to: DbKind) {
+        if self.port.trim() == default_port(self.kind) {
+            self.port = default_port(to);
+        }
+        self.kind = to;
+    }
+
+    /// The type's option `id` is on.
+    pub(crate) fn option_on(&self, id: &str) -> bool {
+        self.options.get(id).is_some_and(|v| v == "true")
+    }
+
+    /// Turns the type's option `id` on, or off (then it is left out).
+    fn set_option(&mut self, id: &str, on: bool) {
+        if on {
+            self.options.insert(id.to_string(), "true".into());
+        } else {
+            self.options.remove(id);
         }
     }
 }
@@ -267,43 +325,90 @@ const GAP: f32 = 12.0;
 /// The port fields' width.
 const PORT_W: f32 = 110.0;
 
-/// The title row, `w` wide: the form's title, and Fill from URL.
-pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+/// `text` in `font` on the left of a row, `width` wide, tagged `id` with `value`.
+fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, text: &str, font: FontId, value: &str, width: f32) {
     let t = TOKENS;
+    let galley = line_galley(ui, text, font, t.text, width);
+    let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
+    ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.text);
+    tags.tag_value(id, &r, value);
+}
+
+/// A button at the right end of a row, as wide as the other one above or below it, tagged `id`;
+/// whether it was clicked.
+fn side_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str) -> bool {
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        let r = ui.add_sized(vec2(SIDE_BUTTON_W, FIELD_H), Button::new(label));
+        tags.tag(id, &r);
+        r.clicked()
+    })
+    .inner
+}
+
+/// The title row, `w` wide: the form's title, and Fill from URL when `url` (a type the form can
+/// take has a URL).
+pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::left_to_right(Align::Center), |ui| {
-        let url_w = 120.0;
         let title = conn.form.title();
-        let galley = line_galley(ui, &title, FontId::proportional(19.0), t.text, w - url_w - GAP);
-        let (rect, r) = ui.allocate_exact_size(vec2(w - url_w - GAP, 30.0), Sense::hover());
-        ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.text);
-        tags.tag_value("conn-title", &r, title.as_str());
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let r = ui.add(Button::new(RichText::new("Fill from URL…").color(t.accent)).frame(false));
-            tags.tag("conn-url", &r);
-            if r.clicked() {
-                acts.push(Act::FillFromUrl);
-            }
-        });
+        row_text(ui, tags, "conn-title", &title, FontId::proportional(19.0), &title, w - SIDE_BUTTON_W - GAP);
+        if url && side_button(ui, tags, "conn-fill-url", "Fill from URL…") {
+            acts.push(Act::FillFromUrl);
+        }
     });
     ui.add_space(4.0);
 }
 
-/// The fields, `w` wide; they scroll past `fields_h`. Enter in one of them connects.
-pub(crate) fn fields(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32, fields_h: f32) {
+/// The engine row, `w` wide: the database type, and Change engine unless the type is fixed.
+pub(crate) fn engine_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    let kind = conn.form.kind;
+    ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::left_to_right(Align::Center), |ui| {
+        row_text(ui, tags, "conn-kind", kind.label(), FontId::proportional(15.0), kind.id(), w - SIDE_BUTTON_W - GAP);
+        if !conn.form.engine_fixed() && side_button(ui, tags, "conn-change-engine", "Change engine") {
+            acts.push(Act::ChangeEngine);
+        }
+    });
+    ui.add_space(4.0);
+}
+
+/// The fields, `w` wide, then the footer at the bottom of the room left: the fields scroll when
+/// they need more. Enter in one of them connects.
+pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let in_field = ui.ctx().memory(|m| m.focused()).is_some_and(|focused| FORM_FIELDS.iter().any(|id| field_id(id) == focused));
     if in_field && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         acts.push(Act::ConnectForm);
     }
+    let gap = 8.0 + 2.0 * ui.spacing().item_spacing.y;
+    let fields_h = (ui.available_height() - FOOTER_H - gap).max(60.0);
     ScrollArea::vertical().id_salt("conn-form-scroll").max_height(fields_h).auto_shrink([false, true]).show(ui, |ui| {
         ui.set_width(w);
         name_row(ui, &mut conn.form, tags, w);
-        server_rows(ui, conn, tags, w);
-        tls_rows(ui, conn, tags, acts, w);
-        read_only_row(ui, &mut conn.form, tags, w);
-        ui.add_space(6.0);
-        ssh_box(ui, conn, tags, acts, w);
+        match conn.form.kind.info().settings {
+            Settings::Server { tls, ssh } => {
+                server_rows(ui, conn, tags, w);
+                if tls {
+                    tls_rows(ui, conn, tags, acts, w);
+                }
+                read_only_row(ui, &mut conn.form, tags, w);
+                option_rows(ui, &mut conn.form, tags, w);
+                if ssh {
+                    ui.add_space(6.0);
+                    ssh_box(ui, conn, tags, acts, w);
+                }
+            }
+            Settings::File { .. } => {
+                file_row(ui, conn, tags, acts, w);
+                read_only_row(ui, &mut conn.form, tags, w);
+                option_rows(ui, &mut conn.form, tags, w);
+            }
+        }
     });
     ui.add_space(8.0);
+    // The footer keeps its place at the bottom, however tall the fields are.
+    let above = ui.available_height() - FOOTER_H - ui.spacing().item_spacing.y;
+    if above > 0.0 {
+        ui.add_space(above);
+    }
+    footer(ui, conn, tags, acts, w);
 }
 
 /// The picker the form waits for (not one the user stopped waiting for).
@@ -369,7 +474,7 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, w: f32
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = GAP;
         column(ui, w - PORT_W - GAP, "Host", |ui| text_field(ui, tags, "conn-host", &mut f.host, "localhost"));
-        column(ui, PORT_W, "Port", |ui| text_field(ui, tags, "conn-port", &mut f.port, "5432"));
+        column(ui, PORT_W, "Port", |ui| text_field(ui, tags, "conn-port", &mut f.port, &default_port(f.kind)));
     });
 
     let half = (w - GAP) / 2.0;
@@ -452,14 +557,49 @@ fn tls_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mu
     ui.add_space(4.0);
 }
 
+/// The database file, with Choose… and New file…: the pickers show the type's extensions first.
+fn file_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+    let picking = picking(conn);
+    let f = &conn.form;
+    column(ui, w, "File", |ui| {
+        ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let button_w = 84.0;
+            let waiting = picking.filter(|p| matches!(p, Pick::File | Pick::NewFile));
+            path_box(ui, tags, "conn-file", w - 2.0 * (button_w + 6.0), f.file.as_deref(), waiting.is_some());
+            for (pick, id, label) in [(Pick::File, "conn-file-choose", "Choose…"), (Pick::NewFile, "conn-file-new", "New file…")] {
+                let this = waiting == Some(pick);
+                let b = ui.add_enabled(picking.is_none() || this, Button::new(if this { "Stop" } else { label }).min_size(vec2(button_w, FIELD_H)));
+                tags.tag(id, &b);
+                if b.clicked() {
+                    acts.push(if this { Act::StopPicking } else { Act::Pick(pick) });
+                }
+            }
+        });
+    });
+    ui.add_space(4.0);
+}
+
 /// Read-only.
 fn read_only_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
-    let t = TOKENS;
     ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
         let r = ui.checkbox(&mut f.read_only, "Read-only");
         tags.tag_value("conn-readonly", &r, f.read_only);
-        ui.label(RichText::new("Sessions start read-only and the grid offers no editing.").size(12.0).color(t.text_muted));
     });
+}
+
+/// The type's own on/off settings, one check box each (`conn-option-<id>`).
+fn option_rows(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
+    for option in f.kind.info().options {
+        ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
+            let mut on = f.option_on(option.id);
+            let r = ui.checkbox(&mut on, option.label);
+            if r.changed() {
+                f.set_option(option.id, on);
+            }
+            tags.tag_value(&format!("conn-option-{}", option.id), &r, on);
+        });
+    }
 }
 
 /// The SSH tunnel: on or off, then host, port, user, the login and what it will use.
@@ -531,7 +671,7 @@ fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut
 
 /// Save · Test · Connect, `w` wide, then the reserved slot under them for an error, a result or
 /// a note.
-pub(crate) fn footer(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+fn footer(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let t = TOKENS;
     let running = conn.running.map(|(_, kind)| kind);
     ui.allocate_ui_with_layout(vec2(w, 32.0), Layout::left_to_right(Align::Center), |ui| {
@@ -603,5 +743,57 @@ mod tests {
         };
         let back = Form::from_config(&sqlite).to_config().unwrap();
         assert_eq!((back.kind, back.file), (DbKind::Sqlite, file));
+    }
+
+    #[test]
+    fn a_type_switch_moves_only_a_default_port() {
+        let mut f = Form::new(true);
+        f.name = "Shop".into();
+        f.color = ConnectionColor::Red;
+        assert_eq!((f.kind, f.port.as_str()), (DbKind::Postgres, "5432"));
+        f.switch_kind(DbKind::MySql);
+        assert_eq!((f.kind, f.port.as_str()), (DbKind::MySql, "3306"));
+        f.switch_kind(DbKind::MariaDb);
+        assert_eq!(f.port, "3306");
+        f.port = "5544".into();
+        f.switch_kind(DbKind::Postgres);
+        assert_eq!(f.port, "5544", "a typed port stays");
+        f.port = " 5432 ".into();
+        f.switch_kind(DbKind::Sqlite);
+        assert_eq!(f.port, "", "a file has no port");
+        f.switch_kind(DbKind::MySql);
+        assert_eq!(f.port, "3306");
+        assert_eq!((f.name.as_str(), f.color), ("Shop", ConnectionColor::Red));
+    }
+
+    #[test]
+    fn the_title_names_a_saved_connection_as_its_card_does() {
+        assert_eq!(Form::new(true).title(), "New connection");
+        let file = ConnectionConfig {
+            id: "a".into(),
+            kind: DbKind::Sqlite,
+            file: Some(PathBuf::from("/x/shop.sqlite")),
+            host: String::new(),
+            port: 0,
+            ..ConnectionConfig::default()
+        };
+        let form = Form::from_config(&file);
+        assert_eq!((form.title(), form.port.as_str()), ("shop.sqlite".to_string(), ""));
+        let server =
+            ConnectionConfig { id: "b".into(), user: "ann".into(), host: "db".into(), database: "shop".into(), ..ConnectionConfig::default() };
+        assert_eq!(Form::from_config(&server).title(), "ann@db/shop");
+        assert_eq!(Form::from_config(&ConnectionConfig { name: " Shop ".into(), ..server }).title(), "Shop");
+    }
+
+    #[test]
+    fn an_option_is_true_or_left_out() {
+        let mut f = Form::new(true);
+        f.options.insert("aLaterOption".into(), "x".into());
+        f.set_option(dbee_config::ALLOW_PUBLIC_KEY.id, true);
+        assert!(f.option_on(dbee_config::ALLOW_PUBLIC_KEY.id));
+        assert_eq!(f.options.get("allowPublicKey").map(String::as_str), Some("true"));
+        f.set_option(dbee_config::ALLOW_PUBLIC_KEY.id, false);
+        assert!(!f.option_on(dbee_config::ALLOW_PUBLIC_KEY.id));
+        assert_eq!(f.options.keys().collect::<Vec<_>>(), ["aLaterOption"], "unknown keys stay");
     }
 }

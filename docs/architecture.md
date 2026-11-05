@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-11-03 · **Change:** minor (SQLite in the engine, the rowid key, isolated runs' folders)
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-11-05 · **Change:** minor (the connection screen for every database type)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -66,12 +66,13 @@ Desktop only: macOS, Windows, Linux and FreeBSD, of which only Linux x86_64 has 
 
 ## Known gaps
 
-M1's crates are all in place. The driver interface exists, and the engine and the UI reach databases only through it. Postgres, MySQL and MariaDB, and SQLite sit behind it and are registered in `drivers`. The connection form cannot make a SQLite connection yet (M2.15); the engine and the control channel can. The MCP crate is empty, and the CLI prints its version. The ranked work list is [`gaps.md`](gaps.md).
+M1's crates are all in place. The driver interface exists, and the engine and the UI reach databases only through it. Postgres, MySQL and MariaDB, and SQLite sit behind it and are registered in `drivers`, and the connection screen offers each of them. The MCP crate is empty, and the CLI prints its version. The ranked work list is [`gaps.md`](gaps.md).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-05 | minor | `crates/ui-egui`: the connection screen starts a new connection with a card per database type, then the form with that type's rows; `connection.parseUrl` names the type, `connection.test` and `connection.open` take `createFile` (M2.15) |
 | 2026-11-03 | minor | `crates/drivers` lists `SqliteDriver`; `crates/sqlite`: keyless tables keyed by a hidden rowid, SQL kept to its own file in isolated runs; `crates/engine`: pages show the visible columns, isolated runs' allowed folders (M2.14) |
 | 2026-11-03 | minor | `crates/sqlite`: opening reads `sqlite_schema` instead of the whole file, is bounded by the connect timeout and refuses what is no file; the file closes on a blocking thread; the apply session's own rollback step (M2.13) |
 | 2026-11-03 | minor | `crates/sqlite` (L4): the SQLite driver on `rusqlite` with the bundled SQLite: files read-write or read-only, interrupt, values as text by fixed rules, classes by affinity, the catalog from the pragmas, all-or-nothing apply (M2.13) |

@@ -1249,6 +1249,7 @@ version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-core",
+ "dbee-driver",
  "dbee-drivers",
  "dbee-engine",
  "dbee-sql",

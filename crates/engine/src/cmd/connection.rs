@@ -146,7 +146,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Test Connection",
         menu: &[],
         shortcut: None,
-        params: "{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?}",
+        params: "{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, createFile?}",
         enabled: always,
         run: test,
         journal: false,
@@ -157,7 +157,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Connect",
         menu: &["File"],
         shortcut: None,
-        params: "{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?}",
+        params: "{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?, createFile?}",
         enabled: not_connected,
         run: open,
         journal: true,
@@ -521,11 +521,13 @@ fn may_reach(s: &Session, config: &ConnectionConfig) -> Result<Option<Vec<PathBu
 }
 
 /// Opens the tunnel (when the config has one and its type takes one) and a connection through it
-/// with `driver`, which checks a file against `allowed_dirs` (an isolated run's folders).
+/// with `driver`, which checks a file against `allowed_dirs` (an isolated run's folders) and makes
+/// a missing one only with `create_file`.
 async fn open_connection(
     driver: &dyn Driver,
     config: &ConnectionConfig,
     allowed_dirs: Option<&[PathBuf]>,
+    create_file: bool,
     env: &SshEnv,
     creds: &Credentials,
 ) -> Result<Opened, EngineError> {
@@ -533,8 +535,7 @@ async fn open_connection(
         None => None,
         Some(ssh) => Some(Arc::new(Tunnel::open(ssh, env, &creds.ssh, creds.trust.as_deref()).await.map_err(|e| ssh_error(&e))?)),
     };
-    let target =
-        Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file: false, allowed_dirs };
+    let target = Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file, allowed_dirs };
     match driver.connect(target).await {
         Ok(conn) => Ok(Opened { conn, tunnel }),
         Err(e) => {
@@ -598,10 +599,11 @@ async fn connect_and_load(
     driver: &dyn Driver,
     config: &ConnectionConfig,
     allowed_dirs: Option<&[PathBuf]>,
+    create_file: bool,
     env: &SshEnv,
     creds: &Credentials,
 ) -> Result<(Opened, Catalog), EngineError> {
-    let opened = open_connection(driver, config, allowed_dirs, env, creds).await?;
+    let opened = open_connection(driver, config, allowed_dirs, create_file, env, creds).await?;
     match load_catalog_within(opened.conn.as_ref(), CATALOG_TIMEOUT).await {
         Ok(catalog) => Ok((opened, catalog)),
         Err(e) => {
@@ -738,11 +740,12 @@ fn duplicate(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Done(json!({ "id": copy.id })))
 }
 
-/// `{url}` → `{host, port, user, password, database, sslMode}`, each `null` when the URL lacks
-/// it. Not journaled.
+/// `{url}` → `{kind, host, port, user, password, database, sslMode}`: the database type its scheme
+/// names, then the parts, each `null` when the URL lacks it. Not journaled.
 fn parse(_: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let parts = parse_url(p::str(params, "url")?).map_err(|e| bad(e.to_string()))?;
     Ok(Outcome::Done(json!({
+        "kind": parts.kind,
         "host": parts.host,
         "port": parts.port,
         "user": parts.user,
@@ -771,19 +774,22 @@ fn ssh_key(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Started(job))
 }
 
-/// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?}` → a job returning
-/// `{server, via, warnings}`: connects (through the tunnel when there is one), then closes. The
-/// screen and the lists stay as they are. A trusted unknown host key is learned.
+/// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, createFile?}` → a job
+/// returning `{server, via, warnings}`: connects (through the tunnel when there is one), then
+/// closes. The screen and the lists stay as they are. A trusted unknown host key is learned.
+/// `createFile: true` makes a database file that is missing (an empty file, which SQLite takes as
+/// an empty database); an existing one opens as it is.
 fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = target_config(s, params)?;
     let allowed_dirs = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let creds = given(params)?;
+    let create_file = p::bool_or(params, "createFile", false)?;
     let allowed = stored_reuse(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(TEST, async move {
         let creds = fill_from_store(creds, store, &config, allowed).await;
-        let result = match open_connection(driver.as_ref(), &config, allowed_dirs.as_deref(), &env, &creds).await {
+        let result = match open_connection(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, &creds).await {
             Ok(opened) => {
                 let info = opened.conn.info();
                 let r = json!({ "server": server_text(info), "via": opened.via(), "warnings": info.warnings });
@@ -803,11 +809,11 @@ fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Started(job))
 }
 
-/// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?}` → a
-/// job returning `{connection, server, tables, warnings}`: the tunnel, the browse connection and
-/// the catalog. On success the workspace shows, the connection goes to the top of the recent
-/// list (an unsaved config gets an id for it) and the file is written. One open at a time
-/// (`Busy`).
+/// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?,
+/// createFile?}` → a job returning `{connection, server, tables, warnings}`: the tunnel, the
+/// browse connection and the catalog. On success the workspace shows, the connection goes to the
+/// top of the recent list (an unsaved config gets an id for it) and the file is written. One open
+/// at a time (`Busy`). `createFile` as for `connection.test`.
 ///
 /// `savePassword: true` asks to keep the secrets given in the params: the result then has
 /// `secretsSaved`, and `secretsNote` when they were not kept. They are kept only for a saved
@@ -822,6 +828,7 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let driver = driver_for(&s.drivers, config.kind)?;
     let typed = given(params)?;
     let keep = p::bool_or(params, "savePassword", false)?;
+    let create_file = p::bool_or(params, "createFile", false)?;
     if config.id.is_empty() {
         config.id = new_id();
     }
@@ -829,7 +836,7 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(OPEN, async move {
         let creds = fill_from_store(typed.clone(), store, &config, allowed).await;
-        let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), &env, &creds).await;
+        let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, &creds).await;
         let typed = keep.then_some(typed);
         let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds, result, typed));
         apply
@@ -926,7 +933,7 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(RECONNECT, async move {
         let creds = fill_from_store(creds, store, &config, allowed).await;
-        let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), &env, &creds).await;
+        let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), false, &env, &creds).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, &old, creds, result));
         apply
     });

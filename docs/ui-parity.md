@@ -1,14 +1,14 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** trivial (the observation notes are cited as kept outside the repository) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-11-05 · **Change:** minor (the connection screen for PostgreSQL, MySQL, MariaDB and SQLite) · **Target:** Beekeeper Studio 5.5.7
 
 Graded by behaviour against what was observed in Beekeeper Studio, not by whether a control exists. The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). Status: **done** (does what the observed element does, for Postgres), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `crates/ui-egui/tests/`).
 
 | Element | Beekeeper Studio | dbee | Status |
 |---|---|---|---|
 | Window frame and menus | Own title bar; File, Edit, View, Tools, Help menus | Native frame. A menu bar built from the commands' menu paths (File, Edit, View, Query), with shortcuts; a disabled entry says why | partial: no Tools or Help menu |
-| Connection lists | Saved and recent lists with a filter, a colour bar, an engine pill; a right-click menu | Saved and recent lists with a filter and the colour bar; Connect, Edit, Duplicate, Delete on right-click; double-click connects | partial: no Copy URL (and one engine, so no pill) |
-| Connection form | Engine type, auth method, socket mode, host and port, user and password, database, SSL with CA, client cert and key, SSH tunnel with jump host and keepalive, read-only, name, colour, save passwords, Fill from URL, Test, Connect, Save | Postgres: host and port, user and password (show), database, SSL modes with a CA file, read-only, SSH tunnel (host, port, user; key found on its own, agent or password), name, seven colours or none, save passwords, Fill from URL, Test, Connect, Save | partial: no socket mode, IAM, client certificate, jump host or keepalive |
+| Connection lists | Saved and recent lists with a filter, a colour bar, an engine pill; a right-click menu | Saved and recent lists with a filter and the colour bar, the database type's name under each connection's name; Connect, Edit, Duplicate, Delete on right-click; double-click connects | partial: no Copy URL |
+| Connection form | Engine type, auth method, socket mode, host and port, user and password, database, SSL with CA, client cert and key, SSH tunnel with jump host and keepalive, read-only, name, colour, save passwords, Fill from URL, Test, Connect, Save | The database type first (PostgreSQL, MySQL, MariaDB or SQLite, as cards; a URL picks it too), then its form. Servers: host and port, user and password (show), database, SSL modes with a CA file, read-only, the type's options, SSH tunnel (host, port, user; key found on its own, agent or password). SQLite: the file (choose one, or a new one), read-only. Every type: name, seven colours or none, save passwords (servers), Fill from URL, Test, Connect, Save | partial: no socket mode, IAM, client certificate, jump host or keepalive |
 | Connect prompts | Asks for what is missing | Dialogs for an unknown host key, a key passphrase, the SSH and database passwords, confirmations | done |
 | Schema tree | Database switcher; schemas, tables, views, columns with types; filter, refresh, expand and collapse all, pin, hide | Schemas (system schemas grouped), tables, views and materialized views with counts, columns with type and key; filter and refresh | partial: no database switcher, pin, hide or expand-all |
 | Quick search | Ctrl+P overlay, `schema.table`, match in bold | Ctrl+P overlay, best match first, arrows and Enter, within a frame on 1,000 tables | done |
@@ -39,6 +39,7 @@ From [gaps.md](gaps.md): wide results first (5), then the editing limits (9, 10)
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-05 | minor | Connection form and lists: every database type (M2.15); grades unchanged. |
 | 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
 | 2026-10-27 | minor | gaps.md references renumbered (the generated-columns entry is fixed and gone): the editing limits are 9 and 10. |
 | 2026-10-27 | minor | Connection lists (no Copy URL) and the paging bar (no page box) regraded partial: 3 done, 15 partial, 48 % by count; ~45 % stands. |

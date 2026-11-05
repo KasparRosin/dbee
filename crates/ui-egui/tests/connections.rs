@@ -1,6 +1,6 @@
 //! The connection screen driven through the control channel, one frame at a time in a kittest
-//! harness over [`DbeeApp::ui`]: the form, the saved and recent lists, the dialogs a connect asks
-//! for, and inline errors. Everything goes through control requests and automation ids, the way
+//! harness over [`DbeeApp::ui`]: the engine cards, the form for each database type, the saved
+//! and recent lists, the dialogs a connect asks for, and inline errors. Everything goes through control requests and automation ids, the way
 //! an agent drives the real window; assertions read `ui.inspect` and `document.inspect`.
 //!
 //! Safety: every session keeps its connections file in a throwaway home, its secrets in a
@@ -17,18 +17,37 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::*;
-use dbee_config::{ConnectionConfig, SecretKind, SecretStore, SshAuth, SshConfig};
+use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, SshAuth, SshConfig};
+use dbee_driver::Drivers;
 use dbee_testkit::{TempHome, TestDb, temp_home};
 use serde_json::{Value as Json, json};
 
-/// A 1200 × 900 window on a throwaway home with a memory secret store.
-fn ui() -> Ui {
+/// A 1200 × 900 window on a throwaway home with a memory secret store, showing the engine cards
+/// of a new connection.
+fn cards() -> Ui {
     Ui::fresh(egui::vec2(1200.0, 900.0))
 }
 
-/// A 1200 × 900 window on `home`, with a memory secret store or none.
+/// [`cards`] with PostgreSQL chosen: the form of a new PostgreSQL connection.
+fn ui() -> Ui {
+    let mut ui = cards();
+    ui.click("conn-kind-postgres");
+    ui
+}
+
+/// A 1200 × 900 window on `home`, with a memory secret store or none, showing the engine cards.
 fn ui_in(home: TempHome, with_secrets: bool) -> Ui {
     Ui::window(Setup { size: egui::vec2(1200.0, 900.0), home: Some(home), secrets: with_secrets, ..Setup::default() })
+}
+
+/// `127.0.0.1:1`, a server of `kind` that answers nothing, named `name`.
+fn server_of(kind: DbKind, name: &str) -> ConnectionConfig {
+    ConnectionConfig { name: name.into(), kind, port: kind.default_port().unwrap_or(1), ..silent_config(1) }
+}
+
+/// A SQLite connection to `file` (never opened), named `name`.
+fn file_of(file: &str, name: &str) -> ConnectionConfig {
+    ConnectionConfig { name: name.into(), kind: DbKind::Sqlite, file: Some(file.into()), host: String::new(), port: 0, ..ConnectionConfig::default() }
 }
 
 impl Ui {
@@ -118,9 +137,220 @@ fn silent_config(port: u16) -> ConnectionConfig {
 }
 
 #[test]
+fn new_connection_starts_with_the_engine_cards() {
+    let mut ui = cards();
+    let i = ui.inspect();
+    for kind in DbKind::ALL {
+        let card = tag_in(&i, &format!("conn-kind-{}", kind.id())).unwrap_or_else(|| panic!("no card for {kind:?}: {i}"));
+        assert_eq!(card["value"], json!({ "label": kind.label(), "upcoming": false }), "{card}");
+        assert!(card.get("enabled").is_none(), "{card}");
+    }
+    assert_eq!(tag_in(&i, "conn-title").unwrap()["value"], "New connection");
+    for id in ["conn-host", "conn-file", "conn-name", "conn-save", "conn-change-engine"] {
+        assert!(tag_in(&i, id).is_none(), "{id} before an engine is chosen: {i}");
+    }
+    // The cards and the form share the title row: choosing moves nothing of it.
+    let title = rect(&tag_in(&i, "conn-title").unwrap());
+    let url = rect(&tag_in(&i, "conn-fill-url").unwrap());
+    ui.click("conn-kind-postgres");
+    let i = ui.inspect();
+    assert_eq!((rect(&tag_in(&i, "conn-title").unwrap()), rect(&tag_in(&i, "conn-fill-url").unwrap())), (title, url));
+    assert_eq!(tag_in(&i, "conn-kind").unwrap()["value"], "postgres");
+    assert_eq!(tag_in(&i, "conn-port").unwrap()["value"], "5432");
+    // Change engine and Fill from URL are the same width, one above the other.
+    let change = rect(&tag_in(&i, "conn-change-engine").unwrap());
+    assert_eq!((change[0], change[2]), (url[0], url[2]), "{change:?} {url:?}");
+}
+
+#[test]
+fn switching_to_mysql_sets_its_port() {
+    let mut ui = cards();
+    ui.click("conn-new");
+    ui.click("conn-kind-mysql");
+    assert_eq!(ui.value("conn-kind"), "mysql");
+    assert_eq!(ui.value("conn-port"), "3306");
+    // Change engine keeps the name and the colour; the default port follows the engine.
+    ui.click("conn-name");
+    ui.text("Shop");
+    ui.click("conn-color-red");
+    ui.click("conn-change-engine");
+    assert!(ui.tag("conn-host").is_none() && ui.tag("conn-kind-postgres").is_some(), "back on the cards");
+    ui.click("conn-kind-postgres");
+    let i = ui.inspect();
+    let shown = |id: &str| tag_in(&i, id).unwrap()["value"].clone();
+    assert_eq!(
+        (shown("conn-kind"), shown("conn-port"), shown("conn-name"), shown("conn-color")),
+        (json!("postgres"), json!("5432"), json!("Shop"), json!("red"))
+    );
+}
+
+#[test]
+fn a_typed_port_survives_a_type_switch() {
+    let mut ui = ui();
+    ui.replace("conn-port", "5544");
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-mariadb");
+    assert_eq!(ui.value("conn-kind"), "mariadb");
+    assert_eq!(ui.value("conn-port"), "5544");
+}
+
+#[test]
+fn sqlite_shows_only_file_rows() {
+    let mut ui = cards();
+    ui.click("conn-kind-sqlite");
+    let i = ui.inspect();
+    assert_eq!(tag_in(&i, "conn-kind").unwrap()["value"], "sqlite");
+    for id in ["conn-name", "conn-color", "conn-file", "conn-file-choose", "conn-file-new", "conn-readonly", "conn-save", "conn-test", "conn-connect"]
+    {
+        assert!(tag_in(&i, id).is_some(), "{id}: {i}");
+    }
+    for id in ["conn-host", "conn-port", "conn-user", "conn-password", "conn-save-secrets", "conn-database", "conn-ssl", "conn-ca", "conn-ssh-on"] {
+        assert!(tag_in(&i, id).is_none(), "{id}: {i}");
+    }
+    assert_eq!(tag_in(&i, "conn-file").unwrap()["value"], Json::Null);
+    // Without a file there is nothing to save.
+    ui.click("conn-save");
+    assert!(ui.value("conn-error").as_str().unwrap().contains("file is empty"));
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"], json!([]));
+    // A server type has its rows again.
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-postgres");
+    assert!(ui.tag("conn-host").is_some() && ui.tag("conn-ssh-on").is_some() && ui.tag("conn-file").is_none());
+}
+
+#[test]
+fn mysql_url_fills_type_and_fields() {
+    let mut ui = cards();
+    ui.click("conn-fill-url");
+    let text = ui.value("dialog-text");
+    assert!(text.as_str().unwrap().contains("mysql://"), "{text}");
+    ui.text("mysql://u@h:3307/shop");
+    ui.click("dialog-ok");
+    let i = ui.inspect();
+    assert_eq!(i["dialog"], Json::Null, "{i}");
+    let shown = |id: &str| tag_in(&i, id).unwrap()["value"].clone();
+    assert_eq!(
+        (shown("conn-kind"), shown("conn-host"), shown("conn-port"), shown("conn-user"), shown("conn-database")),
+        (json!("mysql"), json!("h"), json!("3307"), json!("u"), json!("shop"))
+    );
+}
+
+#[test]
+fn a_url_on_the_cards_skips_them() {
+    let mut ui = cards();
+    ui.click("conn-fill-url");
+    ui.text("mariadb://db.example/shop");
+    ui.click("dialog-ok");
+    let i = ui.inspect();
+    assert!(ids(&i).iter().all(|id| !id.starts_with("conn-kind-")), "the cards are gone: {i}");
+    assert_eq!(tag_in(&i, "conn-kind").unwrap()["value"], "mariadb");
+    // No port in the URL: the type's default.
+    assert_eq!(tag_in(&i, "conn-port").unwrap()["value"], "3306");
+    // In the form of a new connection, a URL of another type switches it.
+    ui.click("conn-fill-url");
+    ui.text("postgresql://ann@pg.example:6543/shop");
+    ui.click("dialog-ok");
+    assert_eq!((ui.value("conn-kind"), ui.value("conn-port"), ui.value("conn-host")), (json!("postgres"), json!("6543"), json!("pg.example")));
+}
+
+#[test]
+fn cards_name_the_type() {
+    let mut ui = cards();
+    let maria = ui.save(&server_of(DbKind::MariaDb, "Maria"), None);
+    assert_eq!(ui.value(&maria), "Maria");
+    assert_eq!(ui.value(&format!("{maria}-kind")), "MariaDB");
+    let file = ui.save(&file_of("/data/shop.sqlite", "Shop file"), None);
+    assert_eq!(ui.value(&format!("{file}-kind")), "SQLite");
+    let pg = ui.save(&silent_config(1), None);
+    assert_eq!(ui.value(&format!("{pg}-kind")), "PostgreSQL");
+}
+
+#[test]
+fn an_upcoming_engine_cannot_be_chosen() {
+    // A build with the Postgres and SQLite drivers only: MySQL and MariaDB are upcoming.
+    let drivers = Drivers::new(dbee_drivers::all().iter().filter(|d| !d.kinds().contains(&DbKind::MySql)).cloned().collect());
+    let mut ui = Ui::window(Setup { size: egui::vec2(1200.0, 900.0), drivers: Some(drivers), ..Setup::default() });
+    let i = ui.inspect();
+    for (kind, upcoming) in [(DbKind::Postgres, false), (DbKind::MySql, true), (DbKind::MariaDb, true), (DbKind::Sqlite, false)] {
+        let card = tag_in(&i, &format!("conn-kind-{}", kind.id())).unwrap();
+        assert_eq!(card["value"]["upcoming"], upcoming, "{card}");
+        assert_eq!(card.get("enabled").is_none(), !upcoming, "{card}");
+    }
+    ui.click("conn-kind-mysql");
+    assert!(ui.tag("conn-host").is_none() && ui.tag("conn-kind-mysql").is_some(), "nothing was chosen");
+    // Nor through a URL: the dialog names what this build opens.
+    ui.click("conn-fill-url");
+    let text = ui.value("dialog-text").as_str().unwrap().to_string();
+    assert!(text.contains("postgres://") && !text.contains("mysql://"), "{text}");
+    ui.text("mysql://u@h/shop");
+    ui.click("dialog-ok");
+    assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
+    let error = ui.value("dialog-error").as_str().unwrap().to_string();
+    assert!(error.contains("postgres://"), "{error}");
+    ui.click("dialog-cancel");
+    assert!(ui.tag("conn-kind-mysql").is_some(), "still the cards");
+}
+
+#[test]
+fn an_existing_connection_shows_its_engine_fixed() {
+    let mut ui = cards();
+    let card = ui.save(&server_of(DbKind::MySql, "Shop mysql"), None);
+    ui.click(&card);
+    let i = ui.inspect();
+    assert_eq!(tag_in(&i, "conn-kind").unwrap()["value"], "mysql");
+    assert_eq!(tag_in(&i, "conn-title").unwrap()["value"], "Shop mysql");
+    assert!(tag_in(&i, "conn-change-engine").is_none(), "{i}");
+    assert!(ids(&i).iter().all(|id| !id.starts_with("conn-kind-")), "no cards: {i}");
+    // Fill from URL keeps to its engine.
+    ui.click("conn-fill-url");
+    ui.text("postgres://h/db");
+    ui.click("dialog-ok");
+    assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
+    let error = ui.value("dialog-error").as_str().unwrap().to_string();
+    assert!(error.contains("mysql://") && !error.contains("postgres://"), "{error}");
+    ui.replace("dialog-url", "mysql://other.example:3310/db2");
+    ui.click("dialog-ok");
+    assert_eq!((ui.value("conn-kind"), ui.value("conn-host"), ui.value("conn-port")), (json!("mysql"), json!("other.example"), json!("3310")));
+    // A saved file connection: its file, and no URL to fill from.
+    let card = ui.save(&file_of("/data/shop.sqlite", ""), None);
+    ui.click(&card);
+    let i = ui.inspect();
+    assert_eq!(tag_in(&i, "conn-kind").unwrap()["value"], "sqlite");
+    assert_eq!(tag_in(&i, "conn-file").unwrap()["value"], "/data/shop.sqlite");
+    assert_eq!(tag_in(&i, "conn-title").unwrap()["value"], "shop.sqlite");
+    assert!(tag_in(&i, "conn-fill-url").is_none() && tag_in(&i, "conn-change-engine").is_none(), "{i}");
+}
+
+#[test]
+fn a_mysql_option_round_trips_through_save() {
+    let mut ui = cards();
+    ui.click("conn-kind-postgres");
+    assert!(ids(&ui.inspect()).iter().all(|id| !id.starts_with("conn-option-")), "PostgreSQL has no options");
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-mysql");
+    assert_eq!(ui.value("conn-option-allowPublicKey"), false);
+    ui.click("conn-name");
+    ui.text("keyed");
+    ui.click("conn-option-allowPublicKey");
+    ui.click("conn-save");
+    let id = ui.saved_id("keyed");
+    let list = ui.execute("connection.list", json!({}));
+    assert_eq!(list["saved"][0]["options"], json!({ "allowPublicKey": "true" }), "{list}");
+    // Loaded again, it shows on.
+    ui.click("conn-new");
+    ui.click(&format!("conn-saved-{id}"));
+    assert_eq!(ui.value("conn-option-allowPublicKey"), true);
+    // Off, it is gone from the file.
+    ui.click("conn-option-allowPublicKey");
+    ui.click("conn-save");
+    let list = ui.execute("connection.list", json!({}));
+    assert!(list["saved"][0].get("options").is_none(), "{list}");
+}
+
+#[test]
 fn fill_from_url_fills_the_form() {
     let mut ui = ui();
-    ui.click("conn-url");
+    ui.click("conn-fill-url");
     assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
     // A URL that does not parse keeps the dialog open with the reason.
     ui.text("oracle://nope");
@@ -150,7 +380,7 @@ fn fill_from_url_fills_the_form() {
 #[test]
 fn dialog_widgets_are_in_place_from_their_first_frame() {
     let mut ui = ui();
-    let _reply = ui.send("ui.click", json!({ "id": "conn-url" }));
+    let _reply = ui.send("ui.click", json!({ "id": "conn-fill-url" }));
     let start = Instant::now();
     // The frame that first draws the dialog is egui's sizing pass; a click on what `ui.inspect`
     // lists then must still land.
@@ -226,8 +456,10 @@ fn save_puts_the_card_in_the_list() {
     assert!(ui.tag(&format!("conn-saved-{id}")).is_none());
     ui.replace("conn-filter", "SHOP");
     assert!(ui.tag(&format!("conn-saved-{id}")).is_some());
-    // New connection empties the form again.
+    // New connection starts over with the engine cards, then an empty form.
     ui.click("conn-new");
+    assert!(ui.tag("conn-name").is_none() && ui.tag("conn-kind-postgres").is_some());
+    ui.click("conn-kind-postgres");
     assert_eq!(ui.value("conn-name"), "");
     assert_eq!(ui.value("conn-host"), "localhost");
     assert_eq!(ui.value("conn-port"), "5432");
@@ -403,6 +635,7 @@ fn test_and_connect_run_once_and_show_it() {
 #[test]
 fn no_secret_store_turns_saving_off() {
     let mut without = ui_in(temp_home(None, None), false);
+    without.click("conn-kind-postgres");
     let i = without.inspect();
     let save = tag_in(&i, "conn-save-secrets").unwrap();
     assert_eq!((save["value"].clone(), save["enabled"].clone()), (json!(false), json!(false)), "{save}");
@@ -431,7 +664,9 @@ fn store_warning_shows_while_set() {
 
 #[test]
 fn typing_and_errors_do_not_move_the_layout() {
-    let mut ui = ui();
+    // Tall enough for every field with the SSH tunnel on: a click on a field then scrolls nothing.
+    let mut ui = Ui::fresh(egui::vec2(1200.0, 1000.0));
+    ui.click("conn-kind-postgres");
     ui.click("conn-ssh-on");
     // Every widget of the form and the side bar, but the message under the buttons, the cards and
     // the key file buttons, which only the Key login shows (in its fixed slot).

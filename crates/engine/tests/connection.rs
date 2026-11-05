@@ -142,9 +142,19 @@ fn test_and_open_need_an_id_or_a_config() {
 fn parse_url_fills_the_form_and_is_not_journaled() {
     let mut s = session();
     let r = s.run_blocking("connection.parseUrl", json!({ "url": "postgresql://ann:s%40cret@db.example.com:6543/shop?sslmode=require" }), T).unwrap();
-    assert_eq!(r, json!({ "host": "db.example.com", "port": 6543, "user": "ann", "password": "s@cret", "database": "shop", "sslMode": "require" }));
+    assert_eq!(
+        r,
+        json!({ "kind": "postgres", "host": "db.example.com", "port": 6543, "user": "ann", "password": "s@cret", "database": "shop", "sslMode": "require" })
+    );
     let r = s.run_blocking("connection.parseUrl", json!({ "url": "postgres://localhost" }), T).unwrap();
-    assert_eq!(r, json!({ "host": "localhost", "port": null, "user": null, "password": null, "database": null, "sslMode": null }));
+    assert_eq!(
+        r,
+        json!({ "kind": "postgres", "host": "localhost", "port": null, "user": null, "password": null, "database": null, "sslMode": null })
+    );
+    // The scheme names the database type.
+    for (url, kind) in [("mysql://u@h:3307/shop", "mysql"), ("mariadb://h", "mariadb"), ("postgresql://h", "postgres")] {
+        assert_eq!(s.run_blocking("connection.parseUrl", json!({ "url": url }), T).unwrap()["kind"], kind, "{url}");
+    }
     assert_eq!(s.execute("connection.parseUrl", json!({ "url": "oracle://x" })).unwrap_err().code(), "badParams");
     assert_eq!(s.execute("connection.parseUrl", json!({})).unwrap_err().code(), "badParams");
     assert!(s.journal().iter().all(|(id, _)| id != "connection.parseUrl"), "a URL can carry a password");
@@ -1058,5 +1068,32 @@ fn an_isolated_run_opens_no_tunnel_for_a_file() {
             assert!(e.to_string().contains("a database file has no SSH tunnel"), "{id}: {e}");
             assert!(!s.busy(), "{id} started a job");
         }
+    }
+}
+
+#[test]
+fn create_file_makes_a_missing_file_only_when_asked() {
+    let folder = Folder(dbee_testkit::repo_root().join("target").join("testkit").join(unique("create-file")));
+    std::fs::create_dir_all(&folder.0).unwrap();
+    let mut s = session();
+    for id in ["connection.test", "connection.open"] {
+        let file = folder.0.join(format!("{}.sqlite", unique("new")));
+        let config = json!({ "kind": "sqlite", "file": file });
+        let e = run_err(&mut s, id, json!({ "config": config }));
+        assert!(e.code() == "connect" && e.to_string().contains("no file at"), "{id}: {e}");
+        assert!(!file.exists(), "{id}: nothing is made unasked");
+        let e = s.execute(id, json!({ "config": config, "createFile": "yes" })).unwrap_err();
+        assert_eq!(e.code(), "badParams", "{id}: {e}");
+        s.run_blocking(id, json!({ "config": config, "createFile": true }), T).unwrap();
+        assert!(file.is_file(), "{id}: an empty file, which SQLite takes as an empty database");
+        if id == "connection.open" {
+            assert_eq!(s.inspect()["screen"], "workspace");
+            let journal = s.journal().last().cloned().unwrap();
+            assert_eq!((journal.0.as_str(), &journal.1["createFile"]), ("connection.open", &json!(true)), "{journal:?}");
+            s.run_blocking("connection.close", json!({}), T).unwrap();
+        }
+        // An existing file opens as it is, asked or not.
+        s.run_blocking("connection.test", json!({ "config": config, "createFile": true }), T).unwrap();
+        s.run_blocking("connection.test", json!({ "config": config }), T).unwrap();
     }
 }
