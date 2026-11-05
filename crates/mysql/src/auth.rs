@@ -26,16 +26,14 @@ const CHARSET: u8 = 45;
 
 /// The capabilities dbee asks for, of those the server offers; `CLIENT_SSL` and
 /// `CLIENT_CONNECT_WITH_DB` are added when used. `CLIENT_MULTI_RESULTS` lets a `CALL` return
-/// result sets; several statements in one text stay refused. `CLIENT_SESSION_TRACK` lets OK
-/// packets say which database a statement made current.
+/// result sets; several statements in one text stay refused.
 const WANTED: CapabilityFlags = CapabilityFlags::CLIENT_PROTOCOL_41
     .union(CapabilityFlags::CLIENT_SECURE_CONNECTION)
     .union(CapabilityFlags::CLIENT_PLUGIN_AUTH)
     .union(CapabilityFlags::CLIENT_FOUND_ROWS)
     .union(CapabilityFlags::CLIENT_TRANSACTIONS)
     .union(CapabilityFlags::CLIENT_MULTI_RESULTS)
-    .union(CapabilityFlags::CLIENT_DEPRECATE_EOF)
-    .union(CapabilityFlags::CLIENT_SESSION_TRACK);
+    .union(CapabilityFlags::CLIENT_DEPRECATE_EOF);
 
 /// The MariaDB capability dbee asks a MariaDB server for, when it offers it: the extended
 /// metadata, which tells a JSON column from a text one.
@@ -205,12 +203,17 @@ pub(crate) fn parse_greeting(payload: &[u8]) -> Result<Greeting, DbError> {
 }
 
 /// What dbee's side of the session uses: [`WANTED`] as far as the server offers it, plus TLS
-/// and a database at login when asked for.
-pub(crate) fn capabilities(g: &Greeting, tls: bool, database: bool) -> Result<CapabilityFlags, DbError> {
+/// and a database at login when asked for, and `CLIENT_SESSION_TRACK` when `session_track` asks
+/// for it and the server offers it (its OK packets then say which database a statement made
+/// current).
+pub(crate) fn capabilities(g: &Greeting, tls: bool, database: bool, session_track: bool) -> Result<CapabilityFlags, DbError> {
     if !g.capabilities.contains(REQUIRED) {
         return Err(lacks(REQUIRED.difference(g.capabilities)));
     }
     let mut caps = WANTED & g.capabilities;
+    if session_track {
+        caps |= CapabilityFlags::CLIENT_SESSION_TRACK & g.capabilities;
+    }
     if tls {
         caps |= CapabilityFlags::CLIENT_SSL;
     }
@@ -434,7 +437,7 @@ mod tests {
         let all = CapabilityFlags::all();
         for version in [(5, 5, 5), (8, 0, 99), (0, 0, 0)] {
             let g = greeting(all, version);
-            let caps = capabilities(&g, false, true).unwrap();
+            let caps = capabilities(&g, false, true, false).unwrap();
             let who = Login { user: "root", password: b"pw", database: Some("shop") };
             let r = handshake_response(&g, &who, caps, MariadbCapabilities::empty(), Method::CachingSha2, vec![1; 32]);
             // capability flags, max packet size, character set, 23 bytes of filler.
@@ -446,7 +449,7 @@ mod tests {
             let expected = [&b"root\0"[..], &[32], &[1; 32], b"shop\0", b"caching_sha2_password\0"].concat();
             assert_eq!(rest, &expected[..], "{version:?}");
         }
-        let caps = capabilities(&greeting(all, (8, 0, 0)), true, false).unwrap();
+        let caps = capabilities(&greeting(all, (8, 0, 0)), true, false, false).unwrap();
         assert!(caps.contains(WANTED | CapabilityFlags::CLIENT_SSL) && !caps.contains(CapabilityFlags::CLIENT_CONNECT_WITH_DB));
         assert!(!caps.intersects(CapabilityFlags::CLIENT_LOCAL_FILES | CapabilityFlags::CLIENT_MULTI_STATEMENTS | CapabilityFlags::CLIENT_COMPRESS));
         assert!(caps.contains(CapabilityFlags::CLIENT_MULTI_RESULTS) && !caps.contains(CapabilityFlags::CLIENT_PS_MULTI_RESULTS));
@@ -457,10 +460,20 @@ mod tests {
     #[test]
     fn capabilities_follow_the_server() {
         let old = greeting(CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_SECURE_CONNECTION, (5, 1, 0));
-        assert!(matches!(capabilities(&old, false, false).unwrap_err(), DbError::Connect(m) if m.contains("CLIENT_PLUGIN_AUTH")));
+        assert!(matches!(capabilities(&old, false, false, false).unwrap_err(), DbError::Connect(m) if m.contains("CLIENT_PLUGIN_AUTH")));
         let no_eof = greeting(REQUIRED | CapabilityFlags::CLIENT_FOUND_ROWS, (5, 6, 0));
-        assert_eq!(capabilities(&no_eof, false, false).unwrap(), REQUIRED | CapabilityFlags::CLIENT_FOUND_ROWS);
-        assert_eq!(capabilities(&no_eof, false, true).unwrap_err().code(), "connect");
+        assert_eq!(capabilities(&no_eof, false, false, true).unwrap(), REQUIRED | CapabilityFlags::CLIENT_FOUND_ROWS);
+        assert_eq!(capabilities(&no_eof, false, true, false).unwrap_err().code(), "connect");
+    }
+
+    #[test]
+    fn session_tracking_only_when_asked_for_and_offered() {
+        let track = CapabilityFlags::CLIENT_SESSION_TRACK;
+        let all = greeting(CapabilityFlags::all(), (8, 0, 0));
+        assert!(!capabilities(&all, false, false, false).unwrap().contains(track), "not asked for");
+        assert!(capabilities(&all, false, false, true).unwrap().contains(track));
+        let without = greeting(CapabilityFlags::all().difference(track), (8, 0, 0));
+        assert!(!capabilities(&without, false, false, true).unwrap().contains(track), "not offered");
     }
 
     /// Protocol::HandshakeV10 as MySQL's documentation lays it out, with a challenge of
@@ -493,7 +506,7 @@ mod tests {
         assert_eq!(mariadb_capabilities(&g, MARIADB_WANTED), MariadbCapabilities::empty());
         // MariaDB's documentation puts them in the last 4 of the 23 filler bytes, both requests.
         let g = parse_greeting(&greeting_of("5.5.5-11.4.2-MariaDB", mariadb, 21, offered)).unwrap();
-        let caps = capabilities(&g, true, false).unwrap();
+        let caps = capabilities(&g, true, false, false).unwrap();
         let asked = mariadb_capabilities(&g, MARIADB_WANTED);
         assert!(!caps.contains(CLIENT_MYSQL));
         let who = Login { user: "root", password: b"pw", database: None };

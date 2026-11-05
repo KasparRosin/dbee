@@ -298,8 +298,8 @@ mod tests {
         for s in db.servers_of(&[dbee_testkit::Kind::MySql, dbee_testkit::Kind::MariaDb]) {
             let route = Route { host: "127.0.0.1".into(), port: s.port, tunnel: None };
             let who = Login { user: "root", password: db.password.as_bytes(), database: None };
-            let mut plain = Session::open_asking(&route, &who, &TlsUse::Off, ServerKey::Allowed, MariadbCapabilities::empty()).await.unwrap();
-            let mut extended = Session::open(&route, &who, &TlsUse::Off, ServerKey::Allowed).await.unwrap();
+            let mut plain = Session::open_asking(&route, &who, &TlsUse::Off, ServerKey::Allowed, MariadbCapabilities::empty(), false).await.unwrap();
+            let mut extended = Session::open(&route, &who, &TlsUse::Off, ServerKey::Allowed, false).await.unwrap();
             let mariadb = s.kind == dbee_testkit::Kind::MariaDb;
             assert_eq!((plain.extended_metadata, extended.extended_metadata), (false, mariadb), "{}", s.name);
             for sql in queries {

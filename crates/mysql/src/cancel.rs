@@ -77,7 +77,7 @@ impl Canceller {
                 return Ok(false);
             }
             let who = Login { user: &k.user, password: k.password.as_bytes(), database: None };
-            let mut session = Session::open(&k.route, &who, &k.tls, k.server_key).await.map_err(while_connecting)?;
+            let mut session = Session::open(&k.route, &who, &k.tls, k.server_key, false).await.map_err(while_connecting)?;
             let target = k.statements.running.load(Ordering::SeqCst);
             if target == 0 {
                 session.quit().await;

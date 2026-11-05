@@ -2,7 +2,7 @@
 
 use dbee_core::{DatabaseAfter, ResultSet};
 use dbee_driver::{DbError, Limits};
-use mysql_common::constants::{CapabilityFlags, StatusFlags};
+use mysql_common::constants::{CapabilityFlags, SessionStateType, StatusFlags};
 use mysql_common::io::ParseBuf;
 use mysql_common::packets::session_state_change::SessionStateChange;
 use mysql_common::packets::{CommonOkPacket, OkPacket, OkPacketDeserializer, OkPacketKind, OldEofPacket, ResultSetTerminator};
@@ -24,15 +24,41 @@ pub(crate) fn parse_ok<K: OkPacketKind>(payload: &[u8], caps: CapabilityFlags) -
     ParseBuf(payload).parse::<OkPacketDeserializer<'_, K>>(caps).map(OkPacketDeserializer::into_inner).map_err(|_| malformed("OK packet"))
 }
 
-/// The database an OK packet says the statement made current (`SESSION_TRACK_SCHEMA`), the
-/// inner `None` for none; `None` when it says nothing of it. Session state that does not decode,
-/// and entries of other kinds, are passed over.
-pub(crate) fn schema_change(ok: &OkPacket<'_>) -> Option<Option<String>> {
-    let entries = ok.session_state_info().ok()?;
-    entries.iter().rev().find_map(|entry| match entry.decode() {
-        Ok(SessionStateChange::Schema(schema)) => Some(Some(schema.as_str().into_owned()).filter(|name| !name.is_empty())),
-        _ => None,
-    })
+/// What an OK packet says of the database the statement made current (`SESSION_TRACK_SCHEMA`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SchemaReport {
+    /// Nothing.
+    Silent,
+    /// This database, or none.
+    Said(Option<String>),
+    /// Its session state, or a schema entry in it, does not decode: it may have said anything.
+    Unreadable,
+}
+
+impl SchemaReport {
+    /// This report, then `later`, of one command: the last thing said counts, and an unreadable
+    /// report spoils them all.
+    fn then(self, later: SchemaReport) -> SchemaReport {
+        match (self, later) {
+            (SchemaReport::Unreadable, _) | (_, SchemaReport::Unreadable) => SchemaReport::Unreadable,
+            (earlier, SchemaReport::Silent) => earlier,
+            (_, said) => said,
+        }
+    }
+}
+
+/// What `ok` says of the database the statement made current. Entries of other kinds are passed
+/// over.
+pub(crate) fn schema_change(ok: &OkPacket<'_>) -> SchemaReport {
+    let Ok(entries) = ok.session_state_info() else { return SchemaReport::Unreadable };
+    let mut report = SchemaReport::Silent;
+    for entry in entries.iter().filter(|entry| matches!(entry.data_type(), SessionStateType::SESSION_TRACK_SCHEMA)) {
+        report = match entry.decode() {
+            Ok(SessionStateChange::Schema(schema)) => SchemaReport::Said(Some(schema.as_str().into_owned()).filter(|name| !name.is_empty())),
+            _ => return SchemaReport::Unreadable,
+        };
+    }
+    report
 }
 
 /// Read the answer to a command: an OK packet, an ERR packet, or result sets, as many as the
@@ -42,7 +68,8 @@ pub(crate) fn schema_change(ok: &OkPacket<'_>) -> Option<Option<String>> {
 /// `CLIENT_FOUND_ROWS`), `None` when no OK packet came. An ERR packet ends it with its error.
 /// Rows past `limits` are read but not kept. MariaDB's extended metadata is in each column
 /// definition when `extended_metadata` was agreed. When the server reports the current
-/// database (`tracks_schema`), the result says where the command left it.
+/// database (`tracks_schema`), the result says where the command left it, and untold when a
+/// report does not decode.
 pub(crate) async fn read_result(
     p: &mut Packets,
     caps: CapabilityFlags,
@@ -53,14 +80,14 @@ pub(crate) async fn read_result(
 ) -> Result<ResultSet, DbError> {
     let mut kept: Option<ResultSet> = None;
     let mut affected = None;
-    let mut moved = None;
+    let mut moved = SchemaReport::Silent;
     loop {
         let first = p.read().await?;
         let status = match first.first() {
             Some(0x00) => {
                 let ok = parse_ok::<CommonOkPacket>(&first, caps)?;
                 affected = Some(ok.affected_rows());
-                moved = schema_change(&ok).or(moved);
+                moved = moved.then(schema_change(&ok));
                 ok.status_flags()
             }
             Some(0xFF) => return Err(errors::from_err_packet(&first, caps, flavor)),
@@ -70,7 +97,7 @@ pub(crate) async fn read_result(
                 drop(kept.take());
                 let (set, status, schema) = read_rows(p, &first, caps, flavor, extended_metadata, limits).await?;
                 kept = Some(set);
-                moved = schema.or(moved);
+                moved = moved.then(schema);
                 status
             }
         };
@@ -81,9 +108,9 @@ pub(crate) async fn read_result(
     let mut result = kept.unwrap_or(ResultSet { complete: true, ..ResultSet::default() });
     result.rows_affected = affected;
     result.database_after = match (tracks_schema, moved) {
-        (false, _) => DatabaseAfter::Untold,
-        (true, None) => DatabaseAfter::Unchanged,
-        (true, Some(database)) => DatabaseAfter::Changed(database),
+        (false, _) | (true, SchemaReport::Unreadable) => DatabaseAfter::Untold,
+        (true, SchemaReport::Silent) => DatabaseAfter::Unchanged,
+        (true, SchemaReport::Said(database)) => DatabaseAfter::Changed(database),
     };
     Ok(result)
 }
@@ -98,7 +125,7 @@ async fn read_rows(
     flavor: Flavor,
     extended_metadata: bool,
     limits: Limits,
-) -> Result<(ResultSet, StatusFlags, Option<Option<String>>), DbError> {
+) -> Result<(ResultSet, StatusFlags, SchemaReport), DbError> {
     let count = match lenenc_int(first) {
         Some((n, [])) if (1..=MAX_COLUMNS).contains(&n) => usize::try_from(n).map_err(|_| malformed("column count"))?,
         _ => return Err(malformed("column count")),
@@ -268,7 +295,7 @@ pub(crate) mod tests {
         let caps = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF | CapabilityFlags::CLIENT_TRANSACTIONS;
         let v = valid_packets();
         assert_eq!(parse_ok::<CommonOkPacket>(&v[0], caps).unwrap().affected_rows(), 1);
-        assert_eq!(schema_change(&parse_ok::<CommonOkPacket>(&v[1], TRACKING).unwrap()), Some(Some("many".to_owned())));
+        assert_eq!(schema_change(&parse_ok::<CommonOkPacket>(&v[1], TRACKING).unwrap()), SchemaReport::Said(Some("many".to_owned())));
         assert!(parse_ok::<ResultSetTerminator>(&v[2], caps).unwrap().status_flags().contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT));
         assert!(parse_ok::<OldEofPacket>(&v[3], caps).unwrap().status_flags().contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT));
         assert_eq!(errors::from_err_packet(&v[4], caps, Flavor::MySql).to_string(), "Table 'x' doesn't exist (MySQL error 1146)");
@@ -301,27 +328,51 @@ pub(crate) mod tests {
     #[test]
     fn an_ok_packet_says_which_database_a_statement_made_current() {
         let change = |state: &[u8]| schema_change(&parse_ok::<CommonOkPacket>(&ok_with_state(state), TRACKING).unwrap());
-        assert_eq!(change(&schema_entry("many")), Some(Some("many".to_owned())));
-        assert_eq!(change(&schema_entry("")), Some(None), "an empty name: no database");
+        let said = |name: &str| SchemaReport::Said(Some(name.to_owned()));
+        assert_eq!(change(&schema_entry("many")), said("many"));
+        assert_eq!(change(&schema_entry("")), SchemaReport::Said(None), "an empty name: no database");
         // A system variable entry first (type 0x00: `autocommit`, `ON`), then the schema.
         let variable = [&[0x00, 14, 10][..], b"autocommit", &[2], b"ON"].concat();
-        assert_eq!(change(&[variable.clone(), schema_entry("odd")].concat()), Some(Some("odd".to_owned())));
-        assert_eq!(change(&variable), None, "no schema entry: nothing said of it");
+        assert_eq!(change(&[variable.clone(), schema_entry("odd")].concat()), said("odd"));
+        assert_eq!(change(&variable), SchemaReport::Silent, "no schema entry: nothing said of it");
+        // The last schema entry counts.
+        assert_eq!(change(&[schema_entry("odd"), schema_entry("many")].concat()), said("many"));
+        // An entry of another kind that does not decode is passed over.
+        assert_eq!(change(&[&[0x00, 2, 9, b'a'][..], &schema_entry("many")].concat()), said("many"));
         // Without session tracking the same flags carry no state: nothing is said.
         let plain = parse_ok::<CommonOkPacket>(&[0x00, 0, 0, 2, 0, 0, 0], TRACKING).unwrap();
-        assert_eq!(schema_change(&plain), None);
+        assert_eq!(schema_change(&plain), SchemaReport::Silent);
+    }
+
+    /// A session state entry of kind 6, past the 0 to 5 that MySQL's documentation lists.
+    const UNKNOWN_KIND: [u8; 3] = [0x06, 1, 0];
+
+    #[test]
+    fn a_session_state_that_does_not_decode_is_unreadable() {
+        let ok = |state: &[u8]| parse_ok::<CommonOkPacket>(&ok_with_state(state), TRACKING).map(|ok| schema_change(&ok));
+        // An entry longer than the block, a schema name longer than its entry, an entry cut off
+        // after its type, and an unknown type: the packet parses, and what it says is unreadable.
+        for state in [&[0x01, 9, 4][..], &[0x01, 2, 9, b'a'], &[0x01], &[0x7F, 1, 0], &UNKNOWN_KIND] {
+            assert_eq!(ok(state), Ok(SchemaReport::Unreadable), "{state:?}");
+        }
+        // A good schema entry beside one that does not decode, or beside an unknown kind, before
+        // it or after it, is no proof of where the statement left the connection.
+        let good = schema_entry("many");
+        for bad in [&[0x01, 2, 9, b'a'][..], &UNKNOWN_KIND] {
+            assert_eq!(ok(&[bad, &good].concat()), Ok(SchemaReport::Unreadable), "{bad:?} first");
+            assert_eq!(ok(&[&good, bad].concat()), Ok(SchemaReport::Unreadable), "{bad:?} after");
+        }
     }
 
     #[test]
-    fn a_malformed_session_state_is_passed_over() {
-        let ok = |state: &[u8]| parse_ok::<CommonOkPacket>(&ok_with_state(state), TRACKING).map(|ok| schema_change(&ok));
-        // An entry longer than the block, a schema name longer than its entry, an entry cut off
-        // after its type, and an unknown type: the packet parses, and no database is reported.
-        for state in [&[0x01, 9, 4][..], &[0x01, 2, 9, b'a'], &[0x01], &[0x7F, 1, 0]] {
-            assert_eq!(ok(state), Ok(None), "{state:?}");
-        }
-        // A good entry after one that does not decode is still read.
-        assert_eq!(ok(&[&[0x01, 2, 9, b'a'][..], &schema_entry("many")].concat()), Ok(Some(Some("many".to_owned()))));
+    fn unreadable_spoils_every_report_of_a_command() {
+        let (said, silent, unreadable) = (|| SchemaReport::Said(Some("many".into())), || SchemaReport::Silent, || SchemaReport::Unreadable);
+        assert_eq!(said().then(silent()), said());
+        assert_eq!(silent().then(said()), said());
+        assert_eq!(SchemaReport::Said(None).then(said()), said(), "the last thing said counts");
+        assert_eq!(said().then(unreadable()), unreadable());
+        assert_eq!(unreadable().then(said()), unreadable());
+        assert_eq!(unreadable().then(silent()), unreadable());
     }
 
     #[tokio::test]
@@ -333,6 +384,10 @@ pub(crate) mod tests {
         assert_eq!(read(ok_with_state(&schema_entry("many")), true).await, DatabaseAfter::Changed(Some("many".into())));
         assert_eq!(read(vec![0x00, 0, 0, 2, 0, 0, 0], true).await, DatabaseAfter::Unchanged);
         assert_eq!(read(ok_with_state(&schema_entry("many")), false).await, DatabaseAfter::Untold, "a session that does not track tells nothing");
+        // A schema change beside an entry of a kind above 5: the server's report is unreadable.
+        let beside = ok_with_state(&[&schema_entry("many")[..], &UNKNOWN_KIND].concat());
+        assert_eq!(read(beside, true).await, DatabaseAfter::Untold);
+        assert_eq!(read(ok_with_state(&[&UNKNOWN_KIND[..], &schema_entry("many")].concat()), true).await, DatabaseAfter::Untold);
     }
 
     /// `VAR_STRING`, the type of a `VARCHAR` result.

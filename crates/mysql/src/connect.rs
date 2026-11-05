@@ -90,9 +90,10 @@ pub(crate) struct Session {
 
 impl Session {
     /// Open the stream, read the greeting, start TLS as `tls` says, and log in, with the
-    /// server's RSA key as `key` allows.
-    pub(crate) async fn open(route: &Route, who: &Login<'_>, tls: &TlsUse, key: ServerKey) -> Result<Session, DbError> {
-        Session::open_asking(route, who, tls, key, auth::MARIADB_WANTED).await
+    /// server's RSA key as `key` allows; asking for `CLIENT_SESSION_TRACK` when `session_track`
+    /// says so (the query connection's does).
+    pub(crate) async fn open(route: &Route, who: &Login<'_>, tls: &TlsUse, key: ServerKey, session_track: bool) -> Result<Session, DbError> {
+        Session::open_asking(route, who, tls, key, auth::MARIADB_WANTED, session_track).await
     }
 
     /// [`Session::open`], asking a MariaDB server for the MariaDB capabilities in `wanted` it
@@ -103,6 +104,7 @@ impl Session {
         tls: &TlsUse,
         key: ServerKey,
         wanted: MariadbCapabilities,
+        session_track: bool,
     ) -> Result<Session, DbError> {
         let mut packets = Packets::new(open_stream(route).await?, LOGIN_MAX_PAYLOAD);
         let greeting = auth::parse_greeting(&packets.read().await?)?;
@@ -112,7 +114,7 @@ impl Session {
             TlsUse::Require(_) if !greeting.offers_tls() => return Err(DbError::Tls("the server does not offer TLS".into())),
             TlsUse::Require(config) => Some(Arc::clone(config)),
         };
-        let caps = auth::capabilities(&greeting, config.is_some(), who.database.is_some())?;
+        let caps = auth::capabilities(&greeting, config.is_some(), who.database.is_some(), session_track)?;
         let mariadb = auth::mariadb_capabilities(&greeting, wanted);
         if let Some(config) = &config {
             packets.write(&auth::ssl_request(caps, mariadb)).await?;
@@ -150,6 +152,13 @@ impl Session {
         self.packets.reset();
         let _ = self.packets.write(&[Command::COM_QUIT as u8]).await;
     }
+}
+
+/// `sql` names `session_track` in any case: it may change what the server reports, so the
+/// session stops trusting its reports of the database.
+fn names_session_track(sql: &str) -> bool {
+    const NAME: &[u8] = b"session_track";
+    sql.as_bytes().windows(NAME.len()).any(|w| w.eq_ignore_ascii_case(NAME))
 }
 
 async fn open_stream(route: &Route) -> Result<Stream, DbError> {
@@ -211,21 +220,15 @@ fn server_key(cfg: &ConnectionConfig, tunnel: bool) -> ServerKey {
 
 /// Open a connection on the caller's tokio runtime.
 ///
-/// `sql` names `session_track` in any case: it may change what the server reports, so the
-/// session stops trusting its reports of the database.
-fn names_session_track(sql: &str) -> bool {
-    const NAME: &[u8] = b"session_track";
-    sql.as_bytes().windows(NAME.len()).any(|w| w.eq_ignore_ascii_case(NAME))
-}
-
-/// After the login (as `utf8mb4_general_ci`, with `CLIENT_FOUND_ROWS`), the session runs `SET
-/// NAMES utf8mb4`; a browse connection also makes its `sql_mode` strict, turns backslash
-/// escapes off and autocommit on; a query connection turns `session_track_schema` on where the
-/// server can report it (it then says in each OK packet which database a statement made
-/// current; a server without it leaves that untold, as does the session after a statement of
-/// the user's that names `session_track`); a read-only connection runs `SET SESSION TRANSACTION
-/// READ ONLY`, which the flavor's variable must then confirm. In `prefer` mode a failed TLS handshake
-/// is tried again without TLS, as libpq does.
+/// After the login (as `utf8mb4_general_ci`, with `CLIENT_FOUND_ROWS`, and on a query connection
+/// `CLIENT_SESSION_TRACK` when offered), the session runs `SET NAMES utf8mb4`; a browse
+/// connection also makes its `sql_mode` strict, turns backslash escapes off and autocommit on; a
+/// query connection turns `session_track_schema` on where the server can report it (it then
+/// says in each OK packet which database a statement made current; a server without it leaves
+/// that untold, as does the session after a statement of the user's that names `session_track`);
+/// a read-only connection runs `SET SESSION TRANSACTION READ ONLY`, which the flavor's variable
+/// must then confirm. In `prefer` mode a failed TLS handshake is tried again without TLS, as
+/// libpq does.
 pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     // The timeouts need a runtime; without one they would panic.
     tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("connecting needs a tokio runtime".into()))?;
@@ -279,7 +282,7 @@ async fn attempt(
     let addr = route.address();
     log::info!("mysql: connecting to {addr}{}", if route.tunnel.is_some() { " through SSH" } else { "" });
     let opening = async {
-        let mut session = Session::open(route, who, tls, key).await?;
+        let mut session = Session::open(route, who, tls, key, purpose == Purpose::Query).await?;
         let (info, id) = setup(&mut session, read_only, purpose).await?;
         Ok((session, info, id))
     };
@@ -458,6 +461,23 @@ mod tests {
         // A new connection is trusted again.
         let mut fresh = tracking_session(1);
         assert_eq!(fresh.query("USE many", QUERY_LIMITS).await.unwrap().database_after, moved);
+    }
+
+    #[tokio::test]
+    async fn only_the_query_connection_asks_for_session_tracking() {
+        let db = dbee_testkit::require_testdb!();
+        for s in db.servers_of(&[dbee_testkit::Kind::MySql, dbee_testkit::Kind::MariaDb]) {
+            let kind = dbee_config::DbKind::from_id(s.kind.id()).unwrap();
+            let config = ConnectionConfig { kind, host: "127.0.0.1".into(), port: s.port, user: "root".into(), ..ConnectionConfig::default() };
+            let mut asked = Vec::new();
+            for purpose in [Purpose::Browse, Purpose::Query] {
+                let target = Target { config: &config, password: Some(&db.password), tunnel: None, purpose, create_file: false, allowed_dirs: None };
+                let conn = connect(target).await.unwrap();
+                let session = conn.session.lock().await;
+                asked.push((session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK), session.tracks_schema));
+            }
+            assert_eq!(asked, [(false, false), (true, true)], "{}: (asked for, read) on the browse and the query connection", s.name);
+        }
     }
 
     #[test]
