@@ -213,6 +213,35 @@ fn a_space_or_a_dash_starts_a_word() {
     assert_eq!((first("live"), first("stag")), ("Shop live".to_string(), "pg staging".to_string()));
 }
 
+/// `search`'s results as `table <name>` and `connection <name>`.
+fn labels(found: Vec<Found<'_>>) -> Vec<String> {
+    found
+        .into_iter()
+        .map(|f| match f {
+            Found::Table(h) => format!("table {}", h.table.name),
+            Found::Connection(h) => format!("connection {}", h.name),
+        })
+        .collect()
+}
+
+#[test]
+fn an_empty_query_keeps_the_saved_order() {
+    let list = [saved("a", "Orders replica"), saved("b", "pg14"), saved("c", "Shop live")];
+    let names = |hits: Vec<dbee_engine::fuzzy::ConnectionHit<'_>>| hits.into_iter().map(|h| h.name).collect::<Vec<_>>();
+    // As the connection screen lists them, not by the length of their names.
+    assert_eq!(names(find_connections(&list, None, "", 20)), ["Orders replica", "pg14", "Shop live"]);
+    assert_eq!(names(find_connections(&list, None, "  ", 20)), ["Orders replica", "pg14", "Shop live"]);
+    assert_eq!(names(find_connections(&list, Some("b"), "", 20)), ["Orders replica", "Shop live"]);
+    assert_eq!(labels(search(None, &list, None, "", 20)), ["connection Orders replica", "connection pg14", "connection Shop live"]);
+    // Connected: the tables in their own empty-query order (M1's), then the connections.
+    let c = Catalog { schemas: vec![schema("shop", false, &["orders", "items"])], default_schema: None };
+    assert_eq!(
+        labels(search(Some(&c), &list, None, "", 20)),
+        ["table items", "table orders", "connection Orders replica", "connection pg14", "connection Shop live"]
+    );
+    assert_eq!(labels(search(Some(&c), &list, None, "", 3)), ["table items", "table orders", "connection Orders replica"]);
+}
+
 #[test]
 fn search_mixes_tables_and_connections_by_score() {
     let c = Catalog { schemas: vec![schema("shop", false, &["orders", "shop_orders"])], default_schema: None };

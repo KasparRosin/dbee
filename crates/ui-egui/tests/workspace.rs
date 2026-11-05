@@ -62,7 +62,12 @@ impl Ui {
 /// A window at the app's first size connected to pg14, with the newest Postgres saved (with the
 /// test servers' password) as "pgnew"; and pgnew's id.
 fn with_pgnew(db: &TestDb) -> (Ui, String) {
-    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    with_pgnew_held(db, false)
+}
+
+/// [`with_pgnew`], the window holding the lock exclusively when `exclusive` (it kills backends).
+fn with_pgnew_held(db: &TestDb, exclusive: bool) -> (Ui, String) {
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, exclusive, ..Setup::default() });
     let pgnew = server_config(db.server("pgnew").unwrap());
     let id = ui.execute("connection.save", json!({ "config": pgnew, "password": db.password }))["id"].as_str().unwrap().to_string();
     ui.frame();
@@ -167,18 +172,36 @@ fn ctrl_p_switches_connection() {
     ui.ctrl("P");
     ui.text("pg");
     ui.frame();
-    // Tables and connections in one list, every row as high and as wide as the others (of the
-    // first ten: at this size the twentieth is cut by the window's bottom edge).
+    // Tables and connections in one list of twenty rows, every row as high and as wide as the
+    // others. At this size not all twenty fit: the list scrolls, the rows in view are whole and
+    // inside the window, and the others are listed out of view.
     let i = ui.inspect();
     let rows: Vec<Json> = (0..20).filter_map(|n| tag_in(&i, &format!("qs-item-{n}"))).collect();
-    let rects: Vec<Vec<f64>> = rows.iter().take(10).map(|r| r["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect()).collect();
-    assert!(rects.iter().all(|r| r[0] == rects[0][0] && r[2] == rects[0][2] && r[3] == 28.0), "{rects:?}");
+    assert_eq!(rows.len(), 20, "{rows:?}");
+    let rect = |row: &Json| -> Vec<f64> { row["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect() };
+    let x = rect(&rows[0])[0];
+    // A row in view is whole, but for the list's top edge rounded to a pixel.
+    let whole = |r: &[f64]| r[3] > 27.0 && r[3] <= 28.0;
+    for row in &rows {
+        let r = rect(row);
+        assert!(r[0] == x && r[2] == 560.0 && whole(&r), "{rows:?}");
+        assert!(!visible(&Some(row.clone())) || r[1] + r[3] <= f64::from(APP_SIZE.y), "{row}");
+    }
+    assert!(!visible(&Some(rows[19].clone())), "the twentieth row waits below the list: {rows:?}");
     let pgnew_row = (0..rows.len()).find(|n| tag_in(&i, &format!("qs-item-{n}-kind")).is_some()).expect("a connection hit");
-    assert!(pgnew_row < 10, "among the rows compared: {rows:?}");
     assert_eq!(rows[pgnew_row]["value"], "pgnew");
     assert_eq!(tag_in(&i, &format!("qs-item-{pgnew_row}-kind")).unwrap()["value"], "PostgreSQL");
     assert!(rows.iter().any(|r| r["value"].as_str().is_some_and(|v| v.starts_with("pg_catalog."))), "table hits too: {rows:?}");
     assert!(!rows.iter().any(|r| r["value"] == "pg14"), "the open connection is left out");
+    // Down to the last row: the list scrolls it into view, whole.
+    for _ in 0..19 {
+        ui.key("ArrowDown");
+    }
+    let last = ui.tag("qs-item-19");
+    assert!(visible(&last), "{last:?}");
+    let r = rect(last.as_ref().unwrap());
+    assert!(whole(&r) && r[1] + r[3] <= f64::from(APP_SIZE.y), "{r:?}");
+    assert!(!visible(&ui.tag("qs-item-0")), "the first row scrolled away");
     ui.key("Escape");
     ui.quick_choose("pgnew");
     ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
@@ -270,13 +293,16 @@ fn ctrl_p_without_a_stored_password_asks_as_a_double_click_does() {
 fn ctrl_p_on_the_connection_screen_lists_and_opens_connections() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = Ui::window(Setup { size: APP_SIZE, ..Setup::default() });
-    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
     ui.execute("connection.save", json!({ "config": ConnectionConfig { name: "Shop live".into(), color: ConnectionColor::Red, ..pg14(db) } }));
+    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
     ui.frame();
     ui.ctrl("P");
     assert!(visible(&ui.tag("qs-input")), "Ctrl+P opens the quick search on the connection screen");
     ui.frame();
-    assert_eq!((ui.value("qs-item-0"), ui.value("qs-item-1")), (json!("pg14"), json!("Shop live")), "every saved connection, connections only");
+    // Every saved connection, connections only, in the saved list's order.
+    let saved: Vec<Json> = ui.execute("connection.list", json!({}))["saved"].as_array().unwrap().iter().map(|c| c["name"].clone()).collect();
+    assert_eq!(saved, [json!("Shop live"), json!("pg14")]);
+    assert_eq!(vec![ui.value("qs-item-0"), ui.value("qs-item-1")], saved);
     assert!(ui.tag("qs-item-2").is_none());
     ui.text("zzz");
     ui.frame();
@@ -284,6 +310,50 @@ fn ctrl_p_on_the_connection_screen_lists_and_opens_connections() {
     ui.key("Escape");
     ui.quick_choose("pg14");
     ui.until("connected to pg14", |ui| ui.connection_id().as_deref() == Some(id.as_str()) && ui.document()["screen"] == "workspace");
+}
+
+#[test]
+fn a_failed_switch_ends_on_the_form_with_its_error() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    ui.ctrl("T");
+    // Nothing listens on port 1: the server refuses.
+    ui.execute("connection.save", json!({ "config": ConnectionConfig { name: "nowhere".into(), port: 1, ..pg14(db) } }));
+    ui.frame();
+    ui.quick_choose("nowhere");
+    ui.until("the connect's error", |ui| ui.tag("conn-error").is_some());
+    let d = ui.document();
+    assert_eq!(
+        (d["screen"].clone(), d["connection"].clone(), d["tabs"].clone(), d["jobs"].clone()),
+        (json!("connections"), Json::Null, json!([]), json!([])),
+        "{d}"
+    );
+    assert_eq!(ui.value("conn-name"), "nowhere", "the form shows the chosen connection");
+    assert!(ui.value("conn-error").as_str().is_some_and(|e| !e.is_empty()), "the error in the form's message slot");
+    assert_eq!(ui.inspect()["dialog"], Json::Null);
+}
+
+#[test]
+fn ctrl_p_leaves_a_lost_connection() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, pgnew) = with_pgnew_held(db, true);
+    ui.ctrl("T");
+    dbee_testkit::kill_dbee_connections(pg14_server(db)).unwrap();
+    // The next database action finds the connection gone.
+    ui.click("tree-refresh");
+    ui.until("the lost mark", |ui| ui.document()["connection"]["lost"] == true);
+    // While lost, only connections are found.
+    ui.ctrl("P");
+    ui.text("pg");
+    ui.frame();
+    let i = ui.inspect();
+    let rows: Vec<usize> = (0..20).filter(|n| tag_in(&i, &format!("qs-item-{n}")).is_some()).collect();
+    assert!(!rows.is_empty() && rows.iter().all(|n| tag_in(&i, &format!("qs-item-{n}-kind")).is_some()), "{:?}", ids(&i));
+    ui.key("Escape");
+    ui.quick_choose("pgnew");
+    ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
+    let d = ui.document();
+    assert_eq!((d["connection"]["lost"].clone(), d["tabs"].clone()), (json!(false), json!([])), "{d}");
 }
 
 #[test]

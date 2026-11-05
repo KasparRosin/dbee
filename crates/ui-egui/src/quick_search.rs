@@ -6,12 +6,13 @@
 //!
 //! The field has the keyboard while it is open: typing narrows the list, ArrowDown and ArrowUp
 //! move the highlighted result, Enter or a click chooses it, and Escape or a click outside closes
-//! the search. A table opens in a table tab (`table.open`, through [`DbeeApp::start`]); a
-//! connection connects as a double-click on its card does ([`connections::switch_to`]), after
-//! the open connection closes through `connection.close` with its questions. It counts as a
-//! dialog for the app's other shortcuts, which do not fire while it is open. Closing it gives the
-//! keyboard back to the widget that had it when the search opened, so a text field keeps its own
-//! keys (Ctrl+A, Ctrl+Z, …).
+//! the search. The list shows as many whole rows as fit above the window's bottom edge and scrolls
+//! the rest, keeping the highlighted row in view. A table opens in a table tab (`table.open`,
+//! through [`DbeeApp::start`]); a connection connects as a double-click on its card does
+//! ([`connections::switch_to`]), after the open connection closes through `connection.close` with
+//! its questions. It counts as a dialog for the app's other shortcuts, which do not fire while it
+//! is open. Closing it gives the keyboard back to the widget that had it when the search opened,
+//! so a text field keeps its own keys (Ctrl+A, Ctrl+Z, …).
 //!
 //! The results are asked for once per query text, catalog and saved list, not per frame; Enter
 //! acts on the results for the text as it is after this frame's typing (a paste and Enter in one
@@ -28,7 +29,7 @@ use std::sync::Arc;
 use dbee_config::{ConnectionColor, ConnectionConfig};
 use dbee_core::{Catalog, RelKind, TableRef};
 use dbee_engine::{Json, Outcome, Screen, State};
-use egui::{Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Modifiers, Rect, Sense, Stroke, TextEdit, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Modifiers, Rect, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -48,6 +49,10 @@ const TOP: f32 = 56.0;
 const ITEM_H: f32 = 28.0;
 /// The radius of a connection's colour dot, where a table's icon is.
 const DOT_R: f32 = 5.0;
+/// The space inside the modal's border.
+const PAD: i8 = 12;
+/// The least space between the modal and the window's bottom edge.
+const BOTTOM: f32 = 12.0;
 
 /// One result.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +141,10 @@ pub(crate) struct QuickSearch {
     place: Place,
     /// The highlighted result.
     selected: usize,
+    /// Scroll the highlighted result into view when the list is next drawn.
+    reveal: bool,
+    /// The list's scroll offset, as last drawn.
+    offset: f32,
     /// The field has had keyboard focus since the search opened.
     focused: bool,
     /// The widget that had keyboard focus when the search opened (`None` when none had), and
@@ -161,7 +170,7 @@ impl std::fmt::Debug for QuickSearch {
 impl QuickSearch {
     /// Opens the search, empty, over what `state` shows.
     pub(crate) fn show_new(&mut self, state: &State) {
-        *self = QuickSearch { open: true, place: place_of(state), ..QuickSearch::default() };
+        *self = QuickSearch { open: true, place: place_of(state), reveal: true, ..QuickSearch::default() };
     }
 }
 
@@ -202,6 +211,20 @@ enum Act {
     Open(Hit),
     /// Enter: open the highlighted result for the text as it is now.
     Enter,
+}
+
+/// The scroll offset that brings row `n` of the list into a view `view_h` tall, scrolled to
+/// `offset`, moving it as little as it can; rows are `pitch` apart.
+fn reveal_offset(n: usize, offset: f32, view_h: f32, pitch: f32) -> f32 {
+    let top = n as f32 * pitch;
+    let bottom = top + ITEM_H;
+    if top < offset {
+        top
+    } else if bottom > offset + view_h {
+        bottom - view_h
+    } else {
+        offset
+    }
 }
 
 /// Asks `quickSearch.find` for the query when it, the catalog or the saved connections changed.
@@ -299,9 +322,12 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
         let last = qs.hits.len() - 1;
         qs.selected = qs.selected.saturating_add(down).saturating_sub(up).min(last);
     }
+    if down > 0 || up > 0 {
+        qs.reveal = true;
+    }
     let id = egui::Id::new("dbee-quick-search");
     let screen = ctx.content_rect();
-    let outer = WIDTH + 2.0 * 12.0 + 2.0;
+    let outer = WIDTH + 2.0 * f32::from(PAD) + 2.0;
     // A fixed corner, so the first frame puts every widget where the next ones do.
     let offset = vec2(((screen.width() - outer) / 2.0).max(0.0), TOP.min(screen.height() * 0.1));
     let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, offset).fade_in(false);
@@ -309,7 +335,7 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
         .fill(t.card)
         .stroke(Stroke::new(1.0, t.border))
         .corner_radius(CornerRadius::same(RADIUS.saturating_mul(2)))
-        .inner_margin(Margin::same(12));
+        .inner_margin(Margin::same(PAD));
     let mut act = Act::None;
     let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(t.text.gamma_multiply(0.25)).show(ctx, |ui| {
         ui.set_width(WIDTH);
@@ -328,6 +354,7 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
         }
         if field.changed() {
             qs.selected = 0;
+            qs.reveal = true;
         }
         ui.add_space(6.0);
         if let Some(e) = &qs.error {
@@ -336,53 +363,66 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
             let none = if qs.tables { "No table or connection matches." } else { "No connection matches." };
             ui.label(egui::RichText::new(none).color(t.text_muted));
         }
-        for (n, hit) in qs.hits.iter().enumerate() {
-            let (rect, r) = ui.allocate_exact_size(vec2(WIDTH, ITEM_H), Sense::click());
-            let fill = if n == qs.selected {
-                t.selection
-            } else if r.hovered() {
-                t.hover
-            } else {
-                Color32::TRANSPARENT
-            };
-            let p = ui.painter();
-            p.rect_filled(rect, CornerRadius::same(RADIUS), fill);
-            let mark = pos2(rect.left() + 16.0, rect.center().y);
-            let x = rect.left() + 32.0;
-            let font = FontId::proportional(14.0);
-            match hit {
-                Hit::Table { table, kind } => {
-                    let (icon, color) = kind_icon(*kind);
-                    icon(p, Rect::from_center_size(mark, vec2(16.0, 16.0)), color);
-                    let schema = line_galley(ui, &format!("{}.", table.schema), font.clone(), t.text_muted, WIDTH * 0.4);
-                    let schema_w = schema.size().x;
-                    p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);
-                    let name = line_galley(ui, &table.name, font, t.text, (rect.right() - 8.0 - x - schema_w).max(1.0));
-                    p.galley(pos2(x + schema_w, rect.center().y - name.size().y / 2.0), name, t.text);
-                }
-                Hit::Connection { name, label, color, .. } => {
-                    match connection_color(*color) {
-                        Some(c) => {
-                            p.circle_filled(mark, DOT_R, c);
-                        }
-                        // No colour: a ring, as in the form, dark enough for the highlight.
-                        None => {
-                            p.circle_stroke(mark, DOT_R - 0.75, Stroke::new(1.5, t.text_muted));
-                        }
-                    }
-                    let kind = line_galley(ui, label, font.clone(), t.text_muted, WIDTH * 0.3);
-                    let kind_x = rect.right() - 8.0 - kind.size().x;
-                    let name = line_galley(ui, name, font, t.text, (kind_x - 12.0 - x).max(1.0));
-                    p.galley(pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
-                    p.galley(pos2(kind_x, rect.center().y - kind.size().y / 2.0), kind, t.text_muted);
-                    tags.tag_value_as(&format!("qs-item-{n}-kind"), &r, label.as_str(), true);
-                }
-            }
-            tags.tag_value_as(&format!("qs-item-{n}"), &r, hit.value(), true);
-            if r.clicked() {
-                act = Act::Open(hit.clone());
-            }
+        let gap = ui.spacing().item_spacing.y;
+        let pitch = ITEM_H + gap;
+        let room = screen.bottom() - ui.cursor().top() - f32::from(PAD) - 1.0 - BOTTOM;
+        // Whole rows only, so moving the highlight scrolls by whole rows.
+        let list_h = ((room + gap) / pitch).floor().max(1.0) * pitch - gap;
+        // The modal's room is last frame's size: the minimum lets the list grow past it.
+        let mut list = ScrollArea::vertical().id_salt("qs-list").max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, true]);
+        if std::mem::take(&mut qs.reveal) {
+            list = list.vertical_scroll_offset(reveal_offset(qs.selected, qs.offset, list_h, pitch));
         }
+        let shown = list.show(ui, |ui| {
+            for (n, hit) in qs.hits.iter().enumerate() {
+                let (rect, r) = ui.allocate_exact_size(vec2(WIDTH, ITEM_H), Sense::click());
+                let fill = if n == qs.selected {
+                    t.selection
+                } else if r.hovered() {
+                    t.hover
+                } else {
+                    Color32::TRANSPARENT
+                };
+                let p = ui.painter();
+                p.rect_filled(rect, CornerRadius::same(RADIUS), fill);
+                let mark = pos2(rect.left() + 16.0, rect.center().y);
+                let x = rect.left() + 32.0;
+                let font = FontId::proportional(14.0);
+                match hit {
+                    Hit::Table { table, kind } => {
+                        let (icon, color) = kind_icon(*kind);
+                        icon(p, Rect::from_center_size(mark, vec2(16.0, 16.0)), color);
+                        let schema = line_galley(ui, &format!("{}.", table.schema), font.clone(), t.text_muted, WIDTH * 0.4);
+                        let schema_w = schema.size().x;
+                        p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);
+                        let name = line_galley(ui, &table.name, font, t.text, (rect.right() - 8.0 - x - schema_w).max(1.0));
+                        p.galley(pos2(x + schema_w, rect.center().y - name.size().y / 2.0), name, t.text);
+                    }
+                    Hit::Connection { name, label, color, .. } => {
+                        match connection_color(*color) {
+                            Some(c) => {
+                                p.circle_filled(mark, DOT_R, c);
+                            }
+                            // No colour: a ring, as in the form, dark enough for the highlight.
+                            None => {
+                                p.circle_stroke(mark, DOT_R - 0.75, Stroke::new(1.5, t.text_muted));
+                            }
+                        }
+                        let kind = line_galley(ui, label, font.clone(), t.text_muted, WIDTH * 0.3);
+                        let kind_x = rect.right() - 8.0 - kind.size().x;
+                        let name = line_galley(ui, name, font, t.text, (kind_x - 12.0 - x).max(1.0));
+                        p.galley(pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
+                        p.galley(pos2(kind_x, rect.center().y - kind.size().y / 2.0), kind, t.text_muted);
+                        tags.tag_value_as(&format!("qs-item-{n}-kind"), &r, label.as_str(), true);
+                    }
+                }
+                tags.tag_value_as(&format!("qs-item-{n}"), &r, hit.value(), true);
+                if r.clicked() {
+                    act = Act::Open(hit.clone());
+                }
+            }
+        });
+        qs.offset = shown.state.offset.y;
     });
     if !matches!(act, Act::None) {
         return act;

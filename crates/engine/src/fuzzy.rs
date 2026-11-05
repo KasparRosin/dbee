@@ -126,8 +126,8 @@ pub struct ConnectionHit<'a> {
 }
 
 /// The best `limit` of the `saved` connections for `query`, scored on their display names: by
-/// score, then shorter name, then list order. The one whose id is `open` is left out; none is
-/// when `open` is `None` or empty.
+/// score, then shorter name, then list order; with nothing typed, in list order. The one whose id
+/// is `open` is left out; none is when `open` is `None` or empty.
 pub fn find_connections<'a>(saved: &'a [ConnectionConfig], open: Option<&str>, query: &str, limit: usize) -> Vec<ConnectionHit<'a>> {
     if limit == 0 {
         return Vec::new();
@@ -142,7 +142,9 @@ pub fn find_connections<'a>(saved: &'a [ConnectionConfig], open: Option<&str>, q
             score(query, &name).map(|score| ConnectionHit { config: c, name, score })
         })
         .collect();
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.chars().count().cmp(&b.name.chars().count())));
+    if !query.is_empty() {
+        hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.chars().count().cmp(&b.name.chars().count())));
+    }
     hits.truncate(limit);
     hits
 }
@@ -173,13 +175,16 @@ impl Found<'_> {
 
 /// The quick search: the best `limit` of `catalog`'s tables ([`find`]; none without a catalog)
 /// and of the `saved` connections but `open` ([`find_connections`]), by score, then shorter name.
-/// Each kind keeps its own order on a tie, and a table comes before a connection.
+/// Each kind keeps its own order on a tie, and a table comes before a connection. With nothing
+/// typed, the tables come in their own order, then the connections in the saved list's.
 pub fn search<'a>(catalog: Option<&'a Catalog>, saved: &'a [ConnectionConfig], open: Option<&str>, query: &str, limit: usize) -> Vec<Found<'a>> {
     let tables = catalog.map(|c| find(c, query, limit)).unwrap_or_default();
     let connections = find_connections(saved, open, query, limit);
     let mut all: Vec<Found<'a>> = tables.into_iter().map(Found::Table).chain(connections.into_iter().map(Found::Connection)).collect();
-    // Stable, so the lists' own orders break the last ties.
-    all.sort_by(|a, b| b.score().cmp(&a.score()).then_with(|| a.name_len().cmp(&b.name_len())));
+    if !query.trim().is_empty() {
+        // Stable, so the lists' own orders break the last ties.
+        all.sort_by(|a, b| b.score().cmp(&a.score()).then_with(|| a.name_len().cmp(&b.name_len())));
+    }
     all.truncate(limit);
     all
 }
