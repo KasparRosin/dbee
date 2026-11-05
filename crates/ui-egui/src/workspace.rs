@@ -8,8 +8,9 @@
 //! - the schema tree on the left ([`crate::tree`]);
 //! - the value panel on the right, while it shows ([`crate::value_panel`]), with its toggle at the
 //!   right end of the status bar;
-//! - the tabs strip, then the active tab;
-//! - the quick search over everything while it is open ([`crate::quick_search`]).
+//! - the tabs strip, then the active tab.
+//!
+//! The quick search (Ctrl+P) is drawn over it by the window ([`crate::quick_search`]).
 //!
 //! **Tabs strip.** The strip is a band of its own (`tab_band`) with a line along its bottom; the
 //! tabs stand on the band's bottom edge, and the active one takes the content's fill and opens
@@ -43,7 +44,6 @@ use crate::app::Origin;
 use crate::connections::line_galley;
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
-use crate::quick_search::{self, QuickSearch};
 use crate::table_tab::{self, Grids};
 use crate::theme::{RADIUS, TOKENS, connection_color};
 use crate::tree::{self, Refresh, Tree, TreeAct};
@@ -64,10 +64,6 @@ const TITLE_MAX: f32 = 200.0;
 #[derive(Debug, Default)]
 pub(crate) struct Workspace {
     pub tree: Tree,
-    pub quick: QuickSearch,
-    /// The widget to give the keyboard back to in the next frame, once the quick search has
-    /// closed (see `quick_search`).
-    pub refocus: Option<egui::Id>,
     /// Each table tab's grid (its column widths), dropped with the tab.
     pub grids: Grids,
     /// The cell editor, while one is open ([`crate::editors`]).
@@ -85,10 +81,10 @@ pub(crate) struct Workspace {
 }
 
 impl Workspace {
-    /// The workspace is not shown (back on the connection screen): its state goes, so the quick
-    /// search cannot stay open (and hold the shortcuts) and the next connection starts afresh.
+    /// The workspace is not shown (back on the connection screen): its state goes, so the next
+    /// connection starts afresh.
     pub(crate) fn leave(&mut self) {
-        if self.connection.is_some() || self.quick.open || self.editor.is_some() {
+        if self.connection.is_some() || self.editor.is_some() {
             *self = Workspace::default();
         }
     }
@@ -188,8 +184,7 @@ enum Act {
 /// Draws the workspace and acts on it.
 pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let t = TOKENS;
-    let ctx = ui.ctx().clone();
-    // A new connection starts with a fresh tree and search.
+    // A new connection starts with a fresh tree.
     let id = app.session.state().connected.as_ref().map(|c| c.config.id.clone());
     if app.view.work.connection != id {
         app.view.work = Workspace { connection: id, ..Workspace::default() };
@@ -238,7 +233,6 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
             }
         }
     }
-    quick_search::show(app, &ctx);
 }
 
 /// The status bar; true when the value panel's toggle was clicked.

@@ -991,7 +991,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let Some(Tab::Query(q)) = session.state().tab(id) else { return };
         // The engine's own rule for the Run buttons; what the run refuses it says when clicked.
         let run_blocked = can_run(session).err();
-        let modal = view.dialog.is_some() || view.work.quick.open;
+        let modal = view.dialog.is_some() || view.quick.open;
         let focus_now = view.work.focused_query != Some(id) && !modal;
         if focus_now {
             view.work.focused_query = Some(id);

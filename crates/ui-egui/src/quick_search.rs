@@ -12,7 +12,8 @@
 //! The results are asked for once per query text and catalog, not per frame; Enter acts on the
 //! results for the text as it is after this frame's typing (a paste and Enter in one frame open
 //! the pasted name's best match). A dialog closes the search and cannot be opened over one, so
-//! the search never takes a dialog's Enter or Escape.
+//! the search never takes a dialog's Enter or Escape. The window draws it over the screen it
+//! opened on, and it closes when the window shows another screen or another connection.
 //!
 //! Automation ids: `qs-input` (value: the query) and `qs-item-<n>` (value: `schema.table`), `n`
 //! from 0, best first.
@@ -20,7 +21,7 @@
 use std::sync::Arc;
 
 use dbee_core::{Catalog, RelKind, TableRef};
-use dbee_engine::{Json, Outcome};
+use dbee_engine::{Json, Outcome, Screen, State};
 use egui::{Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Modifiers, Rect, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
@@ -47,11 +48,16 @@ struct Hit {
     kind: RelKind,
 }
 
+/// Where the search opened: the screen and the open connection's id. It closes when either
+/// changes.
+type Place = (Screen, Option<String>);
+
 /// The quick search's state.
 #[derive(Default)]
 pub(crate) struct QuickSearch {
     pub open: bool,
     pub query: String,
+    place: Place,
     /// The highlighted result.
     selected: usize,
     /// The field has had keyboard focus since the search opened.
@@ -75,10 +81,15 @@ impl std::fmt::Debug for QuickSearch {
 }
 
 impl QuickSearch {
-    /// Opens the search, empty.
-    pub(crate) fn show_new(&mut self) {
-        *self = QuickSearch { open: true, ..QuickSearch::default() };
+    /// Opens the search, empty, over what `state` shows.
+    pub(crate) fn show_new(&mut self, state: &State) {
+        *self = QuickSearch { open: true, place: place_of(state), ..QuickSearch::default() };
     }
+}
+
+/// What `state` shows, as a [`Place`].
+fn place_of(state: &State) -> Place {
+    (state.screen, state.connected.as_ref().map(|c| c.config.id.clone()))
 }
 
 /// When the keyboard goes back to the widget that had it before the search.
@@ -94,11 +105,11 @@ enum Refocus {
 
 /// Closes the search and gives the keyboard back to the widget that had it ([`Refocus`]).
 fn close(app: &mut DbeeApp, ctx: &egui::Context, when: Refocus) {
-    let qs = std::mem::take(&mut app.view.work.quick);
+    let qs = std::mem::take(&mut app.view.quick);
     ctx.memory_mut(|m| m.surrender_focus(egui::Id::new(INPUT)));
     match (qs.restore, when) {
         (Some(id), Refocus::Now) => ctx.memory_mut(|m| m.request_focus(id)),
-        (Some(id), Refocus::NextFrame) => app.view.work.refocus = Some(id),
+        (Some(id), Refocus::NextFrame) => app.view.quick_refocus = Some((id, qs.place)),
         (None, _) => {}
     }
 }
@@ -118,7 +129,7 @@ enum Act {
 /// Asks `quickSearch.find` for the query when it or the catalog changed.
 fn find(app: &mut DbeeApp) {
     let catalog = app.session.state().connected.as_ref().map(|c| Arc::clone(&c.catalog));
-    let qs = &app.view.work.quick;
+    let qs = &app.view.quick;
     let fresh = match (&qs.found_for, &catalog) {
         (Some((had, query)), Some(now)) => Arc::ptr_eq(had, now) && *query == qs.query,
         _ => false,
@@ -128,7 +139,7 @@ fn find(app: &mut DbeeApp) {
     }
     let query = qs.query.clone();
     let result = app.run("quickSearch.find", json!({ "query": query, "limit": LIMIT }));
-    let qs = &mut app.view.work.quick;
+    let qs = &mut app.view.quick;
     qs.found_for = catalog.map(|c| (c, query));
     qs.hits.clear();
     qs.error = None;
@@ -150,10 +161,18 @@ fn find(app: &mut DbeeApp) {
 
 /// Draws the search when it is open, and acts on it. Runs after the screen is drawn.
 pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
-    if let Some(id) = app.view.work.refocus.take() {
+    let here = place_of(app.session.state());
+    if let Some((id, place)) = app.view.quick_refocus.take()
+        && place == here
+    {
         ctx.memory_mut(|m| m.request_focus(id));
     }
-    if !app.view.work.quick.open {
+    if !app.view.quick.open {
+        return;
+    }
+    if app.view.quick.place != here {
+        // The screen it searched is gone, and with it the widget to give the keyboard back to.
+        app.view.quick = QuickSearch::default();
         return;
     }
     if app.view.dialog.is_some() {
@@ -161,7 +180,7 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
         close(app, ctx, Refocus::Now);
         return;
     }
-    let qs = &mut app.view.work.quick;
+    let qs = &mut app.view.quick;
     if !qs.remembered {
         qs.restore = ctx.memory(|m| m.focused());
         qs.remembered = true;
@@ -174,7 +193,7 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
     find(app);
     let act = {
         let DbeeApp { view, tags, .. } = app;
-        draw(ctx, &mut view.work.quick, tags)
+        draw(ctx, &mut view.quick, tags)
     };
     let open = match act {
         Act::None => return,
@@ -183,7 +202,7 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
         Act::Enter => {
             // The results for the text typed this frame, not those drawn.
             find(app);
-            let qs = &app.view.work.quick;
+            let qs = &app.view.quick;
             match qs.hits.get(qs.selected) {
                 Some(hit) => Some(hit.table.clone()),
                 None => return,
@@ -297,7 +316,7 @@ mod tests {
         let home = dbee_testkit::temp_home(None, None);
         let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
         let mut app = DbeeApp::new(session, None);
-        app.view.work.quick.show_new();
+        app.view.quick.show_new(app.session.state());
         let rerun = Rerun { command: "tab.close", params: json!({}), origin: Origin::Menu };
         app.view.dialog = Some(Dialog::Confirm { message: "Close it?".into(), rerun });
         let why = app.commands().into_iter().find(|c| c.id == "ui.quickSearch").and_then(|c| c.disabled_reason);
@@ -312,7 +331,7 @@ mod tests {
             .drop_without_applying_deltas();
         };
         frame(&mut app, vec![]);
-        assert!(!app.view.work.quick.open, "a dialog closes the search");
+        assert!(!app.view.quick.open, "a dialog closes the search");
         frame(&mut app, vec![key(Key::Escape)]);
         assert!(app.view.dialog.is_none(), "Escape reached the dialog");
     }

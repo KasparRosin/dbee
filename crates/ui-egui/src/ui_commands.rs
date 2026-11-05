@@ -107,7 +107,7 @@ pub(crate) fn run(app: &mut DbeeApp, c: &UiCommand, params: Json) -> Result<Outc
 }
 
 fn quick_search(app: &mut DbeeApp, _: Json) -> Result<Outcome, EngineError> {
-    app.view.work.quick.show_new();
+    app.view.quick.show_new(app.session.state());
     Ok(Outcome::Done(json!({ "open": true })))
 }
 

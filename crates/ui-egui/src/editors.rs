@@ -490,7 +490,7 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
         }
         return;
     }
-    if app.view.dialog.is_some() || app.view.work.quick.open {
+    if app.view.dialog.is_some() || app.view.quick.open {
         commit(app, ctx);
         return;
     }
@@ -568,7 +568,7 @@ pub fn take_large_pastes(events: &mut Vec<Event>, length: usize, selected: usize
 /// selection and no widget has the keyboard.
 fn open_on_enter(app: &mut DbeeApp, ctx: &egui::Context) {
     let st = app.session.state();
-    if st.screen != Screen::Workspace || app.view.dialog.is_some() || app.view.work.quick.open || ctx.memory(|m| m.focused()).is_some() {
+    if st.screen != Screen::Workspace || app.view.dialog.is_some() || app.view.quick.open || ctx.memory(|m| m.focused()).is_some() {
         return;
     }
     let Some(Tab::Table(t)) = st.active_tab() else { return };

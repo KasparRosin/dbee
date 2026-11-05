@@ -43,6 +43,7 @@ use crate::automation::Tags;
 use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
 use crate::dialogs::{self, Dialog, Rerun};
+use crate::quick_search::{self, QuickSearch};
 use crate::theme::{RADIUS, TOKENS};
 use crate::workspace::Workspace;
 use crate::{editors, shortcuts, theme, ui_commands, workspace};
@@ -172,8 +173,13 @@ pub(crate) struct View {
     pub value_panel: bool,
     /// The value panel's value, its rows and the selection in it.
     pub panel: crate::value_panel::PanelState,
-    /// The workspace's tree and quick search.
+    /// The workspace's tree, tabs and editors.
     pub work: Workspace,
+    /// The quick search ([`crate::quick_search`]).
+    pub quick: QuickSearch,
+    /// The widget to give the keyboard back to in the next frame, once the quick search has
+    /// closed, while the window still shows what the search opened over.
+    pub quick_refocus: Option<(egui::Id, (Screen, Option<String>))>,
     /// The dialog on screen ([`crate::dialogs`]).
     pub dialog: Option<Dialog>,
     /// Notices with the time they were first shown (`None` until then).
@@ -195,6 +201,8 @@ impl View {
             value_panel: true,
             panel: crate::value_panel::PanelState::default(),
             work: Workspace::default(),
+            quick: QuickSearch::default(),
+            quick_refocus: None,
             dialog: None,
             notices: VecDeque::new(),
             conn: ConnScreen::new(has_store),
@@ -475,7 +483,7 @@ impl DbeeApp {
         }
         // 4. The cell editor, then shortcuts, unless a dialog or the quick search is open.
         editors::before_frame(self, &ctx);
-        if self.view.dialog.is_none() && !self.view.work.quick.open {
+        if self.view.dialog.is_none() && !self.view.quick.open {
             shortcuts::handle(self, &ctx);
         }
         // 5. Draw, then the cell editor's key.
@@ -515,6 +523,7 @@ impl DbeeApp {
                 workspace::screen(self, ui);
             }
         }
+        quick_search::show(self, ui.ctx());
         dialogs::show(self, ui.ctx());
         self.notices(ui);
     }
