@@ -1,6 +1,6 @@
 # Testing
 
-> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-11-05 · **Change:** minor (§6: the quick search timing with saved connections)
+> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** minor (§4: the M2 day; §1 and §6: every engine)
 
 ```sh
 cargo xtask testdb up                                         # start the Docker test servers (§3); ci does it when Docker answers
@@ -9,7 +9,7 @@ DBEE_REQUIRE_ORACLES=1 cargo xtask ci                         # the same, and wi
 cargo test --workspace                                        # every test; tests that need the servers print SKIPPED without them
 cargo test --workspace --test table_tab                       # one test file (of any crate)
 cargo test --workspace paging                                 # tests whose name contains `paging`
-cargo test --workspace -- --ignored --nocapture --test-threads=1   # the timing tests and the M1 day (§4, §6)
+cargo test --workspace -- --ignored --nocapture --test-threads=1   # the timing tests and the M1 and M2 days (§4, §6)
 cargo xtask licenses                                          # the licence check, by hand after adding a dependency
 ```
 
@@ -23,10 +23,10 @@ Layers still marked **(planned)** below are the contract for tests as features l
 |---|---|---|
 | Unit | `src/` `#[cfg(test)]` modules | identifier quoting, type mapping, value formatting, command parameter parsing |
 | Property (`proptest`) **(planned)** | domain crates, engine | quote then unquote is the identity, undo/redo restores state, export then import round-trips |
-| Scripted UI | `crates/ui-egui/tests/`; `apps/dbee/tests/m1_day.rs` (the real window, by hand) | the app driven over the control channel: open a connection, run a query, click by automation id (§4) |
+| Scripted UI | `crates/ui-egui/tests/`; `apps/dbee/tests/m1_day.rs` and `m2_day.rs` (the real window, by hand) | the app driven over the control channel: open a connection, run a query, click by automation id (§4) |
 | Golden images **(planned)** | `crates/ui-egui/tests/` | small screenshots of fixed states, compared with a tolerance |
 | Oracle **(planned)** | driver and engine tests | query results checked against the `sqlite3` CLI (§2) |
-| Driver | `crates/pg`, `crates/ssh` tests | PostgreSQL 14 and the newest major, and SSH tunnels, against the Docker test servers (§3) |
+| Driver | `crates/pg`, `crates/mysql`, `crates/sqlite`, `crates/ssh` tests | PostgreSQL 14 and the newest major, MySQL 5.7, 8.0 and the newest, MariaDB 10.11 and the newest, and SSH tunnels, against the Docker test servers (§3); SQLite files the tests make |
 | Robustness / fuzz | engine; wire parsers **(planned)** | `every_command_survives_empty_params`, the command-sequence fuzz (`DBEE_FUZZ_SEED`, `DBEE_FUZZ_STEPS`), hostile wire input **(planned)** (§5) |
 | Performance (`#[ignore]`) | core, engine, ui-egui, xtask | frame times with 1,000 tables, 20 MB values, wide results and big scripts; a page of a million rows; the launch time (§6). Streaming a large export **(planned)** |
 
@@ -95,6 +95,12 @@ cargo xtask testdb down     # remove the containers, their volumes and target/te
   ```
 
   Without the test servers it prints `SKIPPED` (with `DBEE_REQUIRE_ORACLES=1` it fails), and without `DISPLAY` or `WAYLAND_DISPLAY` it prints `SKIPPED`.
+- **The M2 day in the real window** (`apps/dbee/tests/m2_day.rs`, `#[ignore]` for the same reason) drives the same window the same way, with the driver both days share (`apps/dbee/tests/common/mod.rs`), on three engines in one run, and saves `target/m2-day/<n>-<engine>-<step>.png`:
+  - `dbee <file>` opens a fresh copy of the SQLite seed, unsaved, and Save connection in the status bar saves it;
+  - New connection: the engine cards, PostgreSQL, Change engine, MySQL; the form for `mysql80` through the test sshd, its Database field's list picking `shop`; Save and Connect;
+  - Ctrl+P switches to a saved MariaDB connection (the newest, directly, with no database), through the question about the query text, and at the end back to the SQLite file.
+
+  On each engine: Ctrl+P `ord`, three filters, the JSON panel (a line copied), the foreign key, a fixed name, a deleted row and a new row in one Ctrl+S (checked with the engine's own client), a query tab with three result sets, a cancelled statement (held by a lock a session of the test's own holds; on SQLite a long count) and a join copied with its header. On MySQL and MariaDB the query tab's database chip says where a run goes; on MariaDB it moves the tab to `many`. On the servers the day writes customers and an order of its own into `shop`, marked by their note `the M2 day test row`, and removes them when it ends (and at the start, those of a killed run); the customers' and orders' counts and sums are checked to be as before. Run it as the M1 day is run: `cargo test --workspace --test m2_day -- --ignored --nocapture`.
 - **Golden images (planned)** are procedural: a fixed in-code database, a fixed window size, one state per image. Update a golden image only after looking at the new picture.
 - **Interactive checks** run the real app with `cargo xtask run-isolated`, drive it and take `ui.screenshot`. Such a run keeps every copy and cut in the app (`DBEE_CLIPBOARD=memory`), a text field's as well as the grid's, so it never touches the system clipboard; `document.inspect` shows the first 4 KiB of the last copy as `clipboard` and its length as `clipboardBytes`. It connects only to the Docker test servers (and `127.0.0.1:1`); `connection.test`, `connection.listDatabases`, `connection.open` and `connection.reconnect` refuse any other target with a `config` error before any network I/O (`DBEE_ALLOW_TARGETS`, [`agents.md`](agents.md) §4), and the file driver refuses any database file outside the run's home and `target/` inside its open (`DBEE_ALLOW_DIRS`), as the job's `config` error. The launch time check (`cargo test --workspace connection_screen -- --ignored --nocapture`) starts the release build that way and prints how long the connection screen takes. Do this for every UI change (see [`agents.md`](agents.md) §4).
 - **A hidden window runs no frames on Wayland.** The control channel is served in the window's frames. On Wayland, winit holds the next redraw until the compositor answers the last frame's frame callback (egui-wgpu asks for one before every present), and KWin sends none to a window it does not show. So while the isolated window is minimised (reproduced on KDE Plasma 6, Mesa 25 RADV), and presumably while KWin paints nothing for it at all (another virtual desktop, displays asleep), every request times out with "the app did not answer in time (is the window hidden?)", and requests are answered again within one frame once the window is shown. The UI thread meanwhile idles in winit's event loop, not in wgpu's present.
@@ -115,7 +121,7 @@ Follow [never crash](standards/never-crash.md). Beyond a regression test per fix
 
 ## 6. Performance
 
-Performance tests are `#[ignore]` so `cargo test` stays fast; run them with `-- --ignored --nocapture --test-threads=1` (one at a time, so two timing tests of one file do not share the CPU). Each states its budget (for example time to first row, rows per second, peak memory) and prints the machine, the load average and the measured value. A claim of improvement needs before/after numbers on the same build. The numbers measured at the end of M1 are in [`target-app-parity.md`](target-app-parity.md), "Performance".
+Performance tests are `#[ignore]` so `cargo test` stays fast; run them with `-- --ignored --nocapture --test-threads=1` (one at a time, so two timing tests of one file do not share the CPU). Each states its budget (for example time to first row, rows per second, peak memory) and prints the machine, the load average and the measured value. A claim of improvement needs before/after numbers on the same build. The numbers measured at the end of M1, and again on every engine at the end of M2, are in [`target-app-parity.md`](target-app-parity.md), "Performance".
 
 Today: `tree_filter_1000_tables_within_a_frame` (`crates/ui-egui/tests/workspace.rs`) draws the schema tree over a synthetic catalog of 1,000 tables and prints the median frame time with a new filter each frame and with the filter unchanged (budget 16 ms each); `grid_frame_within_budget` (`crates/ui-egui/tests/table_tab.rs`) draws the data grid over 10,000 rows of 20 columns with a 20 MB value in view, the selection moving each frame (budget 16 ms); `keystroke_frame_with_a_value_at_the_cap` (`crates/ui-egui/tests/editing.rs`) types into a cell editor holding one paragraph just under the inline cap (32 KiB), single-line and multiline, and prints the median frame time with the frame's tessellation (budget 33 ms); `value_panel_frames_within_budget` (`crates/ui-egui/tests/value_panel.rs`) shows values at the 10 MiB cap in the value panel (the seed's 20 MB text and jsonb, 20 MB of line breaks, 20 MB of two-byte characters, 20 MB of tabs and emoji, a pretty-printed 9 MiB jsonb) and prints the frame that first shows each (budget 250 ms), the frames until its JSON colours arrive, and the median frame unchanged, while scrolling, while the width changes, and while the panel's edge is dragged, with the frame that lets it go (budget 16 ms for the unchanged, scrolling and dragging ones); `keystroke_frames_in_big_scripts` (`crates/ui-egui/tests/query_tab.rs`) types into the query editor holding SQL of 32 KiB, 256 KiB and 1 MiB, as a script of short lines and as one line, and prints the median keystroke frame with its tessellation for the editor alone (beside egui's plain code editor on the same text) and for the whole window, in a plain egui context and in kittest, which always builds the AccessKit tree (budget 33 ms for the 32 KiB script in the editor alone; the others are reported); the launch time check is in §4.
 
@@ -123,7 +129,7 @@ Today: `tree_filter_1000_tables_within_a_frame` (`crates/ui-egui/tests/workspace
 
 `wide_result_frames` (`crates/ui-egui/tests/query_tab.rs`) times a frame with a result of 50, 100, 300 and 1,664 columns over 10,000 rows (NULLs, then short texts) in view. It measures the whole window without an AccessKit tree, unchanged and scrolling, and the kittest frame. It reports and sets no budget: such a frame grows with the columns ([`gaps.md`](gaps.md)).
 
-Elsewhere: `filter_1000_tables_within_a_frame` (`crates/core`), `quick_search_1000_tables_within_a_frame` and `quick_search_with_connections_within_budget` (1,000 tables and 100 saved connections; both `crates/engine/tests/schema.rs`, budget 2 ms) and `next_page_on_a_million_rows_is_fast` (`crates/engine/tests/table.rs`).
+Elsewhere: `filter_1000_tables_within_a_frame` (`crates/core`), `quick_search_1000_tables_within_a_frame` and `quick_search_with_connections_within_budget` (1,000 tables and 100 saved connections; both `crates/engine/tests/schema.rs`, budget 2 ms), and on every engine `next_page_on_a_million_rows_is_fast` (budget 200 ms) and `twenty_megabyte_cell_loads_within_ten_seconds` (both `crates/engine/tests/table.rs`). `a_page_draws_in_the_frame_its_rows_arrive` (`crates/ui-egui/tests/table_tab.rs`) checks on every engine, with the normal tests, that a page is drawn in the frame its rows arrive.
 
 Two guards against a frozen window run with the normal tests: `twenty_megabyte_cells_keep_frames_under_250_ms` (`crates/ui-egui/tests/table_tab.rs`) and `no_copy_freezes_the_window` (`crates/ui-egui/tests/clipboard.rs`, a copy of a 10,000-row result or of a row whose escaping passes the limit takes less than a second, in each format).
 

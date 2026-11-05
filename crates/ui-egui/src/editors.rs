@@ -150,8 +150,9 @@ impl Choice {
         }
     }
 
-    /// The choice a boolean cell's value is. Postgres prints `t` and `f`; a staged value is as it
-    /// was typed, in any of the spellings Postgres reads. Other text is no choice.
+    /// The choice a boolean cell's value is. Postgres prints `t` and `f`, the other engines `1` and
+    /// `0`; a staged value is as it was typed, in any of the spellings Postgres reads. Other text is
+    /// no choice.
     pub fn of(value: Option<&str>) -> Option<Choice> {
         let Some(v) = value else { return Some(Choice::Null) };
         match v.trim().to_ascii_lowercase().as_str() {

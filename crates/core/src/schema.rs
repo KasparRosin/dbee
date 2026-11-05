@@ -28,17 +28,17 @@ pub enum RelKind {
     ForeignTable,
 }
 
-/// Whether Postgres computes a column's value, so that it takes no written value (an `UPDATE` or
-/// `INSERT` of one fails with SQLSTATE 428C9).
+/// Whether the engine computes a column's value, so that it takes no written value (on Postgres an
+/// `UPDATE` or `INSERT` of one fails with SQLSTATE 428C9).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Generated {
     /// An ordinary column; an identity `BY DEFAULT` or a default can be written over.
     #[default]
     No,
-    /// A generated column, `GENERATED ALWAYS AS (…)` (stored, or virtual on Postgres 18).
+    /// A generated column, `GENERATED ALWAYS AS (…)`, stored or virtual.
     Expression,
-    /// An identity column `GENERATED ALWAYS`.
+    /// A Postgres identity column `GENERATED ALWAYS`.
     Identity,
 }
 
@@ -55,7 +55,8 @@ pub struct ColumnInfo {
     pub class: TypeClass,
     pub not_null: bool,
     pub has_default: bool,
-    /// Postgres computes the value (`attgenerated`, `attidentity = 'a'`).
+    /// The engine computes the value (Postgres's `attgenerated` and `attidentity = 'a'`, a generated
+    /// column on MySQL, MariaDB and SQLite).
     #[serde(default)]
     pub generated: Generated,
     /// A column the engine keeps out of sight (a SQLite hidden column): the grid, sort, filters and
@@ -70,8 +71,8 @@ impl ColumnInfo {
         !matches!(self.class, TypeClass::Text | TypeClass::LongText)
     }
 
-    /// Why the column's cells cannot be edited, or `None` when they can: Postgres computes the
-    /// value of a generated column and of an identity column `GENERATED ALWAYS`.
+    /// Why the column's cells cannot be edited, or `None` when they can: the engine computes the
+    /// value of a generated column, and Postgres that of an identity column `GENERATED ALWAYS`.
     pub fn not_editable(&self) -> Option<&'static str> {
         match self.generated {
             Generated::No => None,

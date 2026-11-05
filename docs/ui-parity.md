@@ -1,8 +1,8 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-11-05 · **Change:** minor (Ctrl+P finds saved connections and switches to one) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** minor (graded on every engine; the M2 day) · **Target:** Beekeeper Studio 5.5.7
 
-Graded by behaviour against what was observed in Beekeeper Studio, not by whether a control exists. The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). Status: **done** (does what the observed element does, for Postgres), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `crates/ui-egui/tests/`).
+Graded by behaviour against what was observed in Beekeeper Studio, not by whether a control exists. The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). Status: **done** (does what the observed element does, on every engine dbee has: PostgreSQL, MySQL, MariaDB and SQLite), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `apps/dbee/tests/m2_day.rs`, `crates/ui-egui/tests/`).
 
 | Element | Beekeeper Studio | dbee | Status |
 |---|---|---|---|
@@ -39,6 +39,7 @@ From [gaps.md](gaps.md): wide results first (5), then the editing limits (9, 10)
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-05 | minor | Graded on every engine: the M2 day drives the same elements on MySQL, MariaDB and SQLite (`m2_day`); grades unchanged. |
 | 2026-11-05 | minor | Quick search: Ctrl+P finds saved connections (by any word of their names) and switches to one, also on the connection screen; the list scrolls when it doesn't fit the window (M2.19, issue #3); grades unchanged. |
 | 2026-11-05 | minor | Connection form: the Database field lists the server's databases to choose from (M2.18, issue #1); grades unchanged. |
 | 2026-11-05 | minor | The workspace on every engine (M2.16): the engine's word for schemas, the default schema first, a query tab's database on MySQL and MariaDB, operator notes, the product in the status bar; grades unchanged. |

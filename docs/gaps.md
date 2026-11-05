@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** minor (entries 17 and 18: opening database files from the desktop on macOS and Linux) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** minor (entries 19–24: MySQL and SQLite limits, Ctrl+P, the cramped form; older entries say which engines they hold for) · **Target:** Beekeeper Studio 5.5.7
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -26,12 +26,12 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 3. No TLS client certificates (D)
 
-- **Missing:** `sslcert`/`sslkey`: logging in to Postgres with a client certificate.
-- **Evidence:** `crates/pg/src/tls.rs` builds its rustls config `with_no_client_auth()`. The connection form has a CA file only.
-- **Impact:** servers that require certificate login (some managed Postgres) refuse the connection.
+- **Missing:** logging in with a client certificate (`sslcert`/`sslkey` on Postgres, `ssl-cert`/`ssl-key` on MySQL and MariaDB).
+- **Evidence:** `crates/pg/src/tls.rs` and the TLS setup the other drivers share, `crates/driver/src/tls.rs`, build their rustls configs `with_no_client_auth()`. The connection form has a CA file only.
+- **Impact:** servers that require certificate login (some managed Postgres and MySQL) refuse the connection.
 - **Estimate:** 3–5 h (estimated).
 
-### 4. No transaction-mode connection poolers (D)
+### 4. Postgres: no transaction-mode connection poolers (D)
 
 - **Missing:** support for a pooler in transaction mode (PgBouncer `pool_mode=transaction`, pooled ports of hosted Postgres).
 - **Evidence:** out of M1's scope. dbee quotes values into SQL text, which is safe only with `standard_conforming_strings = on`. The connect sets it (and `default_transaction_read_only = on` for a read-only connection) and confirms both with a separate `SHOW` (`crates/pg/src/connect.rs`). A pooler that runs the `SHOW` in another server session can fail that check, and then the connect is refused ("read-only mode did not stick …; a transaction-mode connection pooler is not supported", or the `standard_conforming_strings` message). Later statements would still assume the same session.
@@ -57,13 +57,13 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Missing:** several connections at once, or several windows.
 - **Evidence:** the session holds one `connected: Option<Connected>` (`crates/engine/src/state.rs`), and `connection.open` is disabled while connected (a later milestone).
-- **Impact:** comparing two databases means disconnecting and reconnecting. Tabs and staged edits belong to the one connection.
+- **Impact:** comparing two databases means switching between them (Ctrl+P finds a saved connection and switches to it, asking first about query text and staged edits). Tabs and staged edits belong to the one connection.
 - **Estimate:** not estimated (an engine change: sessions per connection).
 
 ### 7. Query results are capped at 10,000 rows (F)
 
 - **Limit:** a query keeps at most 10,000 rows per result and 256 MiB of cell text per run, and says `First 10,000 of N rows`.
-- **Evidence:** `QUERY_LIMITS` (`crates/pg/src/query.rs`); `a_result_cut_at_the_cap_says_so` (`crates/ui-egui/tests/query_tab.rs`).
+- **Evidence:** `QUERY_LIMITS` (`crates/driver/src/api.rs`), the same on every engine; `a_result_cut_at_the_cap_says_so` (`crates/ui-egui/tests/query_tab.rs`).
 - **Impact:** a larger result cannot be read through in the query tab. A table tab pages through any number of rows (100 a page; the next page of a million-row table loads in 1.06–1.09 ms, [`target-app-parity.md`](target-app-parity.md), "Performance"), and file export comes in M3.
 - **Estimate:** part of M3's export; paging query results is not estimated.
 
@@ -74,12 +74,12 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** large selections need several copies until file export lands in M3 (entry 1).
 - **Estimate:** M3.
 
-### 9. Unique indexes without a constraint are not row keys (F)
+### 9. Postgres and SQLite: unique indexes without a constraint are not row keys (F)
 
-- **Limit:** a table without a primary key can still be edited through a unique constraint on NOT NULL columns. A unique index made with `CREATE UNIQUE INDEX` is not seen, so such a table is read-only in the grid, and the note above it says why.
-- **Evidence:** keys come from `pg_constraint` only (`contype` `p`, `u`, `f`: `CONSTRAINTS_SQL`, `crates/pg/src/catalog.rs`; `TableInfo::row_key`, `crates/core/src/schema.rs`). On pg14 (2026-10-26), a unique index alone leaves `pg_constraint` empty for its table.
-- **Impact:** such tables are changed through SQL in a query tab.
-- **Estimate:** 2–3 h (estimated): read `pg_index` (`indisunique`, no expressions, no predicate).
+- **Limit:** a table without a primary key can still be edited through a unique constraint on NOT NULL columns. A unique index made with `CREATE UNIQUE INDEX` is not seen, so on Postgres such a table is read-only in the grid, and the note above it says why. On SQLite such a table is edited by its rowid instead. MySQL and MariaDB keep no such difference: a unique index is their unique key.
+- **Evidence:** on Postgres keys come from `pg_constraint` only (`contype` `p`, `u`, `f`: `CONSTRAINTS_SQL`, `crates/pg/src/catalog.rs`; `TableInfo::row_key`, `crates/core/src/schema.rs`). On pg14 (2026-10-26), a unique index alone leaves `pg_constraint` empty for its table. On SQLite only `UNIQUE` constraints are keys (`crates/sqlite/src/catalog.rs`, the module docs).
+- **Impact:** such tables are changed through SQL in a query tab (Postgres), or by their rowid (SQLite).
+- **Estimate:** 2–3 h (estimated): read `pg_index` (`indisunique`, no expressions, no predicate), and SQLite's unique indexes.
 
 ### 10. Inline editing stops at 32 KiB (U)
 
@@ -116,19 +116,19 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: few real values have a million short lines. In the far end of such a value, rows can sit several points off and a click can land one row away.
 - **Estimate:** 3–6 h (estimated): scroll by row, not by point.
 
-### 14. A failed statement leaves a query tab's transaction failed (D)
+### 14. Postgres: a failed statement leaves a query tab's transaction failed (D)
 
-- **Limit:** a script that opens a transaction (`BEGIN`) and fails inside it leaves the query connection in that failed transaction: every later run fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead. The error card says so: under a 25P02 error it adds that a ROLLBACK ends the failed transaction.
+- **Limit:** on Postgres, a script that opens a transaction (`BEGIN`) and fails inside it leaves the query connection in that failed transaction: every later run fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead. The error card says so: under a 25P02 error it adds that a ROLLBACK ends the failed transaction.
 - **Evidence:** `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
-- **Impact:** one more run (`ROLLBACK`) after a failed transaction. A reconnect also ends it.
+- **Impact:** one more run (`ROLLBACK`) after a failed transaction. A reconnect also ends it. MySQL, MariaDB and SQLite keep a transaction going after a failed statement, so there it does not arise.
 - **Estimate:** 2–4 h (estimated): show the open or failed transaction in the query tab and offer Rollback.
 
 ### 15. A table without a row key pages by OFFSET alone (D)
 
-- **Limit:** a table with neither a primary key nor a NOT NULL unique key pages with `LIMIT 101 OFFSET n` and no `ORDER BY`, so Postgres may return its rows in another order from one page to the next. Under concurrent writes (or a plan change) a page can repeat rows of another or skip some. Ordering by `ctid` would fix the order, but it sorts the whole table for every page, which a large keyless table cannot afford.
+- **Limit:** on Postgres, MySQL and MariaDB a table with neither a primary key nor a NOT NULL unique key pages with `LIMIT 101 OFFSET n` and no `ORDER BY`, so the server may return its rows in another order from one page to the next (SQLite pages such a table by its rowid). Under concurrent writes (or a plan change) a page can repeat rows of another or skip some. Ordering by `ctid` would fix the order, but it sorts the whole table for every page, which a large keyless table cannot afford.
 - **Evidence:** `page_sql` (`crates/sql/src/select.rs`) orders by the row key only; `page_details` (`crates/sql/tests/builders.rs`) checks that a keyless table's page has no `ORDER BY`.
 - **Impact:** browsing a keyless table that changes meanwhile can show a row twice or miss one; such tables are read-only in the grid (no row to name in an `UPDATE`).
-- **Estimate:** 3–5 h (estimated): page a keyless table by `ctid` ranges (a `tid` cursor), which needs no sort.
+- **Estimate:** 3–5 h (estimated) on Postgres: page a keyless table by `ctid` ranges (a `tid` cursor), which needs no sort. MySQL and MariaDB have no such row id; not estimated there.
 
 ### 16. A filter row cannot match an empty string (F)
 
@@ -151,10 +151,53 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** a SQLite file with an unusual name takes one more step: New connection, then the file. Nothing is changed or lost.
 - **Estimate:** 1–2 h (estimated) if Open With should open such a file anyway: pick the type by the file's first bytes when its name names none.
 
+### 19. MySQL and MariaDB: no Unix socket (D)
+
+- **Missing:** connecting to MySQL or MariaDB through its socket file (`/var/run/mysqld/mysqld.sock` and the like) or a Windows named pipe. dbee connects over TCP only, directly or through the SSH tunnel.
+- **Evidence:** the MySQL driver opens a TCP connection or an SSH channel (`crates/mysql/src/connect.rs`); the connection form has a host and a port, no socket path. A non-goal of M2 (drivers spec §4).
+- **Impact:** a server that listens only on its socket (`skip_networking`) cannot be reached. Most servers also listen on TCP, on `127.0.0.1:3306` at least, and the SSH tunnel reaches that.
+- **Estimate:** 2–4 h (estimated).
+
+### 20. SQLite: no attached databases, no extensions, no encrypted files (D)
+
+- **Missing:** the tables of a database attached with `ATTACH` in the tree and in table tabs; loading an extension (SpatiaLite and the like); opening an encrypted file (SQLCipher).
+- **Evidence:** the SQLite catalog reads schema `main` only (`crates/sqlite/src/catalog.rs`); rusqlite is built without its `load_extension` feature (`crates/sqlite/Cargo.toml`). In a normal run `ATTACH` works in a query tab, but the attached tables are not listed; in an isolated run it is refused. Non-goals of M2 (drivers spec §4).
+- **Impact:** an attached database is read through SQL in a query tab only. A table that needs an extension's functions or virtual tables cannot be read, and an encrypted file is refused as not a database.
+- **Estimate:** attached databases 3–5 h (estimated); extensions and encryption not estimated.
+
+### 21. Ctrl+P finds saved connections only (U)
+
+- **Limit:** the quick search lists saved connections, not recent ones. With nothing typed on the workspace it lists the open connection's tables first, so the other connections show once a letter or two is typed. Letters are matched from the left, so `stag` matches "Shop staging" from the S of "Shop", not as the start of "staging", and ranks it lower than it could.
+- **Evidence:** `quickSearch.find` reads the saved list only (`crates/engine/src/cmd/schema.rs`); `fuzzy::search` puts the tables first for an empty query and matches letters left to right (`crates/engine/src/fuzzy.rs`).
+- **Impact:** a connection opened once from Recent must be saved to be found. Typing the start of a word of the name finds it.
+- **Estimate:** 1–2 h (estimated) each: Recent in the search; a match that tries each word start.
+
+### 22. SQLite: a row keyed by its rowid can change under a VACUUM (S)
+
+- **Limit:** a SQLite table without a primary key or a NOT NULL unique key is edited by its hidden rowid. SQLite's `VACUUM` may renumber the rowids of a table without an `INTEGER PRIMARY KEY`. If another program vacuums the file while such a table's page is loaded, an edit staged from that page can write a different row. Apply checks that each statement changes exactly one row, which catches a row that is gone, not one that moved.
+- **Evidence:** SQLite's documentation of `VACUUM`; the rowid key in `crates/sqlite/src/catalog.rs` (`a_table_without_a_key_is_keyed_by_a_hidden_rowid`, `crates/sqlite/tests/catalog.rs`); `docs/decisions.md` (2026-11-03).
+- **Impact:** rare: it needs another program to vacuum the file while dbee has the table open. Refreshing the page after a VACUUM avoids it.
+- **Estimate:** 2–3 h (estimated): check the file's change counter before Apply and refuse a stale page.
+
+### 23. Linux without the desktop portal: Choose… cannot pick a file without an extension (U)
+
+- **Limit:** where xdg-desktop-portal is missing, the file picker is zenity's. Its "All files" filter becomes `*.*`, so a database file whose name has no extension is not offered.
+- **Evidence:** rfd's zenity backend turns the filter `*` into `*.*` (`rfd` 0.17, `src/backend/linux/zenity.rs`); the pickers are in `crates/ui-egui/src/picker.rs`.
+- **Impact:** such a file can't be chosen in the connection form. Renaming it with `.sqlite` or `.db`, or installing the portal, works around it.
+- **Estimate:** 1–2 h (estimated): no filter at all where only zenity is there.
+
+### 24. The connection form is cramped at the smallest window (U)
+
+- **Limit:** at the window's minimum size (640×420) the form under the title row is too narrow: the TLS mode buttons and Save, Test and Connect run past the card's edge, Test covers part of Save, and the name field shrinks to about 30 points.
+- **Evidence:** the connection form's layout (`crates/ui-egui/src/conn_form.rs`), seen at 640×420. At the default size (1100×720) and above everything fits (`crates/ui-egui/tests/connections.rs`).
+- **Impact:** small: only in a window made as small as it goes. A wider window shows the form whole.
+- **Estimate:** part of the connection screen's redesign; not estimated.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-05 | minor | M2 done: entries 19 (no Unix socket for MySQL and MariaDB), 20 (SQLite: no attached databases, extensions or encrypted files), 21 (Ctrl+P finds saved connections only, tables first with nothing typed), 22 (SQLite rowid keys and VACUUM), 23 (zenity's "All files" picker), 24 (the cramped form at the smallest window); entries 3, 6, 7, 9, 14 and 15 say which engines they hold for. |
 | 2026-11-05 | minor | Entry 18: on Linux, file managers offer dbee for any SQLite file by its content while dbee opens by extension, and with no other app for SQLite files dbee is the only candidate. |
 | 2026-11-05 | minor | Entry 17: on macOS, Finder's Open With cannot hand dbee a database file (winit does not pass the open-documents event on), so the bundle declares no document types. |
 | 2026-10-28 | minor | Import and export is now M3 (M2 is three databases). |

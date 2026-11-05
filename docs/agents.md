@@ -39,7 +39,7 @@ For any UI change, look at the result:
 3. Assert on `ui.inspect` and `document.inspect`.
 4. Take `ui.screenshot` (the whole window) and open the PNG; `app.quit` ends the run.
 
-The whole M1 day is scripted the same way, in the real window with the isolated run's environment: `cargo test --workspace --test m1_day -- --ignored --nocapture` drives the M1 day (an SSH connection, Ctrl+P, filters, a JSON value, a foreign key, edits, a query copied with its header) and saves a screenshot of each step in `target/m1-day/` ([`testing.md`](testing.md) §4).
+The whole M1 day is scripted the same way, in the real window with the isolated run's environment: `cargo test --workspace --test m1_day -- --ignored --nocapture` drives the M1 day (an SSH connection, Ctrl+P, filters, a JSON value, a foreign key, edits, a query copied with its header) and saves a screenshot of each step in `target/m1-day/` ([`testing.md`](testing.md) §4). `--test m2_day` drives the same day on SQLite, MySQL through SSH and MariaDB in one window, with the engine cards, the Database field's list and Ctrl+P switching connection, into `target/m2-day/`.
 
 Screenshots you commit follow the asset rule in [`AGENTS.md`](../AGENTS.md): synthetic data only, and a row in `ATTRIBUTION.md`. Screenshots of Beekeeper Studio are never committed.
 
