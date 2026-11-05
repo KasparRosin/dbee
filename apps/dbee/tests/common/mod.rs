@@ -164,6 +164,10 @@ impl App {
         self.ok("ui.click", json!({ "id": id, "count": 2 }));
     }
 
+    pub fn right_click(&mut self, id: &str) {
+        self.ok("ui.click", json!({ "id": id, "button": "right" }));
+    }
+
     /// A click at window point `(x, y)`, with Shift held when `shift`.
     pub fn click_at(&mut self, x: f64, y: f64, shift: bool) {
         self.ok("ui.click", json!({ "x": x, "y": y, "modifiers": { "shift": shift } }));
@@ -184,6 +188,20 @@ impl App {
 
     pub fn text(&mut self, text: &str) {
         self.ok("ui.text", json!({ "text": text }));
+    }
+
+    /// Clicks the text field `id`, selects all of it and types `text` over it.
+    pub fn replace(&mut self, id: &str, text: &str) {
+        self.click(id);
+        self.ctrl("A");
+        self.text(text);
+    }
+
+    /// The automation entries whose id starts with `prefix`, in drawing order.
+    pub fn tags_with(&mut self, prefix: &str) -> Vec<Json> {
+        let i = self.inspect();
+        let all = i["automation"].as_array().unwrap();
+        all.iter().filter(|a| a["id"].as_str().is_some_and(|id| id.starts_with(prefix))).cloned().collect()
     }
 
     /// Asks until `done` holds (each request runs a frame).

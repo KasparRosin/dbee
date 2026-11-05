@@ -301,20 +301,23 @@ fn context_menu_copy_puts_the_selection_on_the_clipboard() {
 #[test]
 fn a_page_draws_in_the_frame_its_rows_arrive() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = Ui::connected(db);
-    // The reply goes out in the frame that applies the rows; `ui.inspect` reports that frame.
-    ui.execute("table.open", json!({ "schema": "shop", "table": "big_rows" }));
-    let i = ui.inspect();
-    assert!(
-        visible(&tag_in(&i, "grid-cell-0-0")),
-        "the first row is drawn in the frame it arrived: {:?} {:?}",
-        tag_in(&i, "grid-cell-0-0"),
-        tag_in(&i, "page-number")
-    );
-    assert!(visible(&tag_in(&i, "grid-header-1")));
-    // Only the rows in view are laid out; the others are listed as out of view.
-    let far = tag_in(&i, "grid-cell-99-0").expect("rows out of view are listed");
-    assert_eq!(far["visible"], false, "{far}");
+    for t in dbee_testkit::targets() {
+        let mut ui = connected_to_target(db, &t, None, APP_SIZE);
+        // The reply goes out in the frame that applies the rows; `ui.inspect` reports that frame.
+        ui.execute("table.open", json!({ "schema": t.schema("shop"), "table": "big_rows" }));
+        let i = ui.inspect();
+        assert!(
+            visible(&tag_in(&i, "grid-cell-0-0")),
+            "{}: the first row is drawn in the frame it arrived: {:?} {:?}",
+            t.name(),
+            tag_in(&i, "grid-cell-0-0"),
+            tag_in(&i, "page-number")
+        );
+        assert!(visible(&tag_in(&i, "grid-header-1")), "{}", t.name());
+        // Only the rows in view are laid out; the others are listed as out of view.
+        let far = tag_in(&i, "grid-cell-99-0").expect("rows out of view are listed");
+        assert_eq!(far["visible"], false, "{}: {far}", t.name());
+    }
 }
 
 #[test]
