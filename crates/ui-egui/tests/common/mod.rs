@@ -23,11 +23,11 @@
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc};
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
+use dbee_config::{ConnectionConfig, DbKind, MemoryStore, SecretStore, SslMode};
 use dbee_driver::Drivers;
 use dbee_engine::{Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{Server, TempHome, TestDb, temp_home, unique};
+use dbee_testkit::{Server, TempHome, TestDb, TestTarget, temp_home, unique};
 use dbee_ui_egui::{ControlRequest, DbeeApp};
 use egui::{Event, Pos2};
 use egui_kittest::Harness;
@@ -315,7 +315,75 @@ impl Ui {
     pub fn copied(&self) -> Option<String> {
         self.copied.last().cloned()
     }
+
+    /// The pointer moves to `at` and stays there for a frame.
+    pub fn hover(&mut self, at: Pos2) {
+        self.frame_with(vec![Event::PointerMoved(at)]);
+    }
+
+    /// The pointer moves to `at` and rests there for a second (four frames), longer than a
+    /// tooltip waits: each move starts that wait again.
+    pub fn rest(&mut self, at: Pos2) {
+        self.hover(at);
+        for _ in 0..4 {
+            self.frame();
+        }
+    }
+
+    /// The text shapes of the last frame: each galley where it was drawn.
+    pub fn texts(&self) -> Vec<(egui::Rect, Arc<egui::Galley>)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, Arc<egui::Galley>)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push((t.galley.rect.translate(t.pos.to_vec2()), Arc::clone(&t.galley))),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &self.harness.output().shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// The text drawn inside `within` that reads `text`: where it was drawn and whether it was cut
+    /// short (an ellipsis).
+    pub fn text_in(&self, within: egui::Rect, text: &str) -> Option<(egui::Rect, bool)> {
+        self.texts().into_iter().find(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).map(|(r, g)| (r, g.elided))
+    }
 }
+
+/// The settings for `t`: its server on `127.0.0.1` as the kind's user, on the kind's test
+/// database (none on MySQL's servers), TLS `prefer`; or its file. Named after the target.
+pub fn config_of(t: &TestTarget) -> ConnectionConfig {
+    let info = t.kind().info();
+    let kind = DbKind::from_id(t.kind().id()).expect("the test kinds are dbee's");
+    let base = ConnectionConfig { name: t.name(), kind, ..ConnectionConfig::default() };
+    match t.server() {
+        Some(s) => ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port: s.port,
+            user: info.user.into(),
+            database: info.database.into(),
+            ssl_mode: SslMode::Prefer,
+            ..base
+        },
+        None => ConnectionConfig { file: t.file().map(std::path::Path::to_path_buf), ..base },
+    }
+}
+
+/// A window of `size` connected to `t` (with `database` instead of the kind's, when given), on
+/// the workspace. A SQLite target's file goes with the target, which must outlive the window.
+pub fn connected_to_target(db: &TestDb, t: &TestTarget, database: Option<&str>, size: egui::Vec2) -> Ui {
+    let mut config = config_of(t);
+    if let Some(d) = database {
+        config.database = d.into();
+    }
+    Ui::connected_with(db, Setup { size, config: Some(config), ..Setup::default() })
+}
+
+/// The app's first window size (`apps/dbee`), for tests where layout matters.
+pub const APP_SIZE: egui::Vec2 = egui::vec2(1100.0, 720.0);
 
 /// The automation entry `id` in a `ui.inspect` result.
 pub fn tag_in(inspect: &Json, id: &str) -> Option<Json> {

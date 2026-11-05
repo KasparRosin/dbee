@@ -305,6 +305,7 @@ fn readable_on(fill: Color32) -> Color32 {
 fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let t = TOKENS;
     let Some(catalog) = app.session.state().connected.as_ref().map(|c| Arc::clone(&c.catalog)) else { return };
+    let dialect = app.session.state().dialect();
     let refresh = if app.session.running("schema.refresh") {
         Refresh::Running
     } else {
@@ -319,7 +320,7 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
         let DbeeApp { view, tags, .. } = app;
         let frame = Frame::new().fill(t.panel).inner_margin(Margin::same(8));
         egui::Panel::left("dbee-tree").resizable(true).default_size(280.0).size_range(200.0..=600.0).frame(frame).show(ui, |ui| {
-            acts = tree::show(ui, &catalog, &mut view.work.tree, tags);
+            acts = tree::show(ui, &catalog, dialect, &mut view.work.tree, tags);
         });
     }
     for act in acts {

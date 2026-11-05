@@ -15,6 +15,7 @@ pub(crate) const RULES: Rules = Rules {
     text_holds_nul: false,
     bool_literals: ("1", "0"),
     op_notes: &[(&[Op::Like, Op::NotLike], "Ignores upper and lower case for A–Z only.")],
+    schema_word: ("schema", "Schemas"),
     string_literal: StringLiteral::Quoted,
     binary_literal: Some(BinaryLiteral::XQuoted),
     values: Values::BareNumbers,

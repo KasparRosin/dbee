@@ -18,6 +18,7 @@ pub(crate) const RULES: Rules = Rules {
     text_holds_nul: true,
     bool_literals: ("1", "0"),
     op_notes: &[(&[Op::Eq, Op::Ne, Op::Like, Op::NotLike], "Compares by the column's collation; most ignore upper and lower case.")],
+    schema_word: ("database", "Databases"),
     string_literal: StringLiteral::HexForBackslash,
     binary_literal: Some(BinaryLiteral::ZeroX),
     values: Values::Literal,

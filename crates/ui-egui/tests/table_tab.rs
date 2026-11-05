@@ -10,7 +10,6 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -33,33 +32,6 @@ impl Ui {
     /// The ids drawn in the last frame that start with `prefix`.
     fn ids_with(&self, prefix: &str) -> Vec<String> {
         self.harness.state().tags().ids().into_iter().filter(|id| id.starts_with(prefix)).map(str::to_string).collect()
-    }
-
-    /// The pointer moves to `at` and stays there for a frame.
-    fn hover(&mut self, at: Pos2) {
-        self.frame_with(vec![Event::PointerMoved(at)]);
-    }
-
-    /// The text shapes of the last frame: each galley where it was drawn.
-    fn texts(&self) -> Vec<(egui::Rect, Arc<egui::Galley>)> {
-        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, Arc<egui::Galley>)>) {
-            match shape {
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
-                egui::Shape::Text(t) => out.push((t.galley.rect.translate(t.pos.to_vec2()), Arc::clone(&t.galley))),
-                _ => {}
-            }
-        }
-        let mut out = Vec::new();
-        for clipped in &self.harness.output().shapes {
-            walk(&clipped.shape, &mut out);
-        }
-        out
-    }
-
-    /// The text drawn inside `within` that reads `text`: where it was drawn and whether it was cut
-    /// short (an ellipsis).
-    fn text_in(&self, within: egui::Rect, text: &str) -> Option<(egui::Rect, bool)> {
-        self.texts().into_iter().find(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).map(|(r, g)| (r, g.elided))
     }
 }
 
@@ -472,27 +444,61 @@ fn count_rows_on_a_view_and_its_read_only_note() {
 }
 
 /// A table's own reason, a sentence of the driver's (an engine without transactions), shows as
-/// written.
+/// written where dbee's own reasons show: one line, cut short in a narrow tab and whole on hover,
+/// so the filter bar and the grid stay where a short note leaves them.
 #[test]
-fn a_table_that_cannot_undo_shows_its_own_reason() {
+fn myisam_reason_is_shown() {
     let db = dbee_testkit::require_testdb!();
-    let mysql = db.server("mysql80").unwrap();
-    let config = dbee_config::ConnectionConfig {
-        name: mysql.name.clone(),
-        kind: dbee_config::DbKind::MySql,
-        host: "127.0.0.1".into(),
-        port: mysql.port,
-        user: "root".into(),
-        ..dbee_config::ConnectionConfig::default()
-    };
-    let mut ui = Ui::connected_with(db, Setup { config: Some(config), ..Setup::default() });
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+    let loaded = |ui: &mut Ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0);
+    // dbee's own reasons keep their lead-in.
+    ui.open("shop", "order_totals");
+    ui.until("the view's rows", loaded);
+    ui.frame();
+    assert_eq!(ui.value("table-note"), "These rows cannot be edited: views are read-only.");
+    let (short, bar) = (ui.rect("table-note").unwrap(), ui.rect("filter-0-column").unwrap());
     ui.open("shop", "audit_log");
+    ui.until("the audit_log rows", loaded);
+    ui.frame();
     let reason = ui.table()["noEditReason"].as_str().unwrap_or_default().to_owned();
     assert!(reason.starts_with("The MyISAM table engine can't undo a write") && reason.ends_with('.'), "{reason}");
     assert_eq!(ui.value("table-note"), reason.as_str());
-    // dbee's own reasons keep their lead-in.
-    ui.open("shop", "order_totals");
-    assert_eq!(ui.value("table-note"), "These rows cannot be edited: views are read-only.");
+    let note = ui.rect("table-note").unwrap();
+    assert!((note.height() - short.height()).abs() < 0.5, "one line: {note:?} vs {short:?}");
+    assert_eq!(ui.rect("filter-0-column").unwrap().min, bar.min, "the filter bar stays where it was");
+    let (_, cut) = ui.text_in(note, &reason).unwrap_or_else(|| panic!("the reason is drawn in {note:?}"));
+    assert!(cut, "cut short in the app's first window, with the value panel open");
+    // Hovered, it reads whole.
+    ui.rest(note.center());
+    let whole = ui.texts().into_iter().any(|(r, g)| g.text() == reason && !g.elided && !note.contains(r.center()));
+    assert!(whole, "the hover shows the whole reason");
+}
+
+/// The filter bar's operator hover adds what the operator does on this engine that its label
+/// does not say; on Postgres there is nothing to add.
+#[test]
+fn operator_note_on_mysql() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let pg = dbee_testkit::target(pg14_server(db));
+    for (t, note) in [(&mysql, true), (&pg, false)] {
+        let mut ui = connected_to_target(db, t, None, APP_SIZE);
+        ui.open("shop", "orders");
+        ui.until("the page", |ui| ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+        ui.click("filter-0-op");
+        ui.frame();
+        let like = ui.rect("filter-0-op-like").expect("the operators are listed");
+        ui.rest(like.center());
+        let shown = ui.texts().into_iter().any(|(_, g)| g.text().contains("collation"));
+        assert_eq!(shown, note, "{}: the like operator's hover", t.name());
+        // The chosen operator's hover says it too.
+        ui.click("filter-0-op-like");
+        let choice = ui.rect("filter-0-op").unwrap();
+        ui.rest(choice.center());
+        let shown = ui.texts().into_iter().any(|(_, g)| g.text().contains("collation"));
+        assert_eq!(shown, note, "{}: the chosen operator's hover", t.name());
+    }
 }
 
 #[test]

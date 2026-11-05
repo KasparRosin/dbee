@@ -14,6 +14,7 @@ pub(crate) const RULES: Rules = Rules {
     text_holds_nul: false,
     bool_literals: ("t", "f"),
     op_notes: &[],
+    schema_word: ("schema", "Schemas"),
     string_literal: StringLiteral::Quoted,
     binary_literal: None,
     values: Values::Cast,

@@ -251,6 +251,60 @@ fn tree_rows_out_of_view_scroll_in_when_clicked() {
     ui.until("the t_290 tab", |ui| ui.document()["table"]["name"] == "t_290");
 }
 
+/// The tree's schema rows in the order drawn: `(schema, open)`.
+fn schema_rows(i: &Json) -> Vec<(String, bool)> {
+    let rows = i["automation"].as_array().unwrap().iter();
+    rows.filter_map(|a| Some((a["id"].as_str()?.strip_prefix("tree-schema-")?.to_string(), a["value"]["open"] == true))).collect()
+}
+
+/// The catalog's default schema (Postgres `public`, MySQL the database the settings name, SQLite
+/// `main`) is listed first and starts open; without one the first in the catalog's order does.
+#[test]
+fn the_first_schema_is_the_default_one_on_every_engine() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let pg = dbee_testkit::target(pg14_server(db));
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    for (t, database, first) in [(&pg, None, "public"), (&mysql, Some("shop"), "shop"), (&mysql, None, "many"), (&sqlite, None, "main")] {
+        let mut ui = connected_to_target(db, t, database, APP_SIZE);
+        let rows = schema_rows(&ui.inspect());
+        assert_eq!(rows.first(), Some(&(first.to_string(), true)), "{}: {rows:?}", t.name());
+        assert!(rows.iter().skip(1).all(|(_, open)| !open), "{}: only the first starts open: {rows:?}", t.name());
+    }
+}
+
+/// The tree names the level under a connection with the engine's word: databases on MySQL,
+/// schemas on Postgres.
+#[test]
+fn the_tree_says_databases_on_mysql_and_schemas_on_postgres() {
+    let db = dbee_testkit::require_testdb!();
+    for (server, label) in [("pg14", "System schemas"), ("mysql80", "System databases")] {
+        let t = dbee_testkit::target(db.server(server).unwrap());
+        let mut ui = connected_to_target(db, &t, None, APP_SIZE);
+        // The open schema closed (MySQL's `many` holds 300 tables), so the group is in view.
+        if let Some((open, _)) = schema_rows(&ui.inspect()).into_iter().find(|(_, open)| *open) {
+            ui.click(&format!("tree-schema-{open}"));
+        }
+        let group = ui.harness.state().tags().rect("tree-system").expect("the system group is drawn");
+        let texts: Vec<String> = ui.texts().iter().filter(|(r, _)| group.contains(r.center())).map(|(_, g)| g.text().to_string()).collect();
+        assert!(ui.text_in(group, label).is_some(), "{server}: {texts:?}");
+    }
+}
+
+/// The status bar names the server as it reports itself, MariaDB as MariaDB.
+#[test]
+fn status_bar_names_the_product() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let maria = dbee_testkit::target(db.server("mariadbnew").unwrap());
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    for (t, product) in [(&maria, "MariaDB 1"), (&mysql, "MySQL 8.0"), (&sqlite, "SQLite 3")] {
+        let mut ui = connected_to_target(db, t, None, APP_SIZE);
+        let server = ui.value("status-server");
+        assert!(server.as_str().is_some_and(|s| s.starts_with(product)), "{}: {server}", t.name());
+    }
+}
+
 #[test]
 fn tree_refresh_reloads_the_catalog() {
     let db = dbee_testkit::require_testdb!();
@@ -646,7 +700,7 @@ fn tree_filter_1000_tables_within_a_frame() {
     let mut h = Harness::builder().with_size(egui::vec2(320.0, 900.0)).build_ui_state(
         |ui, s: &mut State| {
             s.tags.begin_frame();
-            let _ = tree::show(ui, &s.catalog, &mut s.tree, &mut s.tags);
+            let _ = tree::show(ui, &s.catalog, dbee_sql::Dialect::Postgres, &mut s.tree, &mut s.tags);
         },
         state,
     );

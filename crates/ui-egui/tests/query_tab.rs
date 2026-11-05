@@ -446,38 +446,142 @@ fn the_split_between_editor_and_results_drags() {
     assert!((other - after).abs() < 1.0, "{after} vs {other}");
 }
 
-/// The editor lexes with the open connection's dialect: on MySQL `#` starts a comment and a
-/// backtick quotes a name, which on Postgres are an operator and a stray character, both plain.
-/// A new editor starts with the dialect of no connection, so the MySQL window shows the switch.
+/// The editor lexes with the open connection's dialect: on MySQL `#` starts a comment (drawn in
+/// the colour of a `--` one) and a backtick quotes a name, which on Postgres are an operator and
+/// a stray character, both plain. A new editor starts with the dialect of no connection, so the
+/// MySQL window shows the switch.
 #[test]
-fn the_editor_lexes_with_the_open_connections_dialect() {
+fn query_highlighting_follows_the_dialect() {
     let db = dbee_testkit::require_testdb!();
-    let mysql = db.server("mysql80").unwrap();
-    let config = dbee_config::ConnectionConfig {
-        name: mysql.name.clone(),
-        kind: dbee_config::DbKind::MySql,
-        host: "127.0.0.1".into(),
-        port: mysql.port,
-        user: "root".into(),
-        ..dbee_config::ConnectionConfig::default()
-    };
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
     let highlighted = |ui: &mut Ui, text: &str| {
         ui.execute("query.setText", json!({ "text": text }));
         ui.frame();
         ui.editor()["highlighted"].clone()
     };
     let cases = [("x # y", "a comment"), ("x `y`", "a quoted name")];
+    // The colour of `# c`'s `c` and of `-- d`'s `d`.
+    let comment = "x # c\n-- d";
+    let colours = |ui: &mut Ui| {
+        ui.execute("query.setText", json!({ "text": comment }));
+        ui.frame();
+        let (_, g) = ui.texts().into_iter().find(|(_, g)| g.text() == comment).expect("the editor's text is drawn");
+        let at = |byte: usize| g.job.sections.iter().find(|s| s.byte_range.contains(&egui::text::ByteIndex(byte))).map(|s| s.format.color);
+        (at(4), at(9))
+    };
     {
-        let mut ui = Ui::connected_with(db, Setup { config: Some(config), ..Setup::default() });
+        let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
         ui.ctrl("T");
         ui.frame();
         for (text, what) in cases {
             assert_eq!(highlighted(&mut ui, text), true, "{text:?} on MySQL holds {what}");
         }
+        let (hash, dash) = colours(&mut ui);
+        assert!(hash.is_some() && hash == dash, "on MySQL `#` starts a comment: {hash:?} vs {dash:?}");
     }
     let mut ui = query_tab(db);
     for (text, _) in cases {
         assert_eq!(highlighted(&mut ui, text), false, "{text:?} on Postgres");
+    }
+    let (hash, dash) = colours(&mut ui);
+    assert!(dash.is_some() && hash != dash, "on Postgres `#` is no comment: {hash:?} vs {dash:?}");
+}
+
+/// A MySQL query tab shows its database at the left of its toolbar, as tall as its buttons. A
+/// table opened from the tree is the tree's selection, so a new query tab opens on its database;
+/// a click on the chip lists the catalog's databases (not the server's own), and choosing one
+/// sets the tab's. While the tab runs the chip waits.
+#[test]
+fn mysql_query_tab_shows_and_changes_its_database() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+    ui.click("tree-schema-shop");
+    ui.double_click("tree-table-shop.orders");
+    ui.until("the orders tab", |ui| ui.document()["table"]["name"] == "orders");
+    ui.ctrl("T");
+    ui.frame();
+    assert_eq!(ui.query()["database"], "shop");
+    assert_eq!(ui.value("query-database"), "shop");
+    let (chip, run) = (ui.rect("query-database"), ui.rect("query-run"));
+    assert!(chip[0] + chip[2] <= run[0], "the chip is left of Run: {chip:?} {run:?}");
+    assert!((chip[1] - run[1]).abs() < 0.5 && (chip[3] - run[3]).abs() < 0.5, "as tall as Run, level with it: {chip:?} {run:?}");
+    ui.click("query-database");
+    ui.frame();
+    let i = ui.inspect();
+    for name in ["many", "odd", "scratch", "shop"] {
+        assert!(tag_in(&i, &format!("query-database-{name}")).is_some(), "{name} is listed: {:?}", ids(&i));
+    }
+    for system in ["mysql", "information_schema", "performance_schema", "sys"] {
+        assert!(tag_in(&i, &format!("query-database-{system}")).is_none(), "{system} is the server's own");
+    }
+    ui.click("query-database-many");
+    ui.frame();
+    assert_eq!(ui.query()["database"], "many");
+    assert_eq!(ui.value("query-database"), "many");
+    assert!(ui.tag("query-database-shop").is_none(), "the list closed");
+    // While the tab runs, the chip waits.
+    ui.execute("query.setText", json!({ "text": mysql.sleep_sql(2) }));
+    ui.click("query-run");
+    ui.until("the run to start", |ui| !ui.query()["running"].is_null());
+    ui.frame();
+    assert!(!ui.enabled("query-database"), "disabled while the tab runs");
+    ui.ran();
+    assert!(ui.enabled("query-database"));
+    assert_eq!(ui.query()["error"], Json::Null, "the run in `many` went through");
+}
+
+/// Every way of opening a query tab opens it on the tree's selection: a selected database, or a
+/// selected table's. With nothing selected it opens on the connection's database, or on none.
+#[test]
+fn a_new_query_tab_opens_on_the_trees_selection() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    {
+        let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+        ui.ctrl("T");
+        ui.frame();
+        assert_eq!(ui.query()["database"], Json::Null, "nothing selected, and no database in the settings");
+        assert_eq!(ui.value("query-database"), Json::Null);
+        // Ctrl+T on a selected database.
+        ui.click("tree-schema-odd");
+        ui.ctrl("T");
+        ui.frame();
+        assert_eq!(ui.query()["database"], "odd");
+        // + on a selected table.
+        ui.click("tree-schema-shop");
+        ui.click("tree-table-shop.customers");
+        ui.click("tab-new");
+        ui.frame();
+        assert_eq!(ui.query()["database"], "shop");
+        // The File menu.
+        ui.click("tree-schema-scratch");
+        ui.click("menu-File");
+        ui.click("menu-tab.newQuery");
+        ui.frame();
+        assert_eq!(ui.query()["database"], "scratch");
+    }
+    let mut ui = connected_to_target(db, &mysql, Some("shop"), APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    assert_eq!(ui.query()["database"], "shop", "nothing selected: the settings' database");
+    assert_eq!(ui.value("query-database"), "shop");
+}
+
+/// No chip where the engine has no `USE`: Postgres and SQLite.
+#[test]
+fn no_database_chip_without_use() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let pg = dbee_testkit::target(pg14_server(db));
+    for (t, schema) in [(&pg, "shop"), (&sqlite, "main")] {
+        let mut ui = connected_to_target(db, t, None, APP_SIZE);
+        ui.click(&format!("tree-schema-{schema}"));
+        ui.ctrl("T");
+        ui.frame();
+        assert!(ui.tag("query-run").is_some(), "{}: the toolbar is drawn", t.name());
+        assert!(ui.tag("query-database").is_none(), "{}: no database chip", t.name());
+        assert_eq!(ui.query()["database"], Json::Null, "{}: a query tab has no database of its own", t.name());
     }
 }
 

@@ -107,7 +107,7 @@ struct ScratchOn<'a>(&'a dbee_testkit::Server, String);
 
 impl Drop for ScratchOn<'_> {
     fn drop(&mut self) {
-        let _ = dbee_testkit::psql(self.0, &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.1));
+        let _ = dbee_testkit::sql(self.0, &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.1));
     }
 }
 
@@ -694,6 +694,32 @@ fn booleans_choose_true_false_or_null() {
     ui.ctrl("S");
     ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
     assert_eq!(q(db, &format!("SELECT string_agg(coalesce(flag::text, 'null'), ',' ORDER BY id) FROM scratch.{}", t.0)), "null,true,false");
+}
+
+/// A MySQL `BOOLEAN` is a `TINYINT(1)`, printed `1` and `0`: the boolean choice opens on it, and
+/// false chosen there writes `0`.
+#[test]
+fn a_mysql_boolean_set_to_false_in_the_editor_writes_0() {
+    let db = dbee_testkit::require_testdb!();
+    let server = db.server("mysql80").unwrap();
+    let name = unique("t_bool_ui");
+    let _drop = ScratchOn(server, name.clone());
+    dbee_testkit::mysql(
+        server,
+        &format!("CREATE TABLE scratch.{name} (id INT PRIMARY KEY, flag BOOLEAN); INSERT INTO scratch.{name} VALUES (1, TRUE);"),
+    )
+    .unwrap();
+    let t = dbee_testkit::target(server);
+    let mut ui = Ui::connected_with(db, Setup { step: Some(0.25), config: Some(config_of(&t)), ..Setup::default() });
+    ui.open("scratch", &name);
+    ui.until("the page", |ui| ui.table()["rows"] == 1);
+    ui.double_click("grid-cell-0-1");
+    assert_eq!(ui.editor(), Some(json!({ "choice": "true" })), "the choice opens on the 1 MySQL prints");
+    ui.click("cell-editor-false");
+    assert_eq!(ui.staged(0, 1), Some(json!("0")), "staged as MySQL prints a false BOOLEAN");
+    ui.ctrl("S");
+    ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
+    assert_eq!(dbee_testkit::mysql(server, &format!("SELECT flag FROM scratch.{name}")).unwrap().trim(), "0");
 }
 
 #[test]

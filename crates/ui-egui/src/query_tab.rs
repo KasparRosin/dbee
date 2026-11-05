@@ -3,11 +3,15 @@
 //! - the SQL editor ([`editor`]), with line numbers in a gutter at its left;
 //! - the split: dragged, it moves the line between the editor and the results. Where it is lasts
 //!   for the window's run, in memory, and is the same for every query tab (`View::query_split`);
-//! - the toolbar: Run (`query.run`), Run current (`query.run` with `current` and the cursor) and
-//!   Cancel (`query.cancel`, enabled while the tab's run goes), a spinner while it runs, and with
-//!   several results the selector `1 · 2 · 3` (`query.showResult`; with more than fit, those
-//!   around the shown one, [`selector_range`]); at its right, what the shown result holds:
-//!   `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
+//! - the toolbar: on an engine with `USE` (`Dialect::has_use_database`), first the database chip:
+//!   the database each run of the tab starts in (`QueryTab::database`, else the connection's), in
+//!   the engine's word for one ([`database_chip`]); a click lists the catalog's databases, the
+//!   server's own left out, and choosing one sends `query.setDatabase`. It waits while the tab
+//!   runs, and while Run cannot. Then Run (`query.run`), Run current (`query.run` with `current`
+//!   and the cursor) and Cancel (`query.cancel`, enabled while the tab's run goes), a spinner
+//!   while it runs, and with several results the selector `1 · 2 · 3` (`query.showResult`; with
+//!   more than fit, those around the shown one, [`selector_range`]); at its right, what the shown
+//!   result holds: `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
 //! - the last run's error card, when it stopped early ([`card`]);
 //! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
 //!   selecting and copying work, and the value panel follows the selected cell), or for a
@@ -59,13 +63,14 @@
 //! Automation ids: `query-editor` (value `{cursor, focused, lines, length, highlighted}`: the
 //! cursor as a byte offset, whether the editor has the keyboard, the lines, the text's length in
 //! bytes, and whether some token is coloured), `query-split` (value: the editor's share of the
-//! height), `query-run`, `query-run-current`, `query-cancel`, `result-<n>` (1-based, with several
-//! results; value `{shown, rows, rowsAffected}`), `query-rows` (value: what the shown result
-//! holds, e.g. `First 10,000 of 25,000 rows`), `query-affected` (value: `2 rows affected`),
-//! `query-error` (value `{code, heading, message, detail, hint, note, position, statement, line,
-//! column, jump}`, `note` the card's line that a ROLLBACK ends a failed transaction (an error whose
-//! meaning is `TransactionAborted`, Postgres's 25P02) or null, `jump` saying whether a click moves
-//! the cursor) and `query-hint`.
+//! height), `query-database` (value: the database shown, or null for none; while its list is open
+//! the choices `query-database-<name>`), `query-run`, `query-run-current`, `query-cancel`,
+//! `result-<n>` (1-based, with several results; value `{shown, rows, rowsAffected}`),
+//! `query-rows` (value: what the shown result holds, e.g. `First 10,000 of 25,000 rows`),
+//! `query-affected` (value: `2 rows affected`), `query-error` (value `{code, heading, message,
+//! detail, hint, note, position, statement, line, column, jump}`, `note` the card's line that a
+//! ROLLBACK ends a failed transaction (an error whose meaning is `TransactionAborted`, Postgres's
+//! 25P02) or null, `jump` saying whether a click moves the cursor) and `query-hint`.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -73,7 +78,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use dbee_core::ResultSet;
-use dbee_engine::cmd::query::can_run;
+use dbee_engine::cmd::query::{can_run, can_set_database};
 use dbee_engine::state::NO_CONNECTION_DIALECT;
 use dbee_engine::{Json, Meaning, QueryError, StatementOutcome, Tab, TabId};
 use dbee_sql::Dialect;
@@ -81,21 +86,24 @@ use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
 use egui::text_edit::TextEditState;
 use egui::{
-    Align, Button, Color32, CornerRadius, CursorIcon, Event, FontId, Frame, Id, Key, Label, Layout, Margin, Rect, Response, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, TextEdit, UiBuilder, pos2, vec2,
+    Align, Button, Color32, CornerRadius, CursorIcon, Event, FontId, Frame, Id, Key, Label, Layout, Margin, Popup, Rect, Response, RichText,
+    ScrollArea, Sense, Stroke, StrokeKind, TextEdit, UiBuilder, pos2, vec2,
 };
 use serde_json::json;
 
-use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{RADIUS, SqlSyntax, TOKENS, sql_syntax};
-use crate::tree::thousands;
+use crate::tree::{is_system, thousands};
+use crate::{DbeeApp, filter_bar, icons};
 
 /// The automation ids.
 pub const EDITOR: &str = "query-editor";
 pub const SPLIT: &str = "query-split";
+/// The database chip; its list's choices are `query-database-<name>`.
+pub const DATABASE: &str = "query-database";
 pub const RUN: &str = "query-run";
 pub const RUN_CURRENT: &str = "query-run-current";
 pub const CANCEL: &str = "query-cancel";
@@ -123,6 +131,11 @@ const MIN_RESULTS_H: f32 = 90.0;
 const TOP_PAD: f32 = 6.0;
 const SPLIT_H: f32 = 8.0;
 const TOOLBAR_H: f32 = 36.0;
+/// The toolbar's buttons' height, the database chip's too, and the chip's width.
+const BUTTON_H: f32 = 26.0;
+const CHIP_W: f32 = 150.0;
+/// How tall the chip's list gets before it scrolls.
+const CHIP_LIST_H: f32 = 320.0;
 /// The gutter's inset at each side of its numbers.
 const GUTTER_PAD: f32 = 8.0;
 /// The text's inset in the editor.
@@ -742,7 +755,7 @@ fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover
     let t = TOKENS;
     let enabled = why_not.is_none();
     let text = if main && enabled { RichText::new(label).color(t.accent_text) } else { RichText::new(label) };
-    let mut button = Button::new(text.size(12.5)).min_size(vec2(0.0, 26.0));
+    let mut button = Button::new(text.size(12.5)).min_size(vec2(0.0, BUTTON_H));
     if main && enabled {
         button = button.fill(t.accent);
     }
@@ -753,6 +766,68 @@ fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover
     };
     tags.tag_value_as(id, &r, label, enabled);
     r.clicked()
+}
+
+/// What the database chip shows: the database the tab's runs start in, the ones to choose from,
+/// the engine's word for one and for many, and why it cannot be used now.
+struct Chip<'a> {
+    database: Option<&'a str>,
+    choices: Vec<&'a str>,
+    word: (&'static str, &'static str),
+    why_not: Option<String>,
+}
+
+/// The database chip, as tall as the toolbar's buttons and of a fixed width, so nothing beside
+/// it moves when the database changes (a long name is cut, and reads whole on hover). A click
+/// opens the list of `chip.choices` under its heading; returns the one chosen.
+fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<String> {
+    let t = TOKENS;
+    let (one, many) = chip.word;
+    let enabled = chip.why_not.is_none();
+    let mut chosen = None;
+    ui.add_enabled_ui(enabled, |ui| {
+        let (rect, r) = ui.allocate_exact_size(vec2(CHIP_W, BUTTON_H), Sense::click());
+        let p = ui.painter();
+        let fill = if enabled && r.hovered() { t.hover } else { t.card };
+        p.rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        let icon = Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0));
+        icons::schema(p, icon, if enabled { t.icon_schema } else { t.border });
+        let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(14.0, 14.0));
+        icons::chevron(p, arrow, if enabled { t.text_muted } else { t.border }, true);
+        let none = format!("No {one} chosen");
+        let (text, ink) = match chip.database {
+            Some(name) if enabled => (name, t.text),
+            Some(name) => (name, t.text_muted),
+            None => (none.as_str(), t.text_muted),
+        };
+        let left = icon.right() + 6.0;
+        let g = line_galley(ui, text, FontId::proportional(12.5), ink, (arrow.left() - 4.0 - left).max(1.0));
+        ui.painter().galley(pos2(left, rect.center().y - g.size().y / 2.0), g, ink);
+        let hover = match chip.database {
+            Some(name) => format!("Each run starts in the {one} {name}. Click to choose another."),
+            None => format!("No {one} is chosen for this tab. Click to choose one."),
+        };
+        let r = match &chip.why_not {
+            Some(why) => r.on_disabled_hover_text(format!("Choose the {one}: not now, {why}")),
+            None => r.on_hover_text(hover),
+        };
+        tags.tag_value_as(DATABASE, &r, chip.database, enabled);
+        Popup::menu(&r).width(CHIP_W).show(|ui| {
+            ui.add(Label::new(RichText::new(many).size(11.5).color(t.text_muted)).selectable(false));
+            ScrollArea::vertical().max_height(CHIP_LIST_H).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
+                for name in &chip.choices {
+                    let r = filter_bar::item(ui, chip.database == Some(*name), name);
+                    // A menu's first frame is a sizing pass, which reads every widget as disabled.
+                    tags.tag_value_as(&format!("{DATABASE}-{name}"), &r, *name, true);
+                    if r.clicked() {
+                        chosen = Some((*name).to_owned());
+                    }
+                }
+            });
+        });
+    });
+    chosen
 }
 
 /// The card's line under an error that means the transaction failed earlier.
@@ -952,6 +1027,21 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let mut bar =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-bar", id.0)).max_rect(bar_rect).layout(Layout::left_to_right(Align::Center)));
         bar.spacing_mut().item_spacing.x = 6.0;
+        let running = q.running.is_some();
+        if let Some(c) = session.state().connected.as_ref().filter(|c| c.dialect.has_use_database()) {
+            let chip = Chip {
+                database: q.database.as_deref().or_else(|| Some(c.config.database.as_str()).filter(|d| !d.is_empty())),
+                choices: c.catalog.schemas.iter().filter(|s| !is_system(s)).map(|s| s.name.as_str()).collect(),
+                word: c.dialect.schema_word(),
+                why_not: can_set_database(session)
+                    .err()
+                    .or_else(|| running.then(|| "the tab's query is running".to_owned()))
+                    .or_else(|| run_blocked.clone()),
+            };
+            if let Some(name) = database_chip(&mut bar, tags, &chip) {
+                runs.push(("query.setDatabase", json!({ "tab": id, "database": name })));
+            }
+        }
         let why_not = run_blocked.as_deref();
         if tool_button(&mut bar, tags, RUN, "Run", ("Run every statement (Ctrl+Enter)", why_not), true) {
             runs.push((QUERY_RUN, json!({})));
@@ -960,7 +1050,6 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         if tool_button(&mut bar, tags, RUN_CURRENT, "Run current", current, false) {
             runs.push((QUERY_RUN, json!({ "current": true, "cursor": out.cursor })));
         }
-        let running = q.running.is_some();
         let stop = ("Stop the running statement", (!running).then_some("nothing is running"));
         if tool_button(&mut bar, tags, CANCEL, "Cancel", stop, false) {
             runs.push(("query.cancel", json!({})));

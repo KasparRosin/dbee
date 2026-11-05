@@ -15,7 +15,8 @@
 //! While a job runs the window repaints every 100 ms, so waits time out and progress shows even
 //! without input. The UI is thin: screens read `session.state()` and act through
 //! [`DbeeApp::run`]. A command the user started (a shortcut, a button, a dialog) goes through
-//! [`DbeeApp::start`], which hands its outcome back to where it came from ([`Origin`]), at once
+//! [`DbeeApp::start`], which gives a new query tab the tree's selected schema and hands its
+//! outcome back to where it came from ([`Origin`]), at once
 //! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; other
 //! errors show as a notice (a command that cannot run now gives its reason alone, as a sentence:
 //! [`notice_text`]), or under the connection form's buttons; the database error of a page load's
@@ -43,6 +44,9 @@ use crate::{editors, shortcuts, theme, ui_commands, workspace};
 
 /// The Apply command, whose job errors the table tab's card shows.
 const APPLY: &str = "edit.apply";
+
+/// The command that opens a query tab.
+const NEW_QUERY: &str = "tab.newQuery";
 
 /// How often a busy session repaints.
 const BUSY_REPAINT: Duration = Duration::from_millis(100);
@@ -339,6 +343,20 @@ impl DbeeApp {
         self.run_from_ui(id, params);
     }
 
+    /// `params` of a command the user started, with what the tree has selected where the command
+    /// takes it: a new query tab (from a shortcut, the menu or `+` alike) opens on the selected
+    /// schema, or the selected table's, unless `params` name one. The engine uses it where the
+    /// dialect has `USE`.
+    fn with_selection(&self, command: &str, mut params: Json) -> Json {
+        if command == NEW_QUERY
+            && let Some(schema) = self.view.work.tree.selected_schema()
+            && let Some(p) = params.as_object_mut()
+        {
+            p.entry("schema").or_insert_with(|| Json::from(schema));
+        }
+        params
+    }
+
     /// Runs command `id` because the user asked (a shortcut, a menu): a `needs…` error opens a
     /// dialog, other errors show as a notice, a job's too once it ends; a command that cannot run
     /// now says why in a notice (buttons that show the reason themselves are disabled instead).
@@ -349,6 +367,7 @@ impl DbeeApp {
     /// Runs `command` because the user asked, and hands its outcome to `origin`: now, or when
     /// its job ends (then the job is returned).
     pub(crate) fn start(&mut self, command: &'static str, params: Json, origin: Origin) -> Option<JobId> {
+        let params = self.with_selection(command, params);
         // The params are kept to run the command again after a dialog.
         match self.run(command, params.clone()) {
             Ok(Outcome::Started(job)) => {

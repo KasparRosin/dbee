@@ -55,6 +55,8 @@ pub(crate) struct Rules {
     pub bool_literals: (&'static str, &'static str),
     /// What filter operators do on the engine that their labels do not say.
     pub op_notes: &'static [(&'static [Op], &'static str)],
+    /// What the engine calls a schema: one, in a sentence, and many, as a heading.
+    pub schema_word: (&'static str, &'static str),
     pub string_literal: StringLiteral,
     /// How a binary value is written where values are literals; `None` writes it as text.
     pub binary_literal: Option<BinaryLiteral>,
@@ -382,6 +384,12 @@ impl Dialect {
     pub fn op_note(self, op: Op) -> Option<&'static str> {
         self.rules().op_notes.iter().find(|(ops, _)| ops.contains(&op)).map(|&(_, note)| note)
     }
+
+    /// What the engine calls a schema: one, in a sentence (`schema`), and many, as a heading
+    /// (`Schemas`). MySQL's are its databases.
+    pub fn schema_word(self) -> (&'static str, &'static str) {
+        self.rules().schema_word
+    }
 }
 
 #[cfg(test)]
@@ -645,6 +653,13 @@ mod tests {
             assert_eq!(Dialect::Sqlite.op_note(op), sqlite, "{op:?}");
             assert_eq!(Dialect::Postgres.op_note(op), None, "{op:?}");
         }
+    }
+
+    #[test]
+    fn each_engine_names_its_schemas() {
+        assert_eq!(Dialect::Postgres.schema_word(), ("schema", "Schemas"));
+        assert_eq!(Dialect::MySql.schema_word(), ("database", "Databases"));
+        assert_eq!(Dialect::Sqlite.schema_word(), ("schema", "Schemas"));
     }
 
     #[test]

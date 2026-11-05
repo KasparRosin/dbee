@@ -1,7 +1,8 @@
 //! The table tab's body ([`show`]), from top to bottom:
 //!
 //! - a small note when the rows cannot be edited, saying why (`table-note`: a view, no row key,
-//!   a read-only connection, or the table's own reason as the driver writes it);
+//!   a read-only connection, or the table's own reason as the driver writes it), on one line: a
+//!   longer one is cut short, and reads whole on hover;
 //! - the filter bar ([`crate::filter_bar`]);
 //! - an inline card (`table-error`) when the last Apply failed, with the server's message (the
 //!   staged changes stay, and the grid marks the row it failed on), or else when the last page
@@ -155,11 +156,12 @@ fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, 
     }
 }
 
-/// The note above the grid for rows that cannot be edited, `why` being the engine's reason. The
-/// table's own reason (`own`, the driver's) is a sentence and shows as written; dbee's are phrases.
+/// The note above the grid for rows that cannot be edited, `why` being the engine's reason, on
+/// one line (cut short, and whole on hover). The table's own reason (`own`, the driver's) is a
+/// sentence and shows as written; dbee's are phrases.
 fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str, own: Option<&str>) {
     let text = if own == Some(why) { why.to_owned() } else { format!("These rows cannot be edited: {why}.") };
-    let r = ui.label(RichText::new(text.as_str()).size(12.0).color(TOKENS.text_muted));
+    let r = ui.add(egui::Label::new(RichText::new(text.as_str()).size(12.0).color(TOKENS.text_muted)).truncate());
     tags.tag_value("table-note", &r, text.as_str());
 }
 
@@ -259,6 +261,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             raw_mode: tab.raw_mode,
             disabled: lost.then_some(LOST),
             blocked: blocked(tab, lost),
+            dialect: session.state().dialect(),
         };
         runs.extend(filter_bar::show(&mut top, &bar, tags));
         top.add_space(6.0);

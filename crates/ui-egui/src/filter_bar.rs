@@ -9,7 +9,9 @@
 //! rows and the raw field without applying. The columns come from the schema; the operators are
 //! the 13 of `dbee_sql::filter::Op`, each read as its words with its symbol in brackets (`equals
 //! (=)`), a word operator by its words alone (`like`, `is null`; [`op_text`]); `is null` and `is
-//! not null` take no value, so choosing one clears the value and hides its field. A filter whose
+//! not null` take no value, so choosing one clears the value and hides its field. An operator
+//! that does on this engine what its words do not say (`Dialect::op_note`: MySQL compares by the
+//! column's collation) says so on hover, in its list and as the chosen one. A filter whose
 //! operator takes a value and that has none is left out of the condition: its row is muted, its
 //! field's hint and hover say so, and the tab title does not count it. While changes
 //! are staged typing goes on but Apply waits (its hover says why; Enter asks anyway, and the
@@ -30,6 +32,7 @@
 //! `filter-raw-toggle` (value: whether the raw field shows), `filter-raw`, `filter-apply`.
 
 use dbee_engine::{Json, TabId};
+use dbee_sql::Dialect;
 use dbee_sql::filter::{Filter, Op};
 use egui::{
     Align, Button, ComboBox, CornerRadius, InnerResponse, Key, Layout, Rect, Response, RichText, Sense, TextEdit, TextStyle, TextWrapMode,
@@ -74,7 +77,7 @@ const ARROW_GAP: f32 = 4.0;
 const CHOICE_PAD: f32 = 7.0;
 /// A list item's height, the gap between items and the room left and right of an item's text.
 const ITEM_H: f32 = 24.0;
-const ITEM_GAP: f32 = 2.0;
+pub(crate) const ITEM_GAP: f32 = 2.0;
 const ITEM_PAD: f32 = 8.0;
 
 /// The widths of the column and operator choices in a filter row `available` wide, the operator
@@ -116,6 +119,8 @@ pub(crate) struct Bar<'a> {
     pub disabled: Option<&'static str>,
     /// Why the filters cannot be applied now (staged changes), if they cannot.
     pub blocked: Option<&'static str>,
+    /// The connection's, for its operator notes.
+    pub dialect: Dialect,
 }
 
 /// A command the bar asks for: its id and params.
@@ -269,7 +274,7 @@ fn choice<R>(
 /// An item of a choice's list reading `text`, marked when `selected`. It is [`ITEM_H`] tall, and
 /// as wide as the list or its text, whether hovered, pressed or not, so the list never moves
 /// under the pointer.
-fn item(ui: &mut egui::Ui, selected: bool, text: &str) -> Response {
+pub(crate) fn item(ui: &mut egui::Ui, selected: bool, text: &str) -> Response {
     let t = TOKENS;
     let galley = ui.painter().layout_no_wrap(text.to_string(), TextStyle::Button.resolve(ui.style()), t.text);
     let width = ui.available_width().max(galley.size().x + 2.0 * ITEM_PAD);
@@ -329,14 +334,15 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             let mut op = None;
             let combo = choice(ui, ("dbee-filter-op", bar.tab.0, n), op_w, 400.0, shown(op_text(row.op)), |ui| {
                 for o in Op::ALL {
-                    let r = item(ui, o == row.op, &op_text(o));
+                    let r = noted(item(ui, o == row.op, &op_text(o)), bar.dialect.op_note(o));
                     tags.tag_value_as(&format!("filter-{n}-op-{}", o.id()), &r, o.label(), true);
                     if r.clicked() {
                         op = Some(o);
                     }
                 }
             });
-            tags.tag_value(&format!("filter-{n}-op"), &combo.response, row.op.id());
+            let r = noted(combo.response, bar.dialect.op_note(row.op));
+            tags.tag_value(&format!("filter-{n}-op"), &r, row.op.id());
             if let Some(o) = op.filter(|o| *o != row.op) {
                 // An operator without a value drops the one typed.
                 let base = changed.clone().unwrap_or_else(|| row.clone());
@@ -395,6 +401,14 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                 runs.push(apply());
             }
         });
+    }
+}
+
+/// `r` with `note` as its hover, when there is one.
+fn noted(r: Response, note: Option<&str>) -> Response {
+    match note {
+        Some(note) => r.on_hover_text(note),
+        None => r,
     }
 }
 
