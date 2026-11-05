@@ -4,14 +4,15 @@
 //! - the split: dragged, it moves the line between the editor and the results. Where it is lasts
 //!   for the window's run, in memory, and is the same for every query tab (`View::query_split`);
 //! - the toolbar: on an engine with `USE` (`Dialect::has_use_database`), first the database chip:
-//!   the database each run of the tab starts in (`QueryTab::database`, else the connection's), in
-//!   the engine's word for one ([`database_chip`]); a click lists the catalog's databases, the
-//!   server's own left out, and choosing one sends `query.setDatabase`. It waits while the tab
-//!   runs, and while Run cannot. Then Run (`query.run`), Run current (`query.run` with `current`
-//!   and the cursor) and Cancel (`query.cancel`, enabled while the tab's run goes), a spinner
-//!   while it runs, and with several results the selector `1 · 2 · 3` (`query.showResult`; with
-//!   more than fit, those around the shown one, [`selector_range`]); at its right, what the shown
-//!   result holds: `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
+//!   the database the tab's next run starts in, as the engine knows it (`Connected::starts_in`:
+//!   the tab's own, else where the query connection is), in the engine's word for one
+//!   ([`database_chip`]); a click lists the catalog's databases, the server's own left out, and
+//!   choosing one sends `query.setDatabase`. It waits while the tab runs, and while Run cannot.
+//!   Then Run (`query.run`), Run current (`query.run` with `current` and the cursor) and Cancel
+//!   (`query.cancel`, enabled while the tab's run goes), a spinner while it runs, and with several
+//!   results the selector `1 · 2 · 3` (`query.showResult`; with more than fit, those around the
+//!   shown one, [`selector_range`]); at its right, what the shown result holds: `3 rows`, or the
+//!   cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
 //! - the last run's error card, when it stopped early ([`card`]);
 //! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
 //!   selecting and copying work, and the value panel follows the selected cell), or for a
@@ -80,7 +81,7 @@ use std::sync::{Arc, Weak};
 use dbee_core::ResultSet;
 use dbee_engine::cmd::query::{can_run, can_set_database};
 use dbee_engine::state::NO_CONNECTION_DIALECT;
-use dbee_engine::{Json, Meaning, QueryError, StatementOutcome, Tab, TabId};
+use dbee_engine::{CurrentDatabase, Json, Meaning, QueryError, StatementOutcome, Tab, TabId};
 use dbee_sql::Dialect;
 use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
@@ -768,10 +769,11 @@ fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover
     r.clicked()
 }
 
-/// What the database chip shows: the database the tab's runs start in, the ones to choose from,
-/// the engine's word for one and for many, and why it cannot be used now.
+/// What the database chip shows: the database the tab's next run starts in, as the engine knows
+/// it, the ones to choose from, the engine's word for one and for many, and why it cannot be used
+/// now.
 struct Chip<'a> {
-    database: Option<&'a str>,
+    database: CurrentDatabase,
     choices: Vec<&'a str>,
     word: (&'static str, &'static str),
     why_not: Option<String>,
@@ -795,29 +797,38 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
         let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(14.0, 14.0));
         icons::chevron(p, arrow, if enabled { t.text_muted } else { t.border }, true);
         let none = format!("No {one} chosen");
-        let (text, ink) = match chip.database {
-            Some(name) if enabled => (name, t.text),
-            Some(name) => (name, t.text_muted),
-            None => (none.as_str(), t.text_muted),
+        let unknown = format!("{} not known", capitalized(one));
+        let (text, ink) = match &chip.database {
+            CurrentDatabase::Known(Some(name)) if enabled => (name.as_str(), t.text),
+            CurrentDatabase::Known(Some(name)) => (name.as_str(), t.text_muted),
+            CurrentDatabase::Known(None) => (none.as_str(), t.text_muted),
+            CurrentDatabase::Unknown => (unknown.as_str(), t.text_muted),
         };
         let left = icon.right() + 6.0;
         let g = line_galley(ui, text, FontId::proportional(12.5), ink, (arrow.left() - 4.0 - left).max(1.0));
         ui.painter().galley(pos2(left, rect.center().y - g.size().y / 2.0), g, ink);
-        let hover = match chip.database {
-            Some(name) => format!("Each run starts in the {one} {name}. Click to choose another."),
-            None => format!("No {one} is chosen for this tab. Click to choose one."),
+        let hover = match &chip.database {
+            CurrentDatabase::Known(Some(name)) => format!("The next run starts in the {one} {name}. Click to choose another."),
+            CurrentDatabase::Known(None) => format!("No {one} is chosen for this tab. Click to choose one."),
+            CurrentDatabase::Unknown => {
+                format!("Which {one} the next run starts in is not known: a run was stopped, or reading it failed. Click to choose one.")
+            }
+        };
+        let shown = match &chip.database {
+            CurrentDatabase::Known(Some(name)) => Some(name.as_str()),
+            CurrentDatabase::Known(None) | CurrentDatabase::Unknown => None,
         };
         let r = match &chip.why_not {
             Some(why) => r.on_disabled_hover_text(format!("Choose the {one}: not now, {why}")),
             None => r.on_hover_text(hover),
         };
-        tags.tag_value_as(DATABASE, &r, chip.database, enabled);
+        tags.tag_value_as(DATABASE, &r, shown, enabled);
         Popup::menu(&r).width(CHIP_W).show(|ui| {
             ui.add(Label::new(RichText::new(many).size(11.5).color(t.text_muted)).selectable(false));
             ScrollArea::vertical().max_height(CHIP_LIST_H).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
                 for name in &chip.choices {
-                    let r = filter_bar::item(ui, chip.database == Some(*name), name);
+                    let r = filter_bar::item(ui, shown == Some(*name), name);
                     // A menu's first frame is a sizing pass, which reads every widget as disabled.
                     tags.tag_value_as(&format!("{DATABASE}-{name}"), &r, *name, true);
                     if r.clicked() {
@@ -828,6 +839,12 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
         });
     });
     chosen
+}
+
+/// `word` with its first letter upper-cased.
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
 /// The card's line under an error that means the transaction failed earlier.
@@ -1030,7 +1047,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let running = q.running.is_some();
         if let Some(c) = session.state().connected.as_ref().filter(|c| c.dialect.has_use_database()) {
             let chip = Chip {
-                database: q.database.as_deref().or_else(|| Some(c.config.database.as_str()).filter(|d| !d.is_empty())),
+                database: c.starts_in(q),
                 choices: c.catalog.schemas.iter().filter(|s| !is_system(s)).map(|s| s.name.as_str()).collect(),
                 word: c.dialect.schema_word(),
                 why_not: can_set_database(session)

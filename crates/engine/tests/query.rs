@@ -557,11 +557,16 @@ fn mysql_query_tab_uses_the_tree_database() {
         run(&mut s, "tab.activate", json!({ "tab": first }));
         run(&mut s, "query.run", json!({}));
         assert_eq!(first_value(&s).as_deref(), Some("3"));
-        // A `USE` in the text works for its run; the tab's database comes back for the next.
+        // A `USE` in the text sticks to the tab: its next run starts there too.
         run(&mut s, "tab.activate", json!({ "tab": shop }));
         run(&mut s, "query.setText", json!({ "text": "USE many; SELECT v FROM t_002" }));
         run(&mut s, "query.run", json!({}));
         assert_eq!(first_value(&s).as_deref(), Some("row of table 2"));
+        assert_eq!(shown(&s)["database"], "many", "{}", t.name());
+        run(&mut s, "query.setText", json!({ "text": "SELECT v FROM t_001" }));
+        run(&mut s, "query.run", json!({}));
+        assert_eq!(first_value(&s).as_deref(), Some("row of table 1"));
+        run(&mut s, "query.setDatabase", json!({ "database": "shop" }));
         run(&mut s, "query.setText", json!({ "text": "SELECT COUNT(*) FROM orders" }));
         run(&mut s, "query.run", json!({}));
         assert_eq!(first_value(&s), Some(ORDERS_COUNT.to_string()));
@@ -600,6 +605,93 @@ fn mysql_query_tab_uses_the_tree_database() {
         assert_eq!(shown(&s)["database"], "odd", "the tree's schema comes first");
     }
     assert!(seen > 0, "the MySQL and MariaDB servers have USE");
+}
+
+/// Every target whose dialect has `USE`, connected; at least one.
+fn with_use(mut each: impl FnMut(&TestTarget, &mut Session)) {
+    let mut seen = 0;
+    for t in engine_targets() {
+        let mut s = connected_to(&t);
+        if s.state().dialect().has_use_database() {
+            seen += 1;
+            each(&t, &mut s);
+        }
+    }
+    assert!(seen > 0, "the MySQL and MariaDB servers have USE");
+}
+
+/// Where the active tab's next run starts: `(database, known)`.
+fn starts_in(s: &Session) -> (Json, Json) {
+    let at = &shown(s)["startsIn"];
+    (at["database"].clone(), at["known"].clone())
+}
+
+/// A tab with no database runs where the query connection is: another tab's `USE` moved it,
+/// so the tab says so, and its run goes there.
+#[test]
+fn a_tab_without_a_database_starts_where_the_connection_is() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let first = tab(s, "SELECT DATABASE()");
+        assert_eq!(shown(s)["database"], Json::Null);
+        assert_eq!(starts_in(s), (Json::Null, json!(true)), "{}: the settings name no database", t.name());
+        tab(s, "USE shop");
+        run(s, "query.run", json!({}));
+        assert_eq!(shown(s)["database"], "shop", "{}: a typed USE sticks to its tab", t.name());
+        run(s, "tab.activate", json!({ "tab": first }));
+        assert_eq!(shown(s)["database"], Json::Null);
+        assert_eq!(starts_in(s), (json!("shop"), json!(true)), "{}", t.name());
+        run(s, "query.run", json!({}));
+        assert_eq!(first_value(s).as_deref(), Some("shop"), "{}", t.name());
+        assert_eq!(shown(s)["database"], "shop", "{}: after its run the tab names where it ran", t.name());
+    });
+}
+
+/// A `USE` typed in a tab makes that tab's database the one it names; another tab's next run
+/// still starts in its own.
+#[test]
+fn a_typed_use_sticks_to_its_tab_and_no_other() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let moved = run(s, "tab.newQuery", json!({ "text": "USE many; SELECT DATABASE()", "schema": "shop" }))["tab"].clone();
+        run(s, "query.run", json!({}));
+        assert_eq!(first_value(s).as_deref(), Some("many"));
+        assert_eq!(shown(s)["database"], "many", "{}", t.name());
+        run(s, "tab.newQuery", json!({ "text": "SELECT DATABASE()", "schema": "odd" }));
+        run(s, "query.run", json!({}));
+        assert_eq!(first_value(s).as_deref(), Some("odd"), "{}: the other tab starts in its own", t.name());
+        run(s, "tab.activate", json!({ "tab": moved }));
+        run(s, "query.setText", json!({ "text": "SELECT DATABASE()" }));
+        run(s, "query.run", json!({}));
+        assert_eq!(first_value(s).as_deref(), Some("many"), "{}", t.name());
+        // A tab whose `USE` fails keeps its own database: it never ran its text.
+        run(s, "query.setDatabase", json!({ "database": "dbee_gone" }));
+        assert_eq!(run_fails(s, json!({})).code(), "server");
+        assert_eq!(shown(s)["database"], "dbee_gone", "{}", t.name());
+    });
+}
+
+/// A run stopped after its text went to the server may have moved the connection: the engine
+/// does not know where it is, and says so, rather than guess.
+#[test]
+fn a_stopped_run_leaves_the_database_unknown() {
+    let _db = require_testdb!();
+    with_use(|t, s| {
+        let (key, m) = (unique("dbee_lock"), marker());
+        let held = t.hold_lock(&key).unwrap();
+        tab(s, &format!("USE many; SELECT '{m}' AS tag FROM DUAL WHERE {}", t.waits_for_lock_sql(&key)));
+        let job = start(s, json!({}));
+        until_running(t, &m);
+        run(s, "query.cancel", json!({}));
+        assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap_err().code(), "cancelled", "{}", t.name());
+        drop(held);
+        assert_eq!(shown(s)["database"], Json::Null, "{}", t.name());
+        assert_eq!(starts_in(s), (Json::Null, json!(false)), "{}", t.name());
+        // The next run that reaches the server reads it again.
+        run(s, "query.setText", json!({ "text": "SELECT 1" }));
+        run(s, "query.run", json!({}));
+        assert_eq!(starts_in(s), (json!("many"), json!(true)), "{}", t.name());
+    });
 }
 
 #[test]

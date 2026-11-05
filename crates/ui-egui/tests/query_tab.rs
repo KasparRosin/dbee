@@ -543,6 +543,11 @@ fn a_new_query_tab_opens_on_the_trees_selection() {
         ui.frame();
         assert_eq!(ui.query()["database"], Json::Null, "nothing selected, and no database in the settings");
         assert_eq!(ui.value("query-database"), Json::Null);
+        // A `USE` it runs becomes its database, as the engine reads it back.
+        ui.execute("query.setText", json!({ "text": "USE odd" }));
+        ui.ctrl("Enter");
+        ui.ran();
+        assert_eq!(ui.value("query-database"), "odd");
         // Ctrl+T on a selected database.
         ui.click("tree-schema-odd");
         ui.ctrl("T");

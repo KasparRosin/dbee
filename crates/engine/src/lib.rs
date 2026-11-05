@@ -36,7 +36,7 @@ pub use cmd::{CommandInfo, CommandSpec};
 pub use dbee_driver::Meaning;
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
-pub use state::{Connected, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total};
+pub use state::{Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total};
 pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};
 
 /// Params, results and error data.
@@ -494,7 +494,7 @@ impl Session {
         let connection = st.connected.as_ref().map(Connected::summary);
         let active = st.active_tab();
         let query = match active {
-            Some(Tab::Query(q)) => cmd::query::summary(q),
+            Some(Tab::Query(q)) => cmd::query::summary(q, st.connected.as_ref()),
             _ => Json::Null,
         };
         let table = match active {

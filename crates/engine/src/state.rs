@@ -56,6 +56,10 @@ pub struct Connected {
     /// Query tabs' statements; opened on the first query run (and again after a reconnect, or
     /// once it was lost).
     pub(crate) query: Option<Arc<dyn Connection>>,
+    /// The database the query connection is in, while it is open: the settings' when it opens,
+    /// each `USE` the engine sends, then what the dialect's read gives after each run that
+    /// reached the server.
+    pub(crate) query_database: CurrentDatabase,
     /// The query run in progress: one at a time, since the query connection runs one statement at
     /// a time and a cancel request hits whatever runs on it.
     pub(crate) query_run: Option<QueryRun>,
@@ -75,6 +79,7 @@ impl std::fmt::Debug for Connected {
             .field("lost", &self.lost)
             .field("browse_closed", &self.browse.is_closed())
             .field("query_closed", &self.query.as_ref().map(|q| q.is_closed()))
+            .field("query_database", &self.query_database)
             .field("query_run", &self.query_run)
             .field("tunnel", &self.tunnel)
             .field("credentials", &self.credentials)
@@ -82,7 +87,42 @@ impl std::fmt::Debug for Connected {
     }
 }
 
+/// What the engine knows of the database a connection is in. It is never guessed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CurrentDatabase {
+    /// Not known: a read of it failed, or a run that may have changed it was stopped.
+    #[default]
+    Unknown,
+    /// This database, or none.
+    Known(Option<String>),
+}
+
+impl CurrentDatabase {
+    /// The settings' database, as a connection opened with `config` starts in it.
+    pub fn of_settings(config: &ConnectionConfig) -> CurrentDatabase {
+        CurrentDatabase::Known(Some(config.database.clone()).filter(|d| !d.is_empty()))
+    }
+
+    /// `{database, known}`: the name or null, and whether the engine knows it.
+    pub fn summary(&self) -> Json {
+        match self {
+            CurrentDatabase::Unknown => json!({ "database": null, "known": false }),
+            CurrentDatabase::Known(d) => json!({ "database": d, "known": true }),
+        }
+    }
+}
+
 impl Connected {
+    /// The database a run of `q` starts in: the tab's own, which the run makes current first;
+    /// else the query connection's while it is open, or the settings' before it opens.
+    pub fn starts_in(&self, q: &QueryTab) -> CurrentDatabase {
+        match (&q.database, &self.query) {
+            (Some(name), _) => CurrentDatabase::Known(Some(name.clone())),
+            (None, Some(_)) => self.query_database.clone(),
+            (None, None) => CurrentDatabase::of_settings(&self.config),
+        }
+    }
+
     /// `{id, name, color, kind, host, port, database, user, ssh, readOnly, server, lost}`, as
     /// `inspect()` and `connection.open` show it: `kind` is the database type's id, `server`
     /// the product and its version (`PostgreSQL 14.12`). Never a secret.
@@ -163,8 +203,10 @@ pub struct QueryTab {
     pub shown: usize,
     /// Why the last run stopped early: an error, or a cancel.
     pub error: Option<QueryError>,
-    /// The database each run starts in, made current first with the dialect's `USE`; `None` runs
-    /// in whatever database the query connection has (none, or the last one made current).
+    /// The database each run starts in, made current first with the dialect's `USE`. After a
+    /// run that got past it, it becomes the database the query connection is then in, so a `USE`
+    /// in the text sticks to the tab. `None` runs in the query connection's current database
+    /// ([`Connected::starts_in`]).
     pub database: Option<String>,
 }
 

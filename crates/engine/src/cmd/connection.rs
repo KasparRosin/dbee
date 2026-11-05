@@ -58,7 +58,7 @@ use serde_json::json;
 
 use super::{CommandSpec, LOST, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
 use crate::allowed;
-use crate::state::{Connected, Credentials, server_text};
+use crate::state::{Connected, Credentials, CurrentDatabase, server_text};
 use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
 
 const LIST: &str = "connection.list";
@@ -871,8 +871,19 @@ fn apply_open(
     let Opened { conn, tunnel } = opened;
     let (info, dialect) = (conn.info().clone(), conn.dialect());
     s.state.store.touch_recent(&config, unix_now());
-    let c =
-        Connected { config, info, dialect, catalog: Arc::new(catalog), lost: false, browse: conn, query: None, query_run: None, tunnel, credentials };
+    let c = Connected {
+        config,
+        info,
+        dialect,
+        catalog: Arc::new(catalog),
+        lost: false,
+        browse: conn,
+        query: None,
+        query_database: CurrentDatabase::Unknown,
+        query_run: None,
+        tunnel,
+        credentials,
+    };
     let mut result = opened_json(&c);
     if let (Json::Object(map), Some(kept)) = (&mut result, kept) {
         map.insert("secretsSaved".into(), json!(kept.is_ok()));
