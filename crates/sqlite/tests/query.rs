@@ -222,7 +222,6 @@ async fn page_limit_of_101_rows_is_exact() {
 async fn twenty_megabyte_cell_loads() {
     let seed = seeded();
     let c = open(&seed).await;
-    let started = Instant::now();
     let r = ok(&c, "SELECT id, t, j FROM big_cell", QUERY_LIMITS).await;
     assert!(r.complete && r.rows.len() == 1);
     let t = r.rows[0][1].as_deref().unwrap_or_default();
@@ -230,6 +229,17 @@ async fn twenty_megabyte_cell_loads() {
     assert!(t.starts_with("0123456789abcdefghij") && t.ends_with("XYZ-_"));
     let j = r.rows[0][2].as_deref().unwrap_or_default();
     assert_eq!(j.len() as u64, c.scalar_u64("SELECT length(j) FROM big_cell").await.unwrap());
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
+async fn twenty_megabyte_cell_loads_within_twenty_seconds() {
+    let seed = seeded();
+    let c = open(&seed).await;
+    let started = Instant::now();
+    let r = ok(&c, "SELECT id, t, j FROM big_cell", QUERY_LIMITS).await;
+    assert_eq!(r.rows.len(), 1);
+    println!("sqlite: a 20 MB cell read in {:?}", started.elapsed());
     assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
 }
 

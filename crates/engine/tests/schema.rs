@@ -213,7 +213,6 @@ fn a_space_or_a_dash_starts_a_word() {
     assert_eq!((first("live"), first("stag")), ("Shop live".to_string(), "pg staging".to_string()));
 }
 
-/// `search`'s results as `table <name>` and `connection <name>`.
 fn labels(found: Vec<Found<'_>>) -> Vec<String> {
     found
         .into_iter()
@@ -246,23 +245,14 @@ fn an_empty_query_keeps_the_saved_order() {
 fn search_mixes_tables_and_connections_by_score() {
     let c = Catalog { schemas: vec![schema("shop", false, &["orders", "shop_orders"])], default_schema: None };
     let list = [saved("a", "orders"), saved("b", "Orders archive")];
-    let names = |found: Vec<Found<'_>>| {
-        found
-            .into_iter()
-            .map(|f| match f {
-                Found::Table(h) => format!("table {}", h.table.name),
-                Found::Connection(h) => format!("connection {}", h.name),
-            })
-            .collect::<Vec<_>>()
-    };
     // A tie (the same name) puts the table first; a weaker match comes after a better one of
     // either kind.
     assert_eq!(
-        names(search(Some(&c), &list, None, "orders", 20)),
+        labels(search(Some(&c), &list, None, "orders", 20)),
         ["table orders", "connection orders", "connection Orders archive", "table shop_orders"]
     );
-    assert_eq!(names(search(Some(&c), &list, None, "orders", 3)).len(), 3);
-    assert_eq!(names(search(None, &list, Some("a"), "orders", 20)), ["connection Orders archive"], "no catalog: connections only");
+    assert_eq!(labels(search(Some(&c), &list, None, "orders", 3)).len(), 3);
+    assert_eq!(labels(search(None, &list, Some("a"), "orders", 20)), ["connection Orders archive"], "no catalog: connections only");
     assert!(search(Some(&c), &list, None, "orders", 0).is_empty());
 }
 

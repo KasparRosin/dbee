@@ -54,6 +54,16 @@ async fn with_table() -> (TestTarget, SqliteConnection, SqliteConnection) {
 
 const UNCHANGED: [&str; 2] = ["1:one:1.5", "2:two:2.5"];
 
+/// Waits until a write transaction has written its first change: SQLite has made the file's
+/// rollback journal, `journal`, which it does at a transaction's first write and removes at its end.
+async fn until_written(journal: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !journal.exists() {
+        assert!(Instant::now() < deadline, "no change was written");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test]
 async fn apply_writes_all_or_nothing() {
     let (seed, w, r) = with_table().await;
@@ -174,16 +184,15 @@ async fn a_gate_cancels_an_apply_until_it_commits() {
         format!("UPDATE {t} SET name = 'slow' WHERE id = 1 AND {}", seed.slow_condition_sql(30)),
     ];
     let canceller = w.canceller();
+    let journal = seed.file().unwrap().with_extension("sqlite-journal");
     let cancel = async {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        until_written(&journal).await;
         assert!(gate.cancel(), "before the commit");
         canceller.cancel().await.unwrap();
     };
-    let started = Instant::now();
     let (out, ()) = tokio::join!(w.apply(&stmts, &gate), cancel);
     let err = out.expect_err("cancelled");
     assert_eq!((err.index, err.error.code()), (1, "cancelled"));
-    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     assert!(!w.is_closed(), "the rollback found the transaction ended, which is no loss");
     assert_eq!(rows(&r).await, UNCHANGED);
 

@@ -104,9 +104,10 @@ pub struct KindInfo {
     dbee_connections_sql: Option<&'static str>,
     /// Ends the connection with that id.
     kill_sql: fn(&str) -> String,
-    /// Makes every UPDATE of `scratch.<table>` take `secs` seconds: the SQL that does it, and what
-    /// a [`Scratch`]-style guard drops afterwards (`DROP <that>`).
-    slow_updates_sql: fn(&str, u32) -> (String, String),
+    /// On a file, which has no other session to hold a row: makes every UPDATE of
+    /// `scratch.<table>` take `secs` seconds, the SQL that does it and what a guard drops
+    /// afterwards (`DROP <that>`). `None` on a server, where a test holds the row with [`hold`].
+    slow_updates_sql: Option<fn(&str, u32) -> (String, String)>,
     /// Counts dbee's statements on `scratch.<table>` that wait for a row lock.
     row_lock_waits_sql: fn(&str) -> String,
     /// How a test makes a COMMIT wait ([`CommitGate`]); `None` where it cannot.
@@ -737,10 +738,10 @@ impl TestTarget {
         self.server().is_none_or(|s| s.full_seed)
     }
 
-    /// SQL that makes every UPDATE of `scratch.<table>` take `secs` seconds, and what to drop
-    /// afterwards (`DROP <that>`).
-    pub fn slow_updates_sql(&self, table: &str, secs: u32) -> (String, String) {
-        (self.kind.info().slow_updates_sql)(table, secs)
+    /// On a file: SQL that makes every UPDATE of `scratch.<table>` take `secs` seconds, and what to
+    /// drop afterwards (`DROP <that>`). `None` on a server ([`KindInfo`]'s `slow_updates_sql`).
+    pub fn slow_updates_sql(&self, table: &str, secs: u32) -> Option<(String, String)> {
+        self.kind.info().slow_updates_sql.map(|f| f(table, secs))
     }
 
     /// A query that counts dbee's statements running now whose text holds `marker`.

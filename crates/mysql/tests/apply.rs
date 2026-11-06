@@ -191,6 +191,7 @@ async fn multi_statement_text_is_refused_before_sending() {
 async fn dropped_apply_marks_the_connection_closed() {
     let db = require_testdb!();
     with_table(db, |s, w, r, t| async move {
+        let id = w.scalar_u64("SELECT CONNECTION_ID()").await.unwrap();
         let stmts = vec![format!("UPDATE {t} SET name = 'gone' WHERE id = 1 AND SLEEP(5) = 0")];
         let out = tokio::time::timeout(Duration::from_millis(300), apply(&w, &stmts)).await;
         assert!(out.is_err(), "apply should still be running");
@@ -199,10 +200,16 @@ async fn dropped_apply_marks_the_connection_closed() {
         assert_eq!(w.run_untyped("SELECT 1", QUERY_LIMITS).await.unwrap_err().code(), "connectionLost", "{}", s.name);
         let later = vec![format!("UPDATE {t} SET name = 'later' WHERE id = 2")];
         assert_eq!(apply(&w, &later).await.unwrap_err().error.code(), "connectionLost", "{}", s.name);
-        // Stop the sleeping statement, drop the connection, and the original rows remain.
+        // Stop the sleeping statement and drop the connection: once the server has ended its
+        // session, which rolls the transaction back, the original rows remain.
         let _ = w.canceller().cancel().await;
         drop(w);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let gone = format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while r.scalar_u64(&gone).await != Ok(0) {
+            assert!(std::time::Instant::now() < deadline, "{}: connection {id} still there", s.name);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert_eq!(rows(&r, &t).await, ["1:one:1.50", "2:two:2.50"], "{}", s.name);
     })
     .await;

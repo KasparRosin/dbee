@@ -27,14 +27,7 @@ pub(crate) const INFO: KindInfo = KindInfo {
     // 14+) waits until the backend has exited.
     dbee_connections_sql: Some("SELECT pid FROM pg_stat_activity WHERE application_name = 'dbee'"),
     kill_sql: |pid| format!("SELECT pg_terminate_backend({pid}, 5000)"),
-    slow_updates_sql: |t, secs| {
-        let f = format!("scratch.{t}_slow()");
-        let sql = format!(
-            "CREATE FUNCTION {f} RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep({secs}); RETURN NEW; END $$;
-             CREATE TRIGGER slow BEFORE UPDATE ON scratch.{t} FOR EACH ROW EXECUTE FUNCTION {f};"
-        );
-        (sql, format!("FUNCTION IF EXISTS {f} CASCADE"))
-    },
+    slow_updates_sql: None,
     row_lock_waits_sql: |t| {
         format!(
             "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND wait_event_type = 'Lock' AND query LIKE 'UPDATE \"scratch\".\"{t}\"%'"

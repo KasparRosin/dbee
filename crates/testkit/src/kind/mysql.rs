@@ -29,11 +29,7 @@ const MYSQL: KindInfo = KindInfo {
     // these are dbee's connections while no other tool connects as root.
     dbee_connections_sql: Some("SELECT ID FROM information_schema.PROCESSLIST WHERE USER = 'root' AND HOST <> 'localhost' AND ID <> CONNECTION_ID()"),
     kill_sql: |id| format!("KILL {id}"),
-    slow_updates_sql: |t, secs| {
-        // While it sleeps, the session's statement is the trigger's, which names the table.
-        let sql = format!("CREATE TRIGGER scratch.{t}_slow BEFORE UPDATE ON scratch.{t} FOR EACH ROW SET @dbee_slow_{t} = SLEEP({secs})");
-        (sql, format!("TRIGGER IF EXISTS scratch.{t}_slow"))
-    },
+    slow_updates_sql: None,
     row_lock_waits_sql: |t| {
         format!("SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_state = 'LOCK WAIT' AND trx_query LIKE 'UPDATE `scratch`.`{t}`%'")
     },

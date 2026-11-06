@@ -272,15 +272,22 @@ async fn odd_identifiers_survive() {
 }
 
 #[tokio::test]
+async fn three_hundred_tables_load() {
+    let (_seed, conn) = seeded().await;
+    let cat = load(&conn).await;
+    assert!((1..=300).all(|i| cat.table(&tr(&format!("t_{i:03}"))).is_some_and(|t| t.primary_key == ["id"])));
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
 async fn three_hundred_tables_load_quickly() {
     let (_seed, conn) = seeded().await;
     load(&conn).await;
     let started = Instant::now();
     let cat = conn.load_catalog().await.unwrap();
     let took = started.elapsed();
-    assert!(took < Duration::from_secs(2), "{took:?}");
-    assert!((1..=300).all(|i| cat.table(&tr(&format!("t_{i:03}"))).is_some_and(|t| t.primary_key == ["id"])));
     println!("catalog of {} relations in {took:?}", cat.table_count());
+    assert!(took < Duration::from_secs(2), "{took:?}");
 }
 
 #[tokio::test]

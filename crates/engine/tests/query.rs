@@ -390,6 +390,34 @@ fn read_only_refuses_insert() {
     }
 }
 
+/// A read-only connection's query tab refuses `CREATE TABLE`, `ALTER TABLE` and `DROP TABLE` on
+/// every engine: on MySQL and MariaDB the session's `SET SESSION TRANSACTION READ ONLY` holds them
+/// too (measured on 5.7, 8.0, 26.10, 10.11 and 13.0).
+#[test]
+fn read_only_refuses_ddl() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let (sc, old, new) = (t.schema("scratch"), unique("t_ro_ddl"), unique("t_ro_new"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{old}"), format!("TABLE IF EXISTS {sc}.{new}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{old} (id int)"));
+        let mut s = session();
+        let config = dbee_config::ConnectionConfig { read_only: true, ..config_for(&t) };
+        open(&mut s, json!({ "config": config, "password": pw() }));
+        tab(&mut s, "");
+        for sql in
+            [format!("CREATE TABLE {sc}.{new} (id int)"), format!("ALTER TABLE {sc}.{old} ADD COLUMN extra int"), format!("DROP TABLE {sc}.{old}")]
+        {
+            run(&mut s, "query.setText", json!({ "text": sql }));
+            let e = run_fails(&mut s, json!({}));
+            assert_eq!(e.code(), "readOnly", "{}: {sql}: {e}", t.name());
+        }
+        // The old table is there as it was, and no new one.
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{old}")), "0", "{}", t.name());
+        assert!(t.sql(&format!("SELECT extra FROM {sc}.{old}")).is_err(), "{}: no column was added", t.name());
+        assert!(t.sql(&format!("SELECT count(*) FROM {sc}.{new}")).is_err(), "{}: no table was made", t.name());
+    }
+}
+
 /// A string only this test's query holds, so other tests' queries do not count.
 fn marker() -> String {
     unique("dbee_marker")

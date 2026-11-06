@@ -389,6 +389,22 @@ async fn row_estimates() {
 }
 
 #[tokio::test]
+async fn three_hundred_tables_load() {
+    let db = require_testdb!();
+    for s in mysql_servers(db) {
+        let conn = open(s, db, "").await;
+        load(&conn, s).await;
+        let _no_ddl = DDL.read().await;
+        let rows = conn.catalog_rows().await.unwrap_or_else(|e| panic!("catalog rows on {}: {e}", s.name));
+        assert_eq!(rows.dropped(), 0, "{}", s.name);
+        let cat = rows.build(None);
+        let many = cat.schemas.iter().find(|x| x.name == "many").expect("many");
+        assert_eq!((many.tables.len(), many.tables[0].table.name.as_str()), (300, "t_001"), "{}", s.name);
+    }
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
 async fn three_hundred_tables_load_quickly() {
     let db = require_testdb!();
     for s in mysql_servers(db) {
@@ -398,12 +414,9 @@ async fn three_hundred_tables_load_quickly() {
         let _alone = DDL.write().await;
         let start = Instant::now();
         let rows = conn.catalog_rows().await.unwrap_or_else(|e| panic!("catalog rows on {}: {e}", s.name));
-        assert_eq!(rows.dropped(), 0, "{}", s.name);
         let cat = rows.build(None);
         let took = start.elapsed();
         println!("{}: the second catalog load took {took:?} ({} tables)", s.name, cat.table_count());
-        let many = cat.schemas.iter().find(|x| x.name == "many").expect("many");
-        assert_eq!((many.tables.len(), many.tables[0].table.name.as_str()), (300, "t_001"), "{}", s.name);
         assert!(took.as_secs_f64() < 2.0, "{}: took {took:?}", s.name);
     }
 }

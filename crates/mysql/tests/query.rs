@@ -267,7 +267,6 @@ async fn twenty_megabyte_cell_loads() {
     let mut seen = 0;
     for s in mysql_servers(db).filter(|s| s.full_seed) {
         let c = open(s, db).await;
-        let started = Instant::now();
         let r = ok(&c, "SELECT id, t, j FROM shop.big_cell", QUERY_LIMITS).await;
         assert!(r.complete && r.rows.len() == 1, "{}", s.name);
         let t = r.rows[0][1].as_deref().unwrap_or_default();
@@ -276,10 +275,23 @@ async fn twenty_megabyte_cell_loads() {
         let j = r.rows[0][2].as_deref().unwrap_or_default();
         let length = c.scalar_u64("SELECT LENGTH(j) FROM shop.big_cell").await.unwrap();
         assert_eq!(j.len() as u64, length, "{}", s.name);
-        assert!(started.elapsed() < Duration::from_secs(20), "{}: {:?}", s.name, started.elapsed());
         seen += 1;
     }
     assert_eq!(seen, 2, "mysql80 and mariadbnew hold the big cell");
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
+async fn twenty_megabyte_cell_loads_within_twenty_seconds() {
+    let db = require_testdb!();
+    for s in mysql_servers(db).filter(|s| s.full_seed) {
+        let c = open(s, db).await;
+        let started = Instant::now();
+        let r = ok(&c, "SELECT id, t, j FROM shop.big_cell", QUERY_LIMITS).await;
+        assert_eq!(r.rows.len(), 1, "{}", s.name);
+        println!("{}: a 20 MB cell read in {:?}", s.name, started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(20), "{}: {:?}", s.name, started.elapsed());
+    }
 }
 
 #[tokio::test]

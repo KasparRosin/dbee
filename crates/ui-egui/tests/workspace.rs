@@ -212,15 +212,30 @@ fn ctrl_p_switches_connection() {
     assert_eq!(tag_in(&i, &format!("qs-item-{pgnew_row}-kind")).unwrap()["value"], "PostgreSQL");
     assert!(rows.iter().any(|r| r["value"].as_str().is_some_and(|v| v.starts_with("pg_catalog."))), "table hits too: {rows:?}");
     assert!(!rows.iter().any(|r| r["value"] == "pg14"), "the open connection is left out");
-    // Down to the last row: the list scrolls it into view, whole.
+    // Down to the last row: the list scrolls it into view, whole. Down once more stays there.
+    let in_view = |ui: &mut Ui, n: usize| {
+        let row = ui.tag(&format!("qs-item-{n}"));
+        assert!(visible(&row), "row {n}: {row:?}");
+        let r = rect(row.as_ref().unwrap());
+        assert!(whole(&r) && r[1] + r[3] <= f64::from(APP_SIZE.y), "row {n}: {r:?}");
+    };
     for _ in 0..19 {
         ui.key("ArrowDown");
     }
-    let last = ui.tag("qs-item-19");
-    assert!(visible(&last), "{last:?}");
-    let r = rect(last.as_ref().unwrap());
-    assert!(whole(&r) && r[1] + r[3] <= f64::from(APP_SIZE.y), "{r:?}");
+    in_view(&mut ui, 19);
     assert!(!visible(&ui.tag("qs-item-0")), "the first row scrolled away");
+    ui.key("ArrowDown");
+    in_view(&mut ui, 19);
+    assert!(!visible(&ui.tag("qs-item-0")), "Down at the last row stays there");
+    // Up to the first row: it scrolls back into view, whole. Up once more stays there.
+    for _ in 0..19 {
+        ui.key("ArrowUp");
+    }
+    in_view(&mut ui, 0);
+    assert!(!visible(&ui.tag("qs-item-19")), "the last row scrolled away");
+    ui.key("ArrowUp");
+    in_view(&mut ui, 0);
+    assert!(!visible(&ui.tag("qs-item-19")), "Up at the first row stays there");
     ui.key("Escape");
     ui.quick_choose("pgnew");
     ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");

@@ -60,7 +60,7 @@ fn on_each_table(mut test: impl FnMut(&TestTarget, &str, &mut TestSession)) {
 /// busy machine), and `scratch` drops it.
 fn hold_row(t: &TestTarget, scratch: &mut Scratch<'_>, name: &str, id: u32) -> Option<Held> {
     let Some(server) = t.server() else {
-        let (slow, cleanup) = t.slow_updates_sql(name, 2);
+        let (slow, cleanup) = t.slow_updates_sql(name, 2).expect("a file has slow updates");
         q(t, &slow);
         scratch.1.insert(0, cleanup);
         return None;
@@ -636,7 +636,7 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
         assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }));
         assert_eq!(count(&s), 1);
         drop(lock);
-        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 2")), "Bob", "{}: the reconnect cancelled it", t.name());
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 2")), "Bob", "{}: the update never wrote", t.name());
         assert_eq!(table["failed"]["message"], UNKNOWN);
         assert_eq!((&table["outcomeUnknown"], &read(&mut s)["outcomeUnknown"]), (&json!(true), &json!(true)), "the UI can see why Apply asks");
         let e = refused(&mut s, "edit.apply", json!({}));
