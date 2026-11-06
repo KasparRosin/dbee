@@ -20,6 +20,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+mod kind;
+
 /// The compose project of the test servers.
 pub const PROJECT: &str = "dbee-testdb";
 
@@ -159,122 +161,10 @@ impl Kind {
     /// The one `match` on a kind.
     pub fn info(self) -> &'static KindInfo {
         match self {
-            Kind::Postgres => &KindInfo {
-                id: "postgres",
-                product: "PostgreSQL",
-                dialect: "Postgres",
-                user: "postgres",
-                database: "dbee",
-                client: Some(Client::Psql),
-                sleep_sql: |secs| format!("SELECT pg_sleep({secs})"),
-                slow_condition_sql: |secs| format!("(SELECT true FROM pg_sleep({secs}))"),
-                one_schema: None,
-                odd_table: "Odd \"Name\" 🐝",
-                keyless_tables_editable: false,
-                parallel_writes: true,
-                enforces_lengths: true,
-                copy_table_sql: copy_keyed_by_id,
-                date_column_sql: |c| format!("{c} date"),
-                repeat_sql: |text, n| format!("repeat({text}, {n})"),
-                failing_when_sql: two_rows_when,
-                long_text_type: "text",
-                json_type: "jsonb",
-                // dbee connects with application_name `dbee`; the two-argument terminate (Postgres
-                // 14+) waits until the backend has exited.
-                dbee_connections_sql: Some("SELECT pid FROM pg_stat_activity WHERE application_name = 'dbee'"),
-                kill_sql: |pid| format!("SELECT pg_terminate_backend({pid}, 5000)"),
-                slow_updates_sql: |t, secs| {
-                    let f = format!("scratch.{t}_slow()");
-                    let sql = format!(
-                        "CREATE FUNCTION {f} RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep({secs}); RETURN NEW; END $$;
-                         CREATE TRIGGER slow BEFORE UPDATE ON scratch.{t} FOR EACH ROW EXECUTE FUNCTION {f};"
-                    );
-                    (sql, format!("FUNCTION IF EXISTS {f} CASCADE"))
-                },
-                row_lock_waits_sql: |t| {
-                    format!(
-                        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND wait_event_type = 'Lock' AND query LIKE 'UPDATE \"scratch\".\"{t}\"%'"
-                    )
-                },
-                commit_wait: Some(CommitWait::AdvisoryLock),
-                read_only_sql: ("SHOW default_transaction_read_only", "on"),
-                connection_id_sql: "SELECT pg_backend_pid()",
-                running_with_sql: |m| {
-                    format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND state = 'active' AND query LIKE '%{m}%'")
-                },
-                take_lock_sql: |key| format!("SELECT pg_advisory_xact_lock(hashtext('{key}'))"),
-                waits_for_lock_sql: |key| format!("(SELECT true FROM pg_advisory_xact_lock_shared(hashtext('{key}')))"),
-                json_type_label: "jsonb",
-                plain_json_label: "json",
-                json_sorts_keys: true,
-                int_literal_class: "number",
-                int_literal_type: "int4",
-                failing_error: "more than one row returned by a subquery used as an expression",
-            },
-            Kind::MySql => &KindInfo { product: "MySQL", id: "mysql", client: Some(Client::MySql("mysql")), ..MYSQL },
-            // MariaDB 10.11 has no `transaction_read_only`.
-            Kind::MariaDb => &KindInfo {
-                product: "MariaDB",
-                id: "mariadb",
-                client: Some(Client::MySql("mariadb")),
-                read_only_sql: ("SELECT @@SESSION.tx_read_only", "1"),
-                commit_wait: Some(CommitWait::BackupStage),
-                // Its JSON is a LONGTEXT with a json_valid check, kept as written.
-                json_type_label: "longtext",
-                plain_json_label: "longtext",
-                json_sorts_keys: false,
-                int_literal_type: "int",
-                ..MYSQL
-            },
-            // SQLite has no sleep: a count that takes about that long, at least on this machine.
-            Kind::Sqlite => &KindInfo {
-                id: "sqlite",
-                product: "SQLite",
-                dialect: "Sqlite",
-                user: "",
-                database: "",
-                client: None,
-                sleep_sql: |secs| format!("SELECT (SELECT count(*) FROM ({}))", sqlite_count(secs)),
-                slow_condition_sql: |secs| format!("(SELECT count(*) FROM ({})) > 0", sqlite_count(secs)),
-                one_schema: Some("main"),
-                odd_table: "Odd \"Name\" 🐝",
-                keyless_tables_editable: true,
-                parallel_writes: false,
-                enforces_lengths: false,
-                // SQLite adds no key to a table once it is made: the copy is keyed by its rowid.
-                copy_table_sql: |t, source| format!("CREATE TABLE {t} AS SELECT * FROM {source}"),
-                date_column_sql: |c| format!("{c} date CHECK ({c} IS date({c}))"),
-                repeat_sql: |text, n| format!("printf('%.*c', {n}, {text})"),
-                failing_when_sql: |cond| format!("json(CASE WHEN {cond} THEN 'not JSON' ELSE '1' END) IS NOT NULL"),
-                long_text_type: "TEXT",
-                json_type: "JSON",
-                dbee_connections_sql: None,
-                kill_sql: |_| String::new(),
-                // A trigger cannot hold a WITH clause, so the count goes in a view the trigger reads.
-                slow_updates_sql: |t, secs| {
-                    let sql = format!(
-                        "CREATE VIEW main.{t}_slow AS SELECT count(*) AS n FROM ({});
-                         CREATE TRIGGER main.{t}_slow_update BEFORE UPDATE ON {t} BEGIN SELECT n FROM {t}_slow; END;",
-                        sqlite_count(secs)
-                    );
-                    (sql, format!("TRIGGER IF EXISTS main.{t}_slow_update; DROP VIEW IF EXISTS main.{t}_slow"))
-                },
-                row_lock_waits_sql: |_| String::new(),
-                commit_wait: None,
-                read_only_sql: ("PRAGMA query_only", "1"),
-                connection_id_sql: "",
-                running_with_sql: |_| String::new(),
-                take_lock_sql: |_| String::new(),
-                waits_for_lock_sql: |_| String::new(),
-                // Measured with its driver (M2.13): a column labels its declared type, and an
-                // expression has none.
-                json_type_label: "JSON",
-                plain_json_label: "JSON",
-                json_sorts_keys: false,
-                int_literal_class: "other",
-                int_literal_type: "",
-                failing_error: "malformed JSON",
-            },
+            Kind::Postgres => &kind::postgres::INFO,
+            Kind::MySql => &kind::mysql::INFO,
+            Kind::MariaDb => &kind::mysql::MARIADB,
+            Kind::Sqlite => &kind::sqlite::INFO,
         }
     }
 
@@ -286,74 +176,6 @@ impl Kind {
     pub fn from_id(id: &str) -> Option<Kind> {
         Kind::ALL.into_iter().find(|k| k.id() == id)
     }
-}
-
-/// What MySQL and MariaDB share.
-const MYSQL: KindInfo = KindInfo {
-    id: "mysql",
-    product: "MySQL",
-    dialect: "MySql",
-    user: "root",
-    database: "",
-    client: None,
-    sleep_sql: |secs| format!("SELECT SLEEP({secs})"),
-    // A sleep in the WHERE clause or a subquery runs once per row; a derived table runs once.
-    slow_condition_sql: |secs| format!("EXISTS (SELECT 1 FROM (SELECT SLEEP({secs}) AS z) AS d)"),
-    one_schema: None,
-    odd_table: "Odd \"Name\" é",
-    keyless_tables_editable: false,
-    parallel_writes: true,
-    enforces_lengths: true,
-    copy_table_sql: copy_keyed_by_id,
-    date_column_sql: |c| format!("{c} date"),
-    repeat_sql: |text, n| format!("repeat({text}, {n})"),
-    failing_when_sql: two_rows_when,
-    long_text_type: "LONGTEXT",
-    json_type: "JSON",
-    // The tests' own client connects over the socket (host `localhost`); dbee comes over TCP, so
-    // these are dbee's connections while no other tool connects as root.
-    dbee_connections_sql: Some("SELECT ID FROM information_schema.PROCESSLIST WHERE USER = 'root' AND HOST <> 'localhost' AND ID <> CONNECTION_ID()"),
-    kill_sql: |id| format!("KILL {id}"),
-    slow_updates_sql: |t, secs| {
-        // While it sleeps, the session's statement is the trigger's, which names the table.
-        let sql = format!("CREATE TRIGGER scratch.{t}_slow BEFORE UPDATE ON scratch.{t} FOR EACH ROW SET @dbee_slow_{t} = SLEEP({secs})");
-        (sql, format!("TRIGGER IF EXISTS scratch.{t}_slow"))
-    },
-    row_lock_waits_sql: |t| {
-        format!("SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_state = 'LOCK WAIT' AND trx_query LIKE 'UPDATE `scratch`.`{t}`%'")
-    },
-    // MySQL has no lock that holds a COMMIT but not the update before it: the global read lock
-    // holds both, and taken between the two it loses the race with a COMMIT sent at once.
-    commit_wait: None,
-    read_only_sql: ("SELECT @@SESSION.transaction_read_only", "1"),
-    connection_id_sql: "SELECT CONNECTION_ID()",
-    running_with_sql: |m| format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{m}%' AND ID <> CONNECTION_ID()"),
-    take_lock_sql: |key| format!("SELECT GET_LOCK('{key}', 0)"),
-    // Taken and given back at once, in a derived table, which runs once.
-    waits_for_lock_sql: |key| format!("EXISTS (SELECT 1 FROM (SELECT GET_LOCK('{key}', 60) + RELEASE_LOCK('{key}') AS z) AS d)"),
-    json_type_label: "json",
-    plain_json_label: "json",
-    json_sorts_keys: true,
-    int_literal_class: "number",
-    int_literal_type: "bigint",
-    failing_error: "Subquery returns more than 1 row",
-};
-
-/// [`KindInfo::copy_table_sql`] for an engine that adds a key to a copy.
-fn copy_keyed_by_id(t: &str, source: &str) -> String {
-    format!("CREATE TABLE {t} AS SELECT * FROM {source}; ALTER TABLE {t} ADD PRIMARY KEY (id)")
-}
-
-/// [`KindInfo::failing_when_sql`] by a scalar subquery that returns two rows once `cond` holds.
-fn two_rows_when(cond: &str) -> String {
-    format!("(SELECT 1 UNION ALL SELECT 1 WHERE {cond}) > 0")
-}
-
-/// A count SQLite steps through in about `secs` seconds: 2.5 million rows a second, as measured
-/// on a busy development machine (2026-11-03).
-fn sqlite_count(secs: u32) -> String {
-    let rows = u64::from(secs).saturating_mul(2_500_000);
-    format!("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < {rows}) SELECT i FROM c")
 }
 
 /// The test servers, as `env.json` describes them.

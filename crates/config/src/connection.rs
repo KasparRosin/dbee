@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::kind;
+
 /// Errors of this crate. The text never contains a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
@@ -75,27 +77,6 @@ pub struct KindOption {
     pub label: &'static str,
 }
 
-/// MySQL's and MariaDB's: on a link without TLS that the user wanted encrypted, the password
-/// may go out encrypted with a key the server sends, which dbee cannot check.
-pub const ALLOW_PUBLIC_KEY: KindOption = KindOption { id: "allowPublicKey", label: "Allow the server's public key without encryption" };
-
-/// MariaDB's row builds on this one: it lists only what differs.
-const MYSQL: KindInfo = KindInfo {
-    id: "mysql",
-    label: "MySQL",
-    default_port: Some(3306),
-    settings: Settings::Server { tls: true, ssh: true },
-    url_schemes: &["mysql"],
-    ssl_aliases: &[
-        ("DISABLED", SslMode::Disable),
-        ("PREFERRED", SslMode::Prefer),
-        ("REQUIRED", SslMode::Require),
-        ("VERIFY_CA", SslMode::VerifyCa),
-        ("VERIFY_IDENTITY", SslMode::VerifyFull),
-    ],
-    options: &[ALLOW_PUBLIC_KEY],
-};
-
 /// The database types dbee can open. Saved as the type's id.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "&'static str")]
@@ -120,26 +101,10 @@ impl DbKind {
 
     pub const fn info(self) -> &'static KindInfo {
         match self {
-            DbKind::Postgres => &KindInfo {
-                id: "postgres",
-                label: "PostgreSQL",
-                default_port: Some(5432),
-                settings: Settings::Server { tls: true, ssh: true },
-                url_schemes: &["postgres", "postgresql"],
-                ssl_aliases: &[],
-                options: &[],
-            },
-            DbKind::MySql => &MYSQL,
-            DbKind::MariaDb => &KindInfo { id: "mariadb", label: "MariaDB", url_schemes: &["mariadb"], ..MYSQL },
-            DbKind::Sqlite => &KindInfo {
-                id: "sqlite",
-                label: "SQLite",
-                default_port: None,
-                settings: Settings::File { extensions: &["sqlite", "sqlite3", "db"] },
-                url_schemes: &[],
-                ssl_aliases: &[],
-                options: &[],
-            },
+            DbKind::Postgres => &kind::postgres::INFO,
+            DbKind::MySql => &kind::mysql::INFO,
+            DbKind::MariaDb => &kind::mysql::MARIADB,
+            DbKind::Sqlite => &kind::sqlite::INFO,
         }
     }
 

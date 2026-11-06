@@ -3,12 +3,14 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod connection;
+mod kind;
 pub mod secrets;
 pub mod store;
 
 pub use connection::{
-    ALLOW_PUBLIC_KEY, ConfigError, ConnectionColor, ConnectionConfig, DbKind, KindInfo, KindOption, Settings, SshAuth, SshConfig, SslMode, UrlParts,
-    home_dir, new_id, parse_url,
+    ConfigError, ConnectionColor, ConnectionConfig, DbKind, KindInfo, KindOption, Settings, SshAuth, SshConfig, SslMode, UrlParts, home_dir, new_id,
+    parse_url,
 };
+pub use kind::mysql::ALLOW_PUBLIC_KEY;
 pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretKind, SecretStore, keyring_store};
 pub use store::{ConnectionStore, RecentEntry};
