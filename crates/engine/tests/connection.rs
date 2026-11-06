@@ -1360,6 +1360,8 @@ fn save_open_keeps_the_password_as_the_forms_save_does() {
         run(&mut s, "connection.close", json!({}));
         open(&mut s, json!({ "id": id }));
         // Off: no password is kept, so the next open asks.
+        // One session at a time: two on one thread can deadlock on the tests' lock.
+        drop(s);
         let mut s = session();
         open(&mut s, json!({ "config": ConnectionConfig { save_secrets: false, ..config_for(&t) }, "password": pw() }));
         let id = run(&mut s, "connection.saveOpen", json!({}))["id"].as_str().unwrap().to_owned();
@@ -1375,6 +1377,7 @@ fn save_open_needs_an_unsaved_connection() {
     let mut s = session();
     let e = s.execute("connection.saveOpen", json!({})).unwrap_err();
     assert!(matches!(e, EngineError::Disabled { ref why, .. } if why == "not connected"), "{e}");
+    drop(s);
     for t in engine_targets().into_iter().filter(TestTarget::is_file) {
         // Opened from the saved list: saved already.
         let mut s = connected_to(&t);
@@ -1459,6 +1462,7 @@ fn list_databases_respects_allowed_targets() {
     }
     let mut s = session_adjusted(|o| o.allowed_targets = Some(vec![("127.0.0.1".into(), pg14().port)]));
     assert!(names(&s.run_blocking(LIST, params, T).unwrap()).contains(&"dbee"));
+    drop(s);
     // Through a tunnel, the SSH server's target counts, not the database host behind it (`pg14:5432`,
     // which the sshd resolves).
     let db = db();

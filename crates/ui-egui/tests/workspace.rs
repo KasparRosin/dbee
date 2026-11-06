@@ -940,6 +940,7 @@ fn the_file_the_command_line_names_opens_once_the_window_is_up() {
     assert!(visible(&ui.tag("status-save")));
     // One that is not there: the plain error, and the window goes on.
     let gone = ui.home.home.join("gone.sqlite");
+    drop(ui);
     let mut ui = Ui::window(Setup { size: APP_SIZE, app: Some(with_file(gone.clone())), ..Setup::default() });
     ui.until("the error", |ui| ui.tag("notice").is_some());
     let notice = ui.value("notice");
