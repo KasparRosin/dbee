@@ -242,20 +242,30 @@ async fn tls_verify_full_needs_trusted_ca() {
     }
 }
 
-/// Starts `SELECT pg_sleep(30)`, cancels it after 300 ms, and expects `cancelled` within 5 s;
-/// then the connection still works.
-async fn cancel_sleep(conn: Arc<PgConnection>) {
+/// Waits until backend `pid` sleeps in `pg_sleep()`, as `watcher`, a connection to the same
+/// server, sees in `pg_stat_activity`: the statement runs.
+async fn until_sleeping(watcher: &PgConnection, pid: &str) {
+    let sql = format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid} AND wait_event = 'PgSleep'");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while scalar(watcher, &sql).await.as_deref() != Some("1") {
+        assert!(Instant::now() < deadline, "backend {pid} never got to its sleep");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Starts `SELECT pg_sleep(30)`, cancels it once `watcher` sees it sleep, and expects
+/// `cancelled`; then the connection still works.
+async fn cancel_sleep(conn: Arc<PgConnection>, watcher: &PgConnection) {
     let canceller: Canceller = conn.canceller();
+    let pid = scalar(&conn, "SELECT pg_backend_pid()").await.unwrap();
     let runner = Arc::clone(&conn);
-    let started = Instant::now();
     let job = tokio::spawn(async move { query::run_untyped(&runner, "SELECT pg_sleep(30)", QUERY_LIMITS).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    until_sleeping(watcher, &pid).await;
     canceller.cancel().await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
     let e = result.unwrap_err();
     assert_eq!(e.code(), "cancelled", "{e:?}");
     assert_eq!(e, DbError::Cancelled);
-    assert!(started.elapsed() < Duration::from_secs(6));
     assert!(!conn.is_closed());
     assert_eq!(scalar(&conn, "SELECT 'still here'").await.as_deref(), Some("still here"));
 }
@@ -264,8 +274,9 @@ async fn cancel_sleep(conn: Arc<PgConnection>) {
 async fn cancel_stops_pg_sleep() {
     let db = require_testdb!();
     for s in postgres(db) {
+        let watcher = open(&config(s, SslMode::Prefer), db).await;
         for mode in [SslMode::Prefer, SslMode::Disable] {
-            cancel_sleep(Arc::new(open(&config(s, mode), db).await)).await;
+            cancel_sleep(Arc::new(open(&config(s, mode), db).await), &watcher).await;
         }
     }
     let home = temp_home(None, Some(&db.sshd.known_hosts_line));
@@ -282,7 +293,7 @@ async fn cancel_stops_pg_sleep() {
         })
         .await
         .unwrap();
-        cancel_sleep(Arc::new(conn)).await;
+        cancel_sleep(Arc::new(conn), &open(&config(s, SslMode::Prefer), db).await).await;
     }
     t.close().await;
 }
@@ -415,11 +426,12 @@ async fn the_trait_canceller_stops_pg_sleep() {
     for s in postgres(db) {
         let conn: Arc<dyn Connection> = PgDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
         let canceller = conn.canceller();
+        let pid = conn.scalar_u64("SELECT pg_backend_pid()").await.unwrap().to_string();
         let runner = Arc::clone(&conn);
         let job = tokio::spawn(async move { runner.run_untyped("SELECT pg_sleep(30)", QUERY_LIMITS).await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        until_sleeping(&open(&config(s, SslMode::Prefer), db).await, &pid).await;
         canceller.cancel().await.unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
         assert_eq!(result.err(), Some(DbError::Cancelled));
         assert_eq!(conn.scalar_u64("SELECT 1").await, Ok(1));
     }

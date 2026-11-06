@@ -263,6 +263,43 @@ fn cancel_stops_a_long_query() {
     });
 }
 
+/// A statement that cannot end by itself while `held` holds its lock (on a server); on a file, a
+/// count of about 30 s, as a file has no other session to hold a lock.
+fn held_statement(t: &TestTarget, key: &str) -> (String, Option<dbee_testkit::Held>) {
+    let shop = t.schema("shop");
+    match t.server() {
+        Some(_) => (format!("SELECT 1 AS one FROM {shop}.orders WHERE {} LIMIT 1", t.waits_for_lock_sql(key)), Some(t.hold_lock(key).unwrap())),
+        None => (format!("SELECT 1 AS one FROM {shop}.orders WHERE {} LIMIT 1", t.slow_condition_sql(30)), None),
+    }
+}
+
+/// A cancel sent before the statement reaches the server (or SQLite starts it) stops nothing, so
+/// the run sends it again until the statement has ended: stopped right after it starts, the run
+/// ends cancelled, while the lock that holds its statement is still held. A second Cancel sends
+/// nothing itself and says the run is stopping.
+#[test]
+fn a_run_stopped_before_its_statement_starts_ends_cancelled() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        // The query connection is open: the next run goes straight to its statement.
+        tab(s, "select 1");
+        run(s, "query.run", json!({}));
+        let key = unique("dbee_gate");
+        let (sql, held) = held_statement(t, &key);
+        run(s, "query.setText", json!({ "text": sql }));
+        for _ in 0..5 {
+            let job = start(s, json!({}));
+            assert_eq!(run(s, "query.cancel", json!({})), json!({ "tab": shown(s)["tab"], "sent": true }));
+            assert_eq!(run(s, "query.cancel", json!({})), json!({ "tab": shown(s)["tab"], "sent": false, "stopping": true }));
+            let e = s.wait(job, Duration::from_secs(60)).unwrap_err();
+            assert_eq!(e.code(), "cancelled", "{}: {e}", t.name());
+        }
+        drop(held);
+        run(s, "query.setText", json!({ "text": "select 2 as two" }));
+        assert_eq!(names(&run(s, "query.run", json!({}))["results"][0]), ["two"], "the connection takes the next run");
+    });
+}
+
 #[test]
 fn cancel_stops_the_statements_after_it() {
     let _db = require_testdb!();

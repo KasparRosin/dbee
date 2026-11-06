@@ -195,18 +195,42 @@ async fn read_only_refuses_writes() {
     assert!(before < dbee_testkit::ORDERS_COUNT);
 }
 
-/// Starts `sql`, cancels it after 300 ms through the `Cancel` trait, and expects `cancelled`
-/// within 5 s; then the connection still works.
-async fn cancel_after_300_ms(conn: Arc<SqliteConnection>, sql: String) {
+/// Waits until a statement on `file` holds the file's lock: a connection of the test's own then
+/// cannot take it. The statement has started its steps, where SQLite takes an interrupt.
+async fn until_locked(file: &Path) {
+    let file = file.to_path_buf();
+    let probing = tokio::task::spawn_blocking(move || {
+        let probe = rusqlite::Connection::open(&file).unwrap();
+        probe.busy_timeout(Duration::ZERO).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match probe.execute_batch("BEGIN EXCLUSIVE; ROLLBACK") {
+                Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => return,
+                Ok(()) => {}
+                Err(e) => panic!("the probe: {e}"),
+            }
+            assert!(Instant::now() < deadline, "no statement took the file's lock");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+    probing.await.unwrap();
+}
+
+/// A statement of about 30 s that reads `orders`, so it holds the file's lock while it runs.
+fn slow_read(seed: &TestTarget) -> String {
+    format!("SELECT count(*) FROM orders WHERE {}", seed.slow_condition_sql(30))
+}
+
+/// Starts `sql`, which takes the file's lock, cancels it through the `Cancel` trait once it holds
+/// it, and expects `cancelled`; then the connection still works.
+async fn cancel_once_running(conn: Arc<SqliteConnection>, file: &Path, sql: String) {
     let canceller: Arc<dyn Cancel> = Arc::new(conn.canceller());
     let runner = Arc::clone(&conn);
     let job = tokio::spawn(async move { runner.run(&sql, QUERY_LIMITS).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let started = Instant::now();
+    until_locked(file).await;
     canceller.cancel().await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
     assert_eq!(result.err(), Some(DbError::Cancelled));
-    assert!(started.elapsed() < Duration::from_secs(5));
     assert!(!conn.is_closed());
     assert_eq!(conn.scalar_u64("SELECT 7").await, Ok(7));
 }
@@ -214,11 +238,12 @@ async fn cancel_after_300_ms(conn: Arc<SqliteConnection>, sql: String) {
 #[tokio::test]
 async fn cancel_stops_a_long_query() {
     let seed = seeded();
-    let conn = Arc::new(open(&config(seed.file().unwrap(), false)).await);
-    cancel_after_300_ms(Arc::clone(&conn), seed.sleep_sql(30)).await;
+    let file = seed.file().unwrap();
+    let conn = Arc::new(open(&config(file, false)).await);
+    cancel_once_running(Arc::clone(&conn), file, slow_read(&seed)).await;
     // A long statement that writes: nothing of it stays.
     let insert = format!("CREATE TABLE counted AS {}", count_to(1_000_000_000));
-    cancel_after_300_ms(Arc::clone(&conn), insert).await;
+    cancel_once_running(Arc::clone(&conn), file, insert).await;
     assert_eq!(scalar(&conn, "SELECT count(*) FROM sqlite_schema WHERE name = 'counted'").await, 0);
 }
 
@@ -231,7 +256,7 @@ async fn late_interrupt_never_cancels_the_next_statement() {
     canceller.cancel().await.unwrap();
     assert_eq!(scalar(&conn, &count_to(2_000_000)).await, 2_000_000);
     // The statement after a cancelled one runs to its end.
-    cancel_after_300_ms(Arc::clone(&conn), seed.sleep_sql(30)).await;
+    cancel_once_running(Arc::clone(&conn), seed.file().unwrap(), slow_read(&seed)).await;
     assert_eq!(scalar(&conn, &count_to(2_000_000)).await, 2_000_000);
     // Cancels that meet short statements at every point of their run: each stops the statement
     // it met or nothing, never the one after it.
@@ -277,11 +302,11 @@ async fn sqlite_driver_connects_through_the_trait() {
     // The trait's canceller stops a long statement.
     let canceller = conn.canceller();
     let runner = Arc::clone(&conn);
-    let sleep = seed.sleep_sql(30);
-    let job = tokio::spawn(async move { runner.run_untyped(&sleep, QUERY_LIMITS).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let slow = slow_read(&seed);
+    let job = tokio::spawn(async move { runner.run_untyped(&slow, QUERY_LIMITS).await });
+    until_locked(seed.file().unwrap()).await;
     canceller.cancel().await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
     assert_eq!(result.err(), Some(DbError::Cancelled));
     assert_eq!(conn.scalar_u64("SELECT 1").await, Ok(1));
 }
@@ -293,10 +318,9 @@ async fn a_dropped_connection_stops_its_statement() {
     let canceller = conn.canceller();
     let conn = Arc::new(conn);
     let runner = Arc::clone(&conn);
-    // It reads a table, so it holds the file's read lock while it runs.
-    let slow = format!("SELECT count(*) FROM orders WHERE {}", seed.slow_condition_sql(30));
+    let slow = slow_read(&seed);
     let job = tokio::spawn(async move { runner.run(&slow, QUERY_LIMITS).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    until_locked(seed.file().unwrap()).await;
     // The job holds the last handle; abandoning the job drops it, and the statement with it.
     job.abort();
     drop(conn);

@@ -57,6 +57,7 @@ use serde_json::json;
 use super::connection::cancel_statements;
 use super::edit;
 use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needs_db, p};
+use crate::jobs::{self, Stop};
 use crate::state::{PageView, TableTab, Total};
 use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
 
@@ -403,8 +404,10 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     let seq = t.seq;
     let columns = PageColumns::of(&info);
     let job_conn = Arc::clone(&conn);
-    let job = s.spawn_job(label, async move {
-        let loaded = load(job_conn.as_ref(), dialect, &info, &view, last).await;
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
+    let job = s.spawn_stoppable_job(label, stop, async move {
+        let loaded = load(job_conn.as_ref(), dialect, &info, &view, last, &job_stop).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_load(s, &conn, tab, seq, view, last, columns, loaded));
         apply
     });
@@ -423,12 +426,14 @@ pub(crate) struct Loaded {
     page: Result<(u64, ResultSet), DbError>,
 }
 
-async fn load(conn: &dyn Connection, dialect: Dialect, info: &TableInfo, view: &PageView, last: bool) -> Loaded {
+/// Loads the page, counting first for `last`; `stop` stops the statement that runs, and the next
+/// does not start ([`jobs::stoppable`]).
+async fn load(conn: &dyn Connection, dialect: Dialect, info: &TableInfo, view: &PageView, last: bool, stop: &Stop) -> Loaded {
     let mut page = view.page;
     let mut counted = None;
     if last {
         let rows = match count_sql(dialect, info, &view.applied) {
-            Ok(sql) => conn.scalar_u64(&sql).await,
+            Ok(sql) => jobs::stoppable(conn.canceller(), conn.scalar_u64(&sql), stop).await,
             // Built once already, before the job started.
             Err(e) => Err(DbError::Other(e.to_string())),
         };
@@ -441,7 +446,7 @@ async fn load(conn: &dyn Connection, dialect: Dialect, info: &TableInfo, view: &
         }
     }
     let rows = match page_sql(dialect, info, &view.applied, view.sort.as_ref(), page) {
-        Ok(sql) => conn.run_untyped(&sql, PAGE_LIMITS).await,
+        Ok(sql) => jobs::stoppable(conn.canceller(), conn.run_untyped(&sql, PAGE_LIMITS), stop).await,
         Err(e) => Err(DbError::Other(e.to_string())),
     };
     Loaded { counted, page: rows.map(|rs| (page, rs)) }
@@ -579,7 +584,7 @@ impl Reload {
     }
 
     pub(crate) async fn run(&self, conn: &dyn Connection) -> Loaded {
-        load(conn, self.dialect, &self.info, &self.view, false).await
+        load(conn, self.dialect, &self.info, &self.view, false, &Stop::default()).await
     }
 
     pub(crate) fn finish(self, s: &mut Session, conn: &Arc<dyn Connection>, tab: TabId, loaded: Loaded) -> Result<Json, EngineError> {
@@ -760,8 +765,10 @@ fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let estimate = quick_estimate(dialect, info, &condition);
     let conn = s.browse()?;
     let job_conn = Arc::clone(&conn);
-    let job = s.spawn_job(COUNT, async move {
-        let rows = job_conn.scalar_u64(&sql).await;
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
+    let job = s.spawn_stoppable_job(COUNT, stop, async move {
+        let rows = jobs::stoppable(job_conn.canceller(), job_conn.scalar_u64(&sql), &job_stop).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_count(s, &conn, tab, &condition, rows));
         apply
     });
@@ -806,11 +813,13 @@ fn apply_count(
     }
 }
 
-/// `{}` → `{sent}`: while the tab loads a page or counts, sends a cancel request for the
-/// statement running on the browse connection (the job then ends with `cancelled`, and the rows
-/// from before stay). `sent: false` when the tab runs nothing. The tab's markers name only
-/// running jobs on the current browse connection (see the module docs); a marker whose job is
-/// not running does not count, all the same.
+/// `{}` → `{sent, stopping?}`: while the tab loads a page or counts, stops those jobs: each sends
+/// a cancel request for its statement on the browse connection, again while the statement has not
+/// ended ([`jobs::stoppable`]); the job then ends with `cancelled`, and the rows from before stay.
+/// `sent: false` when the tab runs nothing; called again while they stop, it sends nothing more
+/// (`{sent: false, stopping: true}`). The tab's markers name only running jobs on the current
+/// browse connection (see the module docs); a marker whose job is not running does not count, all
+/// the same.
 ///
 /// While the tab's own Apply runs, `{sent: true, apply: true}`: the Apply is cancelled (it writes
 /// nothing, and keeps its edits) and a cancel request stops the statement it waits on, as long as
@@ -821,7 +830,9 @@ fn apply_count(
 /// A cancel request cancels whatever statement runs on the connection at that moment, and every
 /// tab shares the browse connection. So while another tab's `edit.apply` job runs (or one of a tab
 /// closed meanwhile) nothing is sent and the result is `Busy`: the tab's load may still be
-/// waiting behind the Apply, and the request would roll the Apply back instead.
+/// waiting behind the Apply, and the request would roll the Apply back instead. A load waiting
+/// behind another tab's load sends its requests to that one, as before its own: the connection
+/// runs one statement at a time, in turn, so never to one that comes after it.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));
@@ -839,12 +850,17 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     if !running {
         return Ok(Outcome::Done(json!({ "sent": false })));
     }
+    let jobs = [t.loading, t.counting.filter(|&c| Some(c) != t.loading)];
     if s.jobs.is_running_label(edit::APPLY) {
         return Err(EngineError::Busy(edit::APPLYING.into()));
     }
-    let conn = s.browse()?;
-    cancel_statements(s, std::iter::once(conn));
-    Ok(Outcome::Done(json!({ "sent": true })))
+    s.browse()?;
+    let stopped: Vec<bool> = jobs.into_iter().flatten().filter_map(|job| s.jobs.stop(job)).collect();
+    Ok(Outcome::Done(match (stopped.contains(&true), stopped.is_empty()) {
+        (true, _) => json!({ "sent": true }),
+        (false, true) => json!({ "sent": false }),
+        (false, false) => json!({ "sent": false, "stopping": true }),
+    }))
 }
 
 /// `{}` → a job returning `{tab, page, rows, hasNext, total}`: loads the page again. The total

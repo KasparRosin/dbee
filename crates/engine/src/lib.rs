@@ -527,6 +527,16 @@ impl Session {
         self.jobs.spawn(label, fut)
     }
 
+    /// [`Session::spawn_job`] for a job that `stop` stops (`Jobs::stop`).
+    pub(crate) fn spawn_stoppable_job(
+        &mut self,
+        label: &'static str,
+        stop: Arc<jobs::Stop>,
+        fut: impl Future<Output = Apply> + Send + 'static,
+    ) -> JobId {
+        self.jobs.spawn_stoppable(label, stop, fut)
+    }
+
     /// The job whose result is being applied, inside an [`Apply`]; `None` elsewhere.
     pub(crate) fn applying_job(&self) -> Option<JobId> {
         self.jobs.applying()

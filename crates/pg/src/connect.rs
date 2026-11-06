@@ -1,14 +1,16 @@
 //! Opening a connection: TCP or an SSH tunnel channel, TLS, login, the session setup, and the
 //! cancel request.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use dbee_config::ConnectionConfig;
 use dbee_driver::{CONNECT_TIMEOUT, DbError, ServerInfo, Target};
 use dbee_ssh::Tunnel;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_postgres::tls::MakeTlsConnect;
@@ -84,8 +86,11 @@ impl PgConnection {
     /// Serializes operations: hold the guard for the whole operation. Refuses with
     /// [`DbError::ConnectionLost`] once the connection is closed, checked after the mutex is
     /// taken so an operation queued behind an abandoned apply cannot run inside its transaction.
+    /// A cancel request on its way is waited for first ([`Canceller::cancel`]), so it reaches the
+    /// statement it was sent for, or none.
     pub(crate) async fn lock(&self) -> Result<MutexGuard<'_, ()>, DbError> {
         let guard = self.lock.lock().await;
+        drop(self.canceller.on_its_way.lock().await);
         if self.is_closed() {
             return Err(DbError::ConnectionLost);
         }
@@ -110,48 +115,60 @@ impl PgConnection {
     }
 }
 
-/// The route a cancel request takes when the connection runs through a tunnel.
+/// The server the connection reached, for a cancel request: `host` and `port`, through `tunnel`
+/// when it has one.
 #[derive(Clone)]
-struct TunnelRoute {
-    tunnel: Arc<Tunnel>,
+struct Route {
+    tunnel: Option<Arc<Tunnel>>,
     host: String,
     port: u16,
 }
 
 /// Sends a cancel request for the statement running on one connection. Cheap to clone; holds
-/// no lock.
+/// none of the connection's locks.
 #[derive(Clone)]
 pub struct Canceller {
     token: CancelToken,
     tls: Tls,
-    route: Option<TunnelRoute>,
+    route: Route,
+    /// Held while a request is on its way; the connection starts no statement meanwhile.
+    on_its_way: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for Canceller {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The token holds the backend's secret key: not shown.
-        f.debug_struct("Canceller").field("tls", &self.tls).field("tunnel", &self.route.is_some()).finish()
+        f.debug_struct("Canceller").field("tls", &self.tls).field("tunnel", &self.route.tunnel.is_some()).finish()
     }
 }
 
 impl Canceller {
     /// Ask the server to cancel the running statement, over a new connection: a new channel
-    /// through the tunnel, or a direct TCP connection to the address the connection uses. `Ok`
-    /// means the request was delivered; the statement then fails with [`DbError::Cancelled`],
-    /// unless it finished first.
+    /// through the tunnel, or a direct connection to the host the connection uses. `Ok` means the
+    /// request was handled: the server closed that connection, as it does once it has (the
+    /// protocol sends no answer); the statement then fails with [`DbError::Cancelled`], unless it
+    /// finished first. The connection starts no statement until then ([`PgConnection::lock`]).
     pub async fn cancel(&self) -> Result<(), DbError> {
         // The timeout below needs a runtime; without one it would panic.
         tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("cancelling needs a tokio runtime".into()))?;
         let sending = async {
-            match &self.route {
-                Some(r) => {
-                    let stream = r.tunnel.connect(&r.host, r.port).await?;
-                    let tls = tls_connect(&self.tls, &r.host, &stream);
-                    self.token.cancel_query_raw(stream, tls).await
+            let _on_its_way = self.on_its_way.lock().await;
+            let Route { tunnel, host, port } = &self.route;
+            match tunnel {
+                Some(tunnel) => self.request(tunnel.connect(host, *port).await?).await,
+                #[cfg(unix)]
+                None if host.starts_with('/') => {
+                    let socket = std::path::Path::new(host).join(format!(".s.PGSQL.{port}"));
+                    let stream = tokio::net::UnixStream::connect(socket).await.map_err(|e| DbError::Connect(format!("{host}: {e}")))?;
+                    self.request(stream).await
                 }
-                None => self.token.cancel_query(self.tls.connector.clone()).await,
+                None => {
+                    let stream = tokio::net::TcpStream::connect((host.as_str(), *port))
+                        .await
+                        .map_err(|e| DbError::Connect(format!("{}: {e}", address(host, *port))))?;
+                    self.request(stream).await
+                }
             }
-            .map_err(|e| error::map(&e, Phase::Connect))
         };
         match tokio::time::timeout(CONNECT_TIMEOUT, sending).await {
             Ok(result) => {
@@ -159,6 +176,60 @@ impl Canceller {
                 result
             }
             Err(_) => Err(DbError::Connect(format!("the cancel request was not delivered within {} s", CONNECT_TIMEOUT.as_secs()))),
+        }
+    }
+}
+
+impl Canceller {
+    /// Sends the cancel request over `stream`, with TLS as the connection has it, and waits until
+    /// the server has closed it.
+    async fn request<S>(&self, stream: S) -> Result<(), DbError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let stream = UntilClosed { inner: stream, shut: false };
+        let tls = tls_connect(&self.tls, &self.route.host, &stream);
+        self.token.cancel_query_raw(stream, tls).await.map_err(|e| error::map(&e, Phase::Connect))
+    }
+}
+
+/// A stream whose shutdown also waits until the other end has closed the connection: a cancel
+/// request has been handled once the server closed its connection.
+struct UntilClosed<S> {
+    inner: S,
+    shut: bool,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for UntilClosed<S> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for UntilClosed<S> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if !self.shut {
+            ready!(Pin::new(&mut self.inner).poll_shutdown(cx))?;
+            self.shut = true;
+        }
+        let mut bytes = [0u8; 256];
+        loop {
+            let mut read = ReadBuf::new(&mut bytes);
+            match ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read)) {
+                Ok(()) if read.filled().is_empty() => return Poll::Ready(Ok(())),
+                // Whatever the server sends before it closes (a TLS alert) is not read.
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Poll::Ready(Ok(())),
+                Err(e) => return Poll::Ready(Err(e)),
+            }
         }
     }
 }
@@ -256,8 +327,8 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
         }
     };
     let info = setup(&client, cfg.read_only).await?;
-    let route = t.tunnel.as_ref().map(|tunnel| TunnelRoute { tunnel: Arc::clone(tunnel), host: cfg.host.clone(), port: cfg.port });
-    let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), route };
+    let route = Route { tunnel: t.tunnel.clone(), host: cfg.host.clone(), port: cfg.port };
+    let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), route, on_its_way: Arc::default() };
     Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller })
 }
 
@@ -339,4 +410,76 @@ async fn setup(client: &Client, read_only: bool) -> Result<ServerInfo, DbError> 
     }
     let warnings = version_warning(version_num).into_iter().collect();
     Ok(ServerInfo { product: PRODUCT.into(), version: version.clone(), version_num, read_only: server_read_only, warnings })
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_shutdown_waits_until_the_other_end_closes() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let (got_all, all_got) = tokio::sync::oneshot::channel();
+        let (close, closing) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut seen = Vec::new();
+            socket.read_to_end(&mut seen).await.unwrap();
+            got_all.send(seen).unwrap();
+            let _ = closing.await;
+        });
+        let client = tokio::spawn(async move {
+            let mut stream = UntilClosed { inner: TcpStream::connect(at).await.unwrap(), shut: false };
+            stream.write_all(b"cancel").await.unwrap();
+            stream.shutdown().await
+        });
+        // The server has the request and the client's end of it, and has not closed: the
+        // client's shutdown is still waiting.
+        assert_eq!(all_got.await.unwrap(), b"cancel");
+        assert!(!client.is_finished());
+        close.send(()).unwrap();
+        server.await.unwrap();
+        assert!(client.await.unwrap().is_ok(), "done once the server closed");
+    }
+
+    #[test]
+    fn no_statement_starts_while_a_cancel_request_is_on_its_way() {
+        let db = dbee_testkit::require_testdb!();
+        let server = db.server("pg14").unwrap();
+        let config = ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port: server.port,
+            user: "postgres".into(),
+            database: "dbee".into(),
+            ..ConnectionConfig::default()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let target = Target {
+                config: &config,
+                password: Some(&db.password),
+                tunnel: None,
+                purpose: dbee_driver::Purpose::Browse,
+                create_file: false,
+                allowed_dirs: None,
+            };
+            let conn = Arc::new(connect(target).await.unwrap());
+            let on_its_way = conn.canceller.on_its_way.lock().await;
+            let starting = tokio::spawn({
+                let conn = Arc::clone(&conn);
+                async move { conn.lock().await.map(drop) }
+            });
+            // One thread: the task has run as far as it can, to the request on its way.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!starting.is_finished(), "started while a cancel request was on its way");
+            drop(on_its_way);
+            assert_eq!(starting.await.unwrap(), Ok(()));
+        });
+    }
 }

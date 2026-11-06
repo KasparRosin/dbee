@@ -26,9 +26,10 @@
 //!
 //! **Stopping.** `query.cancel`, closing the running tab, `connection.close` and a reconnect stop
 //! the run through its `Stop`. The job then sends the cancel request itself, through the query
-//! connection's `Cancel`, and waits for the statement to end (so the request cannot reach a
-//! later run), and it starts no further statement. A stopped run ends with code `cancelled`. The
-//! job is never dropped or aborted.
+//! connection's `Cancel`, again while the statement has not ended (a request that reaches the
+//! server before the statement is lost), and waits for the statement to end and for each request
+//! to arrive (so none can reach a later run, [`crate::jobs::stoppable`]); it starts no further
+//! statement. A stopped run ends with code `cancelled`. The job is never dropped or aborted.
 //!
 //! **The database a run starts in.** On a dialect with `USE`, a tab with a database of its own
 //! makes it current first, unless the query connection is known to be there already (a `USE`
@@ -69,7 +70,7 @@ use serde_json::json;
 
 use super::connection::{db_error, driver_for};
 use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, bad, disabled, ignored, needs_db, p};
-use crate::jobs::Stop;
+use crate::jobs::{self, Stop};
 use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, Selection, StatementOutcome};
 use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
 
@@ -289,7 +290,9 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
         }
     };
     let moves = setup.dialect.has_use_database();
-    if let Some((name, sql)) = setup.use_database {
+    if stop.is_set() {
+        ran.failure = stopped(0);
+    } else if let Some((name, sql)) = setup.use_database {
         match run_one(conn.as_ref(), &sql, Limits { max_rows: 0, max_bytes: 0 }, &stop).await {
             Ok(_) => ran.current = CurrentDatabase::known(Some(name)),
             Err(error) => {
@@ -344,21 +347,10 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
     ran
 }
 
-/// Runs one statement. When the run is stopped meanwhile, the cancel request goes out and the
-/// statement is waited for (it then usually ends with `Cancelled`).
+/// Runs one statement. When the run is stopped meanwhile, the cancel request goes out until the
+/// statement has ended ([`jobs::stoppable`]); it then usually ends with `Cancelled`.
 async fn run_one(conn: &dyn Connection, sql: &str, limits: Limits, stop: &Stop) -> Result<ResultSet, DbError> {
-    let mut running = conn.run(sql, limits);
-    tokio::select! {
-        result = &mut running => result,
-        () = stop.stopped() => {
-            let canceller = conn.canceller();
-            let (sent, result) = futures_util::future::join(canceller.cancel(), &mut running).await;
-            if sent.is_err() {
-                log::info!("query: the cancel request was not delivered");
-            }
-            result
-        }
-    }
+    jobs::stoppable(conn.canceller(), conn.run(sql, limits), stop).await
 }
 
 // ---- applying a run --------------------------------------------------------------------------
@@ -587,7 +579,7 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let generation = Arc::downgrade(&c.browse);
     let stop = Arc::new(Stop::default());
     let job_stop = Arc::clone(&stop);
-    let job = s.spawn_job(RUN, async move {
+    let job = s.spawn_stoppable_job(RUN, Arc::clone(&stop), async move {
         let ran = run_statements(via, text, ranges, setup, job_stop, RUN_LIMITS.max_bytes).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_run(s, tab, &generation, ran));
         apply
@@ -601,22 +593,23 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Started(job))
 }
 
-/// `{}` → `{tab, sent}`: stops the active tab's run (see the module docs); `sent: false` when the
-/// tab runs nothing.
+/// `{}` → `{tab, sent, stopping?}`: stops the active tab's run (see the module docs); `sent: false`
+/// when the tab runs nothing. Called again while the run stops, it sends nothing itself (the job
+/// sends the request again while the statement runs): `{tab, sent: false, stopping: true}`.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let (tab, running) = match s.state.active_tab() {
         Some(Tab::Query(q)) => (q.id, q.running),
         _ => return Err(disabled(NO_QUERY_TAB)),
     };
     let run = s.state.connected.as_ref().and_then(|c| c.query_run.as_ref());
-    let sent = match (running, run) {
-        (Some(job), Some(run)) if run.job == job && s.jobs.is_running(job) => {
-            run.stop.stop();
-            true
-        }
-        _ => false,
+    let stopped = match (running, run) {
+        (Some(job), Some(run)) if run.job == job && s.jobs.is_running(job) => Some(run.stop.stop()),
+        _ => None,
     };
-    Ok(Outcome::Done(json!({ "tab": tab, "sent": sent })))
+    Ok(Outcome::Done(match stopped {
+        Some(false) => json!({ "tab": tab, "sent": false, "stopping": true }),
+        sent => json!({ "tab": tab, "sent": sent.is_some() }),
+    }))
 }
 
 /// `{tab?, database}` → `{tab, database}`: the database the query tab's runs start in (default:

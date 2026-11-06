@@ -327,6 +327,17 @@ async fn wait_gone(other: &MySqlConnection, id: u64) {
     }
 }
 
+/// Waits until connection `id` sleeps in `SLEEP()`, as `watcher`, a connection to the same server,
+/// sees in the processlist: the statement runs.
+async fn until_sleeping(watcher: &MySqlConnection, id: u64) {
+    let sql = format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id} AND STATE = 'User sleep'");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while watcher.scalar_u64(&sql).await != Ok(1) {
+        assert!(Instant::now() < deadline, "connection {id} never got to its sleep");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn killed_connection_reports_connection_lost() {
     let db = require_testdb!();
@@ -345,9 +356,9 @@ async fn killed_connection_reports_connection_lost() {
         let id = c.scalar_u64("SELECT CONNECTION_ID()").await.unwrap();
         let runner = std::sync::Arc::clone(&c);
         let job = tokio::spawn(async move { runner.run("SELECT SLEEP(30)", QUERY_LIMITS).await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        until_sleeping(&other, id).await;
         ok(&other, &format!("KILL {id}"), QUERY_LIMITS).await;
-        let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not ended within 5 s").unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not ended").unwrap();
         assert_eq!(result.unwrap_err(), DbError::ConnectionLost, "{}", s.name);
         assert!(c.is_closed(), "{}", s.name);
     }
@@ -406,11 +417,12 @@ async fn a_cancelled_sleep_is_cancelled() {
     for s in mysql_servers(db) {
         let c = std::sync::Arc::new(open(s, db).await);
         let canceller = c.canceller();
+        let id = c.scalar_u64("SELECT CONNECTION_ID()").await.unwrap();
         let runner = std::sync::Arc::clone(&c);
         let job = tokio::spawn(async move { runner.run("SELECT SLEEP(30)", QUERY_LIMITS).await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        until_sleeping(&open(s, db).await, id).await;
         canceller.cancel().await.unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
         assert_eq!(result.unwrap_err(), DbError::Cancelled, "{}", s.name);
         assert!(!c.is_closed(), "{}", s.name);
         assert_eq!(c.scalar_u64("SELECT 3").await.unwrap(), 3, "{}", s.name);

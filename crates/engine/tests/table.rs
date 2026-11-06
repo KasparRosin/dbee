@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use dbee_core::TableRef;
-use dbee_engine::{EngineError, Json, Outcome, Session};
+use dbee_engine::{Json, Outcome, Session};
 use dbee_testkit::{Held, TestTarget, require_testdb, unique};
 use serde_json::json;
 
@@ -734,23 +734,34 @@ fn cancel_stops_a_slow_page() {
         open_table(s, t.schema("shop"), "orders");
         // Nothing runs: nothing to cancel.
         assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": false }));
-        let slow = json!({ "raw": t.slow_condition_sql(30), "rawMode": true });
-        let Outcome::Started(job) = s.execute("table.setFilters", slow).unwrap() else { panic!("a job") };
-        std::thread::sleep(Duration::from_millis(300));
-        // A cancel that arrives before the statement starts cancels nothing, so it is sent again
-        // until the job ends.
-        let started = Instant::now();
-        let e = loop {
-            assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
-            match s.wait(job, Duration::from_millis(500)) {
-                Err(EngineError::Timeout) => assert!(started.elapsed() < Duration::from_secs(10), "the page was not cancelled"),
-                other => break other.unwrap_err(),
+        let key = unique("dbee_gate");
+        let gate = hold_gate(t, &key);
+        // On a file the condition counts for about 30 s, as a file has no other session to hold a lock.
+        let slow = if t.is_file() { t.slow_condition_sql(30) } else { t.waits_for_lock_sql(&key) };
+        // Stopped right after it starts, and once it runs: each time it ends cancelled while its
+        // statement cannot end by itself (a cancel that comes before the statement is sent again).
+        for running in [false, true] {
+            let Outcome::Started(job) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
+            if running && t.lists_running_statements() {
+                until_running(t, &key);
             }
-        };
-        assert_eq!(e.code(), "cancelled", "{}: {e}", t.name());
-        // The rows from before stay, and the connection works.
-        assert_eq!(rows(&read(s)), 100);
-        assert_eq!(s.inspect()["table"]["applied"], "none");
+            assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
+            assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": false, "stopping": true }), "a second cancel sends nothing itself");
+            let e = s.wait(job, Duration::from_secs(60)).unwrap_err();
+            assert_eq!(e.code(), "cancelled", "{}: {e}", t.name());
+            // The rows from before stay.
+            assert_eq!(rows(&read(s)), 100);
+            assert_eq!(s.inspect()["table"]["applied"], "none");
+        }
+        // A count is stopped the same way: its condition applied while the lock is free.
+        drop(gate);
+        run(s, "table.setFilters", json!({ "raw": gated(t, &key), "rawMode": true }));
+        let gate = hold_gate(t, &key);
+        let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
+        assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
+        assert_eq!(s.wait(count, Duration::from_secs(60)).unwrap_err().code(), "cancelled", "{}", t.name());
+        drop(gate);
+        // The connection works.
         assert_eq!(page(s, json!("next"))["page"], 1);
     });
 }

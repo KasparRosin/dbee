@@ -1211,11 +1211,8 @@ fn apply_reconnect(
     c.dialect = conn.dialect();
     c.catalog = Arc::new(catalog);
     let old_browse = std::mem::replace(&mut c.browse, conn);
-    let old_query = c.query.take();
-    let query_reset = old_query.is_some();
-    if let Some(run) = c.query_run.take() {
-        run.stop.stop();
-    }
+    let query_reset = c.query.take().is_some();
+    c.query_run = None;
     c.tunnel = tunnel;
     c.credentials = credentials;
     c.lost = false;
@@ -1231,11 +1228,19 @@ fn apply_reconnect(
             Tab::Query(q) => q.running = None,
         }
     }
-    if s.busy() {
-        cancel_statements(s, std::iter::once(old_browse).chain(old_query));
-    }
+    stop_statements(s, old_browse);
     tell(s, unsaved);
     Ok(result)
+}
+
+/// Stops what still runs on connections that are let go, `browse` and the query connection: the
+/// jobs that stop themselves (a query run, page loads and counts) through their `Stop`, and for
+/// the others (an Apply, a catalog load) a cancel request on `browse`.
+fn stop_statements(s: &Session, browse: Arc<dyn Connection>) {
+    s.jobs.stop_all();
+    if s.jobs.unstoppable_running() {
+        cancel_statements(s, std::iter::once(browse));
+    }
 }
 
 /// Why the host key the user trusted was not saved to `known_hosts`, when that failed.
@@ -1314,12 +1319,7 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     s.state.screen = Screen::Connections;
     s.state.tabs.clear();
     s.state.active = None;
-    if let Some(run) = &c.query_run {
-        run.stop.stop();
-    }
-    if s.busy() {
-        cancel_statements(s, std::iter::once(Arc::clone(&c.browse)).chain(c.query.clone()));
-    }
+    stop_statements(s, Arc::clone(&c.browse));
     Ok(Outcome::Done(json!({ "closed": c.config.id })))
 }
 

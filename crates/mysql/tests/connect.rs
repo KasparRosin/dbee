@@ -338,18 +338,28 @@ async fn browse_session_is_strict() {
     }
 }
 
-/// Starts `SELECT SLEEP(30)`, cancels it after 300 ms through the `Cancel` trait, and expects
-/// `cancelled` within 5 s; then the connection still works.
-async fn cancel_sleep(conn: Arc<MySqlConnection>) {
+/// Waits until connection `id` sleeps in `SLEEP()`, as `watcher`, a connection to the same server,
+/// sees in the processlist: the statement runs.
+async fn until_sleeping(watcher: &MySqlConnection, id: u64) {
+    let sql = format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id} AND STATE = 'User sleep'");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while watcher.scalar_u64(&sql).await != Ok(1) {
+        assert!(Instant::now() < deadline, "connection {id} never got to its sleep");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Starts `SELECT SLEEP(30)`, cancels it through the `Cancel` trait once `watcher` sees it sleep,
+/// and expects `cancelled`; then the connection still works.
+async fn cancel_sleep(conn: Arc<MySqlConnection>, watcher: &MySqlConnection) {
     let canceller: Arc<dyn Cancel> = Arc::new(conn.canceller());
+    let id = conn.scalar_u64("SELECT CONNECTION_ID()").await.unwrap();
     let runner = Arc::clone(&conn);
-    let started = Instant::now();
     let job = tokio::spawn(async move { runner.run("SELECT SLEEP(30)", QUERY_LIMITS).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    until_sleeping(watcher, id).await;
     canceller.cancel().await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
     assert_eq!(result.err(), Some(DbError::Cancelled));
-    assert!(started.elapsed() < Duration::from_secs(6));
     assert!(!conn.is_closed());
     assert_eq!(scalar(&conn, "SELECT 'still here'").await.as_deref(), Some("still here"));
 }
@@ -358,14 +368,16 @@ async fn cancel_sleep(conn: Arc<MySqlConnection>) {
 async fn cancel_stops_sleep() {
     let db = require_testdb!();
     for s in mysql_servers(db) {
+        let watcher = open(&config(s, SslMode::Prefer), db).await;
         for mode in [SslMode::Prefer, SslMode::Disable] {
-            cancel_sleep(Arc::new(open(&config(s, mode), db).await)).await;
+            cancel_sleep(Arc::new(open(&config(s, mode), db).await), &watcher).await;
         }
     }
     let home = temp_home(None, Some(&db.sshd.known_hosts_line));
     let t = tunnel(db, &home).await;
     for s in mysql_servers(db) {
-        cancel_sleep(Arc::new(open_tunnelled(&tunnelled(s, db, SslMode::Prefer), db, &t).await)).await;
+        let watcher = open(&config(s, SslMode::Prefer), db).await;
+        cancel_sleep(Arc::new(open_tunnelled(&tunnelled(s, db, SslMode::Prefer), db, &t).await), &watcher).await;
     }
     t.close().await;
 }
@@ -381,7 +393,7 @@ async fn late_kill_never_cancels_the_next_statement() {
         canceller.cancel().await.unwrap();
         assert_eq!(scalar(&conn, "SELECT SLEEP(0.5)").await.as_deref(), Some("0"), "{}", s.name);
         // The statement after a cancelled one runs to its end.
-        cancel_sleep(Arc::clone(&conn)).await;
+        cancel_sleep(Arc::clone(&conn), &open(&config(s, SslMode::Prefer), db).await).await;
         assert_eq!(scalar(&conn, "SELECT SLEEP(0.5)").await.as_deref(), Some("0"), "{}", s.name);
         // A KILL QUERY the server gets while the connection is idle does not carry over.
         let id = scalar(&conn, "SELECT CONNECTION_ID()").await.unwrap();
@@ -583,11 +595,12 @@ async fn the_trait_canceller_stops_sleep() {
     for s in mysql_servers(db) {
         let conn: Arc<dyn Connection> = MySqlDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
         let canceller = conn.canceller();
+        let id = conn.scalar_u64("SELECT CONNECTION_ID()").await.unwrap();
         let runner = Arc::clone(&conn);
         let job = tokio::spawn(async move { runner.run_untyped("SELECT SLEEP(30)", QUERY_LIMITS).await });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        until_sleeping(&open(&config(s, SslMode::Prefer), db).await, id).await;
         canceller.cancel().await.unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(5), job).await.expect("not cancelled within 5 s").unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
         assert_eq!(result.err(), Some(DbError::Cancelled), "{}", s.name);
         assert_eq!(conn.scalar_u64("SELECT 1").await, Ok(1), "{}", s.name);
     }
