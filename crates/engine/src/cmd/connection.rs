@@ -379,7 +379,9 @@ fn tls_strength(mode: SslMode) -> u8 {
 /// The stored secrets of `saved` that `given` may use: each only where it was saved for.
 /// - The database password: the same host, port and user; the same tunnel (no tunnel on either
 ///   side, or the same SSH host and port, since behind a tunnel the database host is usually
-///   `localhost` of another machine); and a TLS mode at least as strong as the saved one.
+///   `localhost` of another machine); a TLS mode at least as strong as the saved one, and under
+///   `verify-ca` or `verify-full` the same CA file; and no option that protects it less
+///   ([`KindOption::weakens`](dbee_config::KindOption::weakens)) on where the saved settings had it off.
 /// - The SSH password: the same SSH host, port and user.
 /// - The key passphrase: the same SSH host, port and user, and the same key file.
 fn reuse(saved: &ConnectionConfig, given: &ConnectionConfig) -> Reuse {
@@ -388,11 +390,15 @@ fn reuse(saved: &ConnectionConfig, given: &ConnectionConfig) -> Reuse {
         (Some(a), Some(b)) => a.host == b.host && a.port == b.port,
         _ => false,
     };
+    let verifies = matches!(given.ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull);
+    let weaker = given.kind.info().options.iter().any(|o| o.weakens && given.option_on(o.id) && !saved.option_on(o.id));
     let db = saved.host == given.host
         && saved.port == given.port
         && saved.user == given.user
         && same_tunnel
-        && tls_strength(given.ssl_mode) >= tls_strength(saved.ssl_mode);
+        && tls_strength(given.ssl_mode) >= tls_strength(saved.ssl_mode)
+        && (!verifies || given.ca_file == saved.ca_file)
+        && !weaker;
     let (ssh_password, passphrase) = match (&saved.ssh, &given.ssh) {
         (Some(a), Some(b)) if a.host == b.host && a.port == b.port && a.user == b.user => {
             let same_key = matches!((&a.auth, &b.auth), (SshAuth::Key { path: x }, SshAuth::Key { path: y }) if x == y);
@@ -1382,6 +1388,52 @@ mod tests {
         // No tunnel on either side: the database password by its own rule.
         let direct = ConnectionConfig { ssh: None, ..saved() };
         assert_eq!(reuse(&direct, &direct), Reuse { db: true, ssh_password: false, passphrase: false });
+    }
+
+    #[test]
+    fn stored_password_needs_the_same_ca_file_to_verify_with() {
+        use dbee_config::SslMode::{Prefer, Require, VerifyCa, VerifyFull};
+        let with = |mode, ca: Option<&str>| ConnectionConfig { ssl_mode: mode, ca_file: ca.map(PathBuf::from), ..saved() };
+        for mode in [VerifyCa, VerifyFull] {
+            let was = with(mode, Some("/ca/ours.pem"));
+            assert!(reuse(&was, &with(mode, Some("/ca/ours.pem"))).db, "the same CA file: {mode:?}");
+            for other in [Some("/ca/theirs.pem"), None] {
+                let r = reuse(&was, &with(mode, other));
+                assert!(!r.db, "another CA file ({other:?}) under {mode:?}");
+                assert!(r.ssh_password && r.passphrase, "the CA file does not concern the tunnel");
+            }
+            // Verifying now where the saved settings did not: by the CA file the saved ones had.
+            assert!(reuse(&with(Require, Some("/ca/ours.pem")), &with(mode, Some("/ca/ours.pem"))).db, "{mode:?}");
+            assert!(!reuse(&with(Require, None), &with(mode, Some("/ca/theirs.pem"))).db, "{mode:?}");
+        }
+        // Without verifying, the CA file is not read, so it does not count.
+        for mode in [Prefer, Require] {
+            assert!(reuse(&with(mode, Some("/ca/ours.pem")), &with(mode, Some("/ca/theirs.pem"))).db, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn stored_password_is_not_used_with_an_option_that_protects_it_less() {
+        let mysql = |on: Option<&str>| {
+            let mut c = ConnectionConfig { kind: DbKind::MySql, port: 3306, ..saved() };
+            if let Some(v) = on {
+                c.options.insert(dbee_config::ALLOW_PUBLIC_KEY.id.into(), v.into());
+            }
+            c
+        };
+        const { assert!(dbee_config::ALLOW_PUBLIC_KEY.weakens) };
+        let off = mysql(None);
+        let on = mysql(Some("true"));
+        let r = reuse(&off, &on);
+        assert!(!r.db, "allowPublicKey turned on where the saved settings had it off");
+        assert!(r.ssh_password && r.passphrase, "the option does not concern the tunnel");
+        // Saved with it on, or off on both sides, or turned off: the password is used.
+        assert!(reuse(&on, &on).db && reuse(&off, &off).db && reuse(&on, &off).db);
+        assert!(reuse(&off, &mysql(Some("false"))).db, "only \"true\" is on");
+        // An option the type does not have does not count.
+        let mut stray = saved();
+        stray.options.insert(dbee_config::ALLOW_PUBLIC_KEY.id.into(), "true".into());
+        assert!(reuse(&saved(), &stray).db, "Postgres has no allowPublicKey");
     }
 
     #[test]

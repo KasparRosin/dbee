@@ -4,7 +4,8 @@ use crate::connection::{KindInfo, KindOption, Settings, SslMode};
 
 /// MySQL's and MariaDB's: on a link without TLS that the user wanted encrypted, the password
 /// may go out encrypted with a key the server sends, which dbee cannot check.
-pub const ALLOW_PUBLIC_KEY: KindOption = KindOption { id: "allowPublicKey", label: "Allow the server's public key without encryption" };
+pub const ALLOW_PUBLIC_KEY: KindOption =
+    KindOption { id: "allowPublicKey", label: "Allow the server's public key without encryption", weakens: true };
 
 /// MariaDB's row builds on this one: it lists only what differs.
 pub(crate) const INFO: KindInfo = KindInfo {

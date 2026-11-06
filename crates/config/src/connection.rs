@@ -75,6 +75,9 @@ pub struct KindInfo {
 pub struct KindOption {
     pub id: &'static str,
     pub label: &'static str,
+    /// On, it protects the password less: a stored password is not used for settings that turn it
+    /// on where the saved ones had it off.
+    pub weakens: bool,
 }
 
 /// The database types dbee can open. Saved as the type's id.

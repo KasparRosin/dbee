@@ -424,7 +424,7 @@ fn options_round_trip_and_stay_out_of_the_file_when_empty() {
 
 #[test]
 fn each_kind_lists_its_options() {
-    assert_eq!(ALLOW_PUBLIC_KEY, KindOption { id: "allowPublicKey", label: "Allow the server's public key without encryption" });
+    assert_eq!(ALLOW_PUBLIC_KEY, KindOption { id: "allowPublicKey", label: "Allow the server's public key without encryption", weakens: true });
     assert_eq!(DbKind::MySql.info().options, [ALLOW_PUBLIC_KEY]);
     assert_eq!(DbKind::MariaDb.info().options, [ALLOW_PUBLIC_KEY]);
     assert!(DbKind::Postgres.info().options.is_empty() && DbKind::Sqlite.info().options.is_empty());
