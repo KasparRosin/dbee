@@ -46,7 +46,6 @@
 mod common;
 
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 use common::App;
 use dbee_testkit::{Held, Kind, TestTarget, temp_home, unique};
@@ -60,11 +59,25 @@ const MARK: &str = "the M2 day test row";
 /// Where the screenshots go, from the repository root (the app's working directory).
 const SHOTS: &str = "target/m2-day";
 
-/// One engine of the day: its target, and the prefix of its screenshots.
+/// One engine of the day: its target, the prefix of its screenshots, its query tab's database chip
+/// (on MySQL and MariaDB), and an unqualified statement with the first cell it gives where it runs.
 struct Engine {
     t: TestTarget,
     shots: &'static str,
+    chip: Option<Chip>,
+    first: (&'static str, &'static str),
 }
+
+/// The databases the chip lists, and the one the day chooses with it.
+struct Chip {
+    lists: &'static [&'static str],
+    choose: &'static str,
+}
+
+/// `t_001` exists only in `many` (on SQLite, in `main`).
+const IN_MANY: (&str, &str) = ("SELECT v FROM t_001", "row of table 1");
+/// `customers` exists only in `shop`.
+const IN_SHOP: (&str, &str) = ("SELECT name FROM customers WHERE id = 1", "Customer 1");
 
 impl Engine {
     /// The schema the seed's `shop` is on this engine (SQLite's `main`).
@@ -172,6 +185,21 @@ fn edit_cell(app: &mut App, row: usize, column: usize, text: &str) {
     assert_eq!(cell["text"].as_str(), Some(text), "{cell}");
 }
 
+/// Shows result `n` (1-based) with its selector button, or from the `…` list, pictured as `shot`.
+fn show_result(app: &mut App, root: &Path, n: u64, shot: &str) {
+    let button = format!("result-{n}");
+    if app.tag(&button).is_some() {
+        app.click(&button);
+    } else {
+        let item = format!("result-list-{n}");
+        app.click("result-more");
+        app.until("the list of results", |app| app.tag(&item).is_some());
+        app.shot(root, shot);
+        app.click(&item);
+    }
+    app.until("the result", |app| app.document()["query"]["shown"] == n - 1);
+}
+
 /// The query tab's run has ended.
 fn query_done(app: &mut App) -> Json {
     app.until("the run to end", |app| app.document()["query"]["running"].is_null());
@@ -272,8 +300,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     assert_eq!(rows[r][1]["text"], day.customer.as_str());
     app.shot(root, &format!("{p}-3-filters"));
 
-    // 4. A click on the order's billing cell: the value panel shows the JSON formatted. Its second
-    //    line, selected with a click and a shift-click, is copied with Ctrl+C.
+    // 4. The billing cell's JSON in the value panel; its second line selected and copied.
     app.click(&format!("grid-cell-{r}-5"));
     let d = app.document();
     assert_eq!(d["selection"], json!({ "anchor": [r, 5], "focus": [r, 5] }));
@@ -314,8 +341,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     assert_eq!(app.cell(0, 1)["text"], day.typo.as_str());
     app.shot(root, &format!("{p}-5-customer"));
 
-    // 6. The filter changed to the day's customers (note = MARK). The typo fixed, the second
-    //    customer deleted and a new one added, all three written by one Ctrl+S.
+    // 6. On the day's customers: a name fixed, one deleted, one added, in one Ctrl+S.
     app.click("filter-0-column");
     app.click("filter-0-column-note");
     app.replace("filter-0-value", MARK);
@@ -333,7 +359,6 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     edit_cell(app, 2, 1, &day.added);
     edit_cell(app, 2, 4, MARK);
     assert_eq!(app.table()["edits"]["count"], 3, "{name}: a changed cell, a row to delete and a new row");
-    // The value panel shows the staged name in the picture.
     app.click("grid-cell-0-1");
     app.shot(root, &format!("{p}-6a-staged"));
     app.ctrl("S");
@@ -358,11 +383,8 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.click("grid-cell-1-1");
     app.shot(root, &format!("{p}-6b-applied"));
 
-    // 7. Ctrl+T on the tree's `shop`. Where the engine has USE, the tab's database chip says
-    //    where its runs go and lists the catalog's databases: on a connection without a database
-    //    the chip moves the tab to `many`, where `t_001` is found unqualified; a connection that
-    //    names `shop` lists only it. Three statements give three results.
-    // Other open schemas closed first, so `shop`'s row is near (MariaDB's `many` holds 300 tables).
+    // 7. Ctrl+T on the tree's `shop`; the database chip on MySQL and MariaDB only.
+    // Other open schemas closed first: `ui.click` scrolls a row 300 rows away in too few frames.
     let shop_row = format!("tree-schema-{shop}");
     for row in app.tags_with("tree-schema-") {
         let id = row["id"].as_str().unwrap_or_default().to_string();
@@ -373,47 +395,31 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.click(&shop_row);
     app.ctrl("T");
     app.until("the query tab", |app| app.document()["query"].is_object());
-    let mut t001 = format!("{}.t_001", e.t.schema("many"));
-    if let Some(chip) = app.tag("query-database") {
-        assert_eq!(chip["value"], "shop", "{name}: the tree's selection");
-        app.click("query-database");
-        let items: Vec<String> = app.tags_with("query-database-").iter().filter_map(|t| t["id"].as_str().map(str::to_string)).collect();
-        app.shot(root, &format!("{p}-7a-databases"));
-        if items.iter().any(|i| i == "query-database-many") {
-            assert!(!items.iter().any(|i| i == "query-database-mysql"), "{name}: the server's own are left out: {items:?}");
-            app.click("query-database-many");
-            app.until("the chip on many", |app| app.tag("query-database").is_some_and(|t| t["value"] == "many"));
-            assert_eq!(app.document()["query"]["database"], "many");
-            t001 = "t_001".into();
-        } else {
-            assert_eq!(items, ["query-database-shop"], "{name}: the settings' database narrows the catalog");
-            app.click("query-database-shop");
+    let chip = app.tag("query-database");
+    match &e.chip {
+        Some(c) => {
+            assert_eq!(chip.map(|t| t["value"].clone()), Some(json!("shop")), "{name}: the chip says the tree's selection");
+            app.click("query-database");
+            let listed: Vec<String> = app.tags_with("query-database-").iter().filter_map(|t| t["value"].as_str().map(str::to_string)).collect();
+            assert_eq!(listed, c.lists, "{name}: the chip's list");
+            app.shot(root, &format!("{p}-7a-databases"));
+            app.click(&format!("query-database-{}", c.choose));
+            app.until("the chip's choice", |app| app.tag("query-database").is_some_and(|t| t["value"] == c.choose));
+            assert_eq!(app.document()["query"]["database"], c.choose, "{name}");
         }
+        None => assert!(chip.is_none(), "{name}: no chip without USE"),
     }
+    let (first, cell) = e.first;
     app.click("query-editor");
-    app.text(&format!("SELECT v FROM {t001};\nSELECT 2 AS two;\nSELECT 3 AS three"));
+    app.text(&format!("{first};\nSELECT 2 AS two;\nSELECT 3 AS three"));
     app.ctrl("Enter");
     let q = query_done(app);
     assert!(q["error"].is_null(), "{name}: {q}");
     assert_eq!((q["results"].as_array().map(Vec::len), q["shown"].as_u64()), (Some(3), Some(2)), "{name}: the last result shows: {q}");
     assert_eq!(app.cell(0, 0)["text"], "3");
-    assert!(app.tag("result-3").is_some(), "{name}: the shown result's button");
-    // With the database chip, the window's first size leaves the selector room for the shown result
-    // alone; hiding the value panel gives it the rest.
-    let narrow = app.tag("result-1").is_none();
-    if narrow {
-        app.click("value-toggle");
-    }
-    for n in 1..=3 {
-        assert!(app.tag(&format!("result-{n}")).is_some(), "{name}: the selector shows result {n}");
-    }
-    app.click("result-1");
-    app.until("the first result", |app| app.document()["query"]["shown"] == 0);
-    assert_eq!(app.cell(0, 0)["text"], "row of table 1", "{name}: `t_001` was found where the run went");
+    show_result(app, root, 1, &format!("{p}-7b-results-list"));
+    assert_eq!(app.cell(0, 0)["text"], cell, "{name}: the unqualified statement ran where the chip says");
     app.shot(root, &format!("{p}-7b-results"));
-    if narrow {
-        app.click("value-toggle");
-    }
 
     //    A statement that runs until cancelled; Cancel in the toolbar stops it.
     let marker = unique("m2day_run");
@@ -429,28 +435,14 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     }
     assert!(app.tag("query-cancel").is_some_and(|t| t.get("enabled") != Some(&json!(false))), "{name}: Cancel is enabled while it runs");
     app.shot(root, &format!("{p}-7c-running"));
-    // A cancel that comes before the statement starts (on a file, where nothing says it has)
-    // stops nothing, so it is clicked again until the run ends.
-    let started = Instant::now();
-    loop {
-        app.click("query-cancel");
-        let tried = Instant::now();
-        while !app.document()["query"]["running"].is_null() && tried.elapsed() < Duration::from_secs(2) {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if app.document()["query"]["running"].is_null() {
-            break;
-        }
-        assert!(started.elapsed() < common::WAIT, "{name}: the run was not cancelled");
-    }
-    let q = app.document()["query"].clone();
+    app.click("query-cancel");
+    let q = query_done(app);
     drop(held);
     assert_eq!(q["error"]["code"], "cancelled", "{name}: {q}");
     assert_eq!(app.value("query-error")["code"], "cancelled");
     app.shot(root, &format!("{p}-7d-cancelled"));
 
-    //    The join: Ctrl+Enter, a click on a result cell, Ctrl+A, Ctrl+Shift+C copies it with its
-    //    header row.
+    //    The join, copied with its header: a click on a cell, Ctrl+A, Ctrl+Shift+C.
     let join = format!(
         "select o.id, c.name as customer, o.total, o.shipped_at\nfrom {shop}.orders o\njoin {shop}.customers c on c.id = o.customer_id\nwhere o.dealer_id = 42 and o.status = 'completed' and o.total > 100\norder by o.id"
     );
@@ -467,7 +459,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.ctrl("A");
     app.ctrl_shift("C");
     let (head, notice) = ("id\tcustomer\ttotal\tshipped_at\n", format!("Copied {n} rows"));
-    // The notice shows for a few seconds: it is read first.
+    // Read first: the notice shows for a few seconds.
     app.until("the copy's notice", |app| app.tag("notice").is_some_and(|t| t["value"] == notice.as_str()));
     let d = app.document();
     assert!(d["clipboard"].as_str().is_some_and(|c| c.starts_with(head)), "{name}: the header row first: {d}");
@@ -488,11 +480,13 @@ fn m2_day_end_to_end() {
     let root = dbee_testkit::repo_root();
     let _ = std::fs::remove_dir_all(root.join(SHOTS));
     let (mysql, maria) = (db.server("mysql80").unwrap(), db.server("mariadbnew").unwrap());
-    // Dropped in reverse order: the app goes first, then the rows, then the targets and the home.
+    // Dropped in reverse: the app, the rows, the targets, the home.
     let home = temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
-    let sqlite = Engine { t: dbee_testkit::targets_of(&[Kind::Sqlite]).pop().unwrap(), shots: "1-sqlite" };
-    let my = Engine { t: dbee_testkit::target(mysql), shots: "2-mysql80" };
-    let mb = Engine { t: dbee_testkit::target(maria), shots: "3-mariadbnew" };
+    let sqlite = Engine { t: dbee_testkit::targets_of(&[Kind::Sqlite]).pop().unwrap(), shots: "1-sqlite", chip: None, first: IN_MANY };
+    // A connection that names `shop` lists only it; one that names none lists every database.
+    let my = Engine { t: dbee_testkit::target(mysql), shots: "2-mysql80", chip: Some(Chip { lists: &["shop"], choose: "shop" }), first: IN_SHOP };
+    let all = &["many", "odd", "scratch", "shop"];
+    let mb = Engine { t: dbee_testkit::target(maria), shots: "3-mariadbnew", chip: Some(Chip { lists: all, choose: "many" }), first: IN_MANY };
     let engines = [&sqlite, &my, &mb];
     for e in engines {
         e.q(&sweep_sql(e));
@@ -500,8 +494,7 @@ fn m2_day_end_to_end() {
     let before: Vec<String> = engines.iter().map(|e| digest(e)).collect();
     let (on_sqlite, on_mysql, on_maria) = (DayRows::insert(&sqlite), DayRows::insert(&my), DayRows::insert(&mb));
 
-    // 1. `dbee <file>`: the SQLite copy opens unsaved, named after its file, with Save connection
-    //    in the status bar.
+    // 1. `dbee <file>`: the SQLite copy opens unsaved; Save connection saves it.
     let file = sqlite.t.file().unwrap().to_path_buf();
     let file_name = file.file_name().unwrap().to_string_lossy().into_owned();
     let mut app = App::start_with(&root, &home.home, db, SHOTS, &[file.as_os_str()]);
@@ -519,7 +512,7 @@ fn m2_day_end_to_end() {
     let saved = app.execute("connection.list", json!({}))["saved"].clone();
     assert_eq!(saved.as_array().map(Vec::len), Some(1), "{saved}");
     app.shot(&root, "1-sqlite-1b-saved");
-    // MariaDB, saved with its password for step 5's switch, without a database: every one is listed.
+    // MariaDB for step 5, saved with its password and no database.
     let config = json!({
         "name": "Shop mariadb", "kind": "mariadb", "color": "green", "host": "127.0.0.1", "port": maria.port,
         "user": "root", "database": "", "sslMode": "prefer",
@@ -527,9 +520,7 @@ fn m2_day_end_to_end() {
     app.execute("connection.save", json!({ "config": config, "password": db.password }));
     the_day(&mut app, &root, &sqlite, &on_sqlite);
 
-    // 3. Ctrl+Shift+Q asks about the query text, then the connection screen. New connection: the
-    //    engine cards, PostgreSQL, Change engine back to the cards, MySQL; the name typed before
-    //    stays, the port follows the type.
+    // 3. Ctrl+Shift+Q, then New connection: the cards, PostgreSQL, Change engine, MySQL.
     app.ctrl_shift("Q");
     app.until("the question", |app| app.inspect()["dialog"] == "confirm");
     app.click("dialog-ok");
@@ -606,9 +597,10 @@ fn m2_day_end_to_end() {
     //    Ctrl+P back to the SQLite file, by its name.
     let c = switch(&mut app, &root, "4-sqlite-1-switch", "seed", &file_name, "SQLite", "Shop mariadb");
     assert_eq!((c["kind"].clone(), c["saved"].clone()), (json!("sqlite"), json!(true)), "{c}");
+    assert!(app.tag("tree-schema-main").is_some_and(|t| t.get("visible") != Some(&json!(false))), "the tree starts at its top");
     app.shot(&root, "4-sqlite-1b-workspace");
 
-    // The day's rows and the added ones go; then every engine's customers and orders are as before.
+    // Once the day's rows are gone, every engine's customers and orders are as before.
     drop(app);
     drop((on_sqlite, on_mysql, on_maria));
     let after: Vec<String> = engines.iter().map(|e| digest(e)).collect();

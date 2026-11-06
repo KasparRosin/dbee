@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** minor (the data flow for every engine; the M2 day)
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** trivial (a stale note on the engine and `pg` dropped)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -37,7 +37,7 @@ An engine-first Cargo workspace. Layering is enforced by `cargo xtask layers`; n
 | L7 | `apps/dbee`, `apps/dbee-cli` | Binaries that wire a front end to the engine. |
 | — | `xtask` | Build tooling (exempt). |
 
-A crate may depend only on lower layers. Two rules for the drivers: `drivers` may use every driver, and no driver uses another or the registry; the engine and the front ends (L5, L6) may take a driver or `drivers` only as a dev-dependency, so they know drivers through `driver`'s interface alone (until M2.8 the engine still uses `pg` directly, listed as an exception in `xtask/src/layers.rs`). A driver is registered as one `Class::Driver` line, which both rules then cover. Register every new crate in `xtask/src/layers.rs` and in this table in the same change.
+A crate may depend only on lower layers. Two rules for the drivers: `drivers` may use every driver, and no driver uses another or the registry; the engine and the front ends (L5, L6) may take a driver or `drivers` only as a dev-dependency, so they know drivers through `driver`'s interface alone. A driver is registered as one `Class::Driver` line, which both rules then cover. Register every new crate in `xtask/src/layers.rs` and in this table in the same change.
 
 ## Data flow
 
@@ -72,6 +72,7 @@ M1's and M2's crates are all in place. The driver interface exists, and the engi
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-06 | trivial | Layers: the note about the engine using `pg` until M2.8 dropped (no such exception is left). |
 | 2026-11-05 | minor | The data flow for every engine: the driver's cancel, two sessions per connection on each engine, literals in the connection's dialect; `apps/dbee`: `tests/m2_day.rs` and the shared `tests/common/mod.rs` (M2.20). |
 | 2026-11-05 | minor | `crates/engine`: `quickSearch.find` ranks the saved connections with the tables (`fuzzy::search`) and runs without a connection; `crates/ui-egui`: the quick search belongs to the window and opens over either screen, and choosing a connection closes the open one through `connection.close` and connects as a double-click on its card does (M2.19). |
 | 2026-11-05 | minor | `crates/driver`: `Driver::list_connection` and `Connection::list_databases`, which the Postgres and MySQL drivers implement; `crates/engine`: `connection.listDatabases`; `crates/ui-egui`: the Database field's list (M2.18) |

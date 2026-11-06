@@ -74,6 +74,25 @@ fn with_pgnew_held(db: &TestDb, exclusive: bool) -> (Ui, String) {
     (ui, id)
 }
 
+/// A connection switched to with Ctrl+P shows its tree from the top, not scrolled as the last one was.
+#[test]
+fn the_tree_starts_at_its_top_after_a_switch() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, _) = with_pgnew(db);
+    // The SQLite seed's tree is tall enough (315 rows open) to keep an old offset.
+    let file = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let config = json!({ "name": "seed file", "kind": "sqlite", "file": file.file().unwrap() });
+    ui.execute("connection.save", json!({ "config": config }));
+    ui.click("tree-schema-many");
+    ui.click("tree-table-many.t_300");
+    ui.frame();
+    assert!(!visible(&ui.tag("tree-schema-public")), "scrolled down to `many`'s last table");
+    ui.quick_choose("seed file");
+    ui.until("the file's workspace", |ui| ui.document()["connection"]["kind"] == "sqlite" && ui.document()["screen"] == "workspace");
+    ui.frame();
+    assert!(visible(&ui.tag("tree-schema-main")), "the first schema row shows: {:?}", ui.tag("tree-schema-main"));
+}
+
 #[test]
 fn ctrl_p_opens_orders() {
     let db = dbee_testkit::require_testdb!();

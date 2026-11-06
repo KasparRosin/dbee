@@ -1,6 +1,6 @@
 # Agents
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-11-05 · **Change:** minor (§4: the database list keeps to the allowed targets too)
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (§4: the M2 day)
 
 dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
 

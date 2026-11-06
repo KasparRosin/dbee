@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, MutexGuard};
 use crate::auth::{self, Login, ServerKey};
 use crate::cancel::{Canceller, KillRoute, Statements};
 use crate::errors;
-use crate::flavor::{Flavor, version_num, version_warning};
+use crate::flavor::{Flavor, shown_version, version_num, version_warning};
 use crate::result;
 use crate::wire::{MAX_PAYLOAD, Packets, Stream};
 
@@ -268,7 +268,15 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
         statements: Arc::clone(&statements),
     }));
     let database = who.database.map(str::to_owned);
-    Ok(MySqlConnection { session: Mutex::new(session), info, database, closed: AtomicBool::new(false), statements, canceller })
+    Ok(MySqlConnection {
+        flavor: session.flavor,
+        session: Mutex::new(session),
+        info,
+        database,
+        closed: AtomicBool::new(false),
+        statements,
+        canceller,
+    })
 }
 
 async fn attempt(
@@ -341,7 +349,8 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     let version = version.unwrap_or_default();
     let flavor = Flavor::from_version(&version);
     session.flavor = flavor;
-    let version_num = version_num(&version).ok_or_else(|| DbError::Other(format!("the server sent an unreadable version ({version:?})")))?;
+    let version_num =
+        version_num(shown_version(&version)).ok_or_else(|| DbError::Other(format!("the server sent an unreadable version ({version:?})")))?;
     let connection_id =
         id.and_then(|id| id.parse::<u64>().ok()).ok_or_else(|| DbError::Other("the server sent an unreadable connection id".into()))?;
     let (variable, value) = read_only_state(session, flavor).await?;
@@ -350,6 +359,7 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
         return Err(DbError::Other(format!("read-only mode did not stick (@@session.{variable} is {value:?})")));
     }
     let warnings = version_warning(flavor, version_num).into_iter().collect();
+    let version = shown_version(&version).to_owned();
     Ok((ServerInfo { product: flavor.product().into(), version, version_num, read_only: server_read_only, warnings }, connection_id))
 }
 
@@ -377,6 +387,7 @@ async fn read_only_state(session: &mut Session, flavor: Flavor) -> Result<(&'sta
 pub struct MySqlConnection {
     session: Mutex<Session>,
     info: ServerInfo,
+    flavor: Flavor,
     /// The database the settings name, if any: the catalog lists only it.
     pub(crate) database: Option<String>,
     /// Set when the session broke, or an operation on it was abandoned half-way.
@@ -399,7 +410,7 @@ impl MySqlConnection {
 
     /// Which member of the MySQL family the connection reached.
     pub(crate) fn flavor(&self) -> Flavor {
-        Flavor::from_version(&self.info.version)
+        self.flavor
     }
 
     /// The connection has ended; every further operation fails with

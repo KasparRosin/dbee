@@ -91,6 +91,8 @@ pub struct Tree {
     shape: u64,
     rows: Option<Rows>,
     names: Option<Names>,
+    /// Drawn once: until then, as a new tree for another connection, it starts at its top.
+    drawn: bool,
 }
 
 /// What is selected in the tree.
@@ -448,6 +450,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     let mut click = Click::None;
     let selected = tree.selected.clone();
     let pending = tags.scroll_pending().map(str::to_owned);
+    let fresh = !tree.drawn;
     let rows = tree.rows(catalog);
     if rows.list.is_empty() {
         let text = if filtering { "No table matches the filter.".to_owned() } else { format!("This connection has no {many} dbee can show.") };
@@ -455,7 +458,11 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         return acts;
     }
     let system_label = format!("System {many}");
-    ScrollArea::vertical().id_salt("tree-rows").auto_shrink([false, false]).show_viewport(ui, |ui, viewport| {
+    let mut area = ScrollArea::vertical().id_salt("tree-rows").auto_shrink([false, false]);
+    if fresh {
+        area = area.vertical_scroll_offset(0.0);
+    }
+    area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let frame = ui.max_rect();
         let height = ROW_H * rows.list.len() as f32;
@@ -481,6 +488,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
             }
         }
     });
+    tree.drawn = true;
     let table_ref = |s: usize, t: usize| catalog.schemas.get(s).and_then(|x| x.tables.get(t)).map(|x| x.table.clone());
     match click {
         Click::None => {}

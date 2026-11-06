@@ -836,11 +836,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     let text_w = rect.width() - 22.0;
     let name = c.display_name();
     p.galley(pos2(rect.left() + 16.0, rect.top() + 6.0), line_galley(ui, &name, FontId::proportional(14.0), t.text, text_w), t.text);
-    let label = c.kind.label();
-    let mut sub = match c.kind.info().settings {
-        Settings::Server { .. } => format!("{label} · {}@{}:{}/{}", c.user, c.host, c.port, c.database),
-        Settings::File { .. } => format!("{label} · {}", c.file.as_ref().map(|f| tilde(&f.display().to_string())).unwrap_or_default()),
-    };
+    let mut sub = card_line(c);
     if c.ssh.is_some() && c.kind.takes_ssh() {
         sub.push_str(" · SSH");
     }
@@ -850,7 +846,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     p.galley(pos2(rect.left() + 16.0, rect.top() + 25.0), line_galley(ui, &sub, FontId::proportional(12.0), t.text_muted, text_w), t.text_muted);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
     tags.tag_value(id, &r, name.as_str());
-    tags.tag_value(&format!("{id}-kind"), &r, label);
+    tags.tag_value(&format!("{id}-kind"), &r, c.kind.label());
     if r.clicked() {
         acts.push(Act::Load(c.clone()));
     }
@@ -989,6 +985,16 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &
     tags.tag_value_as(&format!("conn-kind-{}", kind.id()), &r, json!({ "label": kind.label(), "upcoming": !available }), available);
     if available && r.clicked() {
         acts.push(Act::ChooseKind(kind));
+    }
+}
+
+/// A card's second line: the type's label, then a server's `user@host:port/database` (no `/` without
+/// a database) or a file's path.
+fn card_line(c: &ConnectionConfig) -> String {
+    let label = c.kind.label();
+    match c.kind.info().settings {
+        Settings::Server { .. } => format!("{label} · {}@{}:{}{}", c.user, c.host, c.port, c.database_suffix()),
+        Settings::File { .. } => format!("{label} · {}", c.file.as_ref().map(|f| tilde(&f.display().to_string())).unwrap_or_default()),
     }
 }
 
@@ -1405,6 +1411,17 @@ mod tests {
         app.session.run_blocking("connection.close", json!({ "force": true }), std::time::Duration::from_secs(30)).unwrap();
         frame(&mut app, &ctx);
         assert!(!app.view.conn.databases.open && app.tags().rect("conn-database-item-0").is_none());
+    }
+
+    #[test]
+    fn a_cards_line_leaves_out_an_unset_database() {
+        let server =
+            ConnectionConfig { kind: DbKind::MariaDb, user: "root".into(), host: "127.0.0.1".into(), port: 32821, ..ConnectionConfig::default() };
+        assert_eq!(card_line(&server), "MariaDB · root@127.0.0.1:32821");
+        let shop = ConnectionConfig { database: "shop".into(), ..server };
+        assert_eq!(card_line(&shop), "MariaDB · root@127.0.0.1:32821/shop");
+        let file = ConnectionConfig { kind: DbKind::Sqlite, file: Some(PathBuf::from("/data/shop.sqlite")), ..ConnectionConfig::default() };
+        assert_eq!(card_line(&file), "SQLite · /data/shop.sqlite");
     }
 
     #[test]

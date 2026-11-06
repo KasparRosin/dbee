@@ -257,6 +257,84 @@ fn many_results_fit_the_toolbar() {
     assert_eq!(ui.query()["shown"], 1198);
     ui.frame();
     assert!(ui.tag("result-1200").is_some(), "the neighbours stay in reach");
+    // The `…` lists every result, the first one too.
+    let more = ui.rect("result-more");
+    assert!(more[0] + more[2] <= rows[0], "the `…` stays clear of the row count: {more:?} {rows:?}");
+    ui.click("result-more");
+    ui.frame();
+    ui.click("result-list-1");
+    ui.frame();
+    assert_eq!(ui.query()["shown"], 0);
+    assert!(ui.tag("result-list-1").is_none(), "the list closed");
+}
+
+/// Beside the database chip, at the app's first size with the value panel open, every result can
+/// be chosen, also while a statement runs; the selector's label shows whole or not at all.
+#[test]
+fn every_result_can_be_chosen_beside_the_database_chip() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let mut ui = connected_to_target(db, &mysql, Some("shop"), APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    assert!(ui.tag("query-database").is_some(), "the chip is drawn");
+    assert_eq!(ui.value("value-toggle"), true, "the value panel shows");
+    ui.execute("query.setText", json!({ "text": "select 1 as a;\nselect 2 as b;\nselect 3 as c" }));
+    ui.ctrl("Enter");
+    ui.ran();
+    choose_every_result(&mut ui, "after the run");
+    let key = unique("dbee_lock");
+    let held = mysql.hold_lock(&key).unwrap();
+    ui.execute("query.setText", json!({ "text": format!("SELECT 1 AS d FROM DUAL WHERE {}", mysql.waits_for_lock_sql(&key)) }));
+    ui.ctrl("Enter");
+    ui.until("the run to start", |ui| !ui.query()["running"].is_null());
+    ui.frame();
+    choose_every_result(&mut ui, "while a statement runs");
+    drop(held);
+    ui.ran();
+}
+
+/// Chooses each of the three results `a`, `b`, `c`, from the selector or from its `…` list.
+fn choose_every_result(ui: &mut Ui, when: &str) {
+    for (n, column) in [(1, "a"), (2, "b"), (3, "c")] {
+        selector_whole(ui, when);
+        if ui.tag(&format!("result-{n}")).is_some() {
+            ui.click(&format!("result-{n}"));
+        } else {
+            ui.click("result-more");
+            ui.frame();
+            ui.click(&format!("result-list-{n}"));
+        }
+        ui.frame();
+        assert_eq!(ui.query()["shown"], n - 1, "{when}: result {n}");
+        assert_eq!(ui.value("grid-header-0")["name"], column, "{when}: result {n}");
+    }
+}
+
+/// The selector's buttons lie whole between Cancel and the row count, and its label, when drawn,
+/// whole before them.
+fn selector_whole(ui: &mut Ui, when: &str) {
+    let i = ui.inspect();
+    let rect = |id: &str| -> [f32; 4] {
+        let r = tag_in(&i, id).unwrap_or_else(|| panic!("{when}: no `{id}`"))["rect"].clone();
+        [0, 1, 2, 3].map(|k| r[k].as_f64().unwrap() as f32)
+    };
+    let (cancel, rows) = (rect("query-cancel"), rect("query-rows"));
+    let parts: Vec<String> = ids(&i).into_iter().filter(|id| id.starts_with("result-") && !id.starts_with("result-list-")).collect();
+    assert!(!parts.is_empty(), "{when}: a selector");
+    let mut first = f32::MAX;
+    for id in &parts {
+        let [x, _, w, _] = rect(id);
+        assert!(visible(&tag_in(&i, id)) && w >= 22.0, "{when}: `{id}` is whole: {:?}", tag_in(&i, id));
+        assert!(x >= cancel[0] + cancel[2] && x + w <= rows[0], "{when}: `{id}` lies between Cancel and the row count");
+        first = first.min(x);
+    }
+    let bar = egui::Rect::from_min_size(egui::pos2(cancel[0], cancel[1]), egui::vec2(rows[0] + rows[2] - cancel[0], cancel[3]));
+    for (r, g) in ui.texts() {
+        if g.text() == "Results" && bar.contains(r.center()) {
+            assert!(r.max.x <= first, "{when}: the label is whole, before the buttons: {r:?} {first}");
+        }
+    }
 }
 
 #[test]

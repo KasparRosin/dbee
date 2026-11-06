@@ -141,7 +141,8 @@ async fn connects_and_reports_version() {
         assert_eq!(info.version_num, expected_num(&s.version), "{}: {info:?}", s.name);
         assert!(!info.read_only && info.warnings.is_empty(), "{}: {info:?}", s.name);
         assert!(!c.is_closed());
-        assert_eq!(scalar(&c, "SELECT @@version").await.as_deref(), Some(info.version.as_str()));
+        let printed = scalar(&c, "SELECT @@version").await.unwrap_or_default();
+        assert!(printed.starts_with(&info.version) && info.version.chars().all(|c| c.is_ascii_digit() || c == '.'), "{printed} {info:?}");
         assert_eq!(scalar(&c, "SELECT DATABASE()").await, None);
         assert_eq!(scalar(&c, "SELECT 1 + 1").await.as_deref(), Some("2"));
 
@@ -161,8 +162,8 @@ async fn mariadb_version_num_is_the_real_version() {
     let mut seen = 0;
     for s in mysql_servers(db).filter(|s| s.kind == Kind::MariaDb) {
         let info = open(&config(s, SslMode::Prefer), db).await.info().clone();
-        // The handshake says 5.5.5-10.11…; @@version does not.
-        assert!(!info.version.starts_with("5.5.5-") && info.version.contains("MariaDB"), "{info:?}");
+        // The numbers alone: no `5.5.5-` before them, no `-MariaDB-…` after.
+        assert!(info.product == "MariaDB" && info.version.chars().all(|c| c.is_ascii_digit() || c == '.'), "{info:?}");
         assert!(info.version_num >= 101100, "{info:?}");
         assert_eq!(info.version_num, expected_num(&s.version));
         seen += 1;
@@ -978,7 +979,7 @@ async fn an_older_server_warns_and_goes_on() {
     let (port, _server) = fake_server(frame(&greeting("5.6.51-log", "mysql_native_password", server_caps(false)), 0), answer_as_mysql56).await;
     let conn = connect_fake(port).await.unwrap();
     let info = conn.info();
-    assert_eq!((info.product.as_str(), info.version.as_str(), info.version_num), ("MySQL", "5.6.51-log", 50651));
+    assert_eq!((info.product.as_str(), info.version.as_str(), info.version_num), ("MySQL", "5.6.51", 50651));
     assert_eq!(info.warnings.len(), 1, "{info:?}");
     assert!(info.warnings[0].contains("5.7"), "{info:?}");
     assert!(!info.read_only);

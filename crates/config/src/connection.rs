@@ -281,7 +281,8 @@ impl ConnectionConfig {
         self.options.get(id).is_some_and(|v| v == "true")
     }
 
-    /// The name; when empty, a file type's file name, else `user@host/database`.
+    /// The name; when empty, a file type's file name, else `user@host/database` (`user@host`
+    /// without a database).
     pub fn display_name(&self) -> String {
         if !self.name.is_empty() {
             return self.name.clone();
@@ -289,8 +290,13 @@ impl ConnectionConfig {
         let file_name = self.file.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned());
         match (self.kind.uses_file(), file_name) {
             (true, Some(n)) => n,
-            _ => format!("{}@{}/{}", self.user, self.host, self.database),
+            _ => format!("{}@{}{}", self.user, self.host, self.database_suffix()),
         }
+    }
+
+    /// `/database`, or nothing when no database is set.
+    pub fn database_suffix(&self) -> String {
+        if self.database.is_empty() { String::new() } else { format!("/{}", self.database) }
     }
 
     /// A file type needs a file and takes no SSH tunnel. A server type needs a host and a port, and

@@ -42,7 +42,8 @@ pub const CATALOG_LIMITS: Limits = Limits { max_rows: 5_000_000, max_bytes: 512 
 pub struct ServerInfo {
     /// The product as the server reports itself: `PostgreSQL`, `MySQL`, `MariaDB` or `SQLite`.
     pub product: String,
-    /// The version as the server prints it, e.g. `14.12` or `18.0 (Debian 18.0-1)`.
+    /// The version as the driver shows it beside the product: Postgres's as it prints it (`14.12`,
+    /// `18.0 (Debian 18.0-1)`), MySQL's and MariaDB's numbers alone (`8.0.46`, `13.0.2`).
     pub version: String,
     /// The version as one number that grows with it, e.g. Postgres's `server_version_num`
     /// `140012`.

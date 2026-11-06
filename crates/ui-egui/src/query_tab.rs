@@ -9,10 +9,11 @@
 //!   ([`database_chip`]); a click lists the catalog's databases, the server's own left out, and
 //!   choosing one sends `query.setDatabase`. It waits while the tab runs, and while Run cannot.
 //!   Then Run (`query.run`), Run current (`query.run` with `current` and the cursor) and Cancel
-//!   (`query.cancel`, enabled while the tab's run goes), a spinner while it runs, and with several
-//!   results the selector `1 · 2 · 3` (`query.showResult`; with more than fit, those around the
-//!   shown one, [`selector_range`]); at its right, what the shown result holds: `3 rows`, or the
-//!   cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
+//!   (`query.cancel`, enabled while the tab's run goes), a spinner while it runs (with its words
+//!   when the selector keeps room), and with several results the selector `1 · 2 · 3`
+//!   (`query.showResult`; with more than fit, those around the shown one and a `…` that lists
+//!   every result, its label only where it fits whole, [`selector_fit`]); at its right, what the
+//!   shown result holds: `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
 //! - the last run's error card, when it stopped early ([`card`]);
 //! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
 //!   selecting and copying work, and the value panel follows the selected cell), or for a
@@ -66,7 +67,9 @@
 //! bytes, and whether some token is coloured), `query-split` (value: the editor's share of the
 //! height), `query-database` (value: the database shown, or null for none; while its list is open
 //! the choices `query-database-<name>`), `query-run`, `query-run-current`, `query-cancel`,
-//! `result-<n>` (1-based, with several results; value `{shown, rows, rowsAffected}`),
+//! `result-<n>` (1-based, with several results; value `{shown, rows, rowsAffected}`), `result-more`
+//! (the `…` when not all fit; value: the number of results) and, while its list is open,
+//! `result-list-<n>` (value as `result-<n>`; only those in view),
 //! `query-rows` (value: what the shown result holds, e.g. `First 10,000 of 25,000 rows`),
 //! `query-affected` (value: `2 rows affected`), `query-error` (value `{code, heading, message,
 //! detail, hint, note, position, statement, line, column, jump}`, `note` the card's line that a
@@ -110,6 +113,9 @@ pub const RUN_CURRENT: &str = "query-run-current";
 pub const CANCEL: &str = "query-cancel";
 /// The selector's buttons: `result-1`, `result-2`, … (`query.showResult` takes the 0-based index).
 pub const RESULT: &str = "result-";
+/// The selector's `…` when not all results fit, and its list's items `result-list-1`, ….
+pub const RESULT_MORE: &str = "result-more";
+pub const RESULT_LIST: &str = "result-list-";
 pub const ROWS: &str = "query-rows";
 pub const AFFECTED: &str = "query-affected";
 pub const ERROR: &str = "query-error";
@@ -928,48 +934,80 @@ fn result_width(results: usize) -> f32 {
     (7.5 * digits + 20.0).max(22.0) + 12.0
 }
 
-/// The room the selector keeps for its label and the `…` at both ends.
-const SELECTOR_LABELS_W: f32 = 90.0;
+/// The selector's `…` button with its spacing, and its list's width.
+const MORE_W: f32 = 26.0;
+const RESULT_LIST_W: f32 = 220.0;
 
-/// The results the selector shows in `room` points: all of them when they fit, else as many as
-/// fit around the shown one. Returns the first and the end of that range.
-fn selector_range(results: usize, shown: usize, room: f32) -> (usize, usize) {
+/// What the selector draws: its label, the results from `from` to `to`, and the `…` that lists
+/// them all when some are left out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectorFit {
+    label: bool,
+    from: usize,
+    to: usize,
+    more: bool,
+}
+
+/// The selector in `room` points, its label `label_w` wide: all results and the label when they
+/// fit; else as many as fit around the shown one beside the `…`, and the label only if it and one
+/// result fit too, so it is never cut.
+fn selector_fit(results: usize, shown: usize, room: f32, label_w: f32) -> SelectorFit {
     let per = result_width(results);
-    let fit = if room.is_finite() { (room / per).floor().max(1.0) as usize } else { 1 };
-    if results <= fit {
-        return (0, results);
+    let room = if room.is_finite() { room } else { 0.0 };
+    if results as f32 * per + label_w <= room {
+        return SelectorFit { label: true, from: 0, to: results, more: false };
     }
-    let from = shown.saturating_sub(fit / 2).min(results.saturating_sub(fit));
-    (from, from.saturating_add(fit).min(results))
+    let label = room >= label_w + MORE_W + per;
+    let left = room - MORE_W - if label { label_w } else { 0.0 };
+    let fit = if left > 0.0 { ((left / per).floor() as usize).min(results) } else { 0 };
+    let from = shown.min(results.saturating_sub(1)).saturating_sub(fit / 2).min(results.saturating_sub(fit));
+    SelectorFit { label, from, to: from.saturating_add(fit).min(results), more: true }
 }
 
 /// The results selector, `room` points wide: one button per result, `n` from 1 (with more than
-/// fit, those around the shown one, and `…` where some are left out); the index of the one clicked.
+/// fit, those around the shown one, and a `…` listing every result); the index of the one chosen.
 fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], shown: usize, room: f32) -> Option<usize> {
     let t = TOKENS;
     let mut picked = None;
-    let label = |ui: &mut egui::Ui, text: &str| ui.add(Label::new(RichText::new(text).size(12.0).color(t.text_muted)).selectable(false));
-    label(ui, "Results");
-    let (from, to) = selector_range(results.len(), shown, room - SELECTOR_LABELS_W);
-    if from > 0 {
-        label(ui, "…");
+    let muted = |text: &str| RichText::new(text).size(12.0).color(t.text_muted);
+    let label = |ui: &mut egui::Ui, text: &str| ui.add(Label::new(muted(text)).selectable(false));
+    let label_w = ui.painter().layout_no_wrap("Results".to_owned(), FontId::proportional(12.0), t.text_muted).size().x + ui.spacing().item_spacing.x;
+    let fit = selector_fit(results.len(), shown, room, label_w);
+    if fit.label {
+        label(ui, "Results");
     }
-    for (i, o) in results.iter().enumerate().take(to).skip(from) {
-        if i > from {
+    let what = |o: &StatementOutcome| if o.result.columns.is_empty() { affected_text(o.result.rows_affected) } else { rows_text(&o.result) };
+    let value = |i: usize, o: &StatementOutcome| json!({ "shown": i == shown, "rows": o.result.rows.len(), "rowsAffected": o.result.rows_affected });
+    for (i, o) in results.iter().enumerate().take(fit.to).skip(fit.from) {
+        if i > fit.from {
             label(ui, "·");
         }
         let n = i.saturating_add(1);
         let r = ui.add(Button::selectable(i == shown, RichText::new(n.to_string()).size(12.5)).min_size(vec2(22.0, 22.0)));
-        let what = if o.result.columns.is_empty() { affected_text(o.result.rows_affected) } else { rows_text(&o.result) };
-        let r = r.on_hover_text(format!("Statement {n}: {what}"));
-        let value = json!({ "shown": i == shown, "rows": o.result.rows.len(), "rowsAffected": o.result.rows_affected });
-        tags.tag_value(&format!("{RESULT}{n}"), &r, value);
+        let r = r.on_hover_text(format!("Statement {n}: {}", what(o)));
+        tags.tag_value(&format!("{RESULT}{n}"), &r, value(i, o));
         if r.clicked() && i != shown {
             picked = Some(i);
         }
     }
-    if to < results.len() {
-        label(ui, "…");
+    if fit.more {
+        let r = ui.add(Button::new(RichText::new("…").size(12.5)).min_size(vec2(22.0, 22.0)));
+        let r = r.on_hover_text(format!("Choose one of the {} results", results.len()));
+        tags.tag_value(RESULT_MORE, &r, results.len());
+        Popup::menu(&r).width(RESULT_LIST_W).show(|ui| {
+            ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
+            ScrollArea::vertical().max_height(CHIP_LIST_H).show_rows(ui, filter_bar::ITEM_H, results.len(), |ui, rows| {
+                for (i, o) in results.iter().enumerate().take(rows.end).skip(rows.start) {
+                    let n = i.saturating_add(1);
+                    let r = filter_bar::item(ui, i == shown, &format!("Statement {n}: {}", what(o)));
+                    // A menu's first frame is a sizing pass, which reads every widget as disabled.
+                    tags.tag_value_as(&format!("{RESULT_LIST}{n}"), &r, value(i, o), true);
+                    if r.clicked() && i != shown {
+                        picked = Some(i);
+                    }
+                }
+            });
+        });
     }
     picked
 }
@@ -1072,10 +1110,6 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         if tool_button(&mut bar, tags, CANCEL, "Cancel", stop, false) {
             runs.push(("query.cancel", json!({})));
         }
-        if running {
-            bar.add(egui::Spinner::new().size(13.0).color(t.text_muted));
-            bar.label(RichText::new("Running…").size(12.5).color(t.text_muted));
-        }
         let shown = q.shown_result();
         let summary = shown.filter(|o| !o.result.columns.is_empty()).map(|o| (rows_text(&o.result), !o.result.complete));
         // The summary's own width at the right, measured as it is drawn.
@@ -1083,6 +1117,17 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             let font = FontId::proportional(12.5);
             bar.painter().layout_no_wrap(text.clone(), font, t.text).size().x + 16.0
         });
+        if running {
+            let spinner = bar.add(egui::Spinner::new().size(13.0).color(t.text_muted));
+            let words = RichText::new("Running…").size(12.5).color(t.text_muted);
+            let words_w = bar.painter().layout_no_wrap("Running…".to_owned(), FontId::proportional(12.5), t.text_muted).size().x;
+            let after = bar.cursor().min.x + bar.spacing().item_spacing.x + words_w + 10.0;
+            if q.results.len() < 2 || bar_rect.right() - right_room - after >= MORE_W + result_width(q.results.len()) {
+                bar.label(words);
+            } else {
+                spinner.on_hover_text("Running…");
+            }
+        }
         // The selector between the buttons and the summary, kept within its room.
         let left = bar.cursor().min.x + 10.0;
         let right = (bar_rect.right() - right_room).max(left);
@@ -1479,17 +1524,25 @@ mod tests {
 
     #[test]
     fn the_selector_shows_the_results_around_the_shown_one_when_not_all_fit() {
-        let room = |n: usize| n as f32 * result_width(100);
-        assert_eq!(selector_range(3, 2, 3.0 * result_width(3)), (0, 3), "all fit");
-        assert_eq!(selector_range(100, 0, room(10)), (0, 10));
-        assert_eq!(selector_range(100, 50, room(10)), (45, 55));
-        assert_eq!(selector_range(100, 99, room(10)), (90, 100));
-        assert_eq!(selector_range(100, 7, -5.0), (7, 8), "no room: the shown one still");
-        assert_eq!(selector_range(100, 7, f32::NAN), (7, 8));
-        assert_eq!(selector_range(0, 0, room(10)), (0, 0));
+        let fit = |results: usize, shown: usize, room: f32| {
+            let f = selector_fit(results, shown, room, 50.0);
+            (f.label, f.from, f.to, f.more)
+        };
+        let room = |n: usize| 50.0 + MORE_W + n as f32 * result_width(100);
+        assert_eq!(fit(3, 2, 50.0 + 3.0 * result_width(3)), (true, 0, 3, false), "all fit, and the label");
+        assert_eq!(fit(100, 0, room(10)), (true, 0, 10, true));
+        assert_eq!(fit(100, 50, room(10)), (true, 45, 55, true));
+        assert_eq!(fit(100, 99, room(10)), (true, 90, 100, true));
+        // Short of room the label goes first, never cut; the `…` stays and lists them all.
+        assert_eq!(fit(3, 2, MORE_W + result_width(3)), (false, 2, 3, true));
+        assert_eq!(fit(3, 2, MORE_W + 2.0 * result_width(3)), (false, 1, 3, true));
+        assert_eq!(fit(3, 0, MORE_W + 1.0), (false, 0, 0, true), "room for the `…` alone");
+        assert_eq!(fit(100, 7, -5.0), (false, 7, 7, true));
+        assert_eq!(fit(100, 7, f32::NAN), (false, 7, 7, true));
+        assert_eq!(fit(0, 0, room(10)), (true, 0, 0, false));
         // Longer numbers take more room.
         assert!(result_width(3000) > result_width(30) && result_width(30) > result_width(3));
-        assert_eq!(selector_range(3000, 2999, 10.0 * result_width(3000)), (2990, 3000));
+        assert_eq!(fit(3000, 2999, 50.0 + MORE_W + 10.0 * result_width(3000)), (true, 2990, 3000, true));
     }
 
     #[test]

@@ -46,7 +46,7 @@ pub enum Generated {
 #[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
     pub name: String,
-    /// `format_type` output: the type as the server names it, used in key casts.
+    /// The column's type as the server names it, used in key casts.
     pub type_sql: String,
     /// The engine's own base type name (Postgres `pg_type.typname`), read only by that engine's
     /// dialect and driver.

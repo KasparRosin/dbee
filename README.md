@@ -11,7 +11,7 @@
 
 > [!NOTE]
 > **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.\
-> Postgres is the only database so far. MySQL/MariaDB and SQLite come next (M2), then file export and import (M3).\
+> The second, M2, brings the same workflow to MySQL, MariaDB and SQLite files, and it is built too. File export and import come next (M3).\
 > Linux x86_64 is tested; the other platforms are defined, untested yet.
 
 <p align="center">
@@ -20,11 +20,12 @@
 
 ## What works today
 
-- **Connecting:** saved and recent connections; a form with Fill from URL; TLS modes with a CA file; an SSH tunnel with a key (found on its own), the agent or a password, and host key checks; read-only mode; passwords in the OS keyring; reconnecting after a lost connection.
-- **Browsing:** a schema tree with a filter; quick search (Ctrl+P); table tabs with a filter bar (13 operators, any number of filters, raw `WHERE`), sorting, paging, estimated and exact counts, and foreign keys followed into a filtered tab.
+- **Databases:** PostgreSQL (14 and newer), MySQL (5.7 and newer), MariaDB (10.11 and newer) and SQLite files.
+- **Connecting:** saved and recent connections; a card per database type, then its form with Fill from URL; TLS modes with a CA file; an SSH tunnel with a key (found on its own), the agent or a password, and host key checks; the server's databases listed under the Database field; read-only mode; passwords in the OS keyring; reconnecting after a lost connection. A SQLite file opens from the command line (`dbee shop.sqlite`), dropped on the window or from the file manager, and Save connection keeps it in the list.
+- **Browsing:** a schema tree with a filter (databases on MySQL and MariaDB); quick search (Ctrl+P), which also finds saved connections and switches to one; table tabs with a filter bar (13 operators, any number of filters, raw `WHERE`), sorting, paging, estimated and exact counts, and foreign keys followed into a filtered tab.
 - **Editing:** staged edits (one-line, multi-line and boolean editors, set NULL, add and delete rows), undo and redo, and Apply (Ctrl+S) in one transaction, all or nothing.
 - **Values:** a value panel with the whole value of a cell, JSON pretty-printed and coloured.
-- **Queries:** query tabs with syntax colours; run all, or the statement under the cursor; cancel; several results; error cards that jump to the error's position.
+- **Queries:** query tabs with syntax colours; run all, or the statement under the cursor; cancel; several results; error cards that jump to the error's position; on MySQL and MariaDB, the database a tab runs in.
 - **Copying:** values, with a header, or as CSV, JSON or Markdown.
 - **Agents:** a localhost control channel that runs every command and drives the window.
 
@@ -51,7 +52,7 @@ You need:
 - Rust through [rustup](https://rustup.rs). `rust-toolchain.toml` picks the pinned toolchain.
 - A C compiler (Debian and Ubuntu: `build-essential`).
 - On Linux, no `-dev` packages: dbee loads the window and graphics libraries (Wayland or X11, xkbcommon, Vulkan or OpenGL) from the desktop at run time.
-- Optional: Docker, for the test servers that the Postgres and SSH tests run against. Without them those tests print `SKIPPED`.
+- Optional: Docker, for the test servers that the Postgres, MySQL, MariaDB and SSH tests run against. Without them those tests print `SKIPPED`.
 
 ```sh
 cargo run -p dbee                       # the desktop app

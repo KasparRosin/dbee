@@ -66,6 +66,18 @@ impl Flavor {
     }
 }
 
+/// The version shown beside the product: `@@version`'s `major.minor.patch` without a package's
+/// suffix (`13.0.2-MariaDB-ubu2604` is `13.0.2`), and without the `5.5.5-` MariaDB puts first in
+/// its handshake for clients of MySQL 5.5.
+pub fn shown_version(version: &str) -> &str {
+    let v = match version.strip_prefix("5.5.5-") {
+        Some(rest) if rest.contains("MariaDB") => rest,
+        _ => version,
+    };
+    let end = v.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(v.len());
+    v.get(..end).unwrap_or(v)
+}
+
 /// `@@version`'s leading `major.minor.patch` as one number that grows with it:
 /// `major * 10000 + minor * 100 + patch` (`8.0.46` is 80046, `10.11.19` is 101119).
 pub fn version_num(version: &str) -> Option<u32> {
@@ -101,6 +113,18 @@ pub fn version_warning(flavor: Flavor, version_num: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shown_version_is_the_numbers_alone() {
+        assert_eq!(shown_version("8.0.46"), "8.0.46");
+        assert_eq!(shown_version("8.0.46-0ubuntu0.22.04.1"), "8.0.46");
+        assert_eq!(shown_version("5.7.44-log"), "5.7.44");
+        assert_eq!(shown_version("13.0.2-MariaDB-ubu2604"), "13.0.2");
+        assert_eq!(shown_version("5.5.5-10.11.19-MariaDB-ubu2204"), "10.11.19");
+        assert_eq!(version_num(shown_version("5.5.5-10.11.19-MariaDB-ubu2204")), Some(101119));
+        assert_eq!(shown_version("5.5.5-log"), "5.5.5", "a MySQL 5.5.5 keeps its own numbers");
+        assert_eq!(shown_version(""), "");
+    }
 
     #[test]
     fn read_only_variables_by_flavor() {

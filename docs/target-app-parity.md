@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** major (M2: MySQL, MariaDB and SQLite; timings measured again on every engine) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (the launch check at a low load, every run of the M2 day with its load, the fuzz run again) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -58,7 +58,7 @@ Features, weighted by area: **39 %**, put at **~35 % (estimated)**.
 | Database engines | 20 | 20 % | measured (4 of 20 engines) | [driver-parity.md](driver-parity.md) |
 | UI | 12 | ~45 % | estimated | [ui-parity.md](ui-parity.md): 22 elements graded |
 | Performance | 8 | ~30 % | estimated | dbee meets its own M1 targets (measured, below), but a frame passes 16.7 ms at about 100 columns in most runs. Beekeeper's timings were not measured, so there is no side-by-side. |
-| Stability | 8 | ~25 % | estimated | Never-crash rules and the panic guard; the command-sequence fuzz at 20,000 steps and every command with empty params pass (measured). No use on real databases yet. |
+| Stability | 8 | ~25 % | estimated | Never-crash rules and the panic guard; the command-sequence fuzz at 20,000 steps (again on 2026-11-06, seed 1793954111563178215) and every command with empty params pass (measured). No use on real databases yet. |
 | File formats (import/export) | 4 | 0 % | measured | none ([file-format-parity.md](file-format-parity.md)) |
 | Localization | 4 | 0 % | measured | English only ([localization-parity.md](localization-parity.md)) |
 | Platforms | 2 | ~25 % | estimated | Linux x86_64 built, packaged and run; macOS, Windows and FreeBSD not built in M1 ([hardware-parity.md](hardware-parity.md)) |
@@ -104,7 +104,11 @@ Measured on 2026-11-05 on the same machine, in a release build (`cargo test --wo
 
 Quick search (Ctrl+P) over 1,000 tables scores the session's catalog in memory, the same code whatever the engine, so it has one row: 357 µs median (235–481 µs over the three runs; slowest single search 1.7–3.7 ms), and 426 µs (307–496 µs) with 100 saved connections, against 2 ms (`quick_search_1000_tables_within_a_frame`, `quick_search_with_connections_within_budget`).
 
-Every target is met on every engine, in every run. The M2 day itself (`m2_day_end_to_end`, a dev build: SQLite, MySQL through SSH, MariaDB and back) took 39.8–40.3 s for the test in its last two runs.
+Every target is met on every engine, in every run.
+
+The launch check, a release build to the connection screen with the window shown (`connection_screen_within_one_second`, target 1 s), took 224, 228 and 199 ms on 2026-11-06 at a load of 0.99–1.30. On 2026-11-05 it took 1.82 s at a load of about 24, right after its own release build (M1 measured 301 ms in that state), and later the same day it could not draw a frame, as the desktop was locked.
+
+The M2 day itself (`m2_day_end_to_end`, a dev build: SQLite, MySQL through SSH, MariaDB and back) took 40.3 s and 39.8 s on 2026-11-05 (the load was not recorded for those two), 91.9 s in that day's `--ignored` run (load 22.14 at its start), and 37.6 s on 2026-11-06 (load 7.79 at its start, 5.70 at its end).
 
 Beekeeper Studio's own timings were not measured.
 
@@ -147,6 +151,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-06 | minor | The launch check measured at a low load (199–228 ms); the M2 day's runs with their loads; the 20,000-step fuzz run again. |
 | 2026-11-05 | major | M2 built: MySQL, MariaDB and SQLite (4 of 20 engines, ~29 % overall, estimated); readiness for SQLite and MySQL users; M1's targets measured again on every engine, in a release build, with the load; the M2 day; effort for M2. |
 | 2026-10-28 | minor | Import and export is now M3; M2 is three databases (MySQL/MariaDB and SQLite). |
 | 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases, M1 review fixes, earlier runs instead of task ids. |

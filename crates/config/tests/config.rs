@@ -70,6 +70,8 @@ fn serde_shapes() {
 fn display_name_and_validate() {
     let mut c = ConnectionConfig { user: "ann".into(), database: "shop".into(), ..ConnectionConfig::default() };
     assert_eq!(c.display_name(), "ann@localhost/shop");
+    let no_database = ConnectionConfig { database: String::new(), ..c.clone() };
+    assert_eq!(no_database.display_name(), "ann@localhost", "no slash without a database");
     c.name = "Prod".into();
     assert_eq!(c.display_name(), "Prod");
     assert!(c.validate().is_ok());
