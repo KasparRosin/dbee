@@ -6,7 +6,8 @@
 //! 3. the control requests that arrived are handled ([`crate::control`]); then the file the
 //!    command line named ([`DbeeApp::with_file`]), in the first frame, or else the first file
 //!    dropped on the window opens (`connection.openFile`; a file of no type dbee opens shows the
-//!    refusal as a notice). A drop while a dialog shows or a connect runs is let go, not kept;
+//!    refusal as a notice; while a connection is open, it closes first, through its questions,
+//!    as a quick search switch does). A drop while a dialog shows or a connect runs is let go, not kept;
 //! 4. the open cell editor takes its keys and commits on a press outside it, or Enter over a
 //!    selection opens one ([`crate::editors`]); then the keyboard shortcuts run
 //!    ([`crate::shortcuts`]; the value panel's copy first), before any widget sees the keys (not
@@ -38,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+use dbee_engine::cmd::connection::{OPEN, OPEN_FILE, RECONNECT};
 use dbee_engine::{CommandInfo, EngineError, JobId, Json, Outcome, Screen, Session};
 use egui::{CornerRadius, Frame, Margin, RichText, vec2};
 use serde_json::json;
@@ -57,11 +59,8 @@ const APPLY: &str = "edit.apply";
 /// The command that opens a query tab.
 const NEW_QUERY: &str = "tab.newQuery";
 
-/// The command that opens a database file: one dropped on the window, or named on the command line.
-const OPEN_FILE: &str = "connection.openFile";
-
 /// The jobs that connect: while one runs, a dropped file is let go.
-const CONNECTING: [&str; 2] = ["connection.open", "connection.reconnect"];
+const CONNECTING: [&str; 2] = [OPEN, RECONNECT];
 
 /// How often a busy session repaints.
 const BUSY_REPAINT: Duration = Duration::from_millis(100);
@@ -359,8 +358,22 @@ impl DbeeApp {
 
     /// Opens the database file at `path` as the user asked: dropped on the window, or named on the
     /// command line. A refusal (a file of no type dbee opens, one that is not there) is a notice.
-    fn open_file(&mut self, path: &Path) {
+    pub(crate) fn open_file(&mut self, path: &Path) {
         self.start(OPEN_FILE, json!({ "path": path.to_string_lossy() }), Origin::Menu);
+    }
+
+    /// A database file dropped on the window: while a connection is open, through the questions
+    /// of `connection.close` first, as a switch in the quick search is ([`connections::switch_to`]),
+    /// unless the file would be refused anyway (that refusal is the notice, and nothing closes).
+    fn dropped_file(&mut self, path: &Path) {
+        if self.session.state().connected.is_none() {
+            self.open_file(path);
+            return;
+        }
+        match dbee_engine::cmd::connection::file_config(&self.session, path) {
+            Ok(_) => connections::switch_to(self, connections::SwitchTo::File(path.to_path_buf())),
+            Err(e) => self.notice(notice_text(&e)),
+        }
     }
 
     /// Runs command `id` for a shortcut; `query.run` with `current` gets the editor's cursor,
@@ -481,8 +494,10 @@ impl DbeeApp {
         }
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         let busy = self.view.dialog.is_some() || CONNECTING.iter().any(|c| self.session.running(c));
-        if let Some(path) = self.file.take().or(dropped.filter(|_| !busy)) {
+        if let Some(path) = self.file.take() {
             self.open_file(&path);
+        } else if let Some(path) = dropped.filter(|_| !busy) {
+            self.dropped_file(&path);
         }
         // 4. The cell editor, then shortcuts, unless a dialog or the quick search is open.
         editors::before_frame(self, &ctx);

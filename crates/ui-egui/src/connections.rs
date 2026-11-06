@@ -201,9 +201,19 @@ pub(crate) struct ConnScreen {
     pub databases: DatabaseList,
     /// The session has a secret store (`document.inspect`'s `secretStore`).
     pub has_store: bool,
-    /// The saved connection chosen in the quick search while another was open: it connects once
-    /// `connection.close` closed that one ([`switch_pending`]).
-    pub switch: Option<String>,
+    /// What to open once `connection.close` closed the connection that was open: the saved
+    /// connection chosen in the quick search, or a database file dropped on the window
+    /// ([`switch_pending`]).
+    pub switch: Option<SwitchTo>,
+}
+
+/// What a switch opens ([`ConnScreen::switch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SwitchTo {
+    /// A saved connection, by its id.
+    Saved(String),
+    /// A database file.
+    File(PathBuf),
 }
 
 impl ConnScreen {
@@ -465,29 +475,37 @@ pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json) {
     app.view.conn.message = None;
 }
 
-/// The quick search chose the saved connection `id`: with none open it connects as a
-/// double-click on its card does; else `connection.close` runs first, with its questions, and the
-/// connect follows once it closed ([`switch_pending`]).
-pub(crate) fn switch_to(app: &mut DbeeApp, id: &str) {
+/// Opens `to`: the saved connection the quick search chose, or a database file dropped on the
+/// window. With none open, a saved connection connects as a double-click on its card does, and a
+/// file opens (`connection.openFile`); else `connection.close` runs first, with its questions, and
+/// the open follows once it closed ([`switch_pending`]).
+pub(crate) fn switch_to(app: &mut DbeeApp, to: SwitchTo) {
     if app.session.state().connected.is_none() {
-        connect_saved(app, id);
+        open_switch(app, &to);
         return;
     }
-    app.view.conn.switch = Some(id.to_string());
+    app.view.conn.switch = Some(to);
     app.start("connection.close", json!({}), Origin::Menu);
     switch_pending(app);
 }
 
-/// Each frame: a switch waits while a dialog (the close's question) shows; then it connects if
+/// Each frame: a switch waits while a dialog (the close's question) shows; then it opens if
 /// the connection closed, and is dropped if it did not (Cancel, an error), so the open connection
 /// and its tabs stay as they were.
 pub(crate) fn switch_pending(app: &mut DbeeApp) {
     if app.view.dialog.is_some() {
         return;
     }
-    let Some(id) = app.view.conn.switch.take() else { return };
+    let Some(to) = app.view.conn.switch.take() else { return };
     if app.session.state().connected.is_none() {
-        connect_saved(app, &id);
+        open_switch(app, &to);
+    }
+}
+
+fn open_switch(app: &mut DbeeApp, to: &SwitchTo) {
+    match to {
+        SwitchTo::Saved(id) => connect_saved(app, id),
+        SwitchTo::File(path) => app.open_file(path),
     }
 }
 

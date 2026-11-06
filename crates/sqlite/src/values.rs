@@ -43,8 +43,9 @@ pub(crate) fn base_type(declared: &str) -> &str {
 ///
 /// By the type's affinity: INTEGER, NUMERIC and REAL are numbers, TEXT is long text, BLOB is
 /// bytes. A type of NUMERIC or INTEGER affinity named `BOOL` or `BOOLEAN` is true/false, `JSON`
-/// is JSON, and `DATE`, `DATETIME` or `TIMESTAMP` a date and time. No type at all holds anything,
-/// shown as it comes.
+/// is JSON, and `DATE`, `DATETIME` or `TIMESTAMP` a date and time; one of TEXT affinity named
+/// `CHAR`, `VARCHAR`, `NCHAR`, `NVARCHAR` or `CHARACTER` is one line of text. No type at all
+/// holds anything, shown as it comes.
 pub(crate) fn class_of(declared: &str) -> TypeClass {
     if declared.trim().is_empty() {
         return TypeClass::Other;
@@ -58,7 +59,10 @@ pub(crate) fn class_of(declared: &str) -> TypeClass {
             _ => TypeClass::Number,
         },
         Affinity::Real => TypeClass::Number,
-        Affinity::Text => TypeClass::LongText,
+        Affinity::Text => match name.as_str() {
+            "CHAR" | "VARCHAR" | "NCHAR" | "NVARCHAR" | "CHARACTER" => TypeClass::Text,
+            _ => TypeClass::LongText,
+        },
         Affinity::Blob => TypeClass::Binary,
     }
 }
@@ -182,7 +186,14 @@ mod tests {
             ("TIMESTAMP", DateTime),
             ("timestamp with time zone", DateTime),
             ("TEXT", LongText),
-            ("VARCHAR(36)", LongText),
+            ("CLOB", LongText),
+            ("VARCHAR(36)", Text),
+            ("varchar", Text),
+            ("CHAR(2)", Text),
+            ("NCHAR(55)", Text),
+            ("NVARCHAR(100)", Text),
+            ("CHARACTER(20)", Text),
+            ("character varying(10)", Text),
             // A name is a class only where the affinity is NUMERIC or INTEGER.
             ("JSON TEXT", LongText),
             ("DATE TEXT", LongText),

@@ -168,7 +168,7 @@ async fn classes_of_described_columns() {
         ("d", "DATE", "DATE", DateTime),
         ("ts", "DATETIME", "DATETIME", DateTime),
         ("b", "BLOB", "BLOB", Binary),
-        ("u", "VARCHAR", "VARCHAR(36)", LongText),
+        ("u", "VARCHAR", "VARCHAR(36)", Text),
         ("anything", "", "", Other),
         ("total", "REAL", "REAL", Number),
     ];

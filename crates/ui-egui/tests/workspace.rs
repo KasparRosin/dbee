@@ -865,6 +865,43 @@ fn a_dropped_database_file_opens_unsaved_and_save_connection_saves_it() {
 }
 
 #[test]
+fn a_file_dropped_while_connected_opens_through_the_disconnect_question() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let pg14 = ui.connection_id().unwrap();
+    ui.ctrl("T");
+    ui.execute("query.setText", json!({ "text": "select 1" }));
+    // A file dbee would refuse anyway says so, and the connection stays.
+    let notes = ui.home.home.join("notes.txt");
+    drop_files(&mut ui, &[&notes]);
+    ui.frame();
+    assert!(ui.value("notice").as_str().is_some_and(|n| n.starts_with("Can't open notes.txt")), "{:?}", ui.value("notice"));
+    assert_eq!((ui.inspect()["dialog"].clone(), ui.connection_id()), (Json::Null, Some(pg14.clone())));
+    // A database file asks first, as a switch does: Cancel keeps the connection and the text.
+    drop_files(&mut ui, &[file]);
+    ui.frame();
+    assert_eq!(ui.inspect()["dialog"], "confirm", "the query text would be lost");
+    assert_eq!(ui.value("dialog-text"), "Disconnect from pg14? The text of 1 query tab will be lost.");
+    ui.click("dialog-cancel");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"]["id"].clone()), (json!("workspace"), json!(pg14)), "Cancel keeps pg14 open: {d}");
+    assert_eq!((d["tabs"].as_array().map(Vec::len), d["query"]["text"].clone()), (Some(1), json!("select 1")), "{d}");
+    // Disconnect anyway: pg14 closes and the file opens.
+    drop_files(&mut ui, &[file]);
+    ui.frame();
+    assert_eq!(ui.inspect()["dialog"], "confirm");
+    ui.click("dialog-ok");
+    ui.until("the file to open", |ui| ui.document()["connection"]["kind"] == "sqlite" && ui.document()["screen"] == "workspace");
+    assert_eq!(ui.value("status-connection"), file.file_name().unwrap().to_str().unwrap());
+    assert_eq!(ui.document()["tabs"], json!([]));
+}
+
+#[test]
 fn a_dropped_file_of_no_type_dbee_opens_says_which_do() {
     let mut ui = Ui::fresh(APP_SIZE);
     let notes = ui.home.home.join("notes.txt");

@@ -21,7 +21,7 @@ pub enum Dialect {
 impl Dialect {
     pub const ALL: [Dialect; 3] = [Dialect::Postgres, Dialect::MySql, Dialect::Sqlite];
 
-    /// The engine's rules: the one `match` on a dialect, besides the guard below.
+    /// The engine's rules: the one `match` on a dialect.
     pub(crate) fn rules(self) -> &'static Rules {
         match self {
             Dialect::Postgres => &postgres::RULES,
@@ -31,11 +31,6 @@ impl Dialect {
     }
 }
 
-// Names every variant, so a new one fails to compile here until `Dialect::ALL` lists it too.
-const _: () = match Dialect::Postgres {
-    Dialect::Postgres | Dialect::MySql | Dialect::Sqlite => {}
-};
-
 /// How one engine writes and reads SQL. Each engine's `RULES` names every field.
 pub(crate) struct Rules {
     /// The quote around an identifier; one inside it is doubled.
@@ -43,6 +38,9 @@ pub(crate) struct Rules {
     /// The type [`Dialect::as_text`] casts to.
     pub text_type: &'static str,
     pub ilike: ILike,
+    /// What follows a `LIKE` pattern so that `\` escapes `%`, `_` and itself, as it does by
+    /// default on Postgres: an `ESCAPE` clause, or nothing.
+    pub like_escape: &'static str,
     /// How an insert gives every column its default.
     pub insert_defaults: InsertDefaults,
     /// The statement that makes a database current, `{}` standing for its quoted name.
@@ -324,15 +322,17 @@ impl Dialect {
         format!("CAST({expr} AS {})", self.rules().text_type)
     }
 
-    /// A pattern filter on the column's text: `like`, `not like`, `ilike` or `not ilike`.
+    /// A pattern filter on the column's text: `like`, `not like`, `ilike` or `not ilike`. In the
+    /// pattern `\` escapes `%`, `_` and `\` on every engine.
     pub fn like(self, op: Op, column_sql: &str, pattern_sql: &str) -> String {
         let text = self.as_text(column_sql);
+        let escape = self.rules().like_escape;
         match (self.rules().ilike, op) {
             (ILike::LowerLike, Op::ILike | Op::NotILike) => {
                 let not = if op == Op::NotILike { "NOT " } else { "" };
-                format!("LOWER({text}) {not}LIKE LOWER({pattern_sql})")
+                format!("LOWER({text}) {not}LIKE LOWER({pattern_sql}){escape}")
             }
-            (ILike::Native | ILike::LowerLike, _) => format!("{text} {} {pattern_sql}", op.symbol()),
+            (ILike::Native | ILike::LowerLike, _) => format!("{text} {} {pattern_sql}{escape}", op.symbol()),
         }
     }
 
@@ -400,6 +400,18 @@ mod tests {
     use crate::select::{count_sql, page_sql};
     use dbee_core::{RelKind, TableInfo};
     use proptest::prelude::*;
+
+    #[test]
+    fn all_holds_every_dialect_once() {
+        // Each dialect and the next, by an exhaustive match: a new variant joins the chain here.
+        let after = |d: Dialect| match d {
+            Dialect::Postgres => Some(Dialect::MySql),
+            Dialect::MySql => Some(Dialect::Sqlite),
+            Dialect::Sqlite => None,
+        };
+        let every: Vec<Dialect> = std::iter::successors(Some(Dialect::Postgres), |d| after(*d)).collect();
+        assert_eq!(Dialect::ALL.to_vec(), every);
+    }
 
     #[test]
     fn rules_are_consts_per_engine() {
@@ -614,11 +626,12 @@ mod tests {
 
     #[test]
     fn ilike_is_lower_like_off_postgres() {
-        assert_eq!(Dialect::MySql.like(Op::ILike, "`n`", "'%a%'"), "LOWER(CAST(`n` AS CHAR)) LIKE LOWER('%a%')");
-        assert_eq!(Dialect::MySql.like(Op::NotILike, "`n`", "'%a%'"), "LOWER(CAST(`n` AS CHAR)) NOT LIKE LOWER('%a%')");
-        assert_eq!(Dialect::Sqlite.like(Op::ILike, "\"n\"", "'%a%'"), "LOWER(CAST(\"n\" AS TEXT)) LIKE LOWER('%a%')");
-        assert_eq!(Dialect::Sqlite.like(Op::Like, "\"n\"", "'a'"), "CAST(\"n\" AS TEXT) LIKE 'a'");
-        assert_eq!(Dialect::MySql.like(Op::NotLike, "`n`", "'a'"), "CAST(`n` AS CHAR) NOT LIKE 'a'");
+        let my = " ESCAPE _utf8mb4 X'5C'";
+        assert_eq!(Dialect::MySql.like(Op::ILike, "`n`", "'%a%'"), format!("LOWER(CAST(`n` AS CHAR)) LIKE LOWER('%a%'){my}"));
+        assert_eq!(Dialect::MySql.like(Op::NotILike, "`n`", "'%a%'"), format!("LOWER(CAST(`n` AS CHAR)) NOT LIKE LOWER('%a%'){my}"));
+        assert_eq!(Dialect::Sqlite.like(Op::ILike, "\"n\"", "'%a%'"), "LOWER(CAST(\"n\" AS TEXT)) LIKE LOWER('%a%') ESCAPE '\\'");
+        assert_eq!(Dialect::Sqlite.like(Op::Like, "\"n\"", "'a'"), "CAST(\"n\" AS TEXT) LIKE 'a' ESCAPE '\\'");
+        assert_eq!(Dialect::MySql.like(Op::NotLike, "`n`", "'a'"), format!("CAST(`n` AS CHAR) NOT LIKE 'a'{my}"));
         assert_eq!(Dialect::Postgres.like(Op::ILike, "\"n\"", "'a'"), "CAST(\"n\" AS text) ILIKE 'a'");
         assert_eq!(Dialect::Postgres.like(Op::NotILike, "\"n\"", "'a'"), "CAST(\"n\" AS text) NOT ILIKE 'a'");
         assert_eq!(Dialect::ALL.map(|d| d.as_text("x")), ["CAST(x AS text)", "CAST(x AS CHAR)", "CAST(x AS TEXT)"]);
@@ -648,7 +661,7 @@ mod tests {
         let collation = "Compares by the column's collation; most ignore upper and lower case.";
         for op in Op::ALL {
             let mysql = matches!(op, Op::Eq | Op::Ne | Op::Like | Op::NotLike).then_some(collation);
-            let sqlite = matches!(op, Op::Like | Op::NotLike).then_some("Ignores upper and lower case for A–Z only.");
+            let sqlite = matches!(op, Op::Like | Op::NotLike | Op::ILike | Op::NotILike).then_some("Ignores upper and lower case for A–Z only.");
             assert_eq!(Dialect::MySql.op_note(op), mysql, "{op:?}");
             assert_eq!(Dialect::Sqlite.op_note(op), sqlite, "{op:?}");
             assert_eq!(Dialect::Postgres.op_note(op), None, "{op:?}");

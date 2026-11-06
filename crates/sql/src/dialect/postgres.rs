@@ -8,6 +8,8 @@ pub(crate) const RULES: Rules = Rules {
     ident_quote: '"',
     text_type: "text",
     ilike: ILike::Native,
+    // Its LIKE escapes with `\` already.
+    like_escape: "",
     insert_defaults: InsertDefaults::DefaultValues,
     use_database: None,
     // The protocol carries statements as C strings.

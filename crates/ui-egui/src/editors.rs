@@ -21,7 +21,8 @@
 //! **Kinds** ([`Kind`], from the column's catalog entry): one line, where Enter commits; several
 //! lines for `text`, `json`, `jsonb` and `xml` (`ColumnInfo::multiline`), where Enter is a newline
 //! and Ctrl+Enter commits; and a true / false / NULL choice for booleans (class `Bool`), moved
-//! with the arrow keys or clicked.
+//! with the arrow keys or clicked. A boolean holding a value that is no choice (MySQL's
+//! `TINYINT(1)` holding 5) opens as one line instead.
 //!
 //! **Keys.** While an editor is open it has the keyboard: Enter or Ctrl+Enter commits, Tab
 //! commits and selects the next cell to the right, then the start of the next row (Shift+Tab goes
@@ -289,10 +290,11 @@ impl std::fmt::Debug for CellEditor {
 
 impl CellEditor {
     /// An editor of `kind` on cell `(row, col)` of tab `tab`, holding `value` (`None`: NULL), on
-    /// `page`.
+    /// `page`; a boolean whose value is no choice as one line.
     pub fn new(tab: TabId, (row, col): (usize, usize), kind: Kind, value: Option<&str>, page: &Arc<ResultSet>, revision: u64) -> CellEditor {
         let text = value.unwrap_or_default().to_string();
         let opened_choice = Choice::of(value);
+        let kind = if kind == Kind::Bool && opened_choice.is_none() { Kind::Line } else { kind };
         CellEditor {
             tab,
             row,
@@ -809,9 +811,11 @@ mod tests {
         assert_eq!((e.choice, e.command()), (Choice::Null, None));
         e.choice = Choice::True;
         assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": true }))));
-        // Text that is no boolean: any choice is a change.
-        let e = editor(Kind::Bool, Some("maybe"));
-        assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": true }))));
+        // Text that is no boolean opens as one line: Enter alone changes nothing.
+        let mut e = editor(Kind::Bool, Some("5"));
+        assert_eq!((e.kind, e.text.as_str(), e.command()), (Kind::Line, "5", None));
+        e.text = "1".into();
+        assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": "1" }))));
         for (text, choice) in [("TRUE", Some(Choice::True)), ("off", Some(Choice::False)), (" yes ", Some(Choice::True)), ("2", None)] {
             assert_eq!(Choice::of(Some(text)), choice, "{text}");
         }

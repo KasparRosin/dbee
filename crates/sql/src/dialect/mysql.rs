@@ -9,6 +9,8 @@ pub(crate) const RULES: Rules = Rules {
     ident_quote: '`',
     text_type: "CHAR",
     ilike: ILike::LowerLike,
+    // 8.0 and later have no LIKE escape under NO_BACKSLASH_ESCAPES (measured); hex reads alike in every mode.
+    like_escape: " ESCAPE _utf8mb4 X'5C'",
     insert_defaults: InsertDefaults::EmptyLists,
     use_database: Some("USE {}"),
     // Measured on MySQL 5.7, 8.0 and 26.10 and MariaDB 10.11 and 13.0: a NUL inside a string

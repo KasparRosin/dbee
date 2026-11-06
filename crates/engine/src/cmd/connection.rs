@@ -72,10 +72,13 @@ const PARSE_URL: &str = "connection.parseUrl";
 const SSH_KEY: &str = "connection.sshKey";
 const TEST: &str = "connection.test";
 const LIST_DATABASES: &str = "connection.listDatabases";
-const OPEN: &str = "connection.open";
-const OPEN_FILE: &str = "connection.openFile";
+/// The command that opens a connection.
+pub const OPEN: &str = "connection.open";
+/// The command that opens a database file.
+pub const OPEN_FILE: &str = "connection.openFile";
 const SAVE_OPEN: &str = "connection.saveOpen";
-const RECONNECT: &str = "connection.reconnect";
+/// The command that opens the open connection again.
+pub const RECONNECT: &str = "connection.reconnect";
 const REFRESH: &str = "schema.refresh";
 const CLOSE: &str = "connection.close";
 
@@ -1052,25 +1055,60 @@ fn no_file_type<K>(path: &Path, types: &[FileType<K>]) -> String {
     )
 }
 
+/// The params of `connection.open` that `connection.openFile` does not take: a file has no
+/// tunnel, and an unsaved connection keeps no password.
+const NOT_FOR_A_FILE: [&str; 4] = ["savePassword", "sshPassword", "sshPassphrase", "trustHostKey"];
+
+/// The database type of the file at `path` among `kinds`: the first whose file extensions hold the
+/// path's ([`first_with_extension`]). `Err` is the sentence that says why it does not open:
+/// its name, the extensions dbee opens and where a file with another name opens.
+fn file_kind(kinds: &[DbKind], path: &Path) -> Result<DbKind, String> {
+    let types = file_types(kinds);
+    first_with_extension(&types, path).ok_or_else(|| no_file_type(path, &types))
+}
+
+/// The saved connection whose file is the file at `file`, once both are resolved (links
+/// followed, `.` and `..` gone).
+fn saved_for_file<'a>(saved: &'a [ConnectionConfig], file: &Path) -> Option<&'a ConnectionConfig> {
+    let resolved = std::fs::canonicalize(file).ok()?;
+    saved.iter().find(|c| c.kind.uses_file() && c.file.as_deref().and_then(|f| std::fs::canonicalize(f).ok()).is_some_and(|f| f == resolved))
+}
+
 /// `{path, password?}` → a job as [`open`]'s: the file at `path` (a relative path is the current
-/// folder's), opened with the first of the session's types whose file extensions hold the path's
-/// ([`first_with_extension`]), and the secrets the params give, as `connection.open` takes them. The
-/// config is not saved and has no name, so the file's name shows
-/// ([`ConnectionConfig::display_name`]); the summary says `saved: false` until
+/// folder's). When a saved connection's file is that file (both resolved), that connection opens,
+/// with its name, colour and read-only setting. Else the file opens with the first of the
+/// session's types whose file extensions hold the path's ([`file_kind`]), and the password the
+/// params give: the config is not saved and has no name, so the file's name shows
+/// ([`ConnectionConfig::display_name`]), and the summary says `saved: false` until
 /// `connection.saveOpen`. It never makes a file. A path with none of those extensions is refused
-/// (`badParams`), naming the ones dbee opens and where a file with another name opens.
+/// (`badParams`), naming the ones dbee opens and where a file with another name opens, as are
+/// `savePassword` and the SSH params.
 fn open_file(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     not_opening(s)?;
-    let path = Path::new(p::str(params, "path")?);
+    if let Some(name) = NOT_FOR_A_FILE.iter().find(|name| params.get(**name).is_some()) {
+        return Err(bad(format!("`{name}` is not a param of connection.openFile, which takes {{path, password?}}")));
+    }
+    let config = file_config(s, Path::new(p::str(params, "path")?))?;
+    start_open(s, config, false, params)
+}
+
+/// The settings `connection.openFile` opens `path` with, or its `badParams` refusal; also while
+/// a connection is open, when it would be refused only for that (a file dropped on the window
+/// then waits for the open one to close only when it can open).
+pub fn file_config(s: &Session, path: &Path) -> Result<ConnectionConfig, EngineError> {
     if path.as_os_str().is_empty() {
         return Err(bad("`path` is empty"));
     }
-    let types = file_types(&s.kinds());
-    let kind = first_with_extension(&types, path).ok_or_else(|| bad(no_file_type(path, &types)))?;
     let file = std::path::absolute(path).map_err(|e| bad(format!("{}: {e}", path.display())))?;
-    let config = ConnectionConfig { kind, file: Some(file), host: String::new(), port: 0, ..ConnectionConfig::default() };
+    let config = match saved_for_file(&s.state.store.saved, &file) {
+        Some(saved) => saved.clone(),
+        None => {
+            let kind = file_kind(&s.kinds(), path).map_err(bad)?;
+            ConnectionConfig { kind, file: Some(file), host: String::new(), port: 0, ..ConnectionConfig::default() }
+        }
+    };
     config.validate().map_err(|e| bad(e.to_string()))?;
-    start_open(s, config, false, params)
+    Ok(config)
 }
 
 /// A connection is open and the saved list doesn't hold it.

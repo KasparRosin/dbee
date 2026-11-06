@@ -1188,6 +1188,65 @@ fn open_file_is_unsaved_until_saved() {
 }
 
 #[test]
+fn open_file_opens_the_saved_connection_of_that_file() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let file = t.file().unwrap();
+        let mut s = session();
+        let config = ConnectionConfig { name: "Shop file".into(), color: ConnectionColor::Red, read_only: true, ..config_for(&t) };
+        let id = save(&mut s, config, None);
+        // Named another way: through `..`, and through a link.
+        let folder = file.parent().unwrap();
+        let roundabout = folder.join("..").join(folder.file_name().unwrap()).join(file.file_name().unwrap());
+        let mut paths = vec![file.to_path_buf(), roundabout];
+        #[cfg(unix)]
+        let link = Folder(file.with_file_name(format!("{}.{}", unique("link"), extensions(&t)[0])));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(file, &link.0).unwrap();
+            paths.push(link.0.clone());
+        }
+        for path in paths {
+            let r = open_file(&mut s, &path);
+            let c = &r["connection"];
+            let shown = (&c["id"], &c["name"], &c["color"], &c["readOnly"], &c["saved"]);
+            assert_eq!(shown, (&json!(id), &json!("Shop file"), &json!("red"), &json!(true), &json!(true)), "{}: {r}", path.display());
+            // Read-only, as saved: a write is refused.
+            run(&mut s, "tab.newQuery", json!({ "text": "CREATE TABLE never_made (a int)" }));
+            assert_eq!(run_err(&mut s, "query.run", json!({})).code(), "readOnly", "{}", path.display());
+            run(&mut s, "connection.close", json!({ "force": true }));
+        }
+        assert_eq!(run(&mut s, "connection.list", json!({}))["saved"].as_array().map(Vec::len), Some(1), "no copy was saved");
+        // Another file: unsaved, writable, as before.
+        let other = Folder(file.with_file_name(format!("{}.{}", unique("other"), extensions(&t)[0])));
+        std::fs::copy(file, &other.0).unwrap();
+        let c = open_file(&mut s, &other.0)["connection"].clone();
+        assert_eq!(
+            (&c["saved"], &c["readOnly"], &c["name"]),
+            (&json!(false), &json!(false), &json!(other.0.file_name().unwrap().to_str().unwrap())),
+            "{c}"
+        );
+        assert_ne!(c["id"], json!(id));
+    }
+}
+
+#[test]
+fn open_file_takes_no_ssh_secrets_and_keeps_no_password() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let mut s = session();
+        for name in ["savePassword", "sshPassword", "sshPassphrase", "trustHostKey"] {
+            let mut params = json!({ "path": t.file().unwrap() });
+            params[name] = if name == "savePassword" { json!(true) } else { json!("x") };
+            let e = s.execute("connection.openFile", params).unwrap_err();
+            assert_eq!(e.code(), "badParams", "{name}: {e}");
+            assert!(e.to_string().contains(&format!("`{name}` is not a param of connection.openFile")), "{e}");
+        }
+        assert!(!s.busy() && s.inspect()["screen"] == "connections");
+    }
+}
+
+#[test]
 fn open_file_finds_the_type_by_extension_in_any_case() {
     let _db = require_testdb!();
     for t in engine_targets().into_iter().filter(TestTarget::is_file) {

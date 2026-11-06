@@ -138,7 +138,7 @@ async fn columns_types_defaults_and_generated() {
         ("d", "DATE", "DATE", DateTime),
         ("ts", "DATETIME", "DATETIME", DateTime),
         ("b", "BLOB", "BLOB", Binary),
-        ("u", "VARCHAR", "VARCHAR(36)", LongText),
+        ("u", "VARCHAR", "VARCHAR(36)", Text),
         ("anything", "", "", Other),
         ("total", "REAL", "REAL", Number),
     ];

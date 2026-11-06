@@ -88,7 +88,8 @@ impl ConnectionStore {
                 (store.recent, store.kept_recent) = decode_each(body.recent);
                 store.recent.truncate(MAX_RECENT);
                 let kept = store.kept_saved.len() + store.kept_recent.len();
-                let warning = (kept > 0).then(|| format!("{kept} saved connection entries could not be read and are kept unchanged in the file"));
+                let warning =
+                    (kept > 0).then(|| format!("{kept} saved or recent connection entries could not be read and are kept unchanged in the file"));
                 (store, warning)
             }
             Err(e) => {

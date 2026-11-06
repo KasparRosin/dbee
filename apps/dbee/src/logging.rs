@@ -11,9 +11,10 @@
 //! Levels: `info` for dbee's own crates, `warn` for everything else (wgpu and naga are
 //! chatty). `RUST_LOG` replaces that with env_logger-style directives: `debug`,
 //! `warn,dbee_engine=trace`, `wgpu_core=info`. A directive ending in `*` matches every target
-//! that starts with it (`dbee*=debug`). The Postgres and SSH protocol crates ([`CAPPED`]) never
-//! log below `info`, whatever `RUST_LOG` says: at debug and trace they log SQL text, parameters
-//! and protocol data, and logs never hold secrets or cell values.
+//! that starts with it (`dbee*=debug`). Only dbee's own crates ([`own`]) log below `info`,
+//! whatever `RUST_LOG` says: at debug and trace other crates (the Postgres and SSH protocol
+//! crates among them, and any a new driver brings) may log SQL text, parameters and protocol
+//! data, and logs never hold secrets or cell values.
 //!
 //! Records logged before the settings directory is known are kept (up to [`MAX_PENDING`]) and
 //! written once the file is attached. Writing never panics: a file that can't be created or
@@ -39,8 +40,12 @@ pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_PENDING: usize = 512;
 /// The built-in filter when `RUST_LOG` is unset or empty.
 pub const DEFAULT_FILTER: &str = "warn,dbee*=info";
-/// Targets that never log more than `info` (directive syntax: `russh*` is every `russh` crate).
-pub const CAPPED: &[&str] = &["tokio_postgres", "russh*"];
+/// `target` is one of dbee's own crates (`dbee`, `dbee_engine`, …), the only ones that log below
+/// `info`.
+pub fn own(target: &str) -> bool {
+    let krate = target.split("::").next().unwrap_or_default();
+    krate == "dbee" || krate.starts_with("dbee_")
+}
 
 /// Per-target level filter parsed from env_logger-style directives.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +78,7 @@ impl Filter {
     }
 
     /// The level that applies to `target` (the most specific matching directive wins), at most
-    /// `info` for the [`CAPPED`] targets.
+    /// `info` for a target that is not one of dbee's own ([`own`]).
     pub fn level_for(&self, target: &str) -> LevelFilter {
         let level = self
             .directives
@@ -81,7 +86,7 @@ impl Filter {
             .filter(|(name, _)| matches(name, target))
             .max_by_key(|(name, _)| name.len())
             .map_or(self.default, |(_, level)| *level);
-        if CAPPED.iter().any(|name| matches(name, target)) { level.min(LevelFilter::Info) } else { level }
+        if own(target) { level } else { level.min(LevelFilter::Info) }
     }
 
     /// The most verbose level any target can reach (for `log::set_max_level`).
@@ -345,8 +350,10 @@ mod tests {
         // A trailing `*` is a prefix.
         assert_eq!(Filter::parse("dbee*=debug").level_for("dbee_ui_egui::panel"), LevelFilter::Debug);
         assert_eq!(Filter::parse("dbee*=debug").level_for("eframe"), LevelFilter::Error);
-        // A bare target name sets that target to the most verbose level, as env_logger does.
-        assert_eq!(Filter::parse("naga").level_for("naga::front"), LevelFilter::Trace);
+        // A bare target name sets that target to the most verbose level, as env_logger does (for
+        // another crate than dbee's, its most verbose is info).
+        assert_eq!(Filter::parse("dbee_engine").level_for("dbee_engine::session"), LevelFilter::Trace);
+        assert_eq!(Filter::parse("naga").level_for("naga::front"), LevelFilter::Info);
         assert_eq!(Filter::parse("naga").level_for("eframe"), LevelFilter::Error);
         // Levels are case-insensitive and surrounding blanks are ignored.
         assert_eq!(Filter::parse(" WARN , dbee = Debug ").level_for("dbee"), LevelFilter::Debug);
@@ -354,29 +361,33 @@ mod tests {
     }
 
     #[test]
-    fn protocol_crates_never_log_below_info() {
-        // They log SQL text, parameters and protocol data at debug and trace.
-        let targets = ["tokio_postgres", "tokio_postgres::query", "tokio_postgres::prepare", "russh", "russh::client", "russh_keys::agent"];
-        for spec in
-            ["trace", "debug", "*=trace", "tokio_postgres=trace,russh*=trace", "tokio_postgres::query=trace,russh=debug,russh_keys=trace,info"]
-        {
+    fn only_dbees_own_crates_log_below_info() {
+        // Other crates may log SQL text, parameters and protocol data at debug and trace.
+        let others =
+            ["tokio_postgres", "tokio_postgres::query", "russh::client", "russh_keys::agent", "mysql_common", "a_new_protocol_crate::wire", "dbeefy"];
+        for spec in ["trace", "debug", "*=trace", "tokio_postgres=trace,russh*=trace", "a_new_protocol_crate=debug,info"] {
             let f = Filter::parse(spec);
-            for target in targets {
-                assert_eq!(f.level_for(target), LevelFilter::Info, "{spec}: {target}");
+            for target in others {
+                assert!(f.level_for(target) <= LevelFilter::Info, "{spec}: {target}");
             }
         }
-        // A directive for one of them caps that one; the rest keep their level.
-        let f = Filter::parse("tokio_postgres=trace");
-        assert_eq!((f.level_for("tokio_postgres::query"), f.level_for("russh")), (LevelFilter::Info, LevelFilter::Error));
-        // Quieter levels still apply, and other crates are not capped.
+        // A crate no list names, asked for debug: capped at info.
+        assert_eq!(Filter::parse("debug").level_for("a_new_protocol_crate::wire"), LevelFilter::Info);
+        assert_eq!(Filter::parse("a_new_protocol_crate=debug,info").level_for("a_new_protocol_crate"), LevelFilter::Info);
+        // dbee's own crates keep their level.
+        let f = Filter::parse("trace");
+        for target in ["dbee", "dbee::control_server", "dbee_engine", "dbee_ui_egui::panel", "dbee_mysql::wire"] {
+            assert_eq!(f.level_for(target), LevelFilter::Trace, "{target}");
+        }
+        // Quieter levels still apply to every crate.
         assert_eq!(Filter::parse(DEFAULT_FILTER).level_for("tokio_postgres"), LevelFilter::Warn);
         assert_eq!(Filter::parse("tokio_postgres=off").level_for("tokio_postgres::query"), LevelFilter::Off);
-        assert_eq!(Filter::parse("trace").level_for("tokio_postgres_rustls"), LevelFilter::Trace);
-        assert_eq!(Filter::parse("trace").level_for("dbee_engine"), LevelFilter::Trace);
+        assert_eq!(Filter::parse("error").level_for("a_new_protocol_crate"), LevelFilter::Error);
         let logger = AppLogger::new(Filter::parse("trace"), false);
         use log::Log;
-        assert!(!logger.enabled(&log::Metadata::builder().level(log::Level::Debug).target("tokio_postgres::query").build()));
+        assert!(!logger.enabled(&log::Metadata::builder().level(log::Level::Debug).target("a_new_protocol_crate").build()));
         assert!(logger.enabled(&log::Metadata::builder().level(log::Level::Info).target("russh::client").build()));
+        assert!(logger.enabled(&log::Metadata::builder().level(log::Level::Trace).target("dbee_engine").build()));
     }
 
     #[test]

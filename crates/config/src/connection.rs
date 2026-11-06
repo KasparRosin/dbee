@@ -94,14 +94,6 @@ pub enum DbKind {
 impl DbKind {
     pub const ALL: [DbKind; 4] = [DbKind::Postgres, DbKind::MySql, DbKind::MariaDb, DbKind::Sqlite];
 
-    /// A new variant fails to compile here, which forces an edit; `info` is exhaustive on its own.
-    #[allow(dead_code)]
-    const fn all_guard(k: DbKind) {
-        match k {
-            DbKind::Postgres | DbKind::MySql | DbKind::MariaDb | DbKind::Sqlite => {}
-        }
-    }
-
     pub const fn info(self) -> &'static KindInfo {
         match self {
             DbKind::Postgres => &kind::postgres::INFO,
@@ -463,6 +455,23 @@ pub fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_holds_every_kind_once() {
+        // Each kind and the next, by an exhaustive match: a new variant joins the chain here.
+        let after = |k: DbKind| match k {
+            DbKind::Postgres => Some(DbKind::MySql),
+            DbKind::MySql => Some(DbKind::MariaDb),
+            DbKind::MariaDb => Some(DbKind::Sqlite),
+            DbKind::Sqlite => None,
+        };
+        let every: Vec<DbKind> = std::iter::successors(Some(DbKind::Postgres), |k| after(*k)).collect();
+        assert_eq!(DbKind::ALL.to_vec(), every);
+        let mut ids: Vec<&str> = DbKind::ALL.iter().map(|k| k.info().id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), DbKind::ALL.len(), "each id once");
+    }
 
     #[test]
     fn a_server_type_without_ssh_refuses_a_tunnel() {

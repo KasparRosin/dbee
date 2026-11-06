@@ -1,9 +1,10 @@
-//! The folders an isolated run's database files may lie in ([`crate::Target::allowed_dirs`]): the
-//! one check a file driver runs inside its open, before it opens anything.
+//! What a file driver checks of its file inside its open, before it opens anything: that the path
+//! names a plain file ([`plain_file`]), and in an isolated run that it lies in the run's folders
+//! ([`crate::Target::allowed_dirs`], [`allowed_file`]).
 //!
-//! The file and the folders are resolved first: links followed, `.` and `..` gone. A file that is
-//! not there yet (not even as a link) is resolved by its folder. A path that cannot be resolved is
-//! refused.
+//! For the folders, the file and the folders are resolved first: links followed, `.` and `..`
+//! gone. A file that is not there yet (not even as a link) is resolved by its folder. A path that
+//! cannot be resolved is refused.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,14 @@ pub fn allowed_file(allowed: &[PathBuf], file: &Path) -> Result<PathBuf, DbError
         return Ok(path);
     }
     Err(DbError::NotAllowed(format!("this isolated run may only open files in its own folders; {} is not in them", file.display())))
+}
+
+/// `path` can be opened as a database file: a regular file, or nothing yet, and not ending in a
+/// separator. A trailing separator names a folder, which a file library may drop and then open, or
+/// make, the file before it.
+pub fn plain_file(path: &Path) -> bool {
+    let names_a_folder = path.as_os_str().as_encoded_bytes().last().is_some_and(|b| std::path::is_separator(char::from(*b)));
+    !names_a_folder && !std::fs::metadata(path).is_ok_and(|m| !m.is_file())
 }
 
 /// `path` with its links followed and `.` and `..` gone; a path that is not there, by its folder.
@@ -52,6 +61,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_plain_file_is_a_file_or_nothing_yet_without_a_trailing_separator() {
+        let folder = Folder::new("plain");
+        let file = folder.0.join("a.sqlite");
+        std::fs::write(&file, "").unwrap();
+        let slashed = |p: &Path| PathBuf::from(format!("{}/", p.display()));
+        assert!(plain_file(&file) && plain_file(&folder.0.join("missing.sqlite")));
+        for path in [folder.0.clone(), slashed(&file), slashed(&folder.0.join("missing.sqlite")), slashed(&folder.0)] {
+            assert!(!plain_file(&path), "{}", path.display());
+        }
+        #[cfg(unix)]
+        assert!(!plain_file(Path::new("/dev/null")), "a device");
     }
 
     #[test]

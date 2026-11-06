@@ -6,7 +6,7 @@
 //! - [`DbError`] is every driver's error, with [`Meaning`]s for the server errors dbee acts on.
 //! - Shared by the drivers: the all-or-nothing apply ([`apply::apply`], over an engine's
 //!   [`ApplySession`]) and its [`ApplyGate`], the TLS setup ([`tls`]), the catalog building
-//!   ([`catalog`]) and the check of an isolated run's file ([`files`]).
+//!   ([`catalog`]) and the checks of a file driver's file ([`files`]).
 //!
 //! Values are text exactly as the server prints them. Drivers log hosts, ports and error codes
 //! only: never SQL text, passwords, server messages or cell values.
@@ -26,5 +26,5 @@ pub use api::{
 pub use apply::{ApplyError, ApplyGate, ApplySession};
 pub use catalog::CatalogBuilder;
 pub use error::{DbError, Meaning, ServerError};
-pub use files::allowed_file;
+pub use files::{allowed_file, plain_file};
 pub use registry::Drivers;

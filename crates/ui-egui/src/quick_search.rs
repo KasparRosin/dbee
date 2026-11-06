@@ -303,7 +303,7 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
         Some(Hit::Table { table, .. }) => {
             app.start("table.open", json!({ "schema": table.schema, "table": table.name }), Origin::Menu);
         }
-        Some(Hit::Connection { id, .. }) => connections::switch_to(app, &id),
+        Some(Hit::Connection { id, .. }) => connections::switch_to(app, connections::SwitchTo::Saved(id)),
         None => {}
     }
 }

@@ -152,6 +152,49 @@ fn filters_on_mysql() {
     });
 }
 
+/// The filter bar's `like`, `not like`, `ilike` and `not ilike` take `\` as their escape on every
+/// engine, as Postgres does: `\%`, `\_` and `\\` match `%`, `_` and `\` themselves.
+#[test]
+fn like_escapes_with_a_backslash_on_every_engine() {
+    let _db = require_testdb!();
+    let values = ["50%", "500", "a_b", "axb", "a\\b", "ab"];
+    let mut wrong = Vec::new();
+    for t in engine_targets() {
+        let name = unique("t_like");
+        let ids: Vec<String> = (1..=values.len()).map(|i| format!("({i}, 'x')")).collect();
+        let _drop =
+            scratch_table(&t, &name, &format!("CREATE TABLE {{t}} (id int PRIMARY KEY, v varchar(20)); INSERT INTO {{t}} VALUES {}", ids.join(", ")));
+        let mut s = connected_to(&t);
+        open_table(&mut s, t.schema("scratch"), &name);
+        // Written by dbee, which writes a backslash the same on every engine.
+        for (row, v) in values.iter().enumerate() {
+            set_cell(&mut s, row, "v", *v);
+        }
+        apply(&mut s);
+        let mut found = |op: &str, value: &str| -> Vec<String> {
+            run(&mut s, "table.setFilters", json!({ "filters": [{ "column": "v", "op": op, "value": value }] }));
+            let d = read(&mut s);
+            (0..rows(&d)).map(|i| cell(&d, i, "v").unwrap_or_default().to_owned()).collect()
+        };
+        let checks: [(&str, &str, &[&str]); 6] = [
+            ("like", "50\\%", &["50%"]),
+            ("like", "a\\_b", &["a_b"]),
+            ("like", "a\\\\b", &["a\\b"]),
+            ("notLike", "50\\%", &["500", "a_b", "axb", "a\\b", "ab"]),
+            ("ilike", "A\\_B", &["a_b"]),
+            ("notIlike", "%\\_%", &["50%", "500", "axb", "a\\b", "ab"]),
+        ];
+        for (op, value, want) in checks {
+            let got = found(op, value);
+            println!("{}: {op} {value} finds {got:?}", t.name());
+            if got != want {
+                wrong.push(format!("{}: {op} {value} found {got:?}, not {want:?}", t.name()));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 #[test]
 fn typing_in_the_filter_bar_journals_one_entry() {
     let _db = require_testdb!();

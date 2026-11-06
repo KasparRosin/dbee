@@ -9,12 +9,14 @@ pub(crate) const RULES: Rules = Rules {
     ident_quote: '"',
     text_type: "TEXT",
     ilike: ILike::LowerLike,
+    // Its LIKE has no escape character unless one is named.
+    like_escape: " ESCAPE '\\'",
     insert_defaults: InsertDefaults::DefaultValues,
     use_database: None,
     // Its prepare stops at a NUL, so text after one would be cut off unseen.
     text_holds_nul: false,
     bool_literals: ("1", "0"),
-    op_notes: &[(&[Op::Like, Op::NotLike], "Ignores upper and lower case for A–Z only.")],
+    op_notes: &[(&[Op::Like, Op::NotLike, Op::ILike, Op::NotILike], "Ignores upper and lower case for A–Z only.")],
     schema_word: ("schema", "Schemas"),
     string_literal: StringLiteral::Quoted,
     binary_literal: Some(BinaryLiteral::XQuoted),

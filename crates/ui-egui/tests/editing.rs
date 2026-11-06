@@ -722,6 +722,32 @@ fn a_mysql_boolean_set_to_false_in_the_editor_writes_0() {
     assert_eq!(dbee_testkit::mysql(server, &format!("SELECT flag FROM scratch.{name}")).unwrap().trim(), "0");
 }
 
+/// A MySQL `BOOLEAN` holding 5 is no choice: the cell opens as one line on the 5, and Enter
+/// alone writes nothing over it.
+#[test]
+fn a_mysql_boolean_holding_another_number_opens_as_one_line() {
+    let db = dbee_testkit::require_testdb!();
+    let server = db.server("mysql80").unwrap();
+    let name = unique("t_bool_ui");
+    let _drop = ScratchOn(server, name.clone());
+    dbee_testkit::mysql(
+        server,
+        &format!("CREATE TABLE scratch.{name} (id INT PRIMARY KEY, flag BOOLEAN); INSERT INTO scratch.{name} VALUES (1, 5);"),
+    )
+    .unwrap();
+    let t = dbee_testkit::target(server);
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, step: Some(0.25), config: Some(config_of(&t)), ..Setup::default() });
+    ui.open("scratch", &name);
+    ui.until("the page", |ui| ui.table()["rows"] == 1);
+    ui.double_click("grid-cell-0-1");
+    assert_eq!(ui.editor(), Some(json!({ "text": "5", "multiline": false })), "one line, on the 5");
+    assert!(ui.tag("cell-editor-true").is_none(), "no choice");
+    ui.key("Enter");
+    assert!(ui.editor().is_none());
+    assert_eq!((ui.staged(0, 1), ui.edits()["count"].clone()), (None, json!(0)), "Enter alone stages nothing");
+    assert_eq!(dbee_testkit::mysql(server, &format!("SELECT flag FROM scratch.{name}")).unwrap().trim(), "5");
+}
+
 #[test]
 fn a_new_row_is_added_selected_and_edited() {
     let db = dbee_testkit::require_testdb!();

@@ -61,12 +61,6 @@ pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
     Ok(SqliteConnection { shared: Some(Arc::new(shared)), running, info, turn: tokio::sync::Mutex::new(()), runtime })
 }
 
-/// `path` ends in a separator, so it names a folder. SQLite drops the separator, and would open (or
-/// make) the file before it.
-fn names_a_folder(path: &Path) -> bool {
-    path.as_os_str().as_encoded_bytes().last().is_some_and(|b| std::path::is_separator(char::from(*b)))
-}
-
 /// Open the file at `given` (checked against `allowed` first, when there are allowed folders) and
 /// set its session up, on the calling (blocking) thread; the connection, its interrupt handle, and
 /// whether it is read-only.
@@ -77,7 +71,7 @@ fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>
         None => given.to_path_buf(),
     };
     let path = path.as_path();
-    if names_a_folder(given) || std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
+    if !dbee_driver::plain_file(given) || !dbee_driver::plain_file(path) {
         return Err(DbError::Connect(format!("{shown} is not a file")));
     }
     let mode = match (read_only, create) {

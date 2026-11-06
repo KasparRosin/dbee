@@ -370,7 +370,8 @@ fn an_unreadable_entry_is_kept_and_the_others_load() {
     let (mut s, warn) = ConnectionStore::load(Some(&dir));
     assert_eq!(s.saved.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["g"]);
     let warn = warn.unwrap();
-    assert!(warn.contains('2') && !warn.contains("Newer"), "{warn}");
+    // One saved entry and one recent one, counted together.
+    assert_eq!(warn, "2 saved or recent connection entries could not be read and are kept unchanged in the file");
     assert!(!dir.join("connections.json.bad").exists());
     s.upsert(cfg("h"));
     s.save().unwrap();
