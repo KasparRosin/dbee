@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, once file export lands (M3). M1 "Daily Postgres workflow" and M2 "Three databases" are built and wait for their last check: a day of real use on the maintainer's own databases.
 
-> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (the fuzz run again; README in line) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (M2's review fixes; test numbers) · **Target:** Beekeeper Studio 5.5.7
 
 Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs` on Postgres, `apps/dbee/tests/m2_day.rs` on MySQL, MariaDB and SQLite). They are connecting (a server also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M3. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
 
@@ -13,7 +13,7 @@ Why pre-alpha: five of the six alpha gate rows work end to end, measured in the 
 | Overall parity with Beekeeper Studio | ~29 % | estimated (weighted dimensions, [target-app-parity](docs/target-app-parity.md)) |
 | Alpha gate rows that pass | 5 of 6, on all four engines | measured (`m1_day`, `m2_day` and the test suites, [roadmap](docs/roadmap.md)) |
 | Commands registered | 50: 47 engine, 3 UI-only | measured (the command tables) |
-| Tests | 986 `#[test]` attributes in 65,690 lines of Rust; `cargo xtask ci` runs 1,168 | measured (`cargo xtask stats` and `cargo xtask ci`, 2026-11-05) |
+| Tests | 1,003 `#[test]` attributes in 66,848 lines of Rust; `cargo xtask ci` runs 1,188 | measured (`cargo xtask stats` and `cargo xtask ci`, 2026-11-06) |
 
 ## By dimension
 
@@ -60,6 +60,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Entry |
 |---|---|
+| 2026-11-06 | M2's whole-branch review fixed: a stopped statement's cancel is sent again until it ends and never reaches a later one; a stored password is not used with another CA file or an option that protects it less; the filter bar's `like` escapes with `\` on every engine; a file dropped while connected opens through the disconnect question, and one a saved connection names opens as saved (read-only kept); each engine's fixed facts in its own file. The engine differences the review found are in gaps.md. |
 | 2026-11-05 | M2 "Three databases" built: one driver interface with Postgres behind it, and MySQL, MariaDB and SQLite with the whole M1 workflow: connect (a server also through SSH; a SQLite file from the command line or a drop), browse, filter, query, edit and copy. The Database field lists the server's databases (#1), and Ctrl+P finds saved connections and switches to one (#3). The M2 day runs end to end in the real window on all three. |
 | 2026-10-28 | Milestones renumbered: M2 is "Three databases" (a driver interface, MySQL/MariaDB and SQLite), and import and export move to M3. SQLite's public-domain code is allowed. |
 | 2026-10-27 | M1 review fixes: a value longer than a `varchar(n)`, `char(n)` or `bit(n)` column fails the Apply instead of being written cut; a running Apply can be cancelled until it commits; generated columns are refused; notices read as sentences; the UI tests share one harness, and ci fails a skipped driver test once the servers are up. |
@@ -71,6 +72,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-06 | minor | Progress log: M2's review fixes; test numbers measured again. |
 | 2026-11-06 | minor | The 20,000-step fuzz run again and dated. |
 | 2026-11-05 | major | M2 built: stage line, headline numbers (parity, engines, commands, tests), dimensions, upcoming list and progress log. |
 | 2026-10-28 | minor | M2 is "Three databases"; import and export are M3; upcoming list and progress log updated. |

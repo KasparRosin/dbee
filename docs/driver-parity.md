@@ -1,6 +1,6 @@
 # Driver parity
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** major (MySQL, MariaDB and SQLite done) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (where the engines differ) · **Target:** Beekeeper Studio 5.5.7
 
 The engine list is the one observed in Beekeeper Studio's connection type list: 20 engines, 10 free and 10 paid ("*" after the name). The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). "done" means it works end to end against the Docker test servers (measured); the limits are in [gaps.md](gaps.md).
 
@@ -29,6 +29,16 @@ The engine list is the one observed in Beekeeper Studio's connection type list: 
 
 Engines: 4 of 20 (20 %, measured by count): PostgreSQL, MySQL, MariaDB and SQLite. Weighted by use the share is larger, as these four are among the most used, but no usage data backs a number. CockroachDB and Amazon Redshift speak Postgres's protocol and may work through its driver, but are not tested.
 
+## Where the engines differ
+
+What one engine does and another does not, beyond the notes above; each limit has its entry in [gaps.md](gaps.md).
+
+- **The same on every engine:** the filter bar's `like`, `not like`, `ilike` and `not ilike` take `\` as their escape, as Postgres's `LIKE` does by default: `\%`, `\_` and `\\` match `%`, `_` and `\` themselves. MySQL 8.0 and later have no escape under the browse connection's `NO_BACKSLASH_ESCAPES`, and SQLite has none unless one is named, so dbee names it (measured on all seven test servers and SQLite: `like_escapes_with_a_backslash_on_every_engine`, `crates/engine/tests/table.rs`). A raw `WHERE` keeps each engine's own string rules: `'it\'s'` works in a MySQL query tab, which keeps the server's `sql_mode`, but not in its filter bar. A read-only connection refuses `CREATE TABLE`, `ALTER TABLE` and `DROP TABLE` on every engine (`read_only_refuses_ddl`, `crates/engine/tests/query.rs`).
+- **Letter case:** MySQL and MariaDB compare `eq` and `like` by the column's collation, and most collations ignore case. SQLite's `like` and `ilike` ignore case for A–Z only (34). The filter bar's notes say both.
+- **Query tabs:** every tab of a connection shares one session, on every engine, and a transaction outlives the tab that opened it; on MySQL and MariaDB another tab's DDL commits it (14). MySQL and MariaDB: a `CALL` shows only its last result set (25), the warning count is not shown (26), and a query tab can turn read-only off, as on Postgres (27).
+- **Connections:** MySQL and MariaDB servers end idle sessions after their `wait_timeout`, often short on hosted servers, and dbee then asks to reconnect (28). The logins `client_ed25519`, PARSEC and `mysql_clear_password` are refused (29), and connections close without the protocol's goodbye, which MariaDB logs (33).
+- **Catalog:** Postgres, MySQL and MariaDB read it in several queries, outside one snapshot; Refresh reads it again (32). MySQL's `lower_case_table_names` 1 and 2 are untested (30), and MariaDB's system-versioned tables with hidden period columns are read-only in the grid (31).
+
 ## Work
 
 - **Done (M2 "Three databases", 2026-11-05):** one driver interface (`crates/driver`), Postgres moved behind it, and MySQL/MariaDB and SQLite on it with the whole M1 workflow, in the real window on each (`apps/dbee/tests/m2_day.rs`).
@@ -39,6 +49,7 @@ Engines: 4 of 20 (20 %, measured by count): PostgreSQL, MySQL, MariaDB and SQLit
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-06 | minor | Where the engines differ: the `like` escape now the same on every engine (measured), and the differences M2's final review listed, each with its gaps.md entry. |
 | 2026-11-05 | major | MySQL, MariaDB and SQLite connect, browse, query and edit: done, with their tests; 4 of 20 engines (M2). |
 | 2026-10-28 | minor | Work: the driver interface, MySQL/MariaDB and SQLite are M2 "Three databases". |
 | 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |

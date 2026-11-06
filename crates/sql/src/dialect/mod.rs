@@ -143,7 +143,8 @@ pub(crate) enum BinaryLiteral {
     XQuoted,
 }
 
-/// How a value for a column is written; the logic for each is in its engine's file.
+/// How a value for a column is written: `Cast` and `BareNumbers` by their engine's file, `Literal` as
+/// [`Dialect::literal`] writes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Values {
     /// `CAST('…' AS type)`, the type picked from the column (Postgres).

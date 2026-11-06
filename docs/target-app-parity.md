@@ -1,6 +1,6 @@
 # Target app parity
 
-> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (the launch check at a low load, every run of the M2 day with its load, the fuzz run again) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (the tarball rebuilt; the launch check right after a release build) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
@@ -106,7 +106,7 @@ Quick search (Ctrl+P) over 1,000 tables scores the session's catalog in memory, 
 
 Every target is met on every engine, in every run.
 
-The launch check, a release build to the connection screen with the window shown (`connection_screen_within_one_second`, target 1 s), took 224, 228 and 199 ms on 2026-11-06 at a load of 0.99–1.30. On 2026-11-05 it took 1.82 s at a load of about 24, right after its own release build (M1 measured 301 ms in that state), and later the same day it could not draw a frame, as the desktop was locked.
+The launch check, a release build to the connection screen with the window shown (`connection_screen_within_one_second`, target 1 s), took 224, 228 and 199 ms on 2026-11-06 at a load of 0.99–1.30, and the same day 948 ms right after its own release build and 347 ms the run after, at a load of 8.5–9.5. On 2026-11-05 it took 1.82 s at a load of about 24, right after its own release build (M1 measured 301 ms in that state), and later the same day it could not draw a frame, as the desktop was locked.
 
 The M2 day itself (`m2_day_end_to_end`, a dev build: SQLite, MySQL through SSH, MariaDB and back) took 40.3 s and 39.8 s on 2026-11-05 (the load was not recorded for those two), 91.9 s in that day's `--ignored` run (load 22.14 at its start), and 37.6 s on 2026-11-06 (load 7.79 at its start, 5.70 at its end).
 
@@ -114,7 +114,7 @@ Beekeeper Studio's own timings were not measured.
 
 ## Platforms
 
-Linux x86_64: built, packaged (tarball, AppImage) and started from the tarball on 2026-10-26; the M2 app's tarball built on 2026-11-05 (the AppImage was not rebuilt: its tool now downloads the AppImage runtime while it builds). The rest of the matrix was not built in M1 or M2. CI builds wait for the GitHub repository. See [hardware-parity.md](hardware-parity.md).
+Linux x86_64: built, packaged (tarball, AppImage) and started from the tarball on 2026-10-26; the M2 app's tarball built on 2026-11-06 from `df2f3ca` (sha256 `38051b3c89fde4a1213fb9a0c80297f173c9d322ea5297a4c439f4ae74f441fa`; the AppImage was not rebuilt: its tool now downloads the AppImage runtime while it builds). The rest of the matrix was not built in M1 or M2. CI builds wait for the GitHub repository. See [hardware-parity.md](hardware-parity.md).
 
 ## Ecosystem and AI
 
@@ -151,6 +151,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-06 | minor | The M2 tarball as rebuilt from `df2f3ca`, with its sha256; the launch check right after its release build (948 and 347 ms at a load of 8.5–9.5). |
 | 2026-11-06 | minor | The launch check measured at a low load (199–228 ms); the M2 day's runs with their loads; the 20,000-step fuzz run again. |
 | 2026-11-05 | major | M2 built: MySQL, MariaDB and SQLite (4 of 20 engines, ~29 % overall, estimated); readiness for SQLite and MySQL users; M1's targets measured again on every engine, in a release build, with the load; the M2 day; effort for M2. |
 | 2026-10-28 | minor | Import and export is now M3; M2 is three databases (MySQL/MariaDB and SQLite). |

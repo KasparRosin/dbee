@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** minor (entries 19–24: MySQL and SQLite limits, Ctrl+P, the cramped form; older entries say which engines they hold for) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (entry 14: query tabs share one session; entries 25–34: engine differences from M2's final review) · **Target:** Beekeeper Studio 5.5.7
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -116,12 +116,12 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: few real values have a million short lines. In the far end of such a value, rows can sit several points off and a click can land one row away.
 - **Estimate:** 3–6 h (estimated): scroll by row, not by point.
 
-### 14. Postgres: a failed statement leaves a query tab's transaction failed (D)
+### 14. Query tabs share one session, and its transaction outlives a tab (D)
 
-- **Limit:** on Postgres, a script that opens a transaction (`BEGIN`) and fails inside it leaves the query connection in that failed transaction: every later run fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead. The error card says so: under a 25P02 error it adds that a ROLLBACK ends the failed transaction.
-- **Evidence:** `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
-- **Impact:** one more run (`ROLLBACK`) after a failed transaction. A reconnect also ends it. MySQL, MariaDB and SQLite keep a transaction going after a failed statement, so there it does not arise.
-- **Estimate:** 2–4 h (estimated): show the open or failed transaction in the query tab and offer Rollback.
+- **Limit:** every query tab of a connection runs on one query connection, so they share one session: its transaction, its `SET`s and its temporary tables. A transaction a tab opened (`BEGIN`) stays open when the tab closes, and another tab's `COMMIT` or `ROLLBACK` ends it. On MySQL and MariaDB a statement that commits on its own (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `LOCK TABLES` and others) in any tab commits it, without a word. On Postgres a script that fails inside a transaction leaves the session in that failed transaction: every later run, in any tab, fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead; under a 25P02 error the card adds that a ROLLBACK ends it. MySQL, MariaDB and SQLite keep a transaction going after a failed statement, so there that part does not arise.
+- **Evidence:** the query connection (`Connected::query`, `crates/engine/src/state.rs`) is one per connection, and closing a tab ends no transaction (`crates/engine/src/cmd/tabs.rs`); `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
+- **Impact:** an uncommitted change made in a tab that was closed can be committed later by another tab, by its `COMMIT` or, on MySQL and MariaDB, by its DDL. A reconnect ends the session and its transaction (rolled back).
+- **Estimate:** 2–4 h (estimated): each driver reports after a run whether a transaction is open (Postgres's ReadyForQuery status, MySQL's `SERVER_STATUS_IN_TRANS`, SQLite's autocommit flag), the query tab shows it, and closing the tab or switching connections asks whether to commit or roll back. Waits for the maintainer's call.
 
 ### 15. A table without a row key pages by OFFSET alone (D)
 
@@ -193,10 +193,81 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: only in a window made as small as it goes. A wider window shows the form whole.
 - **Estimate:** part of the connection screen's redesign; not estimated.
 
+### 25. MySQL and MariaDB: a `CALL` shows only its last result set (D)
+
+- **Limit:** a stored procedure that returns several result sets shows only the last one with rows; the ones before it are read and dropped, with no sign.
+- **Evidence:** `crates/mysql/src/result.rs` keeps the last row-returning result; `several_result_sets_keep_the_last` (`crates/mysql/tests/query.rs`).
+- **Impact:** a procedure that reports in steps shows its last step only. Calling the statements one by one shows each.
+- **Estimate:** 3–5 h (estimated): one statement giving several results in the query tab's selector.
+
+### 26. MySQL and MariaDB: the warning count is not shown (D)
+
+- **Limit:** the server's warning count in its OK packet is dropped. On a server without a strict `sql_mode`, a query tab's `UPDATE` that cuts a value shows "1 row affected" and nothing else (grid edits run under a strict `sql_mode`, so there the value is refused).
+- **Evidence:** the OK packet's warnings are not read into the result (`crates/mysql/src/result.rs`); `ResultSet` has no field for them (`crates/core`).
+- **Impact:** a truncation or a conversion in a query tab goes unseen. `SHOW WARNINGS` right after the statement lists them.
+- **Estimate:** 1–2 h (estimated): the count beside "rows affected", with a link that runs `SHOW WARNINGS`.
+
+### 27. MySQL and MariaDB: a query tab can undo read-only (D)
+
+- **Limit:** a read-only connection's sessions start with `SET SESSION TRANSACTION READ ONLY`, which refuses writes and DDL (measured on all five test servers). A query tab can turn it off with `SET SESSION TRANSACTION READ WRITE` or `START TRANSACTION READ WRITE`, and then write. Postgres has the same hole (issue #8).
+- **Evidence:** `read_only_refuses_ddl` and `read_only_refuses_insert` (`crates/engine/tests/query.rs`); the session setup (`crates/mysql/src/connect.rs`).
+- **Impact:** read-only guards against mistakes, not against someone who means to write. A database user without write grants is the guard against that.
+- **Estimate:** 2–3 h (estimated): refuse such statements on a read-only connection, as for Postgres in issue #8.
+
+### 28. A server's idle timeout ends the session, and dbee then asks to reconnect (D)
+
+- **Limit:** after the server's idle timeout (MySQL's and MariaDB's `wait_timeout`, often short on hosted servers), the next action finds the browse connection gone and asks for a reconnect; a query tab's session (its transaction, `SET`s and temporary tables) is gone with it. Postgres servers rarely end idle sessions, so there it rarely shows.
+- **Evidence:** `a_timed_out_connection_reports_connection_lost` (`crates/mysql/tests/query.rs`); the lost-connection state (`crates/engine/src/cmd/connection.rs`).
+- **Impact:** one more click (Reconnect) after a pause; nothing is lost but an open transaction, which the server already rolled back.
+- **Estimate:** 1–2 h (estimated): a ping or an automatic reconnect of an idle browse connection.
+
+### 29. MySQL and MariaDB: some login methods are refused (D)
+
+- **Missing:** the login methods `client_ed25519` and PARSEC (MariaDB) and `mysql_clear_password` (used with LDAP and PAM). A server that asks for one is refused with an error naming it, before the password is used.
+- **Evidence:** `auth_switch_to_an_unknown_method_is_auth_error` (`crates/mysql/tests/connect.rs`); the login methods dbee answers (`crates/mysql/src/auth.rs`).
+- **Impact:** an account set up with one of them cannot log in; `mysql_native_password`, `caching_sha2_password` and `sha256_password` work.
+- **Estimate:** 2–4 h (estimated) each; `mysql_clear_password` only over TLS.
+
+### 30. MySQL and MariaDB: `lower_case_table_names` 1 and 2 are untested (D)
+
+- **Limit:** the test servers run with `lower_case_table_names = 0`, the Linux default. On 1 (Windows) and 2 (macOS) the server folds or compares names by case differently, which the catalog's matching of tables, columns and keys has not been tried against.
+- **Evidence:** every server in `xtask/testdb/compose.yml` runs with the default; the catalog joins by name (`crates/mysql/src/catalog.rs`) and logs the rows it could not place (`dropped()`).
+- **Impact:** unknown on such servers: a table whose keys are not found would be read-only in the grid.
+- **Estimate:** 2–3 h (estimated): a test server with each setting.
+
+### 31. MariaDB: system-versioned tables with hidden period columns are read-only (D)
+
+- **Limit:** a system-versioned table whose `row_start` and `row_end` are implicit has a primary key that names `row_end`, a column `information_schema.COLUMNS` does not list, so the grid finds no row key and keeps the table read-only. With explicit (INVISIBLE) period columns the table is edited as any other.
+- **Evidence:** the row key needs every key column in the catalog (`crates/mysql/src/catalog.rs`); MariaDB's `KEY_COLUMN_USAGE` names `row_end` in such a table's key while `COLUMNS` leaves it out (measured on the MariaDB test servers).
+- **Impact:** such a table is changed through SQL in a query tab.
+- **Estimate:** 1–2 h (estimated): key such a table by its visible key columns.
+
+### 32. The catalog is not read in one snapshot (D)
+
+- **Limit:** on Postgres, MySQL and MariaDB the catalog is read in several queries, outside one snapshot, so DDL that runs meanwhile on the server can leave the tree with a table whose columns or keys are from before it.
+- **Evidence:** the catalog loads (`crates/pg/src/catalog.rs`, `crates/mysql/src/catalog.rs`) run their queries one after another in auto-commit. On Postgres one snapshot needs care: a failed query inside it would leave the browse session in an aborted transaction.
+- **Impact:** rare: it needs DDL during the load. Refresh (`schema.refresh`) reads it again.
+- **Estimate:** 1–2 h (estimated).
+
+### 33. MySQL and MariaDB: connections close without `COM_QUIT` (D)
+
+- **Limit:** dbee drops a MySQL or MariaDB connection by closing its socket, without the protocol's goodbye. With MariaDB's default `log_warnings = 2` (and MySQL 5.7's notes) the server writes an "Aborted connection" line to its error log for each Test, database list, disconnect and reconnect.
+- **Evidence:** the connection is dropped without `quit()` (`crates/mysql/src/connect.rs`).
+- **Impact:** noise in the server's error log; nothing is lost.
+- **Estimate:** 1 h (estimated): a `Connection::close()` (a no-op by default) that sends `COM_QUIT`.
+
+### 34. SQLite: `ilike` and `like` ignore case for A–Z only (D)
+
+- **Limit:** SQLite's `LIKE` and `LOWER()` fold the letters A to Z only, so `like` and `ilike` match `é` and `É` as different letters. The filter bar's operators say so in their note.
+- **Evidence:** the SQLite dialect's operator notes (`crates/sql/src/dialect/sqlite.rs`); SQLite's documentation of `LIKE` and `lower()`.
+- **Impact:** a case-insensitive filter on text outside ASCII misses rows that differ in case.
+- **Estimate:** 1–2 h (estimated): a Unicode case fold registered as a function on the connection.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-06 | minor | M2's final review: entry 14 now says query tabs share one session, whose transaction outlives a tab (and MySQL's DDL commits it); entries 25–34: MySQL's `CALL` results and warning count, read-only undone in a query tab, idle timeouts, refused login methods, `lower_case_table_names`, MariaDB's system-versioned tables, the catalog read without one snapshot, no `COM_QUIT`, SQLite's case folding. |
 | 2026-11-05 | minor | M2 done: entries 19 (no Unix socket for MySQL and MariaDB), 20 (SQLite: no attached databases, extensions or encrypted files), 21 (Ctrl+P finds saved connections only, tables first with nothing typed), 22 (SQLite rowid keys and VACUUM), 23 (zenity's "All files" picker), 24 (the cramped form at the smallest window); entries 3, 6, 7, 9, 14 and 15 say which engines they hold for. |
 | 2026-11-05 | minor | Entry 18: on Linux, file managers offer dbee for any SQLite file by its content while dbee opens by extension, and with no other app for SQLite files dbee is the only candidate. |
 | 2026-11-05 | minor | Entry 17: on macOS, Finder's Open With cannot hand dbee a database file (winit does not pass the open-documents event on), so the bundle declares no document types. |

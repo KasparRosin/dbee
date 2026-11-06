@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-11-05 · **Change:** minor (the connection screen picks the database type first; no engine logos for now)
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (M2's rulings a contributor would otherwise undo: MySQL hex values, NUL refused, session tracking, kept store entries, autocommit, the `LIKE` escape)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -172,3 +172,32 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 - **Logos:** AGENTS.md allows each engine's own logo where its owner's guidelines do, and the redesign shows one on each card. Read on 2026-11-05, none of the owners' pages grants this use. PostgreSQL's fair use covers the names only; it asks that the elephant not be changed or shown with other logos, and other uses need the board's approval. Oracle's allows two badges, "Powered by MySQL" and "Includes MySQL", as links to mysql.com on websites; every other MySQL logo needs a signed agreement. MariaDB's pages limit the Foundation's logo to referring to the Foundation, and grant no other use. SQLite publishes no guideline; asked on its forum, its author said the logo is a registered trademark and that its use depends on how it is used. SQLite's card shows its name too, so the four cards match. A logo can follow once its owner allows it.
 - **Why:** The type decides which fields make sense, so it comes first; a connection opened from the list keeps its own (the redesign's E2), while one still being made can be corrected. A logo used against its owner's guidelines is a trademark problem dbee doesn't need, and the name says the same.
 
+## 2026-11-06: MySQL values with a backslash or a NUL are written as hex
+
+- **Decision:** A value dbee writes into MySQL or MariaDB SQL text (an edit, a filter, a key) that holds a `\` or a NUL is written `_utf8mb4 X'…'`, the uppercase hex of its UTF-8 bytes; every other value is `'…'` with `'` doubled.
+- **Why:** whether `\` escapes depends on the session's `sql_mode` (`NO_BACKSLASH_ESCAPES`), so a quoted value with one would mean different text on different sessions. Hex reads the same in every mode, and the introducer keeps it a character string, so `LOWER`, `LIKE` and collations treat it as `'…'`.
+
+## 2026-11-06: A NUL outside a string literal is refused on MySQL
+
+- **Decision:** On MySQL and MariaDB a query tab's statement holding a NUL character outside a string literal is refused before it is sent; one inside a literal is sent (it is a character there).
+- **Why:** measured on all five test servers, a NUL outside a literal is a syntax error when text follows it, but ends the statement there when only spaces follow, and is ignored inside a `/* */` comment. The server must run what the editor shows, so every such NUL is refused, as on SQLite, which cuts a statement at one (`DELETE FROM t<NUL> WHERE id = 1` deleted every row).
+
+## 2026-11-06: The query connection's database comes from MySQL's session tracking
+
+- **Decision:** The engine keeps the database the query connection is in: the settings' when it opens, each `USE` it sends, and where the server says each statement left it, from MySQL's session-state tracking (`SESSION_TRACK_SCHEMA` in its OK packets). dbee sends no statement of its own to ask. After a run whose text names `session_track` the driver trusts the reports no more on that connection, and the engine sends a tab's `USE` before every run.
+- **Why:** the tab's database chip must say where a run goes. A `SELECT DATABASE()` after each run would clear the warnings a user reads next with `SHOW WARNINGS`; a statement that turns the tracking off would leave the reports silent, and a run in the wrong database is worse than a `USE` too many.
+
+## 2026-11-06: Connections-file entries dbee cannot read are kept and written back
+
+- **Decision:** The connections file's saved and recent entries are read one by one. An entry this build cannot read (a database type it does not know, say) is kept as it is and written back on every save, and a warning gives their count; a file that is not JSON at all is moved aside as `connections.json.bad`.
+- **Why:** an older dbee must never delete the entries a newer one wrote.
+
+## 2026-11-06: The MySQL browse connection runs in autocommit
+
+- **Decision:** The browse connection's session setup also runs `SET SESSION autocommit = 1`; the query connection keeps the server's mode.
+- **Why:** on a server whose default is autocommit off, page reads would share one long `REPEATABLE READ` snapshot (stale pages) and hold metadata locks that block other sessions' DDL.
+
+## 2026-11-06: `LIKE` escapes with a backslash on every engine
+
+- **Decision:** The filter bar's `like`, `not like`, `ilike` and `not ilike` take `\` as the escape on every engine, as Postgres's `LIKE` does by default: MySQL's and MariaDB's patterns end in `ESCAPE _utf8mb4 X'5C'`, SQLite's in `ESCAPE '\'`, Postgres's in nothing. Each is a field of the engine's dialect `Rules`.
+- **Why:** measured on the seven test servers and SQLite, `50\%` found "50%" on Postgres, MySQL 5.7 and MariaDB, but nothing on MySQL 8.0 and later (no escape under `NO_BACKSLASH_ESCAPES`) and SQLite (no escape unless one is named). The hex form reads the same whether or not `NO_BACKSLASH_ESCAPES` is set, where `'\'` would not.

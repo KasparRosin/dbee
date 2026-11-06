@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-11-05 · **Last updated:** 2026-11-05 · **Change:** minor (graded on every engine; the M2 day) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (the grid's keyboard) · **Target:** Beekeeper Studio 5.5.7
 
 Graded by behaviour against what was observed in Beekeeper Studio, not by whether a control exists. The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). Status: **done** (does what the observed element does, on every engine dbee has: PostgreSQL, MySQL, MariaDB and SQLite), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `apps/dbee/tests/m2_day.rs`, `crates/ui-egui/tests/`).
 
@@ -16,6 +16,7 @@ Graded by behaviour against what was observed in Beekeeper Studio, not by whethe
 | Status bar | Connection, per-tab counts and timings | Connection name in its colour (read-only marked), the server's product and version (MariaDB as MariaDB), the running job with Cancel, a lost connection with Reconnect, the value panel switch | partial: counts live in the tab's own bars |
 | Filter bar | Column, operator, value; + adds; raw SQL toggle; 2 filters free | The same, 13 operators (a hover says what one does differently on the engine, such as MySQL's collation), any number of filters, raw `WHERE` toggle, Apply or Enter | done |
 | Data grid | Type labels, key icons, sort, NULL and empty told apart, line-break glyph, tooltips, column resize modes, hide and reset columns, column filter | Type labels, primary and foreign key icons, sort by header, NULL and empty told apart, line-break glyph, a selection rectangle, column resize, the foreign key link | partial: no hidden columns, column filter or cell tooltips; slow past about 100 columns ([gaps.md](gaps.md) 5) |
+| Grid keyboard | Not observed | Click and Shift+click select; Enter opens the selected cell's editor, and in it Tab and Shift+Tab go to the next and previous cell; Ctrl+A and Ctrl+C on the grid | partial: no arrow keys to move the selection, and a selected cell at the edge of the view is not scrolled into view |
 | Paging bar | Page box, row count on demand, refresh, + row, Reset, Apply with a count | First, previous, page, next, last; the estimate then the exact count; refresh; + Row; the changes, Reset, Apply; gives room up in order when narrow | partial: no page box to type a page into |
 | Inline editing | Editor in the cell, staged colours, Apply and Reset, add, clone, delete rows, set NULL | One-line, multi-line (text, json, jsonb, xml) and true/false/NULL editors; Enter, Tab, Escape; staged, new, deleted and failed colours; add and delete rows; set NULL; Ctrl+S | partial: no clone row, no copy of changes as SQL; 32 KiB per cell ([gaps.md](gaps.md) 10) |
 | Grid right-click menu | Set NULL, copy as TSV, JSON, Markdown, SQL, IN list, column name, quick filter, clone, delete | Set NULL, copy (values, with header, CSV, JSON, Markdown), delete row | partial |
@@ -29,7 +30,7 @@ Graded by behaviour against what was observed in Beekeeper Studio, not by whethe
 | Notifications | Toasts with actions; export progress | Notices at the bottom right ("Copied 13 rows", why something cannot run) | partial |
 | Themes | System, light, dark, Solarized | One light theme of dbee's own | partial: dark theme later |
 
-By count: 3 of 22 elements done and 15 partial, which at half weight is 48 % (estimated). Screens not observed yet (settings, plugins, backup and restore) are not in the list, so the UI dimension is put at **~45 % (estimated)**.
+By count: 3 of 23 elements done and 16 partial, which at half weight is 48 % (estimated). Screens not observed yet (settings, plugins, backup and restore) are not in the list, so the UI dimension is put at **~45 % (estimated)**.
 
 ## Work
 
@@ -39,6 +40,7 @@ From [gaps.md](gaps.md): wide results first (5), then the editing limits (9, 10)
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-06 | minor | Grid keyboard (partial): no arrow keys, and a cell at the view's edge is not scrolled into view; 3 of 23 done, 16 partial, 48 % by count; ~45 % stands. |
 | 2026-11-05 | minor | Graded on every engine: the M2 day drives the same elements on MySQL, MariaDB and SQLite (`m2_day`); grades unchanged. |
 | 2026-11-05 | minor | Quick search: Ctrl+P finds saved connections (by any word of their names) and switches to one, also on the connection screen; the list scrolls when it doesn't fit the window (M2.19, issue #3); grades unchanged. |
 | 2026-11-05 | minor | Connection form: the Database field lists the server's databases to choose from (M2.18, issue #1); grades unchanged. |
