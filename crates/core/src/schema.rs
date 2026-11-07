@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "timing; run with --ignored --nocapture"]
     fn filter_1000_tables_within_a_frame() {
         let tables: Vec<TableInfo> = (0..1000).map(|i| table("public", &format!("Table_{i}_Name"))).collect();
         let c = Catalog { schemas: vec![SchemaInfo { name: "public".into(), system: false, tables }], default_schema: None };

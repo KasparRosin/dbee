@@ -55,6 +55,15 @@ async fn rows(c: &MySqlConnection, table: &str) -> Vec<String> {
     r.rows.into_iter().filter_map(|row| row.into_iter().next().flatten()).collect()
 }
 
+/// Waits until the count `sql`, run through `c`, is `want` (up to 20 s).
+async fn until_count(c: &MySqlConnection, sql: &str, want: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while c.scalar_u64(sql).await != Ok(want) {
+        assert!(std::time::Instant::now() < deadline, "{sql} never gave {want}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn apply(c: &MySqlConnection, statements: &[String]) -> Result<u64, ApplyError> {
     c.apply(statements, &ApplyGate::default()).await
 }
@@ -192,9 +201,13 @@ async fn dropped_apply_marks_the_connection_closed() {
     let db = require_testdb!();
     with_table(db, |s, w, r, t| async move {
         let id = w.scalar_u64("SELECT CONNECTION_ID()").await.unwrap();
-        let stmts = vec![format!("UPDATE {t} SET name = 'gone' WHERE id = 1 AND SLEEP(5) = 0")];
-        let out = tokio::time::timeout(Duration::from_millis(300), apply(&w, &stmts)).await;
-        assert!(out.is_err(), "apply should still be running");
+        let stmts = vec![format!("UPDATE {t} SET name = 'gone' WHERE id = 1 AND SLEEP(30) = 0")];
+        // The apply is dropped once its statement sleeps on the server.
+        let sleeping = format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id} AND STATE = 'User sleep'");
+        tokio::select! {
+            out = apply(&w, &stmts) => panic!("{}: the apply ended: {out:?}", s.name),
+            () = until_count(&r, &sleeping, 1) => {}
+        }
         assert!(w.is_closed(), "{}", s.name);
         // Nothing may run on it: it is still inside the abandoned transaction.
         assert_eq!(w.run_untyped("SELECT 1", QUERY_LIMITS).await.unwrap_err().code(), "connectionLost", "{}", s.name);
@@ -204,12 +217,7 @@ async fn dropped_apply_marks_the_connection_closed() {
         // session, which rolls the transaction back, the original rows remain.
         let _ = w.canceller().cancel().await;
         drop(w);
-        let gone = format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id}");
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while r.scalar_u64(&gone).await != Ok(0) {
-            assert!(std::time::Instant::now() < deadline, "{}: connection {id} still there", s.name);
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        until_count(&r, &format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID = {id}"), 0).await;
         assert_eq!(rows(&r, &t).await, ["1:one:1.50", "2:two:2.50"], "{}", s.name);
     })
     .await;

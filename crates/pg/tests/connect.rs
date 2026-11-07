@@ -394,6 +394,21 @@ async fn run_untyped_keeps_the_last_result_and_server_errors() {
 #[tokio::test]
 async fn unreachable_server_is_connect_error() {
     let db = require_testdb!();
+    unreachable(db).await;
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
+async fn unreachable_server_is_a_connect_error_within_ten_seconds() {
+    let db = require_testdb!();
+    let took = unreachable(db).await;
+    println!("pg: two unreachable servers refused in {took:?}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
+}
+
+/// A port nobody listens on and a server that hangs up at once are `connect` errors; how long the
+/// two took. Settings that cannot work are one too.
+async fn unreachable(db: &TestDb) -> Duration {
     // A port nobody listens on.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -410,10 +425,11 @@ async fn unreachable_server_is_connect_error() {
         }
     });
     assert_eq!(code(connect(target(&config(&s, SslMode::Disable), Some(&db.password))).await), "connect");
-    assert!(started.elapsed() < Duration::from_secs(10));
+    let took = started.elapsed();
     // Settings that cannot work.
     let bad = ConnectionConfig { host: String::new(), ..config(postgres(db).next().unwrap(), SslMode::Prefer) };
     assert_eq!(code(connect(target(&bad, Some(&db.password))).await), "connect");
+    took
 }
 
 #[test]

@@ -107,6 +107,20 @@ async fn apply_writes_all_or_nothing() {
 
 #[tokio::test]
 async fn apply_while_file_locked_fails_cleanly() {
+    apply_while_file_locked().await;
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
+async fn apply_while_file_locked_waits_the_busy_timeout() {
+    let waited = apply_while_file_locked().await;
+    println!("sqlite: an Apply on a locked file gave up after {waited:?}");
+    assert!(waited >= Duration::from_millis(4_500) && waited < Duration::from_secs(10), "the busy timeout: {waited:?}");
+}
+
+/// An Apply while another connection holds the file's write lock fails at its first statement,
+/// writes nothing and leaves the connection usable; how long it waited for the lock.
+async fn apply_while_file_locked() -> Duration {
     let (seed, w, r) = with_table().await;
     // Another connection holds the file's write lock.
     let holder = open(&seed, false, Purpose::Query).await;
@@ -116,12 +130,12 @@ async fn apply_while_file_locked_fails_cleanly() {
     let waited = started.elapsed();
     assert_eq!((err.index, err.error.code()), (0, "server"), "{err}");
     assert!(matches!(&err.error, DbError::Server(e) if e.code == "5" && e.message == "database is locked"), "{:?}", err.error);
-    assert!(waited >= Duration::from_millis(4_500) && waited < Duration::from_secs(10), "the busy timeout: {waited:?}");
     sql(&holder, "ROLLBACK").await;
     assert_eq!(rows(&r).await, UNCHANGED, "nothing written once the lock is gone");
     assert!(!w.is_closed());
     let written = apply(&w, &[format!("UPDATE {TABLE} SET name = 'uno' WHERE id = 1")]).await.map_err(|e| e.to_string());
     assert_eq!(written, Ok(1));
+    waited
 }
 
 #[tokio::test]

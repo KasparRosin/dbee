@@ -981,7 +981,7 @@ fn machine() -> String {
 }
 
 #[test]
-#[ignore = "a timing test: cargo test -p dbee-ui-egui --test editing -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn keystroke_frame_with_a_value_at_the_cap() {
     let db = dbee_testkit::require_testdb!();
     let cap = dbee_ui_egui::editors::MAX_INLINE_BYTES;

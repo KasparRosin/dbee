@@ -174,6 +174,20 @@ fn an_error_without_a_position_offers_no_jump() {
 #[test]
 fn cancel_button_stops_pg_sleep() {
     let db = dbee_testkit::require_testdb!();
+    cancel_with_the_button(db);
+}
+
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn cancel_button_stops_pg_sleep_within_five_seconds() {
+    let db = dbee_testkit::require_testdb!();
+    let took = cancel_with_the_button(db);
+    assert!(took < Duration::from_secs(5), "cancelled in {took:?}");
+}
+
+/// Runs `select pg_sleep(30)` and stops it with the Cancel button: the card says cancelled. How
+/// long from the click until the run ended.
+fn cancel_with_the_button(db: &TestDb) -> Duration {
     let mut ui = query_tab(db);
     ui.text("select pg_sleep(30)");
     ui.frame();
@@ -188,12 +202,13 @@ fn cancel_button_stops_pg_sleep() {
     ui.click("query-cancel");
     ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
     let took = start.elapsed();
-    assert!(took < Duration::from_secs(5), "cancelled in {took:?}");
+    println!("cancelled in {took:?}");
     ui.frame();
     let card = ui.value("query-error");
     assert_eq!(card["code"], "cancelled", "{card}");
     assert!(!ui.enabled("query-cancel"));
     assert!(ui.tag("notice").is_none(), "the card says it: {:?}", ui.tag("notice"));
+    took
 }
 
 #[test]
@@ -867,7 +882,7 @@ fn window_keystrokes(db: &TestDb, text: &str, keys: usize) -> (Duration, Duratio
 }
 
 #[test]
-#[ignore = "a timing test: cargo test --workspace --test query_tab -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn keystroke_frames_in_big_scripts() {
     let keys = 20;
     let mut slow_32k = Duration::ZERO;
@@ -1004,7 +1019,7 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
 /// builds one. Reported, not bounded: a wide result's frame grows with its columns
 /// (`docs/gaps.md`).
 #[test]
-#[ignore = "a timing test: cargo test --workspace --test query_tab -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn wide_result_frames() {
     let db = dbee_testkit::require_testdb!();
     let frames = 15;

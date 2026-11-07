@@ -241,6 +241,24 @@ fn stopped_running(t: &TestTarget, marker: &str) {
 }
 
 #[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn cancel_stops_a_long_query_within_five_seconds() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let m = marker();
+        tab(s, &slow_with(t, &m));
+        let job = start(s, json!({}));
+        until_running(t, &m);
+        let started = Instant::now();
+        assert_eq!(run(s, "query.cancel", json!({}))["sent"], true);
+        assert_eq!(s.wait(job, T).unwrap_err().code(), "cancelled", "{}", t.name());
+        let took = started.elapsed();
+        println!("{}: cancelled in {took:?}", t.name());
+        assert!(took < Duration::from_secs(5), "{}: {took:?}", t.name());
+    });
+}
+
+#[test]
 fn cancel_stops_a_long_query() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
@@ -249,11 +267,9 @@ fn cancel_stops_a_long_query() {
         let job = start(s, json!({}));
         assert_eq!(shown(s)["running"], json!(job.0));
         until_running(t, &m);
-        let started = Instant::now();
         assert_eq!(run(s, "query.cancel", json!({}))["sent"], true);
-        let e = s.wait(job, Duration::from_secs(5)).unwrap_err();
+        let e = s.wait(job, T).unwrap_err();
         assert_eq!(e.code(), "cancelled", "{}: {e}", t.name());
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
         let i = shown(s);
         assert_eq!((&i["running"], &i["error"]["code"]), (&Json::Null, &json!("cancelled")), "{i}");
         // Nothing runs now; the connection takes the next run.

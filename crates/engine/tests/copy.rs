@@ -219,7 +219,6 @@ fn value_view_truncates_huge_values() {
         }
         assert_eq!(run(s, "table.open", json!({ "schema": t.schema("shop"), "table": "big_cell" }))["rows"], 1);
         run(s, "selection.set", json!({ "anchor": [0, 1] }));
-        let started = std::time::Instant::now();
         let v = s.value_view().unwrap();
         assert!(v.truncated && !v.pretty, "{:?}", (v.truncated, v.pretty));
         assert!(v.text.len() <= VALUE_VIEW_MAX_BYTES && v.text.len() > VALUE_VIEW_MAX_BYTES - 4, "{}", v.text.len());
@@ -230,7 +229,6 @@ fn value_view_truncates_huge_values() {
             let _ = s.inspect();
         }
         assert_eq!(s.value_view_computations(), 1);
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
         // The inspect summary holds the metadata and a short start of the text, not the whole value.
         let i = s.inspect()["value"].clone();
         assert_eq!(
@@ -245,6 +243,28 @@ fn value_view_truncates_huge_values() {
         let v = run(s, "value.show", json!({}));
         assert_eq!((v["truncated"].clone(), v["kindLabel"].clone()), (json!(true), json!(t.kind().info().json_type_label)), "{}: {v}", t.name());
         assert!(text(&v).len() <= VALUE_VIEW_MAX_BYTES);
+    });
+}
+
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn value_view_of_a_huge_value_within_ten_seconds() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        if !t.full_seed() {
+            return;
+        }
+        run(s, "table.open", json!({ "schema": t.schema("shop"), "table": "big_cell" }));
+        run(s, "selection.set", json!({ "anchor": [0, 1] }));
+        let started = std::time::Instant::now();
+        assert!(s.value_view().unwrap().truncated);
+        for _ in 0..20 {
+            s.value_view();
+            let _ = s.inspect();
+        }
+        let took = started.elapsed();
+        println!("{}: the 20 MB value's view and 20 frames: {took:?}", t.name());
+        assert!(took < std::time::Duration::from_secs(10), "{}: {took:?}", t.name());
     });
 }
 

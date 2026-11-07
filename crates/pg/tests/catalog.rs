@@ -162,6 +162,18 @@ async fn odd_identifiers_survive() {
 }
 
 #[tokio::test]
+async fn three_hundred_tables_load() {
+    let db = require_testdb!();
+    for s in postgres(db) {
+        let cat = load_catalog(&conn(s, db).await).await.expect("catalog");
+        let many = cat.schemas.iter().find(|x| x.name == "many").expect("many");
+        assert_eq!(many.tables.len(), 300);
+        assert_eq!(many.tables[0].table.name, "t_001");
+    }
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
 async fn three_hundred_tables_load_quickly() {
     let db = require_testdb!();
     for s in postgres(db) {
@@ -170,9 +182,6 @@ async fn three_hundred_tables_load_quickly() {
         let cat = load_catalog(&c).await.expect("catalog");
         let took = start.elapsed();
         println!("pg{}: load_catalog took {took:?} ({} tables)", s.major(), cat.table_count());
-        let many = cat.schemas.iter().find(|x| x.name == "many").expect("many");
-        assert_eq!(many.tables.len(), 300);
-        assert_eq!(many.tables[0].table.name, "t_001");
         assert!(took.as_secs_f64() < 2.0, "took {took:?}");
     }
 }

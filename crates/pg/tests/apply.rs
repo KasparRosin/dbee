@@ -162,9 +162,14 @@ async fn empty_apply_sends_nothing() {
 async fn dropped_apply_marks_the_connection_closed() {
     let db = require_testdb!();
     with_table(db, |major, w, r, t| async move {
-        let stmts = vec![format!("UPDATE {t} SET name = 'abandoned' WHERE id = 1 AND pg_sleep(5) IS NOT NULL")];
-        let out = tokio::time::timeout(Duration::from_millis(300), apply(&w, &stmts)).await;
-        assert!(out.is_err(), "apply should still be running");
+        let pid = number(&w, "SELECT pg_backend_pid()").await;
+        let stmts = vec![format!("UPDATE {t} SET name = 'abandoned' WHERE id = 1 AND pg_sleep(30) IS NOT NULL")];
+        // The apply is dropped once its statement sleeps on the server.
+        let sleeping = format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid} AND wait_event = 'PgSleep'");
+        tokio::select! {
+            out = apply(&w, &stmts) => panic!("pg{major}: the apply ended: {out:?}"),
+            () = until_number(&r, &sleeping, 1) => {}
+        }
         assert!(w.is_closed(), "pg{major}");
         // Nothing may run on it: it is still inside the abandoned transaction.
         let e = run_untyped(&w, "SELECT now() <> statement_timestamp()", QUERY_LIMITS).await.expect_err("refused");
@@ -172,10 +177,11 @@ async fn dropped_apply_marks_the_connection_closed() {
         let later = vec![format!("UPDATE {t} SET name = 'later' WHERE id = 2")];
         let e = apply(&w, &later).await.expect_err("refused");
         assert_eq!(e.error.code(), "connectionLost", "pg{major}");
-        // Stop the sleeping statement, drop the connection, and the original rows remain.
+        // Stop the sleeping statement and drop the connection: once the server has ended its
+        // session, which rolls the transaction back, the original rows remain.
         let _ = w.canceller().cancel().await;
         drop(w);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        until_number(&r, &format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"), 0).await;
         assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
     })
     .await;
@@ -194,6 +200,15 @@ async fn multi_statement_text_is_refused_before_sending() {
         assert!(!w.is_closed());
     })
     .await;
+}
+
+/// Waits until `sql`, run through `c`, gives `want` (up to 20 s).
+async fn until_number(c: &PgConnection, sql: &str, want: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while number(c, sql).await != want {
+        assert!(tokio::time::Instant::now() < deadline, "{sql} never gave {want}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// The number in the first cell of `sql`'s first row, run through `c`.

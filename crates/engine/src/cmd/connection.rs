@@ -1573,8 +1573,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_load_times_out() {
+        let db = dbee_testkit::require_testdb!();
+        let took = catalog_load_timing_out(db).await;
+        println!("a catalog load that timed out ended {took:?} after it started");
+    }
+
+    #[tokio::test]
+    #[ignore = "timing; run with --ignored --nocapture"]
     async fn catalog_load_is_bounded() {
         let db = dbee_testkit::require_testdb!();
+        let took = catalog_load_timing_out(db).await;
+        println!("a catalog load that timed out ended {took:?} after it started");
+        assert!(took < CANCEL_GRACE + Duration::from_secs(5), "{took:?}");
+    }
+
+    /// A catalog load with no time at all times out, is cancelled and gives the `timeout` error; a
+    /// fresh connection loads within the real bound. How long the timed-out load took.
+    async fn catalog_load_timing_out(db: &dbee_testkit::TestDb) -> Duration {
         let server = db.server("pg14").unwrap();
         let config = ConnectionConfig {
             host: "127.0.0.1".into(),
@@ -1596,9 +1612,10 @@ mod tests {
         // No load can answer within no time at all: the first poll only sends the query.
         let started = Instant::now();
         assert!(matches!(load_catalog_within(conn.as_ref(), Duration::ZERO).await, Err(CatalogLoad::TimedOut)));
-        assert!(started.elapsed() < CANCEL_GRACE + Duration::from_secs(5), "{:?}", started.elapsed());
+        let took = started.elapsed();
         let fresh = driver.connect(target()).await.unwrap();
         assert!(load_catalog_within(fresh.as_ref(), CATALOG_TIMEOUT).await.is_ok_and(|c| c.table_count() > 10));
         assert_eq!(catalog_error(CatalogLoad::TimedOut).code(), "timeout");
+        took
     }
 }

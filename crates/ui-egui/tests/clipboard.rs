@@ -359,20 +359,38 @@ fn escaped() -> String {
     format!("select repeat(chr(1), {half}) as a, repeat(E'\\n', {half}) as b")
 }
 
-/// A guard against a frozen window, not a measurement (`copy_frames_within_budget` measures): no
-/// copy of a large result, copied or refused, takes a frame of a second.
-#[test]
-fn no_copy_freezes_the_window() {
-    let db = dbee_testkit::require_testdb!();
+/// Copies the full 10,000-row result and the escaped row in each format: the first is copied, the
+/// second refused. The frame each took, by what and format.
+fn large_copies(db: &TestDb) -> Vec<(String, Duration)> {
+    let mut frames = Vec::new();
     for (what, sql) in [("10,000 rows", FULL.to_string()), ("escaped", escaped())] {
         let mut ui = ran(db, &sql);
         ui.click("grid-cell-0-0");
         ui.ctrl("A");
         for format in FORMATS {
             let (copied, frame) = copy_in_a_frame(&mut ui, format);
-            assert!(frame < Duration::from_secs(1), "copying {what} as {format} took a {frame:?} frame");
             assert_eq!(copied.is_some(), what == "10,000 rows", "{what} as {format}: {copied:?}");
+            frames.push((format!("{what} as {format}"), frame));
         }
+    }
+    frames
+}
+
+#[test]
+fn a_large_copy_is_copied_or_refused() {
+    let db = dbee_testkit::require_testdb!();
+    large_copies(db);
+}
+
+/// A guard against a frozen window, not a measurement (`copy_frames_within_budget` measures): no
+/// copy of a large result, copied or refused, takes a frame of a second.
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn no_copy_freezes_the_window() {
+    let db = dbee_testkit::require_testdb!();
+    for (what, frame) in large_copies(db) {
+        println!("copying {what}: a {frame:?} frame");
+        assert!(frame < Duration::from_secs(1), "copying {what} took a {frame:?} frame");
     }
 }
 
@@ -382,7 +400,7 @@ fn no_copy_freezes_the_window() {
 /// characters (JSON escapes each as six bytes); one row of line breaks (`<br>` in Markdown); and
 /// 10,000 rows of 1,664 NULLs. Budget: 250 ms per frame.
 #[test]
-#[ignore = "a timing test: cargo test --workspace --test clipboard -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn copy_frames_within_budget() {
     let db = dbee_testkit::require_testdb!();
     // TSV of one column is the cells and 9,999 line breaks.

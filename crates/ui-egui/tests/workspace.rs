@@ -1043,7 +1043,7 @@ fn synthetic(n: usize) -> Arc<Catalog> {
 }
 
 #[test]
-#[ignore = "a timing test: cargo test -p dbee-ui-egui --test workspace -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn tree_filter_1000_tables_within_a_frame() {
     struct State {
         catalog: Arc<Catalog>,

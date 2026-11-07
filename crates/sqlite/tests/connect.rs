@@ -313,6 +313,20 @@ async fn sqlite_driver_connects_through_the_trait() {
 
 #[tokio::test]
 async fn a_dropped_connection_stops_its_statement() {
+    dropped_while_running().await;
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
+async fn a_dropped_connection_stops_its_statement_at_once() {
+    let took = dropped_while_running().await;
+    println!("sqlite: a second connection wrote {took:?} after the first was dropped");
+    assert!(took < Duration::from_secs(3), "{took:?}");
+}
+
+/// Drops a connection while its statement holds the file's lock: a second connection then
+/// writes, within the busy timeout. How long that took.
+async fn dropped_while_running() -> Duration {
     let seed = seeded();
     let conn = open(&config(seed.file().unwrap(), false)).await;
     let canceller = conn.canceller();
@@ -328,9 +342,10 @@ async fn a_dropped_connection_stops_its_statement() {
     let started = Instant::now();
     let writer = open(&config(seed.file().unwrap(), false)).await;
     writer.run("CREATE TABLE after_drop (a INTEGER)", QUERY_LIMITS).await.unwrap();
-    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    let took = started.elapsed();
     // A canceller that outlives its connection sends nothing.
     canceller.cancel().await.unwrap();
+    took
 }
 
 #[tokio::test]
@@ -357,32 +372,66 @@ async fn opening_reads_the_schema_not_the_whole_file() {
 
 #[tokio::test]
 async fn a_locked_file_at_open_is_a_connect_error_naming_it() {
+    open_locked().await;
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
+async fn a_locked_file_at_open_waits_the_busy_timeout() {
+    let waited = open_locked().await;
+    println!("sqlite: an open of a locked file gave up after {waited:?}");
+    assert!(waited >= Duration::from_millis(4_500), "the busy timeout: {waited:?}");
+}
+
+/// Opens the file while another connection holds its exclusive lock: a `connect` error naming
+/// the file. How long the open waited.
+async fn open_locked() -> Duration {
     let seed = seeded();
     let holder = open(&config(seed.file().unwrap(), false)).await;
     holder.run("BEGIN EXCLUSIVE", QUERY_LIMITS).await.unwrap();
     let started = Instant::now();
     let e = connect(target(&config(seed.file().unwrap(), false))).await.unwrap_err();
-    assert!(started.elapsed() >= Duration::from_millis(4_500), "the busy timeout: {:?}", started.elapsed());
+    let waited = started.elapsed();
     assert_eq!(e.code(), "connect", "{e}");
     assert!(e.to_string().contains(&format!("{}: database is locked", seed.file().unwrap().display())), "{e}");
     holder.run("ROLLBACK", QUERY_LIMITS).await.unwrap();
+    waited
 }
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_path_that_is_no_file_is_refused() {
+    no_file().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
 async fn a_path_that_is_no_file_is_refused_at_once() {
+    for took in no_file().await {
+        println!("sqlite: a FIFO refused in {took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+}
+
+/// A FIFO and a folder are refused as no file, the FIFO before it is opened (it would wait for a
+/// writer). How long each FIFO open took, read-only and not.
+#[cfg(unix)]
+async fn no_file() -> Vec<Duration> {
     let dir = Scratch::new();
     let fifo = dir.path("fifo.sqlite");
     assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let mut took = Vec::new();
     for read_only in [true, false] {
         let started = Instant::now();
         // Opened, a FIFO would wait for a writer.
         let e = tokio::time::timeout(Duration::from_secs(5), connect(target(&config(&fifo, read_only)))).await.expect("refused at once").unwrap_err();
+        took.push(started.elapsed());
         assert!(e.code() == "connect" && e.to_string().contains(&format!("{} is not a file", fifo.display())), "{e}");
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     }
     let e = connect(target(&config(&dir.0, false))).await.unwrap_err();
     assert!(e.to_string().contains("is not a file"), "{e}");
+    took
 }
 
 #[cfg(unix)]

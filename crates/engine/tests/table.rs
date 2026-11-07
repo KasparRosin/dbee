@@ -875,7 +875,7 @@ fn browses_on_every_server() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn next_page_on_a_million_rows_is_fast() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {

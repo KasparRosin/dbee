@@ -536,6 +536,20 @@ impl Drop for User {
 
 #[tokio::test]
 async fn unreachable_server_is_connect_error() {
+    unreachable().await;
+}
+
+#[tokio::test]
+#[ignore = "timing; run with --ignored --nocapture"]
+async fn unreachable_server_is_a_connect_error_within_ten_seconds() {
+    let took = unreachable().await;
+    println!("mysql: two unreachable servers refused in {took:?}");
+    assert!(took < Duration::from_secs(10), "{took:?}");
+}
+
+/// A port nobody listens on and a server that hangs up at once are `connect` errors; how long the
+/// two took. Settings that cannot work are one too.
+async fn unreachable() -> Duration {
     // A port nobody listens on.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -552,9 +566,10 @@ async fn unreachable_server_is_connect_error() {
         }
     });
     assert_eq!(code(connect(target(&ConnectionConfig { port, ..none.clone() }, Some("pw"))).await), "connect");
-    assert!(started.elapsed() < Duration::from_secs(10));
+    let took = started.elapsed();
     // Settings that cannot work.
     assert_eq!(code(connect(target(&ConnectionConfig { host: String::new(), ..none.clone() }, Some("pw"))).await), "connect");
+    took
 }
 
 #[test]

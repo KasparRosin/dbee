@@ -558,15 +558,14 @@ fn odd_identifiers_filter_sort_and_follow() {
     assert_eq!(ui.table()["filters"], json!([{ "column": "id", "op": "eq", "value": "1" }]));
 }
 
-#[test]
-fn twenty_megabyte_cells_keep_frames_under_250_ms() {
-    let db = dbee_testkit::require_testdb!();
+/// The grid over the row of two 20 MB cells, one of them selected (the value panel builds its view
+/// once); the slowest of the 10 frames after.
+fn twenty_megabyte_cells(db: &TestDb) -> Duration {
     let mut ui = Ui::connected(db);
     ui.open("shop", "big_cell");
     ui.until("the big row", |ui| ui.table()["rows"] == 1);
     let text = ui.value("grid-cell-0-1")["text"].as_str().unwrap().to_string();
     assert!(text.chars().count() <= 201 && text.ends_with('…'), "the grid shows the cut text: {} chars", text.chars().count());
-    // Selecting it (the value panel builds its view once) and drawing it stay cheap.
     ui.click("grid-cell-0-2");
     let mut slowest = Duration::ZERO;
     for _ in 0..10 {
@@ -574,6 +573,21 @@ fn twenty_megabyte_cells_keep_frames_under_250_ms() {
         ui.frame();
         slowest = slowest.max(start.elapsed());
     }
+    println!("the slowest of 10 frames with two 20 MB cells: {slowest:?}");
+    slowest
+}
+
+#[test]
+fn twenty_megabyte_cells_show_cut() {
+    let db = dbee_testkit::require_testdb!();
+    twenty_megabyte_cells(db);
+}
+
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn twenty_megabyte_cells_keep_frames_under_250_ms() {
+    let db = dbee_testkit::require_testdb!();
+    let slowest = twenty_megabyte_cells(db);
     assert!(slowest < Duration::from_millis(250), "a frame with two 20 MB cells took {slowest:?}");
 }
 
@@ -611,7 +625,7 @@ fn machine() -> String {
 }
 
 #[test]
-#[ignore = "a timing test: cargo test -p dbee-ui-egui --test table_tab -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn grid_frame_within_budget() {
     use dbee_core::{Column, ResultSet, TypeClass};
     use dbee_engine::Selection;

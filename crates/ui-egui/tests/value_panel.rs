@@ -229,8 +229,23 @@ fn the_panel_follows_staged_values_and_null() {
 }
 
 #[test]
+fn a_twenty_megabyte_cell_shows_a_truncation_note() {
+    let db = dbee_testkit::require_testdb!();
+    twenty_megabyte_cell(db);
+}
+
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn a_twenty_megabyte_cell_shows_a_truncation_note_without_a_slow_frame() {
     let db = dbee_testkit::require_testdb!();
+    for (what, t) in twenty_megabyte_cell(db) {
+        assert!(t < FRAME_BOUND, "{what} took a {t:?} frame");
+    }
+}
+
+/// The 20 MB text and jsonb of the seed's big cell in the value panel: cut, with a note, wrapped,
+/// scrolled, coloured. The slowest frame of each step.
+fn twenty_megabyte_cell(db: &TestDb) -> [(&'static str, Duration); 4] {
     let mut ui = Ui::connected(db);
     ui.open_rows("shop", "big_cell", 1);
     // The 20,000,000-character text: selecting it builds its view in the frame of the click.
@@ -268,9 +283,7 @@ fn a_twenty_megabyte_cell_shows_a_truncation_note_without_a_slow_frame() {
     ui.until("the colours", |ui| ui.value("value-text")["highlighted"] == true);
     let colours = ui.slowest;
     println!("20 MB cell: select text {select:?}, scroll {scroll:?}, select jsonb {select_json:?}, until coloured {colours:?} (slowest frames)");
-    for (what, t) in [("selecting the text", select), ("scrolling", scroll), ("selecting the jsonb", select_json), ("colouring", colours)] {
-        assert!(t < FRAME_BOUND, "{what} took a {t:?} frame");
-    }
+    [("selecting the text", select), ("scrolling", scroll), ("selecting the jsonb", select_json), ("colouring", colours)]
 }
 
 /// `scratch.<u> (id int PK, note text, other text)`: one row whose `note` is 300 numbered lines.
@@ -396,7 +409,7 @@ fn machine() -> String {
 }
 
 #[test]
-#[ignore = "a timing test: cargo test -p dbee-ui-egui --test value_panel -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn value_panel_frames_within_budget() {
     use dbee_core::{Column, TypeClass};
     use dbee_engine::ValueView;

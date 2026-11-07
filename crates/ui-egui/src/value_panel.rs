@@ -1175,10 +1175,9 @@ mod tests {
         assert!(worker.take(first).is_none(), "an answer nobody waits for any more is dropped");
     }
 
-    #[test]
-    fn rows_of_a_long_line_are_found_quickly() {
-        // 10 MiB on one line, as the cut 20 MB cell: finding a row far down walks a few rows,
-        // not the line.
+    /// 10 MiB on one line, as the cut 20 MB cell: its rows, and the 41 last ones found 100 times;
+    /// how long that took.
+    fn rows_of_a_long_line() -> Duration {
         let text = "0123456789abcdef".repeat(VALUE_VIEW_MAX_BYTES / 16);
         let start = Instant::now();
         let cols = Columns::new(4);
@@ -1188,7 +1187,21 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(rows.ranges(&text, last - 40, 60, &cols).len(), 41);
         }
-        assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+        start.elapsed()
+    }
+
+    #[test]
+    fn rows_of_a_long_line_are_found() {
+        rows_of_a_long_line();
+    }
+
+    #[test]
+    #[ignore = "timing; run with --ignored --nocapture"]
+    fn rows_of_a_long_line_are_found_quickly() {
+        // Finding a row far down walks a few rows, not the line.
+        let took = rows_of_a_long_line();
+        println!("rows of a 10 MiB line: {took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
     }
 
     #[test]
