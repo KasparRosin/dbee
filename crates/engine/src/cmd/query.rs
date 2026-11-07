@@ -711,7 +711,13 @@ mod tests {
             port: pg14.service_port,
             user: "postgres".into(),
             database: "dbee".into(),
-            ssh: Some(SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth: SshAuth::Key { path: None } }),
+            ssh: Some(SshConfig {
+                host: "127.0.0.1".into(),
+                port: db.sshd.port,
+                user: db.sshd.user.clone(),
+                auth: SshAuth::Key { path: None },
+                ..SshConfig::default()
+            }),
             ..ConnectionConfig::default()
         };
         s.run_blocking("connection.open", json!({ "config": config, "password": db.password }), T).unwrap();

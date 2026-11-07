@@ -185,7 +185,13 @@ impl Form {
         let text = |s: &str| if server { s.trim().to_string() } else { String::new() };
         let ssh = if self.ssh_on && self.kind.takes_ssh() {
             let port = parse_port(&self.ssh_port).ok_or("The SSH port must be a number from 1 to 65535.")?;
-            Some(SshConfig { host: self.ssh_host.trim().into(), port, user: self.ssh_user.trim().into(), auth: self.ssh_auth() })
+            Some(SshConfig {
+                host: self.ssh_host.trim().into(),
+                port,
+                user: self.ssh_user.trim().into(),
+                auth: self.ssh_auth(),
+                ..SshConfig::default()
+            })
         } else {
             None
         };
@@ -205,6 +211,7 @@ impl Form {
             read_only: self.read_only,
             save_secrets: self.save_secrets,
             options: self.options_of_kind(),
+            ..ConnectionConfig::default()
         };
         config.validate().map_err(|e| e.to_string())?;
         Ok(config)

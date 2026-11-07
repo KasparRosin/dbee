@@ -181,13 +181,20 @@ pub struct SshConfig {
     pub port: u16,
     pub user: String,
     pub auth: SshAuth,
+    /// Fields this build does not know, read from the connections file and written back to it;
+    /// never serialized anywhere else.
+    #[serde(flatten, skip_serializing)]
+    pub extra: Unknown,
 }
 
 impl Default for SshConfig {
     fn default() -> Self {
-        SshConfig { host: String::new(), port: 22, user: String::new(), auth: SshAuth::default() }
+        SshConfig { host: String::new(), port: 22, user: String::new(), auth: SshAuth::default(), extra: Unknown::new() }
     }
 }
+
+/// Fields of a saved connection that this build does not know (a newer build's), by name.
+pub type Unknown = serde_json::Map<String, serde_json::Value>;
 
 /// One saved connection. Never holds a password.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +218,10 @@ pub struct ConnectionConfig {
     /// are kept.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, String>,
+    /// Fields this build does not know, read from the connections file and written back to it;
+    /// never serialized anywhere else. A command's config has none: one would be refused.
+    #[serde(flatten, skip_serializing)]
+    pub extra: Unknown,
 }
 
 impl Default for ConnectionConfig {
@@ -231,11 +242,27 @@ impl Default for ConnectionConfig {
             read_only: false,
             save_secrets: true,
             options: BTreeMap::new(),
+            extra: Unknown::new(),
         }
     }
 }
 
 impl ConnectionConfig {
+    /// The names of the fields this build does not know, its tunnel's as `ssh.<name>`.
+    pub fn unknown_fields(&self) -> Vec<String> {
+        let ssh = self.ssh.iter().flat_map(|ssh| ssh.extra.keys().map(|k| format!("ssh.{k}")));
+        self.extra.keys().cloned().chain(ssh).collect()
+    }
+
+    /// Takes the fields this build does not know from `old`, the same connection as the file held
+    /// it, where this one lacks them (a config from a form or a script has none).
+    pub(crate) fn keep_unknown(&mut self, old: &ConnectionConfig) {
+        keep(&mut self.extra, &old.extra);
+        if let (Some(ssh), Some(old)) = (self.ssh.as_mut(), old.ssh.as_ref()) {
+            keep(&mut ssh.extra, &old.extra);
+        }
+    }
+
     /// The option `id` ([`KindInfo::options`]) is on: its value is `"true"`.
     pub fn option_on(&self, id: &str) -> bool {
         self.options.get(id).is_some_and(|v| v == "true")
@@ -299,6 +326,13 @@ impl ConnectionConfig {
             }
         }
         Ok(())
+    }
+}
+
+/// Adds the fields of `old` that `extra` lacks.
+pub(crate) fn keep(extra: &mut Unknown, old: &Unknown) {
+    for (k, v) in old {
+        extra.entry(k.clone()).or_insert_with(|| v.clone());
     }
 }
 
@@ -475,7 +509,7 @@ mod tests {
 
     #[test]
     fn a_server_type_without_ssh_refuses_a_tunnel() {
-        let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password };
+        let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password, ..SshConfig::default() };
         let c = ConnectionConfig { ssh: Some(ssh), ..ConnectionConfig::default() };
         assert_eq!(c.validate_for(Settings::Server { tls: true, ssh: true }), Ok(()));
         let refused = c.validate_for(Settings::Server { tls: true, ssh: false });

@@ -53,7 +53,7 @@ mod tests {
     }
 
     fn tunnel(ssh_host: &str, ssh_port: u16, db_host: &str, db_port: u16) -> ConnectionConfig {
-        let ssh = SshConfig { host: ssh_host.into(), port: ssh_port, user: "dbee".into(), auth: SshAuth::Agent };
+        let ssh = SshConfig { host: ssh_host.into(), port: ssh_port, user: "dbee".into(), auth: SshAuth::Agent, ..SshConfig::default() };
         ConnectionConfig { ssh: Some(ssh), ..at(db_host, db_port) }
     }
 

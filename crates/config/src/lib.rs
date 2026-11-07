@@ -8,8 +8,8 @@ pub mod secrets;
 pub mod store;
 
 pub use connection::{
-    ConfigError, ConnectionColor, ConnectionConfig, DbKind, KindInfo, KindOption, Settings, SshAuth, SshConfig, SslMode, UrlParts, home_dir, new_id,
-    parse_url,
+    ConfigError, ConnectionColor, ConnectionConfig, DbKind, KindInfo, KindOption, Settings, SshAuth, SshConfig, SslMode, Unknown, UrlParts, home_dir,
+    new_id, parse_url,
 };
 pub use kind::mysql::ALLOW_PUBLIC_KEY;
 pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretKind, SecretStore, keyring_store};

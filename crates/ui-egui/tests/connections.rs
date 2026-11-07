@@ -91,7 +91,7 @@ fn via_ssh(db: &TestDb, auth: SshAuth) -> ConnectionConfig {
         name: "pg14 via ssh".into(),
         host: pg14_server(db).name.clone(),
         port: pg14_server(db).service_port,
-        ssh: Some(SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth }),
+        ssh: Some(SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth, ..SshConfig::default() }),
         ..pg14(db)
     }
 }

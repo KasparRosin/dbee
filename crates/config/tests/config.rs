@@ -272,7 +272,7 @@ fn sqlite_needs_a_file() {
 
 #[test]
 fn a_database_file_has_no_ssh_tunnel() {
-    let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password };
+    let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password, ..SshConfig::default() };
     let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ssh: Some(ssh.clone()), ..Default::default() };
     assert_eq!(c.validate(), Err(ConfigError::Invalid("a database file has no SSH tunnel".into())));
     assert!(ConnectionConfig { kind: DbKind::Postgres, ssh: Some(ssh), ..Default::default() }.validate().is_ok());
@@ -497,4 +497,66 @@ fn a_change_waits_for_another_dbees_and_then_says_so() {
     other.unlock().unwrap();
     s.change(|s| s.upsert(cfg("b"))).unwrap();
     assert_eq!(in_file(&dir).0, ["a", "b"]);
+}
+
+#[test]
+fn a_newer_file_loads_and_is_never_rewritten() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let entry = serde_json::json!({"id": "n", "name": "Newer", "host": "h", "port": 5432, "group": "work"});
+    let file = serde_json::json!({"version": 2, "folders": ["work"], "saved": [entry], "recent": []});
+    let bytes = serde_json::to_vec_pretty(&file).unwrap();
+    std::fs::write(dir.join(FILE), &bytes).unwrap();
+    let newer = "A newer dbee wrote the connections file, so changes here won't be saved.";
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    assert_eq!((ids(&s.saved), warn.as_deref()), (vec!["n"], Some(newer)));
+    assert_eq!(s.get("n").unwrap().name, "Newer");
+    // A change stays in memory, and the file is as the newer dbee wrote it.
+    assert_eq!(s.change(|s| s.upsert(cfg("mine"))), Ok(((), None)));
+    assert_eq!(ids(&s.saved), ["mine", "n"]);
+    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), bytes);
+    // So it is for a store that read the file before the newer dbee wrote it.
+    std::fs::write(dir.join(FILE), b"{\"version\": 1}").unwrap();
+    let (mut before, _) = ConnectionStore::load(Some(&dir));
+    std::fs::write(dir.join(FILE), &bytes).unwrap();
+    let (_, warn) = before.change(|s| s.upsert(cfg("mine"))).unwrap();
+    assert_eq!(warn.as_deref(), Some(newer));
+    assert_eq!((ids(&before.saved), before.dir.as_ref()), (vec!["mine", "n"], None));
+    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), bytes);
+}
+
+#[test]
+fn fields_this_build_does_not_know_survive_a_save() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let ssh = serde_json::json!({"host": "b", "port": 22, "user": "u", "auth": {"method": "agent"}, "jumpHosts": ["j"]});
+    let entry = serde_json::json!({"id": "a", "name": "A", "host": "h", "port": 5432, "group": "work", "ssh": ssh});
+    let recent = serde_json::json!({"config": {"id": "a", "host": "h", "timezone": "UTC"}, "usedAt": 5, "pinned": true});
+    let file = serde_json::json!({"version": 1, "folders": ["work"], "saved": [entry], "recent": [recent]});
+    std::fs::write(dir.join(FILE), serde_json::to_vec(&file).unwrap()).unwrap();
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    assert_eq!(warn, None);
+    // Another connection saved, and this one again as a form or a script sends it: without them.
+    let mut again = serde_json::from_value::<ConnectionConfig>(serde_json::to_value(s.get("a").unwrap()).unwrap()).unwrap();
+    again.name = "A renamed".into();
+    s.change(|s| {
+        s.upsert(cfg("b"));
+        s.upsert(again);
+    })
+    .unwrap();
+    let back: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(FILE)).unwrap()).unwrap();
+    assert_eq!(back["folders"], serde_json::json!(["work"]));
+    let a = back["saved"].as_array().unwrap().iter().find(|e| e["id"] == "a").unwrap();
+    assert_eq!(
+        (&a["name"], &a["group"], &a["ssh"]["jumpHosts"]),
+        (&serde_json::json!("A renamed"), &serde_json::json!("work"), &serde_json::json!(["j"]))
+    );
+    assert_eq!((&back["recent"][0]["pinned"], &back["recent"][0]["config"]["timezone"]), (&serde_json::json!(true), &serde_json::json!("UTC")));
+    // A use of it keeps them too.
+    s.change(|s| s.touch_recent(&s.get("a").unwrap().clone(), 9)).unwrap();
+    let back: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(FILE)).unwrap()).unwrap();
+    assert_eq!((&back["recent"][0]["pinned"], &back["recent"][0]["config"]["group"]), (&serde_json::json!(true), &serde_json::json!("work")));
+    // They never show outside the file.
+    let shown = serde_json::to_string(&(&s.saved, &s.recent)).unwrap();
+    assert!(!shown.contains("work") && !shown.contains("pinned") && !shown.contains("jumpHosts") && !shown.contains("UTC"), "{shown}");
 }

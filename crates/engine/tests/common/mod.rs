@@ -178,7 +178,7 @@ pub fn pw() -> String {
 /// The test sshd as user `dbee` (keys) with `auth`.
 pub fn ssh_config(auth: SshAuth) -> SshConfig {
     let d = db();
-    SshConfig { host: "127.0.0.1".into(), port: d.sshd.port, user: d.sshd.user.clone(), auth }
+    SshConfig { host: "127.0.0.1".into(), port: d.sshd.port, user: d.sshd.user.clone(), auth, ..SshConfig::default() }
 }
 
 /// pg14 through the test sshd: the database host as the sshd sees it (`pg14:5432`).

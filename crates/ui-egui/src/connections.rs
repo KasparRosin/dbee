@@ -604,7 +604,7 @@ fn tick(app: &mut DbeeApp, ctx: &egui::Context) {
         conn.key = KeyLine { for_auth: Some(want), text: "Asks for the SSH password when connecting".into(), path: None, pending: None };
         return;
     }
-    let ssh = SshConfig { host: conn.form.ssh_host.clone(), port: 22, user: conn.form.ssh_user.clone(), auth: want.clone() };
+    let ssh = SshConfig { host: conn.form.ssh_host.clone(), port: 22, user: conn.form.ssh_user.clone(), auth: want.clone(), ..SshConfig::default() };
     let params = json!({ "config": { "ssh": ssh } });
     match app.start(SSH_KEY, params, Origin::KeyLine) {
         Some(job) => app.view.conn.key.pending = Some((job, want)),

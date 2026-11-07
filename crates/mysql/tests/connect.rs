@@ -110,7 +110,13 @@ fn wrong_ca(db: &TestDb) -> std::path::PathBuf {
 }
 
 fn ssh_config(db: &TestDb) -> SshConfig {
-    SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth: SshAuth::Key { path: Some(db.keys.plain.clone()) } }
+    SshConfig {
+        host: "127.0.0.1".into(),
+        port: db.sshd.port,
+        user: db.sshd.user.clone(),
+        auth: SshAuth::Key { path: Some(db.keys.plain.clone()) },
+        ..SshConfig::default()
+    }
 }
 
 /// A tunnel to the test sshd, logging in with the plain key. `home` holds `known_hosts`.

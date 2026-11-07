@@ -153,6 +153,24 @@ fn two_sessions_on_one_config_folder_keep_each_others_connections() {
 }
 
 #[test]
+fn a_config_key_this_build_does_not_know_is_refused() {
+    let mut s = session();
+    let mut typo = serde_json::to_value(refused_config("typo")).unwrap();
+    typo["hots"] = json!("db.example");
+    let tunnel = SshConfig { host: "b".into(), user: "u".into(), ..SshConfig::default() };
+    let mut ssh_typo = serde_json::to_value(ConnectionConfig { ssh: Some(tunnel), ..refused_config("typo") }).unwrap();
+    ssh_typo["ssh"]["jumpHost"] = json!("j");
+    for id in ["connection.save", "connection.test", "connection.open", "connection.listDatabases", "connection.sshKey"] {
+        for (config, key) in [(&typo, "hots"), (&ssh_typo, "ssh.jumpHost")] {
+            let e = s.execute(id, json!({ "config": config })).unwrap_err();
+            assert_eq!(e.code(), "badParams", "{id}: {e}");
+            assert!(e.to_string().ends_with(&format!(": `{key}` in `config` is not a connection setting")), "{id}: {e}");
+        }
+    }
+    assert!(s.state().store.saved.is_empty() && !s.busy());
+}
+
+#[test]
 fn bad_configs_are_bad_params() {
     let mut s = session();
     for params in [
@@ -214,7 +232,7 @@ fn ssh_key_preview() {
     let key = home.ssh_dir().join("id_ed25519");
     let mut s = session_in(home);
     let with = |auth: SshAuth| ConnectionConfig {
-        ssh: Some(SshConfig { host: "127.0.0.1".into(), port: 1, user: "dbee".into(), auth }),
+        ssh: Some(SshConfig { host: "127.0.0.1".into(), port: 1, user: "dbee".into(), auth, ..SshConfig::default() }),
         ..refused_config("ssh")
     };
     let plan = |s: &mut TestSession, c: ConnectionConfig| s.run_blocking("connection.sshKey", json!({ "config": c }), T).unwrap();
@@ -903,7 +921,7 @@ fn saving_new_settings_forgets_the_secrets_that_no_longer_apply() {
     let key = |path: &str| SshAuth::Key { path: Some(path.into()) };
     let base = ConnectionConfig {
         id: "edit".into(),
-        ssh: Some(SshConfig { host: "127.0.0.1".into(), port: 1, user: "dbee".into(), auth: key("/k/one") }),
+        ssh: Some(SshConfig { host: "127.0.0.1".into(), port: 1, user: "dbee".into(), auth: key("/k/one"), ..SshConfig::default() }),
         ..refused_config("edit")
     };
     let stored = |s: &TestSession| {
@@ -1141,7 +1159,7 @@ fn an_isolated_run_opens_no_tunnel_for_a_file() {
             o.allowed_dirs = Some(vec![folder.clone()]);
         });
         // The file lies in an allowed folder, but the SSH server is no allowed target.
-        let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password };
+        let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password, ..SshConfig::default() };
         let config = ConnectionConfig { ssh: Some(ssh), ..config_for(&t) };
         for id in ["connection.test", "connection.open", "connection.save"] {
             let e = s.execute(id, json!({ "config": config, "sshPassword": "pw" })).unwrap_err();

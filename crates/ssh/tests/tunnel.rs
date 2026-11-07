@@ -15,7 +15,7 @@ use russh::keys::{HashAlg, PublicKeyBase64, load_secret_key, parse_public_key_ba
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn cfg(db: &TestDb, auth: SshAuth) -> SshConfig {
-    SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth }
+    SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth, ..SshConfig::default() }
 }
 
 fn env(home: &TempHome) -> SshEnv {
@@ -286,7 +286,7 @@ async fn nothing_listening_is_a_connect_error() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let home = temp_home(None, None);
-    let c = SshConfig { host: "127.0.0.1".into(), port, user: "x".into(), auth: SshAuth::Password };
+    let c = SshConfig { host: "127.0.0.1".into(), port, user: "x".into(), auth: SshAuth::Password, ..SshConfig::default() };
     let e = Tunnel::open(&c, &env(&home), &secrets(Some("pw"), None), None).await.unwrap_err();
     assert!(matches!(e, SshError::Connect(_)), "{e:?}");
     assert!(e.to_string().contains(&port.to_string()), "{e}");
@@ -297,7 +297,7 @@ async fn plan_shows_what_will_be_used() {
     let home = temp_home(None, None);
     let ssh = home.ssh_dir();
     let e = env(&home);
-    let base = SshConfig { host: "h".into(), port: 22, user: "u".into(), auth: SshAuth::Password };
+    let base = SshConfig { host: "h".into(), port: 22, user: "u".into(), auth: SshAuth::Password, ..SshConfig::default() };
     let with = |auth| SshConfig { auth, ..base.clone() };
     assert_eq!(plan(&with(SshAuth::Password), &e).await, KeyPlan::Password);
     assert_eq!(plan(&with(SshAuth::Key { path: None }), &e).await, KeyPlan::Nothing);

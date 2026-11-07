@@ -249,14 +249,18 @@ const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 // ---- params ----------------------------------------------------------------------------------
 
-/// `params[key]` as a [`ConnectionConfig`]; `None` when missing or null. Unknown keys are
-/// ignored without looking into them.
+/// `params[key]` as a [`ConnectionConfig`]; `None` when missing or null. A key the config does not
+/// have is refused, so a misspelt one (`hots`) is not saved quietly.
 fn parse_config(params: &Json, key: &str) -> Result<Option<ConnectionConfig>, EngineError> {
     let Some(v) = params.get(key).filter(|v| !v.is_null()) else { return Ok(None) };
     if !v.is_object() {
         return Err(bad(format!("`{key}` must be a connection object")));
     }
-    ConnectionConfig::deserialize(v).map(Some).map_err(|e| bad(format!("`{key}` is not a connection: {e}")))
+    let config = ConnectionConfig::deserialize(v).map_err(|e| bad(format!("`{key}` is not a connection: {e}")))?;
+    if let Some(unknown) = config.unknown_fields().first() {
+        return Err(bad(format!("`{unknown}` in `{key}` is not a connection setting")));
+    }
+    Ok(Some(config))
 }
 
 /// `config` for a command that connects or saves: a server's must name its `host` (so a bare `{}`
@@ -1405,7 +1409,13 @@ mod tests {
             port: 5432,
             user: "ann".into(),
             database: "shop".into(),
-            ssh: Some(SshConfig { host: "jump".into(), port: 22, user: "ann".into(), auth: SshAuth::Key { path: Some(PathBuf::from("/k/id")) } }),
+            ssh: Some(SshConfig {
+                host: "jump".into(),
+                port: 22,
+                user: "ann".into(),
+                auth: SshAuth::Key { path: Some(PathBuf::from("/k/id")) },
+                ..SshConfig::default()
+            }),
             ..ConnectionConfig::default()
         }
     }
