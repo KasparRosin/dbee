@@ -7,8 +7,6 @@
 
 <p align="center">A cross-platform desktop database client, written in Rust.</p>
 
-<!-- Later, once CI runs on GitHub: one centred line of 2–3 badges here (CI, licence, latest release). -->
-
 > [!NOTE]
 > **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.\
 > The second, M2, brings the same workflow to MySQL, MariaDB and SQLite files, and it is built too. File export and import come next (M3).\

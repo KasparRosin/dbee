@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (M2's rulings a contributor would otherwise undo: MySQL hex values, NUL refused, session tracking, kept store entries, autocommit, the `LIKE` escape)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the connections file: a change re-reads it under a lock; its version, and fields a build does not know)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -126,7 +126,7 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 ## 2026-10-30: MySQL 5.7's TLS is out of rustls's reach; plain direct and SSH work
 
 - **Decision:** The official `mysql:5.7` image offers TLS only with DHE-RSA ciphers on TLS 1.2, which rustls never speaks. dbee tells this from the TLS failure itself (the server's handshake alert), not from the version: `require`, `verify-ca` and `verify-full` fail with a TLS error that says the server offers only ciphers dbee does not support and points to an SSH tunnel, and `prefer` connects without TLS, as libpq's `prefer` does after a failed handshake. Plain direct connections and connections through the SSH tunnel work.
-- **Why:** No new TLS stack (OpenSSL and aws-lc stay out) and no 5.7-only code path (spec amendment of 2026-10-29). The tunnel encrypts the link instead.
+- **Why:** No new TLS stack (OpenSSL and aws-lc stay out) and no 5.7-only code path. The tunnel encrypts the link instead.
 
 ## 2026-10-31: MySQL's server key only without encryption or when allowed; per-type connection options
 
@@ -164,7 +164,7 @@ Significant decisions, newest last. Add an entry for every significant dependenc
   - `ATTACH` opens with the main file's flags, so on a file dbee opened without leave to make one it opens only a file that is there.
   - `load_extension()` is off: "not authorized". The modules compiled in are `dbstat`, `fts3`, `fts4`, `fts5` and `rtree`, which read only the databases on the connection.
   - `PRAGMA temp_store_directory` and `data_store_directory` move SQLite's own files to another folder, process-wide; the authorizer sees them as pragmas with their value.
-- **Why:** The spec counts `rowid` as a real key within an edit session (Kaspar's call, 2026-10-28). The isolation rule must hold on every path into a file, and parsing paths is where it would leak, so the driver refuses the statements, not paths.
+- **Why:** `rowid` counts as a real key within an edit session (Kaspar's call, 2026-10-28). The isolation rule must hold on every path into a file, and parsing paths is where it would leak, so the driver refuses the statements, not paths.
 
 ## 2026-11-05: The connection screen picks the database type first; no engine logos for now
 
@@ -201,3 +201,13 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** The filter bar's `like`, `not like`, `ilike` and `not ilike` take `\` as the escape on every engine, as Postgres's `LIKE` does by default: MySQL's and MariaDB's patterns end in `ESCAPE _utf8mb4 X'5C'`, SQLite's in `ESCAPE '\'`, Postgres's in nothing. Each is a field of the engine's dialect `Rules`.
 - **Why:** measured on the seven test servers and SQLite, `50\%` found "50%" on Postgres, MySQL 5.7 and MariaDB, but nothing on MySQL 8.0 and later (no escape under `NO_BACKSLASH_ESCAPES`) and SQLite (no escape unless one is named). The hex form reads the same whether or not `NO_BACKSLASH_ESCAPES` is set, where `'\'` would not.
+
+## 2026-11-08: Each change to the connections file re-reads it under a lock
+
+- **Decision:** A save, a delete, a duplicate and the recent list's touch at each open read `connections.json` again, apply only that change to what it holds, write it atomically (temp file, then rename) and keep the result as the session's copy, all under an advisory lock on `connections.json.lock` beside it (std's `File::lock`, no dependency), held for the read and the write only. A lock another dbee keeps for 5 s is an error the user sees, and nothing changes. A file system without locks gets the re-read without the lock. The connection screen reads the file again after a disconnect.
+- **Why:** one dbee per window (and the file manager starts one per file) each wrote its whole list from memory, so a second dbee's open wrote back an older list over the first one's save. The atomic write prevents a torn file, not a lost update.
+
+## 2026-11-08: The connections file's version, and fields a build does not know
+
+- **Decision:** The file says its `version` (1). Adding a field is free; renaming one, or changing what it means, moves `version` on; a build never writes a file whose version is newer than its own. It reads what it can of a newer file and keeps its changes in memory, with the warning "A newer dbee wrote the connections file, so changes here won't be saved." Fields a build does not know (at the top, in an entry, its tunnel, a recent entry) are kept and written back, and never reach the UI or a command's reply. A command's `config` with a key the build does not know is refused (`badParams`, naming it), so a script's `"hots"` is not saved quietly.
+- **Why:** builds of different ages share one file (a Flatpak and a package, dotfiles on two machines, a downgrade), and what the first public build does to a newer file it does for good.
