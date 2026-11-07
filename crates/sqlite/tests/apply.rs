@@ -54,6 +54,27 @@ async fn with_table() -> (TestTarget, SqliteConnection, SqliteConnection) {
 
 const UNCHANGED: [&str; 2] = ["1:one:1.5", "2:two:2.5"];
 
+/// Waits until a transaction holds `file`'s write lock (an Apply's `BEGIN IMMEDIATE` takes it): a
+/// connection of the test's own then cannot take the file's lock.
+async fn until_write_locked(file: &std::path::Path) {
+    let file = file.to_path_buf();
+    let probing = tokio::task::spawn_blocking(move || {
+        let probe = rusqlite::Connection::open(&file).unwrap();
+        probe.busy_timeout(Duration::ZERO).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match probe.execute_batch("BEGIN EXCLUSIVE; ROLLBACK") {
+                Err(e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => return,
+                Ok(()) => {}
+                Err(e) => panic!("the probe: {e}"),
+            }
+            assert!(Instant::now() < deadline, "no transaction took the file's write lock");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+    probing.await.unwrap();
+}
+
 /// Waits until a write transaction has written its first change: SQLite has made the file's
 /// rollback journal, `journal`, which it does at a transaction's first write and removes at its end.
 async fn until_written(journal: &std::path::Path) {
@@ -162,8 +183,11 @@ async fn multi_statement_text_is_refused_before_sending() {
 async fn dropped_apply_marks_the_connection_closed() {
     let (seed, w, r) = with_table().await;
     let stmts = vec![format!("UPDATE {TABLE} SET name = 'gone' WHERE id = 1 AND {}", seed.slow_condition_sql(30))];
-    let out = tokio::time::timeout(Duration::from_millis(300), apply(&w, &stmts)).await;
-    assert!(out.is_err(), "apply should still be running");
+    // The Apply is dropped once its transaction holds the file's write lock.
+    tokio::select! {
+        out = apply(&w, &stmts) => panic!("the apply ended: {out:?}"),
+        () = until_write_locked(seed.file().unwrap()) => {}
+    }
     assert!(w.is_closed());
     // Nothing may run on it: it is still inside the abandoned transaction.
     assert_eq!(w.run_untyped("SELECT 1", QUERY_LIMITS).await.unwrap_err().code(), "connectionLost");
