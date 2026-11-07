@@ -62,6 +62,7 @@ use serde_json::json;
 use super::{CommandSpec, LOST, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
 use crate::allowed;
 use crate::state::{Connected, Credentials, CurrentDatabase, server_text};
+use crate::turns::InTurn;
 use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
 
 const LIST: &str = "connection.list";
@@ -493,6 +494,12 @@ impl Session {
     /// none or it is lost; when it or the tunnel it runs through has closed since its last use,
     /// the session is marked lost and the error is `connectionLost`.
     pub(crate) fn browse(&mut self) -> Result<Arc<dyn Connection>, EngineError> {
+        Ok(self.browse_in_turn()?)
+    }
+
+    /// [`Session::browse`] as the queue it is, for a job that waits for its turn itself
+    /// ([`stoppable_in_turn`](crate::turns::stoppable_in_turn)).
+    pub(crate) fn browse_in_turn(&mut self) -> Result<Arc<InTurn>, EngineError> {
         let c = self.state.connected.as_mut().ok_or_else(|| disabled(NOT_CONNECTED))?;
         if c.lost {
             return Err(disabled(LOST));
@@ -508,7 +515,7 @@ impl Session {
     /// `conn` is still the session's browse connection; a job that used another one (closed or
     /// replaced since) must drop its result.
     pub(crate) fn is_current_browse(&self, conn: &Arc<dyn Connection>) -> bool {
-        self.state.connected.as_ref().is_some_and(|c| Arc::ptr_eq(&c.browse, conn))
+        self.state.connected.as_ref().is_some_and(|c| c.is_browse(conn))
     }
 
     /// An operation on `conn` failed with `e`. When the connection is gone, the session lets go
@@ -518,7 +525,7 @@ impl Session {
         if (*e == DbError::ConnectionLost || conn.is_closed())
             && let Some(c) = self.state.connected.as_mut()
         {
-            if Arc::ptr_eq(&c.browse, conn) && !c.lost {
+            if c.is_browse(conn) && !c.lost {
                 c.lost = true;
                 log::info!("the browse connection was lost; the session is marked lost");
             }
@@ -1161,7 +1168,7 @@ fn apply_open(
         dialect,
         catalog: Arc::new(catalog),
         lost: false,
-        browse: conn,
+        browse: InTurn::new(conn),
         query: None,
         query_database: CurrentDatabase::default(),
         query_run: None,
@@ -1249,7 +1256,7 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 
 fn apply_reconnect(
     s: &mut Session,
-    old: &Arc<dyn Connection>,
+    old: &Arc<InTurn>,
     credentials: Credentials,
     result: Result<(Opened, Catalog), EngineError>,
 ) -> Result<Json, EngineError> {
@@ -1264,7 +1271,7 @@ fn apply_reconnect(
     c.info = conn.info().clone();
     c.dialect = conn.dialect();
     c.catalog = Arc::new(catalog);
-    let old_browse = std::mem::replace(&mut c.browse, conn);
+    let old_browse = std::mem::replace(&mut c.browse, InTurn::new(conn));
     let query_reset = c.query.take().is_some();
     c.query_run = None;
     c.tunnel = tunnel;
@@ -1378,7 +1385,7 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
     s.state.tabs.clear();
     s.state.active = None;
-    stop_statements(s, Arc::clone(&c.browse));
+    stop_statements(s, c.browse);
     Ok(Outcome::Done(json!({ "closed": c.config.id })))
 }
 

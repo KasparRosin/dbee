@@ -17,6 +17,7 @@ use serde_json::json;
 
 use crate::edits::Edits;
 use crate::jobs::Stop;
+use crate::turns::InTurn;
 use crate::{JobId, Json, TabId};
 
 /// The dialect SQL is read with while no connection is open (the query editor's colours then).
@@ -51,8 +52,8 @@ pub struct Connected {
     pub catalog: Arc<Catalog>,
     /// The connection broke; commands that need the database wait for a reconnect.
     pub lost: bool,
-    /// Table pages, counts, the catalog and applies.
-    pub(crate) browse: Arc<dyn Connection>,
+    /// Table pages, counts, the catalog and applies, each in its turn.
+    pub(crate) browse: Arc<InTurn>,
     /// Query tabs' statements; opened on the first query run (and again after a reconnect, or
     /// once it was lost).
     pub(crate) query: Option<Arc<dyn Connection>>,
@@ -68,6 +69,13 @@ pub struct Connected {
     pub(crate) tunnel: Option<Arc<Tunnel>>,
     /// What the connect used, kept in memory for reconnects (and the query connection).
     pub(crate) credentials: Credentials,
+}
+
+impl Connected {
+    /// `conn` is this connection's browse connection.
+    pub(crate) fn is_browse(&self, conn: &Arc<dyn Connection>) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(&self.browse), Arc::as_ptr(conn))
+    }
 }
 
 impl std::fmt::Debug for Connected {

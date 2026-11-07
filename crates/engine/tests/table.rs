@@ -770,6 +770,38 @@ fn a_page_cut_by_the_byte_cap_says_so() {
     }
 }
 
+/// A load stopped while it waits for its turn on the browse connection, which every tab shares,
+/// leaves the queue: it sends no cancel request, which would stop the tab ahead of it.
+#[test]
+fn a_load_stopped_in_the_queue_stops_no_other_tab() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let key = unique("dbee_gate");
+        let gate = hold_gate(t, &key);
+        // Tab A's load holds the connection: it waits for the lock, or on a file counts for about 5 s.
+        let slow = if t.is_file() { t.slow_condition_sql(5) } else { t.waits_for_lock_sql(&key) };
+        let Outcome::Started(a) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
+        until_running(t, &key);
+        // Tab B's first page waits behind it, and is stopped there.
+        let Outcome::Started(b) = s.execute("table.open", json!({ "schema": t.schema("shop"), "table": "customers" })).unwrap() else {
+            panic!("a job")
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while s.browse_waiting() == 0 {
+            assert!(Instant::now() < deadline, "{}: tab B's load never waited for its turn", t.name());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
+        let b = s.wait(b, T);
+        assert_eq!(s.browse_waiting(), 0, "{}: tab B's load left the queue", t.name());
+        drop(gate);
+        let a = s.wait(a, T).unwrap_or_else(|e| panic!("{}: tab A's load: {e}", t.name()));
+        assert_eq!(a["rows"], 100, "{}: {a}", t.name());
+        assert_eq!(b.map_err(|e| e.code()), Err("cancelled"), "{}: tab B's load", t.name());
+    });
+}
+
 #[test]
 fn cancel_stops_a_slow_page() {
     let _db = require_testdb!();

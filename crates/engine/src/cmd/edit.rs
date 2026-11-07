@@ -448,14 +448,14 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         reshaped: !edits.new_rows.is_empty() || !edits.deleted.is_empty(),
     };
     let sql: Vec<String> = statements.into_iter().map(|(_, sql)| sql).collect();
-    let conn = s.browse()?;
+    let job_conn = s.browse_in_turn()?;
+    let conn: Arc<dyn Connection> = job_conn.clone();
     let reload = Reload::prepare(s, tab, info)?;
     if let Some(t) = table_tab_mut(s, tab)
         && (t.edits.failed.is_some() || t.edits.outcome_unknown())
     {
         Arc::make_mut(&mut t.edits).apply_started();
     }
-    let job_conn = Arc::clone(&conn);
     let gate = Arc::new(dbee_driver::ApplyGate::default());
     let job_gate = Arc::clone(&gate);
     let job = s.spawn_job(APPLY, async move {

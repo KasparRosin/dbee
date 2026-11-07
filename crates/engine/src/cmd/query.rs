@@ -72,6 +72,7 @@ use super::connection::{db_error, driver_for};
 use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, bad, disabled, ignored, needs_db, p};
 use crate::jobs::{self, Stop};
 use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, Selection, StatementOutcome};
+use crate::turns::InTurn;
 use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
 
 const RUN: &str = "query.run";
@@ -455,15 +456,14 @@ fn query_error(e: &EngineError, f: &Failure) -> QueryError {
 }
 
 /// `conn` is the connection `generation` was taken from.
-fn same_connection(generation: &Weak<dyn Connection>, conn: &Arc<dyn Connection>) -> bool {
-    // Addresses only: two pointers to one `dyn` value may carry different vtables.
-    Weak::as_ptr(generation).cast::<()>() == Arc::as_ptr(conn).cast::<()>()
+fn same_connection(generation: &Weak<InTurn>, conn: &Arc<InTurn>) -> bool {
+    std::ptr::eq(Weak::as_ptr(generation), Arc::as_ptr(conn))
 }
 
 /// Applies a run: first to the session's query connection, also when the run's tab has closed
 /// (where the run left it, and the connection the job opened), then to the tab, when it is still
 /// open and running this job (its results, and its error, which lets a lost query connection go).
-fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<dyn Connection>, ran: Ran) -> Result<Json, EngineError> {
+fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<InTurn>, ran: Ran) -> Result<Json, EngineError> {
     let me = s.applying_job();
     let for_tab = matches!(s.state.tab(tab), Some(Tab::Query(q)) if me.is_some() && q.running == me);
     // The session's connection is still the one the run started on: not closed, not replaced.

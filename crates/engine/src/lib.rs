@@ -17,6 +17,7 @@ pub mod edits;
 pub mod fuzzy;
 mod jobs;
 pub mod state;
+mod turns;
 pub mod view;
 
 use std::any::Any;
@@ -479,6 +480,12 @@ impl Session {
     /// [`Session::value_view`] without the copy of the text.
     pub fn value_view_shared(&self) -> Option<Arc<ValueView>> {
         self.value_cache.get(self.state.active_tab()?)
+    }
+
+    /// How many operations wait for their turn on the browse connection (for tests of the queue).
+    #[doc(hidden)]
+    pub fn browse_waiting(&self) -> usize {
+        self.state.connected.as_ref().map_or(0, |c| c.browse.waiting())
     }
 
     /// How many value views this session has built (for tests of the caching).
