@@ -1,4 +1,4 @@
-use dbee_config::store::{FILE, MAX_RECENT};
+use dbee_config::store::{FILE, LOCK_FILE, MAX_RECENT};
 use dbee_config::*;
 
 #[test]
@@ -104,22 +104,24 @@ fn store_round_trip_and_recent_cap() {
     let dir = th.home.clone();
     let (mut s, warn) = ConnectionStore::load(Some(&dir));
     assert!(warn.is_none() && s.saved.is_empty());
-    s.upsert(cfg("a"));
-    s.upsert(cfg("b"));
-    let mut a2 = cfg("a");
-    a2.host = "other".into();
-    s.upsert(a2);
+    s.change(|s| {
+        s.upsert(cfg("a"));
+        s.upsert(cfg("b"));
+        let mut a2 = cfg("a");
+        a2.host = "other".into();
+        s.upsert(a2);
+        for i in 0..25 {
+            s.touch_recent(&cfg(&format!("r{i}")), i as u64);
+        }
+        assert_eq!(s.recent.len(), MAX_RECENT);
+        assert_eq!(s.recent[0].config.id, "r24");
+        s.touch_recent(&cfg("r10"), 99);
+    })
+    .unwrap();
     assert_eq!(s.saved.len(), 2);
     assert_eq!(s.get("a").unwrap().host, "other");
-    for i in 0..25 {
-        s.touch_recent(&cfg(&format!("r{i}")), i as u64);
-    }
-    assert_eq!(s.recent.len(), MAX_RECENT);
-    assert_eq!(s.recent[0].config.id, "r24");
-    s.touch_recent(&cfg("r10"), 99);
     assert_eq!((s.recent[0].config.id.as_str(), s.recent[0].used_at, s.recent.len()), ("r10", 99, MAX_RECENT));
     assert_eq!(s.get("r24").unwrap().id, "r24");
-    s.save().unwrap();
     let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
     assert!(text.contains("\"version\""));
     let (l, warn) = ConnectionStore::load(Some(&dir));
@@ -133,9 +135,10 @@ fn store_round_trip_and_recent_cap() {
 
 #[test]
 fn memory_only_store_saves_nothing() {
-    let (s, w) = ConnectionStore::load(None);
+    let (mut s, w) = ConnectionStore::load(None);
     assert!(w.is_none());
-    assert!(s.save().is_ok());
+    assert_eq!(s.change(|s| s.upsert(cfg("a"))), Ok(((), None)));
+    assert_eq!(ids(&s.saved), ["a"]);
 }
 
 #[test]
@@ -184,8 +187,7 @@ fn unreadable_file_is_never_overwritten() {
     let (mut s, warn) = ConnectionStore::load(Some(&dir));
     assert!(warn.unwrap().contains("untouched"));
     assert!(s.dir.is_none());
-    s.upsert(cfg("a"));
-    s.save().unwrap();
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
     assert!(dir.join(FILE).join("keep").is_dir());
 }
 
@@ -202,8 +204,7 @@ fn failed_bad_rename_leaves_file_untouched() {
     let (mut s, warn) = ConnectionStore::load(Some(&dir));
     assert!(warn.unwrap().contains("untouched"));
     assert!(s.dir.is_none());
-    s.upsert(cfg("a"));
-    s.save().unwrap();
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
     assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), "{oops");
 }
 
@@ -212,9 +213,8 @@ fn save_leaves_no_temp_files() {
     let th = dbee_testkit::temp_home(None, None);
     let dir = th.home.clone();
     let (mut s, _) = ConnectionStore::load(Some(&dir));
-    s.upsert(cfg("a"));
-    s.save().unwrap();
-    s.save().unwrap();
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    s.change(|s| s.upsert(cfg("b"))).unwrap();
     let tmp = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
     assert_eq!(tmp, 0);
 }
@@ -373,8 +373,7 @@ fn an_unreadable_entry_is_kept_and_the_others_load() {
     // One saved entry and one recent one, counted together.
     assert_eq!(warn, "2 saved or recent connection entries could not be read and are kept unchanged in the file");
     assert!(!dir.join("connections.json.bad").exists());
-    s.upsert(cfg("h"));
-    s.save().unwrap();
+    s.change(|s| s.upsert(cfg("h"))).unwrap();
     let back: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(FILE)).unwrap()).unwrap();
     assert!(back["saved"].as_array().unwrap().contains(&oracle));
     assert!(back["recent"].as_array().unwrap().contains(&recent));
@@ -389,8 +388,7 @@ fn a_sqlite_connection_round_trips_through_the_store() {
     let dir = th.home.clone();
     let (mut s, _) = ConnectionStore::load(Some(&dir));
     let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ..cfg("s") };
-    s.upsert(c.clone());
-    s.save().unwrap();
+    s.change(|s| s.upsert(c.clone())).unwrap();
     let (l, warn) = ConnectionStore::load(Some(&dir));
     assert_eq!((l.saved, warn), (vec![c], None));
 }
@@ -413,11 +411,10 @@ fn options_round_trip_and_stay_out_of_the_file_when_empty() {
     // A key this build does not know survives a load and a save.
     let th = dbee_testkit::temp_home(None, None);
     let (mut s, _) = ConnectionStore::load(Some(&th.home));
-    s.upsert(c.clone());
-    s.save().unwrap();
-    let (l, warn) = ConnectionStore::load(Some(&th.home));
+    s.change(|s| s.upsert(c.clone())).unwrap();
+    let (mut l, warn) = ConnectionStore::load(Some(&th.home));
     assert!(warn.is_none());
-    l.save().unwrap();
+    l.change(|_| ()).unwrap();
     let (l, _) = ConnectionStore::load(Some(&th.home));
     assert_eq!(l.get("m").unwrap().options.get("aLaterOption").map(String::as_str), Some("42"));
     assert_eq!(l.get("m"), Some(&c));
@@ -429,4 +426,75 @@ fn each_kind_lists_its_options() {
     assert_eq!(DbKind::MySql.info().options, [ALLOW_PUBLIC_KEY]);
     assert_eq!(DbKind::MariaDb.info().options, [ALLOW_PUBLIC_KEY]);
     assert!(DbKind::Postgres.info().options.is_empty() && DbKind::Sqlite.info().options.is_empty());
+}
+
+/// The saved ids, sorted.
+fn ids(saved: &[ConnectionConfig]) -> Vec<&str> {
+    let mut ids: Vec<&str> = saved.iter().map(|c| c.id.as_str()).collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The saved and recent ids the file in `dir` holds now, each sorted.
+fn in_file(dir: &std::path::Path) -> (Vec<String>, Vec<String>) {
+    let (s, warn) = ConnectionStore::load(Some(dir));
+    assert_eq!(warn, None);
+    let recent: Vec<ConnectionConfig> = s.recent.iter().map(|r| r.config.clone()).collect();
+    let own = |v: Vec<&str>| v.into_iter().map(String::from).collect();
+    (own(ids(&s.saved)), own(ids(&recent)))
+}
+
+#[test]
+fn two_dbees_keep_each_others_saves() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut a, _) = ConnectionStore::load(Some(&dir));
+    let (mut b, _) = ConnectionStore::load(Some(&dir));
+    a.change(|s| s.upsert(cfg("a"))).unwrap();
+    b.change(|s| s.upsert(cfg("b"))).unwrap();
+    assert_eq!(in_file(&dir).0, ["a", "b"]);
+    // The one that wrote last holds both now.
+    assert_eq!(ids(&b.saved), ["a", "b"]);
+}
+
+#[test]
+fn a_delete_in_one_dbee_keeps_the_others_save() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut first, _) = ConnectionStore::load(Some(&dir));
+    first.change(|s| s.upsert(cfg("x"))).unwrap();
+    let (mut a, _) = ConnectionStore::load(Some(&dir));
+    let (mut b, _) = ConnectionStore::load(Some(&dir));
+    assert!(a.change(|s| s.remove("x")).unwrap().0);
+    b.change(|s| s.upsert(cfg("y"))).unwrap();
+    assert_eq!(in_file(&dir).0, ["y"]);
+}
+
+#[test]
+fn a_recent_touch_in_one_dbee_keeps_the_others_save() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut a, _) = ConnectionStore::load(Some(&dir));
+    let (mut b, _) = ConnectionStore::load(Some(&dir));
+    a.change(|s| s.upsert(cfg("a"))).unwrap();
+    b.change(|s| s.touch_recent(&cfg("r"), 7)).unwrap();
+    assert_eq!(in_file(&dir), (vec!["a".to_string()], vec!["r".to_string()]));
+}
+
+#[test]
+fn a_change_waits_for_another_dbees_and_then_says_so() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut s, _) = ConnectionStore::load(Some(&dir));
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    let before = std::fs::read(dir.join(FILE)).unwrap();
+    // Another dbee holds the lock and does not let go.
+    let other = std::fs::File::options().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE)).unwrap();
+    other.lock().unwrap();
+    let e = s.change(|s| s.upsert(cfg("b"))).unwrap_err();
+    assert_eq!(e.to_string(), "connections file: another dbee kept it locked for 5 s, so nothing was changed");
+    assert_eq!((ids(&s.saved), std::fs::read(dir.join(FILE)).unwrap()), (vec!["a"], before), "neither the copy nor the file changed");
+    other.unlock().unwrap();
+    s.change(|s| s.upsert(cfg("b"))).unwrap();
+    assert_eq!(in_file(&dir).0, ["a", "b"]);
 }

@@ -1,14 +1,24 @@
 //! The saved and recent connections file (`connections.json`).
+//!
+//! Several dbee processes can share it (two windows, say). So a change never writes a list from
+//! memory: [`ConnectionStore::change`] reads the file again under a lock, applies the one change
+//! to what it holds, and writes that, which keeps what another dbee saved meanwhile.
 
 use crate::connection::{ConfigError, ConnectionConfig};
 use serde::{Deserialize, Serialize};
+use std::fs::{File, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// File name inside the config directory.
 pub const FILE: &str = "connections.json";
+/// The lock file beside it, held while a change reads and writes the file.
+pub const LOCK_FILE: &str = "connections.json.lock";
 /// Most recent entries kept.
 pub const MAX_RECENT: usize = 20;
+/// How long a change waits for another dbee's change to the file.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 /// A connection used lately, with the Unix time of use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,51 +76,129 @@ impl Default for FileBody {
     }
 }
 
+/// What reading the file gave.
+enum Read {
+    /// Its entries (none when there is no file yet), and a warning when some are kept unread.
+    Entries(ConnectionStore, Option<String>),
+    /// It was damaged and is moved aside, so there is no file now.
+    MovedAside(String),
+    /// It must not be written: it could not be read, or it is damaged and could not be moved aside.
+    Unusable(String),
+}
+
+/// Reads `dir/connections.json`, moving a damaged one aside.
+fn read(dir: &Path) -> Read {
+    let mut store = ConnectionStore { dir: Some(dir.to_path_buf()), ..ConnectionStore::default() };
+    let path = dir.join(FILE);
+    let text = match std::fs::read(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Entries(store, None),
+        Err(e) => {
+            return Read::Unusable(format!("could not read {}: {e}; the file was left untouched and changes will not be saved", path.display()));
+        }
+    };
+    match serde_json::from_slice::<FileBody>(&text) {
+        Ok(body) => {
+            (store.saved, store.kept_saved) = decode_each(body.saved);
+            (store.recent, store.kept_recent) = decode_each(body.recent);
+            store.recent.truncate(MAX_RECENT);
+            let kept = store.kept_saved.len() + store.kept_recent.len();
+            let warning =
+                (kept > 0).then(|| format!("{kept} saved or recent connection entries could not be read and are kept unchanged in the file"));
+            Read::Entries(store, warning)
+        }
+        Err(e) => {
+            let damaged = format!("{} is damaged ({e})", path.display());
+            match free_bad_name(dir)
+                .ok_or_else(|| "every .bad name is taken".to_string())
+                .and_then(|bad| std::fs::rename(&path, &bad).map(|()| bad).map_err(|re| re.to_string()))
+            {
+                Ok(bad) => Read::MovedAside(format!("{damaged}; moved it to {}", bad.display())),
+                Err(re) => {
+                    Read::Unusable(format!("{damaged}; could not move it aside ({re}); the file was left untouched and changes will not be saved"))
+                }
+            }
+        }
+    }
+}
+
+/// The lock on `dir`'s file, once another dbee has let it go (within [`LOCK_WAIT`]); `None` where
+/// the file system has no locks.
+fn lock(dir: &Path) -> Result<Option<File>, ConfigError> {
+    let io = |what: &str, e: std::io::Error| ConfigError::Io(format!("{what}: {e}"));
+    std::fs::create_dir_all(dir).map_err(|e| io("create directory", e))?;
+    let file = File::options().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE)).map_err(|e| io("lock", e))?;
+    let deadline = Instant::now().checked_add(LOCK_WAIT);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(TryLockError::WouldBlock) if deadline.is_some_and(|d| Instant::now() < d) => std::thread::sleep(Duration::from_millis(20)),
+            Err(TryLockError::WouldBlock) => {
+                return Err(ConfigError::Io(format!("another dbee kept it locked for {} s, so nothing was changed", LOCK_WAIT.as_secs())));
+            }
+            Err(TryLockError::Error(e)) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(None),
+            Err(TryLockError::Error(e)) => return Err(io("lock", e)),
+        }
+    }
+}
+
 impl ConnectionStore {
     /// Loads `dir/connections.json`. A missing file is an empty store. A file that cannot be
     /// parsed is renamed to `connections.json.bad` and a warning is returned with an empty store.
+    /// A file that cannot be read gives a memory-only store, so no change overwrites it.
     pub fn load(dir: Option<&Path>) -> (ConnectionStore, Option<String>) {
-        let mut store = ConnectionStore { dir: dir.map(Path::to_path_buf), ..ConnectionStore::default() };
-        let Some(dir) = dir else { return (store, None) };
-        let path = dir.join(FILE);
-        let text = match std::fs::read(&path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (store, None),
-            Err(e) => {
-                // Memory only from here on, so a later save cannot overwrite the unreadable file.
-                store.dir = None;
-                return (store, Some(format!("could not read {}: {e}; the file was left untouched and changes will not be saved", path.display())));
+        let Some(dir) = dir else { return (ConnectionStore::default(), None) };
+        match read(dir) {
+            Read::Entries(store, warning) => (store, warning),
+            Read::MovedAside(warning) => (ConnectionStore { dir: Some(dir.to_path_buf()), ..ConnectionStore::default() }, Some(warning)),
+            Read::Unusable(warning) => (ConnectionStore::default(), Some(warning)),
+        }
+    }
+
+    /// Makes one change, `f`, to the file and to this copy, all or nothing. Under the lock beside
+    /// the file it reads the file again, applies `f` to what the file holds, writes the result
+    /// (temp file, then rename) and keeps it as this copy, so what another dbee changed meanwhile
+    /// stays. The lock is held for that only, and one another dbee holds longer than 5 s is an
+    /// error that changes nothing. A memory-only store applies `f` to itself. When the file can
+    /// no longer be used, the store goes memory-only (unreadable) or writes this copy in its place
+    /// (damaged, and moved aside), with `f` applied, and the warning says why.
+    pub fn change<R>(&mut self, f: impl FnOnce(&mut ConnectionStore) -> R) -> Result<(R, Option<String>), ConfigError> {
+        let Some(dir) = self.dir.clone() else { return Ok((f(self), None)) };
+        let _lock = lock(&dir)?;
+        let (mut next, warning) = match read(&dir) {
+            Read::Entries(fresh, warning) => (fresh, warning),
+            Read::MovedAside(warning) => (self.clone(), Some(warning)),
+            Read::Unusable(warning) => {
+                self.dir = None;
+                return Ok((f(self), Some(warning)));
             }
         };
-        match serde_json::from_slice::<FileBody>(&text) {
-            Ok(body) => {
-                (store.saved, store.kept_saved) = decode_each(body.saved);
-                (store.recent, store.kept_recent) = decode_each(body.recent);
-                store.recent.truncate(MAX_RECENT);
-                let kept = store.kept_saved.len() + store.kept_recent.len();
-                let warning =
-                    (kept > 0).then(|| format!("{kept} saved or recent connection entries could not be read and are kept unchanged in the file"));
-                (store, warning)
+        let r = f(&mut next);
+        next.write(&dir)?;
+        *self = next;
+        Ok((r, warning))
+    }
+
+    /// Reads the file again into this copy, so it shows what another dbee changed meanwhile. A
+    /// damaged file is moved aside and this copy kept (the next change writes it); an unreadable
+    /// one makes the store memory-only. The warning says why.
+    pub fn reload(&mut self) -> Option<String> {
+        let dir = self.dir.clone()?;
+        match read(&dir) {
+            Read::Entries(fresh, warning) => {
+                *self = fresh;
+                warning
             }
-            Err(e) => {
-                let moved = match free_bad_name(dir)
-                    .ok_or_else(|| "every .bad name is taken".to_string())
-                    .and_then(|bad| std::fs::rename(&path, &bad).map(|()| bad).map_err(|re| re.to_string()))
-                {
-                    Ok(bad) => format!("moved it to {}", bad.display()),
-                    Err(re) => {
-                        store.dir = None;
-                        format!("could not move it aside ({re}); the file was left untouched and changes will not be saved")
-                    }
-                };
-                (store, Some(format!("{} is damaged ({e}); {moved}", path.display())))
+            Read::MovedAside(warning) => Some(warning),
+            Read::Unusable(warning) => {
+                self.dir = None;
+                Some(warning)
             }
         }
     }
 
-    /// Writes the file atomically (temp file, then rename). Memory-only stores do nothing.
-    pub fn save(&self) -> Result<(), ConfigError> {
-        let Some(dir) = &self.dir else { return Ok(()) };
+    /// Writes this store to `dir/connections.json` atomically (temp file, then rename).
+    fn write(&self, dir: &Path) -> Result<(), ConfigError> {
         let io = |what: &str, e: std::io::Error| ConfigError::Io(format!("{what}: {e}"));
         let to_values = |items: Vec<Result<serde_json::Value, serde_json::Error>>, kept: &[serde_json::Value]| {
             items.into_iter().collect::<Result<Vec<_>, _>>().map(|mut v| {
@@ -129,7 +217,7 @@ impl ConnectionStore {
         std::fs::create_dir_all(dir).map_err(|e| io("create directory", e))?;
         let tmp = dir.join(format!("{FILE}.{}.tmp", crate::connection::new_id()));
         let written = (|| {
-            let mut file = std::fs::File::create(&tmp).map_err(|e| io("write", e))?;
+            let mut file = File::create(&tmp).map_err(|e| io("write", e))?;
             file.write_all(&json).map_err(|e| io("write", e))?;
             file.sync_all().map_err(|e| io("sync", e))
         })();

@@ -106,6 +106,52 @@ fn save_keeps_or_drops_secrets_as_told() {
     assert_secret_hidden(&s, "second");
 }
 
+/// The saved and recent ids in `s`'s connections file, each sorted.
+fn ids_in_file(s: &TestSession) -> (Vec<String>, Vec<String>) {
+    let text = std::fs::read_to_string(s.home.home.join("config").join(dbee_config::store::FILE)).unwrap();
+    let file: Json = serde_json::from_str(&text).unwrap();
+    let ids = |list: &Json, at: &str| {
+        let mut ids: Vec<String> = list.as_array().unwrap().iter().map(|e| e.pointer(at).and_then(Json::as_str).unwrap().to_owned()).collect();
+        ids.sort();
+        ids
+    };
+    (ids(&file["saved"], "/id"), ids(&file["recent"], "/config/id"))
+}
+
+#[test]
+fn two_sessions_on_one_config_folder_keep_each_others_connections() {
+    let mut a = session();
+    let mut b = second_session(&a.home);
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    // Each saves a different connection.
+    let x = save(&mut a, refused_config("x"), None);
+    let y = save(&mut b, refused_config("y"), None);
+    assert_eq!(ids_in_file(&a).0, sorted(vec![x.clone(), y.clone()]));
+    // One deletes while the other saves.
+    run(&mut a, "connection.delete", json!({ "id": x }));
+    let z = save(&mut b, refused_config("z"), None);
+    assert_eq!(ids_in_file(&a).0, sorted(vec![y.clone(), z.clone()]));
+    // An open in one, which writes its recent list, keeps the other's save.
+    let w = save(&mut a, refused_config("w"), None);
+    let folder = Folder(dbee_testkit::repo_root().join("target").join("testkit").join(unique("two-sessions")));
+    std::fs::create_dir_all(&folder.0).unwrap();
+    let file = folder.0.join("empty.sqlite");
+    std::fs::write(&file, b"").unwrap();
+    let opened = open(&mut b, json!({ "config": { "kind": "sqlite", "file": file } }));
+    let used = opened["connection"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(ids_in_file(&a), (sorted(vec![y, z, w.clone()]), vec![used]));
+    // A session's list is the file as its last write left it: b's holds a's w.
+    assert!(b.state().store.is_saved(&w));
+    // Back on the connection screen, a session reads the file again.
+    let v = save(&mut a, refused_config("v"), None);
+    assert!(!b.state().store.is_saved(&v));
+    run(&mut b, "connection.close", json!({}));
+    assert!(b.state().store.is_saved(&v));
+}
+
 #[test]
 fn bad_configs_are_bad_params() {
     let mut s = session();

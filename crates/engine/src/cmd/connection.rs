@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SslMode, new_id, parse_url};
+use dbee_config::{ConfigError, ConnectionConfig, ConnectionStore, DbKind, SecretKind, SecretStore, Settings, SshAuth, SslMode, new_id, parse_url};
 use dbee_core::Catalog;
 use dbee_driver::{Cancel, Connection, DbError, DbFuture, Driver, Drivers, Purpose, Target};
 use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
@@ -725,10 +725,21 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// Writes the connections file after a change that must not fail the command (a use); tells the
-/// user when it could not be written.
-fn save_store_or_tell(s: &mut Session) {
-    if let Err(e) = s.state.store.save() {
+/// Makes one change to the connections file and the session's copy of it
+/// ([`ConnectionStore::change`]); a warning about the file becomes the store warning.
+fn change_store<R>(s: &mut Session, f: impl FnOnce(&mut ConnectionStore) -> R) -> Result<R, ConfigError> {
+    let (r, warning) = s.state.store.change(f)?;
+    if warning.is_some() {
+        log::warn!("the connections file could not be used as it is");
+        s.state.store_warning = warning;
+    }
+    Ok(r)
+}
+
+/// Puts `config` first in the recent list, in the file too; tells the user when the file could
+/// not be written (the open stands).
+fn record_use(s: &mut Session, config: &ConnectionConfig) {
+    if let Err(e) = change_store(s, |store| store.touch_recent(config, unix_now())) {
         log::warn!("the connections file could not be written");
         s.ui_requests.push(UiRequest::Notice(format!("The recent connections could not be saved: {e}")));
     }
@@ -777,11 +788,12 @@ fn save_with_secrets(s: &mut Session, mut config: ConnectionConfig, secrets: &Cr
     if config.id.is_empty() {
         config.id = new_id();
     }
-    let before = s.state.store.saved.iter().find(|c| c.id == config.id).cloned();
-    let mut store = s.state.store.clone();
-    store.upsert(config.clone());
-    store.save().map_err(|e| EngineError::Config(e.to_string()))?;
-    s.state.store = store;
+    let before = change_store(s, |store| {
+        let before = store.saved.iter().find(|c| c.id == config.id).cloned();
+        store.upsert(config.clone());
+        before
+    })
+    .map_err(|e| EngineError::Config(e.to_string()))?;
     if let Some(secret_store) = s.secrets.clone() {
         let ok = if config.save_secrets {
             let still = before.as_ref().map_or(Reuse::default(), |b| reuse(b, &config));
@@ -800,15 +812,14 @@ fn save_with_secrets(s: &mut Session, mut config: ConnectionConfig, secrets: &Cr
 /// `{id}` → `{id}`: removes the connection from the saved and recent lists, with its secrets.
 fn delete(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let id = p::str(params, "id")?.to_owned();
-    let mut store = s.state.store.clone();
-    let saved = store.remove(&id);
-    let recent = store.recent.len();
-    store.recent.retain(|r| r.config.id != id);
-    if !saved && store.recent.len() == recent {
+    if s.state.store.get(&id).is_none() {
         return Err(bad("no saved or recent connection has this `id`"));
     }
-    store.save().map_err(|e| EngineError::Config(e.to_string()))?;
-    s.state.store = store;
+    change_store(s, |store| {
+        store.remove(&id);
+        store.recent.retain(|r| r.config.id != id);
+    })
+    .map_err(|e| EngineError::Config(e.to_string()))?;
     if let Some(secret_store) = s.secrets.clone()
         && !forget_secrets(secret_store.as_ref(), &id)
     {
@@ -823,10 +834,7 @@ fn duplicate(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let id = p::str(params, "id")?;
     let original = s.state.store.get(id).cloned().ok_or_else(|| bad("no saved or recent connection has this `id`"))?;
     let copy = ConnectionConfig { id: new_id(), name: format!("{} (copy)", original.display_name()), ..original.clone() };
-    let mut store = s.state.store.clone();
-    store.upsert(copy.clone());
-    store.save().map_err(|e| EngineError::Config(e.to_string()))?;
-    s.state.store = store;
+    change_store(s, |store| store.upsert(copy.clone())).map_err(|e| EngineError::Config(e.to_string()))?;
     if let Some(secret_store) = s.secrets.clone()
         && copy.save_secrets
     {
@@ -1146,7 +1154,7 @@ fn apply_open(
     let kept = keep.map(|typed| keep_secrets(s, &mut config, &typed));
     let Opened { conn, tunnel } = opened;
     let (info, dialect) = (conn.info().clone(), conn.dialect());
-    s.state.store.touch_recent(&config, unix_now());
+    let used = config.clone();
     let c = Connected {
         config,
         info,
@@ -1173,7 +1181,7 @@ fn apply_open(
     tell(s, unsaved_host_key(c.tunnel.as_ref()));
     s.state.connected = Some(c);
     s.state.screen = Screen::Workspace;
-    save_store_or_tell(s);
+    record_use(s, &used);
     Ok(result)
 }
 
@@ -1190,10 +1198,12 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
         return Err("the settings differ from the saved connection; save them to keep the secrets".into());
     }
     if !saved.save_secrets {
-        let mut store = s.state.store.clone();
-        store.upsert(ConnectionConfig { save_secrets: true, ..saved });
-        store.save().map_err(|e| format!("the connections file could not be written: {e}"))?;
-        s.state.store = store;
+        let id = config.id.clone();
+        let still_saved = change_store(s, |store| store.saved.iter_mut().find(|c| c.id == id).map(|c| c.save_secrets = true).is_some())
+            .map_err(|e| format!("the connections file could not be written: {e}"))?;
+        if !still_saved {
+            return Err("the connection is not saved any more; save it to keep its secrets".into());
+        }
     }
     config.save_secrets = true;
     if !store_secrets(secret_store.as_ref(), &config.id, typed) {
@@ -1338,7 +1348,8 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// only edits would be lost) unless `force`. Every tab closes; statements still running are
 /// cancelled through their connections' cancellers (an Apply then rolls back, and a query run
 /// stops), and the connections are let go (they close once the jobs using them end; those jobs'
-/// results are dropped).
+/// results are dropped). The saved and recent lists are read again from the file, which another
+/// dbee may have changed meanwhile.
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
     let c = s.state.connected.as_ref().ok_or_else(|| disabled(NOT_CONNECTED))?;
@@ -1361,6 +1372,10 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
     let Some(c) = s.state.connected.take() else { return Err(disabled(NOT_CONNECTED)) };
     s.state.screen = Screen::Connections;
+    if let Some(warning) = s.state.store.reload() {
+        log::warn!("the connections file could not be used as it is");
+        s.state.store_warning = Some(warning);
+    }
     s.state.tabs.clear();
     s.state.active = None;
     stop_statements(s, Arc::clone(&c.browse));

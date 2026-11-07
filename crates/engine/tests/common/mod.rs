@@ -112,6 +112,21 @@ pub fn session_in_adjusted(home: TempHome, adjust: impl FnOnce(&mut SessionOptio
     session_with(home, false, adjust)
 }
 
+/// Another session on `home`'s connections file, as a second dbee would have. It holds no lock,
+/// so it must not reach a server (a file is fine).
+pub fn second_session(home: &TempHome) -> Session {
+    Session::new(SessionOptions {
+        config_dir: Some(home.home.join("config")),
+        secrets: Some(Arc::new(MemoryStore::default())),
+        ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
+        notify: None,
+        allowed_targets: None,
+        allowed_dirs: None,
+        drivers: dbee_drivers::all(),
+    })
+    .unwrap()
+}
+
 /// A session that no other test of this binary runs beside; needed by [`kill_dbee_connections`].
 pub fn exclusive_session() -> TestSession {
     session_with(temp_home(None, None), true, |_| {})

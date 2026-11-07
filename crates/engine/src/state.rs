@@ -537,8 +537,8 @@ pub struct State {
     pub active: Option<TabId>,
     /// The id the next tab gets; ids are never reused.
     pub next_tab: u64,
-    /// Why the connections file could not be used (then the store is empty, and may be memory
-    /// only), for the UI to show.
+    /// Why the connections file could not be used, at the start or at a later change (then the
+    /// store may be empty, or memory only), for the UI to show.
     pub store_warning: Option<String>,
 }
 
