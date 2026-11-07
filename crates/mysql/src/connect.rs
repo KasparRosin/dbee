@@ -1,6 +1,7 @@
 //! Opening a connection: TCP or an SSH tunnel channel, TLS, the login and the session setup; the
 //! connection, and the canceller that sends `KILL QUERY` over a second connection.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -48,18 +49,26 @@ const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_RETRIES: u32 = 3;
 
-/// Where a connection goes: directly to `host:port`, or through the tunnel to it.
+/// Where a connection goes: directly to `host:port` (to `reached` once known), or through the
+/// tunnel to it. TLS checks `host`.
 #[derive(Clone)]
 pub(crate) struct Route {
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) tunnel: Option<Arc<Tunnel>>,
+    /// The address a direct connection reached, of those `host` gives: a cancel's KILL goes there,
+    /// as the name may lead to another server later.
+    pub(crate) reached: Option<SocketAddr>,
 }
 
 impl Route {
-    /// `host:port`, with brackets around an IPv6 address.
+    /// `host:port`, with brackets around an IPv6 address; the address reached, once known.
     fn address(&self) -> String {
-        if self.host.contains(':') { format!("[{}]:{}", self.host, self.port) } else { format!("{}:{}", self.host, self.port) }
+        match self.reached {
+            Some(addr) => addr.to_string(),
+            None if self.host.contains(':') => format!("[{}]:{}", self.host, self.port),
+            None => format!("{}:{}", self.host, self.port),
+        }
     }
 }
 
@@ -86,6 +95,8 @@ pub(crate) struct Session {
     /// The server reports, in its OK packets, the database each statement makes current. Off for
     /// good once a statement names `session_track`: it may have turned the reports off.
     tracks_schema: bool,
+    /// The address a direct connection reached; `None` through a tunnel.
+    reached: Option<SocketAddr>,
 }
 
 impl Session {
@@ -106,7 +117,8 @@ impl Session {
         wanted: MariadbCapabilities,
         session_track: bool,
     ) -> Result<Session, DbError> {
-        let mut packets = Packets::new(open_stream(route).await?, LOGIN_MAX_PAYLOAD);
+        let (stream, reached) = open_stream(route).await?;
+        let mut packets = Packets::new(stream, LOGIN_MAX_PAYLOAD);
         let greeting = auth::parse_greeting(&packets.read().await?)?;
         let config = match tls {
             TlsUse::Off => None,
@@ -131,6 +143,7 @@ impl Session {
             tls: config,
             used_server_key,
             tracks_schema: false,
+            reached,
         })
     }
 
@@ -161,13 +174,19 @@ fn names_session_track(sql: &str) -> bool {
     sql.as_bytes().windows(NAME.len()).any(|w| w.eq_ignore_ascii_case(NAME))
 }
 
-async fn open_stream(route: &Route) -> Result<Stream, DbError> {
+/// The stream to the server, and the address it reached when it is direct.
+async fn open_stream(route: &Route) -> Result<(Stream, Option<SocketAddr>), DbError> {
     if let Some(tunnel) = &route.tunnel {
-        return Ok(Box::new(tunnel.connect(&route.host, route.port).await?));
+        return Ok((Box::new(tunnel.connect(&route.host, route.port).await?), None));
     }
-    let tcp = TcpStream::connect((route.host.as_str(), route.port)).await.map_err(|e| DbError::Connect(e.to_string()))?;
+    let connecting = match route.reached {
+        Some(addr) => TcpStream::connect(addr).await,
+        None => TcpStream::connect((route.host.as_str(), route.port)).await,
+    };
+    let tcp = connecting.map_err(|e| DbError::Connect(e.to_string()))?;
     tune(&tcp).map_err(|e| DbError::Connect(e.to_string()))?;
-    Ok(Box::new(tcp))
+    let reached = tcp.peer_addr().ok();
+    Ok((Box::new(tcp), reached))
 }
 
 /// A direct connection's socket options: no delay for small packets, and keepalive probes.
@@ -242,7 +261,7 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
         Some(config) if cfg.ssl_mode == SslMode::Prefer => TlsUse::Prefer(config),
         Some(config) => TlsUse::Require(config),
     };
-    let route = Route { host: cfg.host.clone(), port: cfg.port, tunnel: t.tunnel.clone() };
+    let route = Route { host: cfg.host.clone(), port: cfg.port, tunnel: t.tunnel.clone(), reached: None };
     let password = t.password.unwrap_or_default();
     let who = Login { user: &cfg.user, password: password.as_bytes(), database: Some(cfg.database.as_str()).filter(|d| !d.is_empty()) };
     let key = server_key(cfg, t.tunnel.is_some());
@@ -259,7 +278,7 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     let statements = Arc::new(Statements::default());
     let tls_used = session.tls.clone().map_or(TlsUse::Off, TlsUse::Require);
     let canceller = Canceller(Arc::new(KillRoute {
-        route,
+        route: Route { reached: session.reached, ..route },
         user: cfg.user.clone(),
         password: password.to_owned(),
         tls: tls_used,
@@ -456,7 +475,16 @@ mod tests {
     fn tracking_session(queries: usize) -> Session {
         let input = (0..queries).map(|_| frame(&ok_with_state(&schema_entry("many")), 1)).collect::<Vec<_>>().concat();
         let (packets, _) = packets(input);
-        Session { packets, caps: TRACKING, flavor: Flavor::MySql, extended_metadata: false, tls: None, used_server_key: false, tracks_schema: true }
+        Session {
+            packets,
+            caps: TRACKING,
+            flavor: Flavor::MySql,
+            extended_metadata: false,
+            tls: None,
+            used_server_key: false,
+            tracks_schema: true,
+            reached: None,
+        }
     }
 
     #[tokio::test]
@@ -540,5 +568,21 @@ mod tests {
         assert!(tcp.nodelay().unwrap() && sock.keepalive().unwrap());
         let set = (sock.tcp_keepalive_time().unwrap(), sock.tcp_keepalive_interval().unwrap(), sock.tcp_keepalive_retries().unwrap());
         assert_eq!(set, (KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_RETRIES));
+    }
+
+    /// The KILL goes to the address the connection reached, not to whichever its host name gives
+    /// first when it is sent: here `localhost` names `::1` and `127.0.0.1`, and the servers listen
+    /// on `127.0.0.1` only.
+    #[tokio::test]
+    async fn the_kill_goes_to_the_address_the_connection_reached() {
+        let db = dbee_testkit::require_testdb!();
+        for s in db.servers_of(&[dbee_testkit::Kind::MySql, dbee_testkit::Kind::MariaDb]) {
+            let kind = dbee_config::DbKind::from_id(s.kind.id()).unwrap();
+            let cfg = ConnectionConfig { kind, host: "localhost".into(), port: s.port, user: "root".into(), ..ConnectionConfig::default() };
+            let target =
+                Target { config: &cfg, password: Some(&db.password), tunnel: None, purpose: Purpose::Browse, create_file: false, allowed_dirs: None };
+            let conn = connect(target).await.unwrap_or_else(|e| panic!("{}: {e}", s.name));
+            assert_eq!(conn.canceller.0.route.address(), format!("127.0.0.1:{}", s.port), "{}", s.name);
+        }
     }
 }

@@ -296,7 +296,7 @@ mod tests {
             "SELECT * FROM odd.`Odd \"Name\" é`",
         ];
         for s in db.servers_of(&[dbee_testkit::Kind::MySql, dbee_testkit::Kind::MariaDb]) {
-            let route = Route { host: "127.0.0.1".into(), port: s.port, tunnel: None };
+            let route = Route { host: "127.0.0.1".into(), port: s.port, tunnel: None, reached: None };
             let who = Login { user: "root", password: db.password.as_bytes(), database: None };
             let mut plain = Session::open_asking(&route, &who, &TlsUse::Off, ServerKey::Allowed, MariadbCapabilities::empty(), false).await.unwrap();
             let mut extended = Session::open(&route, &who, &TlsUse::Off, ServerKey::Allowed, false).await.unwrap();

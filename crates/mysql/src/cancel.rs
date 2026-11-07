@@ -39,8 +39,9 @@ impl Statements {
     }
 }
 
-/// What a cancel needs to log in a second time: the route, the login, the TLS the connection
-/// ended up with, and whose statement to kill.
+/// What a cancel needs to log in a second time: the route (to the address the connection
+/// reached, or through its tunnel), the login, the TLS the connection ended up with, and whose
+/// statement to kill.
 pub(crate) struct KillRoute {
     pub(crate) route: Route,
     pub(crate) user: String,
