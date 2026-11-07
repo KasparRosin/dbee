@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 publish = false
-description = "dbee SQL text (L1): identifier and literal quoting, SQL lexer, statement splitting"
+description = "dbee SQL text (L1): per-engine dialects, SQL lexer, statement splitting, and the filter, page, count and edit statements"
 
 [lints]
 workspace = true

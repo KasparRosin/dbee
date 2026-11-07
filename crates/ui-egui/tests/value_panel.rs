@@ -25,7 +25,7 @@ use serde_json::{Value as Json, json};
 /// the scroll bar.
 const BESIDE_BAR: f32 = 30.0;
 
-/// The slowest frame the 20 MB cell may cost (spec Review Focus 3).
+/// The slowest frame the 20 MB cell may cost.
 const FRAME_BOUND: Duration = Duration::from_millis(250);
 
 impl Ui {

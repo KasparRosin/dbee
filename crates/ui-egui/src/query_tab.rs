@@ -207,11 +207,11 @@ fn cap_hover() -> String {
 }
 
 /// The line for a statement without rows: `1 row affected`, `2 rows affected`, or a line of its
-/// own when the server gave no count.
+/// own when the database gave no count.
 fn affected_text(rows: Option<u64>) -> String {
     match rows {
         Some(n) => format!("{} affected", rows_word(n)),
-        None => "The statement ran; the server gave no row count.".into(),
+        None => "The statement ran; the database gave no row count.".into(),
     }
 }
 
@@ -1268,8 +1268,7 @@ mod tests {
         assert_eq!(affected_text(Some(1)), "1 row affected");
         assert_eq!(affected_text(Some(0)), "0 rows affected");
         assert_eq!(affected_text(Some(12_000)), "12,000 rows affected");
-        assert!(!affected_text(None).is_empty());
-        assert!(!affected_text(None).contains("affected"), "no count, no number: {}", affected_text(None));
+        assert_eq!(affected_text(None), "The statement ran; the database gave no row count.");
     }
 
     #[test]

@@ -173,7 +173,7 @@ impl Default for SshAuth {
     }
 }
 
-/// An SSH jump host.
+/// The SSH server a connection tunnels through.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SshConfig {
@@ -300,7 +300,7 @@ impl ConnectionConfig {
             Settings::File { .. } => {
                 return match &self.file {
                     Some(f) if !f.as_os_str().is_empty() => Ok(()),
-                    _ => bad("file is empty"),
+                    _ => bad("no file chosen"),
                 };
             }
             Settings::Server { ssh, .. } => ssh,

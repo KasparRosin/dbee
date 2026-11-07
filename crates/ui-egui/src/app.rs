@@ -71,14 +71,14 @@ const NOTICE_SECS: f64 = 4.0;
 /// Most control requests handled in one frame; the rest wait for the next.
 const REQUESTS_PER_FRAME: usize = 64;
 
-/// What a notice says for `e`. A command that cannot run now (`Disabled`), is busy or got bad
-/// params gives its reason alone, as a sentence: `No staged changes.`, not "`edit.apply` cannot
-/// run now: no staged changes". Every other error reads as its own text. [`EngineError`]'s
-/// `Display`, which names the command, stays for the control channel and the logs.
+/// What a notice says for `e`, as a sentence. A command that cannot run now (`Disabled`), is busy
+/// or got bad params gives its reason alone: `No staged changes.`, not "`edit.apply` cannot run
+/// now: no staged changes". Every other error reads as its own text. [`EngineError`]'s `Display`,
+/// which names the command, stays for the control channel and the logs.
 pub(crate) fn notice_text(e: &EngineError) -> String {
     match e {
         EngineError::Disabled { why: text, .. } | EngineError::BadParams { msg: text, .. } | EngineError::Busy(text) => sentence(text),
-        other => other.to_string(),
+        other => sentence(&other.to_string()),
     }
 }
 
@@ -694,14 +694,14 @@ mod tests {
         app.outcome("table.page", json!({}), Origin::Page, Some(JobId(7)), Err(lost()));
         assert_eq!(shown(&app).len(), before, "the card shows it");
         app.outcome("table.page", json!({}), Origin::Page, None, Err(lost()));
-        assert_eq!(shown(&app).last().map(String::as_str), Some("connection lost"));
+        assert_eq!(shown(&app).last().map(String::as_str), Some("Connection lost."));
         // From a menu or a shortcut, job errors show as before.
         let failed = EngineError::Db { code: "server", message: "the count failed".into(), data: json!({}) };
         app.outcome("table.count", json!({}), Origin::Menu, Some(JobId(8)), Err(failed));
-        assert_eq!(shown(&app).last().map(String::as_str), Some("the count failed"));
+        assert_eq!(shown(&app).last().map(String::as_str), Some("The count failed."));
         // The same text twice (a button clicked again) shows once.
         let n = shown(&app).len();
-        app.notice("the count failed".into());
+        app.notice("The count failed.".into());
         assert_eq!(shown(&app).len(), n);
     }
 
@@ -746,7 +746,7 @@ mod tests {
         let nothing = EngineError::Disabled { id: "query.run".into(), why: "there is no statement to run".into() };
         app.outcome("query.run", json!({}), Origin::Menu, None, Err(nothing));
         let notices = shown(&app);
-        assert_eq!(notices, ["connection lost", "There is no statement to run."]);
+        assert_eq!(notices, ["Connection lost.", "There is no statement to run."]);
     }
 
     #[test]
@@ -760,10 +760,13 @@ mod tests {
         assert_eq!(notice_text(&EngineError::Busy("a query is running in Query 1".into())), "A query is running in Query 1.");
         let bad = EngineError::BadParams { id: "cell.edit".into(), msg: "`value` must be text or null".into() };
         assert_eq!(notice_text(&bad), "`value` must be text or null.");
-        // Every other error reads as its own text; Display keeps the command for the control channel.
+        // Every other error reads as its own text, as a sentence; Display keeps the command for the
+        // control channel.
         let db = EngineError::Db { code: "server", message: "duplicate key (SQLSTATE 23505)".into(), data: json!({}) };
-        assert_eq!(notice_text(&db), "duplicate key (SQLSTATE 23505)");
-        assert_eq!(notice_text(&EngineError::Timeout), EngineError::Timeout.to_string());
+        assert_eq!(notice_text(&db), "Duplicate key (SQLSTATE 23505).");
+        let lost = EngineError::Db { code: "connectionLost", message: "the connection was lost".into(), data: json!({}) };
+        assert_eq!(notice_text(&lost), "The connection was lost.");
+        assert_eq!(notice_text(&EngineError::Timeout), sentence(&EngineError::Timeout.to_string()));
         assert_eq!(disabled("no staged changes").to_string(), "`edit.apply` cannot run now: no staged changes");
     }
 

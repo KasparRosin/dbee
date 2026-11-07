@@ -232,7 +232,7 @@ fn running_names_the_commands_whose_jobs_run() {
 fn every_command_survives_empty_params() {
     let mut s = session();
     for c in s.commands() {
-        // These return Internal by design (R3).
+        // These return Internal by design.
         if c.id.starts_with("test.panic") {
             continue;
         }
@@ -621,7 +621,7 @@ fn panicking_job_becomes_internal() {
 }
 
 /// A query run whose result was never applied (its future or its `Apply` panicked) may have
-/// moved the query connection: once it has ended, where the connection is is not known. Another
+/// moved the query connection: once it has ended, the database it is in is unknown. Another
 /// job's end leaves it alone.
 #[test]
 fn a_query_run_left_unapplied_leaves_the_database_not_known() {

@@ -341,14 +341,14 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     let r = if fit.count_icon {
         let r = square_button(ui, enabled, count_icon);
         match (p.count_blocked, counting) {
-            (Some(why), _) => r.on_hover_text(format!("{count}: cannot count now, {why}")),
+            (Some(why), _) => r.on_hover_text(format!("{count}. Can't count now: {why}.")),
             (None, true) => r.on_hover_text(format!("{count}: counting the rows")),
             (None, false) => r.on_hover_text(format!("{count}: count the rows exactly")),
         }
     } else {
         let r = ui.add_enabled(enabled, Button::new(RichText::new(count).size(TEXT)).min_size(vec2(parts.count_w, SQUARE)));
         match p.count_blocked {
-            Some(why) => r.on_disabled_hover_text(format!("Cannot count now: {why}")),
+            Some(why) => r.on_disabled_hover_text(format!("Can't count now: {why}.")),
             None => r.on_hover_text("Count the rows exactly"),
         }
     };

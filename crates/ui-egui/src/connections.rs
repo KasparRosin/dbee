@@ -384,11 +384,13 @@ pub(crate) fn form_done(
     }
 }
 
-/// `{server, via, warnings}` of a test, as one line.
+/// `{server, via, warnings}` of a test, as one line; without `via` for a type that takes no tunnel.
 fn test_text(v: &Json) -> String {
-    let server = v.get("server").and_then(Json::as_str).unwrap_or("the server");
-    let via = v.get("via").and_then(Json::as_str).unwrap_or("direct");
-    let mut text = format!("Test passed: {server}, {}.", tilde_in(via));
+    let server = v.get("server").and_then(Json::as_str).unwrap_or("the database");
+    let mut text = match v.get("via").and_then(Json::as_str) {
+        Some(via) => format!("Test passed: {server}, {}.", tilde_in(via)),
+        None => format!("Test passed: {server}."),
+    };
     if let Some(warnings) = v.get("warnings").and_then(Json::as_array) {
         for w in warnings.iter().filter_map(Json::as_str) {
             text.push(' ');
@@ -954,7 +956,7 @@ const ENGINE_MIN_W: f32 = 110.0;
 /// window is short; those of `kinds` can be chosen.
 fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     ui.add_space(4.0);
-    ui.label(RichText::new("Choose a database").size(15.0));
+    ui.label(RichText::new("Choose a database type").size(15.0));
     ui.add_space(6.0);
     let gap = 8.0;
     let per_row = (((w + gap) / (ENGINE_MIN_W + gap)).floor() as usize).clamp(1, DbKind::ALL.len());
@@ -1088,6 +1090,17 @@ mod tests {
         conn.step = Step::Form;
         conn.form.ssh_on = true;
         conn.key = KeyLine { for_auth: Some(conn.form.ssh_auth()), text: "Uses /k/id_ed25519".into(), path: None, pending: None };
+    }
+
+    #[test]
+    fn the_test_line_says_how_only_for_a_type_with_a_tunnel() {
+        let line = |v: serde_json::Value| test_text(&v);
+        assert_eq!(
+            line(serde_json::json!({ "server": "PostgreSQL 14.12", "via": "direct", "warnings": [] })),
+            "Test passed: PostgreSQL 14.12, direct."
+        );
+        assert_eq!(line(serde_json::json!({ "server": "SQLite 3.46.0", "via": null, "warnings": [] })), "Test passed: SQLite 3.46.0.");
+        assert_eq!(line(serde_json::json!({})), "Test passed: the database.");
     }
 
     #[test]

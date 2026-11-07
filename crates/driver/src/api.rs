@@ -132,6 +132,11 @@ pub trait Connection: Send + Sync + 'static {
     fn apply<'a>(&'a self, statements: &'a [String], gate: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>>;
 }
 
+/// The error of a cancel request that was not delivered within [`CONNECT_TIMEOUT`].
+pub fn cancel_not_delivered() -> DbError {
+    DbError::Other(format!("the cancel request was not delivered within {} s", CONNECT_TIMEOUT.as_secs()))
+}
+
 /// Stops the statement running on one connection, from outside it. Holds no lock.
 pub trait Cancel: Send + Sync + 'static {
     /// `Ok` means the cancel was delivered; the statement then fails with
@@ -142,6 +147,13 @@ pub trait Cancel: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_that_times_out_says_so_and_is_no_connect_error() {
+        let e = cancel_not_delivered();
+        assert_eq!(e.to_string(), "the cancel request was not delivered within 15 s");
+        assert_eq!(e.code(), "other");
+    }
 
     #[test]
     fn m1_limits_and_timeout() {

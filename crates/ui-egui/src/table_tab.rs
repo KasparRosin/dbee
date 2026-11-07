@@ -160,7 +160,7 @@ fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, 
 /// one line (cut short, and whole on hover). The table's own reason (`own`, the driver's) is a
 /// sentence and shows as written; dbee's are phrases.
 fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str, own: Option<&str>) {
-    let text = if own == Some(why) { why.to_owned() } else { format!("These rows cannot be edited: {why}.") };
+    let text = if own == Some(why) { why.to_owned() } else { format!("These rows can't be edited now: {why}.") };
     let r = ui.add(egui::Label::new(RichText::new(text.as_str()).size(12.0).color(TOKENS.text_muted)).truncate());
     tags.tag_value("table-note", &r, text.as_str());
 }

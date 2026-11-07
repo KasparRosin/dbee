@@ -265,7 +265,7 @@ fn url_takes_both_sslmode_spellings() {
 #[test]
 fn sqlite_needs_a_file() {
     let c = ConnectionConfig { kind: DbKind::Sqlite, file: None, ..Default::default() };
-    assert!(c.validate().is_err());
+    assert_eq!(c.validate(), Err(ConfigError::Invalid("no file chosen".into())));
     let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), host: String::new(), port: 0, ..Default::default() };
     assert!(c.validate().is_ok());
 }

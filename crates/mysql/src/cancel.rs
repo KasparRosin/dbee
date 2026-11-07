@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dbee_driver::{CONNECT_TIMEOUT, Cancel, DbError, DbFuture, QUERY_LIMITS};
+use dbee_driver::{CONNECT_TIMEOUT, Cancel, DbError, DbFuture, QUERY_LIMITS, cancel_not_delivered};
 use tokio::sync::Mutex;
 
 use crate::auth::{Login, ServerKey};
@@ -100,7 +100,7 @@ impl Canceller {
                 log::info!("mysql: cancel failed ({})", e.code());
                 Err(e)
             }
-            Err(_) => Err(DbError::Connect(format!("the cancel was not delivered within {} s", CONNECT_TIMEOUT.as_secs()))),
+            Err(_) => Err(cancel_not_delivered()),
         }
     }
 }

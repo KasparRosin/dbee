@@ -9,7 +9,7 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use dbee_config::ConnectionConfig;
-use dbee_driver::{CONNECT_TIMEOUT, DbError, ServerInfo, Target};
+use dbee_driver::{CONNECT_TIMEOUT, DbError, ServerInfo, Target, cancel_not_delivered};
 use dbee_ssh::Tunnel;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::Handle;
@@ -186,7 +186,7 @@ impl Canceller {
                 log::info!("pg: cancel request {}", if result.is_ok() { "sent" } else { "failed" });
                 result
             }
-            Err(_) => Err(DbError::Connect(format!("the cancel request was not delivered within {} s", CONNECT_TIMEOUT.as_secs()))),
+            Err(_) => Err(cancel_not_delivered()),
         }
     }
 }

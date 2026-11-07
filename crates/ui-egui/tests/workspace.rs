@@ -944,7 +944,7 @@ fn the_file_the_command_line_names_opens_once_the_window_is_up() {
     let mut ui = Ui::window(Setup { size: APP_SIZE, app: Some(with_file(gone.clone())), ..Setup::default() });
     ui.until("the error", |ui| ui.tag("notice").is_some());
     let notice = ui.value("notice");
-    assert!(notice.as_str().is_some_and(|n| n.ends_with(&format!(": no file at {}", gone.display()))), "{notice}");
+    assert!(notice.as_str().is_some_and(|n| n.ends_with(&format!(": no file at {}.", gone.display()))), "{notice}");
     assert_eq!(ui.document()["screen"], "connections");
 }
 

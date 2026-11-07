@@ -768,9 +768,9 @@ fn a_typed_use_sticks_to_its_tab_and_no_other() {
     });
 }
 
-/// A cancelled statement may have moved the connection before its kill landed: where the
-/// connection is is no longer known after it, though the server reported the `USE many` before
-/// it. A tab with a database then sends its `USE` first.
+/// A cancelled statement may have moved the connection before its kill landed: after it, the
+/// database the connection is in is unknown, though the server reported the `USE many` before it.
+/// A tab with a database then sends its `USE` first.
 #[test]
 fn a_cancelled_statement_leaves_the_database_not_known() {
     let _db = require_testdb!();
@@ -917,7 +917,7 @@ fn a_run_that_may_turn_tracking_off_ends_the_trust_in_it() {
         run(s, "query.run", json!({}));
         assert_eq!(first_value(s).as_deref(), Some("shop"), "{}: the run starts in its tab's database", t.name());
         tab(s, "");
-        assert_eq!(starts_in(s).1, json!(false), "{}: where the connection is is not known", t.name());
+        assert_eq!(starts_in(s).1, json!(false), "{}: the database the connection is in is unknown", t.name());
         // A new query connection reports again.
         run(s, "connection.reconnect", json!({}));
         run(s, "tab.activate", json!({ "tab": first }));

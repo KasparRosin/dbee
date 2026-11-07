@@ -308,7 +308,7 @@ fn given(params: &Json) -> Result<Credentials, EngineError> {
 
 // ---- secrets in the store --------------------------------------------------------------------
 
-const KINDS: [SecretKind; 3] = [SecretKind::DbPassword, SecretKind::SshPassword, SecretKind::SshPassphrase];
+const SECRET_KINDS: [SecretKind; 3] = [SecretKind::DbPassword, SecretKind::SshPassword, SecretKind::SshPassphrase];
 
 /// A secret from the store; a failing store counts as none (the user is then asked).
 fn read_secret(store: &dyn SecretStore, id: &str, kind: SecretKind) -> Option<String> {
@@ -353,7 +353,7 @@ fn forget_stale_secrets(store: &dyn SecretStore, id: &str, still: Reuse, given: 
 /// Deletes every secret of `id`; `false` when the store refused.
 fn forget_secrets(store: &dyn SecretStore, id: &str) -> bool {
     let mut ok = true;
-    for kind in KINDS {
+    for kind in SECRET_KINDS {
         ok &= store.delete(id, kind).is_ok();
     }
     ok
@@ -850,7 +850,7 @@ fn duplicate(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         && copy.save_secrets
     {
         let mut ok = true;
-        for kind in KINDS {
+        for kind in SECRET_KINDS {
             match secret_store.get(&original.id, kind) {
                 Ok(Some(v)) => ok &= secret_store.set(&copy.id, kind, &v).is_ok(),
                 Ok(None) => {}
@@ -910,7 +910,8 @@ fn ssh_key(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 
 /// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, createFile?}` → a job
 /// returning `{server, via, warnings}`: connects (through the tunnel when there is one), then
-/// closes. The screen and the lists stay as they are. A trusted unknown host key is learned.
+/// closes. `via` is how it got there, `direct` or the tunnel's login; `null` for a type that takes
+/// no tunnel, such as a file. The screen and the lists stay as they are. A trusted unknown host key is learned.
 /// `createFile: true` lets the file driver make a missing file; an existing one opens as it is. It
 /// is refused for a read-only connection ([`create_file`]).
 fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
@@ -926,7 +927,8 @@ fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         let result = match open_connection(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, &creds).await {
             Ok(opened) => {
                 let info = opened.conn.info();
-                let r = json!({ "server": server_text(info), "via": opened.via(), "warnings": info.warnings });
+                let via = config.kind.takes_ssh().then(|| opened.via());
+                let r = json!({ "server": server_text(info), "via": via, "warnings": info.warnings });
                 let unsaved = unsaved_host_key(opened.tunnel.as_ref());
                 opened.close().await;
                 Ok((r, unsaved))

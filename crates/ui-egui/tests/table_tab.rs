@@ -434,7 +434,7 @@ fn count_rows_on_a_view_and_its_read_only_note() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = Ui::connected(db);
     ui.open("shop", "order_totals");
-    assert_eq!(ui.value("table-note"), "These rows cannot be edited: views are read-only.");
+    assert_eq!(ui.value("table-note"), "These rows can't be edited now: views are read-only.");
     // No estimate for a view: never `~0`.
     assert_eq!(ui.value("page-count"), "Count rows");
     ui.click("page-count");
@@ -459,7 +459,7 @@ fn myisam_reason_is_shown() {
     ui.open("shop", "order_totals");
     ui.until("the view's rows", loaded);
     ui.frame();
-    assert_eq!(ui.value("table-note"), "These rows cannot be edited: views are read-only.");
+    assert_eq!(ui.value("table-note"), "These rows can't be edited now: views are read-only.");
     let (short, bar) = (ui.rect("table-note").unwrap(), ui.rect("filter-0-column").unwrap());
     ui.open("shop", "audit_log");
     ui.until("the audit_log rows", loaded);

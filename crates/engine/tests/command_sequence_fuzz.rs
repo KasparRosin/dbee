@@ -406,7 +406,7 @@ fn check(s: &Session, at: &str) {
     assert_eq!(ids.len(), st.tabs.len(), "{at}: duplicate tab ids");
 }
 
-/// No journal entry from `from` on holds a secret param, at any depth (R2).
+/// No journal entry from `from` on holds a secret param, at any depth.
 fn no_secrets_in_journal(s: &Session, from: usize, at: &str) {
     for (id, params) in s.journal().iter().skip(from) {
         let mut stack = vec![params];

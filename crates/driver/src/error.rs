@@ -105,7 +105,7 @@ impl std::fmt::Display for DbError {
             DbError::Connect(m) => write!(f, "could not connect to the server: {m}"),
             DbError::Tls(m) => write!(f, "could not set up TLS: {m}"),
             DbError::Ssh(e) => write!(f, "{e}"),
-            DbError::ConnectionLost => write!(f, "the connection to the server was lost"),
+            DbError::ConnectionLost => write!(f, "the connection was lost"),
             DbError::Cancelled => write!(f, "the statement was cancelled"),
             DbError::ReadOnly { message } => write!(f, "the connection is read-only: {message}"),
             DbError::RowNotFound { statement } => write!(
@@ -161,6 +161,11 @@ mod tests {
         assert_eq!(e.to_string(), "duplicate key (SQLSTATE 23505)\nDetail: Key (id)=(1) already exists.\nHint: h");
         let DbError::Server(s) = &e else { panic!("a server error") };
         assert_eq!(s.message_with_code(), "duplicate key (SQLSTATE 23505)", "without the detail and the hint");
+    }
+
+    #[test]
+    fn a_lost_connection_names_no_server() {
+        assert_eq!(DbError::ConnectionLost.to_string(), "the connection was lost");
     }
 
     #[test]

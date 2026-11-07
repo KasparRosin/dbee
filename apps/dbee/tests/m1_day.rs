@@ -1,4 +1,4 @@
-//! The M1 day (spec §2) end to end in the real window: `dbee --control <port>` on a throwaway
+//! The M1 day end to end in the real window: `dbee --control <port>` on a throwaway
 //! home with the environment of `cargo xtask run-isolated`, driven only through the control
 //! channel (`docs/control-protocol.md`), with `document.inspect` checked after every step and a
 //! screenshot of each saved as `target/m1-day/<n>-<step>.png`, to look at.

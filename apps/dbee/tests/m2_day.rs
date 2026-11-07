@@ -1,4 +1,4 @@
-//! The M2 day (the drivers spec §2, with §3.7's additions) end to end in the real window, on
+//! The M2 day end to end in the real window, on
 //! three engines: a copy of the SQLite seed opened with `dbee <file>`, MySQL 8.0 (`mysql80`)
 //! through the test sshd, and the newest MariaDB (`mariadbnew`) directly. It drives `dbee
 //! --control <port>` on a throwaway home with the environment of `cargo xtask run-isolated`, only

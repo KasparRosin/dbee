@@ -255,7 +255,8 @@ fn test_command_reports_server() {
         let text = r["server"].as_str().unwrap();
         let version = t.server().map_or("", |s| s.version.as_str());
         assert!(text.starts_with(t.kind().info().product) && text.contains(version), "{}: {r}", t.name());
-        assert_eq!(r["via"], "direct");
+        // How it got there, where the type takes a tunnel.
+        assert_eq!(r["via"], if kind_of(&t).takes_ssh() { json!("direct") } else { Json::Null }, "{}", t.name());
         let i = s.inspect();
         assert_eq!(i["screen"], "connections");
         assert_eq!(i["connection"], Json::Null);
@@ -1141,7 +1142,7 @@ fn a_file_is_named_by_its_path_not_a_host() {
         let e = run_err(&mut s, "connection.open", json!({ "config": { "kind": kind_of(&t) } }));
         assert_eq!(
             (e.code(), e.to_string().as_str()),
-            ("badParams", "bad params for `connection.open`: `config`: invalid connection settings: file is empty")
+            ("badParams", "bad params for `connection.open`: `config`: invalid connection settings: no file chosen")
         );
         // A server's settings must still name its host.
         let e = run_err(&mut s, "connection.test", json!({ "config": { "port": 1 } }));

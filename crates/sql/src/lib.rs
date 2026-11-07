@@ -1,4 +1,6 @@
-//! dbee SQL (layer L1): identifier and literal quoting, a SQL lexer and statement splitting.
+//! dbee SQL (layer L1): each engine's dialect (quoting, literals and its `Rules`), a SQL lexer and
+//! statement splitting, and the statements dbee builds: the filter's `WHERE`, the page and count
+//! `SELECT`s and the edit statements.
 //!
 //! Pure text in, text out: no database, no I/O, no UI. Every value dbee writes or filters on is
 //! quoted here, so the functions are total and never panic on hostile input.

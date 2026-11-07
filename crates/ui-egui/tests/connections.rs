@@ -273,7 +273,7 @@ fn sqlite_shows_only_file_rows() {
     assert_eq!(tag_in(&i, "conn-file").unwrap()["value"], Json::Null);
     // Without a file there is nothing to save.
     ui.click("conn-save");
-    assert!(ui.value("conn-error").as_str().unwrap().contains("file is empty"));
+    assert!(ui.value("conn-error").as_str().unwrap().contains("no file chosen"));
     assert_eq!(ui.execute("connection.list", json!({}))["saved"], json!([]));
     // A server type has its rows again.
     ui.click("conn-change-engine");

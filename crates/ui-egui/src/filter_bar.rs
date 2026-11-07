@@ -164,7 +164,7 @@ pub(crate) fn show(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags) -> Vec<Run
         }
     });
     if let Some(why) = bar.disabled {
-        ui.label(RichText::new(format!("The filters cannot change now: {why}.")).size(11.5).color(TOKENS.text_muted));
+        ui.label(RichText::new(format!("The filters can't change now: {why}.")).size(11.5).color(TOKENS.text_muted));
     }
     runs
 }
