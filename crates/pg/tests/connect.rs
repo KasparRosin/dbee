@@ -7,6 +7,7 @@
 //! connection drops that name afterwards in case it was created anyway.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dbee_config::{ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
@@ -17,6 +18,7 @@ use dbee_pg::{Canceller, MIN_VERSION_NUM, PgConnection, PgDriver, connect, versi
 use dbee_sql::Dialect;
 use dbee_ssh::{AgentSource, SshEnv, SshSecrets, Tunnel};
 use dbee_testkit::{Kind, Server, TempHome, TestDb, require_testdb, temp_home, unique};
+use tokio::io::AsyncReadExt as _;
 
 /// The Postgres test servers.
 fn postgres(db: &TestDb) -> impl Iterator<Item = &Server> {
@@ -268,6 +270,37 @@ async fn cancel_sleep(conn: Arc<PgConnection>, watcher: &PgConnection) {
     assert_eq!(e, DbError::Cancelled);
     assert!(!conn.is_closed());
     assert_eq!(scalar(&conn, "SELECT 'still here'").await.as_deref(), Some("still here"));
+}
+
+/// A cancel request goes to the address the connection reached, not to whichever its host name
+/// gives first when it is sent. Here `localhost` names `::1` and `127.0.0.1`, and the server
+/// listens on `127.0.0.1` only: a stand-in on each other address, as another server behind the
+/// name would be, must get no cancel request. (Without TLS, so the request is the protocol's plain
+/// CancelRequest; other tests' logins to `localhost` that reach a stand-in first are not counted.)
+#[tokio::test]
+async fn a_cancel_goes_to_the_address_the_connection_reached() {
+    const CANCEL_REQUEST_CODE: [u8; 4] = 80877102_u32.to_be_bytes();
+    let db = require_testdb!();
+    for s in postgres(db) {
+        let conn = Arc::new(open(&ConnectionConfig { host: "localhost".into(), ..config(s, SslMode::Disable) }, db).await);
+        let server = std::net::SocketAddr::from(([127, 0, 0, 1], s.port));
+        let hits = Arc::new(AtomicUsize::new(0));
+        for addr in tokio::net::lookup_host(("localhost", s.port)).await.unwrap().filter(|a| *a != server) {
+            let Ok(listener) = tokio::net::TcpListener::bind(addr).await else { continue };
+            let hits = Arc::clone(&hits);
+            tokio::spawn(async move {
+                while let Ok((mut socket, _)) = listener.accept().await {
+                    let mut head = [0; 8];
+                    if socket.read_exact(&mut head).await.is_ok() && head[4..] == CANCEL_REQUEST_CODE {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            });
+        }
+        let watcher = open(&config(s, SslMode::Prefer), db).await;
+        cancel_sleep(conn, &watcher).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "pg{}: a cancel request went to another address", s.major());
+    }
 }
 
 #[tokio::test]

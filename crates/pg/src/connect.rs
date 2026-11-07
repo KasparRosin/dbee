@@ -1,6 +1,7 @@
 //! Opening a connection: TCP or an SSH tunnel channel, TLS, login, the session setup, and the
 //! cancel request.
 
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,13 +116,24 @@ impl PgConnection {
     }
 }
 
-/// The server the connection reached, for a cancel request: `host` and `port`, through `tunnel`
-/// when it has one.
+/// The server the connection reached, for a cancel request: the way there, and `host`, the name
+/// TLS checks.
 #[derive(Clone)]
 struct Route {
-    tunnel: Option<Arc<Tunnel>>,
     host: String,
-    port: u16,
+    way: Way,
+}
+
+/// How a cancel request reaches the server the connection reached.
+#[derive(Clone)]
+enum Way {
+    /// A new channel through the tunnel, to the host and port the connection asked it for.
+    Tunnel { tunnel: Arc<Tunnel>, port: u16 },
+    /// The address that answered, of those the host name gave: the name may lead elsewhere later.
+    Tcp(SocketAddr),
+    /// The server's socket in the folder the host names.
+    #[cfg(unix)]
+    Socket(std::path::PathBuf),
 }
 
 /// Sends a cancel request for the statement running on one connection. Cheap to clone; holds
@@ -131,41 +143,40 @@ pub struct Canceller {
     token: CancelToken,
     tls: Tls,
     route: Route,
-    /// Held while a request is on its way; the connection starts no statement meanwhile.
+    /// Held while a request is on its way; no operation takes the connection's lock meanwhile
+    /// ([`PgConnection::lock`]). An Apply that holds the lock already runs its next statement.
     on_its_way: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for Canceller {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The token holds the backend's secret key: not shown.
-        f.debug_struct("Canceller").field("tls", &self.tls).field("tunnel", &self.route.tunnel.is_some()).finish()
+        f.debug_struct("Canceller").field("tls", &self.tls).field("tunnel", &matches!(self.route.way, Way::Tunnel { .. })).finish()
     }
 }
 
 impl Canceller {
     /// Ask the server to cancel the running statement, over a new connection: a new channel
-    /// through the tunnel, or a direct connection to the host the connection uses. `Ok` means the
-    /// request was handled: the server closed that connection, as it does once it has (the
-    /// protocol sends no answer); the statement then fails with [`DbError::Cancelled`], unless it
-    /// finished first. The connection starts no statement until then ([`PgConnection::lock`]).
+    /// through the tunnel, or a direct connection to the address the connection reached. `Ok`
+    /// means the request was handled: the server closed that connection, as it does once it has
+    /// (the protocol sends no answer); the statement then fails with [`DbError::Cancelled`], unless
+    /// it finished first. Until then no operation takes the connection's lock
+    /// ([`PgConnection::lock`]); an Apply already holding it runs its next statement.
     pub async fn cancel(&self) -> Result<(), DbError> {
         // The timeout below needs a runtime; without one it would panic.
         tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("cancelling needs a tokio runtime".into()))?;
         let sending = async {
             let _on_its_way = self.on_its_way.lock().await;
-            let Route { tunnel, host, port } = &self.route;
-            match tunnel {
-                Some(tunnel) => self.request(tunnel.connect(host, *port).await?).await,
-                #[cfg(unix)]
-                None if host.starts_with('/') => {
-                    let socket = std::path::Path::new(host).join(format!(".s.PGSQL.{port}"));
-                    let stream = tokio::net::UnixStream::connect(socket).await.map_err(|e| DbError::Connect(format!("{host}: {e}")))?;
+            let host = &self.route.host;
+            match &self.route.way {
+                Way::Tunnel { tunnel, port } => self.request(tunnel.connect(host, *port).await?).await,
+                Way::Tcp(addr) => {
+                    let stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| DbError::Connect(format!("{addr}: {e}")))?;
                     self.request(stream).await
                 }
-                None => {
-                    let stream = tokio::net::TcpStream::connect((host.as_str(), *port))
-                        .await
-                        .map_err(|e| DbError::Connect(format!("{}: {e}", address(host, *port))))?;
+                #[cfg(unix)]
+                Way::Socket(socket) => {
+                    let stream = tokio::net::UnixStream::connect(socket).await.map_err(|e| DbError::Connect(format!("{host}: {e}")))?;
                     self.request(stream).await
                 }
             }
@@ -314,22 +325,50 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
     let cfg = t.config;
     let pg = pg_config(cfg, t.password, tls);
     let connect_error = |e: tokio_postgres::Error| error::map(&e, Phase::Connect);
-    let (client, closed) = match &t.tunnel {
+    let (client, closed, way) = match &t.tunnel {
         Some(tunnel) => {
             let stream = tunnel.connect(&cfg.host, cfg.port).await?;
             let connect = tls_connect(tls, &cfg.host, &stream);
             let (client, connection) = pg.connect_raw(stream, connect).await.map_err(connect_error)?;
-            (client, drive(runtime, connection))
+            (client, drive(runtime, connection), Way::Tunnel { tunnel: Arc::clone(tunnel), port: cfg.port })
+        }
+        #[cfg(unix)]
+        None if cfg.host.starts_with('/') => {
+            let (client, connection) = pg.connect(tls.connector.clone()).await.map_err(connect_error)?;
+            let socket = std::path::Path::new(&cfg.host).join(format!(".s.PGSQL.{}", cfg.port));
+            (client, drive(runtime, connection), Way::Socket(socket))
         }
         None => {
-            let (client, connection) = pg.connect(tls.connector.clone()).await.map_err(connect_error)?;
-            (client, drive(runtime, connection))
+            let (client, closed, addr) = connect_tcp(&pg, tls, &cfg.host, cfg.port, runtime).await?;
+            (client, closed, Way::Tcp(addr))
         }
     };
     let info = setup(&client, cfg.read_only).await?;
-    let route = Route { tunnel: t.tunnel.clone(), host: cfg.host.clone(), port: cfg.port };
+    let route = Route { host: cfg.host.clone(), way };
     let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), route, on_its_way: Arc::default() };
     Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller })
+}
+
+/// Connects to the addresses `host` gives, in turn, as tokio-postgres does (TLS still checks
+/// `host`), and says which one answered.
+async fn connect_tcp(
+    pg: &tokio_postgres::Config,
+    tls: &Tls,
+    host: &str,
+    port: u16,
+    runtime: &Handle,
+) -> Result<(Client, Arc<AtomicBool>, SocketAddr), DbError> {
+    let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| DbError::Connect(e.to_string()))?;
+    let mut last = DbError::Connect("the host name gave no address".into());
+    for addr in addrs {
+        let mut one = pg.clone();
+        one.hostaddr(addr.ip());
+        match one.connect(tls.connector.clone()).await {
+            Ok((client, connection)) => return Ok((client, drive(runtime, connection), addr)),
+            Err(e) => last = error::map(&e, Phase::Connect),
+        }
+    }
+    Err(last)
 }
 
 /// The TLS connector for one stream to `host` (the stream only fixes the type).
