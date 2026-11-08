@@ -3,8 +3,9 @@
 //! Before it: the statements dbee does not send ([`Dialect::refusal`]), read as this server reads
 //! its version comments ([`gated::as_read`]) and its strings (`NO_BACKSLASH_ESCAPES`, from the last
 //! OK packet's status), which says in plain words why; and, read from the raw text, comments
-//! included, a statement that names `session_track` or, on MariaDB, `STATEMENT` beside the
-//! read-only variable.
+//! included, a statement that names `session_track`, that holds `SET` beside `sql_mode` or a word
+//! that changes the character set (the session reads dbee's text as it did at connect), or, on
+//! MariaDB, `STATEMENT` beside the read-only variable.
 //!
 //! After it: the server's own report. The session tracks the read-only variable and the
 //! transaction's characteristics, so each OK packet says when a statement changed them, however
@@ -62,6 +63,11 @@ const LOOKALIKE: &str = "on a read-only connection dbee runs no SET with a chara
 const SQL_MODE: &str = "on a read-only connection dbee keeps sql_mode as it was at connect, since the mode decides how the server reads \
                         dbee's text (ANSI_QUOTES, NO_BACKSLASH_ESCAPES), so it does not run a statement that holds both SET and \
                         sql_mode. To change the mode, turn Read-only off in the connection's settings.";
+
+const CHARACTER_SET: &str = "on a read-only connection dbee sets the character set at connect and keeps it, since under another one the \
+                             server can read dbee's text differently from how dbee reads it, so it does not run a statement that holds \
+                             SET beside NAMES, CHARSET, CHARACTER SET or character_set_client. To change it, turn Read-only off in the \
+                             connection's settings.";
 
 const SET_STATEMENT: &str = "SET STATEMENT can turn read-only off for the statement it runs, before the server can report it, so dbee does not \
                              run a statement that names STATEMENT and the read-only variable here. Run the statement without them.";
@@ -137,6 +143,15 @@ fn holds_a_semicolon(sql: &str) -> bool {
     [true, false].into_iter().any(|escapes| tokenize_with(Dialect::MySql, sql, escapes).iter().any(|t| t.kind == TokenKind::Semicolon))
 }
 
+/// `sql` holds the word `SET` and `NAMES`, `CHARSET` or `character_set_client`, or `SET` twice and
+/// `CHARACTER`, as `SET CHARACTER SET` does (a `CAST(… CHARACTER SET …)` holds one): a change of
+/// the character set, whichever way its text reads.
+fn names_the_character_set(sql: &str) -> bool {
+    let sets = code_words(sql, "set");
+    sets > 0
+        && (["names", "charset", "character_set_client"].iter().any(|w| code_words(sql, w) > 0) || (sets > 1 && code_words(sql, "character") > 0))
+}
+
 /// Why dbee does not send `sql` on a read-only connection, from its raw text, comments included:
 /// what no reading of it can show.
 fn raw_refusal(sql: &str, flavor: Flavor) -> Option<&'static str> {
@@ -180,6 +195,9 @@ impl MySqlConnection {
         let escapes = session.backslash_escapes;
         if let Some(refused) = readings.iter().find_map(|r| Dialect::MySql.refusal_with(r, true, escapes)) {
             return Err(refused.into());
+        }
+        if names_the_character_set(sql) {
+            return Err(DbError::ReadOnly { message: CHARACTER_SET.into() });
         }
         if self.check_due.load(Ordering::Acquire) && !readings.iter().all(|r| diagnostic(r, escapes)) {
             match self.mode(session).await {
@@ -399,6 +417,32 @@ mod tests {
             assert_eq!(raw_refusal(sql, Flavor::MySql), None, "{sql}");
         }
         assert_eq!(code_words("/*!40101SET x*/ SET; asset set_x", "set"), 2);
+    }
+
+    /// A statement that holds `SET` beside a word that changes the character set is refused,
+    /// whichever way its text reads; one with `CHARACTER SET` inside an expression is not.
+    #[test]
+    fn a_change_of_the_character_set_is_found_in_the_raw_text() {
+        for sql in [
+            "SET NAMES utf8mb4",
+            "SET @a = (SELECT '\\'' AS \"\\\"), NAMES sjis, @b = '\"'",
+            "/*!40101SET NAMES sjis*/",
+            "SET CHARACTER SET utf8mb4",
+            "set charset 'sjis'",
+            "SET @@SESSION.`character_set_client` = 'utf8mb4'",
+            "SET @a = CAST('x' AS CHAR CHARACTER SET sjis)",
+        ] {
+            assert!(names_the_character_set(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT CAST('x' AS CHAR CHARACTER SET utf8mb4)",
+            "SHOW CHARACTER SET LIKE 'utf8%'",
+            "SELECT @@character_set_client, CHARSET('x')",
+            "SET @a = CONVERT('x' USING sjis)",
+            "SET @namesake = 1",
+        ] {
+            assert!(!names_the_character_set(sql), "{sql}");
+        }
     }
 
     #[test]

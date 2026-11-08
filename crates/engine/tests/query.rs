@@ -655,11 +655,12 @@ fn read_only_mysql_refuses_a_block_of_several_statements() {
     }
 }
 
-/// On a read-only MySQL or MariaDB connection the character set stays UTF-8: `SET NAMES`,
-/// `SET CHARACTER SET`, `SET CHARSET` and a `SET` of `character_set_client` to anything else are
-/// refused. Under `sjis` or `gbk` the server reads the last byte of a character dbee sends with
-/// the `\` or the backtick after it, so a MariaDB block's `;`s that dbee reads inside a string or a
-/// quoted name are code to the server.
+/// On a read-only MySQL or MariaDB connection the character set stays as dbee set it at connect:
+/// `SET NAMES`, `SET CHARACTER SET`, `SET CHARSET` and a `SET` of `character_set_client` are
+/// refused, to `utf8mb4` too, also where the text hides them from a lexer. Under `sjis` or `gbk`
+/// the server reads the last byte of a character dbee sends with the `\` or the backtick after
+/// it, so a MariaDB block's `;`s that dbee reads inside a string or a quoted name are code to the
+/// server. A character set inside an expression, and `SHOW CHARACTER SET`, still run.
 #[test]
 fn read_only_mysql_keeps_the_character_set_utf8() {
     let _db = require_testdb!();
@@ -699,14 +700,24 @@ fn read_only_mysql_keeps_the_character_set_utf8() {
                     wrong.push(format!("{}: ran {block}", t.name()));
                 }
             }
-            run_text(&mut s, "SET NAMES utf8mb4").unwrap_or_else(|e| panic!("{}: {e}", t.name()));
         }
-        for sql in ["SET NAMES 'utf8mb4' COLLATE 'utf8mb4_bin'", "SET CHARACTER SET utf8mb4", "SET @@SESSION.character_set_client = utf8mb4"] {
+        for sql in [
+            "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_bin'",
+            "SET CHARACTER SET utf8mb4",
+            "SET @@SESSION.character_set_client = utf8mb4",
+            "/*!40101SET NAMES sjis*/",
+            "SET @a = (SELECT '\\'' AS \"\\\"), NAMES sjis, @b = '\"'",
+        ] {
+            match run_text(&mut s, sql) {
+                Err(e) if e.code() == "readOnly" && e.to_string().contains("character set") => {}
+                other => wrong.push(format!("{}: {sql} -> {}", t.name(), other.err().map_or("ran".into(), |e| e.to_string()))),
+            }
+        }
+        for sql in ["SELECT CAST('x' AS CHAR CHARACTER SET utf8mb4)", "SHOW CHARACTER SET LIKE 'utf8mb4'"] {
             if let Err(e) = run_text(&mut s, sql) {
                 wrong.push(format!("{}: {sql} -> {e}", t.name()));
             }
         }
-        run_text(&mut s, "SET NAMES utf8mb4").unwrap_or_else(|e| panic!("{}: {e}", t.name()));
         run_text(&mut s, &format!("SELECT @@SESSION.{variable}, @@SESSION.character_set_client, 'Z\u{fc}rich'")).unwrap();
         let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
         let shown = qt.shown_result().and_then(|r| r.result.rows.first().cloned());
