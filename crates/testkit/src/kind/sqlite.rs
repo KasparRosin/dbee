@@ -42,8 +42,7 @@ pub(crate) const INFO: KindInfo = KindInfo {
     running_with_sql: |_| String::new(),
     take_lock_sql: |_| String::new(),
     waits_for_lock_sql: |_| String::new(),
-    // Measured with its driver: a column labels its declared type, and an
-    // expression has none.
+    // Measured with its driver: a column labels its declared type, and an expression has none.
     json_type_label: "JSON",
     plain_json_label: "JSON",
     json_sorts_keys: false,

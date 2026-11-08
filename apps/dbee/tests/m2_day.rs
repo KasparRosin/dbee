@@ -1,9 +1,9 @@
-//! The M2 day end to end in the real window, on
-//! three engines: a copy of the SQLite seed opened with `dbee <file>`, MySQL 8.0 (`mysql80`)
-//! through the test sshd, and the newest MariaDB (`mariadbnew`) directly. It drives `dbee
-//! --control <port>` on a throwaway home with the environment of `cargo xtask run-isolated`, only
-//! through the control channel (`docs/control-protocol.md`), checks `document.inspect` after each
-//! step and saves a screenshot of each as `target/m2-day/<n>-<engine>-<step>.png`, to look at.
+//! The M2 day end to end in the real window, on three engines: a copy of the SQLite seed opened
+//! with `dbee <file>`, MySQL 8.0 (`mysql80`) through the test sshd, and the newest MariaDB
+//! (`mariadbnew`) directly. It drives `dbee --control <port>` on a throwaway home with the
+//! environment of `cargo xtask run-isolated`, only through the control channel
+//! (`docs/control-protocol.md`), checks `document.inspect` after each step and saves a screenshot
+//! of each as `target/m2-day/<n>-<engine>-<step>.png`, to look at.
 //!
 //! The day, in one window:
 //! 1. `dbee <file>` opens the SQLite copy, unsaved; Save connection in the status bar saves it.
