@@ -44,6 +44,8 @@ pub(crate) const RULES: Rules = Rules {
         dollar_idents: true,
         hash_comment: true,
         dash_comment_needs_space: true,
+        // Measured on all five servers: `SELECT 1 -- x<CR>, 2` and `SELECT 1 # x<CR>, 2` give one column.
+        cr_ends_line_comment: false,
         nested_block_comments: false,
         executable_comments: true,
         separator: Separator::DelimiterCommand,

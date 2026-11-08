@@ -177,7 +177,7 @@ pub fn tokenize_with(d: Dialect, sql: &str, reading: Reading) -> Vec<Token> {
             }
             kind = TokenKind::Whitespace;
         } else if dash_comment(lex, b, i) || (lex.hash_comment && c == b'#') {
-            while i < b.len() && b[i] != b'\n' && b[i] != b'\r' {
+            while i < b.len() && b[i] != b'\n' && !(lex.cr_ends_line_comment && b[i] == b'\r') {
                 i += 1;
             }
             kind = TokenKind::Comment;
@@ -521,14 +521,24 @@ mod tests {
         assert_eq!(kinds("a<=b"), [(Ident, "a"), (Operator, "<="), (Ident, "b")]);
     }
 
+    /// Each engine ends a line comment where its server does: Postgres at a carriage return too,
+    /// MySQL and SQLite at a line feed only, so a `;` after a bare carriage return is in the comment.
     #[test]
-    fn line_comment_ends_at_bare_cr() {
+    fn a_line_comment_ends_where_each_engine_ends_it() {
         use TokenKind::*;
         let sql = "x -- a\r; drop table t";
         assert_eq!(kinds(sql)[1], (Comment, "-- a"));
         assert!(has_top_level_semicolon(Dialect::Postgres, sql));
-        let got: Vec<&str> = statements(Dialect::Postgres, sql).into_iter().map(|r| &sql[r]).collect();
-        assert_eq!(got, ["x", "drop table t"]);
+        assert_eq!(pieces(Dialect::Postgres, sql), ["x", "drop table t"]);
+        for (d, sql) in
+            [(Dialect::MySql, "x -- a\r; drop table t"), (Dialect::MySql, "x # a\r; drop table t"), (Dialect::Sqlite, "x -- a\r; drop table t")]
+        {
+            assert_eq!(kinds_in(d, sql)[1], (Comment, &sql[2..]), "{d:?}");
+            assert!(!has_top_level_semicolon(d, sql), "{d:?}");
+            assert_eq!(pieces(d, sql), ["x"], "{d:?}");
+            let crlf = sql.replace('\r', "\r\n");
+            assert_eq!(pieces(d, &crlf), ["x", "drop table t"], "{d:?}");
+        }
     }
 
     #[test]

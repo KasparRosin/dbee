@@ -837,6 +837,46 @@ fn read_only_mysql_finds_set_after_a_version_number() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// MySQL and MariaDB end a `--` or `#` comment at a line feed only, and so does dbee: a `'` after
+/// a bare carriage return is in the comment, for the server and for the guard. So a block cannot
+/// hide its `;`s behind it, a name outside ASCII is found, and a `SET` of the read-only variable
+/// is refused. Nothing is written.
+#[test]
+fn read_only_mysql_ends_a_line_comment_where_the_server_does() {
+    let _db = require_testdb!();
+    let mut wrong = Vec::new();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let tracked = if t.kind().id() == "mariadb" { "\u{17f}ession_track_system_variables" } else { "s\u{eb}ssion_track_system_variables" };
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_cr"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let insert = |n: u32| format!("INSERT INTO {sc}.{name} VALUES ({n})");
+        let mut s = read_only_session(&t);
+        for sql in [
+            format!("BEGIN NOT ATOMIC -- x\r'\nSTART TRANSACTION READ WRITE; {}; COMMIT; END -- '", insert(1)),
+            format!("BEGIN NOT ATOMIC # x\r'\nSTART TRANSACTION READ WRITE; {}; COMMIT; END # '", insert(2)),
+            format!("IF 1 THEN -- \r'\nSTART TRANSACTION READ WRITE; {}; COMMIT; END IF -- '", insert(3)),
+            format!("SET @a = 1 -- \r'\n, @@SESSION.{tracked} = '' -- '"),
+            format!("SET @a = 1 -- \r'\n, @@SESSION.{variable} = 0 -- '"),
+            insert(4),
+        ] {
+            if run_text(&mut s, &sql).is_ok() {
+                wrong.push(format!("{}: ran {}", t.name(), sql.replace('\r', "<CR>").replace('\n', "<LF>")));
+            }
+        }
+        run_text(&mut s, &format!("SELECT @@SESSION.{variable}")).unwrap();
+        if first_value(&s).as_deref() != Some("1") {
+            wrong.push(format!("{}: the session reads {:?}", t.name(), first_value(&s)));
+        }
+        let written = q(&t, &format!("SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM {sc}.{name}"));
+        if !written.is_empty() {
+            wrong.push(format!("{}: rows written {written}", t.name()));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// Puts a server's global `sql_mode` back when dropped.
 struct GlobalMode<'a>(&'a TestTarget, String);
 

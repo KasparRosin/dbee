@@ -41,6 +41,8 @@ pub(crate) const RULES: Rules = Rules {
         dollar_idents: false,
         hash_comment: false,
         dash_comment_needs_space: false,
+        // Measured with the bundled SQLite: `SELECT 1 -- x<CR>, 2` gives one column.
+        cr_ends_line_comment: false,
         nested_block_comments: false,
         executable_comments: false,
         separator: Separator::Semicolon,

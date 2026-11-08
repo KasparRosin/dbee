@@ -41,6 +41,8 @@ pub(crate) const RULES: Rules = Rules {
         dollar_idents: false,
         hash_comment: false,
         dash_comment_needs_space: false,
+        // Measured on Postgres 14 and 18: `SELECT 1 -- x<CR>, 2` gives two columns.
+        cr_ends_line_comment: true,
         nested_block_comments: true,
         executable_comments: false,
         separator: Separator::Semicolon,

@@ -109,6 +109,8 @@ pub(crate) struct LexRules {
     pub hash_comment: bool,
     /// `--` starts a comment only before a space, a control character or the end of the text.
     pub dash_comment_needs_space: bool,
+    /// A carriage return ends a line comment, as a line feed does.
+    pub cr_ends_line_comment: bool,
     /// `/* … */` comments nest.
     pub nested_block_comments: bool,
     /// `/*! … */` and `/*M! … */` hold code the server runs ([`TokenKind::ExecutableMark`]).
