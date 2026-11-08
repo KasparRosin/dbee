@@ -631,3 +631,26 @@ async fn a_scram_error_is_cut() {
     let DbError::Auth { message } = &e else { panic!("{e:?}") };
     assert!(message.contains("xxx") && message.len() <= dbee_driver::MAX_MESSAGE + '\u{2026}'.len_utf8(), "{} bytes", message.len());
 }
+
+/// `prefer` connects once more without TLS after a broken handshake, as libpq does, and the
+/// connection says so; on 127.0.0.1 without a warning.
+#[tokio::test]
+async fn prefer_after_a_broken_handshake_ends_plain() {
+    let (l, port) = listener();
+    let server = std::thread::spawn(move || {
+        let mut s = accept(&l);
+        assert_eq!(read_untyped(&mut s).unwrap().get(..4), Some(&SSL_REQUEST[..]));
+        s.write_all(b"S").unwrap();
+        break_handshake(&mut s);
+        let mut s = accept(&l);
+        let asked = read_untyped(&mut s).unwrap().get(..4) == Some(&SSL_REQUEST[..]);
+        logged_in(&mut s);
+        serve(&mut s, &mut |_, _| false);
+        asked
+    });
+    let conn = open(&config(port, SslMode::Prefer, None)).await.unwrap();
+    let info = conn.info().clone();
+    drop(conn);
+    assert!(!joined(server).await, "the second connection is plain, as libpq's");
+    assert_eq!((info.tls, info.warnings.as_slice()), (Some(TlsState::Off), &[][..]), "{info:?}");
+}
