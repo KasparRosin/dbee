@@ -20,6 +20,8 @@ pub enum SqlError {
     NoKey,
     /// A binary value that is not hex text.
     BadBinary,
+    /// A filter or key compares a type by an operator its operator class lacks.
+    NoComparison { type_name: String, op: &'static str },
 }
 
 impl fmt::Display for SqlError {
@@ -32,6 +34,7 @@ impl fmt::Display for SqlError {
             SqlError::NoChanges => f.write_str("there are no changes to apply"),
             SqlError::NoKey => f.write_str("the table has no primary key or unique key to identify the row"),
             SqlError::BadBinary => f.write_str("the binary value is not valid hex"),
+            SqlError::NoComparison { type_name, op } => write!(f, "{type_name} values can't be compared with {op}; choose another comparison"),
         }
     }
 }

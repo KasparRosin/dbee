@@ -52,10 +52,24 @@ pub enum Operators {
     /// The engine's built-in ones: on Postgres `pg_catalog`'s, for a base type (after domains) or
     /// an array in `pg_catalog`, an enum, a range or a composite.
     Builtin,
-    /// The base type's own, named in the type's `schema` (quoted for SQL): an extension's type
-    /// (`citext`), or a domain over one. dbee compares the values as `base`, the base type's SQL
-    /// name, so no operator in another schema matches them exactly.
-    OfType { schema: String, base: String },
+    /// The base type's own: an extension's type (`citext`), or a domain over one. dbee compares
+    /// the values as `base`, the base type's SQL name, with the operators of its operator class
+    /// (`ops`), each named in its own schema, so none is looked up where someone else made one.
+    OfType { base: String, ops: TypeOperators },
+}
+
+/// A type's own comparisons, from its default btree operator class (`=` and `<>` from its hash
+/// class where it has no btree one; `<>` is the `=`'s negator): each operator as SQL names it, with
+/// its schema (`ext.=`), or `None` where the class has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeOperators {
+    pub eq: Option<String>,
+    pub ne: Option<String>,
+    pub lt: Option<String>,
+    pub le: Option<String>,
+    pub gt: Option<String>,
+    pub ge: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -335,6 +335,57 @@ async fn an_extension_types_own_operators_are_named_in_its_schema() {
     }
 }
 
+/// `hstore` and `ltree`'s `lquery` in `public`, where anyone could make objects up to Postgres 14,
+/// and a logging `<` for `hstore`, which `hstore` itself lacks (its ordering is `#<#`).
+const PLANTED_BESIDE_AN_EXTENSION: &str = r#"
+CREATE EXTENSION hstore;
+CREATE EXTENSION ltree;
+CREATE TABLE public.calls (what text);
+CREATE FUNCTION public.log(what text) RETURNS void LANGUAGE sql AS $$ INSERT INTO public.calls VALUES (what) $$;
+CREATE FUNCTION public.lt_hh(public.hstore, public.hstore) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('hstore < hstore'); RETURN $1::text OPERATOR(pg_catalog.<) $2::text; END $$;
+CREATE OPERATOR public.< (LEFTARG = public.hstore, RIGHTARG = public.hstore, FUNCTION = public.lt_hh);
+CREATE TABLE public.h (id int PRIMARY KEY, h public.hstore, q public.lquery);
+INSERT INTO public.h VALUES (1, 'a=>1', 'a.b'), (2, 'b=>2', 'c.*');
+"#;
+
+/// A type's own comparisons come from its default btree operator class (`=` and `<>` from its
+/// hash class where it has no btree one), each named in its own operator's schema, so an operator
+/// the type lacks is never looked up where someone could have made it: `hstore`'s "less than" is
+/// its `#<#`, and `lquery`, which has no class, cannot be compared, which a filter says before
+/// anything is sent. `citext`'s are found as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_types_own_comparisons_come_from_its_operator_class() {
+    let db = require_testdb!();
+    for s in db.servers_of(&[Kind::Postgres]) {
+        let own = OwnDatabase::new(s, db).await;
+        let planted = conn(s, db, &own.name).await;
+        sql(&planted, PLANTED_BESIDE_AN_EXTENSION).await;
+        let c = conn(s, db, &own.name).await;
+        let catalog = load_catalog(&c).await.unwrap_or_else(|e| panic!("{}: {e}", s.name));
+        let h = catalog.schemas.iter().flat_map(|sc| &sc.tables).find(|t| t.table.name == "h").expect("h").clone();
+        let d = Dialect::Postgres;
+        let filter = |column: &str, op: Op, value: &str| Condition::Filters(vec![Filter { column: column.into(), op, value: value.into() }]);
+        let mut sent = Vec::new();
+        for (cond, rows) in [(filter("h", Op::Eq, "a=>1"), Some(1)), (filter("h", Op::Ne, "a=>1"), Some(1)), (filter("h", Op::Lt, "b=>2"), None)] {
+            let page = page_sql(d, &h, &cond, None, 0).unwrap_or_else(|e| panic!("{}: {e}", s.name));
+            let got = query::run_untyped(&c, &page, QUERY_LIMITS).await.map(|r| r.rows.len());
+            assert!(got.is_ok(), "{}: {page}: {got:?}", s.name);
+            if let Some(rows) = rows {
+                assert_eq!(got, Ok(rows), "{}: {page}", s.name);
+            }
+            sent.push(page);
+        }
+        let calls = sql(&planted, "SELECT what || ' ' || count(*) FROM public.calls GROUP BY what ORDER BY what").await;
+        println!("{}: sent {sent:#?}\ncalls of the planted operator: {calls:?}", s.name);
+        assert!(calls.is_empty(), "{}: dbee's SQL ran {calls:?}", s.name);
+        for op in [Op::Eq, Op::Lt, Op::In] {
+            let e = page_sql(d, &h, &filter("q", op, "a.b"), None, 0).expect_err("lquery has no comparisons");
+            assert!(e.to_string().starts_with("lquery values can't be compared with "), "{}: {e}", s.name);
+        }
+    }
+}
+
 /// A type whose schema is on the session's search path shows without it, as before dbee read the
 /// catalog with only `pg_catalog` on the path, while `type_sql` names the schema for SQL; a type
 /// outside the path, and a built-in one, show as `type_sql`. An extension type keeps its own

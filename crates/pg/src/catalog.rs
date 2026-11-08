@@ -21,7 +21,7 @@
 use dbee_config::ConnectionConfig;
 use dbee_core::cell::Cell;
 use dbee_core::cell::{ResultSet, TypeClass};
-use dbee_core::schema::{Catalog, ColumnInfo, Generated, Operators, RelKind, TableRef};
+use dbee_core::schema::{Catalog, ColumnInfo, Generated, Operators, RelKind, TableRef, TypeOperators};
 use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
 use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError, Target};
 
@@ -46,8 +46,10 @@ ORDER BY n.nspname, c.relname";
 
 /// Columns of those relations. `d` resolves each domain (also a domain over a domain) to its
 /// non-domain base type, whose operators are `pg_catalog`'s when it is built in, an array, an enum,
-/// a range or a composite, and otherwise the type's own, in its schema, compared as that base type
-/// ([`Operators`]). The type's own schema, plain and quoted, gives its label.
+/// a range or a composite, and otherwise the type's own, compared as that base type: `ops` holds,
+/// for each type outside `pg_catalog`, the operators of its default btree and hash operator
+/// classes (strategy 3 of btree and 1 of hash is `=`, with its negator), each named in its own
+/// schema ([`Operators`]). The type's own schema, plain and quoted, gives its label.
 const COLUMNS_SQL: &str = "\
 WITH RECURSIVE d(root, cur) AS (
     SELECT oid, typbasetype FROM pg_catalog.pg_type WHERE typtype = 'd'
@@ -55,13 +57,26 @@ WITH RECURSIVE d(root, cur) AS (
     SELECT d.root, t.typbasetype FROM d JOIN pg_catalog.pg_type t ON t.oid = d.cur AND t.typtype = 'd'
 ), base(root, base) AS (
     SELECT d.root, d.cur FROM d JOIN pg_catalog.pg_type t ON t.oid = d.cur AND t.typtype <> 'd'
+), ops(typ, method, strategy, name, negator) AS (
+    SELECT oc.opcintype, am.amname, ao.amopstrategy,
+           pg_catalog.quote_ident(n.nspname) || '.' || o.oprname, pg_catalog.quote_ident(nn.nspname) || '.' || ng.oprname
+    FROM pg_catalog.pg_opclass oc
+    JOIN pg_catalog.pg_type ot ON ot.oid = oc.opcintype AND ot.typnamespace <> 'pg_catalog'::pg_catalog.regnamespace
+    JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod AND am.amname IN ('btree', 'hash')
+    JOIN pg_catalog.pg_amop ao ON ao.amopfamily = oc.opcfamily AND ao.amopmethod = am.oid
+      AND ao.amoplefttype = oc.opcintype AND ao.amoprighttype = oc.opcintype
+    JOIN pg_catalog.pg_operator o ON o.oid = ao.amopopr
+    JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
+    LEFT JOIN pg_catalog.pg_operator ng ON ng.oid = o.oprnegate
+    LEFT JOIN pg_catalog.pg_namespace nn ON nn.oid = ng.oprnamespace
+    WHERE oc.opcdefault
 )
 SELECT n.nspname, c.relname, a.attnum::text, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),
        bt.typname, bt.typcategory::text, a.attnotnull::text,
        (a.atthasdef OR a.attidentity IN ('a', 'd'))::text, (a.attgenerated <> '')::text, (a.attidentity = 'a')::text,
        (bt.typnamespace = 'pg_catalog'::pg_catalog.regnamespace OR bt.typtype IN ('e', 'r', 'm', 'c') OR bt.typcategory = 'A')::text,
-       tn.nspname, pg_catalog.quote_ident(tn.nspname),
-       pg_catalog.quote_ident(bn.nspname), pg_catalog.format_type(bt.oid, NULL)
+       tn.nspname, pg_catalog.quote_ident(tn.nspname), pg_catalog.format_type(bt.oid, NULL),
+       co.eq, co.ne, co.lt, co.le, co.gt, co.ge
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
@@ -69,7 +84,17 @@ JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
 JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
 LEFT JOIN base ON base.root = t.oid
 JOIN pg_catalog.pg_type bt ON bt.oid = COALESCE(base.base, t.oid)
-JOIN pg_catalog.pg_namespace bn ON bn.oid = bt.typnamespace
+LEFT JOIN LATERAL (
+    SELECT COALESCE(pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 3),
+                    pg_catalog.max(name) FILTER (WHERE method = 'hash' AND strategy = 1)) AS eq,
+           COALESCE(pg_catalog.max(negator) FILTER (WHERE method = 'btree' AND strategy = 3),
+                    pg_catalog.max(negator) FILTER (WHERE method = 'hash' AND strategy = 1)) AS ne,
+           pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 1) AS lt,
+           pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 2) AS le,
+           pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 5) AS gt,
+           pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 4) AS ge
+    FROM ops WHERE ops.typ = bt.oid
+) co ON true
 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
   AND n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_temp!_%' ESCAPE '!'
 ORDER BY c.oid, a.attnum";
@@ -240,7 +265,9 @@ pub async fn catalog_rows(conn: &PgConnection) -> Result<CatalogBuilder, DbError
             operators: if boolean(row, 11, "builtin operators")? {
                 Operators::Builtin
             } else {
-                Operators::OfType { schema: owned(row, 14, "base type schema")?, base: owned(row, 15, "base type")? }
+                let op = |i: usize| row.get(i).cloned().ok_or_else(|| bad("type operator"));
+                let ops = TypeOperators { eq: op(15)?, ne: op(16)?, lt: op(17)?, le: op(18)?, gt: op(19)?, ge: op(20)? };
+                Operators::OfType { base: owned(row, 14, "base type")?, ops }
             },
         };
         let table = TableRef { schema: owned(row, 0, "column schema")?, name: owned(row, 1, "column relation")? };

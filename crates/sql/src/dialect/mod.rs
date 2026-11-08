@@ -379,39 +379,52 @@ impl Dialect {
         }
     }
 
-    /// The column as its operators take it, and the schema that names them: the built-in ones'
-    /// schema, or a type's own, with the column cast to its base type; `None` where this engine's
-    /// operators are not named.
-    fn operand<'a>(self, column: &'a ColumnInfo, column_sql: &str) -> Option<(String, &'a str)> {
-        let builtin = self.rules().operator_schema?;
+    /// The column as its operators take it, and its operator for `op` (`=`, `<>`, `<`, `<=`, `>`,
+    /// `>=`) as SQL names it with its schema: the built-in one, or a type's own from its operator
+    /// class, with the column cast to its base type; `None` where this engine's operators are not
+    /// named. A comparison the type's class lacks is an error, so none is looked up by name.
+    fn operand(self, column: &ColumnInfo, column_sql: &str, op: Op) -> Result<Option<(String, String)>, SqlError> {
+        let Some(builtin) = self.rules().operator_schema else { return Ok(None) };
         match &column.operators {
-            Operators::Builtin => Some((column_sql.to_owned(), builtin)),
-            Operators::OfType { schema, base } => Some((format!("CAST({column_sql} AS {base})"), schema.as_str())),
-            Operators::Unnamed => None,
+            Operators::Unnamed => Ok(None),
+            Operators::Builtin => Ok(Some((column_sql.to_owned(), format!("{builtin}.{}", op.symbol())))),
+            Operators::OfType { base, ops } => {
+                let named = match op {
+                    Op::Eq => &ops.eq,
+                    Op::Ne => &ops.ne,
+                    Op::Lt => &ops.lt,
+                    Op::Le => &ops.le,
+                    Op::Gt => &ops.gt,
+                    Op::Ge => &ops.ge,
+                    _ => &None,
+                };
+                let named = named.clone().ok_or_else(|| SqlError::NoComparison { type_name: column.label().to_owned(), op: op.symbol() })?;
+                Ok(Some((format!("CAST({column_sql} AS {base})"), named)))
+            }
         }
     }
 
     /// `column_sql <op> value_sql`, the column compared with one value by `=`, `<>`, `<`, `<=`, `>`
     /// or `>=`: where the engine's operators have a schema, the operator named by it, in
     /// parentheses (a type's own compares the base type, to which `value_sql` is cast too).
-    pub fn compare(self, column: &ColumnInfo, column_sql: &str, op: Op, value_sql: &str) -> String {
-        match self.operand(column, column_sql) {
-            Some((operand, schema)) => format!("({operand} OPERATOR({schema}.{}) {value_sql})", op.symbol()),
+    pub fn compare(self, column: &ColumnInfo, column_sql: &str, op: Op, value_sql: &str) -> Result<String, SqlError> {
+        Ok(match self.operand(column, column_sql, op)? {
+            Some((operand, named)) => format!("({operand} OPERATOR({named}) {value_sql})"),
             None => format!("{column_sql} {} {value_sql}", op.symbol()),
-        }
+        })
     }
 
     /// `column_sql IN (items)`; where the engine's operators have a schema, the column's `=` with
     /// each item, named, joined by `OR` (`= ANY (ARRAY[…])` would read an array column's items as
     /// one array of more dimensions).
-    pub fn in_list(self, column: &ColumnInfo, column_sql: &str, items: &[String]) -> String {
-        match self.operand(column, column_sql) {
-            Some((operand, schema)) => {
-                let each: Vec<String> = items.iter().map(|item| format!("{operand} OPERATOR({schema}.=) {item}")).collect();
+    pub fn in_list(self, column: &ColumnInfo, column_sql: &str, items: &[String]) -> Result<String, SqlError> {
+        Ok(match self.operand(column, column_sql, Op::Eq)? {
+            Some((operand, named)) => {
+                let each: Vec<String> = items.iter().map(|item| format!("{operand} OPERATOR({named}) {item}")).collect();
                 format!("({})", each.join(" OR "))
             }
             None => format!("{column_sql} IN ({})", items.join(", ")),
-        }
+        })
     }
 
     /// An insert that gives every column its default.
@@ -476,7 +489,7 @@ mod tests {
     use crate::edit::{NewValue, delete_sql, insert_sql, update_sql};
     use crate::filter::{Condition, Filter, where_sql};
     use crate::select::{count_sql, page_sql};
-    use dbee_core::{RelKind, TableInfo};
+    use dbee_core::{RelKind, TableInfo, TypeOperators};
     use proptest::prelude::*;
 
     #[test]
@@ -587,7 +600,10 @@ mod tests {
             total.clone(),
             builtin("note", "character varying(10)", "varchar", TypeClass::Text),
             ColumnInfo {
-                operators: Operators::OfType { schema: "ext".into(), base: "ext.citext".into() },
+                operators: Operators::OfType {
+                    base: "ext.citext".into(),
+                    ops: TypeOperators { eq: Some("ext.=".into()), lt: Some("ext.<".into()), ..TypeOperators::default() },
+                },
                 ..of_class("ci", "public.cidom", "citext", TypeClass::LongText)
             },
         ]);
@@ -610,6 +626,13 @@ mod tests {
             where_sql(pg, &f("ci", Op::In, "A, b"), &t).unwrap().unwrap(),
             "(CAST(\"ci\" AS ext.citext) OPERATOR(ext.=) CAST('A' AS ext.citext) OR CAST(\"ci\" AS ext.citext) OPERATOR(ext.=) CAST('b' AS ext.citext))"
         );
+        assert_eq!(
+            where_sql(pg, &f("ci", Op::Lt, "b"), &t).unwrap().unwrap(),
+            "(CAST(\"ci\" AS ext.citext) OPERATOR(ext.<) CAST('b' AS ext.citext))"
+        );
+        // A comparison the type's operator class lacks is never looked up by its name.
+        let e = where_sql(pg, &f("ci", Op::Ge, "b"), &t).unwrap_err();
+        assert_eq!(e.to_string(), "public.cidom values can't be compared with >=; choose another comparison");
         let both = Condition::Filters(vec![
             Filter { column: "id".into(), op: Op::Gt, value: "1".into() },
             Filter { column: "note".into(), op: Op::Le, value: "b".into() },
