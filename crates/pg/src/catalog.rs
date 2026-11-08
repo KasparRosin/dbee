@@ -21,7 +21,7 @@
 use dbee_config::ConnectionConfig;
 use dbee_core::cell::Cell;
 use dbee_core::cell::{ResultSet, TypeClass};
-use dbee_core::schema::{Catalog, ColumnInfo, Generated, RelKind, TableRef};
+use dbee_core::schema::{Catalog, ColumnInfo, Generated, Operators, RelKind, TableRef};
 use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
 use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError, Target};
 
@@ -46,8 +46,8 @@ ORDER BY n.nspname, c.relname";
 
 /// Columns of those relations. `d` resolves each domain (also a domain over a domain) to its
 /// non-domain base type, whose operators are `pg_catalog`'s when it is built in, an array, an enum,
-/// a range or a composite (`ColumnInfo::builtin_operators`). The type's own schema, plain and
-/// quoted, gives its label.
+/// a range or a composite, and otherwise the type's own, in its schema, compared as that base type
+/// ([`Operators`]). The type's own schema, plain and quoted, gives its label.
 const COLUMNS_SQL: &str = "\
 WITH RECURSIVE d(root, cur) AS (
     SELECT oid, typbasetype FROM pg_catalog.pg_type WHERE typtype = 'd'
@@ -60,7 +60,8 @@ SELECT n.nspname, c.relname, a.attnum::text, a.attname, pg_catalog.format_type(a
        bt.typname, bt.typcategory::text, a.attnotnull::text,
        (a.atthasdef OR a.attidentity IN ('a', 'd'))::text, (a.attgenerated <> '')::text, (a.attidentity = 'a')::text,
        (bt.typnamespace = 'pg_catalog'::pg_catalog.regnamespace OR bt.typtype IN ('e', 'r', 'm', 'c') OR bt.typcategory = 'A')::text,
-       tn.nspname, pg_catalog.quote_ident(tn.nspname)
+       tn.nspname, pg_catalog.quote_ident(tn.nspname),
+       pg_catalog.quote_ident(bn.nspname), pg_catalog.format_type(bt.oid, NULL)
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
@@ -68,6 +69,7 @@ JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
 JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
 LEFT JOIN base ON base.root = t.oid
 JOIN pg_catalog.pg_type bt ON bt.oid = COALESCE(base.base, t.oid)
+JOIN pg_catalog.pg_namespace bn ON bn.oid = bt.typnamespace
 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
   AND n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_temp!_%' ESCAPE '!'
 ORDER BY c.oid, a.attnum";
@@ -235,7 +237,11 @@ pub async fn catalog_rows(conn: &PgConnection) -> Result<CatalogBuilder, DbError
                 (false, false) => Generated::No,
             },
             hidden: false,
-            builtin_operators: boolean(row, 11, "builtin operators")?,
+            operators: if boolean(row, 11, "builtin operators")? {
+                Operators::Builtin
+            } else {
+                Operators::OfType { schema: owned(row, 14, "base type schema")?, base: owned(row, 15, "base type")? }
+            },
         };
         let table = TableRef { schema: owned(row, 0, "column schema")?, name: owned(row, 1, "column relation")? };
         catalog.column(ColumnRow { table, position: number(row, 2, "attnum")?, column });

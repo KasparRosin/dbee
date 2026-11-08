@@ -19,7 +19,7 @@ fn ci(name: &str, type_sql: &str, category: char) -> ColumnInfo {
         generated: Default::default(),
         hidden: false,
         type_label: String::new(),
-        builtin_operators: false,
+        operators: dbee_core::Operators::Unnamed,
     }
 }
 

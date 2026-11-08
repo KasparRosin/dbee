@@ -3,7 +3,7 @@
 use super::{Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, LikeOperators, Paging, Rules, Separator, StringLiteral, Values, quoted};
 use crate::SqlError;
 use crate::refusal::{CHAIN, CHANGES_MODE, Code, ON, READ_WRITE, Refusal};
-use dbee_core::ColumnInfo;
+use dbee_core::{ColumnInfo, Operators};
 
 pub(crate) const RULES: Rules = Rules {
     ident_quote: '"',
@@ -85,7 +85,16 @@ pub(super) fn value(column: &ColumnInfo, text: &str) -> Result<String, SqlError>
 
 /// A value of the row's key, cast to the column's own type: the server sent it, so it fits.
 pub(super) fn key_value(column: &ColumnInfo, text: &str) -> Result<String, SqlError> {
-    typed(text, &column.type_sql)
+    typed(text, compared_as(column).unwrap_or(&column.type_sql))
+}
+
+/// The base type a column whose operators are its type's own is compared as
+/// ([`Operators::OfType`]).
+fn compared_as(column: &ColumnInfo) -> Option<&str> {
+    match &column.operators {
+        Operators::OfType { base, .. } => Some(base),
+        Operators::Builtin | Operators::Unnamed => None,
+    }
 }
 
 /// A value a filter compares the column with, cast to [`filter_type`].
@@ -120,6 +129,9 @@ fn write_type(column: &ColumnInfo) -> &str {
 /// `bpchar[]` and `"bit"[]` (no operator compares them with `text[]` or `bit varying[]`). The
 /// others are [`write_type`]: `varchar(n)` as `text`, whose indexes it uses.
 fn filter_type(column: &ColumnInfo) -> &str {
+    if let Some(base) = compared_as(column) {
+        return base;
+    }
     match column.base_type.as_str() {
         "bpchar" => "pg_catalog.bpchar",
         "bit" => "pg_catalog.\"bit\"",
@@ -640,7 +652,7 @@ mod tests {
             generated: Default::default(),
             hidden: false,
             type_label: String::new(),
-            builtin_operators: false,
+            operators: dbee_core::Operators::Unnamed,
         }
     }
 

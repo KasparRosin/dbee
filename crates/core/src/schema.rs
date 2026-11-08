@@ -42,6 +42,22 @@ pub enum Generated {
     Identity,
 }
 
+/// Whose operators dbee's own SQL names when it compares a column's values.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Operators {
+    /// None by a schema: the engine's operators have none (MySQL, SQLite).
+    #[default]
+    Unnamed,
+    /// The engine's built-in ones: on Postgres `pg_catalog`'s, for a base type (after domains) or
+    /// an array in `pg_catalog`, an enum, a range or a composite.
+    Builtin,
+    /// The base type's own, named in the type's `schema` (quoted for SQL): an extension's type
+    /// (`citext`), or a domain over one. dbee compares the values as `base`, the base type's SQL
+    /// name, so no operator in another schema matches them exactly.
+    OfType { schema: String, base: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
@@ -67,12 +83,9 @@ pub struct ColumnInfo {
     /// session's search path, as Postgres itself shows it; empty means `type_sql`.
     #[serde(default)]
     pub type_label: String,
-    /// The engine's built-in operators compare the column's values, so dbee's own SQL names them
-    /// by their schema: on Postgres a base type (or an array) in `pg_catalog`, an enum, a range or
-    /// a composite. False where operators have no schema, and for a type that brings its own (an
-    /// extension's, such as `citext`).
+    /// Whose operators compare the column's values, which dbee's own SQL names.
     #[serde(default)]
-    pub builtin_operators: bool,
+    pub operators: Operators,
 }
 
 impl ColumnInfo {
@@ -245,7 +258,7 @@ mod tests {
             generated: Generated::No,
             hidden: false,
             type_label: String::new(),
-            builtin_operators: false,
+            operators: Operators::Unnamed,
         }
     }
     fn table(schema: &str, name: &str) -> TableInfo {

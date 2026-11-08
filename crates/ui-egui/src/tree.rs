@@ -675,7 +675,7 @@ mod tests {
             generated: Default::default(),
             hidden: false,
             type_label: String::new(),
-            builtin_operators: false,
+            operators: dbee_core::Operators::Unnamed,
         };
         TableInfo {
             table: TableRef { schema: schema.into(), name: name.into() },

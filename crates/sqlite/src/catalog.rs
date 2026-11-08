@@ -209,7 +209,7 @@ fn relation(s: &mut Session, running: &Running, name: String, kind: RelKind, is_
             has_default: default || generated == Generated::Expression,
             generated,
             hidden: hidden == 1,
-            builtin_operators: false,
+            operators: dbee_core::Operators::Unnamed,
         };
         r.columns.push((column, number(row, 4, "key position")?));
     }
@@ -270,7 +270,7 @@ fn row_id(name: &str) -> ColumnInfo {
         generated: Generated::No,
         hidden: true,
         type_label: String::new(),
-        builtin_operators: false,
+        operators: dbee_core::Operators::Unnamed,
     }
 }
 
@@ -374,7 +374,7 @@ mod tests {
             generated: Generated::No,
             hidden: false,
             type_label: String::new(),
-            builtin_operators: false,
+            operators: dbee_core::Operators::Unnamed,
         };
         let parent = Relation {
             table: TableRef { schema: SCHEMA.into(), name: "Parent".into() },

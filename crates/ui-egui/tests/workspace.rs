@@ -1019,7 +1019,7 @@ fn synthetic(n: usize) -> Arc<Catalog> {
         generated: Default::default(),
         hidden: false,
         type_label: String::new(),
-        builtin_operators: false,
+        operators: dbee_core::Operators::Unnamed,
     };
     let table = |schema: &str, name: String| TableInfo {
         table: TableRef { schema: schema.into(), name },

@@ -286,7 +286,7 @@ fn add_columns(
             has_default: has_default(flavor, nullable(row, 8, "column default")?, &extra),
             generated: generated(&extra),
             hidden: false,
-            builtin_operators: false,
+            operators: dbee_core::Operators::Unnamed,
         };
         catalog.column(ColumnRow { table, position: number(row, 2, "ordinal position")?, column });
     }

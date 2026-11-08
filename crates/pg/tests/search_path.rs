@@ -252,6 +252,89 @@ async fn filters_and_saved_changes_run_no_operator_planted_in_public() {
     }
 }
 
+/// Logging operators in `public` for `citext` kept in a schema of its own after `public` on the
+/// path (as Supabase lays out its `extensions`), and for a domain over it: exact matches, which
+/// Postgres takes over the extension's own operators for an unqualified operator.
+const PLANTED_OVER_AN_EXTENSION: &str = r#"
+CREATE SCHEMA ext;
+CREATE EXTENSION citext SCHEMA ext;
+CREATE TABLE public.calls (what text);
+CREATE FUNCTION public.log(what text) RETURNS void LANGUAGE sql AS $$ INSERT INTO public.calls VALUES (what) $$;
+CREATE DOMAIN public.cidom AS ext.citext;
+CREATE FUNCTION public.eq_cc(ext.citext, ext.citext) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('citext = citext'); RETURN $1::text OPERATOR(pg_catalog.=) $2::text; END $$;
+CREATE OPERATOR public.= (LEFTARG = ext.citext, RIGHTARG = ext.citext, FUNCTION = public.eq_cc);
+CREATE FUNCTION public.ne_cc(ext.citext, ext.citext) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('citext <> citext'); RETURN $1::text OPERATOR(pg_catalog.<>) $2::text; END $$;
+CREATE OPERATOR public.<> (LEFTARG = ext.citext, RIGHTARG = ext.citext, FUNCTION = public.ne_cc);
+CREATE FUNCTION public.lt_cc(ext.citext, ext.citext) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('citext < citext'); RETURN $1::text OPERATOR(pg_catalog.<) $2::text; END $$;
+CREATE OPERATOR public.< (LEFTARG = ext.citext, RIGHTARG = ext.citext, FUNCTION = public.lt_cc);
+CREATE FUNCTION public.eq_dd(public.cidom, public.cidom) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('cidom = cidom'); RETURN $1::text OPERATOR(pg_catalog.=) $2::text; END $$;
+CREATE OPERATOR public.= (LEFTARG = public.cidom, RIGHTARG = public.cidom, FUNCTION = public.eq_dd);
+CREATE TABLE public.w (id int PRIMARY KEY, c ext.citext, cd public.cidom);
+INSERT INTO public.w VALUES (1, 'Ann', 'Ann'), (2, 'bob', 'bob');
+CREATE TABLE public.ckey (c ext.citext PRIMARY KEY, note text);
+INSERT INTO public.ckey VALUES ('Ann', 'x');
+CREATE TABLE public.dkey (d public.cidom PRIMARY KEY, note text);
+INSERT INTO public.dkey VALUES ('Ann', 'x');
+"#;
+
+/// A column whose operators are its type's own (an extension's, or a domain over one) is compared
+/// as that base type with the operator named in the type's schema, so no operator planted in
+/// another schema on the path can match exactly; `citext` still compares without case, and the
+/// key's index still serves the comparison.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_extension_types_own_operators_are_named_in_its_schema() {
+    let db = require_testdb!();
+    for s in db.servers_of(&[Kind::Postgres]) {
+        let own = OwnDatabase::new(s, db).await;
+        let planted = conn(s, db, &own.name).await;
+        sql(&planted, PLANTED_OVER_AN_EXTENSION).await;
+        sql(&planted, &format!("ALTER DATABASE {} SET search_path = \"$user\", public, ext", own.name)).await;
+        let c = conn(s, db, &own.name).await;
+        let catalog = load_catalog(&c).await.unwrap_or_else(|e| panic!("{}: {e}", s.name));
+        let table = |name: &str| catalog.schemas.iter().flat_map(|sc| &sc.tables).find(|t| t.table.name == name).expect("a planted table").clone();
+        let (w, ckey, dkey) = (table("w"), table("ckey"), table("dkey"));
+        let d = Dialect::Postgres;
+        let filter = |column: &str, op: Op, value: &str| Condition::Filters(vec![Filter { column: column.into(), op, value: value.into() }]);
+        let mut sent = Vec::new();
+        let mut found = Vec::new();
+        for (cond, rows) in [
+            (filter("c", Op::Eq, "ANN"), 1),
+            (filter("c", Op::Ne, "ANN"), 1),
+            (filter("c", Op::Lt, "B"), 1),
+            (filter("c", Op::In, "ANN, BOB"), 2),
+            (filter("cd", Op::Eq, "ANN"), 1),
+            (filter("cd", Op::In, "ann"), 1),
+        ] {
+            let page = page_sql(d, &w, &cond, None, 0).unwrap();
+            let count = count_sql(d, &w, &cond).unwrap();
+            let got = (query::run_untyped(&c, &page, QUERY_LIMITS).await.map(|r| r.rows.len()), query::scalar_u64(&c, &count).await);
+            found.push((page.clone(), got, (rows, rows as u64)));
+            sent.push(page);
+        }
+        let note = |t: &dbee_core::TableInfo| t.column("note").unwrap().clone();
+        let update_c = update_sql(d, &ckey, &[(ckey.column("c").unwrap(), "Ann")], &[(&note(&ckey), &NewValue::Text("u".into()))]).unwrap();
+        let update_d = update_sql(d, &dkey, &[(dkey.column("d").unwrap(), "Ann")], &[(&note(&dkey), &NewValue::Text("u".into()))]).unwrap();
+        let applied = dbee_pg::apply(&c, &[update_c.clone(), update_d.clone()]).await.map_err(|e| e.error);
+        sent.extend([update_c, update_d]);
+        let calls = sql(&planted, "SELECT what || ' ' || count(*) FROM public.calls GROUP BY what ORDER BY what").await;
+        println!("{}: sent {sent:#?}\ncalls of the planted operators: {calls:?}", s.name);
+        assert!(calls.is_empty(), "{}: dbee's SQL ran {calls:?}", s.name);
+        for (page, got, want) in found {
+            assert_eq!(got, (Ok(want.0), Ok(want.1)), "{}: {page}", s.name);
+        }
+        assert_eq!(applied, Ok(2), "{}", s.name);
+        sql(&c, "SET enable_seqscan = off").await;
+        for statement in &sent[6..] {
+            let plan: Vec<String> = sql(&c, &format!("EXPLAIN {statement}")).await.into_iter().flatten().flatten().collect();
+            assert!(plan.iter().any(|line| line.contains("Index")), "{}: {statement}: {plan:#?}", s.name);
+        }
+    }
+}
+
 /// A type whose schema is on the session's search path shows without it, as before dbee read the
 /// catalog with only `pg_catalog` on the path, while `type_sql` names the schema for SQL; a type
 /// outside the path, and a built-in one, show as `type_sql`. An extension type keeps its own
@@ -269,7 +352,7 @@ async fn type_labels_leave_out_a_schema_on_the_search_path() {
         let l = catalog.schemas.iter().flat_map(|sc| &sc.tables).find(|t| t.table.name == "l").expect("l").clone();
         let shown = |name: &str| {
             let column = l.column(name).unwrap();
-            (column.type_sql.clone(), column.column().type_label, column.builtin_operators)
+            (column.type_sql.clone(), column.column().type_label, column.operators == dbee_core::Operators::Builtin)
         };
         assert_eq!(shown("c"), ("public.citext".to_owned(), "citext".to_owned(), false), "{}", s.name);
         assert_eq!(shown("m"), ("public.mood".to_owned(), "mood".to_owned(), true), "{}", s.name);

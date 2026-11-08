@@ -266,7 +266,7 @@ mod tests {
             generated: Generated::No,
             hidden: false,
             type_label: String::new(),
-            builtin_operators: false,
+            operators: dbee_core::Operators::Unnamed,
         };
         ColumnRow { table: tr(schema, table), position, column }
     }

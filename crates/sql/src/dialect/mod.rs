@@ -5,7 +5,7 @@ use crate::SqlError;
 use crate::filter::Op;
 use crate::lexer::{Token, TokenKind, tokenize};
 use crate::refusal::{Code, Refusal};
-use dbee_core::{ColumnInfo, TableRef, TypeClass};
+use dbee_core::{ColumnInfo, Operators, TableRef, TypeClass};
 use serde::{Deserialize, Serialize};
 
 mod mysql;
@@ -41,8 +41,8 @@ pub(crate) struct Rules {
     /// The aggregate that counts a table's rows, as the count statement writes it.
     pub count_all: &'static str,
     /// The schema of the engine's built-in operators, which dbee's comparisons name where a
-    /// column's operators are built in ([`ColumnInfo::builtin_operators`]); `None` where operators
-    /// have no schema.
+    /// column's operators are built in ([`Operators::Builtin`]); `None` where operators have no
+    /// schema, and a type's own are not named either.
     pub operator_schema: Option<&'static str>,
     /// The operators `like`, `not like`, `ilike` and `not ilike` are, named in `operator_schema`
     /// (their column is always cast to text); `None` to write the words.
@@ -379,25 +379,38 @@ impl Dialect {
         }
     }
 
-    /// `column_sql <op> value_sql`, the column compared with one value by `=`, `<>`, `<`, `<=`, `>`
-    /// or `>=`: the operator named by its schema, in parentheses, where the column's are built in.
-    pub fn compare(self, column: &ColumnInfo, column_sql: &str, op: Op, value_sql: &str) -> String {
-        match self.rules().operator_schema {
-            Some(schema) if column.builtin_operators => format!("({column_sql} OPERATOR({schema}.{}) {value_sql})", op.symbol()),
-            _ => format!("{column_sql} {} {value_sql}", op.symbol()),
+    /// The column as its operators take it, and the schema that names them: the built-in ones'
+    /// schema, or a type's own, with the column cast to its base type; `None` where this engine's
+    /// operators are not named.
+    fn operand<'a>(self, column: &'a ColumnInfo, column_sql: &str) -> Option<(String, &'a str)> {
+        let builtin = self.rules().operator_schema?;
+        match &column.operators {
+            Operators::Builtin => Some((column_sql.to_owned(), builtin)),
+            Operators::OfType { schema, base } => Some((format!("CAST({column_sql} AS {base})"), schema.as_str())),
+            Operators::Unnamed => None,
         }
     }
 
-    /// `column_sql IN (items)`; where the column's operators are built in and have a schema, its
-    /// `=` with each item, named, joined by `OR` (`= ANY (ARRAY[…])` would read an array column's
-    /// items as one array of more dimensions).
+    /// `column_sql <op> value_sql`, the column compared with one value by `=`, `<>`, `<`, `<=`, `>`
+    /// or `>=`: where the engine's operators have a schema, the operator named by it, in
+    /// parentheses (a type's own compares the base type, to which `value_sql` is cast too).
+    pub fn compare(self, column: &ColumnInfo, column_sql: &str, op: Op, value_sql: &str) -> String {
+        match self.operand(column, column_sql) {
+            Some((operand, schema)) => format!("({operand} OPERATOR({schema}.{}) {value_sql})", op.symbol()),
+            None => format!("{column_sql} {} {value_sql}", op.symbol()),
+        }
+    }
+
+    /// `column_sql IN (items)`; where the engine's operators have a schema, the column's `=` with
+    /// each item, named, joined by `OR` (`= ANY (ARRAY[…])` would read an array column's items as
+    /// one array of more dimensions).
     pub fn in_list(self, column: &ColumnInfo, column_sql: &str, items: &[String]) -> String {
-        match self.rules().operator_schema {
-            Some(schema) if column.builtin_operators => {
-                let each: Vec<String> = items.iter().map(|item| format!("{column_sql} OPERATOR({schema}.=) {item}")).collect();
+        match self.operand(column, column_sql) {
+            Some((operand, schema)) => {
+                let each: Vec<String> = items.iter().map(|item| format!("{operand} OPERATOR({schema}.=) {item}")).collect();
                 format!("({})", each.join(" OR "))
             }
-            _ => format!("{column_sql} IN ({})", items.join(", ")),
+            None => format!("{column_sql} IN ({})", items.join(", ")),
         }
     }
 
@@ -531,7 +544,7 @@ mod tests {
             generated: Default::default(),
             hidden: false,
             type_label: String::new(),
-            builtin_operators: false,
+            operators: dbee_core::Operators::Unnamed,
         }
     }
 
@@ -561,18 +574,22 @@ mod tests {
     }
 
     /// Postgres names `pg_catalog`'s operators, in parentheses, where a column's are built in, and
-    /// writes the plain ones for a type that brings its own (`citext`).
+    /// a type's own in its schema, comparing its base type (a domain over `citext` as `citext`).
     #[test]
     fn postgres_output_names_pg_catalogs_operators() {
         let pg = Dialect::Postgres;
-        let builtin = |name: &str, type_sql: &str, base: &str, class| ColumnInfo { builtin_operators: true, ..of_class(name, type_sql, base, class) };
+        let builtin =
+            |name: &str, type_sql: &str, base: &str, class| ColumnInfo { operators: Operators::Builtin, ..of_class(name, type_sql, base, class) };
         let mut total = builtin("total", "numeric(12,2)", "numeric", TypeClass::Number);
         total.not_null = true;
         let t = table_of(vec![
             builtin("id", "bigint", "int8", TypeClass::Number),
             total.clone(),
             builtin("note", "character varying(10)", "varchar", TypeClass::Text),
-            of_class("ci", "public.citext", "citext", TypeClass::LongText),
+            ColumnInfo {
+                operators: Operators::OfType { schema: "ext".into(), base: "ext.citext".into() },
+                ..of_class("ci", "public.cidom", "citext", TypeClass::LongText)
+            },
         ]);
         let f = |column: &str, op, value: &str| Condition::Filters(vec![Filter { column: column.into(), op, value: value.into() }]);
         assert_eq!(
@@ -585,8 +602,14 @@ mod tests {
             where_sql(pg, &f("id", Op::In, "1, 2"), &t).unwrap().unwrap(),
             "(\"id\" OPERATOR(pg_catalog.=) CAST('1' AS bigint) OR \"id\" OPERATOR(pg_catalog.=) CAST('2' AS bigint))"
         );
-        assert_eq!(where_sql(pg, &f("ci", Op::Eq, "A"), &t).unwrap().unwrap(), "\"ci\" = CAST('A' AS public.citext)");
-        assert_eq!(where_sql(pg, &f("ci", Op::In, "A"), &t).unwrap().unwrap(), "\"ci\" IN (CAST('A' AS public.citext))");
+        assert_eq!(
+            where_sql(pg, &f("ci", Op::Eq, "A"), &t).unwrap().unwrap(),
+            "(CAST(\"ci\" AS ext.citext) OPERATOR(ext.=) CAST('A' AS ext.citext))"
+        );
+        assert_eq!(
+            where_sql(pg, &f("ci", Op::In, "A, b"), &t).unwrap().unwrap(),
+            "(CAST(\"ci\" AS ext.citext) OPERATOR(ext.=) CAST('A' AS ext.citext) OR CAST(\"ci\" AS ext.citext) OPERATOR(ext.=) CAST('b' AS ext.citext))"
+        );
         let both = Condition::Filters(vec![
             Filter { column: "id".into(), op: Op::Gt, value: "1".into() },
             Filter { column: "note".into(), op: Op::Le, value: "b".into() },
