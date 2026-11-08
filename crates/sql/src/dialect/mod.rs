@@ -136,6 +136,9 @@ pub(crate) enum StringLiteral {
     Quoted,
     /// As `Quoted`, but hex when the value holds a backslash, which may or may not escape, or a NUL.
     HexForBackslash,
+    /// As `Quoted`, but an escape string (`E'…'`, `\` doubled too) when the value holds a
+    /// backslash, which a plain string escapes or not as a session setting says.
+    EscapeForBackslash,
 }
 
 /// The hex form of a binary literal; a binary value to write comes as text in the same form.
@@ -285,13 +288,14 @@ impl Dialect {
         Ok(format!("{}.{}", self.ident(&t.schema)?, self.ident(&t.name)?))
     }
 
-    /// `'value'` with `'` doubled; backslashes stay literal, which Postgres gets from
-    /// `standard_conforming_strings`. MySQL may or may not escape them, so a value with one is
-    /// hex, as is one with a NUL. NUL is an error where the statement cannot hold one.
+    /// `'value'` with `'` doubled. Where a backslash in such a string may or may not escape, a
+    /// value with one is written to read the same either way: hex on MySQL (as is one with a NUL),
+    /// an escape string on Postgres. NUL is an error where the statement cannot hold one.
     pub fn literal(self, value: &str) -> Result<String, SqlError> {
         match self.rules().string_literal {
             StringLiteral::Quoted => quoted(value, '\''),
             StringLiteral::HexForBackslash => mysql::literal(value),
+            StringLiteral::EscapeForBackslash => postgres::literal(value),
         }
     }
 
@@ -587,10 +591,24 @@ mod tests {
     fn literals_double_quotes_and_keep_backslashes() {
         for d in Dialect::ALL {
             assert_eq!(d.literal("it's").unwrap(), "'it''s'");
-            if d != Dialect::MySql {
-                assert_eq!(d.literal(r"a\b").unwrap(), r"'a\b'");
-            }
         }
+        assert_eq!(Dialect::Sqlite.literal(r"a\b").unwrap(), r"'a\b'");
+    }
+
+    /// A Postgres value with a backslash is an escape string, which reads the same whatever
+    /// `standard_conforming_strings` says; one without stays plain.
+    #[test]
+    fn postgres_values_with_a_backslash_are_escape_strings() {
+        let pg = Dialect::Postgres;
+        assert_eq!(pg.literal(r"\'").unwrap(), r"E'\\'''");
+        assert_eq!(pg.literal(r"a\b").unwrap(), r"E'a\\b'");
+        assert_eq!(pg.literal(r"\' AS text); COMMIT; --").unwrap(), r"E'\\'' AS text); COMMIT; --'");
+        assert_eq!(pg.literal("it's").unwrap(), "'it''s'");
+        let v = of_class("v", "text", "text", TypeClass::Text);
+        for out in [pg.value(&v, r"\'"), pg.key_value(&v, r"\'"), pg.filter_value(&v, r"\'")] {
+            assert_eq!(out.unwrap(), r"CAST(E'\\''' AS text)");
+        }
+        assert_eq!(pg.literal("a\\\0"), Err(SqlError::Nul));
     }
 
     #[test]
@@ -689,10 +707,15 @@ mod tests {
         assert_eq!(serde_json::from_value::<Dialect>(serde_json::json!("Sqlite")).unwrap(), Dialect::Sqlite);
     }
 
-    /// `s` is one literal: it opens and closes with `'` and every inner `'` is doubled.
+    /// `s` is one literal: it opens and closes with `'` and every inner `'` is doubled; in an
+    /// escape string (`E'…'`) every `\` is doubled too.
     fn is_one_literal(s: &str) -> bool {
         if let Some(hex) = s.strip_prefix("_utf8mb4 X'").and_then(|s| s.strip_suffix('\'')) {
             return hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b));
+        }
+        if let Some(inner) = s.strip_prefix("E'").and_then(|s| s.strip_suffix('\'')) {
+            let plain = inner.replace(r"\\", "");
+            return !plain.contains('\\') && plain.replace("''", "").find('\'').is_none();
         }
         let Some(inner) = s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else { return false };
         inner.replace("''", "").find('\'').is_none()
@@ -712,7 +735,7 @@ mod tests {
             assert_eq!(Dialect::MySql.value(&col, text).unwrap(), lit);
             assert_eq!(Dialect::MySql.key_value(&col, text).unwrap(), lit);
             assert_eq!(Dialect::MySql.filter_value(&col, text).unwrap(), lit);
-            assert_eq!(Dialect::Postgres.literal(text).unwrap().replace("''", "'"), format!("'{text}'"));
+            assert_eq!(Dialect::Postgres.literal(text).unwrap().replace("''", "'"), format!("E'{}'", text.replace('\\', r"\\")));
         }
         assert_eq!(Dialect::MySql.literal("it's").unwrap(), "'it''s'");
         assert_eq!(Dialect::MySql.literal("").unwrap(), "''");

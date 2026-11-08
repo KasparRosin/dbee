@@ -19,7 +19,7 @@ pub(crate) const RULES: Rules = Rules {
     bool_literals: ("t", "f"),
     op_notes: &[],
     schema_word: ("schema", "Schemas"),
-    string_literal: StringLiteral::Quoted,
+    string_literal: StringLiteral::EscapeForBackslash,
     binary_literal: None,
     values: Values::Cast,
     paging: Paging::LimitOffset,
@@ -47,10 +47,20 @@ pub(crate) const RULES: Rules = Rules {
     keywords: KEYWORDS,
 };
 
-/// `CAST('value' AS type_sql)`. `type_sql` comes from the server's `format_type` (or is a
+/// `'value'`, but `E'…'` with each `\` doubled too when it holds one: an escape string reads the
+/// same whether `standard_conforming_strings` is on or off, which a function the session runs can
+/// change.
+pub(super) fn literal(value: &str) -> Result<String, SqlError> {
+    if !value.contains('\\') {
+        return quoted(value, '\'');
+    }
+    Ok(format!("E{}", quoted(&value.replace('\\', r"\\"), '\'')?))
+}
+
+/// `CAST(<literal> AS type_sql)`. `type_sql` comes from the server's `format_type` (or is a
 /// type without its length, from [`write_type`] or [`filter_type`]) and is used verbatim.
 fn typed(value: &str, type_sql: &str) -> Result<String, SqlError> {
-    Ok(format!("CAST({} AS {type_sql})", quoted(value, '\'')?))
+    Ok(format!("CAST({} AS {type_sql})", literal(value)?))
 }
 
 /// A value to write, cast to [`write_type`].

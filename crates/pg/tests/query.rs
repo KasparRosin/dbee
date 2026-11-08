@@ -225,3 +225,32 @@ async fn run_inside_a_transaction_does_not_abort_it() {
         ok(&c, "ROLLBACK", QUERY_LIMITS).await;
     }
 }
+
+/// dbee's literals read back unchanged whether `standard_conforming_strings` is on or, after a
+/// function turned it off for the session, off.
+#[tokio::test]
+async fn literals_read_the_same_with_standard_conforming_strings_off() {
+    let db = require_testdb!();
+    for (major, c) in conns(db).await {
+        let flip = unique("scs_set");
+        let made = format!(
+            "CREATE FUNCTION scratch.{flip}(text) RETURNS text LANGUAGE sql AS $$ SELECT pg_catalog.set_config('standard_conforming_strings', $1, false) $$"
+        );
+        ok(&c, &made, QUERY_LIMITS).await;
+        let values = ["\\", "\\'", "a\\'b", "\\' AS text); SELECT 1; --", "''\\\\''", "it's", "plain", "é\\n", "\\x41", "$$\\", "E'\\''"];
+        let mut wrong = Vec::new();
+        for setting in ["on", "off"] {
+            ok(&c, &format!("SELECT scratch.{flip}('{setting}')"), QUERY_LIMITS).await;
+            for v in values {
+                let literal = dbee_sql::Dialect::Postgres.literal(v).unwrap();
+                let read = run(&c, &format!("SELECT {literal} AS a, 'MARK' AS b"), QUERY_LIMITS).await.map(|r| r.rows);
+                if read.as_ref().ok() != Some(&vec![vec![Some(v.to_owned()), Some("MARK".to_owned())]]) {
+                    wrong.push(format!("{setting}: {literal} read {read:?}"));
+                }
+            }
+        }
+        ok(&c, &format!("SELECT scratch.{flip}('on')"), QUERY_LIMITS).await;
+        ok(&c, &format!("DROP FUNCTION scratch.{flip}(text)"), QUERY_LIMITS).await;
+        assert!(wrong.is_empty(), "pg{major}: {wrong:#?}");
+    }
+}

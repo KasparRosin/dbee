@@ -1287,3 +1287,41 @@ fn a_sorted_page_of_a_rowid_table_edits_the_rows_it_shows() {
         assert_eq!(q(t, &format!("SELECT rowid, title FROM {main}.notes_nokey ORDER BY rowid")), "1|shown last\n2|shown first\n3|second");
     });
 }
+
+/// A view whose function turns `standard_conforming_strings` off on the browse connection does
+/// not change what dbee's edits mean: a text key holding `\'` (data anyone who adds a row
+/// controls) is still one value, so the edit writes its row and runs nothing hidden in the key.
+#[test]
+fn an_edit_after_a_view_turned_standard_conforming_strings_off_writes_only_its_row() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| t.kind().id() == "postgres") {
+        let u = unique("t_scs");
+        let (func, view, table, hidden) = (format!("{u}_off"), format!("{u}_v"), format!("{u}_t"), format!("{u}_hidden"));
+        let _drop = Scratch(
+            &t,
+            vec![
+                format!("VIEW IF EXISTS scratch.{view}"),
+                format!("FUNCTION IF EXISTS scratch.{func}()"),
+                format!("TABLE IF EXISTS scratch.{table}"),
+                format!("TABLE IF EXISTS scratch.{hidden}"),
+            ],
+        );
+        q(
+            &t,
+            &format!(
+                "CREATE FUNCTION scratch.{func}() RETURNS int LANGUAGE plpgsql AS $$ BEGIN PERFORM set_config('standard_conforming_strings', 'off', false); RETURN 1; END $$"
+            ),
+        );
+        q(&t, &format!("CREATE VIEW scratch.{view} AS SELECT scratch.{func}() AS x"));
+        q(&t, &format!("CREATE TABLE scratch.{table} (k text PRIMARY KEY, v text)"));
+        let key = format!("\\' AS text); COMMIT; CREATE TABLE scratch.{hidden} (x int); --");
+        q(&t, &format!("INSERT INTO scratch.{table} VALUES ('{}', 'a')", key.replace('\'', "''")));
+        let mut s = connected_to(&t);
+        open_table(&mut s, "scratch", &view);
+        open_table(&mut s, "scratch", &table);
+        set_cell(&mut s, 0, "v", "c");
+        apply(&mut s);
+        assert_eq!(q(&t, &format!("SELECT v FROM scratch.{table}")), "c", "{}: the edit wrote its row", t.name());
+        assert_eq!(q(&t, &format!("SELECT to_regclass('scratch.{hidden}') IS NULL")), "t", "{}: nothing hidden in the key ran", t.name());
+    }
+}
