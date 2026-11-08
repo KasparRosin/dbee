@@ -1,6 +1,6 @@
 # Agents
 
-> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (§4: the M2 day)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C: §2 and §4, a client sends the token first, screenshots go in one folder, an isolated run checks SSH key and CA files; before: §4: the M2 day)
 
 dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
 
@@ -10,12 +10,13 @@ The control channel (§2) and the isolated runs for checking UI work (§4) exist
 
 ## 2. Control channel
 
-`dbee --control 7979` (or `DBEE_CONTROL_PORT=7979`) listens on `127.0.0.1` only: one JSON request per line, one JSON reply per line.
+`dbee --control 7979` (or `DBEE_CONTROL_PORT=7979`) listens on `127.0.0.1` only. The first line you send is the first line of the run's token file, and the reply carries a `proof` that must equal the file's second line ([`control-protocol.md`](control-protocol.md#connecting) has the file's place and a client to copy). After that: one JSON request per line, one JSON reply per line.
 
 ```jsonc
+<the token file's first line>
 {"id":1,"method":"engine.commands"}
 {"id":2,"method":"engine.execute","params":{"command":"connection.open","params":{"id":"<saved connection id>"}}}
-{"id":3,"method":"ui.screenshot","params":{"path":"target/look/shot.png"}}
+{"id":3,"method":"ui.screenshot","params":{"path":"shot.png"}}
 ```
 
 Replies look like `{"id":2,"ok":true,"result":{…}}` or `{"id":2,"ok":false,"error":"…","code":"…","data":{…}}`. A command that starts a job is answered when the job ends. Method table: [`control-protocol.md`](control-protocol.md).
@@ -28,10 +29,10 @@ Every command is one shell call away: `dbee-cli exec <id> k=v…`, `run <script.
 
 For any UI change, look at the result:
 
-1. `cargo xtask run-isolated --port 7979` (add `--release` for a release build). It builds dbee and runs it on a throwaway home, `target/isolated/<port>/home`, with the control channel on that port, in-memory secrets, an in-memory clipboard (`DBEE_CLIPBOARD=memory`: every copy and cut, a text field's too, stays in the app, and `document.inspect` shows the start of the last as `clipboard` with its length as `clipboardBytes`) and no SSH agent on Linux and macOS (on Windows the OpenSSH agent pipe is still reachable); with the Docker test servers up, that home's `.ssh` holds their test key and host key. The run may connect only to the test servers: each server's port and the sshd's, on `127.0.0.1` and `localhost`, plus `127.0.0.1:1` for error demos (`DBEE_ALLOW_TARGETS` on the child). Without `target/testdb/env.json` only `127.0.0.1:1` is allowed, and run-isolated warns. Test, the database list, open and reconnect refuse any other target before any network I/O, with an error saying this isolated run may only connect to the test servers; through an SSH tunnel the SSH server's host and port are what count. A database file (SQLite) must lie in the throwaway home or `target/` (`DBEE_ALLOW_DIRS` on the child): the driver checks it inside its open, once links and `..` are resolved, and the job fails with a `config` error naming the file; a file takes no SSH tunnel. The run's SQL may open no other file, so SQLite's `ATTACH`, `VACUUM INTO`, `VACUUM` and the pragmas that move its temporary files are refused.
-2. Drive the feature through the control channel: commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
+1. `cargo xtask run-isolated --port 7979` (add `--release` for a release build). It builds dbee and runs it on a throwaway home, `target/isolated/<port>/home`, with the control channel on that port (the token file is `target/isolated/<port>/control-token`), in-memory secrets, an in-memory clipboard (`DBEE_CLIPBOARD=memory`: every copy and cut, a text field's too, stays in the app, and `document.inspect` shows the start of the last as `clipboard` with its length as `clipboardBytes`) and no SSH agent on Linux and macOS (on Windows the OpenSSH agent pipe is still reachable); with the Docker test servers up, that home's `.ssh` holds their test key and host key. The run may connect only to the test servers: each server's port and the sshd's, on `127.0.0.1` and `localhost`, plus `127.0.0.1:1` for error demos (`DBEE_ALLOW_TARGETS` on the child). Without `target/testdb/env.json` only `127.0.0.1:1` is allowed, and run-isolated warns. Test, the database list, open and reconnect refuse any other target before any network I/O, with an error saying this isolated run may only connect to the test servers; through an SSH tunnel the SSH server's host and port are what count. A database file (SQLite) must lie in the throwaway home or `target/` (`DBEE_ALLOW_DIRS` on the child): the driver checks it inside its open, once links and `..` are resolved, and the job fails with a `config` error naming the file; a file takes no SSH tunnel. An SSH key file and a CA file must lie there too: the connect job refuses any other with the same error, before it reads or sends anything. The run's SQL may open no other file, so SQLite's `ATTACH`, `VACUUM INTO`, `VACUUM` and the pragmas that move its temporary files are refused.
+2. Connect as [`control-protocol.md`](control-protocol.md#connecting) says, and drive the feature through the control channel: commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
 3. Assert on `ui.inspect` and `document.inspect`.
-4. Take `ui.screenshot` (the whole window) and open the PNG; `app.quit` ends the run.
+4. Take `ui.screenshot` (the whole window) with a file name, `{"path":"shot.png"}`, and open the PNG, which lands in `target/look/` (the reply says where); `app.quit` ends the run.
 
 The whole M1 day is scripted the same way, in the real window with the isolated run's environment: `cargo test --workspace --test m1_day -- --ignored --nocapture` drives the M1 day (an SSH connection, Ctrl+P, filters, a JSON value, a foreign key, edits, a query copied with its header) and saves a screenshot of each step in `target/m1-day/` ([`testing.md`](testing.md) §4). `--test m2_day` drives the same day on SQLite, MySQL through SSH and MariaDB in one window, with the engine cards, the Database field's list and Ctrl+P switching connection, into `target/m2-day/`.
 

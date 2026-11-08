@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane A, fix round 1: the query connection's TLS and a result whose columns do not fit)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C: the control channel's token and screenshot folder; before: the security review's lane A, fix round 1: the query connection's TLS and a result whose columns do not fit)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -68,7 +68,7 @@ What a fourth engine touches, in the product and in the test kit. Nothing in the
 
 ## Agent control
 
-- Control channel: `dbee --control <port>`, JSON lines on `127.0.0.1`: [`control-protocol.md`](control-protocol.md). `cargo xtask run-isolated` runs the app with it on a throwaway home.
+- Control channel: `dbee --control <port>`, JSON lines on `127.0.0.1`, after a token from a file only this user can read: [`control-protocol.md`](control-protocol.md). `cargo xtask run-isolated` runs the app with it on a throwaway home.
 - CLI **(planned)**: [`cli.md`](cli.md).
 
 ## Platforms
@@ -83,6 +83,7 @@ M1's and M2's crates are all in place. The driver interface exists, and the engi
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | The control channel's token file and proof (`crates/ui-egui/src/control_server.rs`), `ui.screenshot`'s one folder, and an isolated run's key and CA files (`crates/engine/src/allowed.rs`). |
 | 2026-11-08 | minor | `crates/sql`'s lexer ends a line comment where each engine does (`LexRules::cr_ends_line_comment`), and MySQL's read-only refuses `SET CHAR SET`. |
 | 2026-11-08 | minor | `crates/mysql`'s read-only refuses a `SET` of `sql_mode` or the character set from the raw text and reads `"…"` as the session's `sql_mode` at connect says; `crates/sql`'s lexer takes a `Reading`. |
 | 2026-11-08 | minor | `crates/mysql`'s read-only sets its session tracking up again after a caught change; `crates/sql` refuses another character set on a read-only MySQL connection. |

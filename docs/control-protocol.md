@@ -1,6 +1,6 @@
 # dbee control protocol
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane A, fix round 1: `certificateChecked`, `clearPassword`, `tooLarge`, no plain-link warning on this machine; before: the security review's lane A: `tls` on each connection, the plain-link warning, `status-tls` and `conn-ssl-note`; before: the tree's column `type` as Postgres shows it; an Apply whose trigger changed `client_encoding`)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C: a client sends the token first and checks the proof, `unauthorized`, `ui.screenshot` writes only in one folder, under a file name; before: the security review's lane A, fix round 1: `certificateChecked`, `clearPassword`, `tooLarge`, no plain-link warning on this machine; before: the security review's lane A: `tls` on each connection, the plain-link warning, `status-tls` and `conn-ssl-note`; before: the tree's column `type` as Postgres shows it; an Apply whose trigger changed `client_encoding`)
 
 The desktop app takes a control port, so agents and tests can drive the real window:
 
@@ -9,18 +9,56 @@ dbee --control 7979            # or DBEE_CONTROL_PORT=7979
 cargo xtask run-isolated       # the same on a throwaway home (docs/agents.md §4)
 ```
 
-The app listens on `127.0.0.1` only, before the window opens: a port in use stops the start, so an agent never drives another dbee by mistake. Any local process can connect, so it is meant for agents and tests. HTTP requests are refused (an `httpRefused` reply, then the connection closes, with nothing run), so web pages cannot use the channel through the browser. Send newline-delimited JSON; every request line gets one reply line, in order:
+The app listens on `127.0.0.1` only, before the window opens: a port in use stops the start, so an agent never drives another dbee by mistake. A client proves itself with a token only this user can read, and the app proves itself back (see [Connecting](#connecting)). It is meant for agents and tests. HTTP requests are refused (an `httpRefused` reply, then the connection closes, with nothing run), so web pages cannot use the channel through the browser. After the token, send newline-delimited JSON; every request line gets one reply line, in order:
 
 ```json
 {"id":1,"method":"engine.execute","params":{"command":"tab.newQuery","params":{"text":"select 1"}}}
 {"id":1,"ok":true,"result":{"tab":1}}
 ```
 
-Errors look like `{"id":…,"ok":false,"error":"…","code":"…","data":{…}}`. `code` is stable: an engine error's code (`disabled`, `badParams`, `unknownCommand`, `needsPassword`, `connectionLost`, `server`, `busy`, `timeout`, …) with its `data` (`{command, why}` for `disabled`; `{serverCode, detail, hint, position}` for `server`, `serverCode` being the server's own code, such as Postgres's SQLSTATE), or one of the channel's own: `invalidJson`, `badRequest` (not a request object, no `method`), `unknownMethod`, `badParams`, `notFound` (no such automation id), `lineTooLong`, `httpRefused`, `timeout`, `busy` (too many connections or too much queued input), `closed` (the app is closing), `screenshot`. A line that is not JSON gets an error reply and the server keeps serving; blank lines get none.
+Errors look like `{"id":…,"ok":false,"error":"…","code":"…","data":{…}}`. `code` is stable: an engine error's code (`disabled`, `badParams`, `unknownCommand`, `needsPassword`, `connectionLost`, `server`, `busy`, `timeout`, …) with its `data` (`{command, why}` for `disabled`; `{serverCode, detail, hint, position}` for `server`, `serverCode` being the server's own code, such as Postgres's SQLSTATE), or one of the channel's own: `invalidJson`, `badRequest` (not a request object, no `method`), `unknownMethod`, `badParams`, `notFound` (no such automation id), `lineTooLong`, `httpRefused`, `unauthorized`, `timeout`, `busy` (too many connections or too much queued input), `closed` (the app is closing), `screenshot`. A line that is not JSON gets an error reply and the server keeps serving; blank lines get none.
 
 - A request line holds at most 64 MiB.
 - `params` is an object (or left out). Every method takes `timeoutMs` (default 60,000, at most 600,000): how long its reply may wait. A reply that waits longer is a `timeout` error; a job it waited for goes on. A request still waiting to be handled when its reply timed out is not run.
 - Requests are handled in the window's frames, so the window must be shown (not minimised) for replies to come.
+
+## Connecting
+
+Once it holds the port, each start of the app writes a token file with two random lines, new each start. Only this user can read it (the file is `0600` and its folder `0700` where the system has file modes), and the app removes it when it ends.
+
+| Started by | The token file |
+|---|---|
+| `cargo xtask run-isolated --port <port>` | `target/isolated/<port>/control-token` |
+| `dbee --control <port>` | `control-<port>.token` in the settings folder (on Linux, `~/.config/dbee/`), or wherever `DBEE_CONTROL_TOKEN_FILE` says |
+
+To connect:
+
+1. Read the file.
+2. Connect to `127.0.0.1:<port>` and send the file's first line as your first line.
+3. Read the reply, `{"id":null,"ok":true,"result":{"proof":"…"}}`, and compare `proof` with the file's second line. If they differ, or the reply is anything else, you are not talking to the dbee that wrote the file: close the connection and send nothing more, above all no password.
+
+```python
+import json, socket
+
+token, proof = open("target/isolated/7983/control-token").read().split()
+s = socket.create_connection(("127.0.0.1", 7983))
+r = s.makefile("rb")
+s.sendall((token + "\n").encode())
+assert json.loads(r.readline())["result"]["proof"] == proof
+s.sendall(b'{"id":1,"method":"ui.inspect"}\n')
+print(r.readline())
+```
+
+For one request from a shell (this sends the request before it has seen the proof, so keep passwords out of it, and read the proof in the first reply line):
+
+```sh
+{ head -n 1 target/isolated/7983/control-token; echo '{"id":1,"method":"ui.inspect"}'; } | nc -q 5 127.0.0.1 7983
+```
+
+- A first line that is not the token gets one `unauthorized` reply, and the connection closes with nothing run. So does one longer than 4 KiB, or one that takes longer than 10 seconds to arrive. An `unauthorized` right after a start means the file was read before the new start wrote it: read it again.
+- The token works for every connection of that start, and for none after it. A file left by a run that was killed does no harm: a client that reads it gets no proof it can match, and the next start replaces it.
+- The file is written only after the port is taken. A start that finds the port in use stops and leaves the running app's file alone.
+- A start that cannot write the file stops too, and says why.
 
 ## Methods
 
@@ -35,7 +73,7 @@ Errors look like `{"id":…,"ok":false,"error":"…","code":"…","data":{…}}`
 | `ui.click` | `{id}` or `{x, y}`, then `button?` (`left`, `right`, `middle`), `count?` (1–3), `modifiers?` (`{shift?, cmd?, alt?, ctrl?}`) | `{x, y}`, once the frame that got the click has run. `{id}` clicks the centre of that automation id; a widget scrolled out of view is scrolled into view first (`notFound` when that fails within 30 frames). |
 | `ui.key` | `{key, shift?, cmd?, alt?, ctrl?}` | `{}`, once the key was handled. `key` is egui's name (`Enter`, `Escape`, `ArrowDown`, `A`, `F2`; `esc`, `down` and the like work too). `cmd` is Cmd on macOS and Ctrl elsewhere; with it, `C` and `X` arrive as copy and cut, as from the keyboard. Type text with `ui.text`. |
 | `ui.text` | `{text}` | `{}`: the text typed into the focused field. |
-| `ui.screenshot` | `{path?}` | A PNG of the window: written to `path` (relative to the app's working directory, folders created) as `{path, width, height}`, or `{base64, width, height}`. |
+| `ui.screenshot` | `{path?}` | A PNG of the window: saved as `{path, width, height}`, or sent back as `{base64, width, height}` without `path`. `path` is a file name such as `shot.png`, in the run's one screenshot folder, and the reply's `path` is the whole path of the file. An absolute path, a folder in the name, `..` and the like are `badParams`. The same name again replaces a file, but a link or a folder of that name is a `screenshot` error and stays as it is. The file is `0600`, as a picture can show data. The folder is `target/look` in `cargo xtask run-isolated`; otherwise `DBEE_SCREENSHOT_DIR`, else `screenshots` in the settings folder, made when needed. In an isolated run a folder outside the run's allowed folders (`DBEE_ALLOW_DIRS`) is a `screenshot` error, and nothing is made. |
 | `app.quit` | | `{}`; the window closes a frame later, after the reply is written. |
 
 Planned: `ui.dialog.*` (open, fill in, confirm and cancel dialogs) and `app.open {path}`.
