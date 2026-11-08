@@ -98,28 +98,26 @@ fn diagnostic(sql: &str, reading: Reading) -> bool {
     )
 }
 
-/// `sql` holds `word` as a whole word, in any case.
-fn holds_word(sql: &str, word: &str) -> bool {
+/// How often `sql`'s raw text, comments and strings included, holds `word` in any case, with no
+/// ASCII letter right before or after it: a digit, `_` or any other mark is a boundary, so a
+/// version comment's number glued to a word (`/*!40101SET`, which every server runs) does not hide it.
+/// It counts more than the server reads as the word (`t_set`, `character_set_client`): a rule built
+/// on it refuses more, never less.
+fn words(sql: &str, word: &str) -> usize {
     let b = sql.as_bytes();
-    let part = |at: usize| b.get(at).is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80);
-    (0..b.len().saturating_sub(word.len()).saturating_add(1)).any(|at| {
-        b.get(at..at + word.len()).is_some_and(|w| w.eq_ignore_ascii_case(word.as_bytes())) && !part(at + word.len()) && (at == 0 || !part(at - 1))
-    })
-}
-
-/// How often `sql` holds `word` in any case, as the server reads words: with no letter, digit,
-/// `_`, `$` or character outside ASCII after it, and none of these but a digit before it, since a
-/// version comment's number runs into the code after it (`/*!40101SET`).
-fn code_words(sql: &str, word: &str) -> usize {
-    let b = sql.as_bytes();
-    let part = |c: &u8| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$' || *c >= 0x80;
+    let letter = |c: &u8| c.is_ascii_alphabetic();
     (0..b.len().saturating_sub(word.len()).saturating_add(1))
         .filter(|&at| {
             b.get(at..at.saturating_add(word.len())).is_some_and(|w| w.eq_ignore_ascii_case(word.as_bytes()))
-                && !b.get(at.saturating_add(word.len())).is_some_and(part)
-                && !at.checked_sub(1).and_then(|before| b.get(before)).is_some_and(|c| part(c) && !c.is_ascii_digit())
+                && !b.get(at.saturating_add(word.len())).is_some_and(letter)
+                && !at.checked_sub(1).and_then(|before| b.get(before)).is_some_and(letter)
         })
         .count()
+}
+
+/// The raw text holds the word `SET` ([`words`]): what each raw rule about a `SET` reads.
+fn holds_set(sql: &str) -> bool {
+    words(sql, "set") > 0
 }
 
 /// `sql` holds the word `SET` and a character outside plain ASCII outside its `'…'` strings, read
@@ -128,7 +126,7 @@ fn code_words(sql: &str, word: &str) -> usize {
 /// (`ANSI_QUOTES` makes it a name), and the two readings cover a character set such as `sjis`,
 /// whose characters can end in the byte `\`.
 fn sets_a_lookalike(sql: &str, ansi_quotes: bool) -> bool {
-    holds_word(sql, "set")
+    holds_set(sql)
         && both_escapes(ansi_quotes).any(|reading| {
             tokenize_with(Dialect::MySql, sql, reading).iter().any(|t| {
                 let text = sql.get(t.range.clone()).unwrap_or_default();
@@ -154,9 +152,8 @@ fn holds_a_semicolon(sql: &str, ansi_quotes: bool) -> bool {
 /// `CHARACTER`, as `SET CHARACTER SET` does (a `CAST(… CHARACTER SET …)` holds one): a change of
 /// the character set, whichever way its text reads.
 fn names_the_character_set(sql: &str) -> bool {
-    let sets = code_words(sql, "set");
-    sets > 0
-        && (["names", "charset", "character_set_client"].iter().any(|w| code_words(sql, w) > 0) || (sets > 1 && code_words(sql, "character") > 0))
+    holds_set(sql)
+        && (["names", "charset", "character_set_client"].iter().any(|w| words(sql, w) > 0) || (words(sql, "set") > 1 && words(sql, "character") > 0))
 }
 
 /// Why dbee does not send `sql` on a read-only connection, from its raw text, comments included:
@@ -169,7 +166,7 @@ fn raw_refusal(sql: &str, flavor: Flavor, ansi_quotes: bool) -> Option<&'static 
         Some(LOOKALIKE)
     } else if names_session_track(sql) {
         Some(TRACKING)
-    } else if code_words(sql, "set") > 0 && code_words(sql, "sql_mode") > 0 {
+    } else if holds_set(sql) && words(sql, "sql_mode") > 0 {
         Some(SQL_MODE)
     } else if flavor == Flavor::MariaDb && holds("statement") && flavor.read_only_variables().iter().any(|v| holds(v)) {
         Some(SET_STATEMENT)
@@ -374,6 +371,9 @@ mod tests {
             "SET @a = '\u{c1}\\', s\u{eb}ssion_track_system_variables = '', @b = '\u{c1}\\'",
             "SET @gr\u{f6}\u{df}e = 1",
             "UPDATE t SET n = 1 -- \u{e9}",
+            "/*!40101SET SESSION \u{17f}ql_mode = 'ANSI_QUOTES'*/",
+            "/*!40101SET SESSION s\u{eb}ssion_track_system_variables = ''*/",
+            "/*M!100100SET @\u{e9} = 1*/",
         ] {
             assert_eq!(raw_refusal(sql, Flavor::MySql, false), Some(LOOKALIKE), "{sql}");
         }
@@ -428,7 +428,7 @@ mod tests {
         for sql in ["SELECT @@SESSION.sql_mode", "SHOW VARIABLES LIKE 'sql_mode'", "SET @sql_modes = 1", "SET @x = 'presql_mode'"] {
             assert_eq!(raw_refusal(sql, Flavor::MySql, false), None, "{sql}");
         }
-        assert_eq!(code_words("/*!40101SET x*/ SET; asset set_x", "set"), 2);
+        assert_eq!(words("/*!40101SET x*/ SET; asset set_x t1set offset", "set"), 4);
     }
 
     /// A statement that holds `SET` beside a word that changes the character set is refused,
@@ -443,13 +443,15 @@ mod tests {
             "set charset 'sjis'",
             "SET @@SESSION.`character_set_client` = 'utf8mb4'",
             "SET @a = CAST('x' AS CHAR CHARACTER SET sjis)",
+            // `_set_` holds the word: reading the variable is refused too.
+            "SELECT @@character_set_client",
         ] {
             assert!(names_the_character_set(sql), "{sql}");
         }
         for sql in [
             "SELECT CAST('x' AS CHAR CHARACTER SET utf8mb4)",
             "SHOW CHARACTER SET LIKE 'utf8%'",
-            "SELECT @@character_set_client, CHARSET('x')",
+            "SELECT CHARSET('x'), @@collation_connection",
             "SET @a = CONVERT('x' USING sjis)",
             "SET @namesake = 1",
         ] {

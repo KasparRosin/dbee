@@ -718,7 +718,8 @@ fn read_only_mysql_keeps_the_character_set_utf8() {
                 wrong.push(format!("{}: {sql} -> {e}", t.name()));
             }
         }
-        run_text(&mut s, &format!("SELECT @@SESSION.{variable}, @@SESSION.character_set_client, 'Z\u{fc}rich'")).unwrap();
+        // `character_set_client` holds the word `set`, so the session's collation tells the character set.
+        run_text(&mut s, &format!("SELECT @@SESSION.{variable}, LEFT(@@SESSION.collation_connection, 7), 'Z\u{fc}rich'")).unwrap();
         let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
         let shown = qt.shown_result().and_then(|r| r.result.rows.first().cloned());
         let want = [Some("1".to_owned()), Some("utf8mb4".to_owned()), Some("Z\u{fc}rich".to_owned())];
@@ -773,6 +774,53 @@ fn read_only_mysql_keeps_sql_mode() {
             }
         }
         run_text(&mut s, &format!("SELECT @@SESSION.sql_mode = '{}', @@SESSION.{variable}", mode.clone().unwrap_or_default())).unwrap();
+        let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
+        let shown = qt.shown_result().and_then(|r| r.result.rows.first().cloned());
+        if shown != Some(vec![Some("1".to_owned()), Some("1".to_owned())]) {
+            wrong.push(format!("{}: the mode is still {mode:?}, and the session read-only: {shown:?}", t.name()));
+        }
+        let written = q(&t, &format!("SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM {sc}.{name}"));
+        if !written.is_empty() {
+            wrong.push(format!("{}: rows written {written}", t.name()));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// A version comment's number glued to `SET` (`/*!40101SET …*/`, which every server runs) hides no
+/// name outside plain ASCII: the lookalikes of `sql_mode` and `session_track_system_variables`
+/// that MySQL 8.0 and later or MariaDB 13 fold to the real names are refused, so the session keeps
+/// its mode and a MariaDB block written for `ANSI_QUOTES` writes nothing.
+#[test]
+fn read_only_mysql_finds_set_after_a_version_number() {
+    let _db = require_testdb!();
+    let mut wrong = Vec::new();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_glued"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut s = read_only_session(&t);
+        run_text(&mut s, "SELECT @@SESSION.sql_mode").unwrap();
+        let mode = first_value(&s).unwrap_or_default();
+        for sql in [
+            "/*!40101SET SESSION \u{17f}ql_mode = 'ANSI_QUOTES'*/",
+            "/*!40101SET SESSION sql_m\u{f6}de = 'ANSI_QUOTES'*/",
+            "/*!40101SET SESSION \u{17f}ession_track_system_variables = ''*/",
+            "/*!40101SET SESSION s\u{eb}ssion_track_system_variables = ''*/",
+        ] {
+            match run_text(&mut s, sql) {
+                Err(e) if e.code() == "readOnly" && e.to_string().contains("plain ASCII") => {}
+                other => wrong.push(format!("{}: {sql} -> {}", t.name(), other.err().map_or("ran".into(), |e| e.to_string()))),
+            }
+        }
+        let block = format!(
+            "BEGIN NOT ATOMIC DECLARE \"\\\" CHAR(1) DEFAULT '\\''; START TRANSACTION READ WRITE; INSERT INTO {sc}.{name} VALUES (1); COMMIT; END -- '\""
+        );
+        if run_text(&mut s, &block).is_ok() {
+            wrong.push(format!("{}: ran {block}", t.name()));
+        }
+        run_text(&mut s, &format!("SELECT @@SESSION.sql_mode = '{mode}', @@SESSION.{variable}")).unwrap();
         let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
         let shown = qt.shown_result().and_then(|r| r.result.rows.first().cloned());
         if shown != Some(vec![Some("1".to_owned()), Some("1".to_owned())]) {

@@ -72,6 +72,8 @@ const MYSQL: KindInfo = KindInfo {
         "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')",
         "/*!40101SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'*/",
         "SET @a = (SELECT '\\'' AS \"\\\"), NAMES sjis, @b = '\"'",
+        "/*!40101SET SESSION sql_m\u{f6}de = 'ANSI_QUOTES'*/",
+        "/*!40101SET SESSION s\u{eb}ssion_track_system_variables = ''*/",
     ],
     read_only_unseen: Unseen::Function {
         make: "CREATE FUNCTION {f}() RETURNS INT DETERMINISTIC BEGIN SET SESSION transaction_read_only = 0; RETURN 1; END",
@@ -131,6 +133,8 @@ pub(crate) const MARIADB: KindInfo = KindInfo {
         "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')",
         "/*!40101SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'*/",
         "SET @a = (SELECT '\\'' AS \"\\\"), NAMES sjis, @b = '\"'",
+        "/*!40101SET SESSION \u{17f}ql_mode = 'ANSI_QUOTES'*/",
+        "/*!40101SET SESSION \u{17f}ession_track_system_variables = ''*/",
     ],
     read_only_unseen: Unseen::Function {
         make: "CREATE FUNCTION {f}() RETURNS INT DETERMINISTIC BEGIN SET SESSION tx_read_only = 0; RETURN 1; END",
