@@ -16,6 +16,7 @@
 //! configured `host`, also through an SSH tunnel. Falling back to plain in `prefer` mode is the
 //! driver's part.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -61,10 +62,12 @@ pub fn state(on: bool, mode: SslMode, ca_file: Option<&Path>) -> TlsState {
     }
 }
 
-/// [`PLAIN_AFTER_PREFER`] for a `prefer` connection without TLS (`on`) on a `direct` link; the
-/// SSH tunnel encrypts the link as far as the SSH server.
-pub fn prefer_warning(mode: SslMode, on: bool, direct: bool) -> Option<String> {
-    (mode == SslMode::Prefer && !on && direct).then(|| PLAIN_AFTER_PREFER.to_owned())
+/// [`PLAIN_AFTER_PREFER`] for a `prefer` connection without TLS (`on`) whose direct link reached
+/// `reached` over the network: not through the SSH tunnel, which encrypts the link as far as the
+/// SSH server (`None`), nor to a loopback address, from which nothing leaves the machine.
+pub fn prefer_warning(mode: SslMode, on: bool, reached: Option<SocketAddr>) -> Option<String> {
+    let network = reached.is_some_and(|addr| !addr.ip().to_canonical().is_loopback());
+    (mode == SslMode::Prefer && !on && network).then(|| PLAIN_AFTER_PREFER.to_owned())
 }
 
 /// The rustls settings for `mode`, offering the `alpn` protocol ids; `None` for `disable`.
@@ -259,10 +262,20 @@ mod tests {
         assert_eq!(state(true, SslMode::Require, None), TlsState::Unchecked);
         assert_eq!(state(true, SslMode::Require, ca), TlsState::Checked);
         assert_eq!(state(true, SslMode::VerifyFull, None), TlsState::Checked);
-        assert_eq!(prefer_warning(SslMode::Prefer, false, true).as_deref(), Some(PLAIN_AFTER_PREFER));
-        // TLS on, the tunnel's link, or plain text chosen: no warning.
-        for (mode, on, direct) in [(SslMode::Prefer, true, true), (SslMode::Prefer, false, false), (SslMode::Disable, false, true)] {
-            assert_eq!(prefer_warning(mode, on, direct), None, "{mode:?} {on} {direct}");
+        let network: SocketAddr = "192.0.2.7:5432".parse().unwrap();
+        assert_eq!(prefer_warning(SslMode::Prefer, false, Some(network)).as_deref(), Some(PLAIN_AFTER_PREFER));
+        // TLS on, the tunnel's link, plain text chosen, or an address of this machine: no warning.
+        let cases = [
+            (SslMode::Prefer, true, Some(network)),
+            (SslMode::Prefer, false, None),
+            (SslMode::Disable, false, Some(network)),
+            (SslMode::Prefer, false, Some("127.0.0.1:5432".parse().unwrap())),
+            (SslMode::Prefer, false, Some("127.9.9.9:5432".parse().unwrap())),
+            (SslMode::Prefer, false, Some("[::1]:5432".parse().unwrap())),
+            (SslMode::Prefer, false, Some("[::ffff:127.0.0.1]:5432".parse().unwrap())),
+        ];
+        for (mode, on, reached) in cases {
+            assert_eq!(prefer_warning(mode, on, reached), None, "{mode:?} {on} {reached:?}");
         }
         assert!(PLAIN_AFTER_PREFER.contains("not encrypted") && PLAIN_AFTER_PREFER.contains("verify-full"));
     }

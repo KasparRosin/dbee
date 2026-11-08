@@ -337,7 +337,9 @@ fn tls_server(l: TcpListener, tls: Arc<rustls::ServerConfig>) -> JoinHandle<()> 
 #[tokio::test]
 async fn the_link_says_whether_it_is_encrypted_and_checked() {
     let db = require_testdb!();
-    for (mode, warned) in [(SslMode::Prefer, true), (SslMode::Disable, false)] {
+    // On 127.0.0.1 nothing leaves the machine: no warning, also under prefer (the decision for an
+    // address on the network is `dbee_driver::tls`'s own test).
+    for (mode, warned) in [(SslMode::Prefer, false), (SslMode::Disable, false)] {
         let (l, port) = listener();
         let server = plain_server(l);
         let conn = open(&config(port, mode, None)).await.unwrap();

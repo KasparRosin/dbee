@@ -4,17 +4,16 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use dbee_config::{ALLOW_PUBLIC_KEY, ConnectionConfig, SslMode};
 use dbee_core::ResultSet;
-use dbee_driver::{CONNECT_TIMEOUT, DbError, Limits, MAX_MESSAGE, MAX_VERSION, Purpose, QUERY_LIMITS, ServerInfo, Target, kept_text, tls};
+use dbee_driver::{
+    CONNECT_TIMEOUT, DbError, Limits, MAX_MESSAGE, MAX_VERSION, Purpose, QUERY_LIMITS, ServerInfo, Target, connect_first, kept_text, tls, within,
+};
 use dbee_ssh::Tunnel;
 use mysql_common::constants::{CapabilityFlags, Command, MariadbCapabilities};
 use rustls::pki_types::ServerName;
 use rustls::{AlertDescription, ClientConfig};
-use socket2::{SockRef, TcpKeepalive};
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::auth::{self, Login, ServerKey};
@@ -49,12 +48,6 @@ const NO_TRACKING: &str = "this server cannot report a change of read-only mode,
 /// The warning when the user allowed the server's key on a link that should have had TLS.
 const UNCHECKED_KEY: &str =
     "The password was protected with a key from the server that dbee could not check, because the connection is not encrypted";
-
-/// TCP keepalive on direct connections, as for Postgres: the first probe after this long
-/// without traffic, then one this often, and the connection is dead after this many unanswered.
-const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-const KEEPALIVE_RETRIES: u32 = 3;
 
 /// Where a connection goes: directly to `host:port` (to `reached` once known), or through the
 /// tunnel to it. TLS checks `host`.
@@ -136,6 +129,20 @@ impl Session {
         session_track: bool,
     ) -> Result<Session, DbError> {
         let (stream, reached) = open_stream(route).await?;
+        within(CONNECT_TIMEOUT, "the server", Session::start(stream, reached, route, who, tls, key, wanted, session_track)).await
+    }
+
+    /// The greeting, TLS and the login on `stream`, which reached `reached`.
+    async fn start(
+        stream: Stream,
+        reached: Option<SocketAddr>,
+        route: &Route,
+        who: &Login<'_>,
+        tls: &TlsUse,
+        key: ServerKey,
+        wanted: MariadbCapabilities,
+        session_track: bool,
+    ) -> Result<Session, DbError> {
         let mut packets = Packets::new(stream, LOGIN_MAX_PAYLOAD);
         let greeting = auth::parse_greeting(&packets.read().await?)?;
         let config = match tls {
@@ -206,27 +213,21 @@ pub(crate) fn names_session_track(sql: &str) -> bool {
     sql.as_bytes().windows(NAME.len()).any(|w| w.eq_ignore_ascii_case(NAME))
 }
 
-/// The stream to the server, and the address it reached when it is direct.
+/// The stream to the server, and the address it reached when it is direct: the address already
+/// reached, or each the host name gives in turn, each within [`CONNECT_TIMEOUT`] as libpq's
+/// `connect_timeout`.
 async fn open_stream(route: &Route) -> Result<(Stream, Option<SocketAddr>), DbError> {
     if let Some(tunnel) = &route.tunnel {
-        return Ok((Box::new(tunnel.connect(&route.host, route.port).await?), None));
+        let channel = within(CONNECT_TIMEOUT, "the SSH tunnel's channel", async { Ok(tunnel.connect(&route.host, route.port).await?) }).await?;
+        return Ok((Box::new(channel), None));
     }
-    let connecting = match route.reached {
-        Some(addr) => TcpStream::connect(addr).await,
-        None => TcpStream::connect((route.host.as_str(), route.port)).await,
+    let addrs: Vec<SocketAddr> = match route.reached {
+        Some(addr) => vec![addr],
+        None => tokio::net::lookup_host((route.host.as_str(), route.port)).await.map_err(|e| DbError::Connect(e.to_string()))?.collect(),
     };
-    let tcp = connecting.map_err(|e| DbError::Connect(e.to_string()))?;
-    tune(&tcp).map_err(|e| DbError::Connect(e.to_string()))?;
     // Without the address it reached, a cancel's KILL would look the name up again.
-    let reached = tcp.peer_addr().map_err(|e| DbError::Connect(e.to_string()))?;
+    let (tcp, reached) = connect_first(&addrs, CONNECT_TIMEOUT).await?;
     Ok((Box::new(tcp), Some(reached)))
-}
-
-/// A direct connection's socket options: no delay for small packets, and keepalive probes.
-fn tune(tcp: &TcpStream) -> std::io::Result<()> {
-    tcp.set_nodelay(true)?;
-    let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_IDLE).with_interval(KEEPALIVE_INTERVAL).with_retries(KEEPALIVE_RETRIES);
-    SockRef::from(tcp).set_tcp_keepalive(&keepalive)
 }
 
 /// Run the TLS handshake on the session's stream; the server name checked is the configured
@@ -309,7 +310,7 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     }?;
     let on = session.tls.is_some();
     info.tls = Some(tls::state(on, cfg.ssl_mode, cfg.ca_file.as_deref()));
-    info.warnings.extend(tls::prefer_warning(cfg.ssl_mode, on, t.tunnel.is_none()));
+    info.warnings.extend(tls::prefer_warning(cfg.ssl_mode, on, session.reached));
     if session.used_server_key && key == ServerKey::AllowedWithWarning {
         info.warnings.push(UNCHECKED_KEY.into());
     }
@@ -350,11 +351,11 @@ async fn attempt(
     log::info!("mysql: connecting to {addr}{}", if route.tunnel.is_some() { " through SSH" } else { "" });
     let opening = async {
         let mut session = Session::open(route, who, tls, key, purpose == Purpose::Query || read_only).await?;
-        let (info, id) = setup(&mut session, read_only, purpose).await?;
+        let (info, id) = within(CONNECT_TIMEOUT, "the server", setup(&mut session, read_only, purpose)).await?;
         Ok((session, info, id))
     };
-    match tokio::time::timeout(CONNECT_TIMEOUT, opening).await {
-        Ok(Ok((session, info, id))) => {
+    match opening.await {
+        Ok((session, info, id)) => {
             log::info!(
                 "mysql: connected to {addr} ({} {}, TLS {})",
                 info.product,
@@ -363,7 +364,7 @@ async fn attempt(
             );
             Ok((session, info, id))
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             let e = while_connecting(e);
             log::info!("mysql: connecting to {addr} failed ({})", e.code());
             Err(match e {
@@ -371,7 +372,6 @@ async fn attempt(
                 other => other,
             })
         }
-        Err(_) => Err(DbError::Connect(format!("{addr} did not answer within {} s", CONNECT_TIMEOUT.as_secs()))),
     }
 }
 
@@ -652,19 +652,6 @@ mod tests {
         assert_eq!(versions, DbError::Tls(NO_SHARED_VERSION.into()));
         assert!(versions.to_string().contains("TLS versions") && versions.to_string().contains("SSH tunnel"), "{versions}");
         assert_eq!(alert(AlertDescription::BadCertificate).code(), "tls");
-    }
-
-    // socket2 reads the keepalive times back on Unix only.
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn direct_connections_have_keepalive() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let tcp = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
-        tune(&tcp).unwrap();
-        let sock = socket2::SockRef::from(&tcp);
-        assert!(tcp.nodelay().unwrap() && sock.keepalive().unwrap());
-        let set = (sock.tcp_keepalive_time().unwrap(), sock.tcp_keepalive_interval().unwrap(), sock.tcp_keepalive_retries().unwrap());
-        assert_eq!(set, (KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_RETRIES));
     }
 
     /// A route that knows the address reached connects there, without looking its name up.

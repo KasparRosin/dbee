@@ -1,6 +1,8 @@
 //! The interface every database driver implements, and that the engine holds without naming a
 //! driver: [`Driver`] opens a [`Connection`], whose [`Cancel`] stops what runs on it.
 
+use std::future::Future;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,9 +18,43 @@ use crate::{ApplyError, ApplyGate, DbError};
 /// What every driver call returns: a future that fails with a [`DbError`].
 pub type DbFuture<'a, T> = BoxFuture<'a, Result<T, DbError>>;
 
-/// How long opening a connection (TCP or the tunnel channel, TLS, login and the session setup)
-/// and delivering a cancel may take.
+/// How long each step of opening a connection may take: the TCP connection to each address in
+/// turn (as libpq's `connect_timeout`), or the tunnel's channel; the login; the session setup.
+/// Also how long delivering a cancel may take.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// TCP keepalive on direct connections: the first probe after this long without traffic, then
+/// one each [`KEEPALIVE_INTERVAL`]; the connection is dead after [`KEEPALIVE_RETRIES`] unanswered.
+pub const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+pub const KEEPALIVE_RETRIES: u32 = 3;
+
+/// A direct connection's socket options: no delay for small messages, and keepalive probes.
+pub fn tune(tcp: &tokio::net::TcpStream) -> std::io::Result<()> {
+    tcp.set_nodelay(true)?;
+    let keepalive = socket2::TcpKeepalive::new().with_time(KEEPALIVE_IDLE).with_interval(KEEPALIVE_INTERVAL).with_retries(KEEPALIVE_RETRIES);
+    socket2::SockRef::from(tcp).set_tcp_keepalive(&keepalive)
+}
+
+/// `step`, or a [`DbError::Connect`] saying that `what` did not answer within `limit`.
+pub async fn within<T>(limit: Duration, what: &str, step: impl Future<Output = Result<T, DbError>>) -> Result<T, DbError> {
+    tokio::time::timeout(limit, step).await.unwrap_or_else(|_| Err(DbError::Connect(format!("{what} did not answer within {} s", limit.as_secs()))))
+}
+
+/// The first of `addrs`, in turn, that takes a TCP connection within `limit` each, [`tune`]d.
+pub async fn connect_first(addrs: &[SocketAddr], limit: Duration) -> Result<(tokio::net::TcpStream, SocketAddr), DbError> {
+    let mut last = DbError::Connect("the host name gave no address".into());
+    for &addr in addrs {
+        let connecting = async {
+            tokio::net::TcpStream::connect(addr).await.and_then(|tcp| tune(&tcp).map(|()| tcp)).map_err(|e| DbError::Connect(e.to_string()))
+        };
+        match within(limit, &addr.to_string(), connecting).await {
+            Ok(tcp) => return Ok((tcp, addr)),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
 
 /// Caps on what one run keeps: rows, and bytes of memory its columns and kept rows hold, as
 /// [`column_cost`], [`ROW_COST`] and [`cell_cost`] count them.
@@ -207,6 +243,51 @@ mod tests {
         let e = cancel_not_delivered();
         assert_eq!(e.to_string(), "the cancel request was not delivered within 15 s");
         assert_eq!(e.code(), "other");
+    }
+
+    // socket2 reads the keepalive times back on Unix only.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn direct_connections_have_keepalive() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = tokio::net::TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        tune(&tcp).unwrap();
+        let sock = socket2::SockRef::from(&tcp);
+        assert!(tcp.nodelay().unwrap() && sock.keepalive().unwrap());
+        let set = (sock.tcp_keepalive_time().unwrap(), sock.tcp_keepalive_interval().unwrap(), sock.tcp_keepalive_retries().unwrap());
+        assert_eq!(set, (KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_RETRIES));
+    }
+
+    /// An address that takes no connection: a listener whose queue is full, so the kernel drops
+    /// the next SYN (Linux). The streams keep the queue full.
+    #[cfg(target_os = "linux")]
+    fn silent_address() -> (socket2::Socket, SocketAddr, Vec<std::net::TcpStream>) {
+        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        socket.bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into()).unwrap();
+        socket.listen(0).unwrap();
+        let addr = socket.local_addr().unwrap().as_socket().unwrap();
+        let mut queued = Vec::new();
+        for _ in 0..4 {
+            match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+                Ok(s) => queued.push(s),
+                Err(_) => break,
+            }
+        }
+        (socket, addr, queued)
+    }
+
+    /// The limit holds for each address in turn: one that takes no connection gives way to the
+    /// next, as libpq's `connect_timeout` does.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn each_address_has_the_connect_limit() {
+        let (_silent, silent, _queued) = silent_address();
+        let answering = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good = answering.local_addr().unwrap();
+        let reached = connect_first(&[silent, good], Duration::from_millis(300)).await.map(|(_, addr)| addr);
+        assert_eq!(reached, Ok(good));
+        let e = connect_first(&[silent], Duration::from_millis(300)).await.err().unwrap();
+        assert_eq!(e, DbError::Connect(format!("{silent} did not answer within 0 s")));
     }
 
     #[test]
