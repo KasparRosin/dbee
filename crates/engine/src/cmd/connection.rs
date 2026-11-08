@@ -1240,7 +1240,10 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
         saved.save_secrets = true;
         Ok(())
     })
-    .map_err(|e| format!("the connections file could not be written: {e}"))?;
+    .map_err(|e| match e {
+        ConfigError::Locked => "another dbee window was changing the connections file".to_owned(),
+        e => format!("the connections file could not be written: {e}"),
+    })?;
     kept?;
     config.save_secrets = true;
     if !store_secrets(secret_store.as_ref(), &config.id, typed) {

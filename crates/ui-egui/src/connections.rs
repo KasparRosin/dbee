@@ -63,7 +63,7 @@ use egui::{
 };
 use serde_json::json;
 
-use crate::app::Origin;
+use crate::app::{Origin, sentence};
 use crate::automation::Tags;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
@@ -370,7 +370,7 @@ pub(crate) fn form_done(
                 // The file is there now.
                 conn.form.create_file = false;
                 if let Some(note) = v.get("secretsNote").and_then(Json::as_str) {
-                    app.notice(format!("The password was not saved: {note}"));
+                    app.notice(sentence(&format!("The password was not saved: {note}")));
                 }
             }
             _ => {}

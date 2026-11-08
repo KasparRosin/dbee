@@ -17,7 +17,7 @@ pub enum ConfigError {
     Url(String),
     /// The connections file could not be read or written.
     Io(String),
-    /// Another dbee held the connections file's lock past [`LOCK_WAIT`](crate::store::LOCK_WAIT).
+    /// Another dbee held the connections file's lock for over 5 seconds.
     Locked,
 }
 

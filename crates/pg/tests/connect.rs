@@ -283,6 +283,7 @@ async fn cancel_sleep(conn: Arc<PgConnection>, watcher: &PgConnection) {
 /// listens on `127.0.0.1` only: a stand-in on each other address, as another server behind the
 /// name would be, must get no cancel request. (Without TLS, so the request is the protocol's plain
 /// CancelRequest; other tests' logins to `localhost` that reach a stand-in first are not counted.)
+/// Where `localhost` gives no other address a stand-in can listen on, it says `SKIPPED`.
 #[tokio::test]
 async fn a_cancel_goes_to_the_address_the_connection_reached() {
     const CANCEL_REQUEST_CODE: [u8; 4] = 80877102_u32.to_be_bytes();
@@ -293,7 +294,13 @@ async fn a_cancel_goes_to_the_address_the_connection_reached() {
         let hits = Arc::new(AtomicUsize::new(0));
         let mut stand_ins = 0;
         for addr in tokio::net::lookup_host(("localhost", s.port)).await.unwrap().filter(|a| *a != server) {
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| panic!("a stand-in on {addr}: {e}"));
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => listener,
+                // Something else answers there, and would hide a request sent to it.
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => panic!("a stand-in on {addr}: {e}"),
+                // Nothing can listen there (no IPv6, say): a request sent there fails the cancel.
+                Err(_) => continue,
+            };
             stand_ins += 1;
             let hits = Arc::clone(&hits);
             tokio::spawn(async move {
@@ -305,7 +312,12 @@ async fn a_cancel_goes_to_the_address_the_connection_reached() {
                 }
             });
         }
-        assert!(stand_ins > 0, "`localhost` names no address but the server's here, so nothing would show where the request went");
+        if stand_ins == 0 {
+            dbee_testkit::skipped(
+                "a_cancel_goes_to_the_address_the_connection_reached: `localhost` gives no address but the server's that a stand-in can listen on, so nothing would show where the request went",
+            );
+            return;
+        }
         let watcher = open(&config(s, SslMode::Prefer), db).await;
         cancel_sleep(conn, &watcher).await;
         assert_eq!(hits.load(Ordering::SeqCst), 0, "pg{}: a cancel request went to another address", s.major());

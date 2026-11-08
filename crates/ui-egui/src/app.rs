@@ -84,7 +84,7 @@ pub(crate) fn notice_text(e: &EngineError) -> String {
 
 /// `text` trimmed, its first letter upper-cased, ending in a full stop (unless it ends in one
 /// already, or in `?`, `!` or `…`).
-fn sentence(text: &str) -> String {
+pub(crate) fn sentence(text: &str) -> String {
     let text = text.trim();
     let mut chars = text.chars();
     let Some(first) = chars.next() else { return String::new() };

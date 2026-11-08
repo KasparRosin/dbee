@@ -449,6 +449,22 @@ fn save_password_on_open_checks_the_settings_the_file_holds_then() {
     assert_eq!((&file["saved"][0]["host"], &file["saved"][0]["saveSecrets"]), (&json!("localhost"), &json!(false)), "{file}");
 }
 
+/// While another dbee holds the connections file, the note is one plain clause: the UI shows it
+/// after "The password was not saved:".
+#[test]
+fn save_password_on_open_while_another_dbee_holds_the_file() {
+    let _db = require_testdb!();
+    let mut s = session();
+    let id = save(&mut s, ConnectionConfig { save_secrets: false, ..pg14_config() }, None);
+    let lock = s.home.home.join("config").join(dbee_config::store::LOCK_FILE);
+    let other = std::fs::File::options().create(true).truncate(false).write(true).open(lock).unwrap();
+    other.lock().unwrap();
+    let r = open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
+    other.unlock().unwrap();
+    assert_eq!((&r["secretsSaved"], &r["secretsNote"]), (&json!(false), &json!("another dbee window was changing the connections file")), "{r}");
+    assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), None);
+}
+
 #[test]
 fn save_password_on_open_of_a_saved_connection_turns_saving_on() {
     let _db = require_testdb!();
