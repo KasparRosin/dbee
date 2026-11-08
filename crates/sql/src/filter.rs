@@ -195,7 +195,7 @@ fn filter_sql(d: Dialect, filter: &Filter, table: &TableInfo) -> Result<Option<S
         if items.is_empty() {
             return Err(SqlError::EmptyIn);
         }
-        return Ok(Some(format!("{name} IN ({})", items.join(", "))));
+        return Ok(Some(d.in_list(column, &name, &items)));
     }
-    Ok(Some(format!("{name} {} {}", filter.op.symbol(), d.filter_value(column, &filter.value)?)))
+    Ok(Some(d.compare(column, &name, filter.op, &d.filter_value(column, &filter.value)?)))
 }

@@ -265,6 +265,8 @@ mod tests {
             has_default: false,
             generated: Generated::No,
             hidden: false,
+            type_label: String::new(),
+            builtin_operators: false,
         };
         ColumnRow { table: tr(schema, table), position, column }
     }

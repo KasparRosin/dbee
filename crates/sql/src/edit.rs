@@ -2,6 +2,7 @@
 //!
 //! Column types come from the catalog's `ColumnInfo`, never from user text.
 
+use crate::filter::Op;
 use crate::{Dialect, SqlError};
 use dbee_core::{ColumnInfo, TableInfo};
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,7 @@ fn key_sql(d: Dialect, key: &[(&ColumnInfo, &str)]) -> Result<String, SqlError> 
     if key.is_empty() {
         return Err(SqlError::NoKey);
     }
-    let parts = key.iter().map(|(c, v)| Ok(format!("{} = {}", d.ident(&c.name)?, d.key_value(c, v)?))).collect::<Result<Vec<_>, SqlError>>()?;
+    let parts = key.iter().map(|(c, v)| Ok(d.compare(c, &d.ident(&c.name)?, Op::Eq, &d.key_value(c, v)?))).collect::<Result<Vec<_>, SqlError>>()?;
     Ok(parts.join(" AND "))
 }
 

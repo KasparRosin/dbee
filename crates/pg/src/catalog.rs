@@ -45,7 +45,9 @@ WHERE n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_tem
 ORDER BY n.nspname, c.relname";
 
 /// Columns of those relations. `d` resolves each domain (also a domain over a domain) to its
-/// non-domain base type.
+/// non-domain base type, whose operators are `pg_catalog`'s when it is built in, an array, an enum,
+/// a range or a composite (`ColumnInfo::builtin_operators`). The type's own schema, plain and
+/// quoted, gives its label.
 const COLUMNS_SQL: &str = "\
 WITH RECURSIVE d(root, cur) AS (
     SELECT oid, typbasetype FROM pg_catalog.pg_type WHERE typtype = 'd'
@@ -56,11 +58,14 @@ WITH RECURSIVE d(root, cur) AS (
 )
 SELECT n.nspname, c.relname, a.attnum::text, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),
        bt.typname, bt.typcategory::text, a.attnotnull::text,
-       (a.atthasdef OR a.attidentity IN ('a', 'd'))::text, (a.attgenerated <> '')::text, (a.attidentity = 'a')::text
+       (a.atthasdef OR a.attidentity IN ('a', 'd'))::text, (a.attgenerated <> '')::text, (a.attidentity = 'a')::text,
+       (bt.typnamespace = 'pg_catalog'::pg_catalog.regnamespace OR bt.typtype IN ('e', 'r', 'm', 'c') OR bt.typcategory = 'A')::text,
+       tn.nspname, pg_catalog.quote_ident(tn.nspname)
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
 JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
 LEFT JOIN base ON base.root = t.oid
 JOIN pg_catalog.pg_type bt ON bt.oid = COALESCE(base.base, t.oid)
 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
@@ -100,6 +105,16 @@ pub(crate) fn class_for(typname: &str, category: char) -> TypeClass {
         (_, 'S') => TypeClass::Text,
         (_, 'D') => TypeClass::DateTime,
         _ => TypeClass::Other,
+    }
+}
+
+/// `type_sql` as the user reads it: without `quoted_schema.` when `schema` is on the session's
+/// search path (`visible`), as Postgres shows a type the path finds.
+fn label(type_sql: &str, schema: &str, quoted_schema: &str, visible: &[String]) -> String {
+    let unqualified = type_sql.strip_prefix(quoted_schema).and_then(|rest| rest.strip_prefix('.'));
+    match unqualified {
+        Some(rest) if visible.iter().any(|v| v == schema) => rest.to_owned(),
+        _ => type_sql.to_owned(),
     }
 }
 
@@ -204,9 +219,12 @@ pub async fn catalog_rows(conn: &PgConnection) -> Result<CatalogBuilder, DbError
     for row in &columns.rows {
         let category = text(row, 6, "typcategory")?.chars().next().ok_or_else(|| bad("typcategory"))?;
         let base_type = owned(row, 5, "typname")?;
+        let type_sql = owned(row, 4, "format_type")?;
+        let type_label = label(&type_sql, text(row, 12, "type schema")?, text(row, 13, "quoted type schema")?, conn.visible_schemas());
         let column = ColumnInfo {
             name: owned(row, 3, "column name")?,
-            type_sql: owned(row, 4, "format_type")?,
+            type_label,
+            type_sql,
             class: class_for(&base_type, category),
             base_type,
             not_null: boolean(row, 7, "attnotnull")?,
@@ -217,6 +235,7 @@ pub async fn catalog_rows(conn: &PgConnection) -> Result<CatalogBuilder, DbError
                 (false, false) => Generated::No,
             },
             hidden: false,
+            builtin_operators: boolean(row, 11, "builtin operators")?,
         };
         let table = TableRef { schema: owned(row, 0, "column schema")?, name: owned(row, 1, "column relation")? };
         catalog.column(ColumnRow { table, position: number(row, 2, "attnum")?, column });

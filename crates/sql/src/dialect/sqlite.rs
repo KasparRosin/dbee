@@ -10,6 +10,8 @@ pub(crate) const RULES: Rules = Rules {
     ident_quote: '"',
     text_type: "TEXT",
     count_all: "count(*)",
+    operator_schema: None,
+    like_operators: None,
     ilike: ILike::LowerLike,
     // Its LIKE has no escape character unless one is named.
     like_escape: " ESCAPE '\\'",

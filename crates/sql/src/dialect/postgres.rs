@@ -1,15 +1,17 @@
 //! PostgreSQL.
 
-use super::{Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, Paging, Rules, Separator, StringLiteral, Values, quoted};
+use super::{Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, LikeOperators, Paging, Rules, Separator, StringLiteral, Values, quoted};
 use crate::SqlError;
 use crate::refusal::{CHAIN, CHANGES_MODE, Code, READ_WRITE, Refusal};
 use dbee_core::ColumnInfo;
 
 pub(crate) const RULES: Rules = Rules {
     ident_quote: '"',
-    text_type: "text",
+    text_type: "pg_catalog.text",
     // Named in `pg_catalog`, so no `count` made in a schema the search path lists first is used.
     count_all: "pg_catalog.count(*)",
+    operator_schema: Some("pg_catalog"),
+    like_operators: Some(LikeOperators { like: "~~", not_like: "!~~", ilike: "~~*", not_ilike: "!~~*" }),
     ilike: ILike::Native,
     // Its LIKE escapes with `\` already.
     like_escape: "",
@@ -89,9 +91,9 @@ pub(super) fn filter_value(column: &ColumnInfo, text: &str) -> Result<String, Sq
 /// server sent fits its column, so key comparisons keep `type_sql`.
 fn write_type(column: &ColumnInfo) -> &str {
     match column.base_type.as_str() {
-        "varchar" | "bpchar" => "text",
+        "varchar" | "bpchar" => "pg_catalog.text",
         "bit" | "varbit" => "bit varying",
-        "_varchar" | "_bpchar" => "text[]",
+        "_varchar" | "_bpchar" => "pg_catalog.text[]",
         "_bit" | "_varbit" => "bit varying[]",
         _ => &column.type_sql,
     }
@@ -106,11 +108,11 @@ fn write_type(column: &ColumnInfo) -> &str {
 /// others are [`write_type`]: `varchar(n)` as `text`, whose indexes it uses.
 fn filter_type(column: &ColumnInfo) -> &str {
     match column.base_type.as_str() {
-        "bpchar" => "bpchar",
-        "bit" => "\"bit\"",
+        "bpchar" => "pg_catalog.bpchar",
+        "bit" => "pg_catalog.\"bit\"",
         "_varchar" => "character varying[]",
-        "_bpchar" => "bpchar[]",
-        "_bit" => "\"bit\"[]",
+        "_bpchar" => "pg_catalog.bpchar[]",
+        "_bit" => "pg_catalog.\"bit\"[]",
         _ => write_type(column),
     }
 }
@@ -620,6 +622,8 @@ mod tests {
             has_default: false,
             generated: Default::default(),
             hidden: false,
+            type_label: String::new(),
+            builtin_operators: false,
         }
     }
 
@@ -632,17 +636,17 @@ mod tests {
     #[test]
     fn write_type_drops_the_lengths_an_explicit_cast_cuts_to() {
         for (base, type_sql, write) in [
-            ("varchar", "character varying(10)", "text"),
-            ("varchar", "character varying", "text"),
-            ("bpchar", "character(2)", "text"),
+            ("varchar", "character varying(10)", "pg_catalog.text"),
+            ("varchar", "character varying", "pg_catalog.text"),
+            ("bpchar", "character(2)", "pg_catalog.text"),
             ("bit", "bit(2)", "bit varying"),
             ("varbit", "bit varying(2)", "bit varying"),
-            ("_varchar", "character varying(3)[]", "text[]"),
-            ("_bpchar", "character(2)[]", "text[]"),
+            ("_varchar", "character varying(3)[]", "pg_catalog.text[]"),
+            ("_bpchar", "character(2)[]", "pg_catalog.text[]"),
             ("_bit", "bit(2)[]", "bit varying[]"),
             ("_varbit", "bit varying(2)[]", "bit varying[]"),
             // A domain over varchar(5): the base type decides, the assignment to the column checks the domain.
-            ("varchar", "scratch.d5", "text"),
+            ("varchar", "scratch.d5", "pg_catalog.text"),
             // Everything else is written as its own type.
             ("text", "text", "text"),
             ("int4", "integer", "integer"),

@@ -18,6 +18,8 @@ fn ci(name: &str, type_sql: &str, category: char) -> ColumnInfo {
         has_default: false,
         generated: Default::default(),
         hidden: false,
+        type_label: String::new(),
+        builtin_operators: false,
     }
 }
 
@@ -76,8 +78,8 @@ fn the_m1_day_filters() {
 }
 #[test]
 fn like_casts_column_to_text() {
-    assert_eq!(w(f("note", Op::ILike, "%ann%")), "CAST(\"note\" AS text) ILIKE '%ann%'");
-    assert_eq!(w(f("note", Op::NotLike, "a'b")), "CAST(\"note\" AS text) NOT LIKE 'a''b'");
+    assert_eq!(w(f("note", Op::ILike, "%ann%")), "(CAST(\"note\" AS pg_catalog.text) OPERATOR(pg_catalog.~~*) '%ann%')");
+    assert_eq!(w(f("note", Op::NotLike, "a'b")), "(CAST(\"note\" AS pg_catalog.text) OPERATOR(pg_catalog.!~~) 'a''b')");
 }
 #[test]
 fn in_splits_commas() {
@@ -295,8 +297,8 @@ fn writes_cast_to_the_type_without_its_length_so_the_column_refuses_a_long_value
     let changes: Vec<(&ColumnInfo, &NewValue)> = changes.iter().map(|&(c, v)| (c, v)).collect();
     assert_eq!(
         update_sql(Dialect::Postgres, &lengths(), &[(length_col("k"), "key")], &changes).unwrap(),
-        "UPDATE \"scratch\".\"lengths\" SET \"v\" = CAST('abcdefghijkl' AS text), \"c\" = CAST('abc' AS text), \"b\" = CAST('101' AS bit varying), \
-         \"vb\" = CAST('101' AS bit varying), \"d\" = CAST('abcdefg' AS text), \"va\" = CAST('{abcd}' AS text[]), \"ca\" = CAST('{abc}' AS text[]), \
+        "UPDATE \"scratch\".\"lengths\" SET \"v\" = CAST('abcdefghijkl' AS pg_catalog.text), \"c\" = CAST('abc' AS pg_catalog.text), \"b\" = CAST('101' AS bit varying), \
+         \"vb\" = CAST('101' AS bit varying), \"d\" = CAST('abcdefg' AS pg_catalog.text), \"va\" = CAST('{abcd}' AS pg_catalog.text[]), \"ca\" = CAST('{abc}' AS pg_catalog.text[]), \
          \"ba\" = CAST('{101}' AS bit varying[]), \"vba\" = CAST('{101}' AS bit varying[]) WHERE \"k\" = CAST('key' AS character varying(10))",
         "the key keeps its own type: it is a value the server sent"
     );
@@ -307,7 +309,7 @@ fn writes_cast_to_the_type_without_its_length_so_the_column_refuses_a_long_value
             &[(length_col("k"), &text("k1")), (length_col("b"), &text("1")), (length_col("v"), &NewValue::Null)]
         )
         .unwrap(),
-        "INSERT INTO \"scratch\".\"lengths\" (\"k\", \"b\", \"v\") VALUES (CAST('k1' AS text), CAST('1' AS bit varying), NULL)"
+        "INSERT INTO \"scratch\".\"lengths\" (\"k\", \"b\", \"v\") VALUES (CAST('k1' AS pg_catalog.text), CAST('1' AS bit varying), NULL)"
     );
     assert_eq!(
         delete_sql(Dialect::Postgres, &lengths(), &[(length_col("k"), "key")]).unwrap(),
@@ -321,17 +323,17 @@ fn filters_compare_with_the_type_without_its_length_so_a_long_value_matches_noth
     // `varchar(n)` as `text` (its indexes are text_ops), `char(n)` as `bpchar` (trailing spaces
     // do not count), `bit(n)` as `"bit"` (quoted: a bare `bit` is `bit(1)`).
     let w = |filter: Filter| where_sql(Dialect::Postgres, &Condition::Filters(vec![filter]), &lengths()).unwrap().unwrap();
-    assert_eq!(w(f("v", Op::Eq, "abcdefghijkl")), "\"v\" = CAST('abcdefghijkl' AS text)");
-    assert_eq!(w(f("c", Op::Ge, "abc")), "\"c\" >= CAST('abc' AS bpchar)");
-    assert_eq!(w(f("b", Op::Ne, "1")), "\"b\" <> CAST('1' AS \"bit\")");
+    assert_eq!(w(f("v", Op::Eq, "abcdefghijkl")), "\"v\" = CAST('abcdefghijkl' AS pg_catalog.text)");
+    assert_eq!(w(f("c", Op::Ge, "abc")), "\"c\" >= CAST('abc' AS pg_catalog.bpchar)");
+    assert_eq!(w(f("b", Op::Ne, "1")), "\"b\" <> CAST('1' AS pg_catalog.\"bit\")");
     assert_eq!(w(f("vb", Op::Lt, "101")), "\"vb\" < CAST('101' AS bit varying)");
-    assert_eq!(w(f("d", Op::Eq, "abcdefg")), "\"d\" = CAST('abcdefg' AS text)");
+    assert_eq!(w(f("d", Op::Eq, "abcdefg")), "\"d\" = CAST('abcdefg' AS pg_catalog.text)");
     // Each IN item too.
-    assert_eq!(w(f("v", Op::In, "abcdefghijkl, x")), "\"v\" IN (CAST('abcdefghijkl' AS text), CAST('x' AS text))");
-    assert_eq!(w(f("b", Op::In, "101,01")), "\"b\" IN (CAST('101' AS \"bit\"), CAST('01' AS \"bit\"))");
-    assert_eq!(w(f("c", Op::In, "abc")), "\"c\" IN (CAST('abc' AS bpchar))");
+    assert_eq!(w(f("v", Op::In, "abcdefghijkl, x")), "\"v\" IN (CAST('abcdefghijkl' AS pg_catalog.text), CAST('x' AS pg_catalog.text))");
+    assert_eq!(w(f("b", Op::In, "101,01")), "\"b\" IN (CAST('101' AS pg_catalog.\"bit\"), CAST('01' AS pg_catalog.\"bit\"))");
+    assert_eq!(w(f("c", Op::In, "abc")), "\"c\" IN (CAST('abc' AS pg_catalog.bpchar))");
     // Patterns compare the column's text, as before.
-    assert_eq!(w(f("c", Op::Like, "a%")), "CAST(\"c\" AS text) LIKE 'a%'");
+    assert_eq!(w(f("c", Op::Like, "a%")), "(CAST(\"c\" AS pg_catalog.text) OPERATOR(pg_catalog.~~) 'a%')");
 }
 
 #[test]
@@ -339,7 +341,7 @@ fn array_filters_compare_as_arrays_of_the_type_without_its_length() {
     let w = |filter: Filter| where_sql(Dialect::Postgres, &Condition::Filters(vec![filter]), &lengths()).unwrap().unwrap();
     assert_eq!(w(f("va", Op::Eq, "{abcd}")), "\"va\" = CAST('{abcd}' AS character varying[])");
     assert_eq!(w(f("va", Op::Lt, "{b}")), "\"va\" < CAST('{b}' AS character varying[])");
-    assert_eq!(w(f("ca", Op::In, "{abc}")), "\"ca\" IN (CAST('{abc}' AS bpchar[]))");
-    assert_eq!(w(f("ba", Op::Gt, "{101}")), "\"ba\" > CAST('{101}' AS \"bit\"[])");
+    assert_eq!(w(f("ca", Op::In, "{abc}")), "\"ca\" IN (CAST('{abc}' AS pg_catalog.bpchar[]))");
+    assert_eq!(w(f("ba", Op::Gt, "{101}")), "\"ba\" > CAST('{101}' AS pg_catalog.\"bit\"[])");
     assert_eq!(w(f("vba", Op::Eq, "{101}")), "\"vba\" = CAST('{101}' AS bit varying[])");
 }

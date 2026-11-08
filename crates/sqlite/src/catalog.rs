@@ -203,11 +203,13 @@ fn relation(s: &mut Session, running: &Running, name: String, kind: RelKind, is_
             name: owned(row, 0, "column name")?,
             base_type: values::base_type(&declared).to_owned(),
             class: values::class_of(&declared),
+            type_label: declared.clone(),
             type_sql: declared,
             not_null: flag(row, 2, "not null")?,
             has_default: default || generated == Generated::Expression,
             generated,
             hidden: hidden == 1,
+            builtin_operators: false,
         };
         r.columns.push((column, number(row, 4, "key position")?));
     }
@@ -267,6 +269,8 @@ fn row_id(name: &str) -> ColumnInfo {
         has_default: true,
         generated: Generated::No,
         hidden: true,
+        type_label: String::new(),
+        builtin_operators: false,
     }
 }
 
@@ -369,6 +373,8 @@ mod tests {
             has_default: false,
             generated: Generated::No,
             hidden: false,
+            type_label: String::new(),
+            builtin_operators: false,
         };
         let parent = Relation {
             table: TableRef { schema: SCHEMA.into(), name: "Parent".into() },

@@ -278,6 +278,7 @@ fn add_columns(
         let extra = nullable(row, 9, "extra")?.unwrap_or_default().to_ascii_lowercase();
         let column = ColumnInfo {
             name,
+            type_label: type_sql.clone(),
             type_sql,
             base_type,
             class: class_of(&facts),
@@ -285,6 +286,7 @@ fn add_columns(
             has_default: has_default(flavor, nullable(row, 8, "column default")?, &extra),
             generated: generated(&extra),
             hidden: false,
+            builtin_operators: false,
         };
         catalog.column(ColumnRow { table, position: number(row, 2, "ordinal position")?, column });
     }

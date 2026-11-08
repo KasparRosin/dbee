@@ -1018,6 +1018,8 @@ fn synthetic(n: usize) -> Arc<Catalog> {
         has_default: false,
         generated: Default::default(),
         hidden: false,
+        type_label: String::new(),
+        builtin_operators: false,
     };
     let table = |schema: &str, name: String| TableInfo {
         table: TableRef { schema: schema.into(), name },

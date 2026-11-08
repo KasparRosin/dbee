@@ -674,6 +674,8 @@ mod tests {
             has_default: false,
             generated: Default::default(),
             hidden: false,
+            type_label: String::new(),
+            builtin_operators: false,
         };
         TableInfo {
             table: TableRef { schema: schema.into(), name: name.into() },

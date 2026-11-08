@@ -10,6 +10,8 @@ pub(crate) const RULES: Rules = Rules {
     ident_quote: '`',
     text_type: "CHAR",
     count_all: "count(*)",
+    operator_schema: None,
+    like_operators: None,
     ilike: ILike::LowerLike,
     // 8.0 and later have no LIKE escape under NO_BACKSLASH_ESCAPES (measured); hex reads alike in every mode.
     like_escape: " ESCAPE _utf8mb4 X'5C'",

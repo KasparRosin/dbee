@@ -935,6 +935,8 @@ mod tests {
             has_default: false,
             generated: Default::default(),
             hidden: false,
+            type_label: String::new(),
+            builtin_operators: false,
         };
         assert_eq!(Kind::of(Some(&c)), Kind::Bool);
         c.class = TypeClass::Json;

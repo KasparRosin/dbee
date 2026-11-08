@@ -1,6 +1,7 @@
 //! dbee's own Postgres SQL never runs a function or operator someone made in another schema: the
 //! catalog reads run with `search_path` set to `pg_catalog, pg_temp` and name `pg_catalog`'s
-//! functions, and a search path that puts another schema before `pg_catalog` gets a warning.
+//! functions, filters and saved changes name `pg_catalog`'s operators where the column's are built
+//! in, and a search path that puts another schema before `pg_catalog` gets a warning.
 //!
 //! Each test makes its own database on every Postgres test server, plants such objects in its
 //! `public` schema, and drops the database at the end; nothing else is written.
@@ -9,6 +10,10 @@ use dbee_config::{ConnectionConfig, SslMode};
 use dbee_driver::{Purpose, QUERY_LIMITS, Target};
 use dbee_pg::catalog::{list_connection, list_databases, load_catalog};
 use dbee_pg::{PgConnection, connect, query};
+use dbee_sql::Dialect;
+use dbee_sql::edit::{NewValue, update_sql};
+use dbee_sql::filter::{Condition, Filter, Op};
+use dbee_sql::select::{count_sql, page_sql};
 use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
 
 fn config(s: &Server, database: &str) -> ConnectionConfig {
@@ -157,5 +162,120 @@ async fn the_catalog_read_keeps_its_own_search_path() {
         let calls = sql(&c, "SELECT pg_catalog.count(*)::pg_catalog.text FROM public.calls").await;
         println!("{}: calls of the planted oid = oid while dbee read the catalog: {calls:?}", s.name);
         assert_eq!(calls, [[Some("0".to_owned())]], "{}: the catalog read used the session's search path", s.name);
+    }
+}
+
+/// Logging operators in `public`, each an exact match where `pg_catalog`'s needs a coercion or is
+/// polymorphic (`varchar` with `varchar` or `text`, `integer[]`, an enum), so Postgres would take
+/// them for an unqualified operator with the default search path.
+const PLANTED_OPERATORS: &str = r#"
+CREATE TABLE public.calls (what text);
+CREATE TYPE public.mood AS ENUM ('sad', 'ok', 'happy');
+CREATE FUNCTION public.log(what text) RETURNS void LANGUAGE sql AS $$ INSERT INTO public.calls VALUES (what) $$;
+CREATE FUNCTION public.eq_vv(varchar, varchar) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('varchar = varchar'); RETURN $1::text OPERATOR(pg_catalog.=) $2::text; END $$;
+CREATE OPERATOR public.= (LEFTARG = varchar, RIGHTARG = varchar, FUNCTION = public.eq_vv);
+CREATE FUNCTION public.eq_vt(varchar, text) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('varchar = text'); RETURN $1::text OPERATOR(pg_catalog.=) $2; END $$;
+CREATE OPERATOR public.= (LEFTARG = varchar, RIGHTARG = text, FUNCTION = public.eq_vt);
+CREATE FUNCTION public.ne_vt(varchar, text) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('varchar <> text'); RETURN $1::text OPERATOR(pg_catalog.<>) $2; END $$;
+CREATE OPERATOR public.<> (LEFTARG = varchar, RIGHTARG = text, FUNCTION = public.ne_vt);
+CREATE FUNCTION public.lt_vt(varchar, text) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('varchar < text'); RETURN $1::text OPERATOR(pg_catalog.<) $2; END $$;
+CREATE OPERATOR public.< (LEFTARG = varchar, RIGHTARG = text, FUNCTION = public.lt_vt);
+CREATE FUNCTION public.like_vv(varchar, varchar) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('varchar ~~ varchar'); RETURN $1::text OPERATOR(pg_catalog.~~) $2::text; END $$;
+CREATE OPERATOR public.~~ (LEFTARG = varchar, RIGHTARG = varchar, FUNCTION = public.like_vv);
+CREATE FUNCTION public.eq_ii(int[], int[]) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('integer[] = integer[]'); RETURN $1 OPERATOR(pg_catalog.=) $2; END $$;
+CREATE OPERATOR public.= (LEFTARG = int[], RIGHTARG = int[], FUNCTION = public.eq_ii);
+CREATE FUNCTION public.eq_mm(public.mood, public.mood) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN PERFORM public.log('mood = mood'); RETURN $1 OPERATOR(pg_catalog.=) $2; END $$;
+CREATE OPERATOR public.= (LEFTARG = public.mood, RIGHTARG = public.mood, FUNCTION = public.eq_mm);
+CREATE TABLE public.t (code varchar(10) PRIMARY KEY, note text, tags int[]);
+INSERT INTO public.t VALUES ('a', 'n', '{1,2}'), ('b', 'm', '{3}');
+CREATE TABLE public.e (m public.mood PRIMARY KEY, note text);
+INSERT INTO public.e VALUES ('ok', 'n');
+"#;
+
+/// dbee's own filters, counts and saved changes name `pg_catalog`'s operators where the column's
+/// are built in (a `varchar`, an array, an enum), so the planted exact matches are never called,
+/// with the default search path; and the column's index still serves the comparison.
+#[tokio::test(flavor = "multi_thread")]
+async fn filters_and_saved_changes_run_no_operator_planted_in_public() {
+    let db = require_testdb!();
+    for s in db.servers_of(&[Kind::Postgres]) {
+        let own = OwnDatabase::new(s, db).await;
+        let planted = conn(s, db, &own.name).await;
+        sql(&planted, PLANTED_OPERATORS).await;
+        // The planted operators are the ones unqualified SQL finds.
+        sql(&planted, "SELECT count(*) FROM public.t WHERE code = 'a'::text").await;
+        assert_eq!(sql(&planted, "SELECT count(*)::text FROM public.calls").await, [[Some("2".to_owned())]], "{}", s.name);
+        sql(&planted, "DELETE FROM public.calls").await;
+
+        let c = conn(s, db, &own.name).await;
+        let catalog = load_catalog(&c).await.unwrap_or_else(|e| panic!("{}: {e}", s.name));
+        let table = |name: &str| catalog.schemas.iter().flat_map(|sc| &sc.tables).find(|t| t.table.name == name).expect("a planted table").clone();
+        let (t, e) = (table("t"), table("e"));
+        let d = Dialect::Postgres;
+        let filter = |column: &str, op: Op, value: &str| Condition::Filters(vec![Filter { column: column.into(), op, value: value.into() }]);
+        let mut sent = Vec::new();
+        for (cond, rows) in [
+            (filter("code", Op::Eq, "a"), 1),
+            (filter("code", Op::Ne, "a"), 1),
+            (filter("code", Op::Lt, "b"), 1),
+            (filter("code", Op::In, "a, b"), 2),
+            (filter("code", Op::Like, "a%"), 1),
+            (filter("tags", Op::Eq, "{1,2}"), 1),
+        ] {
+            let page = page_sql(d, &t, &cond, None, 0).unwrap();
+            let count = count_sql(d, &t, &cond).unwrap();
+            assert_eq!(query::run_untyped(&c, &page, QUERY_LIMITS).await.map(|r| r.rows.len()), Ok(rows), "{}: {page}", s.name);
+            assert_eq!(query::scalar_u64(&c, &count).await, Ok(rows as u64), "{}: {count}", s.name);
+            sent.push(page);
+        }
+        let note = |t: &dbee_core::TableInfo| t.column("note").unwrap().clone();
+        let update_t = update_sql(d, &t, &[(t.column("code").unwrap(), "a")], &[(&note(&t), &NewValue::Text("x".into()))]).unwrap();
+        let update_e = update_sql(d, &e, &[(e.column("m").unwrap(), "ok")], &[(&note(&e), &NewValue::Text("x".into()))]).unwrap();
+        assert_eq!(dbee_pg::apply(&c, &[update_t.clone(), update_e.clone()]).await.map_err(|e| e.error), Ok(2), "{}", s.name);
+        sent.extend([update_t, update_e]);
+        let calls = sql(&planted, "SELECT what || ' ' || count(*) FROM public.calls GROUP BY what ORDER BY what").await;
+        println!("{}: sent {sent:#?}\ncalls of the planted operators: {calls:?}", s.name);
+        assert!(calls.is_empty(), "{}: dbee's SQL ran {calls:?}", s.name);
+        // The primary keys' indexes still serve the comparisons.
+        sql(&c, "SET enable_seqscan = off").await;
+        for statement in [&sent[0], &sent[3], &sent[6], &sent[7]] {
+            let plan: Vec<String> = sql(&c, &format!("EXPLAIN {statement}")).await.into_iter().flatten().flatten().collect();
+            assert!(plan.iter().any(|line| line.contains("Index")), "{}: {statement}: {plan:#?}", s.name);
+        }
+    }
+}
+
+/// A type whose schema is on the session's search path shows without it, as before dbee read the
+/// catalog with only `pg_catalog` on the path, while `type_sql` names the schema for SQL; a type
+/// outside the path, and a built-in one, show as `type_sql`. An extension type keeps its own
+/// operators, so `citext` still compares without case.
+#[tokio::test(flavor = "multi_thread")]
+async fn type_labels_leave_out_a_schema_on_the_search_path() {
+    let db = require_testdb!();
+    for s in db.servers_of(&[Kind::Postgres]) {
+        let own = OwnDatabase::new(s, db).await;
+        let c = conn(s, db, &own.name).await;
+        sql(&c, "CREATE EXTENSION citext; CREATE SCHEMA other; CREATE TYPE public.mood AS ENUM ('ok'); CREATE TYPE other.feel AS ENUM ('ok')").await;
+        sql(&c, "CREATE TABLE public.l (id int PRIMARY KEY, c public.citext, m public.mood, f other.feel, v varchar(5)); INSERT INTO public.l VALUES (1, 'Ann', 'ok', 'ok', 'x')").await;
+        let c = conn(s, db, &own.name).await;
+        let catalog = load_catalog(&c).await.unwrap_or_else(|e| panic!("{}: {e}", s.name));
+        let l = catalog.schemas.iter().flat_map(|sc| &sc.tables).find(|t| t.table.name == "l").expect("l").clone();
+        let shown = |name: &str| {
+            let column = l.column(name).unwrap();
+            (column.type_sql.clone(), column.column().type_label, column.builtin_operators)
+        };
+        assert_eq!(shown("c"), ("public.citext".to_owned(), "citext".to_owned(), false), "{}", s.name);
+        assert_eq!(shown("m"), ("public.mood".to_owned(), "mood".to_owned(), true), "{}", s.name);
+        assert_eq!(shown("f"), ("other.feel".to_owned(), "other.feel".to_owned(), true), "{}", s.name);
+        assert_eq!(shown("v"), ("character varying(5)".to_owned(), "character varying(5)".to_owned(), true), "{}", s.name);
+        let cond = Condition::Filters(vec![Filter { column: "c".into(), op: Op::Eq, value: "ANN".into() }]);
+        assert_eq!(query::scalar_u64(&c, &count_sql(Dialect::Postgres, &l, &cond).unwrap()).await, Ok(1), "{}: citext's own =", s.name);
     }
 }

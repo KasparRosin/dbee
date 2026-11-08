@@ -40,6 +40,13 @@ pub(crate) struct Rules {
     pub text_type: &'static str,
     /// The aggregate that counts a table's rows, as the count statement writes it.
     pub count_all: &'static str,
+    /// The schema of the engine's built-in operators, which dbee's comparisons name where a
+    /// column's operators are built in ([`ColumnInfo::builtin_operators`]); `None` where operators
+    /// have no schema.
+    pub operator_schema: Option<&'static str>,
+    /// The operators `like`, `not like`, `ilike` and `not ilike` are, named in `operator_schema`
+    /// (their column is always cast to text); `None` to write the words.
+    pub like_operators: Option<LikeOperators>,
     pub ilike: ILike,
     /// What follows a `LIKE` pattern so that `\` escapes `%`, `_` and itself, as it does by
     /// default on Postgres: an `ESCAPE` clause, or nothing.
@@ -113,6 +120,27 @@ pub(crate) struct LexRules {
     /// space), a `U` or a `0` two (`U&'`, `0x` and a hex digit), all else one. A lone `$` reads
     /// further where dollar quotes exist ([`crate::lexer::reach`]).
     pub lookahead: usize,
+}
+
+/// The operator names of `like`, `not like`, `ilike` and `not ilike`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LikeOperators {
+    pub like: &'static str,
+    pub not_like: &'static str,
+    pub ilike: &'static str,
+    pub not_ilike: &'static str,
+}
+
+impl LikeOperators {
+    fn of(self, op: Op) -> Option<&'static str> {
+        match op {
+            Op::Like => Some(self.like),
+            Op::NotLike => Some(self.not_like),
+            Op::ILike => Some(self.ilike),
+            Op::NotILike => Some(self.not_ilike),
+            _ => None,
+        }
+    }
 }
 
 /// How `ilike` and `not ilike` are written.
@@ -339,12 +367,37 @@ impl Dialect {
     pub fn like(self, op: Op, column_sql: &str, pattern_sql: &str) -> String {
         let text = self.as_text(column_sql);
         let escape = self.rules().like_escape;
+        if let (Some(schema), Some(name)) = (self.rules().operator_schema, self.rules().like_operators.and_then(|l| l.of(op))) {
+            return format!("({text} OPERATOR({schema}.{name}) {pattern_sql}){escape}");
+        }
         match (self.rules().ilike, op) {
             (ILike::LowerLike, Op::ILike | Op::NotILike) => {
                 let not = if op == Op::NotILike { "NOT " } else { "" };
                 format!("LOWER({text}) {not}LIKE LOWER({pattern_sql}){escape}")
             }
             (ILike::Native | ILike::LowerLike, _) => format!("{text} {} {pattern_sql}{escape}", op.symbol()),
+        }
+    }
+
+    /// `column_sql <op> value_sql`, the column compared with one value by `=`, `<>`, `<`, `<=`, `>`
+    /// or `>=`: the operator named by its schema, in parentheses, where the column's are built in.
+    pub fn compare(self, column: &ColumnInfo, column_sql: &str, op: Op, value_sql: &str) -> String {
+        match self.rules().operator_schema {
+            Some(schema) if column.builtin_operators => format!("({column_sql} OPERATOR({schema}.{}) {value_sql})", op.symbol()),
+            _ => format!("{column_sql} {} {value_sql}", op.symbol()),
+        }
+    }
+
+    /// `column_sql IN (items)`; where the column's operators are built in and have a schema, its
+    /// `=` with each item, named, joined by `OR` (`= ANY (ARRAY[…])` would read an array column's
+    /// items as one array of more dimensions).
+    pub fn in_list(self, column: &ColumnInfo, column_sql: &str, items: &[String]) -> String {
+        match self.rules().operator_schema {
+            Some(schema) if column.builtin_operators => {
+                let each: Vec<String> = items.iter().map(|item| format!("{column_sql} OPERATOR({schema}.=) {item}")).collect();
+                format!("({})", each.join(" OR "))
+            }
+            _ => format!("{column_sql} IN ({})", items.join(", ")),
         }
     }
 
@@ -477,6 +530,8 @@ mod tests {
             has_default: false,
             generated: Default::default(),
             hidden: false,
+            type_label: String::new(),
+            builtin_operators: false,
         }
     }
 
@@ -505,36 +560,64 @@ mod tests {
         }
     }
 
+    /// Postgres names `pg_catalog`'s operators, in parentheses, where a column's are built in, and
+    /// writes the plain ones for a type that brings its own (`citext`).
     #[test]
-    fn postgres_output_is_unchanged() {
+    fn postgres_output_names_pg_catalogs_operators() {
         let pg = Dialect::Postgres;
-        let mut total = of_class("total", "numeric(12,2)", "numeric", TypeClass::Number);
+        let builtin = |name: &str, type_sql: &str, base: &str, class| ColumnInfo { builtin_operators: true, ..of_class(name, type_sql, base, class) };
+        let mut total = builtin("total", "numeric(12,2)", "numeric", TypeClass::Number);
         total.not_null = true;
         let t = table_of(vec![
-            of_class("id", "bigint", "int8", TypeClass::Number),
+            builtin("id", "bigint", "int8", TypeClass::Number),
             total.clone(),
-            of_class("note", "character varying(10)", "varchar", TypeClass::Text),
+            builtin("note", "character varying(10)", "varchar", TypeClass::Text),
+            of_class("ci", "public.citext", "citext", TypeClass::LongText),
         ]);
         let f = |column: &str, op, value: &str| Condition::Filters(vec![Filter { column: column.into(), op, value: value.into() }]);
-        assert_eq!(where_sql(pg, &f("note", Op::ILike, "%a'b%"), &t).unwrap().unwrap(), "CAST(\"note\" AS text) ILIKE '%a''b%'");
-        assert_eq!(where_sql(pg, &f("note", Op::Eq, "x"), &t).unwrap().unwrap(), "\"note\" = CAST('x' AS text)");
-        assert_eq!(where_sql(pg, &f("id", Op::In, "1, 2"), &t).unwrap().unwrap(), "\"id\" IN (CAST('1' AS bigint), CAST('2' AS bigint))");
+        assert_eq!(
+            where_sql(pg, &f("note", Op::ILike, "%a'b%"), &t).unwrap().unwrap(),
+            "(CAST(\"note\" AS pg_catalog.text) OPERATOR(pg_catalog.~~*) '%a''b%')"
+        );
+        assert_eq!(where_sql(pg, &f("note", Op::Eq, "x"), &t).unwrap().unwrap(), "(\"note\" OPERATOR(pg_catalog.=) CAST('x' AS pg_catalog.text))");
+        assert_eq!(where_sql(pg, &f("note", Op::Ne, "x"), &t).unwrap().unwrap(), "(\"note\" OPERATOR(pg_catalog.<>) CAST('x' AS pg_catalog.text))");
+        assert_eq!(
+            where_sql(pg, &f("id", Op::In, "1, 2"), &t).unwrap().unwrap(),
+            "(\"id\" OPERATOR(pg_catalog.=) CAST('1' AS bigint) OR \"id\" OPERATOR(pg_catalog.=) CAST('2' AS bigint))"
+        );
+        assert_eq!(where_sql(pg, &f("ci", Op::Eq, "A"), &t).unwrap().unwrap(), "\"ci\" = CAST('A' AS public.citext)");
+        assert_eq!(where_sql(pg, &f("ci", Op::In, "A"), &t).unwrap().unwrap(), "\"ci\" IN (CAST('A' AS public.citext))");
+        let both = Condition::Filters(vec![
+            Filter { column: "id".into(), op: Op::Gt, value: "1".into() },
+            Filter { column: "note".into(), op: Op::Le, value: "b".into() },
+        ]);
+        assert_eq!(
+            where_sql(pg, &both, &t).unwrap().unwrap(),
+            "(\"id\" OPERATOR(pg_catalog.>) CAST('1' AS bigint)) AND (\"note\" OPERATOR(pg_catalog.<=) CAST('b' AS pg_catalog.text))"
+        );
         assert_eq!(
             page_sql(pg, &t, &Condition::None, None, 2).unwrap(),
-            "SELECT \"id\", \"total\", \"note\" FROM \"shop\".\"orders\" ORDER BY \"id\" LIMIT 101 OFFSET 200"
+            "SELECT \"id\", \"total\", \"note\", \"ci\" FROM \"shop\".\"orders\" ORDER BY \"id\" LIMIT 101 OFFSET 200"
         );
         assert_eq!(
             count_sql(pg, &t, &f("id", Op::Gt, "5")).unwrap(),
-            "SELECT pg_catalog.count(*) FROM \"shop\".\"orders\" WHERE \"id\" > CAST('5' AS bigint)"
+            "SELECT pg_catalog.count(*) FROM \"shop\".\"orders\" WHERE (\"id\" OPERATOR(pg_catalog.>) CAST('5' AS bigint))"
         );
         let id = t.column("id").unwrap();
         let note = t.column("note").unwrap();
         assert_eq!(
             update_sql(pg, &t, &[(id, "7")], &[(note, &NewValue::Text("Ann".into())), (&total, &NewValue::Null)]).unwrap(),
-            "UPDATE \"shop\".\"orders\" SET \"note\" = CAST('Ann' AS text), \"total\" = NULL WHERE \"id\" = CAST('7' AS bigint)"
+            "UPDATE \"shop\".\"orders\" SET \"note\" = CAST('Ann' AS pg_catalog.text), \"total\" = NULL WHERE (\"id\" OPERATOR(pg_catalog.=) CAST('7' AS bigint))"
         );
         assert_eq!(insert_sql(pg, &t, &[]).unwrap(), "INSERT INTO \"shop\".\"orders\" DEFAULT VALUES");
-        assert_eq!(delete_sql(pg, &t, &[(id, "7")]).unwrap(), "DELETE FROM \"shop\".\"orders\" WHERE \"id\" = CAST('7' AS bigint)");
+        assert_eq!(
+            delete_sql(pg, &t, &[(id, "7")]).unwrap(),
+            "DELETE FROM \"shop\".\"orders\" WHERE (\"id\" OPERATOR(pg_catalog.=) CAST('7' AS bigint))"
+        );
+        // MySQL and SQLite operators have no schema: the flag changes nothing there.
+        let my = Dialect::MySql;
+        assert_eq!(where_sql(my, &f("id", Op::In, "1, 2"), &t).unwrap().unwrap(), "`id` IN ('1', '2')");
+        assert_eq!(where_sql(my, &f("id", Op::Eq, "1"), &t).unwrap().unwrap(), "`id` = '1'");
     }
 
     #[test]
@@ -646,11 +729,11 @@ mod tests {
     #[test]
     fn postgres_values_and_keys() {
         let v = of_class("v", "character varying(10)", "varchar", TypeClass::Text);
-        assert_eq!(Dialect::Postgres.value(&v, "a").unwrap(), "CAST('a' AS text)");
+        assert_eq!(Dialect::Postgres.value(&v, "a").unwrap(), "CAST('a' AS pg_catalog.text)");
         assert_eq!(Dialect::Postgres.key_value(&v, "a").unwrap(), "CAST('a' AS character varying(10))");
         let c = of_class("c", "character(2)", "bpchar", TypeClass::Text);
-        assert_eq!(Dialect::Postgres.filter_value(&c, "a").unwrap(), "CAST('a' AS bpchar)");
-        assert_eq!(Dialect::Postgres.filter_value(&v, "a").unwrap(), "CAST('a' AS text)");
+        assert_eq!(Dialect::Postgres.filter_value(&c, "a").unwrap(), "CAST('a' AS pg_catalog.bpchar)");
+        assert_eq!(Dialect::Postgres.filter_value(&v, "a").unwrap(), "CAST('a' AS pg_catalog.text)");
     }
 
     #[test]
@@ -661,9 +744,11 @@ mod tests {
         assert_eq!(Dialect::Sqlite.like(Op::ILike, "\"n\"", "'%a%'"), "LOWER(CAST(\"n\" AS TEXT)) LIKE LOWER('%a%') ESCAPE '\\'");
         assert_eq!(Dialect::Sqlite.like(Op::Like, "\"n\"", "'a'"), "CAST(\"n\" AS TEXT) LIKE 'a' ESCAPE '\\'");
         assert_eq!(Dialect::MySql.like(Op::NotLike, "`n`", "'a'"), format!("CAST(`n` AS CHAR) NOT LIKE 'a'{my}"));
-        assert_eq!(Dialect::Postgres.like(Op::ILike, "\"n\"", "'a'"), "CAST(\"n\" AS text) ILIKE 'a'");
-        assert_eq!(Dialect::Postgres.like(Op::NotILike, "\"n\"", "'a'"), "CAST(\"n\" AS text) NOT ILIKE 'a'");
-        assert_eq!(Dialect::ALL.map(|d| d.as_text("x")), ["CAST(x AS text)", "CAST(x AS CHAR)", "CAST(x AS TEXT)"]);
+        assert_eq!(Dialect::Postgres.like(Op::ILike, "\"n\"", "'a'"), "(CAST(\"n\" AS pg_catalog.text) OPERATOR(pg_catalog.~~*) 'a')");
+        assert_eq!(Dialect::Postgres.like(Op::NotILike, "\"n\"", "'a'"), "(CAST(\"n\" AS pg_catalog.text) OPERATOR(pg_catalog.!~~*) 'a')");
+        assert_eq!(Dialect::Postgres.like(Op::Like, "\"n\"", "'a'"), "(CAST(\"n\" AS pg_catalog.text) OPERATOR(pg_catalog.~~) 'a')");
+        assert_eq!(Dialect::Postgres.like(Op::NotLike, "\"n\"", "'a'"), "(CAST(\"n\" AS pg_catalog.text) OPERATOR(pg_catalog.!~~) 'a')");
+        assert_eq!(Dialect::ALL.map(|d| d.as_text("x")), ["CAST(x AS pg_catalog.text)", "CAST(x AS CHAR)", "CAST(x AS TEXT)"]);
     }
 
     #[test]

@@ -27,6 +27,8 @@ fn table(schema: &str, name: &str, kind: RelKind) -> TableInfo {
             has_default: false,
             generated: Default::default(),
             hidden: false,
+            type_label: String::new(),
+            builtin_operators: false,
         }],
         primary_key: vec![],
         unique_keys: vec![],

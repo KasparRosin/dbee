@@ -63,6 +63,16 @@ pub struct ColumnInfo {
     /// copies leave it out, and a page reads it only when it is part of the row key.
     #[serde(default)]
     pub hidden: bool,
+    /// The type as the user reads it: on Postgres `type_sql` without a schema that is on the
+    /// session's search path, as Postgres itself shows it; empty means `type_sql`.
+    #[serde(default)]
+    pub type_label: String,
+    /// The engine's built-in operators compare the column's values, so dbee's own SQL names them
+    /// by their schema: on Postgres a base type (or an array) in `pg_catalog`, an enum, a range or
+    /// a composite. False where operators have no schema, and for a type that brings its own (an
+    /// extension's, such as `citext`).
+    #[serde(default)]
+    pub builtin_operators: bool,
 }
 
 impl ColumnInfo {
@@ -87,7 +97,8 @@ impl ColumnInfo {
     }
 
     pub fn column(&self) -> Column {
-        Column { name: self.name.clone(), base_type: self.base_type.clone(), type_label: self.type_sql.clone(), class: self.class }
+        let label = if self.type_label.is_empty() { &self.type_sql } else { &self.type_label };
+        Column { name: self.name.clone(), base_type: self.base_type.clone(), type_label: label.clone(), class: self.class }
     }
 }
 
@@ -233,6 +244,8 @@ mod tests {
             has_default: false,
             generated: Generated::No,
             hidden: false,
+            type_label: String::new(),
+            builtin_operators: false,
         }
     }
     fn table(schema: &str, name: &str) -> TableInfo {

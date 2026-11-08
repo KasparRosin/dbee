@@ -58,6 +58,9 @@ pub struct PgConnection {
     pub(crate) read_only: bool,
     /// The mode could not be read after the last statement; it is read before the next one.
     pub(crate) check_due: AtomicBool,
+    /// The schemas the session's search path finds, read when it opened: a type in one of them is
+    /// shown without its schema.
+    visible_schemas: Vec<String>,
 }
 
 impl std::fmt::Debug for PgConnection {
@@ -70,6 +73,11 @@ impl PgConnection {
     /// What the server said about itself.
     pub fn info(&self) -> &ServerInfo {
         &self.info
+    }
+
+    /// The schemas the session's search path found when it opened (`current_schemas(false)`).
+    pub fn visible_schemas(&self) -> &[String] {
+        &self.visible_schemas
     }
 
     /// The connection has ended: closed by the server, the network or the tunnel. Every further
@@ -348,10 +356,11 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
             (client, closed, Way::Tcp(addr))
         }
     };
-    let info = setup(&client, cfg.read_only).await?;
+    let (info, visible_schemas) = setup(&client, cfg.read_only).await?;
     let route = Route { host: cfg.host.clone(), way };
     let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), route, on_its_way: Arc::default() };
-    Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller, read_only: cfg.read_only, check_due: AtomicBool::new(false) })
+    let check_due = AtomicBool::new(false);
+    Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller, read_only: cfg.read_only, check_due, visible_schemas })
 }
 
 /// Connects to the addresses `host` gives, in turn, as tokio-postgres does (TLS still checks
@@ -459,8 +468,12 @@ fn search_path_warning(path: &str) -> Option<String> {
     })
 }
 
-/// The session setup; returns what the server says about itself.
-async fn setup(client: &Client, read_only: bool) -> Result<ServerInfo, DbError> {
+/// The schemas the session's search path finds, in order.
+const VISIBLE_SCHEMAS: &str = "SELECT pg_catalog.unnest(pg_catalog.current_schemas(false))";
+
+/// The session setup; returns what the server says about itself, and the schemas its search path
+/// finds.
+async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<String>), DbError> {
     let fail = |e: tokio_postgres::Error| error::map(&e, Phase::Connect);
     let set = if read_only {
         "SET standard_conforming_strings = on; SET default_transaction_read_only = on"
@@ -491,7 +504,13 @@ async fn setup(client: &Client, read_only: bool) -> Result<ServerInfo, DbError> 
         )));
     }
     let warnings = version_warning(version_num).into_iter().chain(search_path_warning(path)).collect();
-    Ok(ServerInfo { product: PRODUCT.into(), version: version.clone(), version_num, read_only: server_read_only, warnings })
+    let mut visible = Vec::new();
+    for message in client.simple_query(VISIBLE_SCHEMAS).await.map_err(fail)? {
+        if let SimpleQueryMessage::Row(row) = message {
+            visible.extend(row.try_get(0).ok().flatten().map(str::to_owned));
+        }
+    }
+    Ok((ServerInfo { product: PRODUCT.into(), version: version.clone(), version_num, read_only: server_read_only, warnings }, visible))
 }
 
 #[cfg(test)]
