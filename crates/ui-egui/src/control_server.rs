@@ -71,10 +71,11 @@ impl Secrets {
     }
 }
 
-/// The run's token file, removed when this is dropped. A file left by a run that was killed does no
+/// The run's token file, removed when this is dropped, if it still holds this start's lines (a later
+/// start that named the same file has replaced them). A file left by a run that was killed does no
 /// harm: the next start's lines are new.
 #[derive(Debug)]
-pub struct TokenFile(PathBuf);
+pub struct TokenFile(PathBuf, String);
 
 impl TokenFile {
     /// Writes `secrets` to `path`, `0600` in a `0700` folder where the system has file modes. What
@@ -82,10 +83,10 @@ impl TokenFile {
     fn write(path: &Path, secrets: &Secrets) -> io::Result<TokenFile> {
         let lines = format!("{}\n{}\n", secrets.token, secrets.proof);
         let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        private_dir(dir)
-            .and_then(|()| replace_private_file(path, lines.as_bytes()))
-            .map_err(|e| io::Error::other(format!("its token file {}: {e}", path.display())))?;
-        Ok(TokenFile(path.to_path_buf()))
+        private_dir(dir).and_then(|()| replace_private_file(path, lines.as_bytes())).map_err(|e| {
+            io::Error::other(format!("its token file {}: {e}. Name a file in a folder of your own with DBEE_CONTROL_TOKEN_FILE.", path.display()))
+        })?;
+        Ok(TokenFile(path.to_path_buf(), lines))
     }
 
     pub fn path(&self) -> &Path {
@@ -95,7 +96,9 @@ impl TokenFile {
 
 impl Drop for TokenFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if std::fs::read_to_string(&self.0).is_ok_and(|now| now == self.1) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 }
 
@@ -725,6 +728,29 @@ mod tests {
         assert_refused(&mut r, "the old token", &new.1);
         drop(second);
         assert!(!path.exists(), "the file goes when the run ends");
+    }
+
+    #[test]
+    fn a_start_that_ends_leaves_the_file_of_a_later_start_that_named_it() {
+        let folder = Folder::new();
+        let path = folder.file();
+        let first = listen(0, &path, Arc::new(|| {})).unwrap();
+        let second = listen(0, &path, Arc::new(|| {})).unwrap();
+        let wanted = secrets(&second.token_file);
+        drop(first);
+        assert!(path.exists(), "the second start still runs");
+        assert_eq!(secrets(&second.token_file), wanted);
+        drop(second);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_token_file_that_cannot_be_made_says_what_to_do() {
+        let folder = Folder::new();
+        let blocker = folder.0.join("a-file");
+        std::fs::write(&blocker, "x").unwrap();
+        let e = listen(0, &blocker.join("control-token"), Arc::new(|| {})).unwrap_err().to_string();
+        assert!(e.contains("Name a file in a folder of your own with DBEE_CONTROL_TOKEN_FILE."), "{e}");
     }
 
     #[cfg(unix)]
