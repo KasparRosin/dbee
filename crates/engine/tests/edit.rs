@@ -1378,3 +1378,40 @@ fn an_edit_after_a_view_changed_client_encoding_writes_nothing_hidden() {
         }
     }
 }
+
+/// A trigger that changes `client_encoding` during an Apply, after its first statement, leaves
+/// nothing written: Apply reads the encoding again before `COMMIT`, rolls back (which sets it
+/// back) and asks to apply again, so no value is written as other text and the next page reads.
+#[test]
+fn an_apply_whose_trigger_changes_client_encoding_writes_nothing() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| t.kind().id() == "postgres") {
+        let u = unique("t_enc_tr");
+        let (func, table) = (format!("{u}_f"), format!("{u}_t"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS scratch.{table}"), format!("FUNCTION IF EXISTS scratch.{func}()")]);
+        q(
+            &t,
+            &format!(
+                "CREATE FUNCTION scratch.{func}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM set_config('client_encoding', 'LATIN1', false); \
+                 RETURN NEW; END $$"
+            ),
+        );
+        q(&t, &format!("CREATE TABLE scratch.{table} (k text PRIMARY KEY, v text)"));
+        q(&t, &format!("CREATE TRIGGER {u}_tr BEFORE UPDATE ON scratch.{table} FOR EACH ROW EXECUTE FUNCTION scratch.{func}()"));
+        q(&t, &format!("INSERT INTO scratch.{table} VALUES ('a', 'x'), ('b', 'y')"));
+        let rows = || q(&t, &format!("SELECT string_agg(k || '=' || v, ',' ORDER BY k) FROM scratch.{table}"));
+        let mut s = connected_to(&t);
+        open_table(&mut s, "scratch", &table);
+        set_cell(&mut s, 0, "v", "\u{e9}1");
+        set_cell(&mut s, 1, "v", "\u{e9}2");
+        let e = s.run_blocking("edit.apply", json!({}), T).expect_err("refused");
+        assert!(e.to_string().contains("client_encoding") && e.to_string().contains("apply again"), "{}: {e}", t.name());
+        assert_eq!(rows(), "a=x,b=y", "{}: nothing written", t.name());
+        // Without the trigger, the same edits applied again write their text as it is: the
+        // session is UTF8 again.
+        q(&t, &format!("DROP TRIGGER {u}_tr ON scratch.{table}"));
+        apply(&mut s);
+        assert_eq!(rows(), "a=\u{e9}1,b=\u{e9}2", "{}", t.name());
+        s.run_blocking("table.refresh", json!({}), T).unwrap_or_else(|e| panic!("{}: the next page: {e}", t.name()));
+    }
+}

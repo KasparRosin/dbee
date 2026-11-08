@@ -14,6 +14,8 @@ use crate::{PgConnection, guard};
 struct Locked<'a> {
     conn: &'a PgConnection,
     _guard: MutexGuard<'a, ()>,
+    /// The check before `COMMIT` found `client_encoding` changed: set it back after the rollback.
+    encoding_changed: bool,
 }
 
 impl ApplySession for Locked<'_> {
@@ -21,6 +23,24 @@ impl ApplySession for Locked<'_> {
 
     async fn execute(&mut self, sql: &str) -> Result<Option<u64>, DbError> {
         run_locked(self.conn, sql, NO_ROWS).await.map(|r| r.rows_affected)
+    }
+
+    /// A trigger the statements fired can have changed `client_encoding`, so that the server read
+    /// the later values as other text: then nothing is committed.
+    async fn before_commit(&mut self) -> Result<(), DbError> {
+        if guard::is_utf8(self.conn).await? {
+            return Ok(());
+        }
+        self.encoding_changed = true;
+        Err(DbError::Other(guard::ENCODING_CHANGED_DURING.into()))
+    }
+
+    async fn rollback(&mut self) -> Result<(), DbError> {
+        run_locked(self.conn, "ROLLBACK", NO_ROWS).await?;
+        if self.encoding_changed && !guard::is_utf8(self.conn).await? {
+            guard::set_utf8(self.conn).await?;
+        }
+        Ok(())
     }
 
     fn mark_lost(&self) {
@@ -32,7 +52,7 @@ impl ApplySession for Locked<'_> {
 async fn locked(conn: &PgConnection) -> Result<Locked<'_>, DbError> {
     let guard = conn.lock().await?;
     guard::utf8(conn).await?;
-    Ok(Locked { conn, _guard: guard })
+    Ok(Locked { conn, _guard: guard, encoding_changed: false })
 }
 
 const NO_ROWS: Limits = Limits { max_rows: 0, max_bytes: 0 };

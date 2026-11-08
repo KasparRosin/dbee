@@ -88,6 +88,12 @@ pub trait ApplySession: Send {
     /// Run one statement; the rows it changed, when the server said.
     fn execute(&mut self, sql: &str) -> impl Future<Output = Result<Option<u64>, DbError>> + Send;
 
+    /// Before `COMMIT`, once every statement ran: an error rolls the transaction back and is the
+    /// apply's, at the last statement's index. The default checks nothing.
+    fn before_commit(&mut self) -> impl Future<Output = Result<(), DbError>> + Send {
+        async { Ok(()) }
+    }
+
     /// End the transaction without its changes. The default sends `ROLLBACK`; an engine that can
     /// end a transaction itself, or never start one, checks first whether one is open.
     fn rollback(&mut self) -> impl Future<Output = Result<(), DbError>> + Send {
@@ -148,12 +154,15 @@ pub async fn apply<S: ApplySession>(
     let outcome = write_all(&mut open.session, statements, gate).await;
     let (index, error) = match outcome {
         Ok(()) if !gate.commit() => (last, DbError::Cancelled),
-        Ok(()) => match open.session.execute("COMMIT").await {
-            Ok(_) => {
-                open.armed = false;
-                return Ok(statements.len() as u64);
-            }
+        Ok(()) => match open.session.before_commit().await {
             Err(e) => (last, e),
+            Ok(()) => match open.session.execute("COMMIT").await {
+                Ok(_) => {
+                    open.armed = false;
+                    return Ok(statements.len() as u64);
+                }
+                Err(e) => (last, e),
+            },
         },
         Err((index, e)) => (index, e),
     };

@@ -2,7 +2,7 @@
 //! ([`Dialect::refusal`]), the check that `standard_conforming_strings` is still on before a
 //! statement whose `'…'` strings hold a backslash, and, on a connection dbee made read-only, the
 //! check after each statement that it still is. Before an Apply's statements, the check that
-//! `client_encoding` is still UTF8 ([`utf8`]).
+//! `client_encoding` is still UTF8 ([`utf8`]), and again before its `COMMIT` (`apply.rs`).
 //!
 //! The read-only check reads both settings with `SHOW`, which takes no snapshot, so a transaction
 //! the user began can still set its isolation level after it. When the check cannot run (the
@@ -122,16 +122,31 @@ async fn restore(conn: &PgConnection, said: &str) -> DbError {
 const ENCODING_CHANGED: &str = "client_encoding was not UTF8 in this session (a function can change it), so the server would have read \
                                 these changes as other text. dbee set it back to UTF8 and wrote nothing; apply again.";
 
-/// Before an Apply's statements, with the lock held: the session's `client_encoding` is still
-/// UTF8, in which dbee writes every value; when a function changed it, it is set back, and the
-/// Apply writes nothing.
-pub(crate) async fn utf8(conn: &PgConnection) -> Result<(), DbError> {
+pub(crate) const ENCODING_CHANGED_DURING: &str = "client_encoding changed during the Apply (a trigger on the table can change it), so the \
+                                                  server would have read the later changes as other text. dbee rolled them back, set it \
+                                                  back to UTF8 and wrote nothing; apply again. Should it change again, ask the table's \
+                                                  owner about its triggers.";
+
+/// The session's `client_encoding` is UTF8, in which dbee writes every value.
+pub(crate) async fn is_utf8(conn: &PgConnection) -> Result<bool, DbError> {
     let messages = conn.client().simple_query("SHOW client_encoding").await.map_err(|e| conn.error(&e))?;
-    if messages.iter().any(|m| matches!(m, SimpleQueryMessage::Row(row) if row.get(0) == Some("UTF8"))) {
+    Ok(messages.iter().any(|m| matches!(m, SimpleQueryMessage::Row(row) if row.get(0) == Some("UTF8"))))
+}
+
+/// Sets the session's `client_encoding` back to UTF8.
+pub(crate) async fn set_utf8(conn: &PgConnection) -> Result<(), DbError> {
+    conn.client().batch_execute("SET client_encoding = 'UTF8'").await.map_err(|e| conn.error(&e))?;
+    log::info!("pg: client_encoding had changed; set it back to UTF8");
+    Ok(())
+}
+
+/// Before an Apply's statements, with the lock held: the session's `client_encoding` is still
+/// UTF8; when a function changed it, it is set back, and the Apply writes nothing.
+pub(crate) async fn utf8(conn: &PgConnection) -> Result<(), DbError> {
+    if is_utf8(conn).await? {
         return Ok(());
     }
-    conn.client().batch_execute("SET client_encoding = 'UTF8'").await.map_err(|e| conn.error(&e))?;
-    log::info!("pg: client_encoding had changed; set it back to UTF8 before an apply");
+    set_utf8(conn).await?;
     Err(DbError::Other(ENCODING_CHANGED.into()))
 }
 
