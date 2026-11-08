@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane A, fix round 1: entry 45, tokio-postgres keeps every ParameterStatus a server sends; earlier: entries 41 to 44)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C, job 3: entries 46 to 49, and entry 11 says the Flatpak keeps no trusted host key; earlier: the security review's lane A, fix round 1: entry 45, tokio-postgres keeps every ParameterStatus a server sends; earlier: entries 41 to 44)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -94,6 +94,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Evidence:** `packaging/linux/flatpak/dev.rosin.dbee.yml` (`--filesystem=~/.ssh:ro`, `--socket=ssh-auth`; no `--talk-name=org.freedesktop.secrets`). Not built or run here (unverified).
 - **Impact:** in the Flatpak, saved passwords do not work. SSH tunnels with the user's key and the agent should; a Flatpak host has not checked it. The tarball and the AppImage are expected to work (not measured: key logins through the tunnel were exercised in the dev build only, by `m1_day` and `crates/ssh/tests/tunnel.rs`).
 - **Estimate:** 1–2 h (estimated), plus a check on a Flatpak host.
+- **Also:** `~/.ssh` is read-only there, so a host key the user trusts is saved nowhere ("trusted for this connection only") and every connect asks again, which trains Trust on every connection. The fix: learn into a `known_hosts` of dbee's own in the app's data folder and read both files (about 1 h, estimated). The security review's lane C, C-6.
 
 ### 12. One very long line in the query editor is slow to type in (P)
 
@@ -340,10 +341,39 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** a hostile server makes dbee hold what it sends, with no cap, on an open connection.
 - **Estimate:** 2 h (estimated): a cap in the watch while it reads the login, or a limit in tokio-postgres upstream.
 
+### 46. SSH: `/etc/ssh/ssh_known_hosts` is not read, and names are written unhashed (S)
+
+- **Missing:** dbee reads `~/.ssh/known_hosts` only. A key an administrator recorded in the system file, or a `@revoked` line there, does not count; a user with `HashKnownHosts yes` finds the host names dbee learns in the clear.
+- **Evidence:** `crates/ssh/src/known_hosts.rs` (`entries_for` reads the one file `SshEnv` names).
+- **Impact:** a system-wide revocation is not honoured, and a host dbee has not learned asks, though the system file has it. The security review's lane C, C-6.
+- **Estimate:** 1 h (estimated).
+
+### 47. Windows Credential Manager entries roam (S)
+
+- **Missing:** dbee stores secrets with the persistence the `keyring` crate picks on Windows, which can roam with the user's profile ("Enterprise"). A password may then reach other machines of the same domain account.
+- **Evidence:** the security review's lane C, C-7 (read from the crate's code; no Windows machine here). It goes with the decision on packaging.
+- **Impact:** Windows users on a domain profile.
+- **Estimate:** 1 h (estimated), plus a Windows host.
+
+### 48. macOS ad-hoc signing, and channels an SSH server opens (S)
+
+- **Missing:** unsigned macOS releases are ad-hoc signed, so the keychain's access rule for an item dbee made is the binary's code hash: every update asks again, and users learn to click "Always Allow", for an impostor too. Separately, russh accepts by default the channels an SSH server opens (agent forwarding, forwarded ports, X11, sessions); dbee drops them, so nothing reaches the agent or a local port, but a hostile server can open them without limit.
+- **Evidence:** `.github/workflows/release.yml`, `packaging/macos/package.sh` (ad-hoc); `crates/ssh/src/lib.rs` (`Client` overrides no `server_channel_open_*`). Neither is proven to cost anything (no Mac here). The security review's lane C, C-10.
+- **Impact:** macOS users on unsigned releases; a hostile SSH server.
+- **Estimate:** 1 h (estimated) for the channels, a Developer ID signature as `docs/releasing.md` plans.
+
+### 49. The control channel answers only while the window draws (S)
+
+- **Missing:** a request is handled in a frame of the window, so a minimised or hidden window stalls a client until it is shown again (its reply times out, `docs/control-protocol.md`).
+- **Evidence:** `docs/control-protocol.md`, "Requests are handled in the window's frames"; issue #10's note.
+- **Impact:** an agent driving a dbee on a machine where the window is minimised or on another desktop that does not draw.
+- **Estimate:** 3 h (estimated): serve the channel from a thread that asks the event loop to wake, or run the engine's commands off the draw loop.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | The security review's lane C, job 3: entries 46 (`/etc/ssh/ssh_known_hosts` is not read), 47 (Windows Credential Manager entries roam), 48 (macOS ad-hoc signing, channels an SSH server opens) and 49 (the control channel answers only while the window draws); entry 11 says the Flatpak keeps no trusted host key. |
 | 2026-11-08 | minor | The security review's lane A, fix round 1: entry 45 (tokio-postgres keeps every ParameterStatus a server sends). |
 | 2026-11-08 | minor | The security review's lane B, last two fixes: entry 38 says `SET CHAR SET` is refused and a line comment ends at a line feed only on MySQL, MariaDB and SQLite, lists the harmless statements read-only refuses, and says lane B is closed. |
 | 2026-11-08 | minor | The security review's lane A: entries 41 (a tunnelled cancel names the host again), 42 (a server can keep a statement running forever), 43 (MySQL takes the server's RSA key without a word under `disable` or a tunnel) and 44 (the password held as a plain `String`). |
