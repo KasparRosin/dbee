@@ -260,7 +260,7 @@ async fn row_estimates_come_from_sqlite_stat1() {
 async fn odd_identifiers_survive() {
     let (_seed, conn) = seeded().await;
     let cat = load(&conn).await;
-    let odd = table(&cat, "Odd \"Name\" 🐝");
+    let odd = table(&cat, "Odd \"Name\" 🐙");
     assert_eq!(names(&odd.columns, |c| &c.name), ["id", "Total $", "lower UPPER", "Other Ödd id"]);
     let fk = odd.fk_for("Other Ödd id").expect("fk");
     assert_eq!((fk.target.clone(), fk.target_columns.clone()), (tr("Other Ödd"), strings(&["id"])));

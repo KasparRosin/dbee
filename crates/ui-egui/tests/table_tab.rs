@@ -538,7 +538,7 @@ fn a_bad_filter_value_shows_the_error_over_the_old_rows() {
 fn odd_identifiers_filter_sort_and_follow() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = Ui::connected(db);
-    ui.open("odd", "Odd \"Name\" 🐝");
+    ui.open("odd", "Odd \"Name\" 🐙");
     assert_eq!(ui.value("grid-header-1")["name"], "Total $");
     assert_eq!(ui.value("grid-header-3")["key"], "foreign");
     ui.click("filter-0-column");

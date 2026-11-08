@@ -174,16 +174,16 @@ CREATE TABLE odd."Other Ödd" (
 );
 INSERT INTO odd."Other Ödd" (id, "Label") VALUES (1, 'first'), (2, 'second'), (3, 'third');
 
-CREATE TABLE odd."Odd ""Name"" 🐝" (
+CREATE TABLE odd."Odd ""Name"" 🐙" (
     id int PRIMARY KEY,
     "Total $" numeric,
     "lower UPPER" text,
     "Other Ödd id" int REFERENCES odd."Other Ödd" (id)
 );
-INSERT INTO odd."Odd ""Name"" 🐝" (id, "Total $", "lower UPPER", "Other Ödd id") VALUES
+INSERT INTO odd."Odd ""Name"" 🐙" (id, "Total $", "lower UPPER", "Other Ödd id") VALUES
     (1, 0.5, 'alpha', 1),
     (2, 12.75, 'Beta', 2),
-    (3, 100, 'gamma 🐝', 3),
+    (3, 100, 'gamma 🐙', 3),
     (4, NULL, NULL, NULL);
 
 -- ---------------------------------------------------------------------------------------------

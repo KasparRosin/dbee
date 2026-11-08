@@ -1281,7 +1281,7 @@ mod tests {
 
     #[test]
     fn byte_offsets_and_char_indices_convert_both_ways() {
-        let text = "select 'é🐝', nope";
+        let text = "select 'é🐙', nope";
         let nope = text.find("nope").unwrap();
         assert_eq!(char_index(text, nope), 13);
         assert_eq!(byte_offset(text, 13), nope);
@@ -1418,7 +1418,7 @@ mod tests {
             "\r\n",
             " ",
             "é",
-            "🐝",
+            "🐙",
             "from t",
             "<>",
             "::",

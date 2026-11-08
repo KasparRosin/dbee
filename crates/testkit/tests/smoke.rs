@@ -30,7 +30,7 @@ fn seed_facts_and_secrets() {
         assert_eq!(q("SELECT length(t) FROM shop.big_cell"), "20000000");
         assert!(q("SELECT length(j::text) FROM shop.big_cell").parse::<u64>().unwrap() >= 20_000_000);
         assert!(q("SELECT reltuples FROM pg_class WHERE oid = 'shop.big_rows'::regclass").parse::<f64>().unwrap() >= 900_000.0);
-        assert_eq!(q(r#"SELECT count(*) FROM odd."Odd ""Name"" 🐝" WHERE "Total $" > 1"#), "2");
+        assert_eq!(q(r#"SELECT count(*) FROM odd."Odd ""Name"" 🐙" WHERE "Total $" > 1"#), "2");
         assert_eq!(q("SELECT count(*) FROM pg_tables WHERE schemaname = 'scratch'"), "0");
         assert!(dbee_testkit::psql(s, "SELECT nope").unwrap_err().contains("nope"));
     }

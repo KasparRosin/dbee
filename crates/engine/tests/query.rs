@@ -188,7 +188,7 @@ fn error_position_counts_characters_before_it() {
     let _db = require_testdb!();
     let mut s = connected();
     // Multibyte text before and inside the failing statement, and a comment before it.
-    let text = "select '🐝ü' as x;\n-- naïve 🐝\nselect 'é', nope";
+    let text = "select '🐙ü' as x;\n-- naïve 🐙\nselect 'é', nope";
     tab(&mut s, text);
     let e = run_fails(&mut s, json!({}));
     assert_eq!(e.data()["position"].as_u64(), Some(text.find("nope").unwrap() as u64), "{}", e.data());

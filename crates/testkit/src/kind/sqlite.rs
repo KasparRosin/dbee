@@ -13,7 +13,7 @@ pub(crate) const INFO: KindInfo = KindInfo {
     sleep_sql: |secs| format!("SELECT (SELECT count(*) FROM ({}))", sqlite_count(secs)),
     slow_condition_sql: |secs| format!("(SELECT count(*) FROM ({})) > 0", sqlite_count(secs)),
     one_schema: Some("main"),
-    odd_table: "Odd \"Name\" 🐝",
+    odd_table: "Odd \"Name\" 🐙",
     keyless_tables_editable: true,
     parallel_writes: false,
     enforces_lengths: false,

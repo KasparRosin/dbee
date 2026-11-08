@@ -98,7 +98,7 @@ fn mysql_seed_facts() {
         assert_eq!(q("SELECT CAST(d AS CHAR) FROM shop.legacy_dates WHERE id = 1"), "0000-00-00", "{at}");
         assert_eq!(q("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'many'"), "300", "{at}");
         assert_eq!(q("SELECT COUNT(*) FROM odd.`Odd \"Name\" é` WHERE `Total $` > 1"), "2", "{at}");
-        assert_eq!(q("SELECT `lower UPPER` FROM odd.`Odd \"Name\" é` WHERE id = 3"), "gamma 🐝", "{at}");
+        assert_eq!(q("SELECT `lower UPPER` FROM odd.`Odd \"Name\" é` WHERE id = 3"), "gamma 🐙", "{at}");
         assert_eq!(q("SELECT `back``tick` FROM odd.`Odd \"Name\" é` WHERE id = 1"), "x`y", "{at}");
         assert_eq!(q("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'scratch'"), "0", "{at}");
         assert_eq!(q("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'dbee_seed'"), "0", "{at}");
@@ -128,7 +128,7 @@ fn sqlite_seed_has_the_shop() {
     assert!(count(&c, "SELECT length(j) FROM big_cell") >= 19_000_000, "about 20 MB");
     assert_eq!(count(&c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
     assert_eq!(count(&c, "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name GLOB 't_[0-9][0-9][0-9]'"), 300);
-    assert_eq!(count(&c, r#"SELECT count(*) FROM "Odd ""Name"" 🐝" WHERE "Total $" > 1"#), 2);
+    assert_eq!(count(&c, r#"SELECT count(*) FROM "Odd ""Name"" 🐙" WHERE "Total $" > 1"#), 2);
     assert_eq!(count(&c, "SELECT count(*) FROM notes_nokey"), 3);
     assert_eq!(count(&c, "SELECT count(*) FROM pragma_table_info('rowid_taken') WHERE name = 'rowid'"), 1);
     assert_eq!(count(&c, "SELECT count(*) FROM sqlite_schema WHERE name LIKE 'dbee_seed%'"), 0);

@@ -1060,7 +1060,7 @@ mod tests {
         // Many marks' worth of rows, of lines of every length, with characters of 1 to 4 bytes.
         let mut text = String::new();
         for i in 0..3000 {
-            text.push_str(&"aé🐝".repeat(i % 37));
+            text.push_str(&"aé🐙".repeat(i % 37));
             text.push('\n');
             if i % 5 == 0 {
                 text.push_str(&"x".repeat(i));
@@ -1104,32 +1104,32 @@ mod tests {
         out
     }
 
-    /// Columns as the tests take them: a tab 4, ASCII 1, 🐝 and CJK 2, other characters 1.
+    /// Columns as the tests take them: a tab 4, ASCII 1, 🐙 and CJK 2, other characters 1.
     fn test_columns(text: &str) -> Columns {
         let mut c = Columns::new(4);
-        c.learn(text, |ch| if ch == '🐝' || ('\u{4E00}'..='\u{9FFF}').contains(&ch) { 1.6 } else { 0.9 });
+        c.learn(text, |ch| if ch == '🐙' || ('\u{4E00}'..='\u{9FFF}').contains(&ch) { 1.6 } else { 0.9 });
         c
     }
 
     #[test]
     fn rows_count_tabs_and_wide_characters_by_their_columns() {
-        let text = "a\tb\tc\n🐝🐝🐝\n中文中\nab\t\n\t\t\t\nõõõõõõ";
+        let text = "a\tb\tc\n🐙🐙🐙\n中文中\nab\t\n\t\t\t\nõõõõõõ";
         let cols = test_columns(text);
-        assert_eq!((cols.of('\t'), cols.of('a'), cols.of('🐝'), cols.of('中'), cols.of('õ')), (4, 1, 2, 2, 1));
+        assert_eq!((cols.of('\t'), cols.of('a'), cols.of('🐙'), cols.of('中'), cols.of('õ')), (4, 1, 2, 2, 1));
         let rows = |width: usize| -> Vec<String> {
             let r = Rows::new(text, width, &cols);
             (0..r.count()).map(|i| text[r.range(text, i, &cols).unwrap()].to_string()).collect()
         };
-        assert_eq!(rows(5), ["a\t", "b\t", "c", "🐝🐝", "🐝", "中文", "中", "ab", "\t", "\t", "\t", "\t", "õõõõõ", "õ"]);
+        assert_eq!(rows(5), ["a\t", "b\t", "c", "🐙🐙", "🐙", "中文", "中", "ab", "\t", "\t", "\t", "\t", "õõõõõ", "õ"]);
         // A character wider than a row still takes one.
         assert_eq!(
             rows(1),
-            ["a", "\t", "b", "\t", "c", "🐝", "🐝", "🐝", "中", "文", "中", "a", "b", "\t", "\t", "\t", "\t", "õ", "õ", "õ", "õ", "õ", "õ"]
+            ["a", "\t", "b", "\t", "c", "🐙", "🐙", "🐙", "中", "文", "中", "a", "b", "\t", "\t", "\t", "\t", "õ", "õ", "õ", "õ", "õ", "õ"]
         );
         // Far down, as a plain split with the same columns.
         let mut long = String::new();
         for i in 0..2000 {
-            long.push_str(&"\tx🐝中é".repeat(i % 23));
+            long.push_str(&"\tx🐙中é".repeat(i % 23));
             long.push('\n');
         }
         let cols = test_columns(&long);
@@ -1331,11 +1331,11 @@ mod tests {
     fn no_character_lands_past_the_text_box() {
         let text = [
             "\tindented\twith\ttabs\tand\tmore\ttabs\there\tand\there",
-            &"🐝".repeat(40),
+            &"🐙".repeat(40),
             &"中文字符".repeat(12),
             &"\t".repeat(30),
             "plain ascii that is long enough to wrap more than once in a narrow panel like this one",
-            "mixed\t🐝\tõ\t中\tend",
+            "mixed\t🐙\tõ\t中\tend",
         ]
         .join("\n");
         let view = Arc::new(ValueView::new(&col("t", "text"), Some(&text)));

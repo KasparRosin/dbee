@@ -272,7 +272,7 @@ CREATE TABLE odd.`Odd "Name" é` (
 INSERT INTO odd.`Odd "Name" é` (id, `Total $`, `lower UPPER`, `Other Ödd id`, `back``tick`) VALUES
     (1, 0.5, 'alpha', 1, 'x`y'),
     (2, 12.75, 'Beta', 2, 'plain'),
-    (3, 100, 'gamma 🐝', 3, NULL),
+    (3, 100, 'gamma 🐙', 3, NULL),
     (4, NULL, NULL, NULL, NULL);
 
 -- ---------------------------------------------------------------------------------------------

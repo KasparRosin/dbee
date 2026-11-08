@@ -125,7 +125,7 @@ INSERT INTO all_types (id, note, st, doc, flag, i, r, m, n, d, ts, b, u, anythin
     (1, 'first row', 'paid', '{"a": {"b": [1, 2, 3]}, "s": "text"}', 1, 42, 3.141592653589793, 12.34,
      12345678901234567890.0123456789, '2025-06-01', '2025-06-01 12:34:56.789', X'DEADBEEF',
      'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'text in a column without a type'),
-    (2, 'second row: edge values 🐝', 'cancelled', '[]', 0, 9223372036854775807, 1e300, -0.01,
+    (2, 'second row: edge values 🐙', 'cancelled', '[]', 0, 9223372036854775807, 1e300, -0.01,
      -0.0000000001, '1999-12-31', '1999-12-31 23:59:59', X'', '00000000-0000-0000-0000-000000000000', X'00FF'),
     (3, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 
@@ -482,16 +482,16 @@ CREATE TABLE "Other Ödd" (
 );
 INSERT INTO "Other Ödd" (id, "Label") VALUES (1, 'first'), (2, 'second'), (3, 'third');
 
-CREATE TABLE "Odd ""Name"" 🐝" (
+CREATE TABLE "Odd ""Name"" 🐙" (
     id INTEGER PRIMARY KEY,
     "Total $" NUMERIC,
     "lower UPPER" TEXT,
     "Other Ödd id" INTEGER REFERENCES "Other Ödd" (id)
 );
-INSERT INTO "Odd ""Name"" 🐝" (id, "Total $", "lower UPPER", "Other Ödd id") VALUES
+INSERT INTO "Odd ""Name"" 🐙" (id, "Total $", "lower UPPER", "Other Ödd id") VALUES
     (1, 0.5, 'alpha', 1),
     (2, 12.75, 'Beta', 2),
-    (3, 100, 'gamma 🐝', 3),
+    (3, 100, 'gamma 🐙', 3),
     (4, NULL, NULL, NULL);
 
 -- No key, and `rowid` names a real column: dbee keys the rows by `_rowid_` instead.

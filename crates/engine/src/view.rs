@@ -259,7 +259,7 @@ mod tests {
     fn cut_stays_on_a_character_boundary() {
         assert_eq!(cut("aé", 2), "a");
         assert_eq!(cut("aé", 3), "aé");
-        assert_eq!(cut("🐝🐝", 5), "🐝");
+        assert_eq!(cut("🐙🐙", 5), "🐙");
         assert_eq!(cut("abc", 0), "");
         assert_eq!(cut("abc", usize::MAX), "abc");
     }

@@ -493,14 +493,14 @@ fn set_text_changes_the_active_query_tab() {
     let a = new_query(&mut s, "a");
     let b = new_query(&mut s, "b");
     s.execute("tab.activate", json!({"tab": a.0})).unwrap();
-    s.execute("query.setText", json!({"text": "select 'a;b' -- 🐝"})).unwrap();
+    s.execute("query.setText", json!({"text": "select 'a;b' -- 🐙"})).unwrap();
     let text = |s: &Session, t: TabId| match s.state().tab(t) {
         Some(Tab::Query(q)) => q.text.clone(),
         _ => panic!("no query tab {t:?}"),
     };
-    assert_eq!(text(&s, a), "select 'a;b' -- 🐝");
+    assert_eq!(text(&s, a), "select 'a;b' -- 🐙");
     assert_eq!(text(&s, b), "b");
-    assert_eq!(s.inspect()["query"]["text"], "select 'a;b' -- 🐝");
+    assert_eq!(s.inspect()["query"]["text"], "select 'a;b' -- 🐙");
     assert_eq!(s.execute("tab.activate", json!({"tab": 42})).unwrap_err().code(), "badParams");
 }
 

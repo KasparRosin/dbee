@@ -466,14 +466,14 @@ fn editing_one_column_leaves_exotic_types_unchanged() {
         let others = format!("SELECT {} FROM {sc}.{name} ORDER BY id", others.join(", "));
         let before_server = q(&t, &others);
         for row in 0..3 {
-            set_cell(&mut s, row, "note", format!("edited 🐝 it's \"{row}\""));
+            set_cell(&mut s, row, "note", format!("edited 🐙 it's \"{row}\""));
         }
         assert_eq!(apply(&mut s)["written"], 3);
         let after = read(&mut s);
         for row in 0..3 {
             for (i, c) in before["columns"].as_array().unwrap().iter().enumerate() {
                 if i == note {
-                    assert_eq!(after["rows"][row][i], json!(format!("edited 🐝 it's \"{row}\"")));
+                    assert_eq!(after["rows"][row][i], json!(format!("edited 🐙 it's \"{row}\"")));
                 } else {
                     assert_eq!(after["rows"][row][i], before["rows"][row][i], "{}: row {row}, column {}", t.name(), c["name"]);
                 }
@@ -544,11 +544,11 @@ fn odd_table_edit_round_trip() {
         q(&t, &t.copy_table_sql(&quoted, &source));
         run(&mut s, "schema.refresh", json!({}));
         assert_eq!(open_table(&mut s, sc, &name)["rows"], 4);
-        set_cell(&mut s, 0, "lower UPPER", "it's \"edited\" 🐝");
+        set_cell(&mut s, 0, "lower UPPER", "it's \"edited\" 🐙");
         set_cell(&mut s, 1, "Total $", "99.5");
         let row = run(&mut s, "row.add", json!({}))["row"].as_u64().unwrap() as usize;
         set_cell(&mut s, row, "id", "7");
-        set_cell(&mut s, row, "lower UPPER", "new 🐝");
+        set_cell(&mut s, row, "lower UPPER", "new 🐙");
         run(&mut s, "row.delete", json!({ "rows": [3] }));
         assert_eq!(apply(&mut s)["written"], 4);
         let (lower, total) = (d.ident("lower UPPER").unwrap(), d.as_text(&d.ident("Total $").unwrap()));
@@ -560,7 +560,7 @@ fn odd_table_edit_round_trip() {
                 (f[0].to_owned(), f[1].to_owned(), f[2].parse().ok())
             })
             .collect();
-        let want = [("1", "it's \"edited\" 🐝", Some(0.5)), ("2", "Beta", Some(99.5)), ("3", "gamma 🐝", Some(100.0)), ("7", "new 🐝", None)];
+        let want = [("1", "it's \"edited\" 🐙", Some(0.5)), ("2", "Beta", Some(99.5)), ("3", "gamma 🐙", Some(100.0)), ("7", "new 🐙", None)];
         assert_eq!(got, want.map(|(a, b, c)| (a.to_owned(), b.to_owned(), c)), "{}", t.name());
     }
 }

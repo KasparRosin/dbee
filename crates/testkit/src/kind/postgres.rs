@@ -13,7 +13,7 @@ pub(crate) const INFO: KindInfo = KindInfo {
     sleep_sql: |secs| format!("SELECT pg_sleep({secs})"),
     slow_condition_sql: |secs| format!("(SELECT true FROM pg_sleep({secs}))"),
     one_schema: None,
-    odd_table: "Odd \"Name\" 🐝",
+    odd_table: "Odd \"Name\" 🐙",
     keyless_tables_editable: false,
     parallel_writes: true,
     enforces_lengths: true,

@@ -151,7 +151,7 @@ async fn views_listed_without_keys() {
 async fn odd_identifiers_survive() {
     let db = require_testdb!();
     for (_, cat) in catalogs(db).await {
-        let t = cat.table(&tr("odd", "Odd \"Name\" 🐝")).expect("odd table");
+        let t = cat.table(&tr("odd", "Odd \"Name\" 🐙")).expect("odd table");
         let cols: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(cols, ["id", "Total $", "lower UPPER", "Other Ödd id"]);
         let fk = t.fk_for("Other Ödd id").expect("fk");

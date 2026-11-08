@@ -216,14 +216,14 @@ fn edit_errors_and_insert_values() {
 }
 #[test]
 fn odd_identifiers_are_quoted() {
-    let t = table_of("odd", "Odd \"Name\" 🐝", vec![ci("Total $", "integer", 'N'), ci("k", "integer", 'N')], &["k"]);
+    let t = table_of("odd", "Odd \"Name\" 🐙", vec![ci("Total $", "integer", 'N'), ci("k", "integer", 'N')], &["k"]);
     let sort = Sort { column: "Total $".into(), dir: SortDir::Asc };
     let c = Condition::Filters(vec![f("Total $", Op::Eq, "1")]);
     let sql = page_sql(Dialect::Postgres, &t, &c, Some(&sort), 0).unwrap();
-    assert!(sql.contains("\"odd\".\"Odd \"\"Name\"\" 🐝\""), "{sql}");
+    assert!(sql.contains("\"odd\".\"Odd \"\"Name\"\" 🐙\""), "{sql}");
     assert!(sql.contains("\"Total $\" = CAST('1' AS integer)"), "{sql}");
     assert!(sql.contains("ORDER BY \"Total $\" ASC, \"k\""), "{sql}");
-    assert_eq!(count_sql(Dialect::Postgres, &t, &Condition::None).unwrap(), "SELECT pg_catalog.count(*) FROM \"odd\".\"Odd \"\"Name\"\" 🐝\"");
+    assert_eq!(count_sql(Dialect::Postgres, &t, &Condition::None).unwrap(), "SELECT pg_catalog.count(*) FROM \"odd\".\"Odd \"\"Name\"\" 🐙\"");
 }
 #[test]
 fn filter_serde_round_trip() {

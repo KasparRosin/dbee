@@ -95,8 +95,8 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
 ];
 
 /// Table commands: names from the seed data, odd ones and ones that do not exist.
-const SCHEMA: Hint = Hint::OneOf(&["shop", "odd", "scratch", "", "🐝"]);
-const TABLE: Hint = Hint::OneOf(&["orders", "customers", "big_rows", "order_totals", "Odd \"Name\" 🐝", "nope"]);
+const SCHEMA: Hint = Hint::OneOf(&["shop", "odd", "scratch", "", "🐙"]);
+const TABLE: Hint = Hint::OneOf(&["orders", "customers", "big_rows", "order_totals", "Odd \"Name\" 🐙", "nope"]);
 const COLUMN: Hint = Hint::Custom(column);
 const FILTERS: Hint = Hint::Custom(filters);
 
@@ -148,7 +148,7 @@ fn value(r: &mut Rng, _: &Session) -> Json {
     if r.chance(15) {
         return Json::Null;
     }
-    json!(r.pick(&["", "1", "42", "-7.5", "x", "2025-01-01", "not a date", "true", "{}", "[1, 2]", "it's \"q\" 🐝", "Alice"]))
+    json!(r.pick(&["", "1", "42", "-7.5", "x", "2025-01-01", "not a date", "true", "{}", "[1, 2]", "it's \"q\" 🐙", "Alice"]))
 }
 
 fn page_to(r: &mut Rng, _: &Session) -> Json {
@@ -204,8 +204,8 @@ fn config(r: &mut Rng, s: &Session) -> Json {
         "host": "127.0.0.1",
         "port": if r.chance(5) { 0 } else { 1 },
         "name": text(r),
-        "user": r.pick(&["", "postgres", "it's", "🐝"]),
-        "database": r.pick(&["", "dbee", "a\"b", "🐝"]),
+        "user": r.pick(&["", "postgres", "it's", "🐙"]),
+        "database": r.pick(&["", "dbee", "a\"b", "🐙"]),
         "sslMode": if r.chance(5) { "bogus" } else { *r.pick(&["disable", "prefer", "require", "verify-ca", "verify-full"]) },
         "color": if r.chance(5) { "plaid" } else { *r.pick(&["none", "red", "blue"]) },
         "readOnly": r.chance(50),
@@ -237,7 +237,7 @@ fn config(r: &mut Rng, s: &Session) -> Json {
 /// A saved connection's id most of the time, else one that is not saved.
 fn saved_id(r: &mut Rng, s: &Session) -> Json {
     let saved = &s.state().store.saved;
-    if !saved.is_empty() && r.chance(80) { json!(r.pick(saved).id) } else { json!(r.pick(&["", "nope", "🐝", "../x"])) }
+    if !saved.is_empty() && r.chance(80) { json!(r.pick(saved).id) } else { json!(r.pick(&["", "nope", "🐙", "../x"])) }
 }
 
 /// An open connection's id most of the time, else one that is not open.
@@ -302,12 +302,12 @@ const TEXTS: &[&str] = &[
     "select 'a;b'; select \"x\" from t; -- done",
     "it's \"quoted\"; \\ backslash",
     "nul \u{0} inside",
-    "🐝 emoji, ünïcödé and a combining e\u{301}",
+    "🐙 emoji, ünïcödé and a combining e\u{301}",
     "select * from shop.orders where id = '1''; drop table shop.orders; --'",
 ];
 
 fn nested(depth: usize) -> Json {
-    let mut v = json!({"leaf": "🐝"});
+    let mut v = json!({"leaf": "🐙"});
     for i in 0..depth {
         v = if i % 2 == 0 { json!({ "n": v }) } else { json!([v]) };
     }
@@ -315,7 +315,7 @@ fn nested(depth: usize) -> Json {
 }
 
 fn text(r: &mut Rng) -> Json {
-    if r.chance(5) { Json::String("x'\";🐝\u{0}".repeat(1_000)) } else { json!(r.pick(TEXTS)) }
+    if r.chance(5) { Json::String("x'\";🐙\u{0}".repeat(1_000)) } else { json!(r.pick(TEXTS)) }
 }
 
 /// Any value at all, with the inputs that break code: edges of numbers, quotes, NUL, emoji,
@@ -331,7 +331,7 @@ fn hostile(r: &mut Rng) -> Json {
         6 => json!("it's"),
         7 => json!("say \"hi\"; drop table x; --"),
         8 => json!("nul\u{0}byte"),
-        9 => json!("🐝🐝🐝"),
+        9 => json!("🐙🐙🐙"),
         10 => Json::String("x".repeat(10_000)),
         11 => Json::Null,
         12 => json!([1, "two", null, [3], {"four": 4, "inner": {"sshPassword": "pw"}}]),
@@ -358,7 +358,7 @@ fn well_formed(r: &mut Rng, hint: Hint, s: &Session) -> Json {
     }
 }
 
-const EXTRA_KEYS: &[&str] = &["password", "sshPassphrase", "tab", "text", "force", "", "🐝", "ms"];
+const EXTRA_KEYS: &[&str] = &["password", "sshPassphrase", "tab", "text", "force", "", "🐙", "ms"];
 
 fn params(r: &mut Rng, id: &str, s: &Session) -> Json {
     if r.chance(4) {

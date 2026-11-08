@@ -907,7 +907,7 @@ mod tests {
         assert_eq!(key_named("Down"), Some(egui::Key::ArrowDown));
         assert_eq!(key_named("F2"), Some(egui::Key::F2));
         assert_eq!(key_named(""), None);
-        assert_eq!(key_named("🐝"), None);
+        assert_eq!(key_named("🐙"), None);
     }
 
     /// A folder of its own under `target/`, removed when dropped.

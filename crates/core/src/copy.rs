@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn one_buffer_rendering_matches_the_reference() {
         // Pieces that need quoting, escaping or a line break, mixed at random.
-        let pieces = ["a", "\t", "\n", "\r", "\r\n", "\"", ",", "|", "é", "🐝", "1", "-2.5", "t", "f", "{\"k\": [1]}", "{bad", " ", "\\", "NaN"];
+        let pieces = ["a", "\t", "\n", "\r", "\r\n", "\"", ",", "|", "é", "🐙", "1", "-2.5", "t", "f", "{\"k\": [1]}", "{bad", " ", "\\", "NaN"];
         let types = ["text", "int4", "numeric", "bool", "jsonb", "json", "float8", ""];
         let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = |n: usize| {

@@ -436,7 +436,7 @@ fn value_panel_frames_within_budget() {
     // Hostile shapes: nothing but line breaks, and one line of two-byte characters.
     let breaks = "\n".repeat(20_000_000);
     let wide = "õ".repeat(10_000_000);
-    let tabs = "\tkey\t🐝 value\n".repeat(1_100_000);
+    let tabs = "\tkey\t🐙 value\n".repeat(1_100_000);
     let views = [
         ("20 MB text", Arc::new(ValueView::new(&column("t", "text"), Some(&text)))),
         ("20 MB of line breaks", Arc::new(ValueView::new(&column("t", "text"), Some(&breaks)))),

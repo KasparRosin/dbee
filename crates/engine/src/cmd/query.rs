@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn server_positions_become_byte_offsets() {
-        let text = "select 1;\nselect 'é🐝', nope";
+        let text = "select 1;\nselect 'é🐙', nope";
         let range = 10..text.len();
         let at = |p: u32| byte_position(text, &range, p);
         // 1-based characters of the statement, counted after the multibyte ones.

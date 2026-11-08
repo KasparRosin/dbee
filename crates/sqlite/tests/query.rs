@@ -113,7 +113,7 @@ async fn values_as_text_by_their_storage_class() {
                 some("-1.0e-10"),
                 some("X''"),
                 some("X'00FF'"),
-                some("second row: edge values 🐝"),
+                some("second row: edge values 🐙"),
                 some("0"),
                 some("1999-12-31")
             ],
