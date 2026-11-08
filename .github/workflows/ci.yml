@@ -24,6 +24,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
+      # No debug info in CI builds: with it, the test binaries most likely filled the runner's
+      # disk (the linker died with a bus error). Failing asserts still name their file and line.
+      CARGO_PROFILE_DEV_DEBUG: "0"
       DBEE_REQUIRE_ORACLES: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,7 +36,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev \
-            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
+            libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
 
       - name: Install Rust (the release, profile and components in rust-toolchain.toml)
         run: rustup toolchain install
@@ -44,3 +47,9 @@ jobs:
 
       - name: Quality gate
         run: cargo xtask ci
+
+      - name: Free disk space at the end (tells a full disk from other failures)
+        if: always()
+        run: |
+          df -h / /tmp
+          du -sh target 2>/dev/null || true

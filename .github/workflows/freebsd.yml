@@ -52,17 +52,20 @@ jobs:
         with:
           release: "15.1"
           usesh: true
-          cpu: 4
-          mem: 12288
+          # Sized for a private repo's runner: a 12 GB VM failed to boot there (QEMU: cannot allocate memory).
+          cpu: 2
+          mem: 6144
           envs: "DBEE_VERSION DBEE_VERSION_OVERRIDE DBEE_PACKAGE DBEE_BUILD_SHA"
           # Only the packaging run brings files back (dist/release). The target dir lives outside
           # the synced checkout, because copying it out of the VM fails on large builds.
           copyback: ${{ inputs.package }}
           prepare: |
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2
-            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           run: |
             . "$HOME/.cargo/env"
+            # The release, profile and components in rust-toolchain.toml.
+            rustup toolchain install
             # The checkout is synced in under another owner; let tests that call git read it.
             git config --global --add safe.directory "*"
             export CARGO_TARGET_DIR=/var/tmp/dbee-target CARGO_PROFILE_DEV_DEBUG=0

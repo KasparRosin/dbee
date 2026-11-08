@@ -70,10 +70,11 @@ jobs:
             echo "SIGNED=1" >> "$GITHUB_ENV"
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Install Rust (the release in rust-toolchain.toml) and the build targets
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-macos-universal
@@ -94,7 +95,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: packaging/macos/package.sh --arch universal
       - name: Verify signatures and notarization
-        if: env.SIGNED == '1' && hashFiles('packaging/macos/verify.sh') != ''
+        if: env.SIGNED == '1'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -157,10 +158,11 @@ jobs:
             echo "::warning::Windows build ships unsigned: no WINDOWS_CERTIFICATE pair and empty Azure Trusted Signing secrets:$missing."
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      - name: Install Rust (the release in rust-toolchain.toml) and the build targets
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-windows-${{ matrix.arch }}
@@ -217,9 +219,8 @@ jobs:
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: 2.47.0
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
+      - name: Install Rust (the release, profile and components in rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-linux-${{ matrix.arch }}
@@ -230,12 +231,12 @@ jobs:
         run: packaging/linux/package.sh
       - name: Check the packages
         run: |
-          dpkg-deb --info dist/release/*.deb || true
-          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/|metainfo|applications' || true
+          dpkg-deb --info dist/release/*.deb
+          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/|metainfo|applications'
           for appimage in dist/release/*.AppImage; do
             if [ -f "$appimage" ]; then
               chmod +x "$appimage"
-              APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --version || true
+              APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --version
             fi
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -308,39 +309,22 @@ jobs:
         with:
           release: "15.1"
           usesh: true
-          cpu: 4
-          mem: 12288
+          # Sized for a private repo's runner: a 12 GB VM failed to boot there (QEMU: cannot allocate memory).
+          cpu: 2
+          mem: 6144
           envs: "VERSION BUILD_DATE BUILD_SHA INPUT_VERSION DBEE_VERSION DBEE_BUILD_DATE DBEE_BUILD_SHA"
           prepare: |
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           run: |
             set -e
             . "$HOME/.cargo/env"
+            # The release, profile and components in rust-toolchain.toml.
+            rustup toolchain install
             git config --global --add safe.directory "*"
-            export CARGO_TARGET_DIR=/var/tmp/dbee-target CARGO_BUILD_JOBS=4
-            if [ -n "$INPUT_VERSION" ]; then cargo xtask version set "$VERSION" || cargo run -q -p xtask -- version set "$VERSION"; fi
-            if [ -f packaging/freebsd/package.sh ]; then
-              bash packaging/freebsd/package.sh
-            else
-              cargo build --release --locked -p dbee $(cargo metadata --format-version 1 --no-deps | grep -q '"dbee-cli"' && echo "-p dbee-cli" || true)
-              name="dbee-$VERSION-freebsd-x86_64"
-              mkdir -p "dist/release/$name"
-              cp target/release/dbee "dist/release/$name/" 2>/dev/null || cp /var/tmp/dbee-target/release/dbee "dist/release/$name/"
-              if [ -f target/release/dbee-cli ]; then
-                cp target/release/dbee-cli "dist/release/$name/"
-              elif [ -f /var/tmp/dbee-target/release/dbee-cli ]; then
-                cp /var/tmp/dbee-target/release/dbee-cli "dist/release/$name/"
-              fi
-              cp README.md LICENSE-MIT LICENSE-APACHE ATTRIBUTION.md "dist/release/$name/" 2>/dev/null || true
-              if [ -f packaging/linux/dev.rosin.dbee.desktop ]; then
-                cp packaging/linux/dev.rosin.dbee.desktop "dist/release/$name/"
-              fi
-              mkdir -p "dist/release/$name/icons"
-              cp -R assets/app-icon/hicolor "dist/release/$name/icons/" 2>/dev/null || true
-              tar -C dist/release -czf "dist/release/$name.tar.gz" "$name"
-              rm -rf "dist/release/$name" /var/tmp/dbee-target target
-            fi
+            export CARGO_TARGET_DIR=/var/tmp/dbee-target CARGO_BUILD_JOBS=2
+            if [ -n "$INPUT_VERSION" ]; then cargo xtask version set "$VERSION"; fi
+            bash packaging/freebsd/package.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-freebsd-x86_64
@@ -364,10 +348,11 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: stable
-          targets: riscv64gc-unknown-linux-gnu
+      - name: Install Rust (the release in rust-toolchain.toml) and the build targets
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add riscv64gc-unknown-linux-gnu
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-linux-riscv64
@@ -394,8 +379,8 @@ jobs:
         run: packaging/linux/package.sh --formats "deb rpm tar"
       - name: Check the packages
         run: |
-          dpkg-deb --info dist/release/*-linux-riscv64.deb 2>/dev/null || true
-          dpkg-deb --contents dist/release/*-linux-riscv64.deb 2>/dev/null | grep -E 'usr/bin/|metainfo|applications' || true
+          dpkg-deb --info dist/release/*-linux-riscv64.deb
+          dpkg-deb --contents dist/release/*-linux-riscv64.deb | grep -E 'usr/bin/|metainfo|applications'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-linux-riscv64

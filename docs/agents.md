@@ -6,13 +6,7 @@ dbee is built to be driven by AI agents, and largely built by them. Part 1 cover
 
 # Part 1: driving dbee
 
-The control channel (§2) and the isolated runs for checking UI work (§4) exist. The MCP server (§1) and the command line (§3) are **(planned)**, documented first so the implementation has a contract to meet; today `dbee-cli` prints its version.
-
-## 1. MCP server (planned)
-
-`dbee-cli mcp` serves MCP on stdio, headless (`--demo`, a seeded in-memory SQLite database) or bridged to a running app (`--bridge HOST:PORT`). The core tools `command_list`, `command_run`, `command_batch`, `doc_inspect` and `render_preview` work in both modes. Database tools: `connection_list`, `schema_inspect`, `query_run`, `table_read`. Bridge-only: the `ui_*` tools and `screenshot`. Full reference: [`mcp.md`](mcp.md).
-
-Typical loop: `connection_list` / `schema_inspect` to get names, `command_run` or `query_run`, `table_read` or a screenshot to look at the result, `edit.undo` if it is wrong.
+The control channel (§2) and the isolated runs for checking UI work (§4) exist. The command line (§3) is **(planned)**, documented first so the implementation has a contract to meet; today `dbee-cli` prints its version.
 
 ## 2. Control channel
 
@@ -35,7 +29,7 @@ Every command is one shell call away: `dbee-cli exec <id> k=v…`, `run <script.
 For any UI change, look at the result:
 
 1. `cargo xtask run-isolated --port 7979` (add `--release` for a release build). It builds dbee and runs it on a throwaway home, `target/isolated/<port>/home`, with the control channel on that port, in-memory secrets, an in-memory clipboard (`DBEE_CLIPBOARD=memory`: every copy and cut, a text field's too, stays in the app, and `document.inspect` shows the start of the last as `clipboard` with its length as `clipboardBytes`) and no SSH agent on Linux and macOS (on Windows the OpenSSH agent pipe is still reachable); with the Docker test servers up, that home's `.ssh` holds their test key and host key. The run may connect only to the test servers: each server's port and the sshd's, on `127.0.0.1` and `localhost`, plus `127.0.0.1:1` for error demos (`DBEE_ALLOW_TARGETS` on the child). Without `target/testdb/env.json` only `127.0.0.1:1` is allowed, and run-isolated warns. Test, the database list, open and reconnect refuse any other target before any network I/O, with an error saying this isolated run may only connect to the test servers; through an SSH tunnel the SSH server's host and port are what count. A database file (SQLite) must lie in the throwaway home or `target/` (`DBEE_ALLOW_DIRS` on the child): the driver checks it inside its open, once links and `..` are resolved, and the job fails with a `config` error naming the file; a file takes no SSH tunnel. The run's SQL may open no other file, so SQLite's `ATTACH`, `VACUUM INTO`, `VACUUM` and the pragmas that move its temporary files are refused.
-2. Drive the feature through the control channel (the MCP bridge is planned): commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
+2. Drive the feature through the control channel: commands first (`engine.execute`), then clicks and keys by automation id (`ui.click`, `ui.key`).
 3. Assert on `ui.inspect` and `document.inspect`.
 4. Take `ui.screenshot` (the whole window) and open the PNG; `app.quit` ends the run.
 
@@ -61,7 +55,7 @@ Maintainers also keep a local planning folder, `plan/` (gitignored): the status 
 2. **Plan tests first.** Write down the acceptance test before the code.
 3. **Implement and test.**
 4. **Verify.** Run `cargo xtask ci`. For UI work, also take a screenshot of the window and look at it.
-5. **Record.** Update the progress docs the change touches (ROADMAP.md, `docs/gaps.md`, the parity docs, with their status lines and revision history). Commit as `M<n>.<k>: …`, one task id per commit, then move on.
+5. **Record.** Update the progress docs the change touches (ROADMAP.md, `docs/gaps.md`, the parity docs, with their status lines and revision history). Commit with a subject in the form [`CONTRIBUTING.md`](../CONTRIBUTING.md) gives, for example `feat(M2.6): …`, one task id per commit, then move on.
 
 For parallel agents see §9.
 

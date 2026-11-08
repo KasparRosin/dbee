@@ -98,7 +98,7 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 ## 2026-10-27: GitHub repository after M1; changes land through merge requests
 
 - **Decision:** The private repository `KasparRosin/dbee` is created once M1 is built, before version 1, and `main` is pushed to it after the history tidy. From then on changes land on `main` through merge requests, and CI runs on GitHub.
-- **Why:** M1 does real work and is ready for review on GitHub; CI on GitHub covers the macOS, Windows and BSD builds the local machine cannot run.
+- **Why:** M1 does real work and is ready for review on GitHub; GitHub's runners build the macOS, Windows and BSD releases the local machine cannot. Regular CI builds Linux only.
 
 ## 2026-10-28: M2 is three databases, before import and export
 

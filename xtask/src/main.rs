@@ -30,7 +30,7 @@ commands:
   assets          check that every icon/image/font/sample file is attributed in ATTRIBUTION.md
   layers          enforce the crate dependency layering (AGENTS.md \"Layering\")
   licenses        list dependencies outside the licence allowlist (docs/standards/licensing.md); not a ci step
-  provenance      fail on banned terms in tracked files: the built-in word list, and the brand names in the
+  provenance      fail on brand names in tracked files: the ones in the
                   local plan/provenance-terms.txt when it exists (xtask/src/provenance.rs)
   version [set X.Y.Z[-pre]]
                   print or set the workspace version ([workspace.package] in Cargo.toml)

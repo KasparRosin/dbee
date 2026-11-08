@@ -1,8 +1,8 @@
 # dbee-cli
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (still planned after M1; the control channel meanwhile)
+> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (the `mcp` command is removed until the server exists)
 
-The command-line tool for dbee: run commands, run queries and serve MCP without a window. Today only `version` and `help` exist; everything else is **(planned)** and documented first. M1 (the daily Postgres workflow) left the CLI's commands out on purpose. Until they land, agents and scripts drive dbee through the desktop app's control channel ([`control-protocol.md`](control-protocol.md)), which reaches every command.
+The command-line tool for dbee: run commands, run queries without a window. Today only `version` and `help` exist; everything else is **(planned)** and documented first. M1 (the daily Postgres workflow) left the CLI's commands out on purpose. Until they land, agents and scripts drive dbee through the desktop app's control channel ([`control-protocol.md`](control-protocol.md)), which reaches every command.
 
 ```sh
 cargo run -p dbee-cli -- <subcommand>
@@ -20,7 +20,6 @@ cargo run -p dbee-cli -- <subcommand>
 | `run <script.jsonl>` | planned | One command per line, `{"id":"…","params":{…}}`. The first failing step stops the run. |
 | `query --connection <name> <sql>` | planned | `dbee-cli query --connection demo 'select 1'`: run SQL and print rows as JSON. |
 | `export` | planned | Export a table or query result (CSV, JSON, SQL). |
-| `mcp` | planned | MCP server on stdio ([`mcp.md`](mcp.md)). |
 | `send <port> <method> [json]` | planned | One control-channel request to a running app started with `dbee --control <port>` ([`control-protocol.md`](control-protocol.md)). |
 
 ## Output and exit codes

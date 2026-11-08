@@ -1,11 +1,10 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/banner-dark.svg">
-    <img src="assets/readme/banner-light.svg" alt="dbee">
-  </picture>
+  <img src="assets/app-icon/hicolor/256x256/apps/dev.rosin.dbee.png" alt="dbee" width="128">
 </p>
 
-<p align="center">A cross-platform desktop database client, written in Rust.</p>
+<h1 align="center">dbee</h1>
+
+<p align="center"><b>A fast, free database client for Linux, macOS and Windows.</b></p>
 
 > [!NOTE]
 > **Pre-alpha.** The first milestone, M1, is the daily Postgres workflow, and it is built: connect (also through an SSH tunnel), browse, filter and edit tables, run queries and copy results.\
@@ -33,15 +32,15 @@ Known gaps and limits are ranked in [docs/gaps.md](docs/gaps.md).
 
 - **Native and fast.** One Rust codebase, with no Electron and no browser engine.
 - **Open source.** Dual-licensed MIT or Apache-2.0, written clean-room from public specifications and black-box observation.
-- **Scriptable.** Every action is a command. The control channel reaches all of them today; a command-line tool and an MCP server are planned.
+- **Scriptable.** Every action is a command. The control channel reaches all of them today; a command-line tool is planned.
 
 ## Platforms
 
-dbee is built for Linux (x86_64, aarch64, riscv64), macOS (universal), Windows (x64, x86, arm64) and FreeBSD (x86_64). Linux x86_64 is tested. The other platforms are defined in the release pipeline but untested yet ([docs/hardware-parity.md](docs/hardware-parity.md)).
+dbee is built for Linux (x86_64, aarch64, riscv64), macOS (universal), Windows (x64, x86, arm64) and FreeBSD (x86_64). Linux x86_64 is tested. The other platforms build in the release pipeline but nobody has installed and started them yet (Windows ARM64 excepted) ([docs/hardware-parity.md](docs/hardware-parity.md)).
 
 ## Download
 
-No releases yet: the release pipeline is written but has not run ([docs/releasing.md](docs/releasing.md)). Until the first release, build dbee from source.
+v0.1.0 on the Releases page is an unsigned test pre-release of the release pipeline ([docs/releasing.md](docs/releasing.md)). Building dbee from source is still the main way to run it.
 
 ## Build from source
 
@@ -63,7 +62,7 @@ The app writes its log to `<settings dir>/logs/dbee.log`, where the settings dir
 
 ## For agents
 
-`dbee --control <port>` serves a JSON-lines control channel on `127.0.0.1`. It runs every command and drives the window: clicks, keys, inspection and screenshots ([docs/control-protocol.md](docs/control-protocol.md)). `cargo xtask run-isolated` starts the app with it on a throwaway home. The MCP server and the command-line tool's commands are planned and documented first ([docs/mcp.md](docs/mcp.md), [docs/cli.md](docs/cli.md)). Agents working on dbee start with [AGENTS.md](AGENTS.md).
+`dbee --control <port>` serves a JSON-lines control channel on `127.0.0.1`. It runs every command and drives the window: clicks, keys, inspection and screenshots ([docs/control-protocol.md](docs/control-protocol.md)). `cargo xtask run-isolated` starts the app with it on a throwaway home. The command-line tool's commands are planned and documented first ([docs/cli.md](docs/cli.md)). Agents working on dbee start with [AGENTS.md](AGENTS.md).
 
 ## Documentation
 

@@ -32,7 +32,10 @@ finish-args:
   - --filesystem=xdg-download
   # Network: connections to PostgreSQL, MySQL and other database servers.
   - --share=network
-  # Deliberately not granted: home/host filesystem access.
+  # SSH tunnels: keys and known_hosts (read-only), and the SSH agent.
+  - --filesystem=~/.ssh:ro
+  - --socket=ssh-auth
+  # Deliberately not granted: the rest of the home and host filesystem.
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 modules:

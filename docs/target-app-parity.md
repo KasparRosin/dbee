@@ -62,7 +62,7 @@ Features, weighted by area: **39 %**, put at **~35 % (estimated)**.
 | File formats (import/export) | 4 | 0 % | measured | none ([file-format-parity.md](file-format-parity.md)) |
 | Localization | 4 | 0 % | measured | English only ([localization-parity.md](localization-parity.md)) |
 | Platforms | 2 | ~25 % | estimated | Linux x86_64 built, packaged and run; macOS, Windows and FreeBSD not built in M1 ([hardware-parity.md](hardware-parity.md)) |
-| Ecosystem and AI | 2 | ~25 % | estimated | The localhost control channel drives every command and the window (`docs/control-protocol.md`); MCP and the CLI's database commands are planned; no AI features |
+| Ecosystem and AI | 2 | ~25 % | estimated | The localhost control channel drives every command and the window (`docs/control-protocol.md`); the CLI's database commands are planned; no AI features |
 
 Weighted: 0.40 × 35 + 0.20 × 20 + 0.12 × 45 + 0.08 × 30 + 0.08 × 25 + 0.02 × 25 + 0.02 × 25 = **28.8 %**, given as **~29 % (estimated)**.
 
@@ -118,7 +118,7 @@ Linux x86_64: built, packaged (tarball, AppImage) and started from the tarball o
 
 ## Ecosystem and AI
 
-The control channel (`dbee --control <port>`) reaches every command and drives the real window: clicks, keys, text, screenshots and inspection. The test suites and the M1 day use it. `dbee-cli mcp` and the CLI's database commands are planned ([mcp.md](mcp.md), [cli.md](cli.md)). There are no AI features in dbee (a non-goal).
+The control channel (`dbee --control <port>`) reaches every command and drives the real window: clicks, keys, text, screenshots and inspection. The test suites and the M1 day use it. The CLI's database commands are planned ([cli.md](cli.md)). There are no AI features in dbee (a non-goal).
 
 ## Stage
 
@@ -154,6 +154,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 | 2026-11-06 | minor | The M2 tarball as rebuilt from `df2f3ca`, with its sha256; the launch check right after its release build (948 and 347 ms at a load of 8.5–9.5). |
 | 2026-11-06 | minor | The launch check measured at a low load (199–228 ms); the M2 day's runs with their loads; the 20,000-step fuzz run again. |
 | 2026-11-05 | major | M2 built: MySQL, MariaDB and SQLite (4 of 20 engines, ~29 % overall, estimated); readiness for SQLite and MySQL users; M1's targets measured again on every engine, in a release build, with the load; the M2 day; effort for M2. |
+| 2026-10-29 | trivial | The MCP server is no longer described until it exists. |
 | 2026-10-28 | minor | Import and export is now M3; M2 is three databases (MySQL/MariaDB and SQLite). |
 | 2026-10-27 | minor | Wording: the day of real use on the maintainer's own databases, M1 review fixes, earlier runs instead of task ids. |
 | 2026-10-27 | trivial | The observation notes are cited as kept outside the repository, not by their local paths. |
