@@ -138,6 +138,13 @@ fn find_sub(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 /// Splits `sql` into tokens. Ranges are contiguous and cover the input. An unterminated string,
 /// quoted identifier, dollar quote or comment runs to the end.
 pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
+    tokenize_with(d, sql, d.rules().lex.backslash_escapes)
+}
+
+/// [`tokenize`], with a backslash in a string an escape or a plain character as
+/// `backslash_escapes` says, whatever the dialect's default: a MySQL session can turn escapes off
+/// (`NO_BACKSLASH_ESCAPES`).
+pub fn tokenize_with(d: Dialect, sql: &str, backslash_escapes: bool) -> Vec<Token> {
     let lex = &d.rules().lex;
     let b = sql.as_bytes();
     let mut out = Vec::new();
@@ -183,7 +190,7 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
             i = i.min(b.len());
             kind = TokenKind::Comment;
         } else if c == b'\'' {
-            i = scan_quoted(b, i + 1, b'\'', lex.backslash_escapes);
+            i = scan_quoted(b, i + 1, b'\'', backslash_escapes);
             kind = TokenKind::String;
         } else if lex.escape_strings && (c == b'E' || c == b'e') && at(b, i + 1) == b'\'' {
             i = scan_quoted(b, i + 2, b'\'', true).min(b.len());
@@ -198,7 +205,7 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
         } else if c == b'"' {
             let (quoted, backslash) = match lex.double_quote {
                 DoubleQuote::Ident => (TokenKind::QuotedIdent, false),
-                DoubleQuote::String => (TokenKind::String, lex.backslash_escapes),
+                DoubleQuote::String => (TokenKind::String, backslash_escapes),
             };
             i = scan_quoted(b, i + 1, b'"', backslash);
             kind = quoted;
@@ -312,9 +319,9 @@ fn ws_end(b: &[u8], mut at: usize) -> usize {
     at
 }
 
-fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
+fn scan_statements(d: Dialect, sql: &str, backslash_escapes: bool) -> Vec<Stmt> {
     let lex = &d.rules().lex;
-    let toks = tokenize(d, sql);
+    let toks = tokenize_with(d, sql, backslash_escapes);
     let b = sql.as_bytes();
     let mut out = Vec::new();
     let mut cur: Option<Range<usize>> = None;
@@ -397,13 +404,19 @@ fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
 /// Statements split on top-level `;`. Leading whitespace and comments, trailing comments and the
 /// `;` are excluded; empty statements are dropped.
 pub fn statements(d: Dialect, sql: &str) -> Vec<Range<usize>> {
-    scan_statements(d, sql).into_iter().map(|s| s.range).collect()
+    statements_with(d, sql, d.rules().lex.backslash_escapes)
+}
+
+/// [`statements`], with backslash escapes in strings as `backslash_escapes` says
+/// ([`tokenize_with`]).
+pub fn statements_with(d: Dialect, sql: &str, backslash_escapes: bool) -> Vec<Range<usize>> {
+    scan_statements(d, sql, backslash_escapes).into_iter().map(|s| s.range).collect()
 }
 
 /// The statement whose span (its start through its `;` and the whitespace after it) holds `cursor`.
 /// Past the end it is the last statement; `None` when there are no statements.
 pub fn statement_at(d: Dialect, sql: &str, cursor: usize) -> Option<Range<usize>> {
-    let all = scan_statements(d, sql);
+    let all = scan_statements(d, sql, d.rules().lex.backslash_escapes);
     let pick = all.iter().position(|s| cursor < s.span_end).or(all.len().checked_sub(1))?;
     all.into_iter().nth(pick).map(|s| s.range)
 }

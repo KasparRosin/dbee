@@ -44,7 +44,7 @@ impl MySqlConnection {
         let mut session = self.lock().await?;
         self.before(&mut session, sql).await?;
         let ran = self.statement(&mut session, sql, limits).await;
-        self.after(&mut session, sql, ran).await
+        self.after(&mut session, ran).await
     }
 
     /// [`MySqlConnection::run`], with the columns untyped (table pages take them from the

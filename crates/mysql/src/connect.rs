@@ -21,7 +21,7 @@ use crate::auth::{self, Login, ServerKey};
 use crate::cancel::{Canceller, KillRoute, Statements};
 use crate::errors;
 use crate::flavor::{Flavor, shown_version, version_num, version_warning};
-use crate::result;
+use crate::result::{self, ModeReport, Said};
 use crate::wire::{MAX_PAYLOAD, Packets, Stream};
 
 /// The largest payload dbee reads before the login is done.
@@ -38,6 +38,10 @@ const BROWSE_AUTOCOMMIT: &str = "SET SESSION autocommit = 1";
 /// insufficient-security alert (ciphers), or with a protocol-version alert (versions).
 const NO_SHARED_CIPHER: &str = "the server offers only TLS ciphers dbee does not support; connect through an SSH tunnel instead";
 const NO_SHARED_VERSION: &str = "the server offers only TLS versions dbee does not support; connect through an SSH tunnel instead";
+
+/// Why a read-only connection to a server that cannot report a change of read-only mode fails.
+const NO_TRACKING: &str = "this server cannot report a change of read-only mode, which dbee relies on to keep a connection read-only. \
+                           Connect as a database user without write rights, with Read-only off.";
 
 /// The warning when the user allowed the server's key on a link that should have had TLS.
 const UNCHECKED_KEY: &str =
@@ -97,9 +101,11 @@ pub(crate) struct Session {
     tracks_schema: bool,
     /// The address a direct connection reached; `None` through a tunnel.
     reached: Option<SocketAddr>,
-    /// The last command left warnings or an error, which `SHOW WARNINGS` lists until the next
-    /// statement.
-    pub(crate) conditions: bool,
+    /// What the last command's OK packets said of read-only mode ([`crate::guard`]).
+    pub(crate) mode: ModeReport,
+    /// A backslash in a string escapes the character after it: the server's `sql_mode` lacks
+    /// `NO_BACKSLASH_ESCAPES`, as the last OK packet's status said.
+    pub(crate) backslash_escapes: bool,
     /// The session variable that says whether transactions are read-only, as the server spells it
     /// ([`Flavor::read_only_variables`]); the session setup finds it.
     pub(crate) read_only_variable: &'static str,
@@ -108,7 +114,7 @@ pub(crate) struct Session {
 impl Session {
     /// Open the stream, read the greeting, start TLS as `tls` says, and log in, with the
     /// server's RSA key as `key` allows; asking for `CLIENT_SESSION_TRACK` when `session_track`
-    /// says so (the query connection's does).
+    /// says so (the query connection's and a read-only one's do).
     pub(crate) async fn open(route: &Route, who: &Login<'_>, tls: &TlsUse, key: ServerKey, session_track: bool) -> Result<Session, DbError> {
         Session::open_asking(route, who, tls, key, auth::MARIADB_WANTED, session_track).await
     }
@@ -152,7 +158,8 @@ impl Session {
             used_server_key,
             tracks_schema: false,
             reached,
-            conditions: false,
+            mode: ModeReport::Silent,
+            backslash_escapes: true,
             read_only_variable,
         })
     }
@@ -167,9 +174,14 @@ impl Session {
         command.push(Command::COM_QUERY as u8);
         command.extend_from_slice(sql.as_bytes());
         self.packets.write(&command).await?;
-        let answer = result::read_result(&mut self.packets, self.caps, self.flavor, self.extended_metadata, self.tracks_schema, limits).await;
-        self.conditions = answer.as_ref().map_or(true, |(_, warnings)| *warnings > 0);
-        answer.map(|(result, _)| result)
+        let mut said = Said::default();
+        let answer =
+            result::read_result(&mut self.packets, self.caps, self.flavor, self.extended_metadata, self.tracks_schema, limits, &mut said).await;
+        self.mode = said.mode;
+        if let Some(off) = said.no_backslash_escapes {
+            self.backslash_escapes = !off;
+        }
+        answer
     }
 
     /// Say goodbye (`COM_QUIT`); the server closes the connection.
@@ -180,8 +192,9 @@ impl Session {
 }
 
 /// `sql` names `session_track` in any case: it may change what the server reports, so the
-/// session stops trusting its reports of the database.
-fn names_session_track(sql: &str) -> bool {
+/// session stops trusting its reports of the database, and a read-only connection does not send
+/// it ([`crate::guard`]).
+pub(crate) fn names_session_track(sql: &str) -> bool {
     const NAME: &[u8] = b"session_track";
     sql.as_bytes().windows(NAME.len()).any(|w| w.eq_ignore_ascii_case(NAME))
 }
@@ -259,8 +272,9 @@ fn server_key(cfg: &ConnectionConfig, tunnel: bool) -> ServerKey {
 /// says in each OK packet which database a statement made current; a server without it leaves
 /// that untold, as does the session after a statement of the user's that names `session_track`);
 /// a read-only connection runs `SET SESSION TRANSACTION READ ONLY`, which the flavor's variable
-/// must then confirm. In `prefer` mode a failed TLS handshake is tried again without TLS, as
-/// libpq does.
+/// must then confirm, and has the server report each change of that variable and of the
+/// transaction's characteristics (`CLIENT_SESSION_TRACK`; a server that cannot is refused). In
+/// `prefer` mode a failed TLS handshake is tried again without TLS, as libpq does.
 pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     // The timeouts need a runtime; without one they would panic.
     tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("connecting needs a tokio runtime".into()))?;
@@ -324,7 +338,7 @@ async fn attempt(
     let addr = route.address();
     log::info!("mysql: connecting to {addr}{}", if route.tunnel.is_some() { " through SSH" } else { "" });
     let opening = async {
-        let mut session = Session::open(route, who, tls, key, purpose == Purpose::Query).await?;
+        let mut session = Session::open(route, who, tls, key, purpose == Purpose::Query || read_only).await?;
         let (info, id) = setup(&mut session, read_only, purpose).await?;
         Ok((session, info, id))
     };
@@ -366,16 +380,6 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
         session.query(BROWSE_SQL_MODE, QUERY_LIMITS).await?;
         session.query(BROWSE_AUTOCOMMIT, QUERY_LIMITS).await?;
     }
-    if purpose == Purpose::Query && session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK) {
-        session.tracks_schema = match session.query("SET SESSION session_track_schema = ON", QUERY_LIMITS).await {
-            Ok(_) => true,
-            Err(DbError::Server(_)) => {
-                log::info!("mysql: the server cannot report the current database; dbee leaves it untold");
-                false
-            }
-            Err(e) => return Err(e),
-        };
-    }
     if read_only {
         session.query("SET SESSION TRANSACTION READ ONLY", QUERY_LIMITS).await?;
     }
@@ -393,9 +397,35 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     if read_only && !server_read_only {
         return Err(DbError::Other(format!("read-only mode did not stick (@@session.{variable} is {value:?})")));
     }
+    if read_only {
+        track_read_only(session, variable).await?;
+    }
+    // Last, as a statement that names `session_track`, the read-only setup's too, ends the trust in the reports.
+    if purpose == Purpose::Query && session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK) {
+        session.tracks_schema = match session.query("SET SESSION session_track_schema = ON", QUERY_LIMITS).await {
+            Ok(_) => true,
+            Err(DbError::Server(_)) => {
+                log::info!("mysql: the server cannot report the current database; dbee leaves it untold");
+                false
+            }
+            Err(e) => return Err(e),
+        };
+    }
     let warnings = version_warning(flavor, version_num).into_iter().collect();
     let version = shown_version(&version).to_owned();
     Ok((ServerInfo { product: flavor.product().into(), version, version_num, read_only: server_read_only, warnings }, connection_id))
+}
+
+/// Has the server report, in each OK packet, a change of the read-only `variable` and of the
+/// transaction's characteristics, which a `SET` of the variable without `SESSION` and
+/// `START TRANSACTION READ WRITE` change.
+async fn track_read_only(session: &mut Session, variable: &str) -> Result<(), DbError> {
+    if !session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK | CapabilityFlags::CLIENT_DEPRECATE_EOF) {
+        return Err(DbError::Other(NO_TRACKING.into()));
+    }
+    session.query(&format!("SET SESSION session_track_system_variables = '{variable}'"), QUERY_LIMITS).await?;
+    session.query("SET SESSION session_track_transaction_info = 'CHARACTERISTICS'", QUERY_LIMITS).await?;
+    Ok(())
 }
 
 /// The flavor's read-only variable and its value; the other spelling when the server has no
@@ -429,11 +459,11 @@ pub struct MySqlConnection {
     closed: AtomicBool,
     pub(crate) statements: Arc<Statements>,
     canceller: Canceller,
-    /// dbee made the session read-only, and reads the mode back after each statement
+    /// dbee made the session read-only, and checks each statement and the server's report of it
     /// ([`crate::guard`]).
     pub(crate) read_only: bool,
-    /// The mode is read before the next statement: the last one left warnings, which reading it
-    /// would clear, or a cancel stopped the read.
+    /// The mode is read before the next statement: the last one ended in an error, which carries
+    /// no report, or a cancel stopped the read.
     pub(crate) check_due: AtomicBool,
 }
 
@@ -506,7 +536,8 @@ mod tests {
             used_server_key: false,
             tracks_schema: true,
             reached: None,
-            conditions: false,
+            mode: ModeReport::Silent,
+            backslash_escapes: true,
             read_only_variable: "transaction_read_only",
         }
     }
@@ -526,20 +557,26 @@ mod tests {
         assert_eq!(fresh.query("USE many", QUERY_LIMITS).await.unwrap().database_after, moved);
     }
 
+    /// The query connection asks for session tracking to learn the current database, and both
+    /// connections of a read-only one ask to learn of a change of read-only mode.
     #[tokio::test]
-    async fn only_the_query_connection_asks_for_session_tracking() {
+    async fn the_query_connection_and_a_read_only_one_ask_for_session_tracking() {
         let db = dbee_testkit::require_testdb!();
         for s in db.servers_of(&[dbee_testkit::Kind::MySql, dbee_testkit::Kind::MariaDb]) {
             let kind = dbee_config::DbKind::from_id(s.kind.id()).unwrap();
             let config = ConnectionConfig { kind, host: "127.0.0.1".into(), port: s.port, user: "root".into(), ..ConnectionConfig::default() };
+            let read_only = ConnectionConfig { read_only: true, ..config.clone() };
             let mut asked = Vec::new();
-            for purpose in [Purpose::Browse, Purpose::Query] {
-                let target = Target { config: &config, password: Some(&db.password), tunnel: None, purpose, create_file: false, allowed_dirs: None };
+            for (config, purpose) in
+                [(&config, Purpose::Browse), (&config, Purpose::Query), (&read_only, Purpose::Browse), (&read_only, Purpose::Query)]
+            {
+                let target = Target { config, password: Some(&db.password), tunnel: None, purpose, create_file: false, allowed_dirs: None };
                 let conn = connect(target).await.unwrap();
                 let session = conn.session.lock().await;
                 asked.push((session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK), session.tracks_schema));
             }
-            assert_eq!(asked, [(false, false), (true, true)], "{}: (asked for, read) on the browse and the query connection", s.name);
+            let want = [(false, false), (true, true), (true, false), (true, true)];
+            assert_eq!(asked, want, "{}: (asked for, the database read) on the browse and the query connection, then read-only", s.name);
         }
     }
 

@@ -524,6 +524,10 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
             "COMMIT AND CHAIN".to_owned(),
             "SET GLOBAL max_connections = @@GLOBAL.max_connections".to_owned(),
             "SELECT 1 INTO OUTFILE '/var/lib/mysql-files/dbee-never-written'".to_owned(),
+            format!("SET @@{variable} = 0"),
+            format!("SET @@{variable} = 1 - 1"),
+            format!("SET @@{variable} = TRUE - 1"),
+            format!("SET SESSION session_track_system_variables = '{variable}'"),
         ];
         for sql in &refused {
             let e = run_text(&mut s, sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
@@ -532,7 +536,15 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
         // Behind a version comment a server skips (each of these is skipped by some of the five), the
         // same forms are refused, or are a syntax error where the server runs the comment; the
         // insert after each is refused all the same.
-        for gate in ["/*M!999999 SELECT */", "/*M! SELECT */", "/*!99999 SELECT */"] {
+        for gate in [
+            "/*M!999999 SELECT */",
+            "/*M! SELECT */",
+            "/*!99999 SELECT */",
+            "/*!99999 /* */ SELECT */",
+            "/*!999999 /* */ SELECT */",
+            "/*M!999999 /* */ SELECT */",
+            "/*!99999 /*!50000 x */ SELECT */",
+        ] {
             for form in [
                 "START TRANSACTION READ WRITE".to_owned(),
                 format!("SET @@{variable} = 0"),
@@ -547,6 +559,13 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
                 assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}: after {sql}", t.name());
             }
         }
+        // With backslash escapes off, as the server then reads strings: `'\'` is a whole string.
+        run_text(&mut s, "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',NO_BACKSLASH_ESCAPES')").unwrap();
+        let hidden = format!(r"SET @a = '\', @@{variable} = 0, @b = '\'");
+        let e = run_text(&mut s, &hidden).expect_err("refused");
+        assert!(e.code() == "readOnly" && e.to_string().contains("changes read-only mode"), "{}: {hidden}: {e}", t.name());
+        assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}: after {hidden}", t.name());
+        run_text(&mut s, "SET SESSION sql_mode = DEFAULT").unwrap();
         let e = run_text(&mut s, &format!("SELECT {sc}.{off}()")).expect_err("caught after it ran");
         assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
         assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}", t.name());
@@ -561,9 +580,10 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
     }
 }
 
-/// After a statement that turned read-only off and left a warning, the read-back waits for the next
-/// statement that is not a diagnostic one; a version comment the server skips cannot make an
-/// `INSERT` look like `SHOW WARNINGS` to dbee: it reads the statement as the server will.
+/// After a statement that turned read-only off and then failed (an error carries no report), the
+/// mode is read before the next statement that is not a diagnostic one; a version comment the
+/// server skips cannot make an `INSERT` look like `SHOW WARNINGS` to dbee: it reads the statement
+/// as the server will.
 #[test]
 fn read_only_mysql_reads_a_skipped_version_comment_as_the_server_does() {
     let _db = require_testdb!();
@@ -577,7 +597,7 @@ fn read_only_mysql_reads_a_skipped_version_comment_as_the_server_does() {
         run(&mut w, "query.run", json!({}));
         drop(w);
         let mut s = read_only_session(&t);
-        run_text(&mut s, &format!("SELECT {sc}.{off}(), CAST('1x' AS SIGNED)")).unwrap();
+        run_text(&mut s, &format!("SELECT {sc}.{off}(), (SELECT 1 UNION SELECT 2)")).expect_err("more than one row");
         let e = run_text(&mut s, &format!("/*M!999999 SHOW WARNINGS */ INSERT INTO {sc}.{name} VALUES (1)")).expect_err("not run");
         assert!(e.code() == "readOnly" && e.to_string().contains("did not run this statement"), "{}: {e}", t.name());
         run_text(&mut s, "SELECT 1").unwrap();

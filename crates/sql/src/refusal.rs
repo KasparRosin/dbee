@@ -6,7 +6,7 @@
 use std::ops::Range;
 
 use crate::Dialect;
-use crate::lexer::{Token, TokenKind, code, statements, tokenize};
+use crate::lexer::{Token, TokenKind, code, statements_with, tokenize, tokenize_with};
 
 /// A statement dbee does not send, and why, in words for the user.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,9 +180,15 @@ impl Dialect {
     /// Why dbee does not send `sql`, one statement or several, on a connection of this engine that
     /// is read-only or not; `None` when it may.
     pub fn refusal(self, sql: &str, read_only: bool) -> Option<Refusal> {
+        self.refusal_with(sql, read_only, self.rules().lex.backslash_escapes)
+    }
+
+    /// [`Dialect::refusal`], with backslash escapes in strings as `backslash_escapes` says
+    /// ([`tokenize_with`]): as the session reads them.
+    pub fn refusal_with(self, sql: &str, read_only: bool, backslash_escapes: bool) -> Option<Refusal> {
         let refuse = self.rules().refuse;
-        let tokens = tokenize(self, sql);
-        statements(self, sql).iter().find_map(|range| refuse(&Code::of(sql, &tokens, range), read_only))
+        let tokens = tokenize_with(self, sql, backslash_escapes);
+        statements_with(self, sql, backslash_escapes).iter().find_map(|range| refuse(&Code::of(sql, &tokens, range), read_only))
     }
 
     /// `sql` has a plain string literal (`'…'`) that holds a backslash, which a server reads as the

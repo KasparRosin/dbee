@@ -61,6 +61,75 @@ pub(crate) fn schema_change(ok: &OkPacket<'_>) -> SchemaReport {
     report
 }
 
+/// The spellings of the session variable that holds read-only mode, as the servers report it.
+const READ_ONLY_VARIABLES: [&str; 2] = ["transaction_read_only", "tx_read_only"];
+
+/// What an OK packet says of read-only mode, on a session that tracks the read-only variable and
+/// the transaction's characteristics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ModeReport {
+    /// Nothing that turns it off.
+    #[default]
+    Silent,
+    /// The variable with a value that is not on, or characteristics that hold `READ WRITE`.
+    Off,
+    /// Its session state does not decode: it may have said anything.
+    Unreadable,
+}
+
+impl ModeReport {
+    /// This report, then `later`, of one command: an unreadable one counts most, then one that
+    /// turns it off.
+    fn then(self, later: ModeReport) -> ModeReport {
+        self.max(later)
+    }
+}
+
+/// What `ok` says of read-only mode. A report that it is on (a `SET` to the same value is
+/// reported too) and entries of other kinds say nothing.
+pub(crate) fn mode_report(ok: &OkPacket<'_>) -> ModeReport {
+    let Ok(entries) = ok.session_state_info() else { return ModeReport::Unreadable };
+    let mut report = ModeReport::Silent;
+    for entry in entries.iter() {
+        let said = match entry.data_type() {
+            SessionStateType::SESSION_TRACK_SYSTEM_VARIABLES => match entry.decode() {
+                Ok(SessionStateChange::SystemVariables(variables)) => {
+                    let off = variables.iter().any(|v| {
+                        READ_ONLY_VARIABLES.iter().any(|name| v.name_bytes().eq_ignore_ascii_case(name.as_bytes()))
+                            && !(v.value_bytes().eq_ignore_ascii_case(b"ON") || v.value_bytes() == b"1")
+                    });
+                    if off { ModeReport::Off } else { ModeReport::Silent }
+                }
+                _ => ModeReport::Unreadable,
+            },
+            SessionStateType::SESSION_TRACK_TRANSACTION_CHARACTERISTICS => match entry.decode() {
+                Ok(SessionStateChange::TransactionCharacteristics(c)) if c.as_str().to_ascii_uppercase().contains("READ WRITE") => ModeReport::Off,
+                Ok(SessionStateChange::TransactionCharacteristics(_)) => ModeReport::Silent,
+                _ => ModeReport::Unreadable,
+            },
+            _ => ModeReport::Silent,
+        };
+        report = report.then(said);
+    }
+    report
+}
+
+/// What an answer's OK packets said of the session, beside its result.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Said {
+    /// Of read-only mode, over every OK packet of the answer, also one that ended in an error.
+    pub(crate) mode: ModeReport,
+    /// The last OK packet's `SERVER_STATUS_NO_BACKSLASH_ESCAPES`; `None` when none came.
+    pub(crate) no_backslash_escapes: Option<bool>,
+}
+
+impl Said {
+    fn note(&mut self, mode: ModeReport, status: StatusFlags) {
+        self.mode = self.mode.then(mode);
+        self.no_backslash_escapes = Some(status.contains(StatusFlags::SERVER_STATUS_NO_BACKSLASH_ESCAPES));
+    }
+}
+
 /// Read the answer to a command: an OK packet, an ERR packet, or result sets, as many as the
 /// server says follow (`SERVER_MORE_RESULTS_EXISTS`). The result holds the last result set's
 /// typed columns and rows, values as text ([`CellText`], counted against the caps before it is
@@ -69,7 +138,8 @@ pub(crate) fn schema_change(ok: &OkPacket<'_>) -> SchemaReport {
 /// Rows past `limits` are read but not kept. MariaDB's extended metadata is in each column
 /// definition when `extended_metadata` was agreed. When the server reports the current
 /// database (`tracks_schema`), the result says where the command left it, and untold when a
-/// report does not decode. With it, the warning count the answer's last packet gives.
+/// report does not decode. What the OK packets say of the session goes in `said`, also when the
+/// answer ends in an error.
 pub(crate) async fn read_result(
     p: &mut Packets,
     caps: CapabilityFlags,
@@ -77,11 +147,11 @@ pub(crate) async fn read_result(
     extended_metadata: bool,
     tracks_schema: bool,
     limits: Limits,
-) -> Result<(ResultSet, u16), DbError> {
+    said: &mut Said,
+) -> Result<ResultSet, DbError> {
     let mut kept: Option<ResultSet> = None;
     let mut affected = None;
     let mut moved = SchemaReport::Silent;
-    let mut warnings;
     loop {
         let first = p.read().await?;
         let status = match first.first() {
@@ -89,7 +159,7 @@ pub(crate) async fn read_result(
                 let ok = parse_ok::<CommonOkPacket>(&first, caps)?;
                 affected = Some(ok.affected_rows());
                 moved = moved.then(schema_change(&ok));
-                warnings = ok.warnings();
+                said.note(mode_report(&ok), ok.status_flags());
                 ok.status_flags()
             }
             Some(0xFF) => return Err(errors::from_err_packet(&first, caps, flavor)),
@@ -97,10 +167,10 @@ pub(crate) async fn read_result(
             _ => {
                 // The new result set replaces the one kept: no need to hold both.
                 drop(kept.take());
-                let (set, status, schema, set_warnings) = read_rows(p, &first, caps, flavor, extended_metadata, limits).await?;
+                let (set, status, schema, mode) = read_rows(p, &first, caps, flavor, extended_metadata, limits).await?;
                 kept = Some(set);
                 moved = moved.then(schema);
-                warnings = set_warnings;
+                said.note(mode, status);
                 status
             }
         };
@@ -115,12 +185,12 @@ pub(crate) async fn read_result(
         (true, SchemaReport::Silent) => DatabaseAfter::Unchanged,
         (true, SchemaReport::Said(database)) => DatabaseAfter::Changed(database),
     };
-    Ok((result, warnings))
+    Ok(result)
 }
 
 /// One result set after its column count `first`: the column definitions, then the rows until
-/// the terminator, whose status says whether more results follow, which may report a change of
-/// database ([`schema_change`]), and which gives a warning count.
+/// the terminator, whose status says whether more results follow, and which may report a change of
+/// database ([`schema_change`]) and of read-only mode ([`mode_report`]).
 async fn read_rows(
     p: &mut Packets,
     first: &[u8],
@@ -128,7 +198,7 @@ async fn read_rows(
     flavor: Flavor,
     extended_metadata: bool,
     limits: Limits,
-) -> Result<(ResultSet, StatusFlags, SchemaReport, u16), DbError> {
+) -> Result<(ResultSet, StatusFlags, SchemaReport, ModeReport), DbError> {
     let count = match lenenc_int(first) {
         Some((n, [])) if (1..=MAX_COLUMNS).contains(&n) => usize::try_from(n).map_err(|_| malformed("column count"))?,
         _ => return Err(malformed("column count")),
@@ -161,7 +231,7 @@ async fn read_rows(
             // A row starting 0xFE has a first value of 16 MiB or more, so it is that long too.
             Some(0xFE) if packet.len() < CHUNK => {
                 let end = if old_eof { parse_ok::<OldEofPacket>(&packet, caps)? } else { parse_ok::<ResultSetTerminator>(&packet, caps)? };
-                return Ok((set, end.status_flags(), schema_change(&end), end.warnings()));
+                return Ok((set, end.status_flags(), schema_change(&end), mode_report(&end)));
             }
             _ => {}
         }
@@ -382,7 +452,7 @@ pub(crate) mod tests {
     async fn a_result_says_where_the_statement_left_the_connection() {
         let read = |payload: Vec<u8>, tracks: bool| async move {
             let (mut p, _) = packets(frame(&payload, 0));
-            read_result(&mut p, TRACKING, Flavor::MySql, false, tracks, dbee_driver::QUERY_LIMITS).await.unwrap().0.database_after
+            read_result(&mut p, TRACKING, Flavor::MySql, false, tracks, dbee_driver::QUERY_LIMITS, &mut Said::default()).await.unwrap().database_after
         };
         assert_eq!(read(ok_with_state(&schema_entry("many")), true).await, DatabaseAfter::Changed(Some("many".into())));
         assert_eq!(read(vec![0x00, 0, 0, 2, 0, 0, 0], true).await, DatabaseAfter::Unchanged);
@@ -424,9 +494,16 @@ pub(crate) mod tests {
 
     async fn read(input: Vec<u8>, limits: Limits) -> Result<ResultSet, DbError> {
         let (mut p, _) = packets(input);
-        read_result(&mut p, CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF, Flavor::MySql, false, false, limits)
-            .await
-            .map(|(r, _)| r)
+        read_result(
+            &mut p,
+            CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF,
+            Flavor::MySql,
+            false,
+            false,
+            limits,
+            &mut Said::default(),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -454,7 +531,7 @@ pub(crate) mod tests {
         let small = Limits { max_rows: 100, max_bytes: 10 };
         let read = |input: Vec<u8>, limits: Limits| async move {
             let (mut p, _) = packets(input);
-            read_result(&mut p, caps, Flavor::MySql, false, false, limits).await.map(|(r, _)| r)
+            read_result(&mut p, caps, Flavor::MySql, false, false, limits, &mut Said::default()).await
         };
         // The name's 6 bytes count with the cells': the second row does not fit in 10.
         let r = read(result_set("abcdef", &["xyz", "xyz"]), small).await.unwrap();
