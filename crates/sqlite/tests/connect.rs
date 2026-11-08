@@ -557,22 +557,38 @@ async fn a_link_swapped_in_after_the_check_never_opens_a_file_outside() {
     assert_eq!(outside_opens, 0, "a link swapped in after the check opened the file outside the allowed folder");
 }
 
-/// A file's views, triggers and defaults may use only what SQLite marks harmless
-/// (`trusted_schema` off), and SQL may not write its schema by hand (`DEFENSIVE`): settings
-/// SQLite advises for files from sources one does not know.
+/// A file's views and triggers run as SQLite's defaults let them (`trusted_schema` on): dbee
+/// registers no SQL function and no virtual-table module of its own, so there is nothing more to
+/// keep from them, and views over FTS's `MATCH`, `snippet()` and `bm25()` or a pragma table
+/// function read their rows. SQL may not write the schema by hand (`DEFENSIVE`).
 #[tokio::test]
-async fn a_files_schema_runs_only_what_sqlite_marks_harmless() {
+async fn a_files_views_over_fts_and_pragma_functions_read_their_rows() {
     let dir = Scratch::new();
     let file = dir.path("schema.sqlite");
     rusqlite::Connection::open(&file)
         .unwrap()
-        .execute_batch("CREATE TABLE t (a); CREATE VIEW v AS SELECT name FROM pragma_table_info('t');")
+        .execute_batch(
+            "CREATE TABLE t (a TEXT);
+             CREATE VIRTUAL TABLE docs5 USING fts5(body);
+             CREATE VIRTUAL TABLE docs4 USING fts4(body);
+             CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN
+                 INSERT INTO docs5(rowid, body) VALUES (new.rowid, new.a);
+                 INSERT INTO docs4(docid, body) VALUES (new.rowid, new.a);
+             END;
+             CREATE VIEW v_fts5_match AS SELECT rowid FROM docs5 WHERE docs5 MATCH 'hello';
+             CREATE VIEW v_fts5_snippet AS SELECT snippet(docs5, 0, '[', ']', '...', 5) AS s FROM docs5 WHERE docs5 MATCH 'hello';
+             CREATE VIEW v_fts5_bm25 AS SELECT bm25(docs5) AS r FROM docs5 WHERE docs5 MATCH 'hello';
+             CREATE VIEW v_fts4_match AS SELECT docid FROM docs4 WHERE docs4 MATCH 'hello';
+             CREATE VIEW v_fts4_snippet AS SELECT snippet(docs4) AS s FROM docs4 WHERE docs4 MATCH 'hello';
+             CREATE VIEW v_pragma AS SELECT name FROM pragma_table_info('t');",
+        )
         .unwrap();
     let conn = open(&config(&file, false)).await;
-    let e = conn.run("SELECT * FROM v", QUERY_LIMITS).await.err().map(|e| e.to_string());
-    assert!(e.as_deref().is_some_and(|e| e.contains("unsafe use")), "{e:?}");
-    // The same function, called by the query itself, runs.
-    assert!(conn.run("SELECT name FROM pragma_table_info('t')", QUERY_LIMITS).await.is_ok());
+    conn.run("INSERT INTO t VALUES ('hello world')", QUERY_LIMITS).await.unwrap();
+    for view in ["v_fts5_match", "v_fts5_snippet", "v_fts5_bm25", "v_fts4_match", "v_fts4_snippet", "v_pragma"] {
+        let read = conn.run(&format!("SELECT * FROM {view}"), QUERY_LIMITS).await.map(|r| r.rows.len());
+        assert_eq!(read, Ok(1), "{view}");
+    }
     conn.run("PRAGMA writable_schema = ON", QUERY_LIMITS).await.unwrap();
     let edit = conn.run("UPDATE sqlite_schema SET sql = 'CREATE TABLE t (b)' WHERE name = 't'", QUERY_LIMITS).await;
     assert!(edit.is_err(), "the schema was written by hand: {edit:?}");

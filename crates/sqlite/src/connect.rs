@@ -120,11 +120,12 @@ fn open_flags(read_only: bool, create: bool, isolated: bool) -> OpenFlags {
 }
 
 /// SQLite's own settings for a file from a source dbee does not know, which any file a file
-/// manager hands it can be: the schema's views, triggers and defaults may use only the functions
-/// and virtual tables SQLite marks harmless (`trusted_schema` off), SQL may not write the file's
-/// structure by hand (`DEFENSIVE`), and each page's cells are checked as it is read.
+/// manager hands it can be: SQL may not write the file's structure by hand (`DEFENSIVE`), and each
+/// page's cells are checked as it is read. `trusted_schema` stays on, SQLite's default: dbee
+/// registers no SQL function and no virtual-table module, so turning it off would keep nothing
+/// from a file's views and triggers but FTS's and the pragma functions, which they need. Turn it
+/// off the day dbee registers a function or a module that has effects.
 fn harden(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     conn.execute_batch("PRAGMA cell_size_check = ON")
 }
@@ -407,9 +408,8 @@ mod tests {
         for (read_only, create) in [(false, true), (true, false)] {
             let (conn, _, _) = open(&file, read_only, create, None).unwrap();
             let pragma = |name: &str| conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get::<_, i64>(0)).unwrap();
-            assert_eq!((pragma("trusted_schema"), pragma("cell_size_check")), (0, 1), "read-only {read_only}");
+            assert_eq!((pragma("trusted_schema"), pragma("cell_size_check")), (1, 1), "read-only {read_only}");
             assert_eq!(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).ok(), Some(true), "read-only {read_only}");
-            assert_eq!(conn.db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA).ok(), Some(false), "read-only {read_only}");
         }
         let _ = std::fs::remove_file(&file);
     }
