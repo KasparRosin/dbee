@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "opens a window; run by hand: cargo test -p xtask -- --ignored"]
+    #[ignore = "timing; opens a window, run by hand: cargo test -p xtask -- --ignored --nocapture"]
     fn connection_screen_within_one_second() {
         let root = crate::root();
         let exe = build(&root, true).unwrap();

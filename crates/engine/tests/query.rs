@@ -327,7 +327,7 @@ fn cancel_stops_the_statements_after_it() {
         let job = start(s, json!({}));
         until_running(t, &m);
         run(s, "query.cancel", json!({}));
-        let e = s.wait(job, Duration::from_secs(5)).unwrap_err();
+        let e = s.wait(job, T).unwrap_err();
         assert_eq!((e.code(), e.data()["statement"].as_u64()), ("cancelled", Some(1)), "{}: {e} {}", t.name(), e.data());
         assert_eq!(shown(s)["results"].as_array().map(Vec::len), Some(1));
         assert_eq!(q(t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "the run stopped at the cancelled statement");
@@ -348,7 +348,7 @@ fn second_run_while_running_is_busy() {
         assert_eq!(run(s, "query.cancel", json!({}))["sent"], false, "the other tab's run is not this tab's to cancel");
         run(s, "tab.activate", json!({ "tab": first }));
         run(s, "query.cancel", json!({}));
-        assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap_err().code(), "cancelled", "{}", t.name());
+        assert_eq!(s.wait(job, T).unwrap_err().code(), "cancelled", "{}", t.name());
     });
 }
 
@@ -453,7 +453,7 @@ fn disconnect_during_query_cancels_it() {
         let job = start(s, json!({}));
         until_running(t, &m);
         run(s, "connection.close", json!({ "force": true }));
-        assert!(s.wait_idle(Duration::from_secs(5)), "the query was not cancelled");
+        assert!(s.wait_idle(T), "the query was not cancelled");
         stopped_running(t, &m);
         let results = s.pump();
         assert_eq!(results, vec![(job, Ok(json!({ "ignored": true })))]);
@@ -470,7 +470,7 @@ fn closing_running_tab_ignores_result() {
         let job = start(s, json!({}));
         until_running(t, &m);
         run(s, "tab.close", json!({ "force": true }));
-        assert!(s.wait_idle(Duration::from_secs(5)), "closing the tab did not cancel its query");
+        assert!(s.wait_idle(T), "closing the tab did not cancel its query");
         assert_eq!(s.pump(), vec![(job, Ok(json!({ "ignored": true })))]);
         assert!(s.state().tabs.is_empty());
         stopped_running(t, &m);
@@ -490,7 +490,7 @@ fn reconnect_during_query_stops_it() {
         until_running(t, &m);
         run(s, "connection.reconnect", json!({}));
         assert_eq!(shown(s)["running"], Json::Null, "the run died with its connection");
-        assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap(), json!({ "ignored": true }));
+        assert_eq!(s.wait(job, T).unwrap(), json!({ "ignored": true }));
         stopped_running(t, &m);
         run(s, "query.setText", json!({ "text": "select 2 as two" }));
         assert_eq!(names(&run(s, "query.run", json!({}))["results"][0]), ["two"]);
@@ -600,7 +600,7 @@ fn queries_and_their_cancel_go_through_the_tunnel() {
         let job = start(&mut s, json!({}));
         until_running(&t, &m);
         run(&mut s, "query.cancel", json!({}));
-        assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap_err().code(), "cancelled", "{}", t.name());
+        assert_eq!(s.wait(job, T).unwrap_err().code(), "cancelled", "{}", t.name());
     }
 }
 
@@ -797,7 +797,7 @@ fn a_cancelled_statement_leaves_the_database_not_known() {
         let job = start(s, json!({}));
         until_running(t, &m);
         run(s, "query.cancel", json!({}));
-        assert_eq!(s.wait(job, Duration::from_secs(5)).unwrap_err().code(), "cancelled", "{}", t.name());
+        assert_eq!(s.wait(job, T).unwrap_err().code(), "cancelled", "{}", t.name());
         drop(held);
         assert_eq!(shown(s)["database"], Json::Null, "{}: the tab keeps its own", t.name());
         assert_eq!(starts_in(s), (json!("many"), json!(false)), "{}", t.name());
