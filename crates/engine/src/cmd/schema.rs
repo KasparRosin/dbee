@@ -1,13 +1,14 @@
 //! `schema.inspect` and `quickSearch.find`: read the session's catalog and saved connections,
 //! no database work.
 //!
-//! The catalog is the one loaded on connect and by `schema.refresh`. Both commands are read-only.
+//! The catalog is the one loaded on connect and by `schema.refresh`, of the connection the
+//! `connection` param names, else of the active tab's. Both commands are read-only.
 //! `schema.inspect` needs a connection that is not lost; `quickSearch.find` runs without one too,
 //! and then finds saved connections only.
 
 use serde_json::json;
 
-use super::{CommandSpec, always, bad, needs_db, p};
+use super::{CommandSpec, always, bad, connection_param, needs_db, p};
 use crate::fuzzy::{self, Found};
 use crate::{EngineError, Json, Outcome, Session, Which};
 
@@ -23,7 +24,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Inspect Schema",
         menu: &[],
         shortcut: None,
-        params: "{schema?, table?}",
+        params: "{connection?, schema?, table?}",
         enabled: needs_db,
         run: inspect,
         journal: false,
@@ -34,7 +35,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Quick Search",
         menu: &[],
         shortcut: None,
-        params: "{query, limit?}",
+        params: "{query, limit?, connection?}",
         enabled: always,
         run: quick_find,
         journal: false,
@@ -46,7 +47,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
 fn inspect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let schema = p::opt_str(params, "schema")?;
     let table = p::opt_str(params, "table")?;
-    let Some(c) = s.state.connection(Which::Active) else { return Err(bad("not connected")) };
+    let Some(c) = connection_param(s, params)?.and_then(|id| s.state.connection(Which::Id(id))) else { return Err(bad("not connected")) };
     let catalog = &c.catalog;
     let value = match (schema, table) {
         (None, None) => serde_json::to_value(&**catalog),
@@ -72,7 +73,7 @@ fn inspect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 fn quick_find(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let query = p::str(params, "query")?;
     let limit = p::opt_usize(params, "limit")?.unwrap_or(DEFAULT_LIMIT);
-    let open = s.state.connection(Which::Active);
+    let open = connection_param(s, params)?.and_then(|id| s.state.connection(Which::Id(id)));
     let catalog = open.filter(|c| !c.lost).map(|c| &*c.catalog);
     let hits: Vec<Json> = fuzzy::search(catalog, &s.state.store.saved, open.map(|c| c.config.id.as_str()), query, limit)
         .into_iter()

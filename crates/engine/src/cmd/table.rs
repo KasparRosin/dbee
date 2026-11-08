@@ -55,7 +55,7 @@ use dbee_sql::select::{PAGE_SIZE, count_sql, page_sql};
 use serde_json::json;
 
 use super::edit;
-use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needs_db, p};
+use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needed_connection, needs_db, p};
 use crate::jobs::Stop;
 use crate::state::{PageView, TableTab, Total};
 use crate::turns::{self, InTurn};
@@ -93,7 +93,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Open Table",
         menu: &[],
         shortcut: None,
-        params: "{schema, table, filters?: [{column, op, value}]}",
+        params: "{schema, table, filters?: [{column, op, value}], connection?}",
         enabled: needs_db,
         run: open,
         journal: true,
@@ -632,15 +632,17 @@ fn reload(s: &mut Session, label: &'static str, view: PageView, last: bool) -> R
 
 // ---- the commands ----------------------------------------------------------------------------
 
-/// `{schema, table, filters?}` → a job returning `{tab, page, rows, hasNext, total}`: a new
-/// active tab on page 0, with the filters applied.
+/// `{schema, table, filters?, connection?}` → a job returning `{tab, page, rows, hasNext, total}`:
+/// a new active tab on page 0 of the table of the connection named, else the active tab's, with
+/// the filters applied.
 fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let table = TableRef { schema: p::str(params, "schema")?.to_owned(), name: p::str(params, "table")?.to_owned() };
     let filters = match params.get("filters").filter(|v| !v.is_null()) {
         Some(v) => parse_filters(v)?,
         None => Vec::new(),
     };
-    open_tab(s, OPEN, Which::Active, table, filters)
+    let connection = needed_connection(s, params)?;
+    open_tab(s, OPEN, Which::Id(connection), table, filters)
 }
 
 /// `{filters?, raw?, rawMode?, apply? = true}`: sets what is given in the filter bar. With

@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (entry 11: the Flatpak and the keyring; entry 35: a catalog over 60 s; import and export are M4)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (entry 6: the engine holds its connections by id and allows one)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -56,9 +56,9 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 ### 6. One connection per window (F)
 
 - **Missing:** several connections at once, or several windows.
-- **Evidence:** the session holds one `connected: Option<Connected>` (`crates/engine/src/state.rs`), and `connection.open` is disabled while connected (a later milestone).
+- **Evidence:** the session holds its open connections by id (`State::connections`, `crates/engine/src/state.rs`) and each tab names its connection, but it allows one (`MAX_OPEN`, `crates/engine/src/cmd/mod.rs`): `connection.open` is disabled while one is open (a later milestone). The window shows one connection's tree.
 - **Impact:** comparing two databases means switching between them (Ctrl+P finds a saved connection and switches to it, asking first about query text and staged edits). Tabs and staged edits belong to the one connection.
-- **Estimate:** not estimated (an engine change: sessions per connection).
+- **Estimate:** not estimated (the window's tree, status bar and tabs per connection, and the engine's checks that still judge the active tab's connection).
 
 ### 7. Query results are capped at 10,000 rows (F)
 
@@ -274,6 +274,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Entry 6: the engine holds its open connections by id and each tab names its connection; one may be open. |
 | 2026-11-08 | minor | Entry 11 now says the Flatpak reads `~/.ssh` and the agent and lacks only the keyring; entry 35 (a catalog that takes more than 60 s cannot be opened); import and export are M4 (M3 is the Redesign). |
 | 2026-11-08 | trivial | Entries 19 and 20 no longer point to the private M2 plan. |
 | 2026-11-06 | minor | M2's final review: entry 14 now says query tabs share one session, whose transaction outlives a tab (and MySQL's DDL commits it); entries 25–34: MySQL's `CALL` results and warning count, read-only undone in a query tab, idle timeouts, refused login methods, `lower_case_table_names`, MariaDB's system-versioned tables, the catalog read without one snapshot, no `COM_QUIT`, SQLite's case folding. |

@@ -24,7 +24,7 @@ pub mod tabs;
 
 use serde::Serialize;
 
-use crate::{EngineError, Json, Outcome, Session, Which};
+use crate::{ConnectionId, EngineError, Json, Outcome, Session, Which};
 
 /// One command.
 pub struct CommandSpec {
@@ -176,6 +176,23 @@ pub fn needs_db(s: &Session) -> Result<(), String> {
     }
 }
 
+/// The open connection a command's `connection` param names, else the active tab's
+/// ([`Which::Active`]); `None` when none is named and none is open. An id that is not open is
+/// `BadParams`.
+pub(crate) fn connection_param(s: &Session, params: &Json) -> Result<Option<ConnectionId>, EngineError> {
+    let which = match p::opt_connection_id(params, "connection")? {
+        Some(id) if s.state.connection(Which::Id(id)).is_none() => return Err(bad(format!("no connection {} is open", id.0))),
+        Some(id) => Which::Id(id),
+        None => Which::Active,
+    };
+    Ok(s.state.connection(which).map(|c| c.id))
+}
+
+/// [`connection_param`] for a command that needs a connection: `Disabled` when none is open.
+pub(crate) fn needed_connection(s: &Session, params: &Json) -> Result<ConnectionId, EngineError> {
+    connection_param(s, params)?.ok_or_else(|| disabled(NOT_CONNECTED))
+}
+
 /// Why a query tab command cannot run when the active tab is not a query tab.
 pub const NO_QUERY_TAB: &str = "no query tab is active";
 
@@ -190,7 +207,7 @@ pub fn active_query(s: &Session) -> Result<(), String> {
 /// Reading params. Each helper returns `BadParams` naming the key; `execute` fills in the
 /// command id. A missing key and `null` are the same.
 pub mod p {
-    use crate::{EngineError, Json, TabId};
+    use crate::{ConnectionId, EngineError, Json, TabId};
 
     fn bad_key(key: &str, what: &str) -> EngineError {
         EngineError::BadParams { id: String::new(), msg: format!("`{key}` {what}") }
@@ -240,6 +257,12 @@ pub mod p {
 
     pub fn opt_tab_id(p: &Json, key: &str) -> Result<Option<TabId>, EngineError> {
         get(p, key).map(|v| whole(v, key).map(TabId)).transpose()
+    }
+
+    /// An open connection's id. Whether it is open is the caller's check
+    /// ([`connection_param`](super::connection_param)).
+    pub fn opt_connection_id(p: &Json, key: &str) -> Result<Option<ConnectionId>, EngineError> {
+        get(p, key).map(|v| whole(v, key).map(ConnectionId)).transpose()
     }
 }
 

@@ -59,7 +59,7 @@ use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
 
-use super::{CommandSpec, LOST, MAX_OPEN, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
+use super::{CommandSpec, LOST, MAX_OPEN, NOT_CONNECTED, always, bad, connected, disabled, ignored, needed_connection, needs_db, not_connected, p};
 use crate::allowed;
 use crate::state::{Connected, Credentials, CurrentDatabase, server_text};
 use crate::turns::{self, InTurn};
@@ -200,7 +200,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Save Open Connection",
         menu: &[],
         shortcut: None,
-        params: "{}",
+        params: "{connection?}",
         enabled: unsaved_open,
         run: save_open,
         journal: true,
@@ -211,7 +211,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Reconnect",
         menu: &[],
         shortcut: None,
-        params: "{password?, sshPassword?, sshPassphrase?, trustHostKey?}",
+        params: "{connection?, password?, sshPassword?, sshPassphrase?, trustHostKey?}",
         enabled: connected,
         run: reconnect,
         journal: true,
@@ -222,7 +222,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Refresh Schema",
         menu: &["View"],
         shortcut: None,
-        params: "{}",
+        params: "{connection?}",
         enabled: needs_db,
         run: refresh,
         journal: true,
@@ -233,7 +233,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Disconnect",
         menu: &["File"],
         shortcut: Some("Ctrl+Shift+Q"),
-        params: "{force?}",
+        params: "{connection?, force?}",
         enabled: connected,
         run: close,
         journal: true,
@@ -1151,7 +1151,7 @@ pub fn file_config(s: &Session, path: &Path) -> Result<ConnectionConfig, EngineE
     Ok(config)
 }
 
-/// A connection is open and the saved list doesn't hold it.
+/// The active tab's connection is open and the saved list doesn't hold it.
 fn unsaved_open(s: &Session) -> Result<(), String> {
     match s.state.connection(Which::Active) {
         None => Err(NOT_CONNECTED.into()),
@@ -1160,14 +1160,16 @@ fn unsaved_open(s: &Session) -> Result<(), String> {
     }
 }
 
-/// `{}` → `{id}`: saves the open connection, which the saved list doesn't hold, as `connection.save`
-/// would with the secrets it was opened with: its settings as opened (its id, no name when it had
-/// none), and with `saveSecrets` and a secret store its password and SSH secrets.
-fn save_open(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
-    let c = s.state.connection(Which::Active).ok_or_else(|| disabled(NOT_CONNECTED))?;
+/// `{connection?}` → `{id, connection}`: saves the open connection, which the saved list doesn't
+/// hold, as `connection.save` would with the secrets it was opened with: its settings as opened
+/// (its id, no name when it had none), and with `saveSecrets` and a secret store its password and
+/// SSH secrets.
+fn save_open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    let connection = needed_connection(s, params)?;
+    let c = s.state.connection(Which::Id(connection)).ok_or_else(|| disabled(NOT_CONNECTED))?;
     let (config, secrets) = (c.config.clone(), c.credentials.clone());
     let id = save_with_secrets(s, config, &secrets)?;
-    Ok(Outcome::Done(json!({ "id": id })))
+    Ok(Outcome::Done(json!({ "id": id, "connection": connection })))
 }
 
 fn apply_open(
@@ -1264,21 +1266,21 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
     Ok(())
 }
 
-/// `{password?, sshPassword?, sshPassphrase?, trustHostKey?}` → a job returning `{connection,
-/// server, tables, warnings, querySessionReset?}` (`querySessionReset: true` when a query
-/// connection was open, so its transaction and SETs are dropped): a new tunnel, browse
+/// `{connection?, password?, sshPassword?, sshPassphrase?, trustHostKey?}` → a job returning
+/// `{connection, server, tables, warnings, querySessionReset?}` (`querySessionReset: true` when a
+/// query connection was open, so its transaction and SETs are dropped): a new tunnel, browse
 /// connection and catalog with the secrets kept from the open (the params answer a prompt). On success the old connections are let go (a
 /// statement still running on one is cancelled, and a query run stops), the query connection is
-/// opened again on the next run, and `lost` clears; tabs and their contents stay, but table tabs
-/// forget the loads and counts that ran on the old connection (`TableTab::drop_dead_jobs`) and a
-/// query tab its run.
+/// opened again on the next run, and `lost` clears; the connection keeps its id, and its tabs and
+/// their contents stay, but table tabs forget the loads and counts that ran on the old connection
+/// (`TableTab::drop_dead_jobs`) and a query tab its run.
 fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if s.jobs.is_running_label(RECONNECT) {
         return Err(EngineError::Busy("a reconnect is in progress".into()));
     }
     let answers = given(params)?;
-    let c = s.state.connection(Which::Active).ok_or_else(|| disabled(NOT_CONNECTED))?;
-    let id = c.id;
+    let id = needed_connection(s, params)?;
+    let c = s.state.connection(Which::Id(id)).ok_or_else(|| disabled(NOT_CONNECTED))?;
     let mut creds = c.credentials.clone();
     creds.password = answers.password.or(creds.password);
     creds.ssh.password = answers.ssh.password.or(creds.ssh.password);
@@ -1363,13 +1365,12 @@ fn tell(s: &mut Session, note: Option<String>) {
     }
 }
 
-/// `{}` → a job returning `{tables}`: reloads the catalog on the browse connection. Tabs keep
-/// their tables. A load past [`CATALOG_TIMEOUT`], counted from its turn on the connection, is
-/// cancelled and the connection is discarded:
-/// the session is marked lost, and the error (code `timeout`) names the reconnect in
-/// `data.action`.
-fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
-    let (id, turned) = s.browse_in_turn(Which::Active)?;
+/// `{connection?}` → a job returning `{tables, connection}`: reloads the catalog on the browse
+/// connection. Tabs keep their tables. A load past [`CATALOG_TIMEOUT`], counted from its turn on
+/// the connection, is cancelled and the connection is discarded: the session is marked lost, and
+/// the error (code `timeout`) names the reconnect in `data.action`.
+fn refresh(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    let (id, turned) = s.browse_in_turn(Which::Id(needed_connection(s, params)?))?;
     let job = s.spawn_job(REFRESH, async move {
         let result = load_catalog_in_turn(&turned, CATALOG_TIMEOUT).await;
         let conn: Arc<dyn Connection> = turned;
@@ -1392,24 +1393,25 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
             if let Some(c) = s.state.connection_mut(Which::Id(id)) {
                 c.catalog = Arc::new(catalog);
             }
-            Ok(json!({ "tables": tables }))
+            Ok(json!({ "tables": tables, "connection": id }))
         });
         apply
     });
     Ok(Outcome::Started(job))
 }
 
-/// `{force?}` → `{closed}`: back to the connection screen. Query tabs with text and table tabs
-/// with staged edits ask first (`Needs::Confirm { what: "queryText" }`, or `"stagedEdits"` when
-/// only edits would be lost) unless `force`. Every tab closes; statements still running are
+/// `{connection?, force?}` → `{closed, connection}` (`closed` being the saved connection's id):
+/// back to the connection screen. Its query tabs with text and table tabs with staged edits ask
+/// first (`Needs::Confirm { what: "queryText" }`, or `"stagedEdits"` when only edits would be
+/// lost) unless `force`. Its tabs close, which is every tab; statements still running are
 /// cancelled through their connections' cancellers (an Apply then rolls back, and a query run
 /// stops), and the connections are let go (they close once the jobs using them end; those jobs'
 /// results are dropped). The saved and recent lists are read again from the file, which another
 /// dbee may have changed meanwhile.
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
-    let c = s.state.connection(Which::Active).ok_or_else(|| disabled(NOT_CONNECTED))?;
-    let id = c.id;
+    let id = needed_connection(s, params)?;
+    let c = s.state.connection(Which::Id(id)).ok_or_else(|| disabled(NOT_CONNECTED))?;
     let its = || s.state.tabs.iter().filter(|t| t.connection() == Some(id));
     let with_text = its().filter(|t| matches!(t, Tab::Query(q) if !q.text.trim().is_empty())).count();
     let with_edits = its().filter(|t| matches!(t, Tab::Table(t) if t.has_staged_edits())).count();
@@ -1442,7 +1444,7 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         s.state.active = s.state.tabs.last().map(Tab::id);
     }
     stop_statements(s, c.browse);
-    Ok(Outcome::Done(json!({ "closed": c.config.id })))
+    Ok(Outcome::Done(json!({ "closed": c.config.id, "connection": id })))
 }
 
 #[cfg(test)]

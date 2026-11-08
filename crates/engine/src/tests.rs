@@ -709,13 +709,14 @@ fn inspect_summarises_the_session() {
     let i = s.inspect();
     assert_eq!(i["screen"], "connections");
     assert_eq!(i["connection"], Json::Null);
+    assert_eq!(i["connections"], json!([]));
     assert_eq!(i["active"], Json::Null);
     assert_eq!(i["secretStore"], "memory");
     let t = new_query(&mut s, "select 1");
     let j = started(s.execute("test.sleepJob", json!({"ms": 1000})).unwrap());
     let i = s.inspect();
     assert_eq!(i["active"], json!(t.0));
-    assert_eq!(i["tabs"], json!([{"id": t.0, "kind": "query", "title": "Query 1"}]));
+    assert_eq!(i["tabs"], json!([{"id": t.0, "kind": "query", "title": "Query 1", "connection": null}]));
     assert_eq!(i["query"]["text"], "select 1");
     assert_eq!(i["table"], Json::Null);
     assert_eq!(i["jobs"], json!([{"job": j.0, "label": "test.sleepJob"}]));

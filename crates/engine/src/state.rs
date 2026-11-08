@@ -167,13 +167,15 @@ impl Connected {
         }
     }
 
-    /// `{id, name, color, kind, host, port, database, user, ssh, readOnly, server, lost, saved}`, as
-    /// `inspect()` and `connection.open` show it: `kind` is the database type's id, `server`
-    /// the product and its version (`PostgreSQL 14.12`), `saved` whether the saved list holds it
+    /// `{connection, id, name, color, kind, host, port, database, user, ssh, readOnly, server, lost,
+    /// saved}`, as `inspect()` and `connection.open` show it: `connection` is its [`ConnectionId`],
+    /// `id` the saved connection's, `kind` the database type's id, `server` the product and its
+    /// version (`PostgreSQL 14.12`), `saved` whether the saved list holds it
     /// (`ConnectionStore::is_saved`, which the caller asks). Never a secret.
     pub fn summary(&self, saved: bool) -> Json {
         let c = &self.config;
         json!({
+            "connection": self.id,
             "id": c.id,
             "name": c.display_name(),
             "color": c.color,
@@ -549,9 +551,9 @@ impl Tab {
         }
     }
 
-    /// `{id, kind, title}`, as `tab.list` and `inspect` show it.
+    /// `{id, kind, title, connection}`, as `tab.list` and `inspect` show it.
     pub fn summary(&self) -> Json {
-        json!({ "id": self.id(), "kind": self.kind(), "title": self.title() })
+        json!({ "id": self.id(), "kind": self.kind(), "title": self.title(), "connection": self.connection() })
     }
 }
 

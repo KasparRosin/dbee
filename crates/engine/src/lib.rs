@@ -498,11 +498,12 @@ impl Session {
     }
 
     /// A JSON summary for agents and tests (`document.inspect`): the screen, the database types
-    /// the session can open (`kinds`, their ids), the connection, the tabs and the active one in
-    /// detail, and the running jobs. Never contains a secret.
+    /// the session can open (`kinds`, their ids), the active tab's connection and every open one,
+    /// the tabs and the active one in detail, and the running jobs. Never contains a secret.
     pub fn inspect(&self) -> Json {
         let st = &self.state;
-        let connection = st.connection(Which::Active).map(|c| c.summary(st.store.is_saved(&c.config.id)));
+        let summary = |c: &Connected| c.summary(st.store.is_saved(&c.config.id));
+        let connection = st.connection(Which::Active).map(summary);
         let active = st.active_tab();
         let query = match active {
             Some(Tab::Query(q)) => cmd::query::summary(q, st.connection(Which::Tab(q.id))),
@@ -516,6 +517,7 @@ impl Session {
             "screen": st.screen,
             "kinds": self.kinds(),
             "connection": connection,
+            "connections": st.connections.iter().map(summary).collect::<Vec<_>>(),
             "storeWarning": st.store_warning,
             "secretStore": self.secrets.as_ref().map(|s| s.name()),
             "tabs": st.tabs.iter().map(Tab::summary).collect::<Vec<_>>(),

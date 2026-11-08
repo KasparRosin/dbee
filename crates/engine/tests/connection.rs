@@ -1665,3 +1665,176 @@ fn listing_leaves_the_session_as_it_is() {
     let elsewhere = ConnectionConfig { port: pgnew().port, ..saved };
     assert_eq!(run_err(&mut s, LIST, json!({ "config": elsewhere })).code(), "needsPassword");
 }
+
+// ---- open connections by id ------------------------------------------------------------------
+
+/// The open connection's id, as `inspect()` shows it (`connection.connection`).
+fn open_id(s: &Session) -> Json {
+    s.inspect()["connection"]["connection"].clone()
+}
+
+/// The SQLite seed copy: what these tests check is the same on every engine.
+fn file_target() -> TestTarget {
+    engine_targets().into_iter().find(TestTarget::is_file).expect("a file target")
+}
+
+/// The `connection` of every open tab, as `inspect()` and `tab.list` show them.
+fn tab_connections(s: &mut Session) -> (Vec<Json>, Vec<Json>) {
+    let of = |tabs: &Json| tabs.as_array().map_or_else(Vec::new, |tabs| tabs.iter().map(|t| t["connection"].clone()).collect());
+    let inspected = of(&s.inspect()["tabs"]);
+    (inspected, of(&run(s, "tab.list", json!({}))["tabs"]))
+}
+
+#[test]
+fn the_open_connection_has_an_id_that_its_tabs_name() {
+    let _db = require_testdb!();
+    let t = file_target();
+    let mut s = connected_to(&t);
+    let i = s.inspect();
+    let id = open_id(&s);
+    assert!(id.is_u64(), "an id: {i}");
+    assert_eq!(i["connections"], json!([i["connection"].clone()]), "one open connection: {i}");
+    assert!(i["connection"]["id"].is_string(), "`id` stays the saved connection's: {i}");
+    s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
+    open_table(&mut s, t.schema("shop"), "customers");
+    s.execute("tab.newQuery", json!({ "connection": id })).unwrap();
+    run(&mut s, "table.open", json!({ "schema": t.schema("shop"), "table": "orders", "connection": id }));
+    assert_eq!(tab_connections(&mut s), (vec![id.clone(); 4], vec![id.clone(); 4]));
+    // Named or left out, a command means the same connection.
+    for (command, params) in [("schema.inspect", json!({ "schema": t.schema("shop") })), ("quickSearch.find", json!({ "query": "cust" }))] {
+        let mut named = params.clone();
+        named["connection"] = id.clone();
+        assert_eq!(run(&mut s, command, named), run(&mut s, command, params), "{command}");
+    }
+    // What concerns the connection names it.
+    assert_eq!(run(&mut s, "schema.refresh", json!({}))["connection"], id);
+    assert_eq!(run(&mut s, "schema.refresh", json!({ "connection": id }))["connection"], id);
+}
+
+#[test]
+fn connection_close_takes_the_connection_by_its_id() {
+    let _db = require_testdb!();
+    let t = file_target();
+    let mut s = connected_to(&t);
+    let id = open_id(&s);
+    assert!(id.is_u64(), "{}", s.inspect());
+    s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
+    open_table(&mut s, t.schema("shop"), "customers");
+    let r = run(&mut s, "connection.close", json!({ "connection": id, "force": true }));
+    assert_eq!(r["connection"], id, "{r}");
+    let i = s.inspect();
+    let after = (i["connection"].clone(), i["connections"].clone(), i["tabs"].clone(), i["screen"].clone());
+    assert_eq!(after, (Json::Null, json!([]), json!([]), json!("connections")), "its tabs closed with it: {i}");
+}
+
+#[test]
+fn a_connection_that_is_not_open_is_refused() {
+    let _db = require_testdb!();
+    let t = file_target();
+    let mut s = session();
+    // Not saved, so `connection.saveOpen` can run.
+    open(&mut s, json!({ "config": config_for(&t) }));
+    let id = open_id(&s);
+    assert!(id.is_u64(), "{}", s.inspect());
+    let before = s.inspect();
+    let commands = [
+        ("connection.close", json!({ "force": true })),
+        ("connection.reconnect", json!({})),
+        ("connection.saveOpen", json!({})),
+        ("schema.refresh", json!({})),
+        ("schema.inspect", json!({})),
+        ("quickSearch.find", json!({ "query": "cust" })),
+        ("table.open", json!({ "schema": t.schema("shop"), "table": "customers" })),
+        ("tab.newQuery", json!({})),
+    ];
+    for (command, params) in &commands {
+        for (given, why) in [
+            (json!(999), "no connection 999 is open"),
+            (json!(0), "no connection 0 is open"),
+            (json!("1"), "`connection` must be a whole number, 0 or more"),
+            (json!(-1), "`connection` must be a whole number, 0 or more"),
+        ] {
+            let mut p = params.clone();
+            p["connection"] = given.clone();
+            let e = s.execute(command, p).unwrap_err();
+            assert!(matches!(&e, EngineError::BadParams { msg, .. } if msg == why), "{command} {given}: {e}");
+        }
+    }
+    assert_eq!(s.inspect(), before, "nothing changed");
+    let r = run(&mut s, "connection.saveOpen", json!({ "connection": id }));
+    assert_eq!(r["connection"], id, "{r}");
+}
+
+#[test]
+fn a_reconnect_keeps_the_id_and_the_tabs_on_it() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let id = open_id(s);
+        assert!(id.is_u64(), "{}: {}", t.name(), s.inspect());
+        let query = run(s, "tab.newQuery", json!({ "text": "select 1" }))["tab"].clone();
+        open_table(s, t.schema("shop"), "customers");
+        let r = run(s, "connection.reconnect", json!({ "connection": id }));
+        assert_eq!(r["connection"]["connection"], id, "{}: the id stays: {r}", t.name());
+        assert_eq!(s.inspect()["connections"].as_array().map(Vec::len), Some(1));
+        assert_eq!(tab_connections(s), (vec![id.clone(); 2], vec![id.clone(); 2]), "{}", t.name());
+        // Both tabs run on the new connection.
+        run(s, "table.refresh", json!({}));
+        run(s, "tab.activate", json!({ "tab": query }));
+        run(s, "query.run", json!({}));
+    });
+}
+
+#[test]
+fn every_open_gets_a_new_id_and_a_second_is_still_refused() {
+    let _db = require_testdb!();
+    let t = file_target();
+    let mut s = session();
+    open(&mut s, json!({ "config": config_for(&t) }));
+    let first = open_id(&s);
+    assert!(first.is_u64(), "{}", s.inspect());
+    let before = s.inspect();
+    let e = s.execute("connection.open", json!({ "config": config_for(&t) })).unwrap_err();
+    assert!(matches!(&e, EngineError::Disabled { why, .. } if why == "already connected; disconnect first"), "{e}");
+    assert_eq!(s.inspect(), before, "the open connection stays, with its id");
+    run(&mut s, "connection.close", json!({}));
+    open(&mut s, json!({ "config": config_for(&t) }));
+    let second = open_id(&s);
+    assert!(second.is_u64() && second != first, "{first}, then {second}");
+}
+
+#[test]
+fn a_query_tab_opened_before_connecting_joins_the_connection() {
+    let _db = require_testdb!();
+    let t = file_target();
+    let mut s = session();
+    s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
+    assert_eq!(tab_connections(&mut s), (vec![Json::Null], vec![Json::Null]), "no connection yet");
+    open(&mut s, json!({ "config": config_for(&t) }));
+    let id = open_id(&s);
+    assert!(id.is_u64(), "{}", s.inspect());
+    assert_eq!(tab_connections(&mut s), (vec![id.clone()], vec![id]));
+    run(&mut s, "query.run", json!({}));
+}
+
+#[test]
+fn the_journal_keeps_a_connection_param_only_where_it_was_given() {
+    let _db = require_testdb!();
+    let t = file_target();
+    let mut s = session();
+    open(&mut s, json!({ "config": config_for(&t) }));
+    let id = open_id(&s);
+    assert!(id.is_u64(), "{}", s.inspect());
+    run(&mut s, "schema.refresh", json!({}));
+    run(&mut s, "schema.refresh", json!({ "connection": id }));
+    let journal = s.journal().to_vec();
+    let tail: Vec<(String, Json)> = journal.iter().rev().take(2).rev().cloned().collect();
+    assert_eq!(tail, [("schema.refresh".to_owned(), json!({})), ("schema.refresh".to_owned(), json!({ "connection": id }))]);
+    // A replay in a new session: ids count from the session's start, so the one given names the
+    // replay's connection too, and the entry without one takes the active tab's.
+    drop(s);
+    let mut replay = session();
+    for (command, params) in journal {
+        run(&mut replay, &command, params);
+    }
+    assert_eq!(open_id(&replay), id);
+}
