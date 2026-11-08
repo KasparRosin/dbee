@@ -1326,6 +1326,7 @@ fn apply_reconnect(
     c.tunnel = tunnel;
     c.credentials = credentials;
     c.lost = false;
+    let warnings = c.info.warnings.clone();
     let mut result = opened_json(c, saved);
     if query_reset && let Some(o) = result.as_object_mut() {
         // The query session (an open transaction, SETs, temporary tables) went with its connection.
@@ -1339,6 +1340,9 @@ fn apply_reconnect(
         }
     }
     stop_statements(s, old_browse);
+    for w in warnings {
+        s.ui_requests.push(UiRequest::Notice(w));
+    }
     tell(s, unsaved);
     Ok(result)
 }

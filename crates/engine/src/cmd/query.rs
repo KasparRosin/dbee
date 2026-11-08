@@ -63,7 +63,7 @@ use std::sync::{Arc, Weak};
 
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
-use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target};
+use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target, TlsState};
 use dbee_sql::{Dialect, lexer};
 use dbee_ssh::Tunnel;
 use serde_json::json;
@@ -94,6 +94,10 @@ pub const QUERY_SESSION_LOST: &str = "the query connection was lost, and its ses
 /// The error of a statement holding a NUL character where the dialect says the server cannot
 /// take one.
 const NUL: &str = "the statement holds a NUL character (U+0000), which this database can't take";
+
+/// Why a run fails whose new query connection has less TLS than the browse connection.
+pub const QUERY_TLS_LOST: &str = "The query connection could not set up TLS, though the connection did. dbee did not send the statement. \
+                                  Reconnect; if this happens again, something on the network may be stopping TLS.";
 
 /// Why `query.setDatabase` is off: the dialect has no `USE`.
 pub const NO_DATABASE_SWITCH: &str = "a query tab's database can't be set on this connection";
@@ -202,6 +206,8 @@ enum Via {
         password: Option<String>,
         tunnel: Option<Arc<Tunnel>>,
         allowed_dirs: Option<Vec<PathBuf>>,
+        /// What protects the browse connection's link: the query connection may have no less.
+        browse_tls: Option<TlsState>,
     },
 }
 
@@ -260,7 +266,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
     }
     let (conn, opened) = match via {
         Via::Open(conn) => (conn, false),
-        Via::Connect { driver, config, password, tunnel, allowed_dirs } => {
+        Via::Connect { driver, config, password, tunnel, allowed_dirs, browse_tls } => {
             let target = Target {
                 config: &config,
                 password: password.as_deref(),
@@ -272,6 +278,13 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
             // A connect that is stopped is dropped: nothing ran on it yet.
             tokio::select! {
                 connected = driver.connect(target) => match connected {
+                    // The same settings gave the browse connection more: someone on the network
+                    // took TLS away. The connection closes as it is dropped, unused.
+                    Ok(conn) if conn.info().tls < browse_tls => {
+                        log::info!("the query connection has less TLS than the browse connection; nothing was sent");
+                        ran.failure = Some(Failure { statement: 0, error: DbError::Other(QUERY_TLS_LOST.into()), position: None });
+                        return ran;
+                    }
                     Ok(conn) => (conn, true),
                     Err(error) => {
                         ran.failure = Some(Failure { statement: 0, error, position: None });
@@ -571,6 +584,7 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             password: c.credentials.password.clone(),
             tunnel: c.tunnel.clone(),
             allowed_dirs: s.allowed_dirs.clone(),
+            browse_tls: c.info.tls,
         },
     };
     let generation = Arc::downgrade(&c.browse);
@@ -751,6 +765,7 @@ mod tests {
             password: Some(db.password.clone()),
             tunnel: None,
             allowed_dirs: None,
+            browse_tls: None,
         };
         let text = "select repeat('x', 60) as a; select repeat('y', 600) as b; select 'z' as c".to_owned();
         let ranges = lexer::statements(Dialect::Postgres, &text);

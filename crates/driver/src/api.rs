@@ -103,8 +103,8 @@ pub const PAGE_LIMITS: Limits = Limits { max_rows: 101, max_bytes: 256 * 1024 * 
 /// cut. A result that still hits them is an error, never a partial catalog.
 pub const CATALOG_LIMITS: Limits = Limits { max_rows: 5_000_000, max_bytes: 512 * 1024 * 1024 };
 
-/// What protects the link to the server, as the connection found it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What protects the link to the server, as the connection found it, from least to most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TlsState {
     /// No TLS: what is sent can be read and changed on the way.
     Off,
