@@ -11,7 +11,9 @@ use std::time::Duration;
 use dbee_config::ConnectionConfig;
 use dbee_driver::{CONNECT_TIMEOUT, DbError, ServerInfo, Target, cancel_not_delivered};
 use dbee_ssh::Tunnel;
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_postgres::tls::MakeTlsConnect;
@@ -19,6 +21,7 @@ use tokio_postgres::{CancelToken, Client, Connection, SimpleQueryMessage};
 
 use crate::error::{self, Phase};
 use crate::tls::{self, Tls};
+use crate::watch::{Rule, Watched};
 
 /// The oldest supported server, as `server_version_num`: Postgres 14.
 pub const MIN_VERSION_NUM: u32 = 140000;
@@ -155,6 +158,8 @@ enum Way {
 pub struct Canceller {
     token: CancelToken,
     tls: Tls,
+    /// The session runs over TLS: the request goes over TLS too, or not at all.
+    over_tls: bool,
     route: Route,
     /// Held while a request is on its way; no operation takes the connection's lock meanwhile
     /// ([`PgConnection::lock`]). An Apply that holds the lock already runs its next statement.
@@ -164,7 +169,8 @@ pub struct Canceller {
 impl std::fmt::Debug for Canceller {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The token holds the backend's secret key: not shown.
-        f.debug_struct("Canceller").field("tls", &self.tls).field("tunnel", &matches!(self.route.way, Way::Tunnel { .. })).finish()
+        let tunnel = matches!(self.route.way, Way::Tunnel { .. });
+        f.debug_struct("Canceller").field("tls", &self.tls).field("over_tls", &self.over_tls).field("tunnel", &tunnel).finish()
     }
 }
 
@@ -206,12 +212,14 @@ impl Canceller {
 
 impl Canceller {
     /// Sends the cancel request over `stream`, with TLS as the connection has it, and waits until
-    /// the server has closed it.
+    /// the server has closed it. tokio-postgres would send it without TLS when the server says
+    /// `N` in `prefer` mode; for a session over TLS the watch refuses that ([`Rule::TlsOnly`]).
     async fn request<S>(&self, stream: S) -> Result<(), DbError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let stream = UntilClosed { inner: stream, shut: false };
+        let rule = if self.over_tls { Rule::TlsOnly } else { Rule::Any };
+        let stream = UntilClosed { inner: Watched::new(stream, rule), shut: false };
         let tls = tls_connect(&self.tls, &self.route.host, &stream);
         self.token.cancel_query_raw(stream, tls).await.map_err(|e| error::map(&e, Phase::Connect))
     }
@@ -271,7 +279,9 @@ fn address(host: &str, port: u16) -> String {
 /// default_transaction_read_only = on`, which a separate `SHOW` must confirm (a transaction-mode
 /// pooler that moved the session elsewhere shows there); the same `SHOW` confirms
 /// `standard_conforming_strings` and `client_encoding`. In `prefer` mode a failed TLS handshake
-/// is tried again without TLS, as libpq does.
+/// is tried again without TLS, as libpq does. On a link without TLS a request for the password in
+/// clear text ends the login before the password is sent ([`crate::watch`]); over a Unix socket,
+/// which never leaves the machine, the password goes as the server asks.
 pub async fn connect(t: Target<'_>) -> Result<PgConnection, DbError> {
     let cfg = t.config;
     // The connection task needs a runtime; `tokio::spawn` would panic without one.
@@ -313,15 +323,7 @@ async fn attempt(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnec
 /// as in libpq (the OS user name; a database named like the user).
 fn pg_config(cfg: &ConnectionConfig, password: Option<&str>, tls: &Tls) -> tokio_postgres::Config {
     let mut pg = tokio_postgres::Config::new();
-    pg.host(&cfg.host)
-        .port(cfg.port)
-        .application_name("dbee")
-        .ssl_mode(tls.pg_mode())
-        .connect_timeout(CONNECT_TIMEOUT)
-        .keepalives(true)
-        .keepalives_idle(KEEPALIVE_IDLE)
-        .keepalives_interval(KEEPALIVE_INTERVAL)
-        .keepalives_retries(KEEPALIVE_RETRIES);
+    pg.host(&cfg.host).port(cfg.port).application_name("dbee").ssl_mode(tls.pg_mode()).connect_timeout(CONNECT_TIMEOUT);
     if !cfg.user.is_empty() {
         pg.user(&cfg.user);
     }
@@ -338,51 +340,70 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
     let cfg = t.config;
     let pg = pg_config(cfg, t.password, tls);
     let connect_error = |e: tokio_postgres::Error| error::map(&e, Phase::Connect);
-    let (client, closed, way) = match &t.tunnel {
+    let (client, closed, way, over_tls) = match &t.tunnel {
         Some(tunnel) => {
-            let stream = tunnel.connect(&cfg.host, cfg.port).await?;
+            let stream = Watched::new(tunnel.connect(&cfg.host, cfg.port).await?, Rule::Login);
+            let over_tls = stream.tls();
             let connect = tls_connect(tls, &cfg.host, &stream);
             let (client, connection) = pg.connect_raw(stream, connect).await.map_err(connect_error)?;
-            (client, drive(runtime, connection), Way::Tunnel { tunnel: Arc::clone(tunnel), port: cfg.port })
+            (client, drive(runtime, connection), Way::Tunnel { tunnel: Arc::clone(tunnel), port: cfg.port }, over_tls.load(Ordering::Acquire))
         }
+        // The socket never leaves the machine, and Postgres has no TLS on it: the password may go
+        // in clear text there, as libpq sends it.
         #[cfg(unix)]
         None if cfg.host.starts_with('/') => {
             let (client, connection) = pg.connect(tls.connector.clone()).await.map_err(connect_error)?;
             let socket = std::path::Path::new(&cfg.host).join(format!(".s.PGSQL.{}", cfg.port));
-            (client, drive(runtime, connection), Way::Socket(socket))
+            (client, drive(runtime, connection), Way::Socket(socket), false)
         }
         None => {
-            let (client, closed, addr) = connect_tcp(&pg, tls, &cfg.host, cfg.port, runtime).await?;
-            (client, closed, Way::Tcp(addr))
+            let (client, closed, addr, over_tls) = connect_tcp(&pg, tls, &cfg.host, cfg.port, runtime).await?;
+            (client, closed, Way::Tcp(addr), over_tls)
         }
     };
     let (info, visible_schemas) = setup(&client, cfg.read_only).await?;
     let route = Route { host: cfg.host.clone(), way };
-    let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), route, on_its_way: Arc::default() };
+    let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), over_tls, route, on_its_way: Arc::default() };
     let check_due = AtomicBool::new(false);
     Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller, read_only: cfg.read_only, check_due, visible_schemas })
 }
 
 /// Connects to the addresses `host` gives, in turn, as tokio-postgres does (TLS still checks
-/// `host`), and says which one answered.
+/// `host`), and says which one answered and whether it runs over TLS. The stream is dbee's own,
+/// watched ([`Watched`]).
 async fn connect_tcp(
     pg: &tokio_postgres::Config,
     tls: &Tls,
     host: &str,
     port: u16,
     runtime: &Handle,
-) -> Result<(Client, Arc<AtomicBool>, SocketAddr), DbError> {
+) -> Result<(Client, Arc<AtomicBool>, SocketAddr, bool), DbError> {
     let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| DbError::Connect(e.to_string()))?;
     let mut last = DbError::Connect("the host name gave no address".into());
     for addr in addrs {
-        let mut one = pg.clone();
-        one.hostaddr(addr.ip());
-        match one.connect(tls.connector.clone()).await {
-            Ok((client, connection)) => return Ok((client, drive(runtime, connection), addr)),
+        let stream = match TcpStream::connect(addr).await.and_then(|tcp| tune(&tcp).map(|()| tcp)) {
+            Ok(tcp) => Watched::new(tcp, Rule::Login),
+            Err(e) => {
+                last = DbError::Connect(e.to_string());
+                continue;
+            }
+        };
+        let over_tls = stream.tls();
+        let connect = tls_connect(tls, host, &stream);
+        match pg.connect_raw(stream, connect).await {
+            Ok((client, connection)) => return Ok((client, drive(runtime, connection), addr, over_tls.load(Ordering::Acquire))),
             Err(e) => last = error::map(&e, Phase::Connect),
         }
     }
     Err(last)
+}
+
+/// A direct connection's socket options, as tokio-postgres sets its own: no delay for small
+/// messages, and keepalive probes.
+fn tune(tcp: &TcpStream) -> std::io::Result<()> {
+    tcp.set_nodelay(true)?;
+    let keepalive = TcpKeepalive::new().with_time(KEEPALIVE_IDLE).with_interval(KEEPALIVE_INTERVAL).with_retries(KEEPALIVE_RETRIES);
+    SockRef::from(tcp).set_tcp_keepalive(&keepalive)
 }
 
 /// The TLS connector for one stream to `host` (the stream only fixes the type).
@@ -542,6 +563,19 @@ mod tests {
         {
             assert_eq!(search_path_warning(fine), None, "{fine}");
         }
+    }
+
+    // socket2 reads the keepalive times back on Unix only.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn direct_connections_have_keepalive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        tune(&tcp).unwrap();
+        let sock = SockRef::from(&tcp);
+        assert!(tcp.nodelay().unwrap() && sock.keepalive().unwrap());
+        let set = (sock.tcp_keepalive_time().unwrap(), sock.tcp_keepalive_interval().unwrap(), sock.tcp_keepalive_retries().unwrap());
+        assert_eq!(set, (KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_RETRIES));
     }
 
     #[tokio::test]

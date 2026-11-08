@@ -16,6 +16,7 @@ mod error;
 mod guard;
 pub mod query;
 pub mod tls;
+mod watch;
 
 pub use apply::{apply, apply_gated};
 pub use connect::{Canceller, MIN_VERSION_NUM, PgConnection, connect, version_warning};

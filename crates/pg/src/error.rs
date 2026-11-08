@@ -3,6 +3,8 @@
 use dbee_driver::{DbError, Meaning, ServerError};
 use tokio_postgres::error::{DbError as PgServerError, ErrorPosition, Severity};
 
+use crate::watch::Refusal;
+
 /// What a Postgres error code is called in the error text.
 const SQLSTATE: &str = "SQLSTATE";
 
@@ -29,6 +31,9 @@ const KIND_PARSE: &str = "error parsing response from server";
 pub(crate) fn map(e: &tokio_postgres::Error, phase: Phase) -> DbError {
     if let Some(db) = e.as_db_error() {
         return from_server(db, phase);
+    }
+    if let Some(refusal) = Refusal::of(e) {
+        return refusal.error();
     }
     let kind = e.to_string();
     let cause = std::error::Error::source(e).map(ToString::to_string);

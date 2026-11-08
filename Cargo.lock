@@ -1194,6 +1194,7 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
+ "socket2",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
