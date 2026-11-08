@@ -10,7 +10,9 @@
 //! ([`run`]): a function or operator someone made in another schema can be a closer match than
 //! `pg_catalog`'s (`public.unnest(smallint[])` beats `unnest(anyarray)`, `name !~~ name` beats
 //! `name !~~ text` for a literal), and would run as the user who opens the database. So type
-//! names outside `pg_catalog` come back from `format_type` qualified (`public.citext`).
+//! names outside `pg_catalog` come back from `format_type` qualified (`public.citext`). The `LIKE`
+//! patterns escape with `!`: a backslash in a string would have the driver check
+//! `standard_conforming_strings` first, and refuse the query while a function has it off.
 //!
 //! Limits: a catalog must never be truncated, so the queries run with `CATALOG_LIMITS`, which no
 //! real catalog reaches, instead of the 10,000-row query cap: a database with a few hundred
@@ -39,7 +41,7 @@ SELECT n.nspname, c.relname, c.relkind::text, c.reltuples::numeric::text
 FROM pg_catalog.pg_namespace n
 LEFT JOIN pg_catalog.pg_class c
   ON c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-WHERE n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+WHERE n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_temp!_%' ESCAPE '!'
 ORDER BY n.nspname, c.relname";
 
 /// Columns of those relations. `d` resolves each domain (also a domain over a domain) to its
@@ -62,7 +64,7 @@ JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
 LEFT JOIN base ON base.root = t.oid
 JOIN pg_catalog.pg_type bt ON bt.oid = COALESCE(base.base, t.oid)
 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-  AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+  AND n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_temp!_%' ESCAPE '!'
 ORDER BY c.oid, a.attnum";
 
 /// Primary, unique and foreign keys, one row per key column in key order. Constraints copied
@@ -82,7 +84,7 @@ LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
 LEFT JOIN pg_catalog.pg_attribute fatt ON fatt.attrelid = con.confrelid AND fatt.attnum = fk.attnum
 WHERE con.contype IN ('p', 'u', 'f') AND con.conparentid = 0
   AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-  AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+  AND n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_temp!_%' ESCAPE '!'
 ORDER BY con.conrelid, con.conname, con.oid, k.ord";
 
 /// The class of a column from its base type's `typname` and `typcategory` (a domain has its base

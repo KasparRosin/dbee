@@ -254,3 +254,23 @@ async fn literals_read_the_same_with_standard_conforming_strings_off() {
         assert!(wrong.is_empty(), "pg{major}: {wrong:#?}");
     }
 }
+
+/// dbee's own catalog queries hold no backslash in a string, so a session whose
+/// `standard_conforming_strings` a function turned off still loads its catalog: the setting is
+/// checked only before a statement whose `'…'` strings hold one.
+#[tokio::test]
+async fn the_catalog_loads_after_a_function_turned_standard_conforming_strings_off() {
+    let db = require_testdb!();
+    for (major, c) in conns(db).await {
+        let flip = unique("scs_set");
+        let made = format!(
+            "CREATE FUNCTION scratch.{flip}(text) RETURNS text LANGUAGE sql AS $$ SELECT pg_catalog.set_config('standard_conforming_strings', $1, false) $$"
+        );
+        ok(&c, &made, QUERY_LIMITS).await;
+        ok(&c, &format!("SELECT scratch.{flip}('off')"), QUERY_LIMITS).await;
+        let loaded = dbee_pg::catalog::load_catalog(&c).await.map(drop);
+        ok(&c, &format!("SELECT scratch.{flip}('on')"), QUERY_LIMITS).await;
+        ok(&c, &format!("DROP FUNCTION scratch.{flip}(text)"), QUERY_LIMITS).await;
+        assert!(loaded.is_ok(), "pg{major}: {loaded:?}");
+    }
+}
