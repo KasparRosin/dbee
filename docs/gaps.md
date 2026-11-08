@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (entry 27: read-only's guard and what it cannot reach; entries 36 and 37 from the security review)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (entry 27 names more of what read-only cannot reach; 37 on Windows; 38 MySQL's session tracking; 39 filters under another client_encoding)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -209,8 +209,8 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 27. Read-only guards against mistakes, not against what runs inside one statement (D)
 
-- **Limit:** on a read-only connection dbee refuses, before sending, the statements that can turn read-only off or write in spite of it (a `DO` block, `CALL`, `SET … READ WRITE`, MariaDB's `SET STATEMENT`, SQLite's `ATTACH` and `VACUUM INTO`, and the others the decisions of 2026-11-08 list), and reads the mode back after each statement. What a function does inside one statement stays out of a client's reach: one that commits through another connection (Postgres's `dblink`), or that turns read-only off and writes before its statement ends. Postgres's `COPY … TO PROGRAM` runs a program on the server from a read-only transaction (measured on 14 and 18; superusers and roles granted it only).
-- **Evidence:** `read_only_postgres_refuses_what_turns_it_off_and_reads_it_back`, `read_only_mysql_refuses_what_turns_it_off_and_reads_it_back` and `read_only_sqlite_attaches_nothing_and_keeps_query_only` (`crates/engine/tests/query.rs`), `a_raw_filter_on_a_read_only_connection_writes_nothing` (`crates/engine/tests/table.rs`); the checks (`crates/sql/src/refusal.rs`, `crates/pg/src/guard.rs`, `crates/mysql/src/guard.rs`, the authorizer in `crates/sqlite/src/connect.rs`).
+- **Limit:** on a read-only connection dbee refuses, before sending, the statements that can turn read-only off or write in spite of it (a `DO` block, `CALL`, `SET … READ WRITE`, MariaDB's `SET STATEMENT`, `ALTER SYSTEM`, `COPY … TO`, `INTO OUTFILE`, `SET GLOBAL`, SQLite's `ATTACH` and `VACUUM INTO`, and the others the decisions of 2026-11-08 list), and reads the mode back after each statement. What a function does inside one statement stays out of a client's reach: one that commits through another connection (Postgres's `dblink`), one that turns read-only off and writes before its statement ends, and the built-ins that run SQL text (`query_to_xml`, `query_to_xml_and_xmlschema`, `cursor_to_xml` and the like; measured: `query_to_xml('SELECT lo_from_bytea(…)', …)` made a large object on Postgres 14). Statements that write no table data run too: Postgres's `VACUUM FULL` and `CHECKPOINT`, and `COMMIT PREPARED` and MySQL's `XA COMMIT` of a transaction another session prepared (not tried: the test servers allow no prepared transactions).
+- **Evidence:** `read_only_holds_on_every_engine`, `read_only_postgres_refuses_what_turns_it_off_and_reads_it_back`, `read_only_mysql_refuses_what_turns_it_off_and_reads_it_back` and `read_only_sqlite_attaches_nothing_and_keeps_query_only` (`crates/engine/tests/query.rs`), `a_raw_filter_on_a_read_only_connection_writes_nothing` (`crates/engine/tests/table.rs`); the checks (`crates/sql/src/refusal.rs`, `crates/pg/src/guard.rs`, `crates/mysql/src/guard.rs`, the authorizer in `crates/sqlite/src/connect.rs`).
 - **Impact:** a pasted script or a migration file is stopped; someone who means to write with the connection's role can. A database user without write grants is the lock, as the form's Read-only says.
 - **Estimate:** none: the lock is a role on the server.
 
@@ -279,15 +279,30 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 37. Isolated runs: a parent folder swapped in during a SQLite open is followed (S)
 
-- **Limit:** an isolated run opens the path its check resolved with `SQLITE_OPEN_NOFOLLOW`, so SQLite refuses a link anywhere in it. Between SQLite's own look at the path and its `open()`, a parent folder swapped for a link is still followed.
+- **Limit:** an isolated run opens the path its check resolved with `SQLITE_OPEN_NOFOLLOW`, so SQLite refuses a link anywhere in it. Between SQLite's own look at the path and its `open()`, a parent folder swapped for a link is still followed. On Windows `NOFOLLOW` does nothing: only SQLite's Unix VFS reads it, so there a link swapped in after the check is followed.
 - **Evidence:** `a_link_swapped_in_after_the_check_never_opens_a_file_outside` (`crates/sqlite/tests/connect.rs`) swaps the file itself; nothing swaps a folder.
 - **Impact:** it needs a process of the same user racing the open within that window; an isolated run guards against mistakes, not against such a process.
 - **Estimate:** 2–4 h (estimated): open the folder with `O_DIRECTORY | O_NOFOLLOW` and check it again after the open.
+
+### 38. MySQL and MariaDB: read-only is read back with a statement of dbee's own (D)
+
+- **Limit:** after each statement on a read-only MySQL or MariaDB connection dbee reads the session's read-only variable with a `SELECT`: one more round trip, and, since on MySQL that read clears what `SHOW WARNINGS` lists, after a statement that left warnings it waits for the next statement, which then reports a change. The servers can report the change themselves, in the statement's own OK packet: session tracking.
+- **Evidence:** measured on all five servers (security review of 2026-11-08, fix round 1, review 1, Q2): with `session_track_system_variables` set to the read-only variable, a stored function's `SET SESSION … = 0` inside `SELECT f(), CAST('1x' AS SIGNED)` was reported as `OFF`; with `session_track_transaction_info = 'CHARACTERISTICS'`, `START TRANSACTION READ WRITE` and `SET @@transaction_read_only = 0` were reported, the two forms the variable never shows. A `SET` to the same value is reported too, so a change is a reported value that is not on, or characteristics that hold `READ WRITE`. The read-back today: `crates/mysql/src/guard.rs`.
+- **Impact:** a round trip per statement on read-only connections, and the report of a change one statement late after warnings. Nothing is written meanwhile: the guard's text check and the read before the next statement hold.
+- **Estimate:** 4–6 h (estimated): ask for `CLIENT_SESSION_TRACK` on both sessions of a read-only connection (today only the query session asks), set both tracking variables in the setup, read their entries beside the schema's in `read_result`, and fall back to the read-back for the connection's life once a statement names `session_track` (or refuse such a statement on a read-only connection). Still to measure: whether MariaDB's `SET STATEMENT … FOR` and a `CALL` are reported, and whether a function can change the tracking itself.
+
+### 39. Postgres: a filter under another `client_encoding` finds other rows (D)
+
+- **Limit:** a function the session calls (through a view, say) can change `client_encoding`. Apply checks it before writing and sets it back, but a page or a count does not: a filter value above ASCII then reaches the server as other text and finds other rows, or none. Nothing is written.
+- **Evidence:** the check is in Apply only (`crates/pg/src/apply.rs`); `an_edit_after_a_view_changed_client_encoding_writes_nothing_hidden` (`crates/engine/tests/edit.rs`) covers Apply.
+- **Impact:** a wrong page after such a view, until the next Apply or a reconnect sets the encoding back.
+- **Estimate:** 1 h (estimated): the same check before each page and count, at one round trip each.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | The security review's fix round 1: entry 27 refuses more (`ALTER SYSTEM`, `COPY … TO`, `INTO OUTFILE`, `SET GLOBAL`) and names the built-ins that run SQL text and the statements that write no table data; 37 says `NOFOLLOW` does nothing on Windows; 38 (MySQL and MariaDB: read-only is read back with a statement of dbee's own, where session tracking would do) and 39 (Postgres: a filter under another `client_encoding`). |
 | 2026-11-08 | minor | The security review's lane B: entry 27 now says what read-only refuses and reads back, and what runs inside one statement out of its reach; entries 36 (SQLite: a file from the file manager opens read-write, values up to 1 GB) and 37 (isolated runs: a parent folder swapped in during a SQLite open). |
 | 2026-11-08 | minor | Entry 6: the engine holds its open connections by id and each tab names its connection; one may be open. |
 | 2026-11-08 | minor | Entry 11 now says the Flatpak reads `~/.ssh` and the agent and lacks only the keyring; entry 35 (a catalog that takes more than 60 s cannot be opened); import and export are M4 (M3 is the Redesign). |
