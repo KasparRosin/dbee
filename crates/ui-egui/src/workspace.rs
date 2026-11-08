@@ -30,7 +30,7 @@
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
 //! `tab-new`; `status-connection` (value: the name, and `read-only`), `status-server`,
-//! `status-save`, `status-job` (value: what runs), `status-cancel`, `status-lost`,
+//! `status-tls` (value: what protects the link, for a server), `status-save`, `status-job` (value: what runs), `status-cancel`, `status-lost`,
 //! `status-reconnect`, `value-toggle`.
 
 use std::sync::Arc;
@@ -243,6 +243,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let label = if c.info.read_only { format!("{name} · read-only") } else { name };
     let colour = connection_color(c.config.color);
     let server = dbee_engine::state::server_text(&c.info);
+    let tls = dbee_engine::state::tls_text(&c.info);
     let saved = app.session.state().store.is_saved(&c.config.id);
     let lost = c.lost;
     let job = live_job(&app.session);
@@ -266,6 +267,11 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
             tags.tag_value("status-connection", &r, label.as_str());
             let r = ui.label(RichText::new(server.as_str()).size(12.0).color(t.text_muted));
             tags.tag_value("status-server", &r, server.as_str());
+            if let Some((text, hover)) = tls {
+                ui.add_space(6.0);
+                let r = ui.label(RichText::new(text).size(12.0).color(t.text_muted)).on_hover_text(hover);
+                tags.tag_value("status-tls", &r, text);
+            }
             if !saved {
                 ui.add_space(8.0);
                 let r = status_button(ui, "Save connection", true).on_hover_text("Add this connection to the saved ones");

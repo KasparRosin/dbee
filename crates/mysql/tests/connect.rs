@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use dbee_config::{ALLOW_PUBLIC_KEY, ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
 use dbee_core::TableRef;
-use dbee_driver::{ApplyGate, Cancel, Connection, DbError, Driver, Purpose, QUERY_LIMITS, Target};
+use dbee_driver::{ApplyGate, Cancel, Connection, DbError, Driver, Purpose, QUERY_LIMITS, Target, TlsState};
 use dbee_mysql::wire::{MAX_PAYLOAD, Packets};
 use dbee_mysql::{Canceller, Flavor, MySqlConnection, MySqlDriver, connect, version_num, version_warning};
 use dbee_sql::Dialect;
@@ -145,7 +145,12 @@ async fn connects_and_reports_version() {
         assert_eq!(info.product, product, "{}", s.name);
         assert!(info.version.starts_with(&s.version), "{}: {info:?}", s.name);
         assert_eq!(info.version_num, expected_num(&s.version), "{}: {info:?}", s.name);
-        assert!(!info.read_only && info.warnings.is_empty(), "{}: {info:?}", s.name);
+        assert!(!info.read_only, "{}: {info:?}", s.name);
+        // prefer ends up plain on mysql57, whose TLS rustls cannot speak: the connection says so.
+        let plain = !rustls_can_reach(s);
+        assert_eq!(info.warnings.len(), usize::from(plain), "{}: {info:?}", s.name);
+        assert!(info.warnings.iter().all(|w| w.contains("not encrypted")), "{}: {info:?}", s.name);
+        assert_eq!(info.tls, Some(if plain { TlsState::Off } else { TlsState::Unchecked }), "{}", s.name);
         assert!(!c.is_closed());
         let printed = scalar(&c, "SELECT @@version").await.unwrap_or_default();
         assert!(printed.starts_with(&info.version) && info.version.chars().all(|c| c.is_ascii_digit() || c == '.'), "{printed} {info:?}");
@@ -219,18 +224,27 @@ async fn tls_require_encrypts() {
     for s in mysql_servers(db) {
         let plain = open(&config(s, SslMode::Disable), db).await;
         assert_eq!(cipher(&plain).await, "", "{}", s.name);
+        assert_eq!((plain.info().tls, plain.info().warnings.as_slice()), (Some(TlsState::Off), &[][..]), "{}", s.name);
         let prefer = open(&config(s, SslMode::Prefer), db).await;
         if rustls_can_reach(s) {
             assert!(!cipher(&prefer).await.is_empty(), "{}", s.name);
-            assert!(!cipher(&open(&config(s, SslMode::Require), db).await).await.is_empty(), "{}", s.name);
+            assert_eq!(prefer.info().tls, Some(TlsState::Unchecked), "{}", s.name);
+            let require = open(&config(s, SslMode::Require), db).await;
+            assert!(!cipher(&require).await.is_empty(), "{}", s.name);
+            assert_eq!(require.info().tls, Some(TlsState::Unchecked), "{}", s.name);
             // With a CA file, require checks the chain (libpq's rule), not the host name.
             let ca = ConnectionConfig { ca_file: Some(db.ca_file.clone()), ..config(s, SslMode::Require) };
-            assert!(!cipher(&open(&ca, db).await).await.is_empty(), "{}", s.name);
+            let checked = open(&ca, db).await;
+            assert!(!cipher(&checked).await.is_empty(), "{}", s.name);
+            assert_eq!(checked.info().tls, Some(TlsState::Checked), "{}", s.name);
             let wrong = ConnectionConfig { ca_file: Some(wrong_ca(db)), ..ca.clone() };
             assert_eq!(code(connect(target(&wrong, Some(&db.password))).await), "tls", "{}", s.name);
         } else {
-            // prefer falls back to plain when the TLS handshake fails; require says why it failed.
+            // prefer falls back to plain when the TLS handshake fails, and says so; require says why
+            // it failed.
             assert_eq!(cipher(&prefer).await, "", "{}", s.name);
+            assert_eq!(prefer.info().tls, Some(TlsState::Off), "{}", s.name);
+            assert!(prefer.info().warnings.iter().any(|w| w.contains("not encrypted")), "{}: {:?}", s.name, prefer.info());
             let e = connect(target(&config(s, SslMode::Require), Some(&db.password))).await.err().unwrap();
             assert_cipher_error(&e, s);
         }
@@ -247,7 +261,9 @@ async fn tls_verify_full_needs_trusted_ca() {
             assert_cipher_error(&connect(target(&with_ca, Some(&db.password))).await.err().unwrap(), s);
             continue;
         }
-        assert!(!cipher(&open(&with_ca, db).await).await.is_empty(), "{}", s.name);
+        let full = open(&with_ca, db).await;
+        assert!(!cipher(&full).await.is_empty(), "{}", s.name);
+        assert_eq!(full.info().tls, Some(TlsState::Checked), "{}", s.name);
         // The certificate names 127.0.0.1 too.
         open(&ConnectionConfig { host: "127.0.0.1".into(), ..with_ca.clone() }, db).await;
         // The OS does not trust the test CA.
@@ -270,6 +286,9 @@ async fn through_ssh_tunnel() {
         let c = tunnelled(s, db, SslMode::Prefer);
         let conn = open_tunnelled(&c, db, &t).await;
         assert!(conn.info().version.starts_with(&s.version), "{}: {:?}", s.name, conn.info());
+        // The tunnel encrypts the link as far as the SSH server: a plain link past it gets no warning.
+        let tls = if rustls_can_reach(s) { TlsState::Unchecked } else { TlsState::Off };
+        assert_eq!((conn.info().tls, conn.info().warnings.as_slice()), (Some(tls), &[][..]), "{}", s.name);
         assert_eq!(scalar(&conn, "SELECT 40 + 2").await.as_deref(), Some("42"));
         if rustls_can_reach(s) {
             // TLS through the tunnel checks the configured host name (the service name).
@@ -438,7 +457,7 @@ async fn the_servers_key_only_without_encryption_or_when_allowed() {
         let mut allowed = direct.clone();
         allowed.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
         let warnings = open_as(&allowed, &user.password, Purpose::Query).await.info().warnings.clone();
-        assert!(warnings.len() == 1 && warnings[0].contains("could not check"), "{}: {warnings:?}", s.name);
+        assert!(warnings.len() == 2 && warnings[0].contains("not encrypted") && warnings[1].contains("could not check"), "{}: {warnings:?}", s.name);
         // No encryption chosen, or the tunnel's: no warning.
         let plain = ConnectionConfig { ssl_mode: SslMode::Disable, ..direct.clone() };
         assert!(open_as(&plain, &user.password, Purpose::Query).await.info().warnings.is_empty(), "{}", s.name);
@@ -786,10 +805,20 @@ where
 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let server = tokio::spawn(async move {
+    let server = tokio::spawn(async move { serve_fake(&listener, &first, &mut answer).await });
+    (port, server)
+}
+
+/// One connection of [`fake_server`] on `listener`: `first`, then `answer` to each packet; what
+/// the client sent.
+async fn serve_fake<F>(listener: &TcpListener, first: &[u8], answer: &mut F) -> Vec<Vec<u8>>
+where
+    F: FnMut(&[u8]) -> Vec<Vec<u8>>,
+{
+    {
         let mut got = Vec::new();
         let Ok((mut sock, _)) = listener.accept().await else { return got };
-        if sock.write_all(&first).await.is_err() {
+        if sock.write_all(first).await.is_err() {
             return got;
         }
         loop {
@@ -815,8 +844,7 @@ where
                 }
             }
         }
-    });
-    (port, server)
+    }
 }
 
 fn fake_config(port: u16) -> ConnectionConfig {
@@ -950,7 +978,9 @@ async fn a_sha256_greeting_lets_the_accounts_method_decide() {
     };
     let (port, server) = fake_server(frame(&greeting("8.0.99", "sha256_password", server_caps(true)), 0), answer).await;
     let conn = connect_fake_as(&ConnectionConfig { ssl_mode: SslMode::Prefer, ..fake_config(port) }).await.unwrap();
-    assert!(conn.info().warnings.is_empty(), "{:?}", conn.info());
+    // No word of the server's key; the plain link after prefer warns.
+    let warnings = &conn.info().warnings;
+    assert!(warnings.len() == 1 && warnings[0].contains("not encrypted"), "{:?}", conn.info());
     drop(conn);
     let got = server.await.unwrap();
     assert!(got[0].ends_with(b"caching_sha2_password\0"), "{got:?}");
@@ -980,7 +1010,9 @@ async fn the_servers_key_when_allowed_comes_with_a_warning() {
         let conn = connect_fake_as(&c).await.unwrap_or_else(|e| panic!("{mode:?}: {e}"));
         let warnings = conn.info().warnings.clone();
         assert_eq!(warnings.iter().any(|w| w.contains("could not check")), warned, "{mode:?}: {warnings:?}");
-        assert_eq!(warnings.len(), usize::from(warned), "{mode:?}: {warnings:?}");
+        // prefer ended up plain on the direct link: that warns too.
+        assert_eq!(warnings.iter().any(|w| w.contains("not encrypted")), mode == SslMode::Prefer, "{mode:?}: {warnings:?}");
+        assert_eq!(warnings.len(), 2 * usize::from(warned), "{mode:?}: {warnings:?}");
         drop(conn);
         let got = server.await.unwrap();
         assert_eq!((got[1].as_slice(), got[2].len()), (&[0x02][..], 256), "{mode:?}");
@@ -1310,4 +1342,47 @@ proptest! {
         let answer = [vec![lenenc(count)], defs, rows].concat();
         hostile(frame(&greeting("8.0.99", "mysql_native_password", server_caps(deprecate_eof)), 0), vec![vec![ok_packet(0, 0)], answer])?;
     }
+}
+
+/// M1: a `prefer` connection to a server that offers no TLS says its link is not encrypted, and
+/// warns; one that asked for no TLS says so too, without the warning.
+#[tokio::test]
+async fn a_plain_link_after_prefer_warns() {
+    for (mode, warned) in [(SslMode::Prefer, true), (SslMode::Disable, false)] {
+        let (port, server) =
+            fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0), answer_as_mariadb).await;
+        let conn = connect_fake_as(&ConnectionConfig { ssl_mode: mode, ..fake_config(port) }).await.unwrap();
+        let info = conn.info().clone();
+        drop(conn);
+        server.await.unwrap();
+        assert_eq!(info.tls, Some(TlsState::Off), "{mode:?}");
+        assert_eq!(info.warnings.iter().any(|w| w.contains("not encrypted") && w.contains("verify-full")), warned, "{mode:?}: {info:?}");
+        assert_eq!(info.warnings.len(), usize::from(warned), "{mode:?}: {info:?}");
+    }
+}
+
+/// M1: when the server offers TLS and the handshake fails, `prefer` connects again without TLS,
+/// and that connection warns.
+#[tokio::test]
+async fn prefer_after_a_failed_handshake_warns() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let offers_tls = server_caps(true) | CapabilityFlags::CLIENT_SSL.bits();
+        sock.write_all(&frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", offers_tls), 0)).await.unwrap();
+        // The SSL request (32 bytes and the header), then a fatal handshake_failure alert.
+        let mut ssl_request = [0u8; 36];
+        sock.read_exact(&mut ssl_request).await.unwrap();
+        sock.write_all(b"\x15\x03\x03\x00\x02\x02\x28").await.unwrap();
+        drop(sock);
+        let first = frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0);
+        serve_fake(&listener, &first, &mut answer_as_mariadb).await
+    });
+    let conn = connect_fake_as(&ConnectionConfig { ssl_mode: SslMode::Prefer, ..fake_config(port) }).await.unwrap();
+    let info = conn.info().clone();
+    drop(conn);
+    server.await.unwrap();
+    assert_eq!(info.tls, Some(TlsState::Off));
+    assert!(info.warnings.len() == 1 && info.warnings[0].contains("not encrypted"), "{info:?}");
 }

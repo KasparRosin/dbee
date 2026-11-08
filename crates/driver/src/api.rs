@@ -37,6 +37,28 @@ pub const PAGE_LIMITS: Limits = Limits { max_rows: 101, max_bytes: 256 * 1024 * 
 /// catalog is never cut. A result that still hits them is an error, never a partial catalog.
 pub const CATALOG_LIMITS: Limits = Limits { max_rows: 5_000_000, max_bytes: 512 * 1024 * 1024 };
 
+/// What protects the link to the server, as the connection found it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsState {
+    /// No TLS: what is sent can be read and changed on the way.
+    Off,
+    /// TLS, with a certificate dbee did not check: encrypted, but whoever answered could be anyone.
+    Unchecked,
+    /// TLS, with the server's certificate checked: its chain, and under `verify-full` its name.
+    Checked,
+}
+
+impl TlsState {
+    /// The id the control channel shows: `off`, `unchecked` or `checked`.
+    pub fn id(self) -> &'static str {
+        match self {
+            TlsState::Off => "off",
+            TlsState::Unchecked => "unchecked",
+            TlsState::Checked => "checked",
+        }
+    }
+}
+
 /// What the server said about itself when the connection opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerInfo {
@@ -52,6 +74,8 @@ pub struct ServerInfo {
     pub read_only: bool,
     /// Things the user should know, e.g. that the server is older than dbee supports.
     pub warnings: Vec<String>,
+    /// TLS on the link to the server; `None` for a database without one, a file.
+    pub tls: Option<TlsState>,
 }
 
 /// What a connection is for. A driver may set its session up differently for each.

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use dbee_config::{ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
 use dbee_core::TableRef;
-use dbee_driver::{ApplyGate, Connection, DbError, Driver, Meaning, Purpose, QUERY_LIMITS, Target};
+use dbee_driver::{ApplyGate, Connection, DbError, Driver, Meaning, Purpose, QUERY_LIMITS, Target, TlsState};
 use dbee_pg::query;
 use dbee_pg::{Canceller, MIN_VERSION_NUM, PgConnection, PgDriver, connect, version_warning};
 use dbee_sql::Dialect;
@@ -209,13 +209,18 @@ async fn tls_require_encrypts() {
     let db = require_testdb!();
     let ssl = "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()";
     for s in postgres(db) {
-        for (mode, expected) in [(SslMode::Require, "t"), (SslMode::Prefer, "t"), (SslMode::Disable, "f")] {
+        for (mode, expected, state) in
+            [(SslMode::Require, "t", TlsState::Unchecked), (SslMode::Prefer, "t", TlsState::Unchecked), (SslMode::Disable, "f", TlsState::Off)]
+        {
             let c = open(&config(s, mode), db).await;
             assert_eq!(scalar(&c, ssl).await.as_deref(), Some(expected), "{mode:?}");
+            assert_eq!((c.info().tls, c.info().warnings.as_slice()), (Some(state), &[][..]), "{mode:?}");
         }
         // With a CA file, require checks the chain (libpq's rule), not the host name.
         let ca = ConnectionConfig { host: "localhost".into(), ca_file: Some(db.ca_file.clone()), ..config(s, SslMode::Require) };
-        assert_eq!(scalar(&open(&ca, db).await, ssl).await.as_deref(), Some("t"));
+        let checked = open(&ca, db).await;
+        assert_eq!(scalar(&checked, ssl).await.as_deref(), Some("t"));
+        assert_eq!(checked.info().tls, Some(TlsState::Checked));
         let wrong = ConnectionConfig { ca_file: Some(wrong_ca(db)), ..ca.clone() };
         assert_eq!(code(connect(target(&wrong, Some(&db.password))).await), "tls");
     }

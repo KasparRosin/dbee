@@ -888,7 +888,9 @@ fn without_a_secret_store_dbee_asks_each_time() {
         let r = open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
         assert_eq!(r["secretsSaved"], false, "{r}");
         assert!(r["secretsNote"].as_str().unwrap().contains("secret store"), "{r}");
-        assert_eq!(s.take_ui_requests(), [], "no store, so nothing failed");
+        // No store, so nothing failed; a server that prefer reaches without TLS says that.
+        let said = s.take_ui_requests();
+        assert!(said.iter().all(|r| matches!(r, UiRequest::Notice(n) if n == dbee_driver::tls::PLAIN_AFTER_PREFER)), "{said:?}");
         assert_secret_hidden(&s, &pw());
     }
 }

@@ -883,6 +883,8 @@ fn status_bar_shows_colour_and_read_only() {
     assert!(text.contains("Shop live") && text.contains("read-only"), "{status}");
     let server = ui.value("status-server");
     assert!(server.as_str().is_some_and(|s| s.starts_with("PostgreSQL 14")), "{server}");
+    // prefer, and the test server offers TLS: encrypted, its certificate not checked.
+    assert_eq!(ui.value("status-tls"), "Encrypted, server not checked");
     assert!(ui.tag("status-reconnect").is_none(), "no Reconnect while the connection is fine");
     assert!(ui.tag("status-save").is_none(), "no Save connection for a saved one");
 }
@@ -897,6 +899,7 @@ fn a_dropped_database_file_opens_unsaved_and_save_connection_saves_it() {
     ui.until("the file to open", |ui| ui.document()["screen"] == "workspace");
     let name = file.file_name().unwrap().to_str().unwrap();
     assert_eq!(ui.value("status-connection"), name);
+    assert!(ui.tag("status-tls").is_none(), "a file has no link to protect");
     assert_eq!(ui.document()["connection"]["saved"], false);
     assert!(visible(&ui.tag("status-save")), "{:?}", ids(&ui.inspect()));
     assert!(ui.tag("notice").is_none(), "the second file is left alone");

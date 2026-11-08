@@ -28,13 +28,44 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
-use crate::DbError;
+use crate::{DbError, TlsState};
 
 /// A CA file larger than this is refused (a big system bundle is about 250 KiB).
 const MAX_CA_FILE: u64 = 4 * 1024 * 1024;
 
 /// Why `verify-ca` without a CA file is refused.
 const VERIFY_CA_NEEDS_CA_FILE: &str = "verify-ca needs a CA file; use verify-full to check against the system's certificates";
+
+/// The warning on a connection that `prefer` left without TLS on a direct link.
+pub const PLAIN_AFTER_PREFER: &str = "This connection is not encrypted: TLS could not be set up, and SSL mode prefer then connects without it. \
+                                      Anyone on the network between dbee and the server can read and change what is sent. Set SSL mode to \
+                                      require or verify-full to refuse a connection without TLS, or to disable if plain text is fine here.";
+
+/// Whether `mode` with `ca_file` checks the server's certificate: `verify-ca` and `verify-full`,
+/// and `require` with a CA file (libpq's rule). `prefer` never does.
+pub fn checks(mode: SslMode, ca_file: Option<&Path>) -> bool {
+    match mode {
+        SslMode::Disable | SslMode::Prefer => false,
+        SslMode::Require => ca_file.is_some(),
+        SslMode::VerifyCa | SslMode::VerifyFull => true,
+    }
+}
+
+/// The link's state: TLS started (`on`) or not, and whether `mode` with `ca_file` checked the
+/// certificate.
+pub fn state(on: bool, mode: SslMode, ca_file: Option<&Path>) -> TlsState {
+    match (on, checks(mode, ca_file)) {
+        (false, _) => TlsState::Off,
+        (true, false) => TlsState::Unchecked,
+        (true, true) => TlsState::Checked,
+    }
+}
+
+/// [`PLAIN_AFTER_PREFER`] for a `prefer` connection without TLS (`on`) on a `direct` link; the
+/// SSH tunnel encrypts the link as far as the SSH server.
+pub fn prefer_warning(mode: SslMode, on: bool, direct: bool) -> Option<String> {
+    (mode == SslMode::Prefer && !on && direct).then(|| PLAIN_AFTER_PREFER.to_owned())
+}
 
 /// The rustls settings for `mode`, offering the `alpn` protocol ids; `None` for `disable`.
 /// `ca_file` is read only by the modes that verify (`require`, `verify-ca`, `verify-full`); a
@@ -197,6 +228,43 @@ mod tests {
         let v = verifier(mode, ca).unwrap().unwrap();
         let name = ServerName::try_from(name.to_owned()).unwrap();
         v.verify_server_cert(&server_cert(db), &[], &name, &[], UnixTime::now()).is_ok()
+    }
+
+    /// [`checks`] says what the verifier does: a certificate from another CA (the server's own,
+    /// standing in for one) is refused exactly where it says the certificate is checked.
+    #[test]
+    fn checks_is_what_the_verifier_does() {
+        let db = dbee_testkit::require_testdb!();
+        let other = db.ca_file.with_file_name("server.crt");
+        let wrong = Some(other.as_path());
+        for (mode, ca) in [
+            (SslMode::Prefer, None),
+            (SslMode::Prefer, wrong),
+            (SslMode::Require, None),
+            (SslMode::Require, wrong),
+            (SslMode::VerifyCa, wrong),
+            (SslMode::VerifyFull, wrong),
+            (SslMode::VerifyFull, None),
+        ] {
+            assert_eq!(accepts(db, mode, ca, "localhost"), !checks(mode, ca), "{mode:?} {ca:?}");
+        }
+        assert!(!checks(SslMode::Disable, wrong));
+    }
+
+    #[test]
+    fn the_state_and_the_warning_follow_tls_the_mode_and_the_link() {
+        let ca = Some(Path::new("/ca.crt"));
+        assert_eq!(state(false, SslMode::VerifyFull, ca), TlsState::Off);
+        assert_eq!(state(true, SslMode::Prefer, ca), TlsState::Unchecked);
+        assert_eq!(state(true, SslMode::Require, None), TlsState::Unchecked);
+        assert_eq!(state(true, SslMode::Require, ca), TlsState::Checked);
+        assert_eq!(state(true, SslMode::VerifyFull, None), TlsState::Checked);
+        assert_eq!(prefer_warning(SslMode::Prefer, false, true).as_deref(), Some(PLAIN_AFTER_PREFER));
+        // TLS on, the tunnel's link, or plain text chosen: no warning.
+        for (mode, on, direct) in [(SslMode::Prefer, true, true), (SslMode::Prefer, false, false), (SslMode::Disable, false, true)] {
+            assert_eq!(prefer_warning(mode, on, direct), None, "{mode:?} {on} {direct}");
+        }
+        assert!(PLAIN_AFTER_PREFER.contains("not encrypted") && PLAIN_AFTER_PREFER.contains("verify-full"));
     }
 
     #[test]

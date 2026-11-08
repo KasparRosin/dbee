@@ -22,7 +22,7 @@ pub mod tls;
 
 pub use api::{
     BoxFuture, CATALOG_LIMITS, CONNECT_TIMEOUT, Cancel, Connection, DbFuture, Driver, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, ServerInfo, Target,
-    cancel_not_delivered,
+    TlsState, cancel_not_delivered,
 };
 pub use apply::{ApplyError, ApplyGate, ApplySession};
 pub use catalog::CatalogBuilder;

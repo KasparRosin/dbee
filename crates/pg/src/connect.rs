@@ -361,7 +361,9 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
             (client, closed, Way::Tcp(addr), over_tls)
         }
     };
-    let (info, visible_schemas) = setup(&client, cfg.read_only).await?;
+    let (mut info, visible_schemas) = setup(&client, cfg.read_only).await?;
+    info.tls = Some(dbee_driver::tls::state(over_tls, cfg.ssl_mode, cfg.ca_file.as_deref()));
+    info.warnings.extend(dbee_driver::tls::prefer_warning(cfg.ssl_mode, over_tls, matches!(way, Way::Tcp(_))));
     let route = Route { host: cfg.host.clone(), way };
     let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), over_tls, route, on_its_way: Arc::default() };
     let check_due = AtomicBool::new(false);
@@ -532,7 +534,7 @@ async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<Stri
             visible.extend(row.try_get(0).ok().flatten().map(str::to_owned));
         }
     }
-    Ok((ServerInfo { product: PRODUCT.into(), version: version.clone(), version_num, read_only: server_read_only, warnings }, visible))
+    Ok((ServerInfo { product: PRODUCT.into(), version: version.clone(), version_num, read_only: server_read_only, warnings, tls: None }, visible))
 }
 
 #[cfg(test)]

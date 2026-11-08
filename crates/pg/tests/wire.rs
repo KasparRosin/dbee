@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, DbKind, SslMode};
-use dbee_driver::{DbError, Purpose, Target};
+use dbee_driver::{DbError, Purpose, Target, TlsState};
 use dbee_pg::PgConnection;
 use dbee_testkit::{TestDb, require_testdb};
 use rustls::pki_types::pem::PemObject;
@@ -296,4 +296,65 @@ async fn the_cancel_of_a_tls_session_never_goes_in_plain() {
     assert!(e.to_string().contains("not sent"), "{e}");
     drop(conn);
     joined(server).await;
+}
+
+/// A server that takes no TLS (`N`, or no SSL request under `disable`) and logs anyone in.
+fn plain_server(l: TcpListener) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut s = accept(&l);
+        let Some(first) = read_untyped(&mut s) else { return };
+        if first.get(..4) == Some(&SSL_REQUEST[..]) {
+            s.write_all(b"N").unwrap();
+            read_untyped(&mut s).unwrap();
+        }
+        logged_in(&mut s);
+        serve(&mut s, &mut |_, _| false);
+    })
+}
+
+/// A server that takes TLS with the test servers' certificate and logs anyone in.
+fn tls_server(l: TcpListener, tls: Arc<rustls::ServerConfig>) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut s = accept(&l);
+        read_untyped(&mut s).unwrap();
+        s.write_all(b"S").unwrap();
+        let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(tls).unwrap(), s);
+        if read_untyped(&mut tls).is_none() {
+            return;
+        }
+        logged_in(&mut tls);
+        serve(&mut tls, &mut |_, _| false);
+    })
+}
+
+/// M1: the connection says what protects its link, and a `prefer` connection that ended
+/// without TLS on a direct link warns; one that asked for no TLS does not.
+#[tokio::test]
+async fn the_link_says_whether_it_is_encrypted_and_checked() {
+    let db = require_testdb!();
+    for (mode, warned) in [(SslMode::Prefer, true), (SslMode::Disable, false)] {
+        let (l, port) = listener();
+        let server = plain_server(l);
+        let conn = open(&config(port, mode, None)).await.unwrap();
+        let info = conn.info().clone();
+        drop(conn);
+        joined(server).await;
+        assert_eq!(info.tls, Some(TlsState::Off), "{mode:?}");
+        assert_eq!(info.warnings.iter().any(|w| w.contains("not encrypted") && w.contains("verify-full")), warned, "{mode:?}: {info:?}");
+        assert_eq!(info.warnings.len(), usize::from(warned), "{mode:?}: {info:?}");
+    }
+    for (mode, ca, state) in [
+        (SslMode::Prefer, None, TlsState::Unchecked),
+        (SslMode::Require, None, TlsState::Unchecked),
+        (SslMode::Require, Some(db.ca_file.clone()), TlsState::Checked),
+        (SslMode::VerifyFull, Some(db.ca_file.clone()), TlsState::Checked),
+    ] {
+        let (l, port) = listener();
+        let server = tls_server(l, tls_config(db));
+        let conn = open(&config(port, mode, ca)).await.unwrap();
+        let info = conn.info().clone();
+        drop(conn);
+        joined(server).await;
+        assert_eq!((info.tls, info.warnings.as_slice()), (Some(state), &[][..]), "{mode:?}");
+    }
 }

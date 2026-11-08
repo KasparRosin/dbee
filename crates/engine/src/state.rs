@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
 use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
-use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo};
+use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
@@ -26,6 +26,21 @@ pub const NO_CONNECTION_DIALECT: Dialect = Dialect::Postgres;
 /// What the result texts and the status bar call the server: `PostgreSQL 14.12`.
 pub fn server_text(info: &ServerInfo) -> String {
     format!("{} {}", info.product, info.version)
+}
+
+/// What the status bar says of the link to the server, and its longer text: `None` for a
+/// database without one, a file.
+pub fn tls_text(info: &ServerInfo) -> Option<(&'static str, &'static str)> {
+    Some(match info.tls? {
+        TlsState::Off => {
+            ("Not encrypted", "The connection to the server is not encrypted: anyone on the network between them can read and change what is sent.")
+        }
+        TlsState::Unchecked => (
+            "Encrypted, server not checked",
+            "The connection is encrypted, but dbee did not check the server's certificate, so it cannot tell who answered. SSL mode verify-full checks it.",
+        ),
+        TlsState::Checked => ("Encrypted, server checked", "The connection is encrypted, and the server's certificate was checked."),
+    })
 }
 
 /// Which screen the window shows.
@@ -167,10 +182,11 @@ impl Connected {
         }
     }
 
-    /// `{connection, id, name, color, kind, host, port, database, user, ssh, readOnly, server, lost,
-    /// saved}`, as `inspect()` and `connection.open` show it: `connection` is its [`ConnectionId`],
-    /// `id` the saved connection's, `kind` the database type's id, `server` the product and its
-    /// version (`PostgreSQL 14.12`), `saved` whether the saved list holds it
+    /// `{connection, id, name, color, kind, host, port, database, user, ssh, readOnly, server, tls,
+    /// lost, saved}`, as `inspect()` and `connection.open` show it: `connection` is its
+    /// [`ConnectionId`], `id` the saved connection's, `kind` the database type's id, `server` the
+    /// product and its version (`PostgreSQL 14.12`), `tls` the link's [`TlsState`] (`off`,
+    /// `unchecked`, `checked`; `null` for a file), `saved` whether the saved list holds it
     /// (`ConnectionStore::is_saved`, which the caller asks). Never a secret.
     pub fn summary(&self, saved: bool) -> Json {
         let c = &self.config;
@@ -187,6 +203,7 @@ impl Connected {
             "ssh": c.ssh.is_some(),
             "readOnly": self.info.read_only,
             "server": server_text(&self.info),
+            "tls": self.info.tls.map(TlsState::id),
             "lost": self.lost,
             "saved": saved,
         })
