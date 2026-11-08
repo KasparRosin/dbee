@@ -1,8 +1,9 @@
 //! What runs around each statement on a connection dbee made read-only.
 //!
 //! Before it: the statements dbee does not send ([`Dialect::refusal`]), read as this server reads
-//! its version comments ([`gated::as_read`]) and its strings (`NO_BACKSLASH_ESCAPES`, from the last
-//! OK packet's status), which says in plain words why; and, read from the raw text, comments
+//! its version comments ([`gated::as_read`]), its strings (`NO_BACKSLASH_ESCAPES`, from the last
+//! OK packet's status) and its `"…"` (a name under `ANSI_QUOTES`, from the `sql_mode` read at
+//! connect), which says in plain words why; and, read from the raw text, comments
 //! included, a statement that names `session_track`, that holds `SET` beside `sql_mode` or a word
 //! that changes the character set (the session reads dbee's text as it did at connect), or, on
 //! MariaDB, `STATEMENT` beside the read-only variable.
@@ -20,7 +21,7 @@ use std::sync::atomic::Ordering;
 
 use dbee_driver::{DbError, Limits};
 use dbee_sql::Dialect;
-use dbee_sql::lexer::{TokenKind, tokenize_with};
+use dbee_sql::lexer::{Reading, TokenKind, tokenize_with};
 
 use crate::connect::{MySqlConnection, Session, names_session_track};
 use crate::flavor::Flavor;
@@ -84,8 +85,8 @@ enum Mode {
 }
 
 /// `sql` reads the warnings or errors of the statement before it, and leaves them in place.
-fn diagnostic(sql: &str, backslash_escapes: bool) -> bool {
-    let words: Vec<String> = tokenize_with(Dialect::MySql, sql, backslash_escapes)
+fn diagnostic(sql: &str, reading: Reading) -> bool {
+    let words: Vec<String> = tokenize_with(Dialect::MySql, sql, reading)
         .into_iter()
         .filter(|t| matches!(t.kind, TokenKind::Keyword | TokenKind::Ident))
         .take(3)
@@ -126,10 +127,10 @@ fn code_words(sql: &str, word: &str) -> usize {
 /// folds a name spelled with a letter like `ë` or `ſ` to one of them. A `"…"` counts as outside
 /// (`ANSI_QUOTES` makes it a name), and the two readings cover a character set such as `sjis`,
 /// whose characters can end in the byte `\`.
-fn sets_a_lookalike(sql: &str) -> bool {
+fn sets_a_lookalike(sql: &str, ansi_quotes: bool) -> bool {
     holds_word(sql, "set")
-        && [true, false].into_iter().any(|escapes| {
-            tokenize_with(Dialect::MySql, sql, escapes).iter().any(|t| {
+        && both_escapes(ansi_quotes).any(|reading| {
+            tokenize_with(Dialect::MySql, sql, reading).iter().any(|t| {
                 let text = sql.get(t.range.clone()).unwrap_or_default();
                 let quoted = t.kind == TokenKind::String && text.trim_start_matches(|c: char| c.is_ascii_alphabetic()).starts_with('\'');
                 !text.is_ascii() && !quoted
@@ -137,10 +138,16 @@ fn sets_a_lookalike(sql: &str) -> bool {
         })
 }
 
+/// The session's reading of `"…"` (`ansi_quotes`, read at connect), with backslash escapes and
+/// without.
+fn both_escapes(ansi_quotes: bool) -> impl Iterator<Item = Reading> {
+    [true, false].into_iter().map(move |backslash_escapes| Reading { backslash_escapes, ansi_quotes })
+}
+
 /// `sql` still holds a `;` outside strings and comments, read with backslash escapes and without:
 /// after dbee's split only a `DELIMITER` leaves one in, as a block of several statements needs.
-fn holds_a_semicolon(sql: &str) -> bool {
-    [true, false].into_iter().any(|escapes| tokenize_with(Dialect::MySql, sql, escapes).iter().any(|t| t.kind == TokenKind::Semicolon))
+fn holds_a_semicolon(sql: &str, ansi_quotes: bool) -> bool {
+    both_escapes(ansi_quotes).any(|reading| tokenize_with(Dialect::MySql, sql, reading).iter().any(|t| t.kind == TokenKind::Semicolon))
 }
 
 /// `sql` holds the word `SET` and `NAMES`, `CHARSET` or `character_set_client`, or `SET` twice and
@@ -153,12 +160,12 @@ fn names_the_character_set(sql: &str) -> bool {
 }
 
 /// Why dbee does not send `sql` on a read-only connection, from its raw text, comments included:
-/// what no reading of it can show.
-fn raw_refusal(sql: &str, flavor: Flavor) -> Option<&'static str> {
+/// what no reading of it can show. `"…"` is a name where the session's mode holds `ANSI_QUOTES`.
+fn raw_refusal(sql: &str, flavor: Flavor, ansi_quotes: bool) -> Option<&'static str> {
     let holds = |part: &str| sql.as_bytes().windows(part.len()).any(|w| w.eq_ignore_ascii_case(part.as_bytes()));
-    if holds_a_semicolon(sql) {
+    if holds_a_semicolon(sql, ansi_quotes) {
         Some(BLOCK)
-    } else if sets_a_lookalike(sql) {
+    } else if sets_a_lookalike(sql, ansi_quotes) {
         Some(LOOKALIKE)
     } else if names_session_track(sql) {
         Some(TRACKING)
@@ -173,8 +180,8 @@ fn raw_refusal(sql: &str, flavor: Flavor) -> Option<&'static str> {
 
 impl MySqlConnection {
     /// `sql` as this server reads it, in each way it may ([`gated::as_read`]).
-    fn as_read(&self, session: &Session, sql: &str) -> Result<Vec<String>, DbError> {
-        gated::as_read(sql, self.flavor(), self.info().version_num, session.backslash_escapes).map_err(|why| DbError::ReadOnly {
+    fn as_read(&self, sql: &str, reading: Reading) -> Result<Vec<String>, DbError> {
+        gated::as_read(sql, self.flavor(), self.info().version_num, reading).map_err(|why| DbError::ReadOnly {
             message: match why {
                 Unread::TooMany => TOO_MANY_VERSIONS,
                 Unread::Nested => NESTED,
@@ -188,18 +195,18 @@ impl MySqlConnection {
         if !self.read_only {
             return Ok(());
         }
-        if let Some(why) = raw_refusal(sql, self.flavor()) {
+        if let Some(why) = raw_refusal(sql, self.flavor(), session.ansi_quotes) {
             return Err(DbError::ReadOnly { message: why.into() });
         }
-        let readings = self.as_read(session, sql)?;
-        let escapes = session.backslash_escapes;
-        if let Some(refused) = readings.iter().find_map(|r| Dialect::MySql.refusal_with(r, true, escapes)) {
+        let reading = Reading { backslash_escapes: session.backslash_escapes, ansi_quotes: session.ansi_quotes };
+        let readings = self.as_read(sql, reading)?;
+        if let Some(refused) = readings.iter().find_map(|r| Dialect::MySql.refusal_with(r, true, reading)) {
             return Err(refused.into());
         }
         if names_the_character_set(sql) {
             return Err(DbError::ReadOnly { message: CHARACTER_SET.into() });
         }
-        if self.check_due.load(Ordering::Acquire) && !readings.iter().all(|r| diagnostic(r, escapes)) {
+        if self.check_due.load(Ordering::Acquire) && !readings.iter().all(|r| diagnostic(r, reading)) {
             match self.mode(session).await {
                 Mode::ReadOnly => self.check_due.store(false, Ordering::Release),
                 Mode::Changed => return Err(self.restore(session, TURNED_OFF_BEFORE).await),
@@ -368,7 +375,7 @@ mod tests {
             "SET @gr\u{f6}\u{df}e = 1",
             "UPDATE t SET n = 1 -- \u{e9}",
         ] {
-            assert_eq!(raw_refusal(sql, Flavor::MySql), Some(LOOKALIKE), "{sql}");
+            assert_eq!(raw_refusal(sql, Flavor::MySql, false), Some(LOOKALIKE), "{sql}");
         }
         for sql in [
             "SET @city = 'Z\u{fc}rich'",
@@ -377,7 +384,7 @@ mod tests {
             "SELECT charset('\u{e9}'), \u{e9}t\u{e9} FROM asset",
             "SET @a = _utf8mb4'\u{e9}', @b = N'\u{e9}'",
         ] {
-            assert_eq!(raw_refusal(sql, Flavor::MySql), None, "{sql}");
+            assert_eq!(raw_refusal(sql, Flavor::MySql, false), None, "{sql}");
         }
     }
 
@@ -391,11 +398,16 @@ mod tests {
             "SELECT 1 /*! ; */",
             "SET @a = '\u{c1}\\'; INSERT INTO t VALUES (1)",
         ] {
-            assert_eq!(raw_refusal(sql, Flavor::MariaDb), Some(BLOCK), "{sql}");
+            assert_eq!(raw_refusal(sql, Flavor::MariaDb, false), Some(BLOCK), "{sql}");
         }
         for sql in ["SELECT ';'", "SELECT 1 /* ; */", "SELECT 1 -- ;", "SELECT `a;b` FROM t"] {
-            assert_eq!(raw_refusal(sql, Flavor::MariaDb), None, "{sql}");
+            assert_eq!(raw_refusal(sql, Flavor::MariaDb, false), None, "{sql}");
         }
+        // Under `ANSI_QUOTES` `"\"` is a whole name, so the `;`s after it are code.
+        let ansi = "BEGIN NOT ATOMIC DECLARE \"\\\" CHAR(1) DEFAULT '\\''; INSERT INTO t VALUES (1); END -- '\"";
+        assert_eq!(raw_refusal(ansi, Flavor::MariaDb, false), None);
+        assert_eq!(raw_refusal(ansi, Flavor::MariaDb, true), Some(BLOCK));
+        assert_eq!(raw_refusal("SELECT 1 AS \"a;b\"", Flavor::MariaDb, true), None);
     }
 
     /// A statement that holds the words `SET` and `sql_mode`, wherever they are, is refused; a
@@ -411,10 +423,10 @@ mod tests {
             "SET /*!40101sql_mode*/ = ''",
             "SELECT 'set sql_mode'",
         ] {
-            assert_eq!(raw_refusal(sql, Flavor::MySql), Some(SQL_MODE), "{sql}");
+            assert_eq!(raw_refusal(sql, Flavor::MySql, false), Some(SQL_MODE), "{sql}");
         }
         for sql in ["SELECT @@SESSION.sql_mode", "SHOW VARIABLES LIKE 'sql_mode'", "SET @sql_modes = 1", "SET @x = 'presql_mode'"] {
-            assert_eq!(raw_refusal(sql, Flavor::MySql), None, "{sql}");
+            assert_eq!(raw_refusal(sql, Flavor::MySql, false), None, "{sql}");
         }
         assert_eq!(code_words("/*!40101SET x*/ SET; asset set_x", "set"), 2);
     }
@@ -455,10 +467,10 @@ mod tests {
             "get current diagnostics condition 1 @m = MESSAGE_TEXT",
             "/* x */ SHOW WARNINGS",
         ] {
-            assert!(diagnostic(sql, true), "{sql}");
+            assert!(diagnostic(sql, Reading::of(Dialect::MySql)), "{sql}");
         }
         for sql in ["SELECT 1", "SHOW TABLES", "SHOW VARIABLES LIKE 'warnings'", "SELECT 'show warnings'", ""] {
-            assert!(!diagnostic(sql, true), "{sql}");
+            assert!(!diagnostic(sql, Reading::of(Dialect::MySql)), "{sql}");
         }
     }
 }

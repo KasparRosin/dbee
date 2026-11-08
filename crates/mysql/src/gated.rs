@@ -9,7 +9,7 @@
 use std::ops::Range;
 
 use dbee_sql::Dialect;
-use dbee_sql::lexer::{TokenKind, tokenize_with};
+use dbee_sql::lexer::{Reading, TokenKind, tokenize_with};
 
 use crate::flavor::Flavor;
 
@@ -66,8 +66,8 @@ fn blank(text: &str, range: Range<usize>) -> String {
 }
 
 /// The first executable comment's start in `text`, and the end that closes it, if any.
-fn first_comment(text: &str, backslash_escapes: bool) -> Option<(Range<usize>, Option<Range<usize>>)> {
-    let tokens = tokenize_with(Dialect::MySql, text, backslash_escapes);
+fn first_comment(text: &str, reading: Reading) -> Option<(Range<usize>, Option<Range<usize>>)> {
+    let tokens = tokenize_with(Dialect::MySql, text, reading);
     let marks: Vec<&dbee_sql::Token> = tokens.iter().filter(|t| t.kind == TokenKind::ExecutableMark).collect();
     let k = marks.iter().position(|t| text.get(t.range.clone()).is_some_and(|s| s.starts_with("/*")))?;
     let start = marks.get(k)?.range.clone();
@@ -93,17 +93,17 @@ fn skipped_end(text: &str, start: &Range<usize>) -> usize {
     text.get(start.end..).and_then(|rest| rest.find("*/")).map_or(text.len(), |at| start.end + at + 2)
 }
 
-/// `sql` as `server` reads it, its strings with backslash escapes as `backslash_escapes` says:
+/// `sql` as `server` reads it, its quotes as `reading` says:
 /// each executable comment it skips blanked out, and the marks of each it runs blanked, so the
 /// text between reads as the code it is. More than one reading when a comment can be taken two
 /// ways.
-pub(crate) fn as_read(sql: &str, flavor: Flavor, server: u32, backslash_escapes: bool) -> Result<Vec<String>, Unread> {
+pub(crate) fn as_read(sql: &str, flavor: Flavor, server: u32, reading: Reading) -> Result<Vec<String>, Unread> {
     if !sql.contains("/*!") && !sql.contains("/*M!") {
         return Ok(vec![sql.to_owned()]);
     }
     let (mut done, mut todo) = (Vec::new(), vec![sql.to_owned()]);
     while let Some(text) = todo.pop() {
-        let Some((start, end)) = first_comment(&text, backslash_escapes) else {
+        let Some((start, end)) = first_comment(&text, reading) else {
             done.push(text);
             continue;
         };
@@ -124,6 +124,8 @@ pub(crate) fn as_read(sql: &str, flavor: Flavor, server: u32, backslash_escapes:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ESCAPES: Reading = Reading { backslash_escapes: true, ansi_quotes: false };
 
     #[test]
     fn each_server_skips_what_it_was_measured_to_skip() {
@@ -157,7 +159,7 @@ mod tests {
 
     #[test]
     fn a_statement_reads_as_the_server_reads_it() {
-        let read = |sql: &str, flavor, server| as_read(sql, flavor, server, true).unwrap_or_default();
+        let read = |sql: &str, flavor, server| as_read(sql, flavor, server, ESCAPES).unwrap_or_default();
         assert_eq!(read("/*M!999999 SELECT */ START TRANSACTION", Flavor::MySql, 80046), ["                     START TRANSACTION"]);
         assert_eq!(read("/*M! SELECT */ START", Flavor::MariaDb, 101119), ["     SELECT    START"]);
         assert_eq!(read("SELECT 1 /*!50001 + 1 */", Flavor::MySql, 80046), ["SELECT 1          + 1   "]);
@@ -165,10 +167,13 @@ mod tests {
         assert_eq!(read("SELECT 1 /*!500001 */", Flavor::MySql, 261000).len(), 2);
         assert_eq!(read("SELECT 1", Flavor::MySql, 80046), ["SELECT 1"]);
         let many = "/*!500001 */ ".repeat(5);
-        assert_eq!(as_read(&many, Flavor::MySql, 261000, true), Err(Unread::TooMany));
+        assert_eq!(as_read(&many, Flavor::MySql, 261000, ESCAPES), Err(Unread::TooMany));
         // With backslash escapes off, `'\'` is a whole string, so the comment after it is one.
         assert_eq!(read(r"SELECT '\' /*!99999 x */", Flavor::MySql, 80046), [r"SELECT '\' /*!99999 x */"]);
-        assert_eq!(as_read(r"SELECT '\' /*!99999 x */", Flavor::MySql, 80046, false), Ok(vec![r"SELECT '\'              ".to_owned()]));
+        assert_eq!(
+            as_read(r"SELECT '\' /*!99999 x */", Flavor::MySql, 80046, Reading { backslash_escapes: false, ansi_quotes: false }),
+            Ok(vec![r"SELECT '\'              ".to_owned()])
+        );
     }
 
     /// A comment the server skips ends, on the server, after a comment nested in it (measured on
@@ -184,9 +189,9 @@ mod tests {
             ("/*!99999 /*!50000 x */ SELECT */ START TRANSACTION READ WRITE", Flavor::MariaDb, 101119),
             ("SELECT 1 /*!99999 + 1 /* x */ + 2 */", Flavor::MariaDb, 101119),
         ] {
-            assert_eq!(as_read(sql, flavor, server, true), Err(Unread::Nested), "{flavor:?} {server}: {sql}");
+            assert_eq!(as_read(sql, flavor, server, ESCAPES), Err(Unread::Nested), "{flavor:?} {server}: {sql}");
         }
         // One the server runs may hold a comment: its text is code, and the comment a comment.
-        assert!(as_read("SELECT 1 /*!50000 + 1 /* x */ */", Flavor::MySql, 80046, true).is_ok());
+        assert!(as_read("SELECT 1 /*!50000 + 1 /* x */ */", Flavor::MySql, 80046, ESCAPES).is_ok());
     }
 }

@@ -109,6 +109,9 @@ pub(crate) struct Session {
     /// A backslash in a string escapes the character after it: the server's `sql_mode` lacks
     /// `NO_BACKSLASH_ESCAPES`, as the last OK packet's status said.
     pub(crate) backslash_escapes: bool,
+    /// `"…"` is a quoted name: the session's `sql_mode` held `ANSI_QUOTES` when a read-only
+    /// connection's setup read it, and a read-only session cannot change it ([`crate::guard`]).
+    pub(crate) ansi_quotes: bool,
     /// The session variable that says whether transactions are read-only, as the server spells it
     /// ([`Flavor::read_only_variables`]); the session setup finds it.
     pub(crate) read_only_variable: &'static str,
@@ -163,6 +166,7 @@ impl Session {
             reached,
             mode: ModeReport::Silent,
             backslash_escapes: true,
+            ansi_quotes: false,
             read_only_variable,
         })
     }
@@ -275,8 +279,9 @@ fn server_key(cfg: &ConnectionConfig, tunnel: bool) -> ServerKey {
 /// says in each OK packet which database a statement made current; a server without it leaves
 /// that untold, as does the session after a statement of the user's that names `session_track`);
 /// a read-only connection runs `SET SESSION TRANSACTION READ ONLY`, which the flavor's variable
-/// must then confirm, and has the server report each change of that variable and of the
-/// transaction's characteristics (`CLIENT_SESSION_TRACK`; a server that cannot is refused). In
+/// must then confirm, has the server report each change of that variable and of the
+/// transaction's characteristics (`CLIENT_SESSION_TRACK`; a server that cannot is refused), and
+/// reads whether the session's `sql_mode` holds `ANSI_QUOTES`. In
 /// `prefer` mode a failed TLS handshake is tried again without TLS, as libpq does.
 pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     // The timeouts need a runtime; without one they would panic.
@@ -402,6 +407,8 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     }
     if read_only {
         track_read_only(session, variable).await?;
+        let [mode] = setup_row(session.query("SELECT @@SESSION.sql_mode", QUERY_LIMITS).await?, "sql_mode")?;
+        session.ansi_quotes = mode.unwrap_or_default().split(',').any(|m| m.eq_ignore_ascii_case("ANSI_QUOTES"));
     }
     // Last, as a statement that names `session_track`, the read-only setup's too, ends the trust in the reports.
     if purpose == Purpose::Query && session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK) {
@@ -562,6 +569,7 @@ mod tests {
             reached: None,
             mode: ModeReport::Silent,
             backslash_escapes: true,
+            ansi_quotes: false,
             read_only_variable: "transaction_read_only",
         }
     }

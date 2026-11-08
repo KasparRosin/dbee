@@ -786,6 +786,70 @@ fn read_only_mysql_keeps_sql_mode() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// Puts a server's global `sql_mode` back when dropped.
+struct GlobalMode<'a>(&'a TestTarget, String);
+
+impl Drop for GlobalMode<'_> {
+    fn drop(&mut self) {
+        q(self.0, &format!("SET GLOBAL sql_mode = '{}'", self.1));
+    }
+}
+
+/// A read-only MySQL or MariaDB connection reads `"…"` as its session does: as a quoted name when
+/// the session's `sql_mode`, as the server set it at connect, holds `ANSI_QUOTES`. A `SET` of the
+/// read-only variable spelled that way is refused before it is sent, and a MariaDB block cannot
+/// hide its `;`s in one. The global mode is put back before the session runs the forms; the
+/// session holds the others' tests off meanwhile.
+#[test]
+fn read_only_mysql_reads_double_quotes_as_the_session_does() {
+    let _db = require_testdb!();
+    let mut wrong = Vec::new();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_ansi"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut s = exclusive_session();
+        {
+            let _back = GlobalMode(&t, q(&t, "SELECT @@GLOBAL.sql_mode"));
+            q(&t, "SET GLOBAL sql_mode = CONCAT(@@GLOBAL.sql_mode, ',ANSI_QUOTES')");
+            let config = dbee_config::ConnectionConfig { read_only: true, ..config_for(&t) };
+            open(&mut s, json!({ "config": config, "password": pw() }));
+            tab(&mut s, "");
+            run_text(&mut s, "SELECT 1").unwrap_or_else(|e| panic!("{}: {e}", t.name()));
+        }
+        run_text(&mut s, "SELECT @@SESSION.sql_mode").unwrap();
+        if !first_value(&s).unwrap_or_default().contains("ANSI_QUOTES") {
+            wrong.push(format!("{}: the session's mode is {:?}", t.name(), first_value(&s)));
+        }
+        let write = |n: u32| format!("START TRANSACTION READ WRITE; INSERT INTO {sc}.{name} VALUES ({n}); COMMIT");
+        for (sql, want) in [
+            (format!("SET @@SESSION.\"{variable}\" = 0"), "changes read-only mode"),
+            (format!("BEGIN NOT ATOMIC DECLARE \"\\\" CHAR(1) DEFAULT '\\''; {}; END -- '\"", write(1)), "several statements"),
+            ("SET @a = (SELECT '\\'' AS \"\\\"), NAMES sjis, @b = '\"'".to_owned(), "character set"),
+            (format!("BEGIN NOT ATOMIC DO '\\'', 1, '\u{c1}\\'; {}; END -- '", write(2)), ""),
+        ] {
+            match run_text(&mut s, &sql) {
+                Err(e) if e.code() == "readOnly" && e.to_string().contains(want) => {}
+                Err(e) if want.is_empty() && e.code() == "server" => {}
+                other => wrong.push(format!("{}: {sql} -> {}", t.name(), other.err().map_or("ran".into(), |e| e.to_string()))),
+            }
+        }
+        if let Err(e) = run_text(&mut s, "SELECT 1 AS \"a;b\"") {
+            wrong.push(format!("{}: a quoted name with a ; -> {e}", t.name()));
+        }
+        run_text(&mut s, &format!("SELECT @@SESSION.{variable}")).unwrap();
+        if first_value(&s).as_deref() != Some("1") {
+            wrong.push(format!("{}: the session reads {:?}", t.name(), first_value(&s)));
+        }
+        let written = q(&t, &format!("SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM {sc}.{name}"));
+        if !written.is_empty() {
+            wrong.push(format!("{}: rows written {written}", t.name()));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// A function turns session tracking off and read-only off in a statement that fails: dbee finds
 /// the change before the next statement, turns read-only on again and sets the tracking up again,
 /// so a later function's change of read-only mode is caught by the server's report right after it
