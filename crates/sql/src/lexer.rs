@@ -64,10 +64,30 @@ fn executable_open(lex: &LexRules, b: &[u8], i: usize) -> Option<usize> {
     Some(j)
 }
 
-/// The end of an executable comment (`*/`) at `i`, where the dialect has them: outside one it is
-/// no operator either.
-fn executable_close(lex: &LexRules, b: &[u8], i: usize) -> bool {
-    lex.executable_comments && at(b, i) == b'*' && at(b, i + 1) == b'/'
+/// The end (`*/`) at `i` of the executable comment that is `open`; outside one, a `*/` is what it
+/// would be without executable comments (a `*` and the start of a comment, or an operator).
+fn executable_close(open: bool, b: &[u8], i: usize) -> bool {
+    open && at(b, i) == b'*' && at(b, i + 1) == b'/'
+}
+
+/// `t` is the start of an executable comment (`/*!` or `/*M!`), not its end.
+fn executable_start(t: &Token, sql: &str) -> bool {
+    t.kind == TokenKind::ExecutableMark && sql.get(t.range.clone()).is_some_and(|s| s.starts_with("/*"))
+}
+
+/// Whether an executable comment is open before each of `tokens` (from [`tokenize`] of `sql`), and
+/// after the last: a start opens one, its end closes it.
+pub fn executable_open_states(tokens: &[Token], sql: &str) -> Vec<bool> {
+    let mut open = false;
+    let mut states = Vec::with_capacity(tokens.len().saturating_add(1));
+    for t in tokens {
+        states.push(open);
+        if t.kind == TokenKind::ExecutableMark {
+            open = executable_start(t, sql);
+        }
+    }
+    states.push(open);
+    states
 }
 
 /// A `--` at `i` starts a comment; with `dash_comment_needs_space`, only before a space, a control
@@ -122,6 +142,8 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
     let b = sql.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
+    // An executable comment is open: its `*/` is a mark.
+    let mut open = false;
     while i < b.len() {
         let start = i;
         let c = b[i];
@@ -138,9 +160,11 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
             kind = TokenKind::Comment;
         } else if let Some(end) = executable_open(lex, b, i) {
             i = end;
+            open = true;
             kind = TokenKind::ExecutableMark;
-        } else if executable_close(lex, b, i) {
+        } else if executable_close(open, b, i) {
             i += 2;
+            open = false;
             kind = TokenKind::ExecutableMark;
         } else if c == b'/' && at(b, i + 1) == b'*' {
             let mut depth = 1usize;
@@ -237,7 +261,7 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
                 && is_op_byte(lex, b[i])
                 && !dash_comment(lex, b, i)
                 && !(b[i] == b'/' && at(b, i + 1) == b'*')
-                && !executable_close(lex, b, i)
+                && !executable_close(open, b, i)
             {
                 i += 1;
             }
@@ -303,9 +327,14 @@ fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
     // Bytes before `pos` are done with (a `DELIMITER` line, a delimiter inside a word).
     let mut pos = 0;
     let mut body = Body::Plain;
+    // An executable comment is open: a `;` in it ends no statement, as on the server.
+    let mut executable = false;
     for (k, t) in toks.iter().enumerate() {
         if t.range.end <= pos || !significant(t) {
             continue;
+        }
+        if t.kind == TokenKind::ExecutableMark {
+            executable = executable_start(t, sql);
         }
         let opaque = matches!(t.kind, TokenKind::String | TokenKind::QuotedIdent);
         if opaque && t.range.start < pos {
@@ -350,7 +379,7 @@ fn scan_statements(d: Dialect, sql: &str) -> Vec<Stmt> {
         if cur.is_none() {
             body = lex.bodies.body(sql, &toks, k);
         }
-        if t.kind == TokenKind::Semicolon && body.depth() == 0 {
+        if t.kind == TokenKind::Semicolon && body.depth() == 0 && !executable {
             if let Some(range) = cur.take() {
                 out.push(Stmt { range, span_end: ws_end(b, t.range.end) });
             }
@@ -669,7 +698,7 @@ mod tests {
                 (ExecutableMark, "*/"),
                 (Comment, "/*+ hint */"),
                 (Number, "2"),
-                (ExecutableMark, "*/"),
+                (Operator, "*/"),
                 (Number, "3")
             ]
         );
@@ -678,6 +707,31 @@ mod tests {
         assert_eq!(pieces(Dialect::MySql, &format!("{trigger}; SELECT 1")), [trigger, "SELECT 1"]);
         // A NUL in one is outside a string literal.
         assert_eq!(Dialect::MySql.misplaced_nul("SELECT 1 /*! \0 */"), Some(13));
+    }
+
+    /// A `*/` closes an executable comment only while one is open, and a `;` inside an open one
+    /// does not end the statement: the servers read each of these texts as one statement.
+    #[test]
+    fn a_mark_closes_only_an_open_executable_comment() {
+        use TokenKind::*;
+        let my = Dialect::MySql;
+        for one in [
+            "SELECT 6*/*x;SELECT 7;*/2",
+            "SELECT 6*/*x*/2",
+            "SELECT 1 /*! + 1 ; */",
+            "SELECT 1 /*! + 1 ; SELECT 5 */",
+            "/*!40101 SET @a = 1; SET @a = 2 */",
+            "SELECT 1 /*! + 1 /* x */ + 2 */",
+        ] {
+            assert_eq!(pieces(my, one), [one], "{one:?}");
+        }
+        assert_eq!(
+            kinds_in(my, "SELECT 6*/*x;SELECT 7;*/2"),
+            [(Keyword, "SELECT"), (Number, "6"), (Operator, "*"), (Comment, "/*x;SELECT 7;*/"), (Number, "2")]
+        );
+        assert_eq!(kinds_in(my, "SELECT 2 */ 3"), [(Keyword, "SELECT"), (Number, "2"), (Operator, "*/"), (Number, "3")]);
+        assert_eq!(kinds_in(my, "/*! 2 */*3"), [(ExecutableMark, "/*!"), (Number, "2"), (ExecutableMark, "*/"), (Operator, "*"), (Number, "3")]);
+        assert_eq!(pieces(my, "SELECT 1 /*! + 1 */; SELECT 2"), ["SELECT 1 /*! + 1 */", "SELECT 2"]);
     }
 
     #[test]

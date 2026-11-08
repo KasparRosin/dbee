@@ -290,11 +290,13 @@ fn lex(dialect: Dialect, slice: &str, offset: usize) -> Vec<Token> {
 /// The lexer's tokens of a text, and where its lines start, kept across edits.
 ///
 /// `lexer::tokenize` starts every token afresh and reads only forward, so tokens from a token
-/// boundary on depend only on the text from there; each token is decided by the text up to its
-/// [`lexer::reach`]. An edit keeps the tokens whose reach ends at or before its first changed byte
-/// (and before the end of the text), and lexes again from there (a bounded slice first) until a
-/// new token starts where an old one did in the unchanged rest of the text, the token before it
-/// decided within the slice: from there on the old tokens hold, moved by the change in length.
+/// boundary on depend only on the text from there and on whether a MySQL executable comment is
+/// open there; each token is decided by the text up to its [`lexer::reach`]. An edit keeps the
+/// tokens whose reach ends at or before its first changed byte (and before the end of the text),
+/// fewer when they leave an executable comment open, and lexes again from there (a bounded slice
+/// first) until a new token starts where an old one did in the unchanged rest of the text, the
+/// token before it decided within the slice and the same comment open or not before both: from
+/// there on the old tokens hold, moved by the change in length.
 /// The result is what lexing the whole text gives (`incremental_tokens_match_a_full_lex`, and key
 /// by key for dollar quotes in `typing_and_deleting_dollar_quotes_key_by_key_match_a_full_lex`).
 struct Tokens {
@@ -348,6 +350,11 @@ impl Tokens {
         while keep > 0 && !kept(keep - 1) {
             keep -= 1;
         }
+        // Lexing starts with no executable comment open: before the start of one left open.
+        let old_open = lexer::executable_open_states(&self.list, &old);
+        while keep > 0 && old_open.get(keep).copied().unwrap_or(false) {
+            keep -= 1;
+        }
         let restart = keep.checked_sub(1).and_then(|k| self.list.get(k)).map_or(0, |t| t.range.end);
         let mut cut = floor_boundary(new, changed_end.saturating_add(RESYNC_BYTES)).max(changed_end);
         let tail = loop {
@@ -357,6 +364,7 @@ impl Tokens {
             if cut >= new.len() {
                 break fresh;
             }
+            let fresh_open = lexer::executable_open_states(&fresh, new);
             // A token starting after the change where an old one started too, the token before it
             // decided within the slice (its reach not past the cut) or kept.
             let fits = fresh.iter().enumerate().find_map(|(k, t)| {
@@ -367,7 +375,7 @@ impl Tokens {
                 }
                 let then = at.saturating_add(old.len()).checked_sub(new.len())?;
                 let j = self.list.binary_search_by_key(&then, |t| t.range.start).ok()?;
-                (j >= keep).then_some((k, j))
+                (j >= keep && old_open.get(j) == fresh_open.get(k)).then_some((k, j))
             });
             if let Some((k, j)) = fits {
                 let mut tail = fresh;

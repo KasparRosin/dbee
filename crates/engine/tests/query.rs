@@ -565,6 +565,23 @@ fn read_only_sqlite_attaches_nothing_and_keeps_query_only() {
     }
 }
 
+/// On MySQL and MariaDB a `*/` closes an executable comment only while one is open, and a `;`
+/// inside an open one does not end the statement: dbee sends each of these texts whole, and the
+/// server reads it as the one statement it is (measured on all five servers).
+#[test]
+fn mysql_texts_split_as_the_server_reads_executable_comments() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let mut s = connected_to(&t);
+        for (text, value) in [("SELECT 6*/*x;SELECT 7;*/2", "12"), ("SELECT 1 /*! + 1 ; */", "2")] {
+            tab(&mut s, text);
+            let r = s.run_blocking("query.run", json!({}), T).unwrap_or_else(|e| panic!("{}: {text}: {e}", t.name()));
+            assert_eq!(r["results"].as_array().map(Vec::len), Some(1), "{}: {text}: {r}", t.name());
+            assert_eq!(first_value(&s).as_deref(), Some(value), "{}: {text}", t.name());
+        }
+    }
+}
+
 /// A query tab cannot turn `standard_conforming_strings` off, which dbee's editor and splitter
 /// read as on; after a function turned it off, a statement whose `'…'` strings hold a backslash
 /// runs only once dbee has turned it on again. Text the editor shows as one string never runs as
