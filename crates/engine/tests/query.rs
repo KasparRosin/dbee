@@ -523,6 +523,24 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
             let e = run_text(&mut s, sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
             assert_eq!(e.code(), "readOnly", "{}: {sql}: {e}", t.name());
         }
+        // Behind a version comment a server skips (each of these is skipped by some of the five), the
+        // same forms are refused, or are a syntax error where the server runs the comment; the
+        // insert after each is refused all the same.
+        for gate in ["/*M!999999 SELECT */", "/*M! SELECT */", "/*!99999 SELECT */"] {
+            for form in [
+                "START TRANSACTION READ WRITE".to_owned(),
+                format!("SET @@{variable} = 0"),
+                format!("SET STATEMENT {variable}=0 FOR {insert}"),
+                "CALL anything()".to_owned(),
+                "PREPARE p FROM 'START TRANSACTION READ WRITE'".to_owned(),
+                "COMMIT AND CHAIN".to_owned(),
+            ] {
+                let sql = format!("{gate} {form}");
+                let e = run_text(&mut s, &sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
+                assert!(matches!(e.code(), "readOnly" | "server"), "{}: {sql}: {e}", t.name());
+                assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}: after {sql}", t.name());
+            }
+        }
         let e = run_text(&mut s, &format!("SELECT {sc}.{off}()")).expect_err("caught after it ran");
         assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
         assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}", t.name());
@@ -533,6 +551,30 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
         run_text(&mut s, "SHOW WARNINGS").unwrap();
         let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
         assert_eq!(qt.shown_result().map(|r| r.result.rows.len()), Some(1), "{}: the cast's warning", t.name());
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "{}", t.name());
+    }
+}
+
+/// After a statement that turned read-only off and left a warning, the read-back waits for the next
+/// statement that is not a diagnostic one; a version comment the server skips cannot make an
+/// `INSERT` look like `SHOW WARNINGS` to dbee: it reads the statement as the server will.
+#[test]
+fn read_only_mysql_reads_a_skipped_version_comment_as_the_server_does() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let (sc, name, off) = (t.schema("scratch"), unique("t_ro_gate"), unique("f_ro_gate"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}"), format!("FUNCTION IF EXISTS {sc}.{off}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut w = connected_to(&t);
+        tab(&mut w, &format!("CREATE FUNCTION {sc}.{off}() RETURNS INT DETERMINISTIC BEGIN SET SESSION {variable} = 0; RETURN 1; END"));
+        run(&mut w, "query.run", json!({}));
+        drop(w);
+        let mut s = read_only_session(&t);
+        run_text(&mut s, &format!("SELECT {sc}.{off}(), CAST('1x' AS SIGNED)")).unwrap();
+        let e = run_text(&mut s, &format!("/*M!999999 SHOW WARNINGS */ INSERT INTO {sc}.{name} VALUES (1)")).expect_err("not run");
+        assert!(e.code() == "readOnly" && e.to_string().contains("did not run this statement"), "{}: {e}", t.name());
+        run_text(&mut s, "SELECT 1").unwrap();
         assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "{}", t.name());
     }
 }

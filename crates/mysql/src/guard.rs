@@ -5,7 +5,8 @@
 //! On MySQL reading a variable clears what `SHOW WARNINGS` lists, so after a statement that left
 //! warnings or an error the mode is read before the next statement that is not `SHOW WARNINGS`,
 //! `SHOW ERRORS` or `GET DIAGNOSTICS`, which would clear them anyway. So is a read a cancel
-//! stopped.
+//! stopped. Both checks read the statement as this server will ([`gated::as_read`]): a version
+//! comment it skips hides no word from them.
 
 use std::sync::atomic::Ordering;
 
@@ -14,6 +15,7 @@ use dbee_sql::Dialect;
 use dbee_sql::lexer::{TokenKind, tokenize};
 
 use crate::connect::{MySqlConnection, Session};
+use crate::gated;
 
 const TURNED_OFF: &str = "the statement turned read-only off, so dbee rolled back the open transaction and turned read-only on again. To write, \
                           turn Read-only off in the connection's settings.";
@@ -24,6 +26,9 @@ const TURNED_OFF_BEFORE: &str = "an earlier statement turned read-only off, so d
 const NOT_RESTORED: &str = "read-only was turned off and dbee could not turn it on again, so it closed the connection. Reconnect to go on.";
 
 const ONE_ROW: Limits = Limits { max_rows: 1, max_bytes: 1024 };
+
+const TOO_MANY_VERSIONS: &str = "this statement has more version comments than dbee can tell how the server reads, so it does not run it here. \
+                                 Split the statement, or turn Read-only off in the connection's settings.";
 
 /// What reading the mode back found.
 enum Mode {
@@ -49,12 +54,21 @@ fn diagnostic(sql: &str) -> bool {
 }
 
 impl MySqlConnection {
+    /// `sql` as this server reads it, in each way it may ([`gated::as_read`]).
+    fn as_read(&self, sql: &str) -> Result<Vec<String>, DbError> {
+        gated::as_read(sql, self.flavor(), self.info().version_num).ok_or_else(|| DbError::ReadOnly { message: TOO_MANY_VERSIONS.into() })
+    }
+
     /// Before a statement runs, with the session locked.
     pub(crate) async fn before(&self, session: &mut Session, sql: &str) -> Result<(), DbError> {
-        if let Some(refused) = Dialect::MySql.refusal(sql, self.read_only) {
+        if !self.read_only {
+            return Ok(());
+        }
+        let readings = self.as_read(sql)?;
+        if let Some(refused) = readings.iter().find_map(|r| Dialect::MySql.refusal(r, true)) {
             return Err(refused.into());
         }
-        if self.read_only && self.check_due.load(Ordering::Acquire) && !diagnostic(sql) {
+        if self.check_due.load(Ordering::Acquire) && !readings.iter().all(|r| diagnostic(r)) {
             match self.mode(session).await {
                 Mode::ReadOnly => self.check_due.store(false, Ordering::Release),
                 Mode::Changed => return Err(self.restore(session, TURNED_OFF_BEFORE).await),
@@ -67,7 +81,10 @@ impl MySqlConnection {
 
     /// After a statement ran, with the session still locked.
     pub(crate) async fn after<T>(&self, session: &mut Session, sql: &str, ran: Result<T, DbError>) -> Result<T, DbError> {
-        if !self.read_only || diagnostic(sql) || ran.as_ref().err() == Some(&DbError::ConnectionLost) {
+        if !self.read_only || ran.as_ref().err() == Some(&DbError::ConnectionLost) {
+            return ran;
+        }
+        if self.as_read(sql).is_ok_and(|readings| readings.iter().all(|r| diagnostic(r))) {
             return ran;
         }
         if session.conditions {
