@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C, job 3: entries 46 to 49, and entry 11 says the Flatpak keeps no trusted host key; earlier: the security review's lane A, fix round 1: entry 45, tokio-postgres keeps every ParameterStatus a server sends; earlier: entries 41 to 44)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C fix round: entries 50 to 52, and entries 46 and 47 corrected; before: the security review's lane C, job 3: entries 46 to 49, and entry 11 says the Flatpak keeps no trusted host key; earlier: the security review's lane A, fix round 1: entry 45, tokio-postgres keeps every ParameterStatus a server sends; earlier: entries 41 to 44)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -345,12 +345,13 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Missing:** dbee reads `~/.ssh/known_hosts` only. A key an administrator recorded in the system file, or a `@revoked` line there, does not count; a user with `HashKnownHosts yes` finds the host names dbee learns in the clear.
 - **Evidence:** `crates/ssh/src/known_hosts.rs` (`entries_for` reads the one file `SshEnv` names).
+- **Also:** for a server on another port, OpenSSH falls back to a line with no port and accepts a matching key; dbee looks for `[host]:port` only, and does not read `!` exclusions the way a fall-back would need. It asks, then learns the key, which is the safe side.
 - **Impact:** a system-wide revocation is not honoured, and a host dbee has not learned asks, though the system file has it. The security review's lane C, C-6.
 - **Estimate:** 1 h (estimated).
 
 ### 47. Windows Credential Manager entries roam (S)
 
-- **Missing:** dbee stores secrets with the persistence the `keyring` crate picks on Windows, which can roam with the user's profile ("Enterprise"). A password may then reach other machines of the same domain account.
+- **Missing:** dbee stores secrets with the persistence `windows-native-keyring-store` (with `keyring-core`) picks on Windows, which can roam with the user's profile ("Enterprise"). A password may then reach other machines of the same domain account.
 - **Evidence:** the security review's lane C, C-7 (read from the crate's code; no Windows machine here). It goes with the decision on packaging.
 - **Impact:** Windows users on a domain profile.
 - **Estimate:** 1 h (estimated), plus a Windows host.
@@ -369,10 +370,32 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** an agent driving a dbee on a machine where the window is minimised or on another desktop that does not draw.
 - **Estimate:** 3 h (estimated): serve the channel from a thread that asks the event loop to wake, or run the engine's commands off the draw loop.
 
+### 50. The control channel: a client with no token can keep all 16 places (S)
+
+- **Missing:** a connection that has proved nothing still holds one of the 16 places until its 10 seconds are up, so a client with no token that reconnects in a loop can keep all of them, and a client with the right token gets `busy`. Each refusal also logs a line, which could reach the log's 16 MiB cap over time (not measured).
+- **Evidence:** `crates/ui-egui/src/control_server.rs` (`accept`); the security review's lane C fix round, R1 M6.
+- **Impact:** an annoyance with no secret in reach, and better than before the token, when a silent connection kept its place for good.
+- **Estimate:** 1 h (estimated): count the connections that proved themselves and those that did not apart.
+
+### 51. Two small test gaps around the control channel (S)
+
+- **Missing:** nothing pins that a start without `--control` opens no port and writes no file; and `a_client_that_proved_itself_may_take_its_time` gives the token 1 second to arrive, which could fail on a very loaded machine (it has not yet).
+- **Evidence:** `apps/dbee/tests/control_access.rs`; `crates/ui-egui/src/control_server.rs`. The security review's lane C fix round, R1 M9.
+- **Impact:** a regression there would go unseen, or a test would flake.
+- **Estimate:** 0.5 h (estimated).
+
+### 52. The log's end-to-end test is not built (S)
+
+- **Missing:** an ignored test that runs SQL carrying a marker on each engine with `RUST_LOG=trace` and checks that the log holds no marker or password (the security review's lane C, C-9). Reading every log call with arguments in dbee's crates found none that carries a param, a secret, SQL or server text.
+- **Evidence:** no such test in the tree; `target/sec-wt/C/sec_c_log_probe.py` is the probe it would follow.
+- **Impact:** a new log call could leak without a test saying so.
+- **Estimate:** 1.5 h (estimated).
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | The security review's lane C fix round: entries 50 (a client with no token can keep the 16 places), 51 (two small control channel test gaps) and 52 (the log's end-to-end test); entry 46 says OpenSSH's fall-back to a line with no port and `!` exclusions are not done; entry 47 names the right crate. |
 | 2026-11-08 | minor | The security review's lane C, job 3: entries 46 (`/etc/ssh/ssh_known_hosts` is not read), 47 (Windows Credential Manager entries roam), 48 (macOS ad-hoc signing, channels an SSH server opens) and 49 (the control channel answers only while the window draws); entry 11 says the Flatpak keeps no trusted host key. |
 | 2026-11-08 | minor | The security review's lane A, fix round 1: entry 45 (tokio-postgres keeps every ParameterStatus a server sends). |
 | 2026-11-08 | minor | The security review's lane B, last two fixes: entry 38 says `SET CHAR SET` is refused and a line comment ends at a line feed only on MySQL, MariaDB and SQLite, lists the harmless statements read-only refuses, and says lane B is closed. |

@@ -1,6 +1,6 @@
 # dbee control protocol
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C, job 3: the journal leaves out `trustHostKey`, `connection.parseUrl` no longer returns the password, what the log holds; before: a stored secret goes only to the settings it was saved for; before: a client sends the token first and checks the proof, `unauthorized`, `ui.screenshot` writes only in one folder, under a file name; before: the security review's lane A, fix round 1: `certificateChecked`, `clearPassword`, `tooLarge`, no plain-link warning on this machine; before: the security review's lane A: `tls` on each connection, the plain-link warning, `status-tls` and `conn-ssl-note`; before: the tree's column `type` as Postgres shows it; an Apply whose trigger changed `client_encoding`)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C fix round: a named token file wants a folder of its own, use 127.0.0.1, Windows file rights; before: the security review's lane C, job 3: the journal leaves out `trustHostKey`, `connection.parseUrl` no longer returns the password, what the log holds; before: a stored secret goes only to the settings it was saved for; before: a client sends the token first and checks the proof, `unauthorized`, `ui.screenshot` writes only in one folder, under a file name; before: the security review's lane A, fix round 1: `certificateChecked`, `clearPassword`, `tooLarge`, no plain-link warning on this machine; before: the security review's lane A: `tls` on each connection, the plain-link warning, `status-tls` and `conn-ssl-note`; before: the tree's column `type` as Postgres shows it; an Apply whose trigger changed `client_encoding`)
 
 The desktop app takes a control port, so agents and tests can drive the real window:
 
@@ -24,17 +24,19 @@ Errors look like `{"id":…,"ok":false,"error":"…","code":"…","data":{…}}`
 
 ## Connecting
 
-Once it holds the port, each start of the app writes a token file with two random lines, new each start. Only this user can read it (the file is `0600` and its folder `0700` where the system has file modes), and the app removes it when it ends.
+Once it holds the port, each start of the app writes a token file with two random lines, new each start. Only this user can read it (the file is `0600` and its folder `0700` where the system has file modes), and the app removes it when it ends. On Windows dbee sets no rights on the file, which takes its folder's: under the user's profile that keeps other accounts out, and elsewhere (a repository outside the profile, say) it may not. This is not measured.
 
 | Started by | The token file |
 |---|---|
 | `cargo xtask run-isolated --port <port>` | `target/isolated/<port>/control-token` |
-| `dbee --control <port>` | `control-<port>.token` in the settings folder (on Linux, `~/.config/dbee/`), or wherever `DBEE_CONTROL_TOKEN_FILE` says |
+| `dbee --control <port>` | `control-<port>.token` in the settings folder (on Linux, `~/.config/dbee/`; for the other systems see [README.md](../README.md#L61)), or wherever `DBEE_CONTROL_TOKEN_FILE` says |
+
+The settings folder is used also with `DBEE_NO_PREFS`: the token has to live somewhere, so that run writes the token file there and leaves it (the folder stays) after it ends, though it keeps no connections file and no log file. A file named by `DBEE_CONTROL_TOKEN_FILE` wants a folder of its own: that folder becomes `0700`, so a folder others can write in is no place for it, and a start that cannot make the file stops and says so. Give each run its own file: two starts that name one file replace each other's lines, and only the later one can be reached by a new client.
 
 To connect:
 
 1. Read the file.
-2. Connect to `127.0.0.1:<port>` and send the file's first line as your first line.
+2. Connect to `127.0.0.1:<port>` and send the file's first line as your first line. Use `127.0.0.1` as written, not `localhost`: `localhost` can resolve to `::1`, where dbee holds no port, so another process could listen there and hear the token.
 3. Read the reply, `{"id":null,"ok":true,"result":{"proof":"…"}}`, and compare `proof` with the file's second line. If they differ, or the reply is anything else, you are not talking to the dbee that wrote the file: close the connection and send nothing more, above all no password.
 
 ```python
@@ -49,7 +51,7 @@ s.sendall(b'{"id":1,"method":"ui.inspect"}\n')
 print(r.readline())
 ```
 
-For one request from a shell (this sends the request before it has seen the proof, so keep passwords out of it, and read the proof in the first reply line):
+For one request from a shell on Linux (`nc -q` is not on every system; the Python client above is; this sends the request before it has seen the proof, so keep passwords out of it, and read the proof in the first reply line):
 
 ```sh
 { head -n 1 target/isolated/7983/control-token; echo '{"id":1,"method":"ui.inspect"}'; } | nc -q 5 127.0.0.1 7983
