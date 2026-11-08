@@ -220,7 +220,7 @@ async fn tls_require_encrypts() {
         let ca = ConnectionConfig { host: "localhost".into(), ca_file: Some(db.ca_file.clone()), ..config(s, SslMode::Require) };
         let checked = open(&ca, db).await;
         assert_eq!(scalar(&checked, ssl).await.as_deref(), Some("t"));
-        assert_eq!(checked.info().tls, Some(TlsState::Checked));
+        assert_eq!(checked.info().tls, Some(TlsState::CertificateChecked));
         let wrong = ConnectionConfig { ca_file: Some(wrong_ca(db)), ..ca.clone() };
         assert_eq!(code(connect(target(&wrong, Some(&db.password))).await), "tls");
     }

@@ -353,7 +353,8 @@ async fn the_link_says_whether_it_is_encrypted_and_checked() {
     for (mode, ca, state) in [
         (SslMode::Prefer, None, TlsState::Unchecked),
         (SslMode::Require, None, TlsState::Unchecked),
-        (SslMode::Require, Some(db.ca_file.clone()), TlsState::Checked),
+        (SslMode::Require, Some(db.ca_file.clone()), TlsState::CertificateChecked),
+        (SslMode::VerifyCa, Some(db.ca_file.clone()), TlsState::CertificateChecked),
         (SslMode::VerifyFull, Some(db.ca_file.clone()), TlsState::Checked),
     ] {
         let (l, port) = listener();

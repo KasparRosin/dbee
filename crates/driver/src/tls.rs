@@ -52,13 +52,14 @@ pub fn checks(mode: SslMode, ca_file: Option<&Path>) -> bool {
     }
 }
 
-/// The link's state: TLS started (`on`) or not, and whether `mode` with `ca_file` checked the
-/// certificate.
+/// The link's state: TLS started (`on`) or not, and what `mode` with `ca_file` checked: nothing,
+/// the certificate against the CA file, or under `verify-full` the server's name too.
 pub fn state(on: bool, mode: SslMode, ca_file: Option<&Path>) -> TlsState {
-    match (on, checks(mode, ca_file)) {
-        (false, _) => TlsState::Off,
-        (true, false) => TlsState::Unchecked,
-        (true, true) => TlsState::Checked,
+    match (on, checks(mode, ca_file), mode) {
+        (false, _, _) => TlsState::Off,
+        (true, false, _) => TlsState::Unchecked,
+        (true, true, SslMode::VerifyFull) => TlsState::Checked,
+        (true, true, _) => TlsState::CertificateChecked,
     }
 }
 
@@ -260,8 +261,10 @@ mod tests {
         assert_eq!(state(false, SslMode::VerifyFull, ca), TlsState::Off);
         assert_eq!(state(true, SslMode::Prefer, ca), TlsState::Unchecked);
         assert_eq!(state(true, SslMode::Require, None), TlsState::Unchecked);
-        assert_eq!(state(true, SslMode::Require, ca), TlsState::Checked);
+        assert_eq!(state(true, SslMode::Require, ca), TlsState::CertificateChecked);
+        assert_eq!(state(true, SslMode::VerifyCa, ca), TlsState::CertificateChecked);
         assert_eq!(state(true, SslMode::VerifyFull, None), TlsState::Checked);
+        assert_eq!(state(true, SslMode::VerifyFull, ca), TlsState::Checked);
         let network: SocketAddr = "192.0.2.7:5432".parse().unwrap();
         assert_eq!(prefer_warning(SslMode::Prefer, false, Some(network)).as_deref(), Some(PLAIN_AFTER_PREFER));
         // TLS on, the tunnel's link, plain text chosen, or an address of this machine: no warning.

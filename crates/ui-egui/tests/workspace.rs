@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use dbee_config::{ConnectionColor, ConnectionConfig};
+use dbee_config::{ConnectionColor, ConnectionConfig, SslMode};
 use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef, TypeClass};
 use dbee_testkit::TestDb;
 use dbee_ui_egui::DbeeApp;
@@ -887,6 +887,22 @@ fn status_bar_shows_colour_and_read_only() {
     assert_eq!(ui.value("status-tls"), "Encrypted, server not checked");
     assert!(ui.tag("status-reconnect").is_none(), "no Reconnect while the connection is fine");
     assert!(ui.tag("status-save").is_none(), "no Save connection for a saved one");
+}
+
+/// The status bar tells a checked certificate from a checked server: `verify-ca` and `require`
+/// with a CA file do not check the name, and say so; `verify-full` does.
+#[test]
+fn the_status_bar_tells_what_was_checked() {
+    let db = dbee_testkit::require_testdb!();
+    let ca_file = Some(db.ca_file.clone());
+    for (ssl_mode, says) in [
+        (SslMode::VerifyCa, "Encrypted, certificate checked"),
+        (SslMode::Require, "Encrypted, certificate checked"),
+        (SslMode::VerifyFull, "Encrypted, server checked"),
+    ] {
+        let mut ui = connected_to(db, ConnectionConfig { ssl_mode, ca_file: ca_file.clone(), ..pg14(db) }, false);
+        assert_eq!(ui.value("status-tls"), says, "{ssl_mode:?}");
+    }
 }
 
 #[test]

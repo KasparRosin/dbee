@@ -39,7 +39,11 @@ pub fn tls_text(info: &ServerInfo) -> Option<(&'static str, &'static str)> {
             "Encrypted, server not checked",
             "The connection is encrypted, but dbee did not check the server's certificate, so it cannot tell who answered. SSL mode verify-full checks it.",
         ),
-        TlsState::Checked => ("Encrypted, server checked", "The connection is encrypted, and the server's certificate was checked."),
+        TlsState::CertificateChecked => (
+            "Encrypted, certificate checked",
+            "The connection is encrypted, and the certificate was checked against the CA file, but not the server's name. SSL mode verify-full checks the name too.",
+        ),
+        TlsState::Checked => ("Encrypted, server checked", "The connection is encrypted, and the server's certificate and its name were checked."),
     })
 }
 
@@ -186,7 +190,7 @@ impl Connected {
     /// lost, saved}`, as `inspect()` and `connection.open` show it: `connection` is its
     /// [`ConnectionId`], `id` the saved connection's, `kind` the database type's id, `server` the
     /// product and its version (`PostgreSQL 14.12`), `tls` the link's [`TlsState`] (`off`,
-    /// `unchecked`, `checked`; `null` for a file), `saved` whether the saved list holds it
+    /// `unchecked`, `certificateChecked`, `checked`; `null` for a file), `saved` whether the saved list holds it
     /// (`ConnectionStore::is_saved`, which the caller asks). Never a secret.
     pub fn summary(&self, saved: bool) -> Json {
         let c = &self.config;

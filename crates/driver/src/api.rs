@@ -113,16 +113,20 @@ pub enum TlsState {
     Off,
     /// TLS, with a certificate dbee did not check: encrypted, but whoever answered could be anyone.
     Unchecked,
-    /// TLS, with the server's certificate checked: its chain, and under `verify-full` its name.
+    /// TLS, with the certificate checked against the CA file but not the server's name
+    /// (`verify-ca`, `require` with a CA file): any certificate from that CA passes.
+    CertificateChecked,
+    /// TLS, with the server's certificate and its name checked (`verify-full`).
     Checked,
 }
 
 impl TlsState {
-    /// The id the control channel shows: `off`, `unchecked` or `checked`.
+    /// The id the control channel shows: `off`, `unchecked`, `certificateChecked` or `checked`.
     pub fn id(self) -> &'static str {
         match self {
             TlsState::Off => "off",
             TlsState::Unchecked => "unchecked",
+            TlsState::CertificateChecked => "certificateChecked",
             TlsState::Checked => "checked",
         }
     }
