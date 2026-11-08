@@ -64,15 +64,18 @@ pub struct Limits {
     pub max_bytes: usize,
 }
 
-/// The smallest heap block a cell's text is counted at: an allocator hands out no smaller one.
-const MIN_TEXT_BLOCK: usize = 16;
+/// What a heap block for `len` bytes of text takes as glibc's allocator holds it, the one dbee's
+/// builds on Linux use: an 8-byte header, in multiples of 16 bytes, 32 at the least.
+fn text_block(len: usize) -> usize {
+    len.saturating_add(8).checked_next_multiple_of(16).unwrap_or(usize::MAX).max(32)
+}
 
 /// What a kept cell holds, as the byte caps count it: its slot, and its text of `len` bytes
-/// (`None` for NULL) in at least [`MIN_TEXT_BLOCK`]. An empty text takes no heap block.
+/// (`None` for NULL) in its heap block ([`text_block`]). An empty text takes no heap block.
 pub fn cell_cost(len: Option<usize>) -> usize {
     let text = match len {
         None | Some(0) => 0,
-        Some(len) => len.max(MIN_TEXT_BLOCK),
+        Some(len) => text_block(len),
     };
     size_of::<Cell>().saturating_add(text)
 }
@@ -295,14 +298,17 @@ mod tests {
         // A NULL or empty cell holds its 24-byte slot, though it has no text.
         assert_eq!(cell_cost(None), 24);
         assert_eq!(cell_cost(Some(0)), 24);
-        // A short text takes a whole heap block.
-        assert_eq!(cell_cost(Some(1)), 24 + 16);
-        assert_eq!(cell_cost(Some(100)), 24 + 100);
+        // A text takes a heap block as glibc holds it: an 8-byte header, in multiples of 16, 32 at
+        // the least.
+        assert_eq!(cell_cost(Some(1)), 24 + 32);
+        assert_eq!(cell_cost(Some(24)), 24 + 32);
+        assert_eq!(cell_cost(Some(25)), 24 + 48);
+        assert_eq!(cell_cost(Some(100)), 24 + 112);
         assert_eq!(cell_cost(Some(usize::MAX)), usize::MAX);
         let c = Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into(), class: dbee_core::TypeClass::Number };
         assert_eq!(column_cost(&c), size_of::<Column>() + 2 + 4 + 7);
         let r = ResultSet { columns: vec![c.clone()], rows: vec![vec![None], vec![Some("x".into())]], ..ResultSet::default() };
-        assert_eq!(result_cost(&r), column_cost(&c) + 2 * ROW_COST + 24 + 40);
+        assert_eq!(result_cost(&r), column_cost(&c) + 2 * ROW_COST + 24 + 56);
     }
 
     #[test]
