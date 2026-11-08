@@ -99,13 +99,13 @@ fn diagnostic(sql: &str, reading: Reading) -> bool {
 }
 
 /// How often `sql`'s raw text, comments and strings included, holds `word` in any case, with no
-/// ASCII letter right before or after it: a digit, `_` or any other mark is a boundary, so a
-/// version comment's number glued to a word (`/*!40101SET`, which every server runs) does not hide it.
-/// It counts more than the server reads as the word (`t_set`, `character_set_client`): a rule built
-/// on it refuses more, never less.
+/// ASCII letter, `_` or `$` right before or after it: the server reads those as part of a name
+/// (`x_SET`, `_SET` and `$SET` are names, never the keyword). A digit or any other mark is a
+/// boundary, so a version comment's number glued to a word (`/*!40101SET`, which every server
+/// runs) does not hide it.
 fn words(sql: &str, word: &str) -> usize {
     let b = sql.as_bytes();
-    let letter = |c: &u8| c.is_ascii_alphabetic();
+    let letter = |c: &u8| c.is_ascii_alphabetic() || *c == b'_' || *c == b'$';
     (0..b.len().saturating_sub(word.len()).saturating_add(1))
         .filter(|&at| {
             b.get(at..at.saturating_add(word.len())).is_some_and(|w| w.eq_ignore_ascii_case(word.as_bytes()))
@@ -428,7 +428,7 @@ mod tests {
         for sql in ["SELECT @@SESSION.sql_mode", "SHOW VARIABLES LIKE 'sql_mode'", "SET @sql_modes = 1", "SET @x = 'presql_mode'"] {
             assert_eq!(raw_refusal(sql, Flavor::MySql, false), None, "{sql}");
         }
-        assert_eq!(words("/*!40101SET x*/ SET; asset set_x t1set offset", "set"), 4);
+        assert_eq!(words("/*!40101SET x*/ SET; asset set_x t1set offset data_set _set $set", "set"), 3);
     }
 
     /// A statement that holds `SET` beside a word that changes the character set is refused,
@@ -443,15 +443,13 @@ mod tests {
             "set charset 'sjis'",
             "SET @@SESSION.`character_set_client` = 'utf8mb4'",
             "SET @a = CAST('x' AS CHAR CHARACTER SET sjis)",
-            // `_set_` holds the word: reading the variable is refused too.
-            "SELECT @@character_set_client",
         ] {
             assert!(names_the_character_set(sql), "{sql}");
         }
         for sql in [
             "SELECT CAST('x' AS CHAR CHARACTER SET utf8mb4)",
             "SHOW CHARACTER SET LIKE 'utf8%'",
-            "SELECT CHARSET('x'), @@collation_connection",
+            "SELECT @@character_set_client, CHARSET('x')",
             "SET @a = CONVERT('x' USING sjis)",
             "SET @namesake = 1",
         ] {

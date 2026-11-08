@@ -718,8 +718,7 @@ fn read_only_mysql_keeps_the_character_set_utf8() {
                 wrong.push(format!("{}: {sql} -> {e}", t.name()));
             }
         }
-        // `character_set_client` holds the word `set`, so the session's collation tells the character set.
-        run_text(&mut s, &format!("SELECT @@SESSION.{variable}, LEFT(@@SESSION.collation_connection, 7), 'Z\u{fc}rich'")).unwrap();
+        run_text(&mut s, &format!("SELECT @@SESSION.{variable}, @@SESSION.character_set_client, 'Z\u{fc}rich'")).unwrap();
         let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
         let shown = qt.shown_result().and_then(|r| r.result.rows.first().cloned());
         let want = [Some("1".to_owned()), Some("utf8mb4".to_owned()), Some("Z\u{fc}rich".to_owned())];
