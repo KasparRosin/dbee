@@ -51,6 +51,7 @@ pub(crate) const INFO: KindInfo = KindInfo {
         r#"SELECT U&"lo_from_byte\0061"(0, 'dbee')"#,
         "ALTER SYSTEM RESET work_mem",
         "COPY (SELECT 1) TO PROGRAM 'cat > /dev/null'",
+        r#"COPY (SELECT "to" stdout FROM (VALUES (1)) AS v("to")) TO PROGRAM 'cat > /dev/null'"#,
     ],
     read_only_unseen: Unseen::Function {
         make: "CREATE FUNCTION {f}() RETURNS text LANGUAGE sql AS $$ SELECT pg_catalog.set_config('default_transaction_re' || 'ad_only', 'off', false) $$",

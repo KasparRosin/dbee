@@ -175,7 +175,7 @@ fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
         "SET STATEMENT can turn read-only off for the statement it runs, so dbee does not run it here. Run the statement without it."
     } else if s.starts(&["set"]) && (s.sets_off(READ_ONLY_VARIABLES) || s.pair("read", "write")) {
         CHANGES_MODE
-    } else if s.starts(&["set"]) && s.names_not_after(&["global", "persist", "persist_only"], "@") {
+    } else if s.starts(&["set"]) && s.sets_scope(&["global", "persist", "persist_only"]) {
         "SET GLOBAL and SET PERSIST change the server's settings for every session, so dbee does not run them here. To run them, turn \
          Read-only off in the connection's settings."
     } else if s.pair("into", "outfile") || s.pair("into", "dumpfile") {

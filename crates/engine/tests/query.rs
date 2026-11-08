@@ -473,6 +473,8 @@ fn read_only_postgres_refuses_what_turns_it_off_and_reads_it_back() {
             r#"SET U&"default_transaction_read_onl!0079" UESCAPE '!' = off"#.to_owned(),
             "ALTER SYSTEM RESET work_mem".to_owned(),
             "COPY (SELECT 1) TO PROGRAM 'cat > /dev/null'".to_owned(),
+            r#"COPY (SELECT "to" stdout FROM (VALUES (1)) AS v("to")) TO PROGRAM 'cat > /dev/null'"#.to_owned(),
+            r#"COPY (WITH "to" AS (SELECT 1 AS x) SELECT * FROM "to" stdout) TO PROGRAM 'cat > /dev/null'"#.to_owned(),
         ];
         for sql in &refused {
             let e = run_text(&mut s, sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));

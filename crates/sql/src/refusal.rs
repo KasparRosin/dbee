@@ -111,11 +111,54 @@ impl<'a> Code<'a> {
         })
     }
 
-    /// Some token is one of `words`, and the one before it is not the operator `op`.
-    pub(crate) fn names_not_after(&self, words: &[&str], op: &str) -> bool {
-        (0..self.tokens.len()).any(|i| {
-            let after = i.checked_sub(1).and_then(|b| self.tokens.get(b)).and_then(|t| self.sql.get(t.range.clone()));
-            self.word(i).is_some_and(|x| words.contains(&x.as_str())) && after != Some(op)
+    /// Token `i`'s text.
+    fn text(&self, i: usize) -> Option<&'a str> {
+        self.tokens.get(i).and_then(|t| self.sql.get(t.range.clone()))
+    }
+
+    /// Token `i` is the keyword `w`, unquoted.
+    fn keyword(&self, i: usize, w: &str) -> bool {
+        self.tokens.get(i).is_some_and(|t| matches!(t.kind, TokenKind::Keyword | TokenKind::Ident)) && self.is(i, w)
+    }
+
+    /// How deep in parentheses each token is.
+    fn depths(&self) -> Vec<usize> {
+        let mut depth = 0usize;
+        (0..self.tokens.len())
+            .map(|i| match self.text(i) {
+                Some("(") => {
+                    depth += 1;
+                    depth - 1
+                }
+                Some(")") => {
+                    depth = depth.saturating_sub(1);
+                    depth
+                }
+                _ => depth,
+            })
+            .collect()
+    }
+
+    /// The token after the first unquoted keyword `w` outside parentheses, as an unquoted keyword
+    /// in lowercase (`None` inside when it is something else); `None` when there is no such `w`.
+    pub(crate) fn after_top_level(&self, w: &str) -> Option<Option<String>> {
+        let depths = self.depths();
+        let at = (0..self.tokens.len()).find(|&i| depths.get(i) == Some(&0) && self.keyword(i, w))?;
+        Some(self.tokens.get(at + 1).filter(|t| matches!(t.kind, TokenKind::Keyword | TokenKind::Ident)).and_then(|_| self.word(at + 1)))
+    }
+
+    /// A `SET` that changes a setting for the whole server: one of `scopes` right after `SET` or a
+    /// `,` outside parentheses, or a `@@scope.name` set with `=` or `:=`.
+    pub(crate) fn sets_scope(&self, scopes: &[&str]) -> bool {
+        let depths = self.depths();
+        (0..self.tokens.len()).filter(|&i| self.word(i).is_some_and(|x| scopes.contains(&x.as_str()))).any(|i| {
+            let before = i.checked_sub(1);
+            let opens = before.is_some_and(|b| (b == 0 && self.is(0, "set")) || (self.text(b) == Some(",") && depths.get(b) == Some(&0)));
+            // `:=` is two tokens, and `=` joins the operator characters after it.
+            let named = before.and_then(|b| self.text(b)).is_some_and(|t| t.ends_with("@@"))
+                && self.text(i + 1) == Some(".")
+                && self.text(i + 3).is_some_and(|t| t.starts_with('=') || t == ":");
+            opens || named
         })
     }
 
@@ -137,11 +180,13 @@ impl<'a> Code<'a> {
         self.value_at((0..self.tokens.len()).find(|&i| self.is(i, name))?)
     }
 
-    /// Some setting of `names` is set to a value that is not on ([`ON`]), or to none dbee reads.
+    /// Some setting of `names` is set to anything but one token that turns it on ([`ON`]), alone
+    /// before a `,` or the statement's end; or named where dbee reads no value.
     pub(crate) fn sets_off(&self, names: &[&str]) -> bool {
-        (0..self.tokens.len())
-            .filter(|&i| self.word(i).is_some_and(|x| names.contains(&x.as_str())))
-            .any(|i| !self.value_at(i).is_some_and(|v| ON.contains(&v.as_str())))
+        (0..self.tokens.len()).filter(|&i| self.word(i).is_some_and(|x| names.contains(&x.as_str()))).any(|i| {
+            let alone = self.tokens.get(i + 3).is_none() || self.text(i + 3) == Some(",");
+            !(alone && self.value_at(i).is_some_and(|v| ON.contains(&v.as_str())))
+        })
     }
 }
 
@@ -350,6 +395,12 @@ mod tests {
             (Dialect::MySql, "SET @@global.max_connections = 10"),
             (Dialect::MySql, "SET PERSIST max_connections = 10"),
             (Dialect::MySql, "SET PERSIST_ONLY max_connections = 10"),
+            (Dialect::MySql, "SET @@persist.max_connections := 10"),
+            (Dialect::MySql, "SET @@GLOBAL.max_connections=-1"),
+            (Dialect::MySql, "SET @a = 1, GLOBAL max_connections = 10"),
+            (Dialect::Postgres, r#"COPY (SELECT "to" stdout FROM (VALUES (1)) AS v("to")) TO PROGRAM 'cat'"#),
+            (Dialect::Postgres, r#"COPY (WITH "to" AS (SELECT 1 AS x) SELECT * FROM "to" stdout) TO PROGRAM 'cat'"#),
+            (Dialect::Postgres, r#"COPY t TO "stdout""#),
         ] {
             assert!(matches!(refused(d, sql, true), Some(Refusal::ReadOnly(_))), "{d:?}: {sql}");
             assert_eq!(refused(d, sql, false), None, "{d:?}: {sql}");
@@ -360,9 +411,17 @@ mod tests {
             (Dialect::MySql, "SELECT 1 INTO @a"),
             (Dialect::MySql, "SET @global = 1"),
             (Dialect::MySql, "SET SESSION sql_mode = ''"),
+            (Dialect::MySql, "SET SESSION sql_mode = @@GLOBAL.sql_mode"),
+            (Dialect::MySql, "SET @x = @@global.max_connections, @y = 1"),
+            (Dialect::MySql, "SET @persist = 1"),
+            (Dialect::Postgres, r#"COPY (SELECT 1 AS "to") TO STDOUT"#),
+            (Dialect::Postgres, "COPY t (a, b) TO STDOUT WITH (FORMAT csv)"),
+            (Dialect::Postgres, "COPY t FROM STDIN"),
         ] {
             assert_eq!(refused(d, sql, true), None, "{d:?}: {sql}");
         }
+        let global = refused(Dialect::MySql, "SET GLOBAL max_connections = 10", true).map(Refusal::message).unwrap_or_default();
+        assert!(global.contains("every session"), "{global}");
     }
 
     /// A `SET` that turns read-only on, with no `READ WRITE` in it, changes nothing that matters.
@@ -376,6 +435,7 @@ mod tests {
             (Dialect::MySql, "SET SESSION TRANSACTION READ ONLY"),
             (Dialect::MySql, "SET @@SESSION.transaction_read_only = 1"),
             (Dialect::MySql, "SET SESSION tx_read_only = ON"),
+            (Dialect::MySql, "SET @@transaction_read_only = 1, @a = 2"),
         ] {
             assert_eq!(refused(d, sql, true), None, "{d:?}: {sql}");
         }
@@ -385,6 +445,11 @@ mod tests {
             (Dialect::Postgres, "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"),
             (Dialect::MySql, "SET @@transaction_read_only = 1, @@transaction_read_only = 0"),
             (Dialect::MySql, "SET SESSION TRANSACTION READ ONLY, READ WRITE"),
+            (Dialect::MySql, "SET @@transaction_read_only = 1 - 1"),
+            (Dialect::MySql, "SET @@transaction_read_only = TRUE - 1"),
+            (Dialect::MySql, "SET SESSION tx_read_only = 1 AND 0"),
+            (Dialect::MySql, "SET @@transaction_read_only = ON = OFF"),
+            (Dialect::Postgres, "SET default_transaction_read_only = on off"),
         ] {
             assert!(matches!(refused(d, sql, true), Some(Refusal::ReadOnly(_))), "{d:?}: {sql}");
         }

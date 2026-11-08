@@ -175,7 +175,7 @@ fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
     } else if s.starts(&["alter"]) && s.is(1, "system") {
         "ALTER SYSTEM writes the server's configuration file, so dbee does not run it here. To run it, turn Read-only off in the \
          connection's settings."
-    } else if s.starts(&["copy"]) && s.names(&["to"]) && !s.pair("to", "stdout") {
+    } else if s.starts(&["copy"]) && s.after_top_level("to").is_some_and(|target| target.as_deref() != Some("stdout")) {
         "COPY … TO writes a file on the server or runs a program there, so dbee does not run it here. To run it, turn Read-only off in \
          the connection's settings."
     } else if s.names(LARGE_OBJECT_WRITERS) {
