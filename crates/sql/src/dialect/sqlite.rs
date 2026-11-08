@@ -8,6 +8,7 @@ use dbee_core::{ColumnInfo, TypeClass};
 pub(crate) const RULES: Rules = Rules {
     ident_quote: '"',
     text_type: "TEXT",
+    count_all: "count(*)",
     ilike: ILike::LowerLike,
     // Its LIKE has no escape character unless one is named.
     like_escape: " ESCAPE '\\'",

@@ -8,6 +8,7 @@ use crate::lexer::{Token, TokenKind, is_word, significant, word};
 pub(crate) const RULES: Rules = Rules {
     ident_quote: '`',
     text_type: "CHAR",
+    count_all: "count(*)",
     ilike: ILike::LowerLike,
     // 8.0 and later have no LIKE escape under NO_BACKSLASH_ESCAPES (measured); hex reads alike in every mode.
     like_escape: " ESCAPE _utf8mb4 X'5C'",

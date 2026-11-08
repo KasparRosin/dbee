@@ -138,7 +138,7 @@ fn page_and_count() {
             .unwrap()
             .ends_with("ORDER BY \"total\" DESC, \"id\" LIMIT 101 OFFSET 0")
     );
-    assert_eq!(count_sql(Dialect::Postgres, &orders(), &Condition::None).unwrap(), "SELECT count(*) FROM \"shop\".\"orders\"");
+    assert_eq!(count_sql(Dialect::Postgres, &orders(), &Condition::None).unwrap(), "SELECT pg_catalog.count(*) FROM \"shop\".\"orders\"");
     assert_eq!(PAGE_SIZE, 100);
 }
 #[test]
@@ -151,7 +151,10 @@ fn page_details() {
     let mut keyless = orders();
     keyless.primary_key.clear();
     assert!(!page_sql(Dialect::Postgres, &keyless, &Condition::None, None, 0).unwrap().contains("ORDER BY"));
-    assert_eq!(count_sql(Dialect::Postgres, &orders(), &c).unwrap(), "SELECT count(*) FROM \"shop\".\"orders\" WHERE \"id\" > CAST('5' AS bigint)");
+    assert_eq!(
+        count_sql(Dialect::Postgres, &orders(), &c).unwrap(),
+        "SELECT pg_catalog.count(*) FROM \"shop\".\"orders\" WHERE \"id\" > CAST('5' AS bigint)"
+    );
 }
 #[test]
 fn a_hidden_key_is_read_after_the_columns_and_never_sorted_or_filtered_on() {
@@ -218,7 +221,7 @@ fn odd_identifiers_are_quoted() {
     assert!(sql.contains("\"odd\".\"Odd \"\"Name\"\" 🐝\""), "{sql}");
     assert!(sql.contains("\"Total $\" = CAST('1' AS integer)"), "{sql}");
     assert!(sql.contains("ORDER BY \"Total $\" ASC, \"k\""), "{sql}");
-    assert_eq!(count_sql(Dialect::Postgres, &t, &Condition::None).unwrap(), "SELECT count(*) FROM \"odd\".\"Odd \"\"Name\"\" 🐝\"");
+    assert_eq!(count_sql(Dialect::Postgres, &t, &Condition::None).unwrap(), "SELECT pg_catalog.count(*) FROM \"odd\".\"Odd \"\"Name\"\" 🐝\"");
 }
 #[test]
 fn filter_serde_round_trip() {

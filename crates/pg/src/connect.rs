@@ -414,7 +414,45 @@ where
 
 /// The settings the setup reads back, in order.
 const SHOW_SETTINGS: &str = "SHOW default_transaction_read_only; SHOW standard_conforming_strings; SHOW client_encoding; \
-                             SHOW server_version; SHOW server_version_num";
+                             SHOW server_version; SHOW server_version_num; SHOW search_path";
+
+/// The schemas of a `search_path` value, in order, as the server reads them: a quoted name
+/// unquoted, an unquoted one in lowercase, whitespace outside quotes skipped.
+fn search_path_schemas(path: &str) -> Vec<String> {
+    let mut schemas = Vec::new();
+    let (mut name, mut quoted, mut chars) = (String::new(), false, path.chars().peekable());
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                name.push('"');
+            }
+            '"' => quoted = !quoted,
+            c if quoted => name.push(c),
+            ',' => schemas.push(std::mem::take(&mut name)),
+            c if c.is_whitespace() => {}
+            c => name.push(c.to_ascii_lowercase()),
+        }
+    }
+    schemas.push(name);
+    schemas.retain(|s| !s.is_empty());
+    schemas
+}
+
+/// The warning for a search path that names another schema before `pg_catalog` (the session's
+/// own temporary schema aside), or `None`: dbee's filters and saved changes name built-in types
+/// and operators unqualified, as users do, and such a path finds that schema's first.
+fn search_path_warning(path: &str) -> Option<String> {
+    let schemas = search_path_schemas(path);
+    let at = schemas.iter().position(|s| s == "pg_catalog")?;
+    schemas.get(..at)?.iter().any(|s| s != "pg_temp").then(|| {
+        format!(
+            "The search path ({path}) puts other schemas before pg_catalog, so a function or type someone made in one of them could run in \
+             place of a built-in one when dbee filters or saves rows. Ask the database owner to put pg_catalog first in the \
+             search path, or to leave it out."
+        )
+    })
+}
 
 /// The session setup; returns what the server says about itself.
 async fn setup(client: &Client, read_only: bool) -> Result<ServerInfo, DbError> {
@@ -431,8 +469,8 @@ async fn setup(client: &Client, read_only: bool) -> Result<ServerInfo, DbError> 
             answers.push(row.try_get(0).ok().flatten().unwrap_or_default().to_owned());
         }
     }
-    let [ro, conforming, encoding, version, num] = answers.as_slice() else {
-        return Err(DbError::Other(format!("the server answered {} of 5 settings", answers.len())));
+    let [ro, conforming, encoding, version, num, path] = answers.as_slice() else {
+        return Err(DbError::Other(format!("the server answered {} of 6 settings", answers.len())));
     };
     // dbee quotes values into SQL text; that is safe only with both of these.
     if conforming != "on" || encoding != "UTF8" {
@@ -447,7 +485,7 @@ async fn setup(client: &Client, read_only: bool) -> Result<ServerInfo, DbError> 
             "read-only mode did not stick (default_transaction_read_only is {ro:?}); a transaction-mode connection pooler is not supported"
         )));
     }
-    let warnings = version_warning(version_num).into_iter().collect();
+    let warnings = version_warning(version_num).into_iter().chain(search_path_warning(path)).collect();
     Ok(ServerInfo { product: PRODUCT.into(), version: version.clone(), version_num, read_only: server_read_only, warnings })
 }
 
@@ -457,6 +495,29 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
+
+    #[test]
+    fn a_search_path_is_read_as_the_server_names_its_schemas() {
+        assert_eq!(search_path_schemas("\"$user\", public"), ["$user", "public"]);
+        assert_eq!(search_path_schemas(" A ,\"b, \"\"C\" , PG_Catalog"), ["a", "b, \"C", "pg_catalog"]);
+        assert_eq!(search_path_schemas(""), Vec::<String>::new());
+        assert_eq!(search_path_schemas("\"\""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn only_another_schema_before_pg_catalog_is_warned_of() {
+        for warned in
+            ["public, pg_catalog", "\"$user\", pg_catalog", "pg_temp, app, pg_catalog", "\"a,pg_catalog\", pg_catalog", "public, PG_CATALOG"]
+        {
+            let w = search_path_warning(warned);
+            assert!(w.as_deref().is_some_and(|w| w.contains(warned) && w.contains("put pg_catalog first")), "{warned}: {w:?}");
+        }
+        for fine in
+            ["\"$user\", public", "pg_catalog, public", "pg_temp, pg_catalog, public", "", "public, \"pg_catalog \"", "public, \"PG_CATALOG\""]
+        {
+            assert_eq!(search_path_warning(fine), None, "{fine}");
+        }
+    }
 
     #[tokio::test]
     async fn a_shutdown_waits_until_the_other_end_closes() {

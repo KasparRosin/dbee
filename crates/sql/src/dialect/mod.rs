@@ -37,6 +37,8 @@ pub(crate) struct Rules {
     pub ident_quote: char,
     /// The type [`Dialect::as_text`] casts to.
     pub text_type: &'static str,
+    /// The aggregate that counts a table's rows, as the count statement writes it.
+    pub count_all: &'static str,
     pub ilike: ILike,
     /// What follows a `LIKE` pattern so that `\` escapes `%`, `_` and itself, as it does by
     /// default on Postgres: an `ESCAPE` clause, or nothing.
@@ -512,7 +514,10 @@ mod tests {
             page_sql(pg, &t, &Condition::None, None, 2).unwrap(),
             "SELECT \"id\", \"total\", \"note\" FROM \"shop\".\"orders\" ORDER BY \"id\" LIMIT 101 OFFSET 200"
         );
-        assert_eq!(count_sql(pg, &t, &f("id", Op::Gt, "5")).unwrap(), "SELECT count(*) FROM \"shop\".\"orders\" WHERE \"id\" > CAST('5' AS bigint)");
+        assert_eq!(
+            count_sql(pg, &t, &f("id", Op::Gt, "5")).unwrap(),
+            "SELECT pg_catalog.count(*) FROM \"shop\".\"orders\" WHERE \"id\" > CAST('5' AS bigint)"
+        );
         let id = t.column("id").unwrap();
         let note = t.column("note").unwrap();
         assert_eq!(

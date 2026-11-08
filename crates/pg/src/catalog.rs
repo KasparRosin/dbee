@@ -4,7 +4,13 @@
 //! The queries read only `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type` and
 //! `pg_constraint` columns that exist in Postgres 14 and every later version, and take no user
 //! input. Results are simple-query text (`t`/`f` booleans, decimal numbers). Key columns come
-//! from `unnest(conkey) WITH ORDINALITY`, so no array text is parsed.
+//! from `pg_catalog.unnest(conkey) WITH ORDINALITY`, so no array text is parsed.
+//!
+//! Each query runs with `search_path` set to `pg_catalog, pg_temp` for its own statement
+//! ([`run`]): a function or operator someone made in another schema can be a closer match than
+//! `pg_catalog`'s (`public.unnest(smallint[])` beats `unnest(anyarray)`, `name !~~ name` beats
+//! `name !~~ text` for a literal), and would run as the user who opens the database. So type
+//! names outside `pg_catalog` come back from `format_type` qualified (`public.citext`).
 //!
 //! Limits: a catalog must never be truncated, so the queries run with `CATALOG_LIMITS`, which no
 //! real catalog reaches, instead of the 10,000-row query cap: a database with a few hundred
@@ -68,9 +74,9 @@ SELECT n.nspname, c.relname, con.contype::text, con.conname, k.ord::text, att.at
 FROM pg_catalog.pg_constraint con
 JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+CROSS JOIN LATERAL pg_catalog.unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
 JOIN pg_catalog.pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
-LEFT JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON con.contype = 'f' AND fk.ord = k.ord
+LEFT JOIN LATERAL pg_catalog.unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON con.contype = 'f' AND fk.ord = k.ord
 LEFT JOIN pg_catalog.pg_class fc ON con.contype = 'f' AND fc.oid = con.confrelid
 LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
 LEFT JOIN pg_catalog.pg_attribute fatt ON fatt.attrelid = con.confrelid AND fatt.attnum = fk.attnum
@@ -121,12 +127,17 @@ fn estimate(s: &str) -> Option<u64> {
     (v.is_finite() && v >= 0.0).then(|| v.round() as u64)
 }
 
+/// Put before each catalog query: only `pg_catalog` (and the session's own temporary schema,
+/// after it) is searched, until the implicit transaction of the query's message ends.
+const CATALOG_PATH: &str = "SET LOCAL search_path TO pg_catalog, pg_temp; ";
+
+/// Runs the catalog query `sql` with [`CATALOG_PATH`]; a cut result is an error.
 async fn run(conn: &PgConnection, sql: &str) -> Result<ResultSet, DbError> {
-    require_complete(query::run_untyped(conn, sql, CATALOG_LIMITS).await?)
+    require_complete(query::run_untyped(conn, &format!("{CATALOG_PATH}{sql}"), CATALOG_LIMITS).await?)
 }
 
 /// The databases a connection can open: templates and those that take no connections left out.
-const DATABASES_SQL: &str = "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname";
+const DATABASES_SQL: &str = "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname";
 
 /// The database the list is read through when the server has none named like the user.
 const FALLBACK_DATABASE: &str = "postgres";

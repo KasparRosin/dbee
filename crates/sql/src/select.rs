@@ -41,7 +41,7 @@ pub fn page_sql(d: Dialect, table: &TableInfo, cond: &Condition, sort: Option<&S
     Ok(format!("SELECT {columns} FROM {}{}{order}{paging}", d.table(&table.table)?, where_clause(d, table, cond)?))
 }
 
-/// `SELECT count(*) FROM <table> [WHERE ..]`.
+/// `SELECT count(*) FROM <table> [WHERE ..]`, `count(*)` as the engine's rules write it.
 pub fn count_sql(d: Dialect, table: &TableInfo, cond: &Condition) -> Result<String, SqlError> {
-    Ok(format!("SELECT count(*) FROM {}{}", d.table(&table.table)?, where_clause(d, table, cond)?))
+    Ok(format!("SELECT {} FROM {}{}", d.rules().count_all, d.table(&table.table)?, where_clause(d, table, cond)?))
 }
