@@ -772,6 +772,23 @@ fn test_and_connect_run_once_and_show_it() {
     assert_eq!(ui.document()["jobs"], json!([]));
 }
 
+/// While Read-only is ticked, the form says what it guards against and what is the lock.
+#[test]
+fn read_only_says_what_it_guards_against() {
+    for kind in ["postgres", "sqlite"] {
+        let mut ui = cards();
+        ui.click(&format!("conn-kind-{kind}"));
+        assert!(ui.tag("conn-readonly-note").is_none(), "{kind}");
+        ui.click("conn-readonly");
+        let note = ui.tag("conn-readonly-note").unwrap_or_else(|| panic!("{kind}: the note shows while Read-only is ticked"));
+        let text = note["value"].as_str().unwrap_or_default();
+        assert!(text.contains("mistakes") && text.contains("without write rights"), "{kind}: {note}");
+        assert!(note.get("visible").is_none(), "{kind}: the note is in view: {note}");
+        ui.click("conn-readonly");
+        assert!(ui.tag("conn-readonly-note").is_none(), "{kind}");
+    }
+}
+
 #[test]
 fn no_secret_store_turns_saving_off() {
     let mut without = ui_in(temp_home(None, None), false);

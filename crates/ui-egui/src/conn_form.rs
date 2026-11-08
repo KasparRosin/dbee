@@ -764,12 +764,13 @@ fn file_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Ve
 const READ_ONLY_NOTE: &str = "Read-only guards against mistakes: dbee refuses edits, and the statements that would turn read-only off. It is \
                               not a lock: to be sure nothing is written, connect as a database user without write rights.";
 
-/// Read-only (its note on hover), then the type's own on/off settings, one check box each
-/// (`conn-option-<id>`), on one line while they fit.
+/// Read-only, then the type's own on/off settings, one check box each (`conn-option-<id>`), on one
+/// line while they fit; while Read-only is ticked, what it guards against, under them
+/// (`conn-readonly-note`).
 fn read_only_and_options(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
     ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
         ui.spacing_mut().item_spacing.x = 2.0 * GAP;
-        let r = ui.checkbox(&mut f.read_only, "Read-only").on_hover_text(READ_ONLY_NOTE);
+        let r = ui.checkbox(&mut f.read_only, "Read-only");
         tags.tag_value("conn-readonly", &r, f.read_only);
         for option in f.kind.info().options {
             let mut on = f.option_on(option.id);
@@ -780,6 +781,10 @@ fn read_only_and_options(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f3
             tags.tag_value(&format!("conn-option-{}", option.id), &r, on);
         }
     });
+    if f.read_only {
+        let r = ui.add(Label::new(RichText::new(READ_ONLY_NOTE).size(12.0).color(TOKENS.text_muted)).wrap());
+        tags.tag_value("conn-readonly-note", &r, READ_ONLY_NOTE);
+    }
 }
 
 /// The SSH tunnel: on or off, then host, port, user, the login and what it will use.
