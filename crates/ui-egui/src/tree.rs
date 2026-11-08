@@ -646,13 +646,13 @@ fn draw_row(
                 Some(_) => icons::key_foreign(&p, icon_rect, t.key_foreign),
                 None => icons::column(&p, icon_rect, t.icon_column),
             }
-            let right = muted_right(&col.type_sql);
+            let right = muted_right(col.label());
             label(&col.name, t.text, right);
             let r = match info.fk_for(&col.name) {
                 Some(fk) => r.on_hover_text(format!("{} → {}", col.name, fk.target.display())),
                 None => r,
             };
-            tags.tag_value(id, &r, json!({ "type": col.type_sql, "key": key }));
+            tags.tag_value(id, &r, json!({ "type": col.label(), "key": key }));
         }
     }
     Click::None

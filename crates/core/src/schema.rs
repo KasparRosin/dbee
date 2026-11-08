@@ -110,8 +110,13 @@ impl ColumnInfo {
     }
 
     pub fn column(&self) -> Column {
-        let label = if self.type_label.is_empty() { &self.type_sql } else { &self.type_label };
-        Column { name: self.name.clone(), base_type: self.base_type.clone(), type_label: label.clone(), class: self.class }
+        Column { name: self.name.clone(), base_type: self.base_type.clone(), type_label: self.label().to_owned(), class: self.class }
+    }
+
+    /// The type as the user reads it: [`ColumnInfo::type_label`], or `type_sql` when that is
+    /// empty. Every display of a column's type reads this.
+    pub fn label(&self) -> &str {
+        if self.type_label.is_empty() { &self.type_sql } else { &self.type_label }
     }
 }
 

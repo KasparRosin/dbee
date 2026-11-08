@@ -494,6 +494,37 @@ fn tree_double_click_opens_and_expands_columns() {
     ui.until("the odd tab", |ui| ui.document()["table"]["name"] == "Other Ödd");
 }
 
+/// A type in a schema on the session's search path shows without that schema, as Postgres shows
+/// it, in the tree's column rows and in the filter's column list, as in the grid's header.
+#[test]
+fn the_tree_and_the_filter_show_a_type_as_postgres_does() {
+    let db = dbee_testkit::require_testdb!();
+    let mood = dbee_testkit::unique("mood");
+    let _type = DropType(db, format!("public.{mood}"));
+    let table = Scratch::new(db, "t_label", |t| {
+        format!(
+            "CREATE TYPE public.{mood} AS ENUM ('ok'); CREATE TABLE scratch.{t} (id int PRIMARY KEY, m public.{mood}); INSERT INTO scratch.{t} VALUES (1, 'ok');"
+        )
+    });
+    let mut ui = Ui::connected(db);
+    ui.click("tree-schema-scratch");
+    ui.click(&format!("tree-expand-scratch.{}", table.0));
+    let column = tag_in(&ui.inspect(), &format!("tree-column-scratch.{}.m", table.0)).expect("the column shows under its table");
+    assert_eq!(column["value"]["type"], json!(mood), "{column}");
+    ui.open("scratch", &table.0);
+    ui.click("filter-0-column");
+    assert_eq!(ui.value("filter-0-column-m"), json!(mood));
+}
+
+/// Drops the type it names on pg14 when the test ends, after the table that uses it.
+struct DropType<'a>(&'a TestDb, String);
+
+impl Drop for DropType<'_> {
+    fn drop(&mut self) {
+        let _ = dbee_testkit::psql(pg14_server(self.0), &format!("DROP TYPE IF EXISTS {} CASCADE", self.1));
+    }
+}
+
 #[test]
 fn tree_rows_out_of_view_scroll_in_when_clicked() {
     let db = dbee_testkit::require_testdb!();
