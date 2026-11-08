@@ -12,7 +12,7 @@ pub(crate) const INFO: KindInfo = KindInfo {
     id: "mysql",
     label: "MySQL",
     default_port: Some(3306),
-    settings: Settings::Server { tls: true, ssh: true },
+    settings: Settings::Server { tls: true, ssh: true, socket: false },
     url_schemes: &["mysql"],
     ssl_aliases: &[
         ("DISABLED", SslMode::Disable),

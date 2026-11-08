@@ -57,8 +57,9 @@ pub enum SslMode {
 /// What a database type's settings consist of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settings {
-    /// Host and port, with optional TLS and SSH.
-    Server { tls: bool, ssh: bool },
+    /// Host and port, with optional TLS and SSH. With `socket`, the host may also name the folder
+    /// of a Unix socket (it starts with `/`), where there is no SSH tunnel.
+    Server { tls: bool, ssh: bool, socket: bool },
     /// A single file, opened by these extensions.
     File { extensions: &'static [&'static str] },
 }
@@ -312,14 +313,15 @@ impl ConnectionConfig {
             }
             Settings::Server { ssh, .. } => ssh,
         };
+        let socket = matches!(settings, Settings::Server { socket: true, .. });
         if self.ssh.is_some() && !ssh_allowed {
             return bad("this database type takes no SSH tunnel");
         }
         if self.host.trim().is_empty() {
             return bad("host is empty");
         }
-        if !is_host_name(&self.host) {
-            return bad(HOST_CHARS);
+        if !is_database_host(&self.host, socket && self.ssh.is_none()) {
+            return bad(if socket { DATABASE_HOST_CHARS_SOCKET } else { DATABASE_HOST_CHARS });
         }
         if self.port == 0 {
             return bad("port must not be 0");
@@ -329,7 +331,7 @@ impl ConnectionConfig {
                 return bad("SSH host is empty");
             }
             if !is_host_name(&ssh.host) {
-                return bad(HOST_CHARS);
+                return bad(SSH_HOST_CHARS);
             }
             if ssh.port == 0 {
                 return bad("SSH port must not be 0");
@@ -342,7 +344,25 @@ impl ConnectionConfig {
     }
 }
 
-const HOST_CHARS: &str = "a host is a name of letters, digits, `-`, `.` and `_`, or an IP address (an IPv6 address without brackets)";
+const DATABASE_HOST_CHARS: &str = "The host can hold only letters, digits, hyphens, dots and underscores, or be an IP address.";
+const DATABASE_HOST_CHARS_SOCKET: &str = "The host can hold only letters, digits, hyphens, dots and underscores, or be an IP address, or the full path of a socket folder (without an SSH tunnel).";
+const SSH_HOST_CHARS: &str =
+    "The SSH host can hold only letters, digits, hyphens, dots and underscores, or be an IP address (an IPv6 address without brackets or a zone).";
+
+/// The database host: what [`is_host_name`] takes, an IPv6 address with a zone (`fe80::1%eth0`,
+/// which the drivers' name lookup takes), and with `socket` a folder (`/var/run/postgresql`).
+/// None of these goes into `known_hosts`, which only the SSH host does.
+pub fn is_database_host(host: &str, socket: bool) -> bool {
+    if is_host_name(host) {
+        return true;
+    }
+    if let Some((address, zone)) = host.split_once('%') {
+        return address.parse::<std::net::Ipv6Addr>().is_ok()
+            && !zone.is_empty()
+            && zone.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '.' | '_'));
+    }
+    socket && host.starts_with('/') && !host.chars().any(char::is_control)
+}
 
 /// `host` is a host name (letters, digits, `-`, `.`, `_`) or an IP address, IPv6 without
 /// brackets. Nothing else is safe to write into `known_hosts`, where a comma, a space or a
@@ -533,9 +553,9 @@ mod tests {
     fn a_server_type_without_ssh_refuses_a_tunnel() {
         let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password, ..SshConfig::default() };
         let c = ConnectionConfig { ssh: Some(ssh), ..ConnectionConfig::default() };
-        assert_eq!(c.validate_for(Settings::Server { tls: true, ssh: true }), Ok(()));
-        let refused = c.validate_for(Settings::Server { tls: true, ssh: false });
+        assert_eq!(c.validate_for(Settings::Server { tls: true, ssh: true, socket: false }), Ok(()));
+        let refused = c.validate_for(Settings::Server { tls: true, ssh: false, socket: false });
         assert_eq!(refused, Err(ConfigError::Invalid("this database type takes no SSH tunnel".into())));
-        assert_eq!(ConnectionConfig { ssh: None, ..c }.validate_for(Settings::Server { tls: true, ssh: false }), Ok(()));
+        assert_eq!(ConnectionConfig { ssh: None, ..c }.validate_for(Settings::Server { tls: true, ssh: false, socket: false }), Ok(()));
     }
 }

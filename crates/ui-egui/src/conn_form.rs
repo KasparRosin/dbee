@@ -471,7 +471,7 @@ pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: 
         ui.set_width(w);
         name_row(ui, &mut conn.form, tags, w);
         match conn.form.kind.info().settings {
-            Settings::Server { tls, ssh } => {
+            Settings::Server { tls, ssh, .. } => {
                 server_rows(ui, conn, tags, acts, w);
                 if tls {
                     tls_rows(ui, conn, tags, acts, w);

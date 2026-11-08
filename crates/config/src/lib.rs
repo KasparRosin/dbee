@@ -9,7 +9,7 @@ pub mod store;
 
 pub use connection::{
     ConfigError, ConnectionColor, ConnectionConfig, DbKind, KindInfo, KindOption, Settings, SshAuth, SshConfig, SslMode, Unknown, UrlParts, home_dir,
-    is_host_name, new_id, parse_url,
+    is_database_host, is_host_name, new_id, parse_url,
 };
 pub use kind::mysql::ALLOW_PUBLIC_KEY;
 pub use secrets::{KeyringStore, MemoryStore, SavedFor, SecretError, SecretKind, SecretStore, StoredSecret, keyring_store};

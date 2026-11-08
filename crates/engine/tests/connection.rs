@@ -222,6 +222,53 @@ fn a_host_known_hosts_could_misread_is_bad_params() {
     }
 }
 
+/// A socket `.s.PGSQL.5432` in a folder of a throwaway home, bridged to pg14's TCP port: a Postgres
+/// on a Unix socket, which no server of the test setup offers.
+#[cfg(unix)]
+fn socket_folder_for_pg14() -> dbee_testkit::TempHome {
+    use std::os::unix::net::UnixListener;
+    let home = temp_home(None, None);
+    let listener = UnixListener::bind(home.home.join(".s.PGSQL.5432")).unwrap();
+    let port = pg14().port;
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(client) = client else { return };
+            let Ok(server) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return };
+            let (Ok(mut a), Ok(b)) = (client.try_clone(), server.try_clone()) else { return };
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut a, &mut { b });
+            });
+            let (mut c, mut d) = (server, client);
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut c, &mut d);
+            });
+        }
+    });
+    home
+}
+
+#[cfg(unix)]
+#[test]
+fn a_postgres_socket_folder_is_a_host() {
+    let _db = require_testdb!();
+    let folder = socket_folder_for_pg14();
+    let host = folder.home.display().to_string();
+    let c = ConnectionConfig { id: "sock".into(), host: host.clone(), port: 5432, ssl_mode: SslMode::Disable, ..pg14_config() };
+    let mut s = session();
+    // The test, the save and the open go through the real socket.
+    let r = s.run_blocking("connection.test", json!({ "config": c, "password": pw() }), T).unwrap();
+    assert_eq!(r["via"], "direct", "{r}");
+    assert_eq!(s.run_blocking("connection.save", json!({ "config": c, "password": pw() }), T).unwrap()["id"], "sock");
+    // The saved connection, opened by its id.
+    open(&mut s, json!({ "id": "sock" }));
+    s.run_blocking("connection.close", json!({ "force": true }), T).unwrap();
+    s.run_blocking("connection.test", json!({ "id": "sock" }), T).unwrap();
+    // A folder is no host of a tunnelled connection.
+    let tunnelled = ConnectionConfig { ssh: Some(ssh_config(SshAuth::Password)), ..c };
+    let e = s.execute("connection.test", json!({ "config": tunnelled })).unwrap_err();
+    assert_eq!(e.code(), "badParams", "{e}");
+}
+
 #[test]
 fn parse_url_fills_the_form_and_is_not_journaled() {
     let mut s = session();

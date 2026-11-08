@@ -68,19 +68,45 @@ fn serde_shapes() {
 
 #[test]
 fn a_host_is_a_name_or_an_address_nothing_known_hosts_could_misread() {
-    let bad = ["a,b", "a b", "a\nb", "#a", "[a]", "a\tb", "a/b", "a:22", "[::1]", "fe80::1%eth0", "a\u{0}b"];
+    let bad = ["a,b", "a b", "a\nb", "#a", "[a]", "a\tb", "a/b", "a:22", "[::1]", "fe80::1%", "fe80::1%a b", "1.2.3.4%eth0", "a\u{0}b"];
     for h in bad {
-        let db = ConnectionConfig { host: h.into(), ..ConnectionConfig::default() };
-        assert!(matches!(db.validate(), Err(ConfigError::Invalid(_))), "database host {h:?}");
+        for kind in [DbKind::Postgres, DbKind::MySql] {
+            let db = ConnectionConfig { kind, host: h.into(), ..ConnectionConfig::default() };
+            let e = db.validate().unwrap_err().to_string();
+            assert!(e.contains("The host can hold only"), "{kind:?} database host {h:?}: {e}");
+        }
         let ssh = SshConfig { host: h.into(), user: "u".into(), ..SshConfig::default() };
         let c = ConnectionConfig { ssh: Some(ssh), ..ConnectionConfig::default() };
-        assert!(matches!(c.validate(), Err(ConfigError::Invalid(_))), "SSH host {h:?}");
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("The SSH host can hold only") && !e.contains('`'), "SSH host {h:?}: {e}");
     }
     for h in ["db.example.com", "localhost", "127.0.0.1", "::1", "2001:db8::7", "my_host-1", "bücher.example"] {
         let ssh = SshConfig { host: h.into(), user: "u".into(), ..SshConfig::default() };
         let c = ConnectionConfig { host: h.into(), ssh: Some(ssh), ..ConnectionConfig::default() };
         assert!(c.validate().is_ok(), "{h:?}");
     }
+}
+
+#[test]
+fn a_zone_id_and_a_socket_folder_are_database_hosts_only() {
+    let db = |kind, host: &str, ssh: Option<SshConfig>| ConnectionConfig { kind, host: host.into(), ssh, ..ConnectionConfig::default() };
+    let jump = |host: &str| Some(SshConfig { host: host.into(), user: "u".into(), ..SshConfig::default() });
+    // A zone id goes to the name lookup, never into known_hosts.
+    for kind in [DbKind::Postgres, DbKind::MySql, DbKind::MariaDb] {
+        assert!(db(kind, "fe80::1%eth0", None).validate().is_ok(), "{kind:?}");
+        assert!(db(kind, "fe80::1%eth0", jump("jump")).validate().is_ok(), "{kind:?}");
+    }
+    assert!(db(DbKind::Postgres, "jump", jump("fe80::1%eth0")).validate().is_err(), "not as an SSH host");
+    // A socket folder, where the type says it takes one and there is no tunnel.
+    assert!(db(DbKind::Postgres, "/var/run/postgresql", None).validate().is_ok());
+    assert!(db(DbKind::Postgres, "/tmp/with space/pg", None).validate().is_ok());
+    assert!(db(DbKind::Postgres, "/var/run/postgresql", jump("jump")).validate().is_err());
+    assert!(db(DbKind::Postgres, "/tmp/a\nb", None).validate().is_err());
+    assert!(db(DbKind::Postgres, "a/b", None).validate().is_err());
+    for kind in [DbKind::MySql, DbKind::MariaDb] {
+        assert!(db(kind, "/var/run/mysqld", None).validate().is_err(), "{kind:?}");
+    }
+    assert!(db(DbKind::Postgres, "jump", jump("/var/run")).validate().is_err(), "not as an SSH host");
 }
 
 #[test]
