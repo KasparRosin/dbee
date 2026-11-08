@@ -25,6 +25,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
 
@@ -139,8 +140,11 @@ fn numbered(dir: &Path, n: usize) -> PathBuf {
 
 /// Shift the previous logs up one (`.log` → `.1.log` → … → `.<KEEP>.log`, the oldest dropped)
 /// and create a fresh, empty log file in `dir` (created if missing).
+///
+/// Where the OS has file modes the directory is 0700 and the logs 0600, so another user of the
+/// machine cannot read the host names they hold.
 pub fn rotate(dir: &Path) -> std::io::Result<(PathBuf, File)> {
-    std::fs::create_dir_all(dir)?;
+    create_private_dir(dir)?;
     for n in (1..=KEEP).rev() {
         match std::fs::rename(numbered(dir, n - 1), numbered(dir, n)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
@@ -148,8 +152,60 @@ pub fn rotate(dir: &Path) -> std::io::Result<(PathBuf, File)> {
         }
     }
     let path = numbered(dir, 0);
-    let file = File::create(&path)?;
+    let file = create_private_file(&path)?;
+    #[cfg(unix)]
+    for n in 1..=KEEP {
+        // Logs an older build wrote with the umask's mode.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(numbered(dir, n), std::fs::Permissions::from_mode(0o600));
+    }
     Ok((path, file))
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    File::create(path)
+}
+
+/// The longest message a crate that is not dbee's own may log, in characters.
+pub const FOREIGN_MESSAGE_CHARS: usize = 1024;
+/// How many records of crates that are not dbee's own a run logs. An SSH server controls some of
+/// what russh logs; past this the rest are dropped, so it cannot fill the file.
+pub const FOREIGN_RECORDS: usize = 2000;
+
+/// A message from a crate that is not dbee's own, on one line: control characters (a newline, an
+/// escape sequence) written out, and cut at [`FOREIGN_MESSAGE_CHARS`].
+pub fn sanitize_foreign(message: &str) -> String {
+    let mut out = String::with_capacity(message.len().min(FOREIGN_MESSAGE_CHARS + 16));
+    let mut chars = 0usize;
+    for c in message.chars() {
+        let piece: String = if c.is_control() { c.escape_default().collect() } else { c.to_string() };
+        chars = chars.saturating_add(piece.chars().count());
+        if chars > FOREIGN_MESSAGE_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push_str(&piece);
+    }
+    out
 }
 
 /// One formatted log line: `<timestamp> <LEVEL> [<thread>] <target>: <message>\n`.
@@ -237,11 +293,12 @@ pub struct AppLogger {
     filter: Filter,
     stderr: bool,
     sink: Mutex<Sink>,
+    foreign: AtomicUsize,
 }
 
 impl AppLogger {
     pub fn new(filter: Filter, stderr: bool) -> AppLogger {
-        AppLogger { filter, stderr, sink: Mutex::new(Sink::new(MAX_FILE_BYTES)) }
+        AppLogger { filter, stderr, sink: Mutex::new(Sink::new(MAX_FILE_BYTES)), foreign: AtomicUsize::new(0) }
     }
 
     /// Rotate the logs in `dir` and send records to the fresh file; returns its path. On an error
@@ -276,10 +333,21 @@ impl log::Log for AppLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
+        let mut message = record.args().to_string();
+        if !own(record.target()) {
+            let seen = self.foreign.fetch_add(1, Ordering::Relaxed);
+            if seen > FOREIGN_RECORDS {
+                return;
+            }
+            message = if seen == FOREIGN_RECORDS {
+                format!("{FOREIGN_RECORDS} records of other crates were logged; later ones are dropped")
+            } else {
+                sanitize_foreign(&message)
+            };
+        }
         // Formatted before the sink is locked, so a message that logs while it is formatted can't deadlock.
         let thread = std::thread::current();
-        let line =
-            format_line(&timestamp(SystemTime::now()), record.level(), thread.name().unwrap_or("?"), record.target(), &record.args().to_string());
+        let line = format_line(&timestamp(SystemTime::now()), record.level(), thread.name().unwrap_or("?"), record.target(), &message);
         if self.stderr {
             // No terminal (a Windows GUI build, a closed pipe) is not an error worth reporting.
             let _ = std::io::stderr().write_all(line.as_bytes());
@@ -465,6 +533,56 @@ mod tests {
         assert_eq!(read(&dir.join("dbee.1.log")), "run 3");
         assert_eq!(read(&dir.join("dbee.2.log")), "run 2");
         assert!(!dir.join("dbee.3.log").exists(), "only {KEEP} old logs are kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_directory_and_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+        let dir = temp_dir("private");
+        // A directory and a log an older build made with the umask's mode.
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::write(dir.join(LOG_FILE), "old").expect("write");
+        std::fs::set_permissions(dir.join(LOG_FILE), std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        for _ in 0..2 {
+            let (path, _file) = rotate(&dir).expect("rotate");
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(&dir.join("dbee.1.log")), 0o600);
+        }
+        let fresh = temp_dir("private-new").join("logs");
+        rotate(&fresh).expect("rotate");
+        assert_eq!(mode(&fresh), 0o700);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(fresh.parent().expect("parent"));
+    }
+
+    #[test]
+    fn what_another_crate_logs_is_one_short_line_and_bounded() {
+        let hostile = format!("Unhandled global request: \"a\nb\r\x1b[31m\" {}", "x".repeat(5000));
+        let line = sanitize_foreign(&hostile);
+        assert!(!line.contains('\n') && !line.contains('\r') && !line.contains('\x1b'), "{line}");
+        assert!(line.contains("\\n") && line.chars().count() <= FOREIGN_MESSAGE_CHARS + 1);
+        assert_eq!(sanitize_foreign("plain é text"), "plain é text");
+
+        let dir = temp_dir("foreign");
+        let logger = AppLogger::new(Filter::parse("warn"), false);
+        logger.attach_dir(&dir).expect("attach");
+        record(&logger, log::Level::Warn, "russh::client", "forged\n2026-01-01T00:00:00.000Z ERROR [main] dbee: all good");
+        record(&logger, log::Level::Warn, "dbee_engine", "two\nlines");
+        for _ in 0..FOREIGN_RECORDS + 50 {
+            record(&logger, log::Level::Warn, "russh::client", "noise");
+        }
+        record(&logger, log::Level::Warn, "dbee_engine", "still logged");
+        let text = read(&dir.join(LOG_FILE));
+        assert!(text.contains("russh::client: forged\\n2026"), "{text}");
+        assert!(!text.contains("\n2026-01-01"), "{text}");
+        assert!(text.contains("dbee_engine: two\nlines"));
+        assert_eq!(text.matches("russh::client: noise").count(), FOREIGN_RECORDS - 1);
+        assert!(text.contains("later ones are dropped") && text.contains("still logged"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
