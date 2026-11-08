@@ -19,9 +19,9 @@ const FORMAT: u8 = 0x01;
 /// The most of MariaDB's type name dbee keeps: no real one comes near it.
 const MAX_TYPE_NAME: usize = 64;
 
-/// The longest column name MySQL and MariaDB send, in bytes: longer ones they cut to this
-/// (measured on all five test servers), so only a hostile server sends one.
-const MAX_NAME: usize = 256;
+/// The longest column name MySQL and MariaDB send, in bytes: an alias may be 256 characters, up to
+/// 1,024 bytes in utf8mb4, so only a hostile server sends a longer one.
+const MAX_NAME: usize = 1024;
 
 /// A result column as its definition (Protocol::ColumnDefinition41) gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +139,16 @@ mod tests {
             (name.as_str(), theirs.column_type(), theirs.flags(), theirs.character_set(), theirs.column_length())
         );
         Ok(())
+    }
+
+    #[test]
+    fn an_alias_of_256_two_byte_characters_is_kept_whole() {
+        let alias = "é".repeat(256);
+        let c = parse_column(&definition(&names(&alias), None, LONGTEXT), false).unwrap();
+        assert_eq!(c.name, alias);
+        let hostile = "é".repeat(600);
+        let c = parse_column(&definition(&names(&hostile), None, LONGTEXT), false).unwrap();
+        assert!(c.name.len() <= MAX_NAME + '…'.len_utf8() && c.name.ends_with('…'), "{}", c.name.len());
     }
 
     #[test]

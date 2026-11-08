@@ -618,10 +618,10 @@ pub(crate) mod tests {
     /// Important 3: a column's name is kept to the longest the servers send.
     #[tokio::test]
     async fn a_column_name_is_kept_cut() {
-        let long = "n".repeat(1_000);
+        let long = "n".repeat(2_000);
         let r = read(result_set(&long, &[]), dbee_driver::QUERY_LIMITS).await.unwrap();
         let kept = &r.columns[0].name;
-        assert!(kept.len() <= 256 + '\u{2026}'.len_utf8() && kept.starts_with("nnn"), "{} bytes", kept.len());
+        assert!(kept.len() <= 1024 + '\u{2026}'.len_utf8() && kept.starts_with("nnn"), "{} bytes", kept.len());
     }
 
     /// Minor 7: a result whose columns do not fit is read to the end of the answer, later results
