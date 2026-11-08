@@ -28,12 +28,17 @@ pub fn server_text(info: &ServerInfo) -> String {
     format!("{} {}", info.product, info.version)
 }
 
-/// What the status bar says of the link to the server, and its longer text: `None` for a
-/// database without one, a file.
-pub fn tls_text(info: &ServerInfo) -> Option<(&'static str, &'static str)> {
+/// What the status bar says of the link to the server, and its longer text, for a connection
+/// through the SSH tunnel or not: `None` for a database without a link, a file.
+pub fn tls_text(info: &ServerInfo, tunnel: bool) -> Option<(&'static str, &'static str)> {
+    const NOT_ENCRYPTED: &str = "Not encrypted";
     Some(match info.tls? {
+        TlsState::Off if tunnel => {
+            (NOT_ENCRYPTED, "The SSH tunnel encrypts the connection as far as the SSH server; from there to the database server it is not encrypted.")
+        }
+        TlsState::Off if info.local => (NOT_ENCRYPTED, "The connection is not encrypted, but it does not leave this machine."),
         TlsState::Off => {
-            ("Not encrypted", "The connection to the server is not encrypted: anyone on the network between them can read and change what is sent.")
+            (NOT_ENCRYPTED, "The connection to the server is not encrypted: anyone on the network between them can read and change what is sent.")
         }
         TlsState::Unchecked => (
             "Encrypted, server not checked",
@@ -677,6 +682,27 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Not encrypted" says what that means for the link: on the network anyone can read it, past
+    /// the SSH tunnel only from the SSH server on, and on this machine it goes nowhere.
+    #[test]
+    fn the_plain_links_text_says_where_it_runs() {
+        let info = |local| ServerInfo {
+            product: "PostgreSQL".into(),
+            version: "16".into(),
+            version_num: 160000,
+            read_only: false,
+            warnings: Vec::new(),
+            tls: Some(TlsState::Off),
+            local,
+        };
+        let hover = |local, tunnel| tls_text(&info(local), tunnel).map(|(label, hover)| (label.to_owned(), hover.to_owned())).unwrap();
+        assert_eq!(hover(false, false).0, "Not encrypted");
+        assert!(hover(false, false).1.contains("anyone on the network"), "{:?}", hover(false, false));
+        assert!(hover(true, false).1.contains("does not leave this machine"), "{:?}", hover(true, false));
+        assert!(hover(false, true).1.contains("as far as the SSH server"), "{:?}", hover(false, true));
+        assert_eq!(tls_text(&ServerInfo { tls: None, ..info(true) }, false), None);
+    }
 
     #[test]
     fn the_database_follows_what_the_driver_tells() {

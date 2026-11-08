@@ -63,11 +63,16 @@ pub fn state(on: bool, mode: SslMode, ca_file: Option<&Path>) -> TlsState {
     }
 }
 
+/// `reached` is an address of this machine (127.0.0.0/8, `::1`), from which nothing leaves it.
+pub fn is_local(reached: SocketAddr) -> bool {
+    reached.ip().to_canonical().is_loopback()
+}
+
 /// [`PLAIN_AFTER_PREFER`] for a `prefer` connection without TLS (`on`) whose direct link reached
 /// `reached` over the network: not through the SSH tunnel, which encrypts the link as far as the
 /// SSH server (`None`), nor to a loopback address, from which nothing leaves the machine.
 pub fn prefer_warning(mode: SslMode, on: bool, reached: Option<SocketAddr>) -> Option<String> {
-    let network = reached.is_some_and(|addr| !addr.ip().to_canonical().is_loopback());
+    let network = reached.is_some_and(|addr| !is_local(addr));
     (mode == SslMode::Prefer && !on && network).then(|| PLAIN_AFTER_PREFER.to_owned())
 }
 

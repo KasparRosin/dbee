@@ -727,12 +727,12 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
     });
 }
 
-/// What each SSL mode protects against, shown under the modes (`conn-ssl-note`).
+/// What each SSL mode protects against, shown on its label's row (`conn-ssl-note`).
 fn ssl_note(mode: SslMode) -> &'static str {
     match mode {
         SslMode::Disable => "No encryption: anyone on the network can read and change what is sent.",
         SslMode::Prefer => "Encrypts when the server offers TLS, but does not check who answers.",
-        SslMode::Require => "Encrypts, but checks who answers only against a CA file, when one is set.",
+        SslMode::Require => "Encrypts, but does not check who answers; with a CA file, checks the certificate against it, but not the server's name.",
         SslMode::VerifyCa => "Encrypts, and checks the certificate against the CA file, but not the server's name.",
         SslMode::VerifyFull => "Encrypts, and checks the server's certificate and its name.",
     }

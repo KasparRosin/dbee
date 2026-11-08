@@ -149,6 +149,9 @@ pub struct ServerInfo {
     pub warnings: Vec<String>,
     /// TLS on the link to the server; `None` for a database without one, a file.
     pub tls: Option<TlsState>,
+    /// The link never leaves this machine: a Unix socket, or a loopback address the connection
+    /// reached.
+    pub local: bool,
 }
 
 /// What a connection is for. A driver may set its session up differently for each.

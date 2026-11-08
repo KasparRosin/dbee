@@ -58,7 +58,15 @@ pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
     };
     let (conn, handle, read_only, refused) = opened.inspect_err(|e| log::info!("sqlite: opening a file failed ({})", e.code()))?;
     let version_num = u32::try_from(rusqlite::version_number()).unwrap_or_default();
-    let info = ServerInfo { product: "SQLite".into(), version: rusqlite::version().into(), version_num, read_only, warnings: Vec::new(), tls: None };
+    let info = ServerInfo {
+        product: "SQLite".into(),
+        version: rusqlite::version().into(),
+        version_num,
+        read_only,
+        warnings: Vec::new(),
+        tls: None,
+        local: true,
+    };
     log::info!("sqlite: opened a file (SQLite {version_num}{})", if read_only { ", read-only" } else { "" });
     let running = Arc::new(Running::new(handle));
     let session = Session { refused, ..Session::new(conn) };

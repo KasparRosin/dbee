@@ -183,7 +183,15 @@ pub(crate) mod tests {
 
     impl Default for Quick {
         fn default() -> Self {
-            let info = ServerInfo { product: "Quick".into(), version: "1".into(), version_num: 1, read_only: false, warnings: Vec::new(), tls: None };
+            let info = ServerInfo {
+                product: "Quick".into(),
+                version: "1".into(),
+                version_num: 1,
+                read_only: false,
+                warnings: Vec::new(),
+                tls: None,
+                local: true,
+            };
             Quick { info, cancels: Arc::default() }
         }
     }

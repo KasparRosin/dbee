@@ -243,7 +243,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let label = if c.info.read_only { format!("{name} · read-only") } else { name };
     let colour = connection_color(c.config.color);
     let server = dbee_engine::state::server_text(&c.info);
-    let tls = dbee_engine::state::tls_text(&c.info);
+    let tls = dbee_engine::state::tls_text(&c.info, c.config.ssh.is_some());
     let saved = app.session.state().store.is_saved(&c.config.id);
     let lost = c.lost;
     let job = live_job(&app.session);

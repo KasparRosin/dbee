@@ -146,6 +146,17 @@ enum Way {
     Socket(std::path::PathBuf),
 }
 
+impl Way {
+    /// The server's socket in a folder, which never leaves the machine.
+    fn is_socket(&self) -> bool {
+        match self {
+            #[cfg(unix)]
+            Way::Socket(_) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Sends a cancel request for the statement running on one connection. Cheap to clone; holds
 /// none of the connection's locks.
 #[derive(Clone)]
@@ -356,6 +367,7 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
     let (mut info, visible_schemas) = within(CONNECT_TIMEOUT, "the server", setup(&client, cfg.read_only)).await?;
     info.tls = Some(dbee_driver::tls::state(over_tls, cfg.ssl_mode, cfg.ca_file.as_deref()));
     let reached = if let Way::Tcp(addr) = way { Some(addr) } else { None };
+    info.local = way.is_socket() || reached.is_some_and(dbee_driver::tls::is_local);
     info.warnings.extend(dbee_driver::tls::prefer_warning(cfg.ssl_mode, over_tls, reached));
     let route = Route { host: cfg.host.clone(), way };
     let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), over_tls, route, on_its_way: Arc::default() };
@@ -537,7 +549,7 @@ async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<Stri
     let visible =
         query::own_read(client, VISIBLE_SCHEMAS, SCHEMAS_LIMITS, map).await?.into_iter().flatten().map(|name| kept_text(&name, MAX_NAME)).collect();
     let version = kept_text(version, MAX_VERSION);
-    Ok((ServerInfo { product: PRODUCT.into(), version, version_num, read_only: server_read_only, warnings, tls: None }, visible))
+    Ok((ServerInfo { product: PRODUCT.into(), version, version_num, read_only: server_read_only, warnings, tls: None, local: false }, visible))
 }
 
 #[cfg(test)]

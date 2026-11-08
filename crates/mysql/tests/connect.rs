@@ -287,6 +287,7 @@ async fn through_ssh_tunnel() {
         // The tunnel encrypts the link as far as the SSH server: a plain link past it gets no warning.
         let tls = if rustls_can_reach(s) { TlsState::Unchecked } else { TlsState::Off };
         assert_eq!((conn.info().tls, conn.info().warnings.as_slice()), (Some(tls), &[][..]), "{}", s.name);
+        assert!(!conn.info().local, "{}: through the tunnel the link leaves this machine", s.name);
         assert_eq!(scalar(&conn, "SELECT 40 + 2").await.as_deref(), Some("42"));
         if rustls_can_reach(s) {
             // TLS through the tunnel checks the configured host name (the service name).
@@ -1351,6 +1352,7 @@ async fn a_plain_link_says_so() {
         drop(conn);
         server.await.unwrap();
         assert_eq!(info.tls, Some(TlsState::Off), "{mode:?}");
+        assert!(info.local, "{mode:?}: 127.0.0.1 is this machine");
         assert_eq!(info.warnings.iter().any(|w| w.contains("not encrypted") && w.contains("verify-full")), warned, "{mode:?}: {info:?}");
         assert_eq!(info.warnings.len(), usize::from(warned), "{mode:?}: {info:?}");
     }

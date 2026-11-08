@@ -310,6 +310,7 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
     }?;
     let on = session.tls.is_some();
     info.tls = Some(tls::state(on, cfg.ssl_mode, cfg.ca_file.as_deref()));
+    info.local = session.reached.is_some_and(tls::is_local);
     info.warnings.extend(tls::prefer_warning(cfg.ssl_mode, on, session.reached));
     if session.used_server_key && key == ServerKey::AllowedWithWarning {
         info.warnings.push(UNCHECKED_KEY.into());
@@ -427,7 +428,10 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     }
     let warnings = version_warning(flavor, version_num).into_iter().collect();
     let version = shown_version(&version).to_owned();
-    Ok((ServerInfo { product: flavor.product().into(), version, version_num, read_only: server_read_only, warnings, tls: None }, connection_id))
+    Ok((
+        ServerInfo { product: flavor.product().into(), version, version_num, read_only: server_read_only, warnings, tls: None, local: false },
+        connection_id,
+    ))
 }
 
 /// The statements that have the server report, in each OK packet, a change of the read-only

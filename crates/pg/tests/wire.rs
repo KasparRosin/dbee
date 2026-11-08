@@ -347,6 +347,7 @@ async fn the_link_says_whether_it_is_encrypted_and_checked() {
         drop(conn);
         joined(server).await;
         assert_eq!(info.tls, Some(TlsState::Off), "{mode:?}");
+        assert!(info.local, "{mode:?}: 127.0.0.1 is this machine");
         assert_eq!(info.warnings.iter().any(|w| w.contains("not encrypted") && w.contains("verify-full")), warned, "{mode:?}: {info:?}");
         assert_eq!(info.warnings.len(), usize::from(warned), "{mode:?}: {info:?}");
     }
