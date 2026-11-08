@@ -178,17 +178,58 @@ fn damaged(dir: &Path, path: &Path, why: &str) -> Read {
     match free_bad_name(dir)
         .ok_or_else(|| "every .bad name is taken".to_string())
         .and_then(|bad| std::fs::rename(path, &bad).map(|()| bad).map_err(|re| re.to_string()))
-    {
+        .inspect(|bad| {
+            // The file is moved aside either way; its mode is best effort.
+            let _ = private_file_mode(bad);
+        }) {
         Ok(bad) => Read::MovedAside(format!("{damaged}; moved it to {}", bad.display())),
         Err(re) => Read::Unusable(format!("{damaged}; could not move it aside ({re}); the file was left untouched and changes will not be saved")),
+    }
+}
+
+/// Makes `dir` and the folders above it that are missing. Where the system has file modes, `dir`
+/// is `0700`, also when it was there before: the file lists every saved server.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
+}
+
+/// Options that make a new file `0600` where the system has file modes.
+fn private_file() -> std::fs::OpenOptions {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut options = File::options();
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+}
+
+/// Makes the file at `path`, which may be older than these modes, `0600` where the system has
+/// file modes.
+fn private_file_mode(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
     }
 }
 
 /// The lock on `dir`'s file, once another dbee has let it go (within [`LOCK_WAIT`]).
 fn lock(dir: &Path) -> Result<File, ConfigError> {
     let io = |what: &str, e: std::io::Error| ConfigError::Io(format!("{what}: {e}"));
-    std::fs::create_dir_all(dir).map_err(|e| io("create directory", e))?;
-    let file = File::options().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE)).map_err(|e| io("lock", e))?;
+    private_dir(dir).map_err(|e| io("create directory", e))?;
+    let file = private_file().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE)).map_err(|e| io("lock", e))?;
+    private_file_mode(&dir.join(LOCK_FILE)).map_err(|e| io("lock", e))?;
     let deadline = Instant::now().checked_add(LOCK_WAIT);
     loop {
         match file.try_lock() {
@@ -284,10 +325,10 @@ impl ConnectionStore {
             extra: self.extra.clone(),
         };
         let json = serde_json::to_vec_pretty(&body).map_err(|e| ConfigError::Io(e.to_string()))?;
-        std::fs::create_dir_all(dir).map_err(|e| io("create directory", e))?;
+        private_dir(dir).map_err(|e| io("create directory", e))?;
         let tmp = dir.join(format!("{FILE}.{}.tmp", crate::connection::new_id()));
         let written = (|| {
-            let mut file = File::create(&tmp).map_err(|e| io("write", e))?;
+            let mut file = private_file().write(true).create(true).truncate(true).open(&tmp).map_err(|e| io("write", e))?;
             file.write_all(&json).map_err(|e| io("write", e))?;
             file.sync_all().map_err(|e| io("sync", e))
         })();

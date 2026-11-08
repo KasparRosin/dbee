@@ -613,3 +613,34 @@ fn a_connections_file_past_the_cap_is_left_alone() {
     std::fs::write(dir.join(FILE), &bytes[1..]).unwrap();
     assert_eq!(ConnectionStore::load(Some(&dir)).1, None);
 }
+
+/// The connections file lists every saved server, so it, its lock and a damaged file moved aside
+/// are `0600` and their folder `0700`, whatever the umask; a folder and files from before are
+/// tightened at the next write.
+#[cfg(unix)]
+#[test]
+fn the_connections_file_and_its_folder_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &std::path::Path| format!("{:o}", std::fs::metadata(p).unwrap().permissions().mode() & 0o777);
+    let open_to_all = |p: &std::path::Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let th = dbee_testkit::temp_home(None, None);
+    let made = th.home.join("made");
+    let (mut s, _) = ConnectionStore::load(Some(&made));
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    assert_eq!((mode(&made), mode(&made.join(FILE)), mode(&made.join(LOCK_FILE))), ("700".into(), "600".into(), "600".into()), "made by dbee");
+    let older = th.home.join("older");
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(older.join(FILE), r#"{"version":1,"saved":[],"recent":[]}"#).unwrap();
+    std::fs::write(older.join(LOCK_FILE), "").unwrap();
+    open_to_all(&older, 0o755);
+    open_to_all(&older.join(FILE), 0o644);
+    open_to_all(&older.join(LOCK_FILE), 0o644);
+    let (mut s, _) = ConnectionStore::load(Some(&older));
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    assert_eq!((mode(&older), mode(&older.join(FILE)), mode(&older.join(LOCK_FILE))), ("700".into(), "600".into(), "600".into()), "made before");
+    std::fs::write(older.join(FILE), "{oops").unwrap();
+    open_to_all(&older.join(FILE), 0o644);
+    let (_, warning) = ConnectionStore::load(Some(&older));
+    assert!(warning.is_some_and(|w| w.contains(".bad")));
+    assert_eq!(mode(&older.join(format!("{FILE}.bad"))), "600", "moved aside");
+}
