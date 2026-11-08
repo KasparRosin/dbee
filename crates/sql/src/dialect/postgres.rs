@@ -51,14 +51,25 @@ pub(crate) const RULES: Rules = Rules {
     refuse,
 };
 
-/// `'value'`, but `E'…'` with each `\` doubled too when it holds one: an escape string reads the
-/// same whether `standard_conforming_strings` is on or off, which a function the session runs can
-/// change.
+/// `'value'`, but a dollar quote when it holds a backslash, whose tag occurs neither in the value
+/// nor across its end: no escape reaches the server then, so the value reads the same whatever
+/// `standard_conforming_strings`, `client_encoding` or `backslash_quote` say, which a function the
+/// session runs can change.
 pub(super) fn literal(value: &str) -> Result<String, SqlError> {
     if !value.contains('\\') {
         return quoted(value, '\'');
     }
-    Ok(format!("E{}", quoted(&value.replace('\\', r"\\"), '\'')?))
+    if value.contains('\0') {
+        return Err(SqlError::Nul);
+    }
+    let fits = |tag: &String| format!("{value}{tag}").find(tag.as_str()) == Some(value.len());
+    let tag = ["$v$".to_owned(), "$dbee$".to_owned()].into_iter().chain((1..=8).map(|n| format!("$v{n}$"))).find(fits).unwrap_or_else(|| {
+        // One digit more than the longest run of digits in the value: no `$v` and that many digits
+        // occur in it, and the tag's own `$` ends a run that reaches the value's end.
+        let run = value.split(|c: char| !c.is_ascii_digit()).map(str::len).max().unwrap_or(0);
+        format!("$v{}$", "1".repeat(run.saturating_add(1)))
+    });
+    Ok(format!("{tag}{value}{tag}"))
 }
 
 /// `CAST(<literal> AS type_sql)`. `type_sql` comes from the server's `format_type` (or is a

@@ -1,7 +1,8 @@
 //! What runs around each statement on a connection: the statements dbee does not send
 //! ([`Dialect::refusal`]), the check that `standard_conforming_strings` is still on before a
 //! statement whose `'…'` strings hold a backslash, and, on a connection dbee made read-only, the
-//! check after each statement that it still is.
+//! check after each statement that it still is. Before an Apply's statements, the check that
+//! `client_encoding` is still UTF8 ([`utf8`]).
 //!
 //! The read-only check reads both settings with `SHOW`, which takes no snapshot, so a transaction
 //! the user began can still set its isolation level after it. When the check cannot run (the
@@ -113,6 +114,22 @@ async fn restore(conn: &PgConnection, said: &str) -> DbError {
     }
     conn.mark_closed();
     DbError::Other(NOT_RESTORED.into())
+}
+
+const ENCODING_CHANGED: &str = "client_encoding was not UTF8 in this session (a function can change it), so the server would have read \
+                                these changes as other text. dbee set it back to UTF8 and wrote nothing; apply again.";
+
+/// Before an Apply's statements, with the lock held: the session's `client_encoding` is still
+/// UTF8, in which dbee writes every value; when a function changed it, it is set back, and the
+/// Apply writes nothing.
+pub(crate) async fn utf8(conn: &PgConnection) -> Result<(), DbError> {
+    let messages = conn.client().simple_query("SHOW client_encoding").await.map_err(|e| conn.error(&e))?;
+    if messages.iter().any(|m| matches!(m, SimpleQueryMessage::Row(row) if row.get(0) == Some("UTF8"))) {
+        return Ok(());
+    }
+    conn.client().batch_execute("SET client_encoding = 'UTF8'").await.map_err(|e| conn.error(&e))?;
+    log::info!("pg: client_encoding had changed; set it back to UTF8 before an apply");
+    Err(DbError::Other(ENCODING_CHANGED.into()))
 }
 
 /// The session still has `standard_conforming_strings` on.

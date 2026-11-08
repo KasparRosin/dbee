@@ -5,8 +5,8 @@ use dbee_driver::{ApplyError, ApplyGate, ApplySession, DbError, Limits};
 use dbee_sql::Dialect;
 use tokio::sync::MutexGuard;
 
-use crate::PgConnection;
 use crate::query::run_locked;
+use crate::{PgConnection, guard};
 
 /// The connection with its lock held, for one apply. Marking it lost refuses every later
 /// operation with `ConnectionLost`; the socket and the server-side transaction stay open until
@@ -28,8 +28,11 @@ impl ApplySession for Locked<'_> {
     }
 }
 
+/// The connection for one apply, its lock taken and its `client_encoding` UTF8 ([`guard::utf8`]).
 async fn locked(conn: &PgConnection) -> Result<Locked<'_>, DbError> {
-    Ok(Locked { conn, _guard: conn.lock().await? })
+    let guard = conn.lock().await?;
+    guard::utf8(conn).await?;
+    Ok(Locked { conn, _guard: guard })
 }
 
 const NO_ROWS: Limits = Limits { max_rows: 0, max_bytes: 0 };

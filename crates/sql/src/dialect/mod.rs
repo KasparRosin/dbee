@@ -681,18 +681,22 @@ mod tests {
         assert_eq!(Dialect::Sqlite.literal(r"a\b").unwrap(), r"'a\b'");
     }
 
-    /// A Postgres value with a backslash is an escape string, which reads the same whatever
-    /// `standard_conforming_strings` says; one without stays plain.
+    /// A Postgres value with a backslash is a dollar quote, whose tag the value cannot end early,
+    /// so no escape reaches the server; one without stays plain.
     #[test]
-    fn postgres_values_with_a_backslash_are_escape_strings() {
+    fn postgres_values_with_a_backslash_are_dollar_quoted() {
         let pg = Dialect::Postgres;
-        assert_eq!(pg.literal(r"\'").unwrap(), r"E'\\'''");
-        assert_eq!(pg.literal(r"a\b").unwrap(), r"E'a\\b'");
-        assert_eq!(pg.literal(r"\' AS text); COMMIT; --").unwrap(), r"E'\\'' AS text); COMMIT; --'");
+        assert_eq!(pg.literal(r"\'").unwrap(), r"$v$\'$v$");
+        assert_eq!(pg.literal(r"a\b").unwrap(), r"$v$a\b$v$");
+        assert_eq!(pg.literal(r"\' AS text); COMMIT; --").unwrap(), r"$v$\' AS text); COMMIT; --$v$");
+        assert_eq!(pg.literal(r"x\$v").unwrap(), r"$dbee$x\$v$dbee$");
+        assert_eq!(pg.literal(r"\$v$$dbee$").unwrap(), r"$v1$\$v$$dbee$$v1$");
+        let every = format!(r"\$v$$dbee${}", (1..=8).map(|n| format!("$v{n}$")).collect::<String>());
+        assert_eq!(pg.literal(&every).unwrap(), format!("$v11${every}$v11$"), "the tag past every one tried");
         assert_eq!(pg.literal("it's").unwrap(), "'it''s'");
         let v = of_class("v", "text", "text", TypeClass::Text);
         for out in [pg.value(&v, r"\'"), pg.key_value(&v, r"\'"), pg.filter_value(&v, r"\'")] {
-            assert_eq!(out.unwrap(), r"CAST(E'\\''' AS text)");
+            assert_eq!(out.unwrap(), r"CAST($v$\'$v$ AS text)");
         }
         assert_eq!(pg.literal("a\\\0"), Err(SqlError::Nul));
     }
@@ -795,15 +799,17 @@ mod tests {
         assert_eq!(serde_json::from_value::<Dialect>(serde_json::json!("Sqlite")).unwrap(), Dialect::Sqlite);
     }
 
-    /// `s` is one literal: it opens and closes with `'` and every inner `'` is doubled; in an
-    /// escape string (`E'…'`) every `\` is doubled too.
+    /// `s` is one literal: it opens and closes with `'` and every inner `'` is doubled, or it is a
+    /// dollar quote whose tag first occurs again at its end.
     fn is_one_literal(s: &str) -> bool {
         if let Some(hex) = s.strip_prefix("_utf8mb4 X'").and_then(|s| s.strip_suffix('\'')) {
             return hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b));
         }
-        if let Some(inner) = s.strip_prefix("E'").and_then(|s| s.strip_suffix('\'')) {
-            let plain = inner.replace(r"\\", "");
-            return !plain.contains('\\') && plain.replace("''", "").find('\'').is_none();
+        if let Some(rest) = s.strip_prefix('$') {
+            // A dollar quote: the tag, the value, and the tag again, first found at the end.
+            let Some(end) = rest.find('$') else { return false };
+            let tag = &s[..end + 2];
+            return s.len() >= 2 * tag.len() && s.ends_with(tag) && s[tag.len()..].find(tag) == Some(s.len() - 2 * tag.len());
         }
         let Some(inner) = s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) else { return false };
         inner.replace("''", "").find('\'').is_none()
@@ -823,7 +829,7 @@ mod tests {
             assert_eq!(Dialect::MySql.value(&col, text).unwrap(), lit);
             assert_eq!(Dialect::MySql.key_value(&col, text).unwrap(), lit);
             assert_eq!(Dialect::MySql.filter_value(&col, text).unwrap(), lit);
-            assert_eq!(Dialect::Postgres.literal(text).unwrap().replace("''", "'"), format!("E'{}'", text.replace('\\', r"\\")));
+            assert_eq!(Dialect::Postgres.literal(text).unwrap(), format!("$v${text}$v$"));
         }
         assert_eq!(Dialect::MySql.literal("it's").unwrap(), "'it''s'");
         assert_eq!(Dialect::MySql.literal("").unwrap(), "''");

@@ -1325,3 +1325,56 @@ fn an_edit_after_a_view_turned_standard_conforming_strings_off_writes_only_its_r
         assert_eq!(q(&t, &format!("SELECT to_regclass('scratch.{hidden}') IS NULL")), "t", "{}: nothing hidden in the key ran", t.name());
     }
 }
+
+/// A view whose function changes `client_encoding` (to SJIS, where the byte after a lead byte such
+/// as the end of `Á` is part of its character, and with `backslash_quote` on too) does not change
+/// what dbee's edits mean: a value with a backslash reaches the server with none in it, so nothing
+/// hidden in a key runs; and Apply, which checks `client_encoding` first, sets it back to UTF8,
+/// writes nothing and asks to apply again, since the server would read the values as other text.
+#[test]
+fn an_edit_after_a_view_changed_client_encoding_writes_nothing_hidden() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| t.kind().id() == "postgres") {
+        for settings in [
+            "PERFORM set_config('client_encoding', 'SJIS', false);",
+            "PERFORM set_config('client_encoding', 'SJIS', false); PERFORM set_config('backslash_quote', 'on', false);",
+        ] {
+            let u = unique("t_enc");
+            let (func, view, table, hidden) = (format!("{u}_f"), format!("{u}_v"), format!("{u}_t"), format!("{u}_hidden"));
+            let _drop = Scratch(
+                &t,
+                vec![
+                    format!("VIEW IF EXISTS scratch.{view}"),
+                    format!("FUNCTION IF EXISTS scratch.{func}()"),
+                    format!("TABLE IF EXISTS scratch.{table}"),
+                    format!("TABLE IF EXISTS scratch.{hidden}"),
+                ],
+            );
+            q(&t, &format!("CREATE FUNCTION scratch.{func}() RETURNS int LANGUAGE plpgsql AS $$ BEGIN {settings} RETURN 1; END $$"));
+            q(&t, &format!("CREATE VIEW scratch.{view} AS SELECT scratch.{func}() AS x"));
+            q(&t, &format!("CREATE TABLE scratch.{table} (k text PRIMARY KEY, v text)"));
+            let key = format!("\u{c1}\\' AS text); COMMIT; CREATE TABLE scratch.{hidden} (x int); --");
+            q(&t, &format!("INSERT INTO scratch.{table} VALUES ('{}', 'a')", key.replace('\'', "''")));
+            let mut s = connected_to(&t);
+            open_table(&mut s, "scratch", &table);
+            let first = s.inspect()["active"].clone();
+            run(&mut s, "table.open", json!({ "schema": "scratch", "table": view }));
+            run(&mut s, "tab.activate", json!({ "tab": first }));
+            set_cell(&mut s, 0, "v", "c");
+            let e = s.run_blocking("edit.apply", json!({}), T).expect_err("refused");
+            assert!(e.to_string().contains("client_encoding") && e.to_string().contains("apply again"), "{}: {settings}: {e}", t.name());
+            assert_eq!(q(&t, &format!("SELECT v FROM scratch.{table}")), "a", "{}: {settings}: nothing written", t.name());
+            assert_eq!(q(&t, &format!("SELECT to_regclass('scratch.{hidden}') IS NULL")), "t", "{}: {settings}: nothing hidden ran", t.name());
+            // dbee set it back to UTF8: the same edit, applied again, writes its row as it is.
+            apply(&mut s);
+            assert_eq!(q(&t, &format!("SELECT v FROM scratch.{table}")), "c", "{}: {settings}", t.name());
+            assert_eq!(
+                q(&t, &format!("SELECT k = '{}' FROM scratch.{table}", key.replace('\'', "''"))),
+                "t",
+                "{}: {settings}: the key kept",
+                t.name()
+            );
+            assert_eq!(q(&t, &format!("SELECT to_regclass('scratch.{hidden}') IS NULL")), "t", "{}: {settings}", t.name());
+        }
+    }
+}
