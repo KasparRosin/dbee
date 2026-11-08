@@ -27,7 +27,9 @@
 //! An isolated run's allowed targets ([`crate::allowed`]) are checked by test, the database list,
 //! open and reconnect before anything touches the network. Its allowed folders go to the driver
 //! (`dbee_driver::Target::allowed_dirs`): a file driver checks its file inside the open, so the
-//! refusal is the job's error (`config`), and keeps the connection's SQL from other files.
+//! refusal is the job's error (`config`), and keeps the connection's SQL from other files. The
+//! job checks an SSH key file and a CA file the same way before it opens anything
+//! ([`allowed::check_files`]).
 //!
 //! Connections open through the session's driver for the config's database type
 //! ([`SessionOptions::drivers`](crate::SessionOptions::drivers)); test, the database list, open
@@ -606,9 +608,10 @@ fn connect_error(e: DbError, creds: &Credentials) -> EngineError {
     }
 }
 
-/// Opens the tunnel (when the config has one and its type takes one) and a connection through it
-/// with `driver`, which checks a file against `allowed_dirs` (an isolated run's folders) and makes
-/// a missing one only with `create_file`.
+/// Checks the config's key and CA files against `allowed_dirs` (an isolated run's folders), then
+/// opens the tunnel (when the config has one and its type takes one) and a connection through it
+/// with `driver`, which checks a file against the same folders and makes a missing one only with
+/// `create_file`.
 async fn open_connection(
     driver: &dyn Driver,
     config: &ConnectionConfig,
@@ -617,6 +620,7 @@ async fn open_connection(
     env: &SshEnv,
     creds: &Credentials,
 ) -> Result<Opened, EngineError> {
+    allowed::check_files(allowed_dirs, config).map_err(|e| db_error(&e))?;
     let tunnel = open_tunnel(config, env, creds).await?;
     let target = Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file, allowed_dirs };
     match driver.connect(target).await {
@@ -641,6 +645,7 @@ async fn list_on(
     env: &SshEnv,
     creds: &Credentials,
 ) -> Result<(Vec<String>, Option<String>), EngineError> {
+    allowed::check_files(allowed_dirs, config).map_err(|e| db_error(&e))?;
     let tunnel = open_tunnel(config, env, creds).await?;
     let target =
         Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file: false, allowed_dirs };
