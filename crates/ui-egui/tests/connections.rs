@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::*;
-use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SshConfig, SslMode};
+use dbee_config::{ConnectionConfig, DbKind, SecretKind, SecretStore, Settings, SshAuth, SshConfig, SslMode, StoredSecret};
 use dbee_driver::Drivers;
 use dbee_testkit::{TempHome, TestDb, temp_home};
 use serde_json::{Value as Json, json};
@@ -37,6 +37,14 @@ fn ui() -> Ui {
 }
 
 /// A 1200 × 900 window on `home`, with a memory secret store or none, showing the engine cards.
+/// The secret the store keeps as `kind` of `id`, without the settings kept with it.
+fn stored(ui: &Ui, id: &str, kind: SecretKind) -> Option<String> {
+    match StoredSecret::parse(&ui.secrets.as_ref().unwrap().get(id, kind).unwrap()?) {
+        StoredSecret::For { secret, .. } => Some(secret),
+        other => panic!("not in the store's own form: {other:?}"),
+    }
+}
+
 fn ui_in(home: TempHome, with_secrets: bool) -> Ui {
     Ui::window(Setup { size: egui::vec2(1200.0, 900.0), home: Some(home), secrets: with_secrets, ..Setup::default() })
 }
@@ -690,8 +698,7 @@ fn passphrase_dialog_saves_in_the_keyring() {
     assert!(!i.to_string().contains(&db.keys.passphrase), "{i}");
     ui.click("dialog-ok");
     ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
-    let store = ui.secrets.clone().unwrap();
-    assert_eq!(store.get(&id, SecretKind::SshPassphrase).unwrap().as_deref(), Some(db.keys.passphrase.as_str()));
+    assert_eq!(stored(&ui, &id, SecretKind::SshPassphrase).as_deref(), Some(db.keys.passphrase.as_str()));
     let journal = ui.ok("engine.journal", json!({}));
     assert!(!journal.to_string().contains(&db.keys.passphrase), "{journal}");
 }
@@ -987,7 +994,7 @@ fn typed_password_stays_out_of_inspect_and_journal() {
     ui.text("pw test");
     ui.click("conn-save");
     let id = ui.saved_id("pw test");
-    assert_eq!(ui.secrets.clone().unwrap().get(&id, SecretKind::DbPassword).unwrap().as_deref(), Some("typed-secret-1"));
+    assert_eq!(stored(&ui, &id, SecretKind::DbPassword).as_deref(), Some("typed-secret-1"));
     let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
     assert!(!everything.contains("typed-secret-1"), "{everything}");
     let file = std::fs::read_to_string(ui.home.home.join("config").join("connections.json")).unwrap();

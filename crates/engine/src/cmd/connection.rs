@@ -5,24 +5,30 @@
 //! Secrets (the database password, the SSH password and the key passphrase) come from the
 //! params first (`password`, `sshPassword`, `sshPassphrase`; an empty string counts as not
 //! given), then the secret store, then nowhere. The store keeps secrets only for saved
-//! connections, under their id, and a stored secret is used only where it was saved for
-//! ([`reuse`]):
-//! - the database password: the same host, port and user, the same tunnel (no tunnel on either
-//!   side, or the same SSH host and port), and a TLS mode at least as strong as the saved one
-//!   (disable < prefer < require < verify-ca < verify-full);
+//! connections, under their id, each with the settings it was saved for ([`SavedFor`]). What the
+//! store says decides where a secret may go, at the read in the job ([`read_secret`], [`reuse`]),
+//! never the connections file or a window's copy of it, so a stale window, an edited file or a
+//! move while a save writes never send it elsewhere:
+//! - the database password: the same database type, host, port, user and database, the same
+//!   tunnel (no tunnel on either side, or the same SSH host and port), TLS at least as strong as
+//!   the saved one (disable < prefer < require < verify-ca < verify-full, with `require` and a CA
+//!   file as `verify-ca`) and the same CA file where either side checks with one;
 //! - the SSH password: the same SSH host, port and user;
 //! - the key passphrase: the same SSH host, port and user, and the same key file.
 //!
+//! A secret stored by an older build says nothing: the saved connection decides this once, as it
+//! did then, and the secret is stored again with those settings.
+//!
 //! So an edited form or an agent that sends a saved id with another server never gets the saved
 //! secrets, and saving new settings forgets the stored secrets they no longer apply to (unless
-//! the save gives them again). Secrets are
+//! the save gives them again) and saves the others for the new settings. Secrets are
 //! kept only in the store and in the crate-private [`Connected::credentials`] (for reconnects),
 //! never in the config, the connections file, `inspect()`, `Debug`, logs, errors or the journal
 //! (the journal drops secret params by key, and `connection.parseUrl`, whose URL may carry a
 //! password, is not journaled; nor are `connection.test` and `connection.listDatabases`). Store
 //! reads run in the job, so a slow keyring never holds up the UI thread; writes
-//! (`connection.save`, `savePassword`) run on the caller's thread with the saved-connection
-//! change they belong to.
+//! (`connection.save`, `savePassword`) and what a save or a copy reads for them run on the caller's
+//! thread with the saved-connection change they belong to.
 //!
 //! An isolated run's allowed targets ([`crate::allowed`]) are checked by test, the database list,
 //! open and reconnect before anything touches the network. Its allowed folders go to the driver
@@ -54,9 +60,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dbee_config::{ConfigError, ConnectionConfig, ConnectionStore, DbKind, SecretKind, SecretStore, Settings, SshAuth, SslMode, new_id, parse_url};
+use dbee_config::{
+    ConfigError, ConnectionConfig, ConnectionStore, DbKind, SavedFor, SecretKind, SecretStore, Settings, SshAuth, SslMode, StoredSecret, new_id,
+    parse_url,
+};
 use dbee_core::Catalog;
-use dbee_driver::{Cancel, Connection, DbError, DbFuture, Driver, Drivers, Purpose, Target};
+use dbee_driver::{Cancel, Connection, DbError, DbFuture, Driver, Drivers, Purpose, Target, tls};
 use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
@@ -320,44 +329,92 @@ fn given(params: &Json) -> Result<Credentials, EngineError> {
 
 const SECRET_KINDS: [SecretKind; 3] = [SecretKind::DbPassword, SecretKind::SshPassword, SecretKind::SshPassphrase];
 
-/// A secret from the store; a failing store counts as none (the user is then asked).
-fn read_secret(store: &dyn SecretStore, id: &str, kind: SecretKind) -> Option<String> {
-    match store.get(id, kind) {
-        Ok(v) => v.filter(|v| !v.is_empty()),
+/// The secret stored as `kind` of `config.id`, if `config` may use it: what the store says it was
+/// saved for decides ([`reuse`]), at this read, never the connections file or a window's copy of it.
+/// A failing store counts as none (the user is then asked).
+///
+/// An older build's secret says nothing, so `saved`, the saved connection, decides this once, and
+/// the secret is stored again for it.
+fn read_secret(store: &dyn SecretStore, config: &ConnectionConfig, saved: &SavedFor, kind: SecretKind) -> Option<String> {
+    let text = match store.get(&config.id, kind) {
+        Ok(text) => text?,
         Err(_) => {
             log::warn!("the secret store could not be read; going on without the saved secret");
-            None
+            return None;
         }
-    }
+    };
+    let secret = match StoredSecret::parse(&text) {
+        StoredSecret::For { secret, saved_for } => reuse(&saved_for, config).allows(kind).then_some(secret),
+        StoredSecret::Bare(secret) => reuse(saved, config).allows(kind).then(|| {
+            if !store_secret(store, &config.id, kind, &secret, saved) {
+                log::warn!("the secret store refused a change; the saved secret stays as an older build stored it");
+            }
+            secret
+        }),
+        StoredSecret::Unreadable => None,
+    };
+    secret.filter(|v| !v.is_empty())
 }
 
-/// Stores each secret `c` holds under `id`; `false` when the store refused one.
-fn store_secrets(store: &dyn SecretStore, id: &str, c: &Credentials) -> bool {
+/// Stores `secret` for `saved_for`; `false` when the store refused.
+fn store_secret(store: &dyn SecretStore, id: &str, kind: SecretKind, secret: &str, saved_for: &SavedFor) -> bool {
+    StoredSecret::text(secret, saved_for).and_then(|text| store.set(id, kind, &text)).is_ok()
+}
+
+/// Stores each secret `c` holds under `id`, for `saved_for`; `false` when the store refused one.
+fn store_secrets(store: &dyn SecretStore, id: &str, c: &Credentials, saved_for: &SavedFor) -> bool {
     let mut ok = true;
     for (kind, value) in
         [(SecretKind::DbPassword, &c.password), (SecretKind::SshPassword, &c.ssh.password), (SecretKind::SshPassphrase, &c.ssh.passphrase)]
     {
         if let Some(v) = value {
-            ok &= store.set(id, kind, v).is_ok();
+            ok &= store_secret(store, id, kind, v, saved_for);
         }
     }
     ok
 }
 
-/// Deletes each secret of `id` that `still` no longer allows and `given` does not hold again;
-/// `false` when the store refused.
-fn forget_stale_secrets(store: &dyn SecretStore, id: &str, still: Reuse, given: &Credentials) -> bool {
+/// What a save with the settings `now` does to the stored secrets `given` does not hold again: each
+/// that `now` may still use is saved for `now` from here on, and the others are deleted. `before`,
+/// the settings saved before, stands in for what an older build's secret says nothing about. With
+/// no setting changed, nothing is touched. `false` when the store refused.
+fn carry_secrets(store: &dyn SecretStore, config: &ConnectionConfig, now: &SavedFor, before: Option<&SavedFor>, given: &Credentials) -> bool {
+    if before == Some(now) {
+        return true;
+    }
     let mut ok = true;
-    for (kind, applies, again) in [
-        (SecretKind::DbPassword, still.db, given.password.is_some()),
-        (SecretKind::SshPassword, still.ssh_password, given.ssh.password.is_some()),
-        (SecretKind::SshPassphrase, still.passphrase, given.ssh.passphrase.is_some()),
+    for (kind, again) in [
+        (SecretKind::DbPassword, given.password.is_some()),
+        (SecretKind::SshPassword, given.ssh.password.is_some()),
+        (SecretKind::SshPassphrase, given.ssh.passphrase.is_some()),
     ] {
-        if !applies && !again {
-            ok &= store.delete(id, kind).is_ok();
+        if !again {
+            ok &= carry_secret(store, config, now, before, kind);
         }
     }
     ok
+}
+
+/// [`carry_secrets`] for one secret. A save names its database itself, so that is no reason to
+/// forget a password its server, login and link still allow.
+fn carry_secret(store: &dyn SecretStore, config: &ConnectionConfig, now: &SavedFor, before: Option<&SavedFor>, kind: SecretKind) -> bool {
+    let id = config.id.as_str();
+    let text = match store.get(id, kind) {
+        Ok(Some(text)) => text,
+        Ok(None) => return true,
+        Err(_) => return false,
+    };
+    let stored = StoredSecret::parse(&text);
+    let (secret, saved_for) = match &stored {
+        StoredSecret::For { secret, saved_for } => (secret.as_str(), Some(saved_for.as_ref())),
+        StoredSecret::Bare(secret) => (secret.as_str(), before),
+        StoredSecret::Unreadable => ("", None),
+    };
+    let applies = saved_for.is_some_and(|saved_for| reuse(&SavedFor { database: now.database.clone(), ..saved_for.clone() }, config).allows(kind));
+    if !applies {
+        return store.delete(id, kind).is_ok();
+    }
+    saved_for == Some(now) || store_secret(store, id, kind, secret, now)
 }
 
 /// Deletes every secret of `id`; `false` when the store refused.
@@ -383,39 +440,54 @@ struct Reuse {
     passphrase: bool,
 }
 
-/// How strong a TLS mode is: disable < prefer < require < verify-ca < verify-full.
-fn tls_strength(mode: SslMode) -> u8 {
+impl Reuse {
+    fn allows(self, kind: SecretKind) -> bool {
+        match kind {
+            SecretKind::DbPassword => self.db,
+            SecretKind::SshPassword => self.ssh_password,
+            SecretKind::SshPassphrase => self.passphrase,
+        }
+    }
+}
+
+/// How strong a TLS mode is with its CA file: disable < prefer < require < verify-ca < verify-full,
+/// where `require` with a CA file checks what `verify-ca` checks.
+fn tls_strength(mode: SslMode, ca_file: Option<&Path>) -> u8 {
     match mode {
         SslMode::Disable => 0,
         SslMode::Prefer => 1,
-        SslMode::Require => 2,
-        SslMode::VerifyCa => 3,
+        SslMode::Require if ca_file.is_none() => 2,
+        SslMode::Require | SslMode::VerifyCa => 3,
         SslMode::VerifyFull => 4,
     }
 }
 
-/// The stored secrets of `saved` that `given` may use: each only where it was saved for.
-/// - The database password: the same host, port and user; the same tunnel (no tunnel on either
-///   side, or the same SSH host and port, since behind a tunnel the database host is usually
-///   `localhost` of another machine); a TLS mode at least as strong as the saved one, and under
-///   `verify-ca` or `verify-full` the same CA file; and no option that protects it less
-///   ([`KindOption::weakens`](dbee_config::KindOption::weakens)) on where the saved settings had it off.
+/// The secrets saved for `saved` that `given` may use: each only where it was saved for.
+/// - The database password: the same database type, host, port, user and database; the same tunnel
+///   (no tunnel on either side, or the same SSH host and port, since behind a tunnel the database
+///   host is usually `localhost` of another machine); TLS at least as strong as the saved one
+///   ([`tls_strength`]), and the same CA file where either side checks the certificate with one; and
+///   no option that protects it less ([`KindOption::weakens`](dbee_config::KindOption::weakens)) on
+///   where the saved settings had it off.
 /// - The SSH password: the same SSH host, port and user.
 /// - The key passphrase: the same SSH host, port and user, and the same key file.
-fn reuse(saved: &ConnectionConfig, given: &ConnectionConfig) -> Reuse {
+fn reuse(saved: &SavedFor, given: &ConnectionConfig) -> Reuse {
     let same_tunnel = match (&saved.ssh, &given.ssh) {
         (None, None) => true,
         (Some(a), Some(b)) => a.host == b.host && a.port == b.port,
         _ => false,
     };
-    let verifies = matches!(given.ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull);
-    let weaker = given.kind.info().options.iter().any(|o| o.weakens && given.option_on(o.id) && !saved.option_on(o.id));
-    let db = saved.host == given.host
+    let (saved_ca, given_ca) = (saved.ca_file.as_deref(), given.ca_file.as_deref());
+    let checks = tls::checks(saved.ssl_mode, saved_ca) || tls::checks(given.ssl_mode, given_ca);
+    let weaker = given.kind.info().options.iter().any(|o| o.weakens && given.option_on(o.id) && !saved.weakening.iter().any(|on| on == o.id));
+    let db = saved.kind == given.kind
+        && saved.host == given.host
         && saved.port == given.port
         && saved.user == given.user
+        && saved.database == given.database
         && same_tunnel
-        && tls_strength(given.ssl_mode) >= tls_strength(saved.ssl_mode)
-        && (!verifies || given.ca_file == saved.ca_file)
+        && tls_strength(given.ssl_mode, given_ca) >= tls_strength(saved.ssl_mode, saved_ca)
+        && (!checks || given_ca == saved_ca)
         && !weaker;
     let (ssh_password, passphrase) = match (&saved.ssh, &given.ssh) {
         (Some(a), Some(b)) if a.host == b.host && a.port == b.port && a.user == b.user => {
@@ -427,31 +499,29 @@ fn reuse(saved: &ConnectionConfig, given: &ConnectionConfig) -> Reuse {
     Reuse { db, ssh_password, passphrase }
 }
 
-/// What `config` may use of the stored secrets: those of the saved connection with its id, as
-/// [`reuse`] allows; nothing when no saved connection has that id.
-fn stored_reuse(s: &Session, config: &ConnectionConfig) -> Reuse {
-    s.state.store.saved.iter().find(|c| c.id == config.id).map_or(Reuse::default(), |saved| reuse(saved, config))
+/// The settings of the saved connection with `config`'s id, for [`fill_from_store`]; `None` when no
+/// saved connection has that id.
+fn saved_settings(s: &Session, config: &ConnectionConfig) -> Option<SavedFor> {
+    s.state.store.saved.iter().find(|c| c.id == config.id).map(SavedFor::of)
 }
 
-/// `c` with what it lacks filled from the store under `id`: params first, then the store, then
-/// none. Only what `allowed` permits and the config's login can use is read.
-async fn fill_from_store(mut c: Credentials, store: Option<Arc<dyn SecretStore>>, config: &ConnectionConfig, allowed: Reuse) -> Credentials {
-    let Some(store) = store else { return c };
-    if config.id.is_empty() {
-        return c;
-    }
-    let want_db = c.password.is_none() && allowed.db;
+/// `c` with what it lacks filled from the store under `config.id`: params first, then the store,
+/// then none. Only what the config's login can use is read, and only for a saved connection
+/// (`saved`, its settings). [`read_secret`] decides whether each may be used.
+async fn fill_from_store(mut c: Credentials, store: Option<Arc<dyn SecretStore>>, config: &ConnectionConfig, saved: Option<SavedFor>) -> Credentials {
+    let (Some(store), Some(saved)) = (store, saved) else { return c };
+    let want_db = c.password.is_none();
     let (want_ssh_password, want_passphrase) = match config.ssh.as_ref().map(|ssh| &ssh.auth) {
-        Some(SshAuth::Password) => (c.ssh.password.is_none() && allowed.ssh_password, false),
-        Some(SshAuth::Key { .. }) => (false, c.ssh.passphrase.is_none() && allowed.passphrase),
+        Some(SshAuth::Password) => (c.ssh.password.is_none(), false),
+        Some(SshAuth::Key { .. }) => (false, c.ssh.passphrase.is_none()),
         Some(SshAuth::Agent) | None => (false, false),
     };
     if !(want_db || want_ssh_password || want_passphrase) {
         return c;
     }
-    let id = config.id.clone();
+    let config = config.clone();
     let reading = tokio::task::spawn_blocking(move || {
-        let get = |want: bool, kind| if want { read_secret(store.as_ref(), &id, kind) } else { None };
+        let get = |want: bool, kind| if want { read_secret(store.as_ref(), &config, &saved, kind) } else { None };
         (get(want_db, SecretKind::DbPassword), get(want_ssh_password, SecretKind::SshPassword), get(want_passphrase, SecretKind::SshPassphrase))
     });
     match reading.await {
@@ -807,8 +877,8 @@ fn list(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 
 /// `{config, password?, sshPassword?, sshPassphrase?}` → `{id}`: adds or replaces the saved
 /// connection with the config's id (a new id when it is empty) and writes the file. With
-/// `saveSecrets` and a secret store, the given secrets are stored, and of the ones not given
-/// those the new settings still allow ([`reuse`] against the settings saved before) are kept
+/// `saveSecrets` and a secret store, the given secrets are stored for the new settings, and of the
+/// ones not given those the new settings still allow ([`carry_secrets`]) are saved for them too
 /// while the others are forgotten; without `saveSecrets`, every stored one is forgotten.
 fn save(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = connect_config(params)?.ok_or_else(|| bad("`config` is required (a connection object)"))?;
@@ -831,9 +901,10 @@ fn save_with_secrets(s: &mut Session, mut config: ConnectionConfig, secrets: &Cr
     .map_err(|e| EngineError::Config(e.to_string()))?;
     if let Some(secret_store) = s.secrets.clone() {
         let ok = if config.save_secrets {
-            let still = before.as_ref().map_or(Reuse::default(), |b| reuse(b, &config));
-            let forgot = forget_stale_secrets(secret_store.as_ref(), &config.id, still, secrets);
-            store_secrets(secret_store.as_ref(), &config.id, secrets) && forgot
+            let now = SavedFor::of(&config);
+            let before = before.as_ref().map(SavedFor::of);
+            let carried = carry_secrets(secret_store.as_ref(), &config, &now, before.as_ref(), secrets);
+            store_secrets(secret_store.as_ref(), &config.id, secrets, &now) && carried
         } else {
             forget_secrets(secret_store.as_ref(), &config.id)
         };
@@ -864,7 +935,7 @@ fn delete(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 }
 
 /// `{id}` → `{id}`: a saved copy named `<name> (copy)`, with a new id and copies of the stored
-/// secrets.
+/// secrets, each with the settings it was saved for.
 fn duplicate(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let id = p::str(params, "id")?;
     let original = s.state.store.get(id).cloned().ok_or_else(|| bad("no saved or recent connection has this `id`"))?;
@@ -944,10 +1015,10 @@ fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let allowed_dirs = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let creds = given(params)?;
-    let allowed = stored_reuse(s, &config);
+    let saved = saved_settings(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(TEST, async move {
-        let creds = fill_from_store(creds, store, &config, allowed).await;
+        let creds = fill_from_store(creds, store, &config, saved).await;
         let result = match open_connection(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, &creds).await {
             Ok(opened) => {
                 let info = opened.conn.info();
@@ -983,10 +1054,10 @@ fn list_databases(s: &mut Session, params: &Json) -> Result<Outcome, EngineError
     let allowed_dirs = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let creds = given(params)?;
-    let allowed = stored_reuse(s, &config);
+    let saved = saved_settings(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(LIST_DATABASES, async move {
-        let creds = fill_from_store(creds, store, &config, allowed).await;
+        let creds = fill_from_store(creds, store, &config, saved).await;
         let result = list_on(driver.as_ref(), &config, allowed_dirs.as_deref(), &env, &creds).await;
         let apply: Apply = Box::new(move |s: &mut Session| {
             let (databases, unsaved) = result?;
@@ -1032,10 +1103,10 @@ fn start_open(s: &mut Session, mut config: ConnectionConfig, create_file: bool, 
     if config.id.is_empty() {
         config.id = new_id();
     }
-    let allowed = stored_reuse(s, &config);
+    let saved = saved_settings(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(OPEN, async move {
-        let creds = fill_from_store(typed.clone(), store, &config, allowed).await;
+        let creds = fill_from_store(typed.clone(), store, &config, saved).await;
         let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, &creds).await;
         let typed = keep.then_some(typed);
         let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds, result, typed));
@@ -1236,7 +1307,8 @@ fn apply_open(
 
 /// `savePassword` after a successful open: keeps `typed` for the saved connection `config.id`
 /// when its settings match the saved ones, turning the saved `saveSecrets` on first (and
-/// `config`'s, for the recent list and the session). `Err` says why nothing was kept.
+/// `config`'s, for the recent list and the session). It is stored with the settings the file held
+/// at that check. `Err` says why nothing was kept.
 fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credentials) -> Result<(), String> {
     let Some(secret_store) = s.secrets.clone() else { return Err("there is no secret store, so dbee asks each time".into()) };
     if !s.state.store.is_saved(&config.id) {
@@ -1248,7 +1320,8 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
         let Some(saved) = store.saved.iter_mut().find(|c| c.id == given.id) else {
             return Err("the connection is not saved any more; save it to keep its secrets");
         };
-        let r = reuse(saved, &given);
+        let saved_for = SavedFor::of(saved);
+        let r = reuse(&saved_for, &given);
         if (typed.password.is_some() && !r.db)
             || (typed.ssh.password.is_some() && !r.ssh_password)
             || (typed.ssh.passphrase.is_some() && !r.passphrase)
@@ -1256,15 +1329,15 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
             return Err("the settings differ from the saved connection; save them to keep the secrets");
         }
         saved.save_secrets = true;
-        Ok(())
+        Ok(saved_for)
     })
     .map_err(|e| match e {
         ConfigError::Locked => "another dbee window was changing the connections file".to_owned(),
         e => format!("the connections file could not be written: {e}"),
     })?;
-    kept?;
+    let saved_for = kept?;
     config.save_secrets = true;
-    if !store_secrets(secret_store.as_ref(), &config.id, typed) {
+    if !store_secrets(secret_store.as_ref(), &config.id, typed, &saved_for) {
         secret_store_failed(s, "save the password");
         return Err("the secret store refused them".into());
     }
@@ -1295,10 +1368,10 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let allowed_dirs = may_reach(s, &config)?;
     let old = Arc::clone(&c.browse);
     let driver = driver_for(&s.drivers, config.kind)?;
-    let allowed = stored_reuse(s, &config);
+    let saved = saved_settings(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
     let job = s.spawn_job(RECONNECT, async move {
-        let creds = fill_from_store(creds, store, &config, allowed).await;
+        let creds = fill_from_store(creds, store, &config, saved).await;
         let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), false, &env, &creds).await;
         let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, id, &old, creds, result));
         apply
@@ -1465,6 +1538,11 @@ mod tests {
 
     use super::*;
 
+    /// [`super::reuse`] for a secret saved for the settings of `saved`.
+    fn reuse(saved: &ConnectionConfig, given: &ConnectionConfig) -> Reuse {
+        super::reuse(&SavedFor::of(saved), given)
+    }
+
     fn saved() -> ConnectionConfig {
         ConnectionConfig {
             id: "a".into(),
@@ -1496,10 +1574,11 @@ mod tests {
         let all = Reuse { db: true, ssh_password: true, passphrase: true };
         let nothing = Reuse::default();
         assert_eq!(reuse(&saved(), &saved()), all);
-        // The database name and the display settings do not matter.
-        assert_eq!(reuse(&saved(), &ConnectionConfig { database: "other".into(), name: "x".into(), ..saved() }), all);
-        // Another database host, port or user: no database password; the tunnel is the same.
+        // The display settings do not matter.
+        assert_eq!(reuse(&saved(), &ConnectionConfig { name: "x".into(), color: dbee_config::ConnectionColor::Red, ..saved() }), all);
+        // Another database host, port, user or database: no database password; the tunnel is the same.
         let ssh_only = Reuse { db: false, ssh_password: true, passphrase: true };
+        assert_eq!(reuse(&saved(), &ConnectionConfig { database: "other".into(), ..saved() }), ssh_only);
         assert_eq!(reuse(&saved(), &ConnectionConfig { host: "evil.example".into(), ..saved() }), ssh_only);
         assert_eq!(reuse(&saved(), &ConnectionConfig { port: 1, ..saved() }), ssh_only);
         assert_eq!(reuse(&saved(), &ConnectionConfig { user: "bob".into(), ..saved() }), ssh_only);
@@ -1539,10 +1618,34 @@ mod tests {
             assert!(reuse(&with(Require, Some("/ca/ours.pem")), &with(mode, Some("/ca/ours.pem"))).db, "{mode:?}");
             assert!(!reuse(&with(Require, None), &with(mode, Some("/ca/theirs.pem"))).db, "{mode:?}");
         }
-        // Without verifying, the CA file is not read, so it does not count.
-        for mode in [Prefer, Require] {
-            assert!(reuse(&with(mode, Some("/ca/ours.pem")), &with(mode, Some("/ca/theirs.pem"))).db, "{mode:?}");
+        // `require` with a CA file checks the certificate as `verify-ca` does: the same CA file, or
+        // nothing. Without one it checks nothing, so a CA file there is a change too.
+        let ours = with(Require, Some("/ca/ours.pem"));
+        for other in [Some("/ca/theirs.pem"), None] {
+            assert!(!reuse(&ours, &with(Require, other)).db, "another CA file ({other:?}) under require");
         }
+        assert!(reuse(&ours, &ours).db);
+        assert!(
+            reuse(&ours, &with(VerifyCa, Some("/ca/ours.pem"))).db && reuse(&with(VerifyCa, Some("/ca/ours.pem")), &ours).db,
+            "they check the same"
+        );
+        assert!(!reuse(&ours, &with(Prefer, Some("/ca/ours.pem"))).db, "prefer reads no CA file");
+        assert!(!reuse(&with(Require, None), &with(Require, Some("/ca/theirs.pem"))).db);
+        // `prefer` reads no CA file, so it does not count.
+        assert!(reuse(&with(Prefer, Some("/ca/ours.pem")), &with(Prefer, Some("/ca/theirs.pem"))).db);
+        assert!(reuse(&with(Prefer, None), &with(Prefer, Some("/ca/theirs.pem"))).db);
+    }
+
+    #[test]
+    fn stored_password_needs_the_same_database_type() {
+        let on = |kind| ConnectionConfig { kind, ..saved() };
+        for kind in [DbKind::MySql, DbKind::MariaDb] {
+            let r = reuse(&on(DbKind::Postgres), &on(kind));
+            assert!(!r.db, "saved for Postgres, given {kind:?}");
+            assert!(r.ssh_password && r.passphrase, "the database type does not concern the tunnel");
+        }
+        assert!(!reuse(&on(DbKind::MySql), &on(DbKind::MariaDb)).db);
+        assert!(reuse(&on(DbKind::MySql), &on(DbKind::MySql)).db);
     }
 
     #[test]
@@ -1580,6 +1683,87 @@ mod tests {
                 assert!(r.ssh_password && r.passphrase, "TLS does not concern the tunnel: saved {was:?}, given {now:?}");
             }
         }
+    }
+
+    /// The tunnel's secrets go by what the store says as the database password does; the integration
+    /// tests can't reach this without an SSH server.
+    #[test]
+    fn stored_ssh_secrets_go_by_the_settings_kept_with_them() {
+        let store = dbee_config::MemoryStore::default();
+        let elsewhere = with_ssh(|s| s.host = "evil".into());
+        let other_user = with_ssh(|s| s.user = "bob".into());
+        let other_key = with_ssh(|s| s.auth = SshAuth::Key { path: Some("/k/other".into()) });
+        let saved_for = SavedFor::of(&saved());
+        // The file's settings, here the session's copy, don't decide.
+        let file_says = SavedFor::of(&elsewhere);
+        store_secret(&store, "a", SecretKind::SshPassword, "ssh", &saved_for);
+        store_secret(&store, "a", SecretKind::SshPassphrase, "phrase", &saved_for);
+        let read = |given: &ConnectionConfig, kind| read_secret(&store, given, &file_says, kind);
+        assert_eq!(read(&saved(), SecretKind::SshPassword).as_deref(), Some("ssh"));
+        assert_eq!(read(&saved(), SecretKind::SshPassphrase).as_deref(), Some("phrase"));
+        assert_eq!(read(&elsewhere, SecretKind::SshPassword), None);
+        assert_eq!(read(&elsewhere, SecretKind::SshPassphrase), None);
+        assert_eq!(read(&other_user, SecretKind::SshPassword), None);
+        assert_eq!(read(&other_user, SecretKind::SshPassphrase), None);
+        assert_eq!(read(&other_key, SecretKind::SshPassword).as_deref(), Some("ssh"));
+        assert_eq!(read(&other_key, SecretKind::SshPassphrase), None);
+    }
+
+    #[test]
+    fn an_older_builds_ssh_secrets_are_stored_again_with_their_settings() {
+        let saved_for = SavedFor::of(&saved());
+        for kind in [SecretKind::SshPassword, SecretKind::SshPassphrase] {
+            let store = dbee_config::MemoryStore::default();
+            store.set("a", kind, "older").unwrap();
+            assert_eq!(read_secret(&store, &with_ssh(|s| s.host = "evil".into()), &saved_for, kind), None, "{kind:?}");
+            assert_eq!(store.get("a", kind).unwrap().as_deref(), Some("older"), "{kind:?}: not used, so as it was");
+            assert_eq!(read_secret(&store, &saved(), &saved_for, kind).as_deref(), Some("older"), "{kind:?}");
+            let text = store.get("a", kind).unwrap().unwrap();
+            assert_eq!(StoredSecret::parse(&text), StoredSecret::For { secret: "older".into(), saved_for: Box::new(saved_for.clone()) }, "{kind:?}");
+        }
+    }
+
+    /// A save goes by what each secret says, and moves it to the new settings.
+    #[test]
+    fn a_save_carries_each_secret_by_the_settings_kept_with_it() {
+        let store = dbee_config::MemoryStore::default();
+        let was = SavedFor::of(&saved());
+        store_secret(&store, "a", SecretKind::DbPassword, "db", &was);
+        store_secret(&store, "a", SecretKind::SshPassword, "ssh", &was);
+        store_secret(&store, "a", SecretKind::SshPassphrase, "phrase", &was);
+        let nothing = Credentials::default();
+        let stored = |kind| store.get("a", kind).unwrap().map(|text| StoredSecret::parse(&text));
+
+        // Another SSH user keeps the database password, now saved for the new settings.
+        let now_config = with_ssh(|s| s.user = "bob".into());
+        let now = SavedFor::of(&now_config);
+        assert!(carry_secrets(&store, &now_config, &now, Some(&was), &nothing));
+        assert_eq!(stored(SecretKind::DbPassword), Some(StoredSecret::For { secret: "db".into(), saved_for: Box::new(now.clone()) }));
+        assert_eq!((stored(SecretKind::SshPassword), stored(SecretKind::SshPassphrase)), (None, None));
+
+        // What the store says wins over the file: the password was saved for another server, whatever
+        // the settings saved before say.
+        let elsewhere = SavedFor::of(&ConnectionConfig { host: "elsewhere".into(), ..saved() });
+        store_secret(&store, "a", SecretKind::DbPassword, "db", &elsewhere);
+        let renamed = ConnectionConfig { port: 5433, ..saved() };
+        assert!(carry_secrets(&store, &renamed, &SavedFor::of(&renamed), Some(&was), &nothing));
+        assert_eq!(stored(SecretKind::DbPassword), None);
+
+        // An older build's goes by the settings saved before, and comes out with the new ones.
+        store.set("a", SecretKind::DbPassword, "older").unwrap();
+        let stronger = ConnectionConfig { ssl_mode: SslMode::Require, ..saved() };
+        let now = SavedFor::of(&stronger);
+        assert!(carry_secrets(&store, &stronger, &now, Some(&was), &nothing));
+        assert_eq!(stored(SecretKind::DbPassword), Some(StoredSecret::For { secret: "older".into(), saved_for: Box::new(now.clone()) }));
+        store.set("a", SecretKind::DbPassword, "older").unwrap();
+        assert!(carry_secrets(&store, &stronger, &now, None, &nothing), "no settings saved before");
+        assert_eq!(stored(SecretKind::DbPassword), None);
+
+        // A secret given again is left to the write that follows.
+        store.set("a", SecretKind::DbPassword, "older").unwrap();
+        let given = Credentials { password: Some("new".into()), ..Credentials::default() };
+        assert!(carry_secrets(&store, &renamed, &SavedFor::of(&renamed), Some(&was), &given));
+        assert_eq!(stored(SecretKind::DbPassword), Some(StoredSecret::Bare("older".into())));
     }
 
     fn file_type<K>(kind: K, label: &'static str, extensions: &'static [&'static str]) -> FileType<K> {

@@ -164,6 +164,79 @@ fn memory_store_set_get_delete() {
     s.delete("c1", SecretKind::DbPassword).unwrap();
 }
 
+fn saved_for() -> SavedFor {
+    SavedFor::of(&ConnectionConfig {
+        kind: DbKind::MySql,
+        host: "db.example".into(),
+        port: 3307,
+        user: "ann".into(),
+        database: "shop".into(),
+        ssl_mode: SslMode::Require,
+        ca_file: Some("/ca/ours.pem".into()),
+        ssh: Some(SshConfig {
+            host: "jump".into(),
+            port: 2222,
+            user: "bob".into(),
+            auth: SshAuth::Key { path: Some("/k/id".into()) },
+            ..SshConfig::default()
+        }),
+        options: [(ALLOW_PUBLIC_KEY.id.to_owned(), "true".to_owned())].into(),
+        ..ConnectionConfig::default()
+    })
+}
+
+#[test]
+fn a_stored_secret_reads_back_with_what_it_was_saved_for() {
+    for secret in ["pw", "quo\"te\\ and\nnewline", "пароль", r#"{"v":1,"secret":"x","for":{}}"#] {
+        let text = StoredSecret::text(secret, &saved_for()).unwrap();
+        assert_eq!(StoredSecret::parse(&text), StoredSecret::For { secret: secret.to_owned(), saved_for: Box::new(saved_for()) }, "{text}");
+    }
+    let weakening = saved_for().weakening;
+    assert_eq!(weakening, [ALLOW_PUBLIC_KEY.id], "only the options that are on and protect it less");
+}
+
+#[test]
+fn saved_for_leaves_out_what_does_not_decide_where_a_secret_goes() {
+    let config = ConnectionConfig { name: "shop".into(), id: "a".into(), read_only: true, ..ConnectionConfig::default() };
+    assert_eq!(SavedFor::of(&config), SavedFor::of(&ConnectionConfig::default()));
+    // An option this type does not have, and an option that is off, are not kept.
+    let mut stray = ConnectionConfig::default();
+    stray.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
+    assert!(SavedFor::of(&stray).weakening.is_empty());
+    let mut off = ConnectionConfig { kind: DbKind::MySql, ..ConnectionConfig::default() };
+    off.options.insert(ALLOW_PUBLIC_KEY.id.into(), "false".into());
+    assert!(SavedFor::of(&off).weakening.is_empty());
+    // A newer build's unknown fields in the tunnel are no setting of this one.
+    let mut ssh = SshConfig::default();
+    ssh.extra.insert("later".into(), "x".into());
+    let with = ConnectionConfig { ssh: Some(ssh), ..ConnectionConfig::default() };
+    let without = ConnectionConfig { ssh: Some(SshConfig::default()), ..ConnectionConfig::default() };
+    assert_eq!(SavedFor::of(&with), SavedFor::of(&without));
+}
+
+#[test]
+fn only_the_stores_own_form_is_read_as_one() {
+    for bare in ["pw", "", "12345", "[1]", "{", "{\"v\":1}", "{\"v\":1,\"secret\":\"s\"}", "{\"secret\":\"s\",\"for\":{}}"] {
+        assert_eq!(StoredSecret::parse(bare), StoredSecret::Bare(bare.to_owned()), "{bare}");
+    }
+    let text = StoredSecret::text("s", &saved_for()).unwrap();
+    let later = text.replace("\"v\":1", "\"v\":2");
+    assert_ne!(text, later);
+    let unknown_type = text.replace("\"kind\":\"mysql\"", "\"kind\":\"a later type\"");
+    assert_ne!(text, unknown_type);
+    for unreadable in [later.as_str(), unknown_type.as_str(), r#"{"v":1,"secret":1,"for":{}}"#, r#"{"v":"1","secret":"s","for":{}}"#] {
+        assert_eq!(StoredSecret::parse(unreadable), StoredSecret::Unreadable, "{unreadable}");
+    }
+}
+
+#[test]
+fn a_stored_secrets_debug_hides_it() {
+    let text = StoredSecret::text("hunter2", &saved_for()).unwrap();
+    for stored in [StoredSecret::parse(&text), StoredSecret::Bare("hunter2".into())] {
+        assert!(!format!("{stored:?}").contains("hunter2"));
+    }
+}
+
 #[test]
 fn secret_error_never_shows_secret() {
     let e = SecretError("backend said no".into());

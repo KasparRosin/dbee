@@ -50,7 +50,7 @@ fn save_list_duplicate_delete() {
     let config = ConnectionConfig { color: ConnectionColor::Red, ..refused_config("Shop live") };
     let id = save(&mut s, config, Some("pw-1234".into()));
     assert!(!id.is_empty(), "an id is assigned");
-    assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap().as_deref(), Some("pw-1234"));
+    assert_eq!(s.stored(&id, SecretKind::DbPassword).as_deref(), Some("pw-1234"));
 
     let list = s.run_blocking("connection.list", json!({}), T).unwrap();
     assert_eq!(list["saved"].as_array().map(Vec::len), Some(1), "{list}");
@@ -67,7 +67,7 @@ fn save_list_duplicate_delete() {
     assert_eq!(saved.len(), 2);
     assert_eq!(saved[1].name, "Shop live (copy)");
     assert_eq!((saved[1].host.as_str(), saved[1].port, saved[1].color), ("127.0.0.1", 1, ConnectionColor::Red));
-    assert_eq!(s.secrets.get(&dup_id, SecretKind::DbPassword).unwrap().as_deref(), Some("pw-1234"), "the copy can connect too");
+    assert_eq!(s.stored(&dup_id, SecretKind::DbPassword).as_deref(), Some("pw-1234"), "the copy can connect too");
 
     s.run_blocking("connection.delete", json!({ "id": id }), T).unwrap();
     assert_eq!(s.state().store.saved.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), [dup_id.as_str()]);
@@ -92,11 +92,11 @@ fn save_keeps_or_drops_secrets_as_told() {
     assert_eq!(save(&mut s, again.clone(), None), id, "an existing id is kept");
     assert_eq!(s.state().store.saved.len(), 1);
     assert_eq!(s.state().store.saved[0].name, "a renamed");
-    assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap().as_deref(), Some("first"));
+    assert_eq!(s.stored(&id, SecretKind::DbPassword).as_deref(), Some("first"));
     // SSH secrets are saved under their own kinds.
     s.run_blocking("connection.save", json!({ "config": again, "sshPassword": "sp", "sshPassphrase": "pp" }), T).unwrap();
-    assert_eq!(s.secrets.get(&id, SecretKind::SshPassword).unwrap().as_deref(), Some("sp"));
-    assert_eq!(s.secrets.get(&id, SecretKind::SshPassphrase).unwrap().as_deref(), Some("pp"));
+    assert_eq!(s.stored(&id, SecretKind::SshPassword).as_deref(), Some("sp"));
+    assert_eq!(s.stored(&id, SecretKind::SshPassphrase).as_deref(), Some("pp"));
     // `save_secrets: false` keeps none, and forgets the ones saved before.
     let off = ConnectionConfig { save_secrets: false, ..again };
     s.run_blocking("connection.save", json!({ "config": off, "password": "second" }), T).unwrap();
@@ -421,7 +421,7 @@ fn password_in_params_beats_the_stored_one() {
         let e = run_err(&mut s, "connection.open", json!({ "id": id }));
         assert_eq!(e.code(), "auth", "{}: the stored password is used: {e}", t.name());
         open(&mut s, json!({ "id": id, "password": pw() }));
-        assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap().as_deref(), Some("stale"), "not saved without savePassword");
+        assert_eq!(s.stored(&id, SecretKind::DbPassword).as_deref(), Some("stale"), "not saved without savePassword");
     }
 }
 
@@ -474,7 +474,7 @@ fn save_password_on_open_of_a_saved_connection_turns_saving_on() {
         assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), None, "saveSecrets is off");
         let r = open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
         assert_eq!(r["secretsSaved"], true, "{r}");
-        assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), Some(pw()));
+        assert_eq!(s.stored(&id, SecretKind::DbPassword), Some(pw()));
         assert!(s.state().store.saved[0].save_secrets, "the saved flag agrees with the store");
         let file = std::fs::read_to_string(s.home.home.join("config").join(dbee_config::store::FILE)).unwrap();
         let body: Json = serde_json::from_str(&file).unwrap();
@@ -606,7 +606,7 @@ fn stored_passphrase_is_used() {
     let c = via_ssh(SshAuth::Key { path: Some(db.keys.encrypted.clone()) });
     let r = s.run_blocking("connection.save", json!({ "config": c, "password": pw(), "sshPassphrase": db.keys.passphrase }), T).unwrap();
     let id = r["id"].as_str().unwrap().to_owned();
-    assert_eq!(s.secrets.get(&id, SecretKind::SshPassphrase).unwrap(), Some(db.keys.passphrase.clone()));
+    assert_eq!(s.stored(&id, SecretKind::SshPassphrase), Some(db.keys.passphrase.clone()));
     open(&mut s, json!({ "id": id }));
 }
 
@@ -973,7 +973,7 @@ fn saving_new_settings_forgets_the_secrets_that_no_longer_apply() {
     };
     s.run_blocking("connection.save", json!({ "config": base, "password": "db", "sshPassword": "sp", "sshPassphrase": "pp" }), T).unwrap();
     assert_eq!(stored(&s), [true, true, true]);
-    // A change that concerns no secret keeps them all.
+    // A new name, and another database on the same server and login, keep them all.
     let renamed = ConnectionConfig { name: "renamed".into(), database: "other".into(), ..base };
     save(&mut s, renamed.clone(), None);
     assert_eq!(stored(&s), [true, true, true]);
@@ -987,7 +987,7 @@ fn saving_new_settings_forgets_the_secrets_that_no_longer_apply() {
     save(&mut s, moved.clone(), None);
     assert_eq!(stored(&s), [false, true, false]);
     save(&mut s, moved.clone(), Some("db2".into()));
-    assert_eq!(s.secrets.get("edit", SecretKind::DbPassword).unwrap().as_deref(), Some("db2"));
+    assert_eq!(s.stored("edit", SecretKind::DbPassword).as_deref(), Some("db2"));
     // A weaker TLS mode: the password goes.
     save(&mut s, ConnectionConfig { ssl_mode: SslMode::Disable, ..moved.clone() }, None);
     assert_eq!(stored(&s), [false, true, false]);
@@ -1463,7 +1463,7 @@ fn save_open_keeps_the_password_as_the_forms_save_does() {
         let mut s = session();
         open(&mut s, json!({ "config": config_for(&t), "password": pw() }));
         let id = run(&mut s, "connection.saveOpen", json!({}))["id"].as_str().unwrap().to_owned();
-        assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), Some(pw()), "{}", t.name());
+        assert_eq!(s.stored(&id, SecretKind::DbPassword), Some(pw()), "{}", t.name());
         assert_secret_hidden(&s, &pw());
         run(&mut s, "connection.close", json!({}));
         open(&mut s, json!({ "id": id }));

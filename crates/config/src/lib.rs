@@ -12,5 +12,5 @@ pub use connection::{
     new_id, parse_url,
 };
 pub use kind::mysql::ALLOW_PUBLIC_KEY;
-pub use secrets::{KeyringStore, MemoryStore, SecretError, SecretKind, SecretStore, keyring_store};
+pub use secrets::{KeyringStore, MemoryStore, SavedFor, SecretError, SecretKind, SecretStore, StoredSecret, keyring_store};
 pub use store::{ConnectionStore, RecentEntry};

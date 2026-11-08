@@ -29,7 +29,7 @@ use std::path::Path;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use dbee_config::{ConnectionConfig, DbKind, MemoryStore, SshAuth, SshConfig, SslMode};
+use dbee_config::{ConnectionConfig, DbKind, MemoryStore, SecretKind, SecretStore, SshAuth, SshConfig, SslMode, StoredSecret};
 use dbee_engine::{EngineError, Json, Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
 use dbee_testkit::{Kind, Server, TempHome, TestDb, TestTarget, temp_home};
@@ -56,6 +56,16 @@ pub struct TestSession {
     /// Connections file in `home/config`, SSH files in `home/.ssh`.
     pub home: TempHome,
     hold: Hold,
+}
+
+impl TestSession {
+    /// The secret the store keeps as `kind` of `id`, without the settings kept with it.
+    pub fn stored(&self, id: &str, kind: SecretKind) -> Option<String> {
+        match StoredSecret::parse(&self.secrets.get(id, kind).unwrap()?) {
+            StoredSecret::For { secret, .. } => Some(secret),
+            other => panic!("not in the store's own form: {other:?}"),
+        }
+    }
 }
 
 impl Deref for TestSession {
