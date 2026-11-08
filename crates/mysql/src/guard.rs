@@ -50,6 +50,10 @@ const NESTED: &str = "a version comment this server skips holds another comment,
 const TRACKING: &str = "the server reports read-only mode to dbee through session tracking, which this statement names, so dbee does not \
                         run it here. To run it, turn Read-only off in the connection's settings.";
 
+const LOOKALIKE: &str = "on a read-only connection dbee runs no SET with a character outside plain ASCII outside its '…' strings, since \
+                        the server can read a name spelled with such a letter as one of its own settings. Spell names in plain ASCII, or \
+                        turn Read-only off in the connection's settings.";
+
 const SET_STATEMENT: &str = "SET STATEMENT can turn read-only off for the statement it runs, before the server can report it, so dbee does not \
                              run a statement that names STATEMENT and the read-only variable here. Run the statement without them.";
 
@@ -78,11 +82,38 @@ fn diagnostic(sql: &str, backslash_escapes: bool) -> bool {
     )
 }
 
+/// `sql` holds `word` as a whole word, in any case.
+fn holds_word(sql: &str, word: &str) -> bool {
+    let b = sql.as_bytes();
+    let part = |at: usize| b.get(at).is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80);
+    (0..b.len().saturating_sub(word.len()).saturating_add(1)).any(|at| {
+        b.get(at..at + word.len()).is_some_and(|w| w.eq_ignore_ascii_case(word.as_bytes())) && !part(at + word.len()) && (at == 0 || !part(at - 1))
+    })
+}
+
+/// `sql` holds the word `SET` and a character outside plain ASCII outside its `'…'` strings, read
+/// with backslash escapes and without: every system variable's name is ASCII, while the server
+/// folds a name spelled with a letter like `ë` or `ſ` to one of them. A `"…"` counts as outside
+/// (`ANSI_QUOTES` makes it a name), and the two readings cover a character set such as `sjis`,
+/// whose characters can end in the byte `\`.
+fn sets_a_lookalike(sql: &str) -> bool {
+    holds_word(sql, "set")
+        && [true, false].into_iter().any(|escapes| {
+            tokenize_with(Dialect::MySql, sql, escapes).iter().any(|t| {
+                let text = sql.get(t.range.clone()).unwrap_or_default();
+                let quoted = t.kind == TokenKind::String && text.trim_start_matches(|c: char| c.is_ascii_alphabetic()).starts_with('\'');
+                !text.is_ascii() && !quoted
+            })
+        })
+}
+
 /// Why dbee does not send `sql` on a read-only connection, from its raw text, comments included:
 /// what no reading of it can show.
 fn raw_refusal(sql: &str, flavor: Flavor) -> Option<&'static str> {
     let holds = |part: &str| sql.as_bytes().windows(part.len()).any(|w| w.eq_ignore_ascii_case(part.as_bytes()));
-    if names_session_track(sql) {
+    if sets_a_lookalike(sql) {
+        Some(LOOKALIKE)
+    } else if names_session_track(sql) {
         Some(TRACKING)
     } else if flavor == Flavor::MariaDb && holds("statement") && flavor.read_only_variables().iter().any(|v| holds(v)) {
         Some(SET_STATEMENT)
@@ -265,6 +296,33 @@ mod tests {
             assert_eq!(written_after, Vec::<String>::new(), "{}: written after these", server.name);
             assert_eq!(written.rows, [[Some("0".to_owned())]], "{}: nothing written", server.name);
             assert_eq!(mode, Ok(vec![vec![Some("1".to_owned())]]), "{}", server.name);
+        }
+    }
+
+    /// A `SET` with a character outside ASCII outside its `'…'` strings, by either reading of
+    /// backslashes, is refused; one inside a string is not, nor a statement without the word `SET`.
+    #[test]
+    fn a_set_with_a_name_outside_plain_ascii_is_refused() {
+        for sql in [
+            "SET SESSION s\u{eb}ssion_track_system_variables = ''",
+            "set session \u{17f}ession_track_system_variables = ''",
+            "SET @@transact\u{131}on_read_only = 0",
+            "SET SESSION `transaction_r\u{eb}ad_only` = 0",
+            "SET SESSION \"transaction_r\u{eb}ad_only\" = 0",
+            "SET @a = '\u{c1}\\', s\u{eb}ssion_track_system_variables = '', @b = '\u{c1}\\'",
+            "SET @gr\u{f6}\u{df}e = 1",
+            "UPDATE t SET n = 1 -- \u{e9}",
+        ] {
+            assert_eq!(raw_refusal(sql, Flavor::MySql), Some(LOOKALIKE), "{sql}");
+        }
+        for sql in [
+            "SET @city = 'Z\u{fc}rich'",
+            "SET NAMES utf8mb4",
+            "SELECT 'gr\u{f6}\u{df}e', `gr\u{f6}\u{df}e` FROM t",
+            "SELECT charset('\u{e9}'), \u{e9}t\u{e9} FROM asset",
+            "SET @a = _utf8mb4'\u{e9}', @b = N'\u{e9}'",
+        ] {
+            assert_eq!(raw_refusal(sql, Flavor::MySql), None, "{sql}");
         }
     }
 

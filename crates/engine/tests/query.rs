@@ -582,6 +582,55 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
     }
 }
 
+/// On a read-only MySQL or MariaDB connection a `SET` that holds a character outside plain ASCII
+/// outside its `'…'` strings is refused: the server folds such a name to one of its settings
+/// (`sëssion_track…` on MySQL 8.0 and later, `ſession_track…` and `transactıon_read_only` on
+/// MariaDB 13), which would turn session tracking off, then read-only, unreported. Also in
+/// backticks, and behind `SET NAMES sjis`, under which the server ends a string at a `\` dbee may
+/// read as an escape. A `SET` of such text inside a string, and other statements, run.
+#[test]
+fn read_only_mysql_refuses_a_set_with_a_name_outside_plain_ascii() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let (variable, tracked, info, spelled) = if t.kind().id() == "mariadb" {
+            ("tx_read_only", "\u{17f}ession_track_system_variables", "\u{17f}ession_track_transaction_info", "transact\u{131}on_read_only")
+        } else {
+            ("transaction_read_only", "s\u{eb}ssion_track_system_variables", "s\u{eb}ssion_track_transaction_info", "transaction_r\u{eb}ad_only")
+        };
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_ascii"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut s = read_only_session(&t);
+        let insert = format!("INSERT INTO {sc}.{name} VALUES (1)");
+        for sql in [
+            format!("SET SESSION {tracked} = ''"),
+            format!("SET SESSION {spelled} = 0"),
+            format!("SET SESSION {info} = 'OFF'"),
+            format!("SET @@{spelled} = 0"),
+            format!("SET SESSION `{tracked}` = ''"),
+            format!("set session `{spelled}` = 0"),
+        ] {
+            let e = run_text(&mut s, &sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
+            assert!(e.code() == "readOnly" && e.to_string().contains("plain ASCII"), "{}: {sql}: {e}", t.name());
+            assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}: after {sql}", t.name());
+        }
+        // Under `sjis` the server reads `Á\` as two characters, so its string ends where dbee's
+        // reading with escapes goes on.
+        run_text(&mut s, "SET NAMES sjis").unwrap();
+        let hidden = format!("SET @a = '\u{c1}\\', {tracked} = '', @b = '\u{c1}\\'");
+        let e = run_text(&mut s, &hidden).expect_err("refused");
+        assert!(e.code() == "readOnly" && e.to_string().contains("plain ASCII"), "{}: {hidden}: {e}", t.name());
+        run_text(&mut s, "SET NAMES utf8mb4").unwrap();
+        for sql in ["SET @city = 'Z\u{fc}rich'", "SELECT 'gr\u{f6}\u{df}e'", "SELECT @city"] {
+            run_text(&mut s, sql).unwrap_or_else(|e| panic!("{}: {sql}: {e}", t.name()));
+        }
+        assert_eq!(first_value(&s).as_deref(), Some("Z\u{fc}rich"), "{}", t.name());
+        run_text(&mut s, &format!("SELECT @@SESSION.{variable}")).unwrap();
+        assert_eq!(first_value(&s).as_deref(), Some("1"), "{}", t.name());
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "{}", t.name());
+    }
+}
+
 /// After a statement that turned read-only off and then failed (an error carries no report), the
 /// mode is read before the next statement that is not a diagnostic one; a version comment the
 /// server skips cannot make an `INSERT` look like `SHOW WARNINGS` to dbee: it reads the statement
