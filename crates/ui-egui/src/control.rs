@@ -12,7 +12,8 @@
 //! - `ui.click`, `ui.key`, `ui.text`: until the frame that received the input has run (a click
 //!   on a widget scrolled out of view first waits, a few frames at most, for it to be scrolled
 //!   into view);
-//! - `ui.screenshot`: until the picture of the window arrives.
+//! - `ui.screenshot`: until the picture of the window arrives. A file goes only in the run's one
+//!   screenshot folder ([`DbeeApp::with_screenshot_dir`]), under a plain file name.
 //!
 //! `app.quit` is answered at once and closes the window a frame later (at least
 //! `QUIT_DELAY` on), so its reply is written before the app exits.
@@ -22,12 +23,14 @@
 //! type is `badParams`, never a panic. Logs name the method, never params or results.
 
 use std::collections::VecDeque;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
+use dbee_config::store::replace_private_file;
 use dbee_engine::view::{INSPECT_TEXT_BYTES, cut};
-use dbee_engine::{EngineError, JobId, Json, Outcome};
+use dbee_engine::{EngineError, JobId, Json, Outcome, allowed_file};
 use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use serde_json::{Map, json};
 
@@ -193,10 +196,10 @@ pub(crate) enum Wait {
         ticket: u64,
         result: Json,
     },
-    /// The picture `token`, asked for once `asked`; saved to `path` or sent as base64.
+    /// The picture `token`, asked for once `asked`; saved as `file` or sent as base64.
     Shot {
         token: u64,
-        path: Option<String>,
+        file: Option<ShotFile>,
         asked: bool,
     },
     /// `ui.click` (its `params`) on widget `id`, which is being scrolled into view; `frames`
@@ -267,8 +270,11 @@ fn dispatch(app: &mut DbeeApp, ctx: &egui::Context, method: &str, params: Json) 
         },
         "ui.screenshot" => match params.get("path") {
             None | Some(Json::Null) => Handled::Later(screenshot(app, None)),
-            Some(Json::String(p)) if !p.is_empty() => Handled::Later(screenshot(app, Some(p.clone()))),
-            Some(_) => Handled::Now(bad("`path` must be a file path (a string)")),
+            Some(Json::String(name)) => match shot_file(app, name) {
+                Ok(file) => Handled::Later(screenshot(app, Some(file))),
+                Err(refused) => Handled::Now(refused),
+            },
+            Some(_) => Handled::Now(bad("`path` must be a file name (a string)")),
         },
         "app.quit" => {
             // The window closes in a later frame, so the reply is written before the app exits.
@@ -539,14 +545,70 @@ fn key(app: &mut DbeeApp, p: &Json) -> Handled {
 
 // ---- screenshots -------------------------------------------------------------------------------
 
-fn screenshot(app: &mut DbeeApp, path: Option<String>) -> Wait {
+fn screenshot(app: &mut DbeeApp, file: Option<ShotFile>) -> Wait {
     app.shots = app.shots.wrapping_add(1);
-    Wait::Shot { token: app.shots, path, asked: false }
+    Wait::Shot { token: app.shots, file, asked: false }
 }
 
-/// The window's picture as a PNG: written to `path` (`{path, width, height}`) or returned as
+/// Where `ui.screenshot {path}` writes: the file `name` in the run's one folder `dir`, which must
+/// lie in the `allowed` folders of an isolated run.
+#[derive(Debug, Clone)]
+pub(crate) struct ShotFile {
+    dir: PathBuf,
+    name: String,
+    allowed: Option<Vec<PathBuf>>,
+}
+
+/// `name` is one plain file name on every system: no folder, `..`, drive or stream in it.
+fn plain_file_name(name: &str) -> bool {
+    !name.contains(['/', '\\', ':', '\0']) && matches!(Path::new(name).components().collect::<Vec<_>>().as_slice(), [Component::Normal(_)])
+}
+
+/// The file `name` asks for; `Err` is the reply that refuses it.
+fn shot_file(app: &DbeeApp, name: &str) -> Result<ShotFile, Json> {
+    let dir = app.screenshot_dir.as_ref();
+    if !plain_file_name(name) {
+        let place = dir.map_or_else(|| "the run's screenshot folder".to_string(), |d| d.display().to_string());
+        return Err(bad(format!(
+            "`path` must be a file name such as shot.png, with no folder in it: screenshots are saved only in {place}. Leave `path` out to get the picture as base64."
+        )));
+    }
+    let Some(dir) = dir else {
+        return Err(error(
+            "screenshot",
+            "this run has no screenshot folder: set DBEE_SCREENSHOT_DIR, or leave `path` out to get the picture as base64",
+            json!({}),
+        ));
+    };
+    Ok(ShotFile { dir: dir.clone(), name: name.to_string(), allowed: app.session().allowed_dirs().map(<[PathBuf]>::to_vec) })
+}
+
+/// Writes `png` as `file` and returns its path; `Err` says why it did not, and then nothing was
+/// written. A plain file of that name is replaced; a link never is, nor followed.
+fn write_shot(file: &ShotFile, png: &[u8]) -> Result<PathBuf, String> {
+    let dest = file.dir.join(&file.name);
+    if let Some(allowed) = &file.allowed {
+        // The folder may not be there yet: what counts is where it would be made.
+        let there = file.dir.ancestors().find(|a| a.exists()).unwrap_or(&file.dir);
+        if allowed_file(allowed, &there.join(&file.name)).is_err() {
+            return Err(format!("this isolated run may only write files in its own folders; {} is not in them", dest.display()));
+        }
+    }
+    std::fs::create_dir_all(&file.dir).map_err(|e| format!("{}: {e}", file.dir.display()))?;
+    match std::fs::symlink_metadata(&dest) {
+        Ok(found) if !found.is_file() => {
+            return Err(format!("{} is a link or a folder, so it was not replaced. Choose another name.", dest.display()));
+        }
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("{}: {e}", dest.display())),
+        _ => {}
+    }
+    replace_private_file(&dest, png).map_err(|e| format!("{}: {e}", dest.display()))?;
+    Ok(dest)
+}
+
+/// The window's picture as a PNG: written as `file` (`{path, width, height}`) or returned as
 /// base64 (`{base64, width, height}`).
-fn save_png(image: &egui::ColorImage, path: Option<&str>) -> Json {
+fn save_png(image: &egui::ColorImage, file: Option<&ShotFile>) -> Json {
     let [w, h] = image.size;
     let mut rgba = Vec::with_capacity(w.saturating_mul(h).saturating_mul(4));
     for p in &image.pixels {
@@ -560,19 +622,11 @@ fn save_png(image: &egui::ColorImage, path: Option<&str>) -> Json {
     if let Err(e) = img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png) {
         return error("screenshot", format!("PNG encoding failed: {e}"), json!({}));
     }
-    match path {
-        Some(p) => {
-            let path = std::path::Path::new(p);
-            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
-                && let Err(e) = std::fs::create_dir_all(dir)
-            {
-                return error("screenshot", format!("{}: {e}", dir.display()), json!({}));
-            }
-            match std::fs::write(path, &png) {
-                Ok(()) => ok(json!({ "path": p, "width": w, "height": h })),
-                Err(e) => error("screenshot", format!("{p}: {e}"), json!({})),
-            }
-        }
+    match file {
+        Some(file) => match write_shot(file, &png) {
+            Ok(path) => ok(json!({ "path": path.display().to_string(), "width": w, "height": h })),
+            Err(why) => error("screenshot", why, json!({})),
+        },
         None => ok(json!({ "base64": base64(&png), "width": w, "height": h })),
     }
 }
@@ -595,13 +649,13 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
 
 /// Encodes and writes a picture off the UI thread, then replies (on the UI thread when no
 /// thread can be started).
-fn deliver_shot(image: Arc<egui::ColorImage>, path: Option<String>, reply: Sender<Json>) {
-    let (on_thread, path_on_thread, reply_on_thread) = (Arc::clone(&image), path.clone(), reply.clone());
+fn deliver_shot(image: Arc<egui::ColorImage>, file: Option<ShotFile>, reply: Sender<Json>) {
+    let (on_thread, file_on_thread, reply_on_thread) = (Arc::clone(&image), file.clone(), reply.clone());
     let spawned = std::thread::Builder::new().name("dbee-screenshot".into()).spawn(move || {
-        let _ = reply_on_thread.send(save_png(&on_thread, path_on_thread.as_deref()));
+        let _ = reply_on_thread.send(save_png(&on_thread, file_on_thread.as_ref()));
     });
     if spawned.is_err() {
-        let _ = reply.send(save_png(&image, path.as_deref()));
+        let _ = reply.send(save_png(&image, file.as_ref()));
     }
 }
 
@@ -672,13 +726,13 @@ pub(crate) fn answer_deferred(
             }
             Wait::Idle => idle.then(|| ok(json!({}))),
             Wait::Input { ticket, result } => app.input.delivered(*ticket, frames).then(|| ok(std::mem::take(result))),
-            Wait::Shot { token, path, asked } => {
+            Wait::Shot { token, file, asked } => {
                 if !*asked {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(*token)));
                     *asked = true;
                     None
                 } else if let Some((_, image)) = pictures.iter().find(|(t, _)| t == token) {
-                    deliver_shot(Arc::clone(image), path.take(), d.reply.clone());
+                    deliver_shot(Arc::clone(image), file.take(), d.reply.clone());
                     continue;
                 } else {
                     None
@@ -854,6 +908,162 @@ mod tests {
         assert_eq!(key_named("F2"), Some(egui::Key::F2));
         assert_eq!(key_named(""), None);
         assert_eq!(key_named("🐝"), None);
+    }
+
+    /// A folder of its own under `target/`, removed when dropped.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new(name: &str) -> Folder {
+            let path = dbee_testkit::repo_root().join("target").join("testkit").join("shots").join(dbee_testkit::unique(name));
+            std::fs::create_dir_all(&path).unwrap();
+            Folder(path)
+        }
+
+        fn names(&self) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(&self.0).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn picture() -> egui::ColorImage {
+        egui::ColorImage::new([2, 1], vec![egui::Color32::RED; 2])
+    }
+
+    fn shot(dir: &Path, name: &str, allowed: Option<&[PathBuf]>) -> Json {
+        save_png(&picture(), Some(&ShotFile { dir: dir.to_path_buf(), name: name.into(), allowed: allowed.map(<[PathBuf]>::to_vec) }))
+    }
+
+    fn is_png(path: &Path) -> bool {
+        std::fs::read(path).unwrap().starts_with(b"\x89PNG")
+    }
+
+    #[test]
+    fn a_screenshot_path_is_a_file_name_and_nothing_else() {
+        let (app, _home) = app();
+        let folder = Folder::new("names");
+        let mut app = app.with_screenshot_dir(Some(folder.0.clone()));
+        let ctx = egui::Context::default();
+        let outside = std::env::temp_dir().join(dbee_testkit::unique("dbee-shot.png"));
+        let absolute = outside.display().to_string();
+        let above = format!("../{}", dbee_testkit::unique("above.png"));
+        for path in [
+            absolute.as_str(),
+            above.as_str(),
+            "..",
+            ".",
+            "",
+            "a/b.png",
+            "a/../b.png",
+            "./x.png",
+            "x.png/",
+            "..\\x.png",
+            "a\\b.png",
+            "C:\\x.png",
+            "C:x.png",
+            "x.png:stream",
+            "x\u{0}.png",
+        ] {
+            let line = json!({ "id": 1, "method": "ui.screenshot", "params": { "path": path } }).to_string();
+            let r = handle_line(&mut app, &ctx, &line).unwrap_or_else(|| panic!("{path:?} waits for a picture to write, instead of being refused"));
+            assert_eq!((r["ok"].clone(), r["code"].clone()), (json!(false), json!("badParams")), "{path:?}: {r}");
+        }
+        assert!(!outside.exists());
+        assert_eq!(folder.names(), Vec::<String>::new());
+        for fine in [r#"{"path":"shot.png"}"#, r#"{"path":".hidden name.png"}"#, r#"{"path":null}"#, "{}"] {
+            let line = format!(r#"{{"id":1,"method":"ui.screenshot","params":{fine}}}"#);
+            assert_eq!(handle_line(&mut app, &ctx, &line), None, "{fine} waits for the picture");
+        }
+    }
+
+    #[test]
+    fn without_a_folder_only_the_picture_comes_back() {
+        let (mut app, _home) = app();
+        let ctx = egui::Context::default();
+        let r = handle_line(&mut app, &ctx, r#"{"id":1,"method":"ui.screenshot","params":{"path":"shot.png"}}"#).unwrap();
+        assert_eq!((r["ok"].clone(), r["code"].clone()), (json!(false), json!("screenshot")), "{r}");
+        assert_eq!(handle_line(&mut app, &ctx, r#"{"id":1,"method":"ui.screenshot"}"#), None);
+        assert!(save_png(&picture(), None)["result"]["base64"].is_string());
+    }
+
+    #[test]
+    fn a_screenshot_lands_in_its_folder_and_replaces_only_a_plain_file() {
+        let folder = Folder::new("written");
+        let dir = folder.0.join("made").join("for it");
+        let r = shot(&dir, "shot.png", None);
+        assert_eq!(r["ok"], true, "{r}");
+        let dest = dir.join("shot.png");
+        assert_eq!(r["result"]["path"], json!(dest), "the reply says where it went");
+        assert_eq!((r["result"]["width"].clone(), r["result"]["height"].clone()), (json!(2), json!(1)));
+        assert!(is_png(&dest));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600, "a picture can show a password or data");
+        }
+        std::fs::write(&dest, "an older screenshot").unwrap();
+        assert_eq!(shot(&dir, "shot.png", None)["ok"], true);
+        assert!(is_png(&dest), "the same name again replaces it");
+        std::fs::create_dir(dir.join("a folder.png")).unwrap();
+        let r = shot(&dir, "a folder.png", None);
+        assert_eq!((r["ok"].clone(), r["code"].clone()), (json!(false), json!("screenshot")), "{r}");
+        let names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names.len(), 2, "no temporary file stays behind: {names:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_the_folder_is_refused_and_what_it_names_is_untouched() {
+        use std::os::unix::fs::symlink;
+        let (folder, outside) = (Folder::new("links"), Folder::new("victim"));
+        let victim = outside.0.join("bashrc");
+        std::fs::write(&victim, "keep me").unwrap();
+        let missing = outside.0.join("made-by-a-link");
+        symlink(&victim, folder.0.join("to-file.png")).unwrap();
+        symlink(&missing, folder.0.join("dangling.png")).unwrap();
+        symlink(&outside.0, folder.0.join("to-folder.png")).unwrap();
+        for name in ["to-file.png", "dangling.png", "to-folder.png"] {
+            let r = shot(&folder.0, name, None);
+            assert_eq!((r["ok"].clone(), r["code"].clone()), (json!(false), json!("screenshot")), "{name}: {r}");
+            assert!(r["error"].as_str().unwrap().contains(name), "{r}");
+            assert!(std::fs::symlink_metadata(folder.0.join(name)).unwrap().is_symlink(), "{name} stays what it was");
+        }
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        assert!(!missing.exists());
+        assert_eq!(outside.names(), vec!["bashrc".to_string()]);
+    }
+
+    #[test]
+    fn outside_an_isolated_runs_folders_a_screenshot_is_refused_and_nothing_is_made() {
+        let (allowed, outside) = (Folder::new("allowed"), Folder::new("outside"));
+        let dirs = vec![allowed.0.clone()];
+        let refused = |dir: &Path, list: &[PathBuf]| {
+            let r = shot(dir, "shot.png", Some(list));
+            assert_eq!((r["ok"].clone(), r["code"].clone()), (json!(false), json!("screenshot")), "{}: {r}", dir.display());
+            assert!(r["error"].as_str().unwrap().contains("isolated run"), "{r}");
+        };
+        refused(&outside.0, &dirs);
+        refused(&outside.0.join("new"), &dirs);
+        refused(&allowed.0.join("..").join(outside.0.file_name().unwrap()), &dirs);
+        refused(&allowed.0, &[]);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside.0, allowed.0.join("out")).unwrap();
+            refused(&allowed.0.join("out"), &dirs);
+            refused(&allowed.0.join("out").join("new"), &dirs);
+        }
+        assert_eq!(outside.names(), Vec::<String>::new(), "nothing was written or made");
+        // Inside, the folder is made as in any run.
+        let inside = allowed.0.join("look").join("deep");
+        assert_eq!(shot(&inside, "shot.png", Some(&dirs))["ok"], true);
+        assert!(is_png(&inside.join("shot.png")));
     }
 
     #[test]

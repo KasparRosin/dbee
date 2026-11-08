@@ -1,7 +1,7 @@
 //! The driver the day tests share (`mod common;`): the real app, `dbee --control <port>`, on a
 //! throwaway home with the environment of `cargo xtask run-isolated`, driven only through the
 //! control channel (`docs/control-protocol.md`), with screenshots saved under the repository's
-//! `target/` to look at.
+//! `target/` to look at, the run's one screenshot folder.
 //!
 //! Safety: the app gets an isolated run's environment: the given home (with the test key and the
 //! sshd's host key, from `dbee_testkit::temp_home`), in-memory secrets and clipboard (no copy
@@ -39,7 +39,7 @@ pub struct App {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
     next: u64,
-    /// Where [`App::shot`] saves, from the repository root (the app's working directory).
+    /// The run's screenshot folder, from the repository root, where [`App::shot`] saves.
     shots: &'static str,
 }
 
@@ -84,6 +84,7 @@ impl App {
             .env("DBEE_CLIPBOARD", "memory")
             .env("DBEE_ALLOW_TARGETS", allowed(db))
             .env("DBEE_ALLOW_DIRS", std::env::join_paths([home.to_path_buf(), root.join("target")]).unwrap())
+            .env("DBEE_SCREENSHOT_DIR", root.join(shots))
             .env_remove("SSH_AUTH_SOCK")
             .env_remove("DBEE_CONTROL_PORT")
             .spawn()
@@ -224,9 +225,10 @@ impl App {
 
     /// Saves a screenshot as `<shots>/<name>.png` and checks the file is there.
     pub fn shot(&mut self, root: &Path, name: &str) -> PathBuf {
-        let path = format!("{}/{name}.png", self.shots);
-        let r = self.ok("ui.screenshot", json!({ "path": path }));
-        let file = root.join(&path);
+        let name = format!("{name}.png");
+        let r = self.ok("ui.screenshot", json!({ "path": name }));
+        let file = root.join(self.shots).join(&name);
+        assert_eq!(r["path"], file.display().to_string(), "{r}");
         assert!(file.is_file() && r["width"].as_u64().is_some_and(|w| w > 0), "{r}");
         println!("step screenshot: {}", file.display());
         file

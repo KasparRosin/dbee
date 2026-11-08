@@ -105,6 +105,8 @@ pub struct DbeeApp {
     pub(crate) deferred: Vec<Deferred>,
     /// The last screenshot token handed out.
     pub(crate) shots: u64,
+    /// The one folder `ui.screenshot` writes in ([`DbeeApp::with_screenshot_dir`]).
+    pub(crate) screenshot_dir: Option<PathBuf>,
     /// `app.quit` was answered when this many frames were drawn: close the window at a later
     /// frame, from this instant on.
     pub(crate) quit: Option<(u64, std::time::Instant)>,
@@ -236,6 +238,7 @@ impl DbeeApp {
             input: Input::default(),
             deferred: Vec::new(),
             shots: 0,
+            screenshot_dir: None,
             quit: None,
             frames: 0,
             ui_jobs: Vec::new(),
@@ -257,6 +260,13 @@ impl DbeeApp {
     /// This app with copied text going to `clipboard` (the system clipboard by default).
     pub fn with_clipboard(mut self, clipboard: Clipboard) -> DbeeApp {
         self.memory = (clipboard == Clipboard::Memory).then_some(None);
+        self
+    }
+
+    /// This app with `ui.screenshot` writing its files in `dir`; without one, it only sends the
+    /// picture back.
+    pub fn with_screenshot_dir(mut self, dir: Option<PathBuf>) -> DbeeApp {
+        self.screenshot_dir = dir;
         self
     }
 

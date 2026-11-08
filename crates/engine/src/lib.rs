@@ -34,7 +34,7 @@ use serde_json::{Map, json};
 
 pub use cmd::selection::COPY_MAX_BYTES;
 pub use cmd::{CommandInfo, CommandSpec};
-pub use dbee_driver::Meaning;
+pub use dbee_driver::{Meaning, allowed_file};
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
 pub use state::{
@@ -448,6 +448,12 @@ impl Session {
                 CommandInfo::new(spec, enabled)
             })
             .collect()
+    }
+
+    /// The only folders this run may touch files in, an isolated run's; `None` is no limit
+    /// ([`SessionOptions::allowed_dirs`]).
+    pub fn allowed_dirs(&self) -> Option<&[PathBuf]> {
+        self.allowed_dirs.as_deref()
     }
 
     /// Successful journaled commands, oldest first, with their params minus secrets. Replaying

@@ -188,8 +188,8 @@ fn damaged(dir: &Path, path: &Path, why: &str) -> Read {
 }
 
 /// Makes `dir` and the folders above it that are missing. Where the system has file modes, `dir`
-/// is `0700`, also when it was there before: the file lists every saved server.
-fn private_dir(dir: &Path) -> std::io::Result<()> {
+/// is `0700`, also when it was there before: its files are for this user alone.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -207,6 +207,24 @@ fn private_file() -> std::fs::OpenOptions {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options
+}
+
+/// Puts `bytes` at `path` as a new file, `0600` where the system has file modes: written beside it,
+/// then renamed over it. A reader sees the whole file or the old one, and a link at `path` is
+/// replaced, never followed.
+pub fn replace_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(format!(".{}.tmp", crate::connection::new_id()));
+    let tmp = PathBuf::from(tmp);
+    let written = private_file().write(true).create_new(true).open(&tmp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    let result = written.and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Makes the file at `path`, which may be older than these modes, `0600` where the system has
@@ -326,17 +344,7 @@ impl ConnectionStore {
         };
         let json = serde_json::to_vec_pretty(&body).map_err(|e| ConfigError::Io(e.to_string()))?;
         private_dir(dir).map_err(|e| io("create directory", e))?;
-        let tmp = dir.join(format!("{FILE}.{}.tmp", crate::connection::new_id()));
-        let written = (|| {
-            let mut file = private_file().write(true).create(true).truncate(true).open(&tmp).map_err(|e| io("write", e))?;
-            file.write_all(&json).map_err(|e| io("write", e))?;
-            file.sync_all().map_err(|e| io("sync", e))
-        })();
-        let result = written.and_then(|()| std::fs::rename(&tmp, dir.join(FILE)).map_err(|e| io("rename", e)));
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result
+        replace_private_file(&dir.join(FILE), &json).map_err(|e| io("write", e))
     }
 
     /// Replaces the saved connection with the same id, keeping the fields this build does not

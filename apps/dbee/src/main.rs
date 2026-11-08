@@ -13,6 +13,8 @@
 //! - `DBEE_CLIPBOARD=memory` keeps every copy and cut in the app (a text field's too), never on
 //!   the system clipboard; the control channel's `document.inspect` shows the start of the last
 //!   as `clipboard` ([`Clipboard::Memory`]; set by `cargo xtask run-isolated`).
+//! - `DBEE_SCREENSHOT_DIR` is the one folder `ui.screenshot` writes files in (set by `cargo xtask
+//!   run-isolated`); without it, `screenshots` in the settings folder ([`screenshot_dir`]).
 //! - `DBEE_NO_PREFS` keeps no connections file and no log file.
 //! - `DBEE_ALLOW_TARGETS` (`host:port,…`, set by `cargo xtask run-isolated`) limits connections
 //!   to those targets ([`SessionOptions::allowed_targets`]).
@@ -109,6 +111,13 @@ fn open_file(args: &[OsString]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The folder `ui.screenshot` writes files in, whole: `env` (`DBEE_SCREENSHOT_DIR`; empty is unset),
+/// else `screenshots` in the settings folder `settings`.
+fn screenshot_dir(env: Option<OsString>, settings: Option<PathBuf>) -> Option<PathBuf> {
+    let dir = env.filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| settings.map(|d| d.join("screenshots")))?;
+    std::path::absolute(dir).ok()
 }
 
 /// `DBEE_SECRET_STORE=memory`.
@@ -281,7 +290,8 @@ fn main() -> ExitCode {
                 let _ = window.set(cc.egui_ctx.clone());
                 let ctx = cc.egui_ctx.clone();
                 let session = Session::new(session_options(Arc::new(move || ctx.request_repaint())))?;
-                let app = DbeeApp::new(session, control.take()).with_clipboard(clipboard);
+                let shots = screenshot_dir(std::env::var_os("DBEE_SCREENSHOT_DIR"), config_dir());
+                let app = DbeeApp::new(session, control.take()).with_clipboard(clipboard).with_screenshot_dir(shots);
                 Ok(Box::new(match file.take() {
                     Some(path) => app.with_file(path),
                     None => app,
@@ -352,6 +362,17 @@ mod start_tests {
         assert_eq!(open_file(&args(&["--control=7979", "-x", "--other", "a.db"])), Some(PathBuf::from("a.db")));
         // Whether it is there, and a type dbee opens, is `connection.openFile`'s to say.
         assert_eq!(open_file(&args(&["notes.txt"])), Some(PathBuf::from("notes.txt")));
+    }
+
+    #[test]
+    fn the_screenshot_folder_comes_from_the_environment_or_the_settings_folder() {
+        let settings = || Some(PathBuf::from("/home/u/.config/dbee"));
+        assert_eq!(screenshot_dir(None, settings()), Some(PathBuf::from("/home/u/.config/dbee/screenshots")));
+        assert_eq!(screenshot_dir(Some("/repo/target/look".into()), settings()), Some(PathBuf::from("/repo/target/look")));
+        assert_eq!(screenshot_dir(Some("".into()), settings()), Some(PathBuf::from("/home/u/.config/dbee/screenshots")), "empty is unset");
+        assert_eq!(screenshot_dir(None, None), None);
+        // A relative one is whole, so what it lies in can be checked.
+        assert_eq!(screenshot_dir(Some("look".into()), None), Some(std::env::current_dir().unwrap().join("look")));
     }
 
     #[test]

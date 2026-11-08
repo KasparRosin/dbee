@@ -15,15 +15,17 @@
 //! `DBEE_CLIPBOARD=memory` are set. So the run never reads or writes the real home, `~/.ssh` or
 //! the keyring, keeps every copy and cut in the app (text fields' too; `document.inspect` shows
 //! the last as `clipboard`), and on Linux and macOS never reaches the SSH agent. On Windows the
-//! OpenSSH agent pipe is still reachable: dbee finds it without `SSH_AUTH_SOCK`.
+//! OpenSSH agent pipe is still reachable: dbee finds it without `SSH_AUTH_SOCK`. [`SHOTS_VAR`] is
+//! the one folder `ui.screenshot` writes in, [`shots_dir`]: `target/look`.
 //!
 //! [`ALLOW_VAR`] lists the only targets the run may connect to ([`allowed_targets`]): each test
 //! server's port and the sshd's, on `127.0.0.1` and on `localhost`, and `127.0.0.1:1` for error
 //! demos. Without a readable `env.json` it is `127.0.0.1:1` alone, and a warning says so. dbee
 //! refuses every other target of a test, an open or a reconnect before any network I/O.
-//! [`DIRS_VAR`] lists the only folders a database file may lie in ([`allowed_dirs`]): the
-//! throwaway home and `target/`. While it is set, dbee also keeps a connection's SQL from opening
-//! any other file (SQLite's `ATTACH` and `VACUUM INTO`).
+//! [`DIRS_VAR`] lists the only folders the run touches files in ([`allowed_dirs`]): the throwaway
+//! home and `target/`. It binds a database file, an SSH key file, a CA file and a screenshot. While
+//! it is set, dbee also keeps a connection's SQL from opening any other file (SQLite's `ATTACH` and
+//! `VACUUM INTO`).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -66,11 +68,19 @@ pub fn parse_args(args: &[&str]) -> Result<Options, String> {
 /// `main.rs`).
 pub const ALLOW_VAR: &str = "DBEE_ALLOW_TARGETS";
 
-/// The child's variable with the folders a database file may lie in, joined as the system joins
-/// paths (read by dbee's `main.rs`).
+/// The child's variable with the folders it may touch files in, joined as the system joins paths
+/// (read by dbee's `main.rs`).
 pub const DIRS_VAR: &str = "DBEE_ALLOW_DIRS";
 
-/// The folders an isolated run's database files may lie in: its throwaway `home` and `target/`.
+/// The child's variable with the one folder `ui.screenshot` writes in (read by dbee's `main.rs`).
+pub const SHOTS_VAR: &str = "DBEE_SCREENSHOT_DIR";
+
+/// Where an isolated run's screenshots go: `<repo>/target/look`.
+pub fn shots_dir(root: &Path) -> PathBuf {
+    root.join("target").join("look")
+}
+
+/// The folders an isolated run may touch files in: its throwaway `home` and `target/`.
 pub fn allowed_dirs(root: &Path, home: &Path) -> Vec<PathBuf> {
     vec![home.to_path_buf(), root.join("target")]
 }
@@ -187,6 +197,7 @@ pub fn command(root: &Path, port: u16, exe: &Path, rest: &[String], allowed: &[(
         .env(ALLOW_VAR, allow_list(allowed))
         // A folder whose path holds the separator cannot be listed: then no folder is allowed.
         .env(DIRS_VAR, std::env::join_paths(allowed_dirs(root, &home)).unwrap_or_default())
+        .env(SHOTS_VAR, shots_dir(root))
         .env_remove("SSH_AUTH_SOCK")
         .env_remove("DBEE_CONTROL_PORT");
     c
@@ -208,12 +219,13 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), String> {
         );
     }
     eprintln!(
-        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{}, connections only to {}, files only in {}",
+        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{}, connections only to {}, files only in {}, screenshots in {}",
         home.display(),
         if testdb.is_some() { "with the test servers' SSH key and host" } else { "no test servers" },
         o.port,
         allow_list(&allowed),
-        allowed_dirs(root, &home).iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
+        allowed_dirs(root, &home).iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", "),
+        shots_dir(root).display()
     );
     let status = command(root, o.port, &exe, &o.rest, &allowed).status().map_err(|e| format!("{}: {e}", exe.display()))?;
     if status.success() { Ok(()) } else { Err(format!("dbee exited with {status}")) }
@@ -306,6 +318,12 @@ mod tests {
         let dirs = std::env::join_paths([home.clone(), root.join("target")]).unwrap();
         assert_eq!(env_of(&c, DIRS_VAR), Some(Some(dirs.as_os_str())), "files only in the throwaway home and target/");
         assert_eq!(DIRS_VAR, "DBEE_ALLOW_DIRS");
+        assert_eq!(
+            env_of(&c, SHOTS_VAR),
+            Some(Some(root.join("target").join("look").as_os_str())),
+            "screenshots in target/look, inside those folders"
+        );
+        assert_eq!(SHOTS_VAR, "DBEE_SCREENSHOT_DIR");
         let args: Vec<&OsStr> = c.get_args().collect();
         assert_eq!(args, vec![OsStr::new("--control"), OsStr::new("7979"), OsStr::new("--x")]);
         assert_eq!(c.get_current_dir(), Some(root));
