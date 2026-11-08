@@ -9,10 +9,11 @@
 //! After it: the server's own report. The session tracks the read-only variable and the
 //! transaction's characteristics, so each OK packet says when a statement changed them, however
 //! its text was spelled ([`ModeReport`]); when one turned read-only off, dbee rolls back, turns it on
-//! again and says so. An error packet carries no report, and MariaDB drops what a statement changed
-//! before its error, so after an error the mode is read (the variable, whose packet also brings
-//! what MySQL still has to report) before the next statement that is not `SHOW WARNINGS`,
-//! `SHOW ERRORS` or `GET DIAGNOSTICS`, which the read would clear. So is a read a cancel stopped.
+//! again, sets the tracking up again (the statement may have turned it off too) and says so. An
+//! error packet carries no report, and MariaDB drops what a statement changed before its error, so
+//! after an error the mode is read (the variable, whose packet also brings what MySQL still has to
+//! report) before the next statement that is not `SHOW WARNINGS`, `SHOW ERRORS` or
+//! `GET DIAGNOSTICS`, which the read would clear. So is a read a cancel stopped.
 
 use std::sync::atomic::Ordering;
 
@@ -204,12 +205,15 @@ impl MySqlConnection {
         }
     }
 
-    /// Rolls back what is open and turns read-only on again; the error to report, `said` when it
-    /// worked. When it did not, the connection is closed.
+    /// Rolls back what is open, turns read-only on again and sets its tracking up again; the error
+    /// to report, `said` when it worked. When it did not, the connection is closed.
     async fn restore(&self, session: &mut Session, said: &str) -> DbError {
         let mut set = self.statement(session, "ROLLBACK", ONE_ROW).await.map(drop);
         if set.is_ok() {
             set = self.statement(session, "SET SESSION TRANSACTION READ ONLY", ONE_ROW).await.map(drop);
+        }
+        if set.is_ok() {
+            set = self.track_again(session).await;
         }
         if set.is_ok() && matches!(self.mode(session).await, Mode::ReadOnly) {
             self.check_due.store(false, Ordering::Release);

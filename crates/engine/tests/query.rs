@@ -722,6 +722,59 @@ fn read_only_mysql_keeps_the_character_set_utf8() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// A function turns session tracking off and read-only off in a statement that fails: dbee finds
+/// the change before the next statement, turns read-only on again and sets the tracking up again,
+/// so a later `SET` whose name the text check reads as a string (a `"…"` under `ANSI_QUOTES`) is
+/// caught by the server's report. Nothing is written, and the current database is still told.
+#[test]
+fn read_only_mysql_sets_the_tracking_up_again_after_a_caught_change() {
+    let _db = require_testdb!();
+    let mut wrong = Vec::new();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let (sc, name, off) = (t.schema("scratch"), unique("t_ro_retrack"), unique("f_ro_untrack"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}"), format!("FUNCTION IF EXISTS {sc}.{off}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut w = connected_to(&t);
+        tab(
+            &mut w,
+            &format!(
+                "CREATE FUNCTION {sc}.{off}() RETURNS INT DETERMINISTIC BEGIN SET SESSION session_track_system_variables = ''; \
+                 SET SESSION session_track_transaction_info = 'OFF'; SET SESSION {variable} = 0; RETURN 1; END"
+            ),
+        );
+        run(&mut w, "query.run", json!({}));
+        drop(w);
+        let mut s = read_only_session(&t);
+        run_text(&mut s, &format!("SELECT {sc}.{off}(), (SELECT 1 UNION SELECT 2)")).expect_err("more than one row");
+        let e = run_text(&mut s, &format!("SELECT @@SESSION.{variable}")).expect_err("caught before it ran");
+        assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
+        run_text(&mut s, "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')").unwrap();
+        let set = format!("SET @@SESSION.\"{variable}\" = 0");
+        match run_text(&mut s, &set) {
+            Err(e) if e.code() == "readOnly" && e.to_string().contains("turned read-only on again") => {}
+            other => wrong.push(format!("{}: {set} -> {}", t.name(), other.err().map_or("ran".into(), |e| e.to_string()))),
+        }
+        if run_text(&mut s, &format!("INSERT INTO {sc}.{name} VALUES (1)")).is_ok() {
+            wrong.push(format!("{}: the insert after {set} ran", t.name()));
+        }
+        run_text(&mut s, "SET SESSION sql_mode = DEFAULT").unwrap();
+        run_text(&mut s, &format!("USE {sc}")).unwrap();
+        if starts_in(&s) != (json!(sc), json!(true)) {
+            wrong.push(format!("{}: after USE {sc} the connection starts in {:?}", t.name(), starts_in(&s)));
+        }
+        run_text(&mut s, &format!("SELECT @@SESSION.{variable}")).unwrap();
+        if first_value(&s).as_deref() != Some("1") {
+            wrong.push(format!("{}: the session reads {:?}", t.name(), first_value(&s)));
+        }
+        let written = q(&t, &format!("SELECT count(*) FROM {sc}.{name}"));
+        if written != "0" {
+            wrong.push(format!("{}: {written} rows written", t.name()));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// After a statement that turned read-only off and then failed (an error carries no report), the
 /// mode is read before the next statement that is not a diagnostic one; a version comment the
 /// server skips cannot make an `INSERT` look like `SHOW WARNINGS` to dbee: it reads the statement

@@ -34,6 +34,9 @@ const BROWSE_SQL_MODE: &str = "SET SESSION sql_mode = TRIM(BOTH ',' FROM CONCAT(
 /// The browse connection commits each statement outside an apply, whatever the server's default.
 const BROWSE_AUTOCOMMIT: &str = "SET SESSION autocommit = 1";
 
+/// Has the server report, in each OK packet, the database a statement made current.
+const TRACK_SCHEMA: &str = "SET SESSION session_track_schema = ON";
+
 /// Why a TLS handshake failed that the server ended with a handshake-failure or an
 /// insufficient-security alert (ciphers), or with a protocol-version alert (versions).
 const NO_SHARED_CIPHER: &str = "the server offers only TLS ciphers dbee does not support; connect through an SSH tunnel instead";
@@ -97,7 +100,7 @@ pub(crate) struct Session {
     /// The password went out encrypted with the server's RSA key.
     used_server_key: bool,
     /// The server reports, in its OK packets, the database each statement makes current. Off for
-    /// good once a statement names `session_track`: it may have turned the reports off.
+    /// good once a statement of the user's names `session_track`: it may have turned the reports off.
     tracks_schema: bool,
     /// The address a direct connection reached; `None` through a tunnel.
     reached: Option<SocketAddr>,
@@ -402,7 +405,7 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     }
     // Last, as a statement that names `session_track`, the read-only setup's too, ends the trust in the reports.
     if purpose == Purpose::Query && session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK) {
-        session.tracks_schema = match session.query("SET SESSION session_track_schema = ON", QUERY_LIMITS).await {
+        session.tracks_schema = match session.query(TRACK_SCHEMA, QUERY_LIMITS).await {
             Ok(_) => true,
             Err(DbError::Server(_)) => {
                 log::info!("mysql: the server cannot report the current database; dbee leaves it untold");
@@ -416,15 +419,21 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     Ok((ServerInfo { product: flavor.product().into(), version, version_num, read_only: server_read_only, warnings }, connection_id))
 }
 
-/// Has the server report, in each OK packet, a change of the read-only `variable` and of the
-/// transaction's characteristics, which a `SET` of the variable without `SESSION` and
-/// `START TRANSACTION READ WRITE` change.
+/// The statements that have the server report, in each OK packet, a change of the read-only
+/// `variable` and of the transaction's characteristics, which a `SET` of the variable without
+/// `SESSION` and `START TRANSACTION READ WRITE` change.
+fn tracking(variable: &str) -> [String; 2] {
+    [format!("SET SESSION session_track_system_variables = '{variable}'"), "SET SESSION session_track_transaction_info = 'CHARACTERISTICS'".into()]
+}
+
+/// Has the server report a change of read-only mode ([`tracking`]).
 async fn track_read_only(session: &mut Session, variable: &str) -> Result<(), DbError> {
     if !session.caps.contains(CapabilityFlags::CLIENT_SESSION_TRACK | CapabilityFlags::CLIENT_DEPRECATE_EOF) {
         return Err(DbError::Other(NO_TRACKING.into()));
     }
-    session.query(&format!("SET SESSION session_track_system_variables = '{variable}'"), QUERY_LIMITS).await?;
-    session.query("SET SESSION session_track_transaction_info = 'CHARACTERISTICS'", QUERY_LIMITS).await?;
+    for sql in tracking(variable) {
+        session.query(&sql, QUERY_LIMITS).await?;
+    }
     Ok(())
 }
 
@@ -511,6 +520,21 @@ impl MySqlConnection {
     /// the connection is dropped.
     pub(crate) fn mark_closed(&self) {
         self.closed.store(true, Ordering::Release);
+    }
+
+    /// Sets the session's tracking up again as the setup left it, after a statement that turned
+    /// read-only off, and may have turned the tracking off with it: read-only mode's, then the
+    /// current database's where the session told it.
+    pub(crate) async fn track_again(&self, session: &mut Session) -> Result<(), DbError> {
+        let schema = session.tracks_schema;
+        for sql in tracking(session.read_only_variable) {
+            self.statement(session, &sql, QUERY_LIMITS).await?;
+        }
+        if schema {
+            self.statement(session, TRACK_SCHEMA, QUERY_LIMITS).await?;
+            session.tracks_schema = true;
+        }
+        Ok(())
     }
 }
 
