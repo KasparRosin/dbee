@@ -620,7 +620,7 @@ mod tests {
         let (ch, _folder) = channel(Arc::new(|| {}));
         let (token, proof) = secrets(&ch.token_file);
         let quit = r#"{"id":1,"method":"app.quit"}"#;
-        let almost = format!("{}0", token.get(..63).unwrap());
+        let almost = format!("{}{}", token.get(..63).unwrap(), if token.ends_with('0') { '1' } else { '0' });
         let longer = format!("{token}0");
         let upper = token.to_uppercase();
         for first in [quit, "", " ", "wrong", almost.as_str(), longer.as_str(), upper.as_str(), proof.as_str()] {
