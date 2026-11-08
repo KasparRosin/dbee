@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (SQLite foreign keys, the cancel, files opening as saved, the new milestone numbers)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's fixes: Postgres's catalog and literals, read-only's guard, MySQL's executable comments, SQLite's hardening, the connections file's modes)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -231,3 +231,34 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** the milestone after M2 is M3, the Redesign. Import and export moves from M3 to M4, and the alpha gate's last row (file export) lands in M4.
 - **Why:** the owner's order of work: the redesign renames and moves many things that export and import would otherwise have to name twice.
+
+## 2026-11-08: dbee's Postgres catalog reads search `pg_catalog` only
+
+- **Decision:** each catalog query (relations, columns, keys, the database list) runs as `SET LOCAL search_path TO pg_catalog, pg_temp; <query>` in one message, so the setting ends with that query's implicit transaction, and the queries name `pg_catalog`'s functions and tables themselves. Postgres counts are written `pg_catalog.count(*)`. A search path that lists another schema before `pg_catalog` gets a warning when the connection opens, since filters and saved changes name built-in types and operators unqualified, as users do.
+- **Why:** a function or operator someone made in `public` that is a closer match than `pg_catalog`'s runs as whoever opens the database (the pattern of CVE-2018-1058). Measured on both Postgres test servers: a planted `public.unnest(smallint[])` and a `name !~~ name` operator both ran during dbee's catalog read. Type names outside `pg_catalog` now come back from `format_type` qualified (`public.citext`).
+
+## 2026-11-08: MySQL's executable comments are code
+
+- **Decision:** on MySQL and MariaDB the lexer reads `/*! … */` and `/*M! … */` (with a version or without) as code: the text inside is coloured and split as SQL, and the marks stay in the statement dbee sends, also at its end. A `*/` outside one is a mark too, never an operator.
+- **Why:** the server runs what such a comment holds. dbee coloured it as a comment and cut a trailing one off before sending, while `DELETE … WHERE /*! 1 = 1 OR */ id = 2` deleted every row (measured on all five servers). The server runs what the editor shows (2026-11-06).
+
+## 2026-11-08: Postgres values with a backslash are escape strings
+
+- **Decision:** a value dbee writes into Postgres SQL that holds a `\` is written `E'…'` with each `\` and `'` doubled; every other value stays `'…'` with `'` doubled. A statement that turns `standard_conforming_strings` off (`SET`, `RESET`, `set_config`) is refused on every connection, and before a statement whose `'…'` strings hold a backslash the driver checks that it is still on; when it is not, dbee turns it on again and does not run the statement.
+- **Why:** what `'…\…'` means depends on `standard_conforming_strings`, which a function the session calls (through a view, say) can turn off. An escape string reads the same either way, while a key holding `\'` written as `'…'` ended early and the rest of it ran as SQL (measured on both Postgres test servers). In a query tab, dbee's lexer reads backslashes as plain characters, so a statement with one would be split one way and run another.
+
+## 2026-11-08: Read-only refuses what could turn it off, and reads it back
+
+- **Decision:** on a connection set read-only, the driver refuses, before sending, the statements that can turn read-only off or write in spite of it. On Postgres: `DO`, `CALL`, `SET` or `RESET` of the read-only settings or of `READ WRITE`, `BEGIN` or `START TRANSACTION … READ WRITE`, `RESET ALL`, `DISCARD ALL`, `COMMIT` or `ROLLBACK … AND CHAIN`, `set_config` of a read-only setting, and the large-object functions that write (Postgres 14 runs them in a read-only transaction). On MySQL and MariaDB: `CALL`, `PREPARE`, `EXECUTE`, `SET STATEMENT`, a `SET` of the read-only variable or of `READ WRITE`, `START TRANSACTION … READ WRITE` and `AND CHAIN`, inside an executable comment too. On SQLite the authorizer refuses `ATTACH` (and with it `VACUUM INTO`) and setting `query_only`. After each statement the driver reads the mode back (Postgres both settings with `SHOW`, which takes no snapshot; MySQL and MariaDB the session variable) and, when it changed, rolls back, turns read-only on again and says so; when that fails, it closes the connection. A check that cannot be made then (a failed transaction, a cancel) runs before the next statement; so does MySQL's after a statement that left warnings, since reading a variable clears what `SHOW WARNINGS` lists. The connection form's Read-only says that it guards against mistakes and that a database user without write rights is the lock.
+- **Why:** issue #8 and the security review: a pasted script (`pg_dumpall`'s starts with `SET default_transaction_read_only = off`), a `DO` block that commits, `START TRANSACTION READ WRITE` and MariaDB's `SET STATEMENT` all wrote on a read-only connection, some leaving the session looking read-only. What a function does inside one statement stays out of any client's reach (gaps entry 27): read-only is not a security boundary.
+
+## 2026-11-08: SQLite files open with SQLite's own hardening
+
+- **Decision:** every SQLite file opens with `trusted_schema` off, `SQLITE_DBCONFIG_DEFENSIVE` on and `cell_size_check` on; an isolated run's file opens with `SQLITE_OPEN_NOFOLLOW` on the path its check resolved.
+- **What changes in a query tab:** a view, trigger or default that uses a function or virtual table SQLite does not mark harmless fails with "unsafe use of …" (measured: a pragma table function such as `pragma_table_info` in a view; FTS's `MATCH` in a view, measured with SQLite 3.46; triggers that keep an FTS or R*Tree index up to date still work). `PRAGMA writable_schema = ON` no longer lets SQL write the schema (measured), and `journal_mode = OFF` and `schema_version = N` stop working, as SQLite documents for `DEFENSIVE`.
+- **Why:** SQLite's advice for files from sources one does not know, which any file a file manager hands dbee can be. `NOFOLLOW` closes the race in which a link swapped in after the check opened a file outside the allowed folders (measured: won within the first tries before).
+
+## 2026-11-08: The connections file is private
+
+- **Decision:** where the system has file modes, the folder of `connections.json` is made `0700`, and the file, its lock and a damaged file moved aside `0600`, whatever the umask; a folder and files made before are tightened at the next write.
+- **Why:** the file holds no passwords, but it lists every saved server's host, user, database, SSH host and key path, which other local users could read (`664` under a umask of `002`, measured).

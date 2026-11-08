@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (entry 6: the engine holds its connections by id and allows one)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (entry 27: read-only's guard and what it cannot reach; entries 36 and 37 from the security review)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -207,12 +207,12 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** a truncation or a conversion in a query tab goes unseen. `SHOW WARNINGS` right after the statement lists them.
 - **Estimate:** 1–2 h (estimated): the count beside "rows affected", with a link that runs `SHOW WARNINGS`.
 
-### 27. MySQL and MariaDB: a query tab can undo read-only (D)
+### 27. Read-only guards against mistakes, not against what runs inside one statement (D)
 
-- **Limit:** a read-only connection's sessions start with `SET SESSION TRANSACTION READ ONLY`, which refuses writes and DDL (measured on all five test servers). A query tab can turn it off with `SET SESSION TRANSACTION READ WRITE` or `START TRANSACTION READ WRITE`, and then write. Postgres has the same hole (issue #8).
-- **Evidence:** `read_only_refuses_ddl` and `read_only_refuses_insert` (`crates/engine/tests/query.rs`); the session setup (`crates/mysql/src/connect.rs`).
-- **Impact:** read-only guards against mistakes, not against someone who means to write. A database user without write grants is the guard against that.
-- **Estimate:** 2–3 h (estimated): refuse such statements on a read-only connection, as for Postgres in issue #8.
+- **Limit:** on a read-only connection dbee refuses, before sending, the statements that can turn read-only off or write in spite of it (a `DO` block, `CALL`, `SET … READ WRITE`, MariaDB's `SET STATEMENT`, SQLite's `ATTACH` and `VACUUM INTO`, and the others the decisions of 2026-11-08 list), and reads the mode back after each statement. What a function does inside one statement stays out of a client's reach: one that commits through another connection (Postgres's `dblink`), or that turns read-only off and writes before its statement ends. Postgres's `COPY … TO PROGRAM` runs a program on the server from a read-only transaction (measured on 14 and 18; superusers and roles granted it only).
+- **Evidence:** `read_only_postgres_refuses_what_turns_it_off_and_reads_it_back`, `read_only_mysql_refuses_what_turns_it_off_and_reads_it_back` and `read_only_sqlite_attaches_nothing_and_keeps_query_only` (`crates/engine/tests/query.rs`), `a_raw_filter_on_a_read_only_connection_writes_nothing` (`crates/engine/tests/table.rs`); the checks (`crates/sql/src/refusal.rs`, `crates/pg/src/guard.rs`, `crates/mysql/src/guard.rs`, the authorizer in `crates/sqlite/src/connect.rs`).
+- **Impact:** a pasted script or a migration file is stopped; someone who means to write with the connection's role can. A database user without write grants is the lock, as the form's Read-only says.
+- **Estimate:** none: the lock is a role on the server.
 
 ### 28. A server's idle timeout ends the session, and dbee then asks to reconnect (D)
 
@@ -270,10 +270,25 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** such a server cannot be opened at all.
 - **Estimate:** not estimated: a light load of the table list and details per table, which the Structure view needs too.
 
+### 36. SQLite: a file a file manager hands dbee opens read-write, and a value may be 1 GB (D)
+
+- **Limit:** a file opened from a file manager (not a saved connection) opens read-write, so SQLite applies a hot journal or a WAL beside it, as it always does. A value may be as large as SQLite's own limit, 1 GB, which SQLite holds in memory before dbee's result cap leaves it out.
+- **Evidence:** `connection.openFile` and the open (`crates/sqlite/src/connect.rs`). The security review of 2026-11-08 suggested opening such a file read-only until the user chooses otherwise, and `SQLITE_LIMIT_LENGTH` near the 256 MiB result cap.
+- **Impact:** low: a hostile file needs a bug in SQLite itself to gain anything, and files open with SQLite's hardening for untrusted files. With the length limit, a page holding a larger value would fail to load instead of leaving the value out.
+- **Estimate:** 1–2 h (estimated).
+
+### 37. Isolated runs: a parent folder swapped in during a SQLite open is followed (S)
+
+- **Limit:** an isolated run opens the path its check resolved with `SQLITE_OPEN_NOFOLLOW`, so SQLite refuses a link anywhere in it. Between SQLite's own look at the path and its `open()`, a parent folder swapped for a link is still followed.
+- **Evidence:** `a_link_swapped_in_after_the_check_never_opens_a_file_outside` (`crates/sqlite/tests/connect.rs`) swaps the file itself; nothing swaps a folder.
+- **Impact:** it needs a process of the same user racing the open within that window; an isolated run guards against mistakes, not against such a process.
+- **Estimate:** 2–4 h (estimated): open the folder with `O_DIRECTORY | O_NOFOLLOW` and check it again after the open.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | The security review's lane B: entry 27 now says what read-only refuses and reads back, and what runs inside one statement out of its reach; entries 36 (SQLite: a file from the file manager opens read-write, values up to 1 GB) and 37 (isolated runs: a parent folder swapped in during a SQLite open). |
 | 2026-11-08 | minor | Entry 6: the engine holds its open connections by id and each tab names its connection; one may be open. |
 | 2026-11-08 | minor | Entry 11 now says the Flatpak reads `~/.ssh` and the agent and lacks only the keyring; entry 35 (a catalog that takes more than 60 s cannot be opened); import and export are M4 (M3 is the Redesign). |
 | 2026-11-08 | trivial | Entries 19 and 20 no longer point to the private M2 plan. |

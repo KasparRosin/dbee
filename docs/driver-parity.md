@@ -1,6 +1,6 @@
 # Driver parity
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (SQLite foreign keys; import and export are M4) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (read-only's guard on every engine) · **Target:** Beekeeper Studio 5.5.7
 
 The engine list is the one observed in Beekeeper Studio's connection type list: 20 engines, 10 free and 10 paid ("*" after the name). The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). "done" means it works end to end against the Docker test servers (measured); the limits are in [gaps.md](gaps.md).
 
@@ -35,7 +35,7 @@ What one engine does and another does not, beyond the notes above; each limit ha
 
 - **The same on every engine:** the filter bar's `like`, `not like`, `ilike` and `not ilike` take `\` as their escape, as Postgres's `LIKE` does by default: `\%`, `\_` and `\\` match `%`, `_` and `\` themselves. MySQL 8.0 and later have no escape under the browse connection's `NO_BACKSLASH_ESCAPES`, and SQLite has none unless one is named, so dbee names it (measured on all seven test servers and SQLite: `like_escapes_with_a_backslash_on_every_engine`, `crates/engine/tests/table.rs`). A raw `WHERE` keeps each engine's own string rules: `'it\'s'` works in a MySQL query tab, which keeps the server's `sql_mode`, but not in its filter bar. A read-only connection refuses `CREATE TABLE`, `ALTER TABLE` and `DROP TABLE` on every engine (`read_only_refuses_ddl`, `crates/engine/tests/query.rs`).
 - **Letter case:** MySQL and MariaDB compare `eq` and `like` by the column's collation, and most collations ignore case. SQLite's `like` and `ilike` ignore case for A–Z only (34). The filter bar's notes say both.
-- **Query tabs:** every tab of a connection shares one session, on every engine, and a transaction outlives the tab that opened it; on MySQL and MariaDB another tab's DDL commits it (14). MySQL and MariaDB: a `CALL` shows only its last result set (25), the warning count is not shown (26), and a query tab can turn read-only off, as on Postgres (27).
+- **Query tabs:** every tab of a connection shares one session, on every engine, and a transaction outlives the tab that opened it; on MySQL and MariaDB another tab's DDL commits it (14). MySQL and MariaDB: a `CALL` shows only its last result set (25), and the warning count is not shown (26). Read-only refuses, on every engine, the statements that could turn it off and reads the mode back after each statement; what a function does inside one statement stays out of its reach (27).
 - **Connections:** MySQL and MariaDB servers end idle sessions after their `wait_timeout`, often short on hosted servers, and dbee then asks to reconnect (28). The logins `client_ed25519`, PARSEC and `mysql_clear_password` are refused (29), and connections close without the protocol's goodbye, which MariaDB logs (33).
 - **SQLite foreign keys:** dbee turns them on for its connection (`PRAGMA foreign_keys = ON`); a program that keeps them off against the same file sees cascades it did not expect after dbee deletes a row. Postgres, MySQL and MariaDB always enforce them.
 - **Catalog:** Postgres, MySQL and MariaDB read it in several queries, outside one snapshot; Refresh reads it again (32). MySQL's `lower_case_table_names` 1 and 2 are untested (30), and MariaDB's system-versioned tables with hidden period columns are read-only in the grid (31).
@@ -50,6 +50,7 @@ What one engine does and another does not, beyond the notes above; each limit ha
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Query tabs: read-only refuses what could turn it off and reads the mode back on every engine (27). |
 | 2026-11-08 | minor | SQLite: foreign keys are on for every connection; import and export are M4 (M3 is the Redesign). |
 | 2026-11-06 | minor | Where the engines differ: the `like` escape now the same on every engine (measured), and the differences M2's final review listed, each with its gaps.md entry. |
 | 2026-11-05 | major | MySQL, MariaDB and SQLite connect, browse, query and edit: done, with their tests; 4 of 20 engines (M2). |

@@ -1,6 +1,6 @@
 # dbee control protocol
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (open connections have ids: `connections`, each tab's `connection`, and a `connection` param)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (a read-only connection's refusals and `readOnly` after a statement turned it off; before: open connections have ids)
 
 The desktop app takes a control port, so agents and tests can drive the real window:
 
@@ -82,4 +82,5 @@ Each connection the session opens has an id, a whole number: a new one for each 
 
 - Programmatic calls never open dialogs. `engine.execute` with empty params runs with defaults or returns an error; a command that needs an answer (a password, a host key) returns a `needs…` error with the details in `data`, and is run again with the answer in its params.
 - Params are hostile input: wrong types, missing keys and deep nesting are errors, never panics ([never crash](standards/never-crash.md)).
+- A read-only connection refuses, before sending, the statements that could turn read-only off or write in spite of it (`readOnly`), and when a statement turned it off all the same, the run ends with `readOnly` once dbee has rolled back and turned it on again. On Postgres a statement that turns `standard_conforming_strings` off is refused on every connection (`other`).
 - Passwords are never echoed in replies or the journal. The log names methods and command ids only, never params, SQL or values.
