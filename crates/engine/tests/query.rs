@@ -689,6 +689,9 @@ fn read_only_mysql_keeps_the_character_set_utf8() {
             ("SET @@character_set_client = 'big5'", vec![]),
             ("SET SESSION character_set_client = DEFAULT", vec![]),
             ("SET @@SESSION.character_set_client := @@GLOBAL.character_set_client", vec![]),
+            // The servers read `CHAR` as `CHARACTER`.
+            ("SET CHAR SET sjis", vec![mixed('\u{c1}', 7)]),
+            ("/*!40101 SET @a = 1, CHAR SET gbk */", vec![mixed('\u{4e01}', 8)]),
         ];
         for (set, blocks) in steps {
             match run_text(&mut s, set) {
@@ -704,6 +707,7 @@ fn read_only_mysql_keeps_the_character_set_utf8() {
         for sql in [
             "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_bin'",
             "SET CHARACTER SET utf8mb4",
+            "SET char set utf8mb4",
             "SET @@SESSION.character_set_client = utf8mb4",
             "/*!40101SET NAMES sjis*/",
             "SET @a = (SELECT '\\'' AS \"\\\"), NAMES sjis, @b = '\"'",

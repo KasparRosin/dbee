@@ -149,11 +149,12 @@ fn holds_a_semicolon(sql: &str, ansi_quotes: bool) -> bool {
 }
 
 /// `sql` holds the word `SET` and `NAMES`, `CHARSET` or `character_set_client`, or `SET` twice and
-/// `CHARACTER`, as `SET CHARACTER SET` does (a `CAST(… CHARACTER SET …)` holds one): a change of
-/// the character set, whichever way its text reads.
+/// `CHARACTER` or `CHAR`, as `SET CHARACTER SET` and `SET CHAR SET` do (a `CAST(… CHARACTER SET …)`
+/// holds one `SET`): a change of the character set, whichever way its text reads.
 fn names_the_character_set(sql: &str) -> bool {
     holds_set(sql)
-        && (["names", "charset", "character_set_client"].iter().any(|w| words(sql, w) > 0) || (words(sql, "set") > 1 && words(sql, "character") > 0))
+        && (["names", "charset", "character_set_client"].iter().any(|w| words(sql, w) > 0)
+            || (words(sql, "set") > 1 && (words(sql, "character") > 0 || words(sql, "char") > 0)))
 }
 
 /// Why dbee does not send `sql` on a read-only connection, from its raw text, comments included:
@@ -443,6 +444,8 @@ mod tests {
             "set charset 'sjis'",
             "SET @@SESSION.`character_set_client` = 'utf8mb4'",
             "SET @a = CAST('x' AS CHAR CHARACTER SET sjis)",
+            "SET CHAR SET sjis",
+            "/*!40101 SET @a = 1, CHAR SET gbk */",
         ] {
             assert!(names_the_character_set(sql), "{sql}");
         }

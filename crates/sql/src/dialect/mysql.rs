@@ -164,8 +164,8 @@ const READ_ONLY_VARIABLES: &[&str] = &["transaction_read_only", "tx_read_only"];
 const UTF8: &[&str] = &["utf8mb4", "utf8mb3", "utf8"];
 
 /// A `SET` of the character set the server reads statements in to anything but one of [`UTF8`]
-/// alone: `NAMES`, `CHARACTER SET` or `CHARSET` (a `COLLATE` may follow), or
-/// `character_set_client` with `=` or `:=`.
+/// alone: `NAMES`, `CHARACTER SET` (or `CHAR SET`, which the servers read as one) or `CHARSET` (a
+/// `COLLATE` may follow), or `character_set_client` with `=` or `:=`.
 fn sets_character_set(s: &Code<'_>) -> bool {
     let utf8 = |at: usize, collate: bool| {
         s.literal(at).is_some_and(|v| UTF8.contains(&v.as_str())) && (s.text(at + 1).is_none_or(|t| t == ",") || (collate && s.is(at + 1, "collate")))
@@ -173,7 +173,7 @@ fn sets_character_set(s: &Code<'_>) -> bool {
     let names = s.assignments().into_iter().any(|i| {
         let value = if s.is(i, "names") || s.is(i, "charset") {
             i + 1
-        } else if s.is(i, "character") && s.is(i + 1, "set") {
+        } else if (s.is(i, "character") || s.is(i, "char")) && s.is(i + 1, "set") {
             i + 2
         } else {
             return false;
