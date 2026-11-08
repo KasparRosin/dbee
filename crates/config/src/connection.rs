@@ -318,12 +318,18 @@ impl ConnectionConfig {
         if self.host.trim().is_empty() {
             return bad("host is empty");
         }
+        if !is_host_name(&self.host) {
+            return bad(HOST_CHARS);
+        }
         if self.port == 0 {
             return bad("port must not be 0");
         }
         if let Some(ssh) = &self.ssh {
             if ssh.host.trim().is_empty() {
                 return bad("SSH host is empty");
+            }
+            if !is_host_name(&ssh.host) {
+                return bad(HOST_CHARS);
             }
             if ssh.port == 0 {
                 return bad("SSH port must not be 0");
@@ -334,6 +340,15 @@ impl ConnectionConfig {
         }
         Ok(())
     }
+}
+
+const HOST_CHARS: &str = "a host is a name of letters, digits, `-`, `.` and `_`, or an IP address (an IPv6 address without brackets)";
+
+/// `host` is a host name (letters, digits, `-`, `.`, `_`) or an IP address, IPv6 without
+/// brackets. Nothing else is safe to write into `known_hosts`, where a comma, a space or a
+/// newline changes which names a line vouches for.
+pub fn is_host_name(host: &str) -> bool {
+    !host.is_empty() && (host.parse::<std::net::IpAddr>().is_ok() || host.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '.' | '_')))
 }
 
 /// Adds the fields of `old` that `extra` lacks.

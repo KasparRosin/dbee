@@ -248,7 +248,8 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
                     }
                     _ => {
                         app.view.dialog = None;
-                        connections::fill_from_url(app, &parts);
+                        let password = dbee_config::parse_url(&url).ok().and_then(|u| u.password);
+                        connections::fill_from_url(app, &parts, password);
                     }
                 }
             }

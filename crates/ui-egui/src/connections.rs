@@ -446,8 +446,9 @@ pub(crate) fn url_kinds(form: &Form, kinds: &[DbKind]) -> Vec<DbKind> {
 }
 
 /// Fills the form from `connection.parseUrl`'s result: the type its scheme names, and the parts
-/// the URL has. The form shows, past the engine cards.
-pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json) {
+/// the URL has; the password is the one the dialog read from the URL, as the reply leaves it out.
+/// The form shows, past the engine cards.
+pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json, password: Option<String>) {
     let conn = &mut app.view.conn;
     if let Some(kind) = parts.get("kind").and_then(Json::as_str).and_then(DbKind::from_id).filter(|k| *k != conn.form.kind) {
         conn.form.switch_kind(kind);
@@ -464,7 +465,7 @@ pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json) {
     if let Some(v) = text("user") {
         form.user = v;
     }
-    if let Some(v) = text("password") {
+    if let Some(v) = password {
         form.password = v;
     }
     if let Some(v) = text("database") {
@@ -1272,7 +1273,7 @@ mod tests {
         form_done(&mut app, LIST_DATABASES, params, generation, job(21), listed(&["dbee"]));
         assert!(!app.view.conn.databases.open && app.view.conn.databases.pending.is_none());
         let (params, generation) = listing(&mut app, 23);
-        fill_from_url(&mut app, &json!({ "kind": "mariadb" }));
+        fill_from_url(&mut app, &json!({ "kind": "mariadb" }), None);
         form_done(&mut app, LIST_DATABASES, params, generation, job(23), listed(&["dbee"]));
         assert!(!app.view.conn.databases.open && app.view.conn.databases.pending.is_none(), "a URL of another type");
         // The type's own options count too.

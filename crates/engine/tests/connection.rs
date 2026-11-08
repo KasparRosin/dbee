@@ -207,17 +207,33 @@ fn test_and_open_need_an_id_or_a_config() {
 }
 
 #[test]
+fn a_host_known_hosts_could_misread_is_bad_params() {
+    let mut s = session();
+    for host in ["a,b", "a b", "a\nb", "#a", "[a]"] {
+        let ssh = json!({ "host": host, "port": 22, "user": "u", "auth": { "method": "password" } });
+        for config in
+            [json!({ "kind": "postgres", "host": "db", "port": 5432, "ssh": ssh }), json!({ "kind": "postgres", "host": host, "port": 5432 })]
+        {
+            for id in ["connection.open", "connection.test", "connection.save"] {
+                let e = s.execute(id, json!({ "config": config })).unwrap_err();
+                assert!(e.code() == "badParams" && e.to_string().contains("letters, digits"), "{id} {host:?}: {e}");
+            }
+        }
+    }
+}
+
+#[test]
 fn parse_url_fills_the_form_and_is_not_journaled() {
     let mut s = session();
     let r = s.run_blocking("connection.parseUrl", json!({ "url": "postgresql://ann:s%40cret@db.example.com:6543/shop?sslmode=require" }), T).unwrap();
     assert_eq!(
         r,
-        json!({ "kind": "postgres", "host": "db.example.com", "port": 6543, "user": "ann", "password": "s@cret", "database": "shop", "sslMode": "require" })
+        json!({ "kind": "postgres", "host": "db.example.com", "port": 6543, "user": "ann", "passwordGiven": true, "database": "shop", "sslMode": "require" })
     );
     let r = s.run_blocking("connection.parseUrl", json!({ "url": "postgres://localhost" }), T).unwrap();
     assert_eq!(
         r,
-        json!({ "kind": "postgres", "host": "localhost", "port": null, "user": null, "password": null, "database": null, "sslMode": null })
+        json!({ "kind": "postgres", "host": "localhost", "port": null, "user": null, "passwordGiven": false, "database": null, "sslMode": null })
     );
     // The scheme names the database type.
     for (url, kind) in [("mysql://u@h:3307/shop", "mysql"), ("mariadb://h", "mariadb"), ("postgresql://h", "postgres")] {

@@ -972,8 +972,9 @@ fn create_file(params: &Json, config: &ConnectionConfig) -> Result<bool, EngineE
     Ok(create)
 }
 
-/// `{url}` → `{kind, host, port, user, password, database, sslMode}`: the database type its scheme
-/// names, then the parts, each `null` when the URL lacks it. Not journaled.
+/// `{url}` → `{kind, host, port, user, passwordGiven, database, sslMode}`: the database type its
+/// scheme names, then the parts, each `null` when the URL lacks it. The password is not in the
+/// reply, only whether the URL had one. Not journaled.
 fn parse(_: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let parts = parse_url(p::str(params, "url")?).map_err(|e| bad(e.to_string()))?;
     Ok(Outcome::Done(json!({
@@ -981,7 +982,7 @@ fn parse(_: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         "host": parts.host,
         "port": parts.port,
         "user": parts.user,
-        "password": parts.password,
+        "passwordGiven": parts.password.is_some(),
         "database": parts.database,
         "sslMode": parts.ssl_mode,
     })))

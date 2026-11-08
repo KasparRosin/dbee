@@ -297,6 +297,8 @@ fn secret_params_are_recognised() {
         "nested": {"sshPassword": "pw2", "list": [{"sshPassphrase": "pp"}, {"user": "u"}]}
     }));
     assert_eq!(kept, json!({"text": "keep", "nested": {"list": [{}, {"user": "u"}]}}));
+    let kept = cmd::journal_params(&json!({"config": {"id": "a"}, "trustHostKey": "SHA256:x"}));
+    assert_eq!(kept, json!({"config": {"id": "a"}}), "a replay asks about the host key again");
 }
 
 #[test]

@@ -101,8 +101,9 @@ pub fn is_secret_param(key: &str) -> bool {
     key == "password" || key == "passphrase" || key.ends_with("Password") || key.ends_with("Passphrase")
 }
 
-/// `params` as the journal keeps it: every secret param is left out, at any depth. Replaying
-/// the entry runs the command without it (the secret store or the user supplies it again).
+/// `params` as the journal keeps it: every secret param is left out, at any depth, and so is
+/// `trustHostKey`. Replaying the entry runs the command without them: the secret store or the
+/// user supplies the secret again, and a host key is asked about again.
 pub fn journal_params(params: &Json) -> Json {
     let mut kept = params.clone();
     // Iterative, so deep params cannot overflow the stack.
@@ -110,7 +111,7 @@ pub fn journal_params(params: &Json) -> Json {
     while let Some(v) = stack.pop() {
         match v {
             Json::Object(map) => {
-                map.retain(|k, _| !is_secret_param(k));
+                map.retain(|k, _| !is_secret_param(k) && k != "trustHostKey");
                 stack.extend(map.values_mut());
             }
             Json::Array(items) => stack.extend(items.iter_mut()),
