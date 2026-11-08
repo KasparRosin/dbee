@@ -7,7 +7,8 @@
 //!    key (mode 0600) and `.ssh/known_hosts` holds their sshd's host key line.
 //! 3. Runs the binary from the repository root with `--control <port>` (default
 //!    [`DEFAULT_PORT`]) and the arguments after `--`, and waits for it to exit (an agent starts
-//!    it in the background and ends it with `app.quit`).
+//!    it in the background and ends it with `app.quit`). A client reads the run's token file,
+//!    [`token_file`]: `target/isolated/<port>/control-token` ([`TOKEN_VAR`] on the child).
 //!
 //! Only the child's environment changes ([`command`]): `HOME` and `USERPROFILE` are the
 //! throwaway home, the XDG directories and `APPDATA`/`LOCALAPPDATA` lie inside it,
@@ -67,6 +68,14 @@ pub fn parse_args(args: &[&str]) -> Result<Options, String> {
 /// The child's variable with the allowed targets, `host:port,host:port` (read by dbee's
 /// `main.rs`).
 pub const ALLOW_VAR: &str = "DBEE_ALLOW_TARGETS";
+
+/// The child's variable with the control channel's token file (read by dbee's `main.rs`).
+pub const TOKEN_VAR: &str = "DBEE_CONTROL_TOKEN_FILE";
+
+/// The token file of the run on `port`: `<repo>/target/isolated/<port>/control-token`.
+pub fn token_file(root: &Path, port: u16) -> PathBuf {
+    root.join("target").join("isolated").join(port.to_string()).join("control-token")
+}
 
 /// The child's variable with the folders it may touch files in, joined as the system joins paths
 /// (read by dbee's `main.rs`).
@@ -198,6 +207,7 @@ pub fn command(root: &Path, port: u16, exe: &Path, rest: &[String], allowed: &[(
         // A folder whose path holds the separator cannot be listed: then no folder is allowed.
         .env(DIRS_VAR, std::env::join_paths(allowed_dirs(root, &home)).unwrap_or_default())
         .env(SHOTS_VAR, shots_dir(root))
+        .env(TOKEN_VAR, token_file(root, port))
         .env_remove("SSH_AUTH_SOCK")
         .env_remove("DBEE_CONTROL_PORT");
     c
@@ -219,10 +229,11 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), String> {
         );
     }
     eprintln!(
-        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{}, connections only to {}, files only in {}, screenshots in {}",
+        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{} with the token file {}, connections only to {}, files only in {}, screenshots in {}",
         home.display(),
         if testdb.is_some() { "with the test servers' SSH key and host" } else { "no test servers" },
         o.port,
+        token_file(root, o.port).display(),
         allow_list(&allowed),
         allowed_dirs(root, &home).iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", "),
         shots_dir(root).display()
@@ -324,6 +335,10 @@ mod tests {
             "screenshots in target/look, inside those folders"
         );
         assert_eq!(SHOTS_VAR, "DBEE_SCREENSHOT_DIR");
+        let token = root.join("target").join("isolated").join("7979").join("control-token");
+        assert_eq!(token_file(root, 7979), token);
+        assert_eq!(env_of(&c, TOKEN_VAR), Some(Some(token.as_os_str())), "the token file lies beside the throwaway home");
+        assert_eq!(TOKEN_VAR, "DBEE_CONTROL_TOKEN_FILE");
         let args: Vec<&OsStr> = c.get_args().collect();
         assert_eq!(args, vec![OsStr::new("--control"), OsStr::new("7979"), OsStr::new("--x")]);
         assert_eq!(c.get_current_dir(), Some(root));
@@ -382,14 +397,28 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    /// `ui.inspect`'s `frame`, or `None` while the app does not answer yet.
-    fn inspect_frame(port: u16) -> Option<u64> {
+    /// A connection to the run on `port` that has sent the token and checked the proof, or `None`
+    /// while there is none yet.
+    fn connect(root: &Path, port: u16) -> Option<(BufReader<TcpStream>, TcpStream)> {
+        let text = std::fs::read_to_string(token_file(root, port)).ok()?;
+        let (token, proof) = text.split_once('\n')?;
         let s = TcpStream::connect(("127.0.0.1", port)).ok()?;
         s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
         let mut w = s.try_clone().ok()?;
+        w.write_all(format!("{token}\n").as_bytes()).ok()?;
+        let mut r = BufReader::new(s);
+        let mut line = String::new();
+        r.read_line(&mut line).ok()?;
+        let reply: serde_json::Value = serde_json::from_str(&line).ok()?;
+        (reply["result"]["proof"].as_str() == Some(proof.trim_end())).then_some((r, w))
+    }
+
+    /// `ui.inspect`'s `frame`, or `None` while the app does not answer yet.
+    fn inspect_frame(root: &Path, port: u16) -> Option<u64> {
+        let (mut r, mut w) = connect(root, port)?;
         w.write_all(b"{\"id\":1,\"method\":\"ui.inspect\"}\n").ok()?;
         let mut line = String::new();
-        BufReader::new(s).read_line(&mut line).ok()?;
+        r.read_line(&mut line).ok()?;
         serde_json::from_str::<serde_json::Value>(&line).ok()?["result"]["frame"].as_u64()
     }
 
@@ -404,7 +433,7 @@ mod tests {
         let started = Instant::now();
         let mut child = cmd.spawn().unwrap();
         let took = loop {
-            if inspect_frame(port).is_some_and(|f| f >= 1) {
+            if inspect_frame(&root, port).is_some_and(|f| f >= 1) {
                 break started.elapsed();
             }
             if started.elapsed() > Duration::from_secs(30) {
@@ -414,8 +443,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         println!("connection screen drawn {took:?} after spawn (release build)");
-        if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
-            let _ = s.write_all(b"{\"method\":\"app.quit\"}\n");
+        if let Some((_, mut w)) = connect(&root, port) {
+            let _ = w.write_all(b"{\"method\":\"app.quit\"}\n");
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {

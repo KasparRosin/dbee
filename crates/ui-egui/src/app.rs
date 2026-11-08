@@ -227,7 +227,7 @@ impl std::fmt::Debug for DbeeApp {
 
 impl DbeeApp {
     /// The app over `session`; `control` brings the control channel's requests
-    /// ([`crate::control_server::start`]).
+    /// ([`crate::control_server::listen`]).
     pub fn new(session: Session, control: Option<Receiver<ControlRequest>>) -> DbeeApp {
         let has_store = !session.inspect()["secretStore"].is_null();
         DbeeApp {

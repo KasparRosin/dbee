@@ -1,7 +1,8 @@
 //! The driver the day tests share (`mod common;`): the real app, `dbee --control <port>`, on a
 //! throwaway home with the environment of `cargo xtask run-isolated`, driven only through the
 //! control channel (`docs/control-protocol.md`), with screenshots saved under the repository's
-//! `target/` to look at, the run's one screenshot folder.
+//! `target/` to look at, the run's one screenshot folder. The client sends the token from the
+//! run's token file, in the home, and checks the app's proof first ([`connect`]).
 //!
 //! Safety: the app gets an isolated run's environment: the given home (with the test key and the
 //! sshd's host key, from `dbee_testkit::temp_home`), in-memory secrets and clipboard (no copy
@@ -41,6 +42,8 @@ pub struct App {
     next: u64,
     /// The run's screenshot folder, from the repository root, where [`App::shot`] saves.
     shots: &'static str,
+    pub port: u16,
+    pub token_file: PathBuf,
 }
 
 /// The targets the app may connect to, as `run-isolated` allows them: each server's port and
@@ -57,6 +60,58 @@ fn free_port() -> u16 {
     TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
 }
 
+/// The file the run on `home` keeps its token in.
+fn token_file(home: &Path) -> PathBuf {
+    home.join("control-token")
+}
+
+/// The app as an isolated run starts it, on `port`, with a screenshot folder and its own token file.
+pub fn command(root: &Path, home: &Path, db: &TestDb, shots: &str, port: u16) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dbee"));
+    command
+        .current_dir(root)
+        .arg("--control")
+        .arg(port.to_string())
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local").join("share"))
+        .env("XDG_STATE_HOME", home.join(".local").join("state"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("APPDATA", home.join("AppData").join("Roaming"))
+        .env("LOCALAPPDATA", home.join("AppData").join("Local"))
+        .env("DBEE_SECRET_STORE", "memory")
+        .env("DBEE_CLIPBOARD", "memory")
+        .env("DBEE_ALLOW_TARGETS", allowed(db))
+        .env("DBEE_ALLOW_DIRS", std::env::join_paths([home.to_path_buf(), root.join("target")]).unwrap())
+        .env("DBEE_SCREENSHOT_DIR", root.join(shots))
+        .env("DBEE_CONTROL_TOKEN_FILE", token_file(home))
+        .env_remove("SSH_AUTH_SOCK")
+        .env_remove("DBEE_CONTROL_PORT");
+    command
+}
+
+/// A connection to the app on `port` that has sent the token from `token_file` and checked the
+/// proof in the reply; `Err` says why not, and then nothing more was sent. What a client must do
+/// (`docs/control-protocol.md`).
+pub fn connect(port: u16, token_file: &Path) -> Result<(BufReader<TcpStream>, TcpStream), String> {
+    let text = std::fs::read_to_string(token_file).map_err(|e| format!("{}: {e}", token_file.display()))?;
+    let mut lines = text.lines();
+    let (Some(token), Some(proof)) = (lines.next(), lines.next()) else { return Err(format!("{} is not whole", token_file.display())) };
+    let stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("port {port}: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(120))).map_err(|e| e.to_string())?;
+    let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+    writeln!(writer, "{token}").map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    let mut reply = String::new();
+    reader.read_line(&mut reply).map_err(|e| e.to_string())?;
+    let reply: Json = serde_json::from_str(&reply).map_err(|e| format!("not JSON ({e}): {reply}"))?;
+    if reply["result"]["proof"] != proof {
+        return Err(format!("the reply does not carry the file's proof: {reply}"));
+    }
+    Ok((reader, writer))
+}
+
 impl App {
     /// Starts the app from `root` on `home` with the isolated environment (`isolated::command` in
     /// `xtask/src/isolated.rs`), saving screenshots in `shots`, and waits for its first frame.
@@ -67,41 +122,19 @@ impl App {
     /// [`App::start`] with `args` after `--control <port>` on the command line (`dbee <file>`).
     pub fn start_with(root: &Path, home: &Path, db: &TestDb, shots: &'static str, args: &[&OsStr]) -> App {
         let port = free_port();
-        let child = Command::new(env!("CARGO_BIN_EXE_dbee"))
-            .current_dir(root)
-            .arg("--control")
-            .arg(port.to_string())
-            .args(args)
-            .env("HOME", home)
-            .env("USERPROFILE", home)
-            .env("XDG_CONFIG_HOME", home.join(".config"))
-            .env("XDG_DATA_HOME", home.join(".local").join("share"))
-            .env("XDG_STATE_HOME", home.join(".local").join("state"))
-            .env("XDG_CACHE_HOME", home.join(".cache"))
-            .env("APPDATA", home.join("AppData").join("Roaming"))
-            .env("LOCALAPPDATA", home.join("AppData").join("Local"))
-            .env("DBEE_SECRET_STORE", "memory")
-            .env("DBEE_CLIPBOARD", "memory")
-            .env("DBEE_ALLOW_TARGETS", allowed(db))
-            .env("DBEE_ALLOW_DIRS", std::env::join_paths([home.to_path_buf(), root.join("target")]).unwrap())
-            .env("DBEE_SCREENSHOT_DIR", root.join(shots))
-            .env_remove("SSH_AUTH_SOCK")
-            .env_remove("DBEE_CONTROL_PORT")
-            .spawn()
-            .unwrap();
+        let child = command(root, home, db, shots, port).args(args).spawn().unwrap();
         let child = Running(child);
-        // The channel listens before the window opens.
+        // The channel listens before the window opens, and the file comes once it does.
+        let token_file = token_file(home);
         let start = Instant::now();
-        let stream = loop {
-            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
-                break s;
+        let (reader, writer) = loop {
+            match connect(port, &token_file) {
+                Ok(connected) => break connected,
+                Err(why) => assert!(start.elapsed() < WAIT, "the control channel did not open on port {port}: {why}"),
             }
-            assert!(start.elapsed() < WAIT, "the control channel did not open on port {port}");
             std::thread::sleep(Duration::from_millis(50));
         };
-        stream.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
-        let writer = stream.try_clone().unwrap();
-        let mut app = App { child, reader: BufReader::new(stream), writer, next: 0, shots };
+        let mut app = App { child, reader, writer, next: 0, shots, port, token_file };
         app.until("the first frame", |app| app.inspect()["frame"].as_u64().is_some_and(|f| f >= 1));
         app
     }
@@ -260,13 +293,20 @@ impl App {
     }
 }
 
-impl Drop for App {
-    fn drop(&mut self) {
+impl App {
+    /// Asks the app to quit and waits a little for it to end.
+    pub fn quit(&mut self) {
         let _ = writeln!(self.writer, "{}", json!({ "id": 0, "method": "app.quit" }));
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.child.0.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.quit();
         // `Running` kills and waits for it if it has not ended.
     }
 }

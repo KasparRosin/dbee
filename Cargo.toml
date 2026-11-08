@@ -36,6 +36,8 @@ serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 log = "0.4"
 proptest = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# The control channel's token; already in the tree through russh, at this version.
+getrandom = "0.4"
 
 # network
 russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }

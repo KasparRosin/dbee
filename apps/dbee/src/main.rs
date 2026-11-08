@@ -4,7 +4,9 @@
 //! - `--version` (`-V`) prints the version.
 //! - `--control <port>` (or `DBEE_CONTROL_PORT`) serves the control channel on
 //!   `127.0.0.1:<port>` (`docs/control-protocol.md`). It listens before the window opens, so a
-//!   port in use stops the start: an agent must never drive another dbee by mistake.
+//!   port in use stops the start: an agent must never drive another dbee by mistake. Its token
+//!   file is `DBEE_CONTROL_TOKEN_FILE` (set by `cargo xtask run-isolated`), else in the settings
+//!   folder ([`control_token_file`]).
 //! - The first argument that is no flag names a database file to open once the window is up
 //!   (`connection.openFile`): how a file manager's Open with hands dbee a file. A file of no type
 //!   dbee opens, or one that is not there, says so in the window.
@@ -111,6 +113,12 @@ fn open_file(args: &[OsString]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The control channel's token file: `env` (`DBEE_CONTROL_TOKEN_FILE`; empty is unset), else
+/// `control-<port>.token` in the settings folder `settings`.
+fn control_token_file(port: u16, env: Option<OsString>, settings: Option<PathBuf>) -> Option<PathBuf> {
+    env.filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| settings.map(|d| d.join(format!("control-{port}.token"))))
 }
 
 /// The folder `ui.screenshot` writes files in, whole: `env` (`DBEE_SCREENSHOT_DIR`; empty is unset),
@@ -231,22 +239,28 @@ fn main() -> ExitCode {
     // Listening before the window exists: requests wait in the queue until the first frame, and
     // wake the window once it has a context.
     let window: Arc<OnceLock<egui::Context>> = Arc::new(OnceLock::new());
-    let control = match port {
-        None => None,
+    let (control, _token_file) = match port {
+        None => (None, None),
         Some(port) => {
+            let Some(token_file) = control_token_file(port, std::env::var_os("DBEE_CONTROL_TOKEN_FILE"), config_dir()) else {
+                let line = "control channel: there is no settings folder for its token file: set HOME, or name a file with DBEE_CONTROL_TOKEN_FILE";
+                log::error!("{line}");
+                let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("dbee: {line}\n"));
+                return ExitCode::FAILURE;
+            };
             let w = Arc::clone(&window);
             let wake = Arc::new(move || {
                 if let Some(ctx) = w.get() {
                     ctx.request_repaint();
                 }
             });
-            match dbee_ui_egui::control_server::listen(port, wake) {
-                Ok((_, rx)) => Some(rx),
+            match dbee_ui_egui::control_server::listen(port, &token_file, wake) {
+                Ok(listening) => (Some(listening.requests), Some(listening.token_file)),
                 Err(e) => {
-                    log::error!("control channel: cannot listen on 127.0.0.1:{port}: {e}");
+                    log::error!("control channel: cannot start on 127.0.0.1:{port}: {e}");
                     let _ = std::io::Write::write_fmt(
                         &mut std::io::stderr(),
-                        format_args!("dbee: control channel: cannot listen on 127.0.0.1:{port}: {e}\n"),
+                        format_args!("dbee: control channel: cannot start on 127.0.0.1:{port}: {e}\n"),
                     );
                     return ExitCode::FAILURE;
                 }
@@ -362,6 +376,19 @@ mod start_tests {
         assert_eq!(open_file(&args(&["--control=7979", "-x", "--other", "a.db"])), Some(PathBuf::from("a.db")));
         // Whether it is there, and a type dbee opens, is `connection.openFile`'s to say.
         assert_eq!(open_file(&args(&["notes.txt"])), Some(PathBuf::from("notes.txt")));
+    }
+
+    #[test]
+    fn the_token_file_comes_from_the_environment_or_the_settings_folder() {
+        let settings = || Some(PathBuf::from("/home/u/.config/dbee"));
+        assert_eq!(control_token_file(7983, None, settings()), Some(PathBuf::from("/home/u/.config/dbee/control-7983.token")));
+        assert_eq!(control_token_file(7983, Some("/repo/token".into()), settings()), Some(PathBuf::from("/repo/token")));
+        assert_eq!(
+            control_token_file(7983, Some("".into()), settings()),
+            Some(PathBuf::from("/home/u/.config/dbee/control-7983.token")),
+            "empty is unset"
+        );
+        assert_eq!(control_token_file(7983, None, None), None);
     }
 
     #[test]
