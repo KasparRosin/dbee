@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use dbee_driver::{CONNECT_TIMEOUT, DbError, ServerInfo, Target};
+use rusqlite::config::DbConfig;
 use rusqlite::ffi::ErrorCode;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{InterruptHandle, OpenFlags};
@@ -25,7 +26,8 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// only when `t.create_file` is set (and never read-only).
 ///
 /// A path that exists but is no regular file (a folder, a FIFO, a device), or that ends in a
-/// separator, is refused before it is opened. The session then turns foreign keys on and waits
+/// separator, is refused before it is opened. The file opens with SQLite's hardening for files
+/// from sources dbee does not know ([`harden`]). The session then turns foreign keys on and waits
 /// [`BUSY_TIMEOUT`] for a locked file; a read-only one also runs `PRAGMA query_only = ON`, which
 /// keeps it from temporary tables too. A read of `sqlite_schema` turns a file that is not a
 /// database, or one whose schema is damaged, into [`DbError::Connect`] naming the file; damage
@@ -75,12 +77,7 @@ fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>
     if !dbee_driver::plain_file(given) || !dbee_driver::plain_file(path) {
         return Err(DbError::Connect(format!("{shown} is not a file")));
     }
-    let mode = match (read_only, create) {
-        (true, _) => OpenFlags::SQLITE_OPEN_READ_ONLY,
-        (false, true) => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
-        (false, false) => OpenFlags::SQLITE_OPEN_READ_WRITE,
-    };
-    let conn = rusqlite::Connection::open_with_flags(path, mode | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(|e| {
+    let conn = rusqlite::Connection::open_with_flags(path, open_flags(read_only, create, allowed.is_some())).map_err(|e| {
         let why = e.sqlite_error().map_or_else(|| e.to_string(), |error| rusqlite::ffi::code_to_str(error.extended_code).to_owned());
         match e.sqlite_error_code() {
             Some(ErrorCode::CannotOpen) if matches!(path.try_exists(), Ok(false)) => DbError::Connect(format!("no file at {shown}")),
@@ -92,6 +89,7 @@ fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>
         Some(ErrorCode::DatabaseCorrupt) => DbError::Connect(format!("{shown} is damaged: {e}")),
         _ => DbError::Connect(format!("{shown}: {e}")),
     };
+    harden(&conn).map_err(setup)?;
     conn.execute_batch("PRAGMA foreign_keys = ON").map_err(setup)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(setup)?;
     conn.query_row("SELECT count(*) FROM main.sqlite_schema", [], |_| Ok(())).map_err(setup)?;
@@ -105,6 +103,30 @@ fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>
     }
     let handle = conn.get_interrupt_handle();
     Ok((conn, handle, read_only))
+}
+
+/// The flags a file opens with: read-only, read-write, or read-write making a missing one. In an
+/// isolated run the path its check resolved, which holds no link, opens with
+/// `SQLITE_OPEN_NOFOLLOW`, so a link swapped into it after the check is refused, not followed out
+/// of the allowed folders.
+fn open_flags(read_only: bool, create: bool, isolated: bool) -> OpenFlags {
+    let mode = match (read_only, create) {
+        (true, _) => OpenFlags::SQLITE_OPEN_READ_ONLY,
+        (false, true) => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        (false, false) => OpenFlags::SQLITE_OPEN_READ_WRITE,
+    };
+    let links = if isolated { OpenFlags::SQLITE_OPEN_NOFOLLOW } else { OpenFlags::empty() };
+    mode | links | OpenFlags::SQLITE_OPEN_NO_MUTEX
+}
+
+/// SQLite's own settings for a file from a source dbee does not know, which any file a file
+/// manager hands it can be: the schema's views, triggers and defaults may use only the functions
+/// and virtual tables SQLite marks harmless (`trusted_schema` off), SQL may not write the file's
+/// structure by hand (`DEFENSIVE`), and each page's cells are checked as it is read.
+fn harden(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    conn.execute_batch("PRAGMA cell_size_check = ON")
 }
 
 /// What SQL may do on a connection: in an isolated run it opens no other file (no `ATTACH`, and so
@@ -375,6 +397,40 @@ mod tests {
             assert!(open(&slashed, false, create, None).is_err());
             assert!(!file.exists(), "nothing is made");
         }
+    }
+
+    /// SQLite's hardening for a file from a source dbee does not know, on every open.
+    #[test]
+    fn files_open_with_sqlites_hardening() {
+        let file = scratch_file("hardened");
+        let _ = std::fs::remove_file(&file);
+        for (read_only, create) in [(false, true), (true, false)] {
+            let (conn, _, _) = open(&file, read_only, create, None).unwrap();
+            let pragma = |name: &str| conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get::<_, i64>(0)).unwrap();
+            assert_eq!((pragma("trusted_schema"), pragma("cell_size_check")), (0, 1), "read-only {read_only}");
+            assert_eq!(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).ok(), Some(true), "read-only {read_only}");
+            assert_eq!(conn.db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA).ok(), Some(false), "read-only {read_only}");
+        }
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// In an isolated run the path the check resolved opens without following a link anywhere in
+    /// it; outside one a link is the user's own, and is followed.
+    #[cfg(unix)]
+    #[test]
+    fn an_isolated_run_follows_no_link_at_the_path_it_checked() {
+        let (target, link) = (scratch_file("nofollow-target"), scratch_file("nofollow-link"));
+        let _ = std::fs::remove_file(&link);
+        rusqlite::Connection::open(&target).unwrap().execute_batch("CREATE TABLE IF NOT EXISTS t (x)").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        for read_only in [false, true] {
+            assert!(rusqlite::Connection::open_with_flags(&link, open_flags(read_only, false, false)).is_ok(), "read-only {read_only}");
+            let refused = rusqlite::Connection::open_with_flags(&link, open_flags(read_only, false, true)).err();
+            let code = refused.as_ref().and_then(rusqlite::Error::sqlite_error).map(|e| e.extended_code);
+            assert_eq!(code, Some(rusqlite::ffi::SQLITE_CANTOPEN_SYMLINK), "read-only {read_only}: {refused:?}");
+        }
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
     }
 
     #[tokio::test]

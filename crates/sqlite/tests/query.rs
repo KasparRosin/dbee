@@ -357,12 +357,13 @@ async fn a_name_that_is_not_utf8_never_panics() {
     let (file, c) = Fresh::new().await;
     ok(&c, "CREATE TABLE odd_bytes (a INTEGER)", QUERY_LIMITS).await;
     ok(&c, "INSERT INTO odd_bytes VALUES (1)", QUERY_LIMITS).await;
-    // A column name and a declared type that are not UTF-8, as a crafted file can hold them.
-    ok(&c, "PRAGMA writable_schema = ON", QUERY_LIMITS).await;
-    let crafted = "UPDATE sqlite_schema SET sql = 'CREATE TABLE odd_bytes (' || CAST(X'61FF' AS TEXT) || ' ' || CAST(X'54FF' AS TEXT) || ')' \
-                   WHERE name = 'odd_bytes'";
-    ok(&c, crafted, QUERY_LIMITS).await;
     drop(c);
+    // A column name and a declared type that are not UTF-8, as a file crafted elsewhere can hold
+    // them (dbee's own connection may not write its schema by hand).
+    let crafted = "PRAGMA writable_schema = ON; \
+                   UPDATE sqlite_schema SET sql = 'CREATE TABLE odd_bytes (' || CAST(X'61FF' AS TEXT) || ' ' || CAST(X'54FF' AS TEXT) || ')' \
+                   WHERE name = 'odd_bytes'";
+    rusqlite::Connection::open(&file.0).unwrap().execute_batch(crafted).unwrap();
     let c = open_file(&file.0, false).await;
     for typed in [true, false] {
         let r =
@@ -379,21 +380,18 @@ async fn a_name_that_is_not_utf8_never_panics() {
 }
 
 /// Makes `file` hold a table `name` whose column name and declared type are not UTF-8, through a
-/// connection of its own; the schema's version moves on, as any schema change moves it.
-async fn craft_odd_bytes(file: &Path, name: &str) {
-    let c = open_file(file, true).await;
-    for sql in [
-        format!("CREATE TABLE {name} (a INTEGER)"),
-        "PRAGMA writable_schema = ON".to_owned(),
-        format!(
-            "UPDATE sqlite_schema SET sql = 'CREATE TABLE {name} (' || CAST(X'61FF' AS TEXT) || ' ' || CAST(X'54FF' AS TEXT) || ')' WHERE name = '{name}'"
-        ),
-        "PRAGMA writable_schema = OFF".to_owned(),
-    ] {
-        ok(&c, &sql, QUERY_LIMITS).await;
-    }
-    let version = c.scalar_u64("PRAGMA schema_version").await.unwrap();
-    ok(&c, &format!("PRAGMA schema_version = {}", version + 1), QUERY_LIMITS).await;
+/// connection of its own that is not dbee's (which may not write a schema by hand); the schema's
+/// version moves on, as any schema change moves it.
+fn craft_odd_bytes(file: &Path, name: &str) {
+    let c = rusqlite::Connection::open(file).unwrap();
+    c.execute_batch(&format!(
+        "CREATE TABLE {name} (a INTEGER); PRAGMA writable_schema = ON; \
+         UPDATE sqlite_schema SET sql = 'CREATE TABLE {name} (' || CAST(X'61FF' AS TEXT) || ' ' || CAST(X'54FF' AS TEXT) || ')' WHERE name = '{name}'; \
+         PRAGMA writable_schema = OFF;"
+    ))
+    .unwrap();
+    let version: i64 = c.query_row("PRAGMA schema_version", [], |row| row.get(0)).unwrap();
+    c.execute_batch(&format!("PRAGMA schema_version = {}", version + 1)).unwrap();
 }
 
 #[tokio::test]
@@ -402,7 +400,7 @@ async fn the_names_check_runs_again_after_a_schema_change_or_an_attach() {
     ok(&c, "CREATE TABLE plain (a INTEGER)", QUERY_LIMITS).await;
     assert_eq!(ok(&c, "SELECT a FROM plain", QUERY_LIMITS).await.columns[0].name, "a");
     // Another connection changes the schema: the next statement checks again.
-    craft_odd_bytes(&fresh.0, "odd_main").await;
+    craft_odd_bytes(&fresh.0, "odd_main");
     let e = c.run("SELECT a FROM plain", QUERY_LIMITS).await.unwrap_err();
     assert!(e.code() == "other" && e.to_string().contains("odd_main"), "{e}");
     // A file attached later is checked too, and named with its database.
@@ -410,7 +408,7 @@ async fn the_names_check_runs_again_after_a_schema_change_or_an_attach() {
     ok(&d, "CREATE TABLE plain (a INTEGER)", QUERY_LIMITS).await;
     assert_eq!(ok(&d, "SELECT a FROM plain", QUERY_LIMITS).await.rows_seen, 0);
     let (other, _o) = Fresh::new().await;
-    craft_odd_bytes(&other.0, "odd_other").await;
+    craft_odd_bytes(&other.0, "odd_other");
     let attach = format!("ATTACH {} AS other", dbee_sql::Dialect::Sqlite.literal(&other.0.display().to_string()).unwrap());
     ok(&d, &attach, QUERY_LIMITS).await;
     let e = d.run("SELECT a FROM plain", QUERY_LIMITS).await.unwrap_err();

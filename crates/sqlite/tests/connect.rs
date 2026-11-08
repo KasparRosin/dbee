@@ -507,3 +507,73 @@ async fn a_file_outside_the_allowed_folders_is_never_opened_or_made() {
     let free = config(&outside.path("free.sqlite"), false);
     assert!(connect(Target { create_file: true, ..target(&free) }).await.is_ok());
 }
+
+/// A database at `path` holding one table `m` with one row, `w`.
+fn holding(path: &Path, w: &str) {
+    let c = rusqlite::Connection::open(path).unwrap();
+    c.execute_batch(&format!("CREATE TABLE m (w); INSERT INTO m VALUES ('{w}');")).unwrap();
+}
+
+/// An isolated run opens the path its check resolved without following a link, so a link swapped
+/// in between the check and the open never opens a file outside the allowed folders. A thread
+/// keeps swapping the path between a file inside and a link to one outside.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_swapped_in_after_the_check_never_opens_a_file_outside() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (inside, outside) = (Scratch::new(), Scratch::new());
+    let (real, out, path) = (inside.path("real.sqlite"), outside.path("secret.sqlite"), inside.path("flip.sqlite"));
+    holding(&real, "in");
+    holding(&out, "out");
+    std::fs::copy(&real, &path).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flipper = std::thread::spawn({
+        let (stop, path, real, out, link, copy) =
+            (Arc::clone(&stop), path.clone(), real.clone(), out.clone(), inside.path("link"), inside.path("copy"));
+        move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_file(&link);
+                std::os::unix::fs::symlink(&out, &link).unwrap();
+                let _ = std::fs::rename(&link, &path);
+                std::fs::copy(&real, &copy).unwrap();
+                let _ = std::fs::rename(&copy, &path);
+            }
+        }
+    });
+    let folders = [inside.0.clone()];
+    let cfg = config(&path, true);
+    let (mut opened, mut outside_opens) = (0, 0);
+    for _ in 0..1000 {
+        let Ok(conn) = connect(Target { allowed_dirs: Some(&folders), ..target(&cfg) }).await else { continue };
+        opened += 1;
+        if conn.run("SELECT w FROM m", QUERY_LIMITS).await.is_ok_and(|r| r.rows == [[Some("out".to_owned())]]) {
+            outside_opens += 1;
+            break;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    flipper.join().unwrap();
+    println!("opened {opened} times, {outside_opens} of them the file outside");
+    assert_eq!(outside_opens, 0, "a link swapped in after the check opened the file outside the allowed folder");
+}
+
+/// A file's views, triggers and defaults may use only what SQLite marks harmless
+/// (`trusted_schema` off), and SQL may not write its schema by hand (`DEFENSIVE`): settings
+/// SQLite advises for files from sources one does not know.
+#[tokio::test]
+async fn a_files_schema_runs_only_what_sqlite_marks_harmless() {
+    let dir = Scratch::new();
+    let file = dir.path("schema.sqlite");
+    rusqlite::Connection::open(&file)
+        .unwrap()
+        .execute_batch("CREATE TABLE t (a); CREATE VIEW v AS SELECT name FROM pragma_table_info('t');")
+        .unwrap();
+    let conn = open(&config(&file, false)).await;
+    let e = conn.run("SELECT * FROM v", QUERY_LIMITS).await.err().map(|e| e.to_string());
+    assert!(e.as_deref().is_some_and(|e| e.contains("unsafe use")), "{e:?}");
+    // The same function, called by the query itself, runs.
+    assert!(conn.run("SELECT name FROM pragma_table_info('t')", QUERY_LIMITS).await.is_ok());
+    conn.run("PRAGMA writable_schema = ON", QUERY_LIMITS).await.unwrap();
+    let edit = conn.run("UPDATE sqlite_schema SET sql = 'CREATE TABLE t (b)' WHERE name = 't'", QUERY_LIMITS).await;
+    assert!(edit.is_err(), "the schema was written by hand: {edit:?}");
+}
