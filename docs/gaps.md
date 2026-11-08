@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C fix round: entries 50 to 52, and entries 46 and 47 corrected; before: the security review's lane C, job 3: entries 46 to 49, and entry 11 says the Flatpak keeps no trusted host key; earlier: the security review's lane A, fix round 1: entry 45, tokio-postgres keeps every ParameterStatus a server sends; earlier: entries 41 to 44)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** trivial (entry 14 is planned for M3)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -122,7 +122,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Limit:** every query tab of a connection runs on one query connection, so they share one session: its transaction, its `SET`s and its temporary tables. A transaction a tab opened (`BEGIN`) stays open when the tab closes, and another tab's `COMMIT` or `ROLLBACK` ends it. On MySQL and MariaDB a statement that commits on its own (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `LOCK TABLES` and others) in any tab commits it, without a word. On Postgres a script that fails inside a transaction leaves the session in that failed transaction: every later run, in any tab, fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead; under a 25P02 error the card adds that a ROLLBACK ends it. MySQL, MariaDB and SQLite keep a transaction going after a failed statement, so there that part does not arise.
 - **Evidence:** the query connection (`Connected::query`, `crates/engine/src/state.rs`) is one per connection, and closing a tab ends no transaction (`crates/engine/src/cmd/tabs.rs`); `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
 - **Impact:** an uncommitted change made in a tab that was closed can be committed later by another tab, by its `COMMIT` or, on MySQL and MariaDB, by its DDL. A reconnect ends the session and its transaction (rolled back).
-- **Estimate:** 2–4 h (estimated): each driver reports after a run whether a transaction is open (Postgres's ReadyForQuery status, MySQL's `SERVER_STATUS_IN_TRANS`, SQLite's autocommit flag), the query tab shows it, and closing the tab or switching connections asks whether to commit or roll back. Waits for the maintainer's call.
+- **Estimate:** 2–4 h (estimated): each driver reports after a run whether a transaction is open (Postgres's ReadyForQuery status, MySQL's `SERVER_STATUS_IN_TRANS`, SQLite's autocommit flag), the query tab shows it, and closing the tab or switching connections asks whether to commit or roll back. Planned for M3, with the redesign (the maintainer's call, 2026-11-08).
 
 ### 15. A table without a row key pages by OFFSET alone (D)
 
@@ -422,3 +422,4 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 | 2026-10-27 | minor | Timings quoted from target-app-parity.md, the one source; the next page 1.06–1.09 ms; a fifth wide-result run; the tarball's and AppImage's SSH key logins marked expected, not measured. |
 | 2026-10-26 | major | M1 built: 14 known limits with evidence, ranked; wide results and the long-line editor measured. |
 | 2026-10-15 | major | Template (scaffold). |
+| 2026-11-08 | trivial | Entry 14 is planned for M3, with the redesign. |
