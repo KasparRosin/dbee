@@ -9,10 +9,10 @@
 //! store says decides where a secret may go, at the read in the job ([`read_secret`], [`reuse`]),
 //! never the connections file or a window's copy of it, so a stale window, an edited file or a
 //! move while a save writes never send it elsewhere:
-//! - the database password: the same database type, host, port, user and database, the same
-//!   tunnel (no tunnel on either side, or the same SSH host and port), TLS at least as strong as
-//!   the saved one (disable < prefer < require < verify-ca < verify-full, with `require` and a CA
-//!   file as `verify-ca`) and the same CA file where either side checks with one;
+//! - the database password: the same database type, host, port and user, whichever database the
+//!   settings name, the same tunnel (no tunnel on either side, or the same SSH host and port), TLS
+//!   at least as strong as the saved one (disable < prefer < require < verify-ca < verify-full, with
+//!   `require` and a CA file as `verify-ca`) and the same CA file where either side checks with one;
 //! - the SSH password: the same SSH host, port and user;
 //! - the key passphrase: the same SSH host, port and user, and the same key file.
 //!
@@ -395,8 +395,7 @@ fn carry_secrets(store: &dyn SecretStore, config: &ConnectionConfig, now: &Saved
     ok
 }
 
-/// [`carry_secrets`] for one secret. A save names its database itself, so that is no reason to
-/// forget a password its server, login and link still allow.
+/// [`carry_secrets`] for one secret.
 fn carry_secret(store: &dyn SecretStore, config: &ConnectionConfig, now: &SavedFor, before: Option<&SavedFor>, kind: SecretKind) -> bool {
     let id = config.id.as_str();
     let text = match store.get(id, kind) {
@@ -410,7 +409,7 @@ fn carry_secret(store: &dyn SecretStore, config: &ConnectionConfig, now: &SavedF
         StoredSecret::Bare(secret) => (secret.as_str(), before),
         StoredSecret::Unreadable => ("", None),
     };
-    let applies = saved_for.is_some_and(|saved_for| reuse(&SavedFor { database: now.database.clone(), ..saved_for.clone() }, config).allows(kind));
+    let applies = saved_for.is_some_and(|saved_for| reuse(saved_for, config).allows(kind));
     if !applies {
         return store.delete(id, kind).is_ok();
     }
@@ -463,7 +462,8 @@ fn tls_strength(mode: SslMode, ca_file: Option<&Path>) -> u8 {
 }
 
 /// The secrets saved for `saved` that `given` may use: each only where it was saved for.
-/// - The database password: the same database type, host, port, user and database; the same tunnel
+/// - The database password: the same database type, host, port and user, as it reaches the same
+///   server and user whichever database the settings name; the same tunnel
 ///   (no tunnel on either side, or the same SSH host and port, since behind a tunnel the database
 ///   host is usually `localhost` of another machine); TLS at least as strong as the saved one
 ///   ([`tls_strength`]), and the same CA file where either side checks the certificate with one; and
@@ -484,7 +484,6 @@ fn reuse(saved: &SavedFor, given: &ConnectionConfig) -> Reuse {
         && saved.host == given.host
         && saved.port == given.port
         && saved.user == given.user
-        && saved.database == given.database
         && same_tunnel
         && tls_strength(given.ssl_mode, given_ca) >= tls_strength(saved.ssl_mode, saved_ca)
         && (!checks || given_ca == saved_ca)
@@ -1574,11 +1573,10 @@ mod tests {
         let all = Reuse { db: true, ssh_password: true, passphrase: true };
         let nothing = Reuse::default();
         assert_eq!(reuse(&saved(), &saved()), all);
-        // The display settings do not matter.
-        assert_eq!(reuse(&saved(), &ConnectionConfig { name: "x".into(), color: dbee_config::ConnectionColor::Red, ..saved() }), all);
-        // Another database host, port, user or database: no database password; the tunnel is the same.
+        // The database name and the display settings do not matter.
+        assert_eq!(reuse(&saved(), &ConnectionConfig { database: "other".into(), name: "x".into(), ..saved() }), all);
+        // Another database host, port or user: no database password; the tunnel is the same.
         let ssh_only = Reuse { db: false, ssh_password: true, passphrase: true };
-        assert_eq!(reuse(&saved(), &ConnectionConfig { database: "other".into(), ..saved() }), ssh_only);
         assert_eq!(reuse(&saved(), &ConnectionConfig { host: "evil.example".into(), ..saved() }), ssh_only);
         assert_eq!(reuse(&saved(), &ConnectionConfig { port: 1, ..saved() }), ssh_only);
         assert_eq!(reuse(&saved(), &ConnectionConfig { user: "bob".into(), ..saved() }), ssh_only);

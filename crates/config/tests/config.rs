@@ -197,7 +197,7 @@ fn a_stored_secret_reads_back_with_what_it_was_saved_for() {
 
 #[test]
 fn saved_for_leaves_out_what_does_not_decide_where_a_secret_goes() {
-    let config = ConnectionConfig { name: "shop".into(), id: "a".into(), read_only: true, ..ConnectionConfig::default() };
+    let config = ConnectionConfig { name: "shop".into(), id: "a".into(), database: "shop".into(), read_only: true, ..ConnectionConfig::default() };
     assert_eq!(SavedFor::of(&config), SavedFor::of(&ConnectionConfig::default()));
     // An option this type does not have, and an option that is off, are not kept.
     let mut stray = ConnectionConfig::default();

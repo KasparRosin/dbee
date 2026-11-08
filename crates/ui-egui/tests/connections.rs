@@ -36,7 +36,6 @@ fn ui() -> Ui {
     ui
 }
 
-/// A 1200 × 900 window on `home`, with a memory secret store or none, showing the engine cards.
 /// The secret the store keeps as `kind` of `id`, without the settings kept with it.
 fn stored(ui: &Ui, id: &str, kind: SecretKind) -> Option<String> {
     match StoredSecret::parse(&ui.secrets.as_ref().unwrap().get(id, kind).unwrap()?) {
@@ -45,6 +44,7 @@ fn stored(ui: &Ui, id: &str, kind: SecretKind) -> Option<String> {
     }
 }
 
+/// A 1200 × 900 window on `home`, with a memory secret store or none, showing the engine cards.
 fn ui_in(home: TempHome, with_secrets: bool) -> Ui {
     Ui::window(Setup { size: egui::vec2(1200.0, 900.0), home: Some(home), secrets: with_secrets, ..Setup::default() })
 }
@@ -1076,6 +1076,27 @@ fn form_rects(i: &Json) -> Vec<(String, [f64; 4])> {
             (id, r)
         })
         .collect()
+}
+
+/// A saved connection with a stored password, another database in its form, not saved: List… and
+/// Connect both use the stored password and ask for nothing.
+#[test]
+fn another_database_on_a_saved_connection_asks_for_no_password() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ui();
+    let saved = ConnectionConfig { database: "dbee".into(), ..pg14(db) };
+    let card = ui.save(&saved, Some(&db.password));
+    ui.click(&card);
+    ui.replace("conn-database", "postgres");
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| ui.inspect()["dialog"] != Json::Null || !listed(&ui.inspect()).is_empty());
+    assert_eq!(ui.inspect()["dialog"], Json::Null, "List… asked for a secret");
+    let (item, _) = listed(&ui.inspect()).into_iter().find(|(_, n)| n == "postgres").unwrap();
+    ui.click(&item);
+    ui.click("conn-connect");
+    ui.until("the workspace", |ui| ui.inspect()["dialog"] != Json::Null || ui.document()["screen"] == "workspace");
+    assert_eq!(ui.inspect()["dialog"], Json::Null, "Connect asked for a secret");
+    assert_eq!(ui.document()["connection"]["database"], "postgres");
 }
 
 #[test]

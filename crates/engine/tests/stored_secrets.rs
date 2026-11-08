@@ -257,10 +257,11 @@ fn the_store_keeps_the_settings_with_the_password() {
     assert_eq!((&stored["v"], &stored["secret"]), (&json!(1), &json!("pw-1234")), "{stored}");
     let saved_for = &stored["for"];
     assert_eq!(
-        (&saved_for["kind"], &saved_for["host"], &saved_for["port"], &saved_for["user"], &saved_for["database"]),
-        (&json!("mysql"), &json!("127.0.0.1"), &json!(3306), &json!("ann"), &json!("shop")),
+        (&saved_for["kind"], &saved_for["host"], &saved_for["port"], &saved_for["user"]),
+        (&json!("mysql"), &json!("127.0.0.1"), &json!(3306), &json!("ann")),
         "{stored}"
     );
+    assert!(saved_for.get("database").is_none(), "the database decides nothing: {stored}");
     assert_eq!(
         (&saved_for["sslMode"], &saved_for["caFile"], &saved_for["ssh"], &saved_for["weakening"]),
         (&json!("require"), &json!("/ca/ours.pem"), &Json::Null, &json!([dbee_config::ALLOW_PUBLIC_KEY.id])),
@@ -280,7 +281,6 @@ fn a_stored_password_goes_only_to_the_settings_it_was_saved_for() {
     save(&mut w, &saved, Some("the-password"));
     let others = [
         ("the database type", ConnectionConfig { kind: DbKind::MariaDb, ..saved.clone() }),
-        ("the database", ConnectionConfig { database: "other".into(), ..saved.clone() }),
         ("no CA file", ConnectionConfig { ca_file: None, ..saved.clone() }),
         ("another CA file", ConnectionConfig { ca_file: Some("/ca/theirs.pem".into()), ..saved.clone() }),
         ("a weaker TLS mode", ConnectionConfig { ssl_mode: SslMode::Prefer, ..saved.clone() }),
@@ -404,14 +404,35 @@ fn a_save_that_keeps_a_password_saves_it_for_the_new_settings() {
     assert_eq!(rig.open(&mut b, json!({ "id": ID })), tried(2001, Some("the-password"), "auth"));
 }
 
-/// A save names the database itself, on the same server and login: the password follows it.
+/// The password goes to the same server and the same user, whichever database the settings name:
+/// the form's Database field and its List… ask for nothing, saved or not.
 #[test]
-fn a_save_that_names_another_database_keeps_the_password() {
+fn another_database_on_the_same_server_asks_for_nothing() {
+    let mut rig = Rig::new();
+    rig.accepts = Some("the-password");
+    let mut w = rig.window();
+    save(&mut w, &config(2001), Some("the-password"));
+    let other = ConnectionConfig { database: "orders".into(), ..config(2001) };
+    let logged_in = tried(2001, Some("the-password"), "ok");
+    assert_eq!(rig.run(&mut w, "connection.listDatabases", json!({ "config": config(2001) })), logged_in);
+    assert_eq!(rig.run(&mut w, "connection.listDatabases", json!({ "config": other })), logged_in);
+    assert_eq!(rig.run(&mut w, "connection.test", json!({ "config": other })), logged_in);
+    assert_eq!(rig.open(&mut w, json!({ "config": other })), logged_in);
+    w.run_blocking("connection.close", json!({}), T).unwrap();
+    // A password typed there is kept for the saved connection like any other.
+    let kept = w.run_blocking("connection.open", json!({ "config": other, "password": "the-password", "savePassword": true }), T).unwrap();
+    assert_eq!(kept["secretsSaved"], true, "{kept}");
+}
+
+/// A save that only names another database touches no secret, and the password still goes.
+#[test]
+fn a_save_that_names_another_database_leaves_the_store_alone() {
     let rig = Rig::new();
     let mut w = rig.window();
     save(&mut w, &config(2001), Some("the-password"));
+    let before = rig.store.get(ID, SecretKind::DbPassword).unwrap();
     save(&mut w, &ConnectionConfig { database: "orders".into(), ..config(2001) }, None);
-    assert_eq!((&rig.stored()["for"]["database"], &rig.stored()["secret"]), (&json!("orders"), &json!("the-password")));
+    assert_eq!(rig.store.get(ID, SecretKind::DbPassword).unwrap(), before);
     assert_eq!(rig.open(&mut w, json!({ "id": ID })), tried(2001, Some("the-password"), "auth"));
 }
 
