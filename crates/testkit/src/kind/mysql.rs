@@ -64,6 +64,11 @@ const MYSQL: KindInfo = KindInfo {
         "SET SESSION s\u{eb}ssion_track_system_variables = ''",
         "SET SESSION `transaction_r\u{eb}ad_only` = 0",
         "DELIMITER //\nBEGIN NOT ATOMIC SET SESSION transaction_read_only = 0; INSERT INTO {t} VALUES (1); END//\nDELIMITER ;",
+        "SET NAMES sjis",
+        "SET CHARACTER SET gbk",
+        "SET CHARSET sjis",
+        "SET @@character_set_client = 'big5'",
+        "SET SESSION character_set_client = DEFAULT",
     ],
     read_only_unseen: Unseen::Function {
         make: "CREATE FUNCTION {f}() RETURNS INT DETERMINISTIC BEGIN SET SESSION transaction_read_only = 0; RETURN 1; END",
@@ -115,6 +120,11 @@ pub(crate) const MARIADB: KindInfo = KindInfo {
         "SET @@transact\u{131}on_read_only = 0",
         "DELIMITER //\nBEGIN NOT ATOMIC SET SESSION tx_read_only = 0; INSERT INTO {t} VALUES (1); SET SESSION tx_read_only = 1; END//\nDELIMITER ;",
         "DELIMITER //\nIF 1 THEN SET @@tx_read_only = 0; INSERT INTO {t} VALUES (2); END IF//\nDELIMITER ;",
+        "SET NAMES sjis",
+        "SET CHARACTER SET gbk",
+        "SET CHARSET sjis",
+        "SET @@character_set_client = 'big5'",
+        "SET SESSION character_set_client = DEFAULT",
     ],
     read_only_unseen: Unseen::Function {
         make: "CREATE FUNCTION {f}() RETURNS INT DETERMINISTIC BEGIN SET SESSION tx_read_only = 0; RETURN 1; END",

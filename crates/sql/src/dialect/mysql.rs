@@ -160,6 +160,37 @@ impl Compound {
 /// The session variables that hold read-only mode: MySQL's and MariaDB's spellings.
 const READ_ONLY_VARIABLES: &[&str] = &["transaction_read_only", "tx_read_only"];
 
+/// The client character sets under which the server reads dbee's UTF-8 text as dbee does.
+const UTF8: &[&str] = &["utf8mb4", "utf8mb3", "utf8"];
+
+/// A `SET` of the character set the server reads statements in to anything but one of [`UTF8`]
+/// alone: `NAMES`, `CHARACTER SET` or `CHARSET` (a `COLLATE` may follow), or
+/// `character_set_client` with `=` or `:=`.
+fn sets_character_set(s: &Code<'_>) -> bool {
+    let utf8 = |at: usize, collate: bool| {
+        s.literal(at).is_some_and(|v| UTF8.contains(&v.as_str())) && (s.text(at + 1).is_none_or(|t| t == ",") || (collate && s.is(at + 1, "collate")))
+    };
+    let names = s.assignments().into_iter().any(|i| {
+        let value = if s.is(i, "names") || s.is(i, "charset") {
+            i + 1
+        } else if s.is(i, "character") && s.is(i + 1, "set") {
+            i + 2
+        } else {
+            return false;
+        };
+        !utf8(value, true)
+    });
+    // `=` takes the operator characters after it along (`=@x`), and `:=` is two tokens.
+    let client = s.starts(&["set"])
+        && s.naming("character_set_client").into_iter().any(|i| match (s.text(i + 1), s.text(i + 2)) {
+            (Some("="), _) => !utf8(i + 2, false),
+            (Some(":"), Some("=")) => !utf8(i + 3, false),
+            (Some(sign), _) => sign.starts_with('=') || sign == ":",
+            (None, _) => false,
+        });
+    names || client
+}
+
 /// Why dbee does not send a statement on a read-only connection: those that can turn read-only
 /// off, or hide what they run. Nothing is refused on another connection.
 fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
@@ -178,6 +209,10 @@ fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
     } else if s.starts(&["set"]) && s.sets_scope(&["global", "persist", "persist_only"]) {
         "SET GLOBAL and SET PERSIST change the server's settings for every session, so dbee does not run them here. To run them, turn \
          Read-only off in the connection's settings."
+    } else if sets_character_set(s) {
+        "on a read-only connection dbee keeps the character set at utf8mb4, so it does not run this statement: under another character \
+         set, the server can read dbee's text differently from how dbee reads it. To change it, turn Read-only off in the connection's \
+         settings."
     } else if s.pair("into", "outfile") || s.pair("into", "dumpfile") {
         "INTO OUTFILE and INTO DUMPFILE write a file on the server, so dbee does not run them here. To run one, turn Read-only off in the \
          connection's settings."

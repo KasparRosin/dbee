@@ -586,8 +586,8 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
 /// outside its `'…'` strings is refused: the server folds such a name to one of its settings
 /// (`sëssion_track…` on MySQL 8.0 and later, `ſession_track…` and `transactıon_read_only` on
 /// MariaDB 13), which would turn session tracking off, then read-only, unreported. Also in
-/// backticks, and behind `SET NAMES sjis`, under which the server ends a string at a `\` dbee may
-/// read as an escape. A `SET` of such text inside a string, and other statements, run.
+/// backticks, and after a string that, read without backslash escapes, ends at a `\`. A `SET` of
+/// such text inside a string, and other statements, run.
 #[test]
 fn read_only_mysql_refuses_a_set_with_a_name_outside_plain_ascii() {
     let _db = require_testdb!();
@@ -614,13 +614,9 @@ fn read_only_mysql_refuses_a_set_with_a_name_outside_plain_ascii() {
             assert!(e.code() == "readOnly" && e.to_string().contains("plain ASCII"), "{}: {sql}: {e}", t.name());
             assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}: after {sql}", t.name());
         }
-        // Under `sjis` the server reads `Á\` as two characters, so its string ends where dbee's
-        // reading with escapes goes on.
-        run_text(&mut s, "SET NAMES sjis").unwrap();
         let hidden = format!("SET @a = '\u{c1}\\', {tracked} = '', @b = '\u{c1}\\'");
         let e = run_text(&mut s, &hidden).expect_err("refused");
         assert!(e.code() == "readOnly" && e.to_string().contains("plain ASCII"), "{}: {hidden}: {e}", t.name());
-        run_text(&mut s, "SET NAMES utf8mb4").unwrap();
         for sql in ["SET @city = 'Z\u{fc}rich'", "SELECT 'gr\u{f6}\u{df}e'", "SELECT @city"] {
             run_text(&mut s, sql).unwrap_or_else(|e| panic!("{}: {sql}: {e}", t.name()));
         }
@@ -657,6 +653,73 @@ fn read_only_mysql_refuses_a_block_of_several_statements() {
         assert_eq!(first_value(&s).as_deref(), Some("1"), "{}", t.name());
         assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "{}", t.name());
     }
+}
+
+/// On a read-only MySQL or MariaDB connection the character set stays UTF-8: `SET NAMES`,
+/// `SET CHARACTER SET`, `SET CHARSET` and a `SET` of `character_set_client` to anything else are
+/// refused. Under `sjis` or `gbk` the server reads the last byte of a character dbee sends with
+/// the `\` or the backtick after it, so a MariaDB block's `;`s that dbee reads inside a string or a
+/// quoted name are code to the server.
+#[test]
+fn read_only_mysql_keeps_the_character_set_utf8() {
+    let _db = require_testdb!();
+    let mut wrong = Vec::new();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_charset"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut s = read_only_session(&t);
+        let write = |n: u32| format!("START TRANSACTION READ WRITE; INSERT INTO {sc}.{name} VALUES ({n}); COMMIT");
+        // `Á` is C3 81 and `丁` E4 B8 81: under sjis and gbk the 81 takes the `\` or backtick after it.
+        let mixed = |c: char, n: u32| format!("BEGIN NOT ATOMIC DO '\\'', 1, '{c}\\'; {}; END -- '", write(n));
+        let steps = [
+            (
+                "SET NAMES sjis",
+                vec![
+                    mixed('\u{c1}', 1),
+                    format!("IF 1 THEN DO '\\'', 1, '\u{c1}\\'; {}; END IF -- '", write(2)),
+                    format!("BEGIN NOT ATOMIC DECLARE \u{4e01}` INT; {}; END -- \u{4e01}`", write(3)),
+                ],
+            ),
+            ("SET NAMES gbk", vec![mixed('\u{4e01}', 4)]),
+            ("SET CHARACTER SET gbk", vec![mixed('\u{4e01}', 5)]),
+            ("SET CHARSET sjis", vec![mixed('\u{c1}', 6)]),
+            ("SET @@character_set_client = 'big5'", vec![]),
+            ("SET SESSION character_set_client = DEFAULT", vec![]),
+            ("SET @@SESSION.character_set_client := @@GLOBAL.character_set_client", vec![]),
+        ];
+        for (set, blocks) in steps {
+            match run_text(&mut s, set) {
+                Err(e) if e.code() == "readOnly" && e.to_string().contains("character set") => {}
+                other => wrong.push(format!("{}: {set} -> {}", t.name(), other.err().map_or("ran".into(), |e| e.to_string()))),
+            }
+            for block in blocks {
+                if run_text(&mut s, &block).is_ok() {
+                    wrong.push(format!("{}: ran {block}", t.name()));
+                }
+            }
+            run_text(&mut s, "SET NAMES utf8mb4").unwrap_or_else(|e| panic!("{}: {e}", t.name()));
+        }
+        for sql in ["SET NAMES 'utf8mb4' COLLATE 'utf8mb4_bin'", "SET CHARACTER SET utf8mb4", "SET @@SESSION.character_set_client = utf8mb4"] {
+            if let Err(e) = run_text(&mut s, sql) {
+                wrong.push(format!("{}: {sql} -> {e}", t.name()));
+            }
+        }
+        run_text(&mut s, "SET NAMES utf8mb4").unwrap_or_else(|e| panic!("{}: {e}", t.name()));
+        run_text(&mut s, &format!("SELECT @@SESSION.{variable}, @@SESSION.character_set_client, 'Z\u{fc}rich'")).unwrap();
+        let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
+        let shown = qt.shown_result().and_then(|r| r.result.rows.first().cloned());
+        let want = [Some("1".to_owned()), Some("utf8mb4".to_owned()), Some("Z\u{fc}rich".to_owned())];
+        if shown.as_deref() != Some(&want[..]) {
+            wrong.push(format!("{}: the session reads {shown:?}", t.name()));
+        }
+        let written = q(&t, &format!("SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM {sc}.{name}"));
+        if !written.is_empty() {
+            wrong.push(format!("{}: rows written {written}", t.name()));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
 }
 
 /// After a statement that turned read-only off and then failed (an error carries no report), the

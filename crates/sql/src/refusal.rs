@@ -112,8 +112,41 @@ impl<'a> Code<'a> {
     }
 
     /// Token `i`'s text.
-    fn text(&self, i: usize) -> Option<&'a str> {
+    pub(crate) fn text(&self, i: usize) -> Option<&'a str> {
         self.tokens.get(i).and_then(|t| self.sql.get(t.range.clone()))
+    }
+
+    /// Token `i` as a name: a word ([`Code::word`]), or a `"…"` string's text, which MySQL's
+    /// `ANSI_QUOTES` makes a name, in lowercase.
+    pub(crate) fn name(&self, i: usize) -> Option<String> {
+        let text = self.text(i)?;
+        match self.tokens.get(i)?.kind {
+            TokenKind::String if text.starts_with('"') => self.quoted(i, text).map(|name| name.to_lowercase()),
+            _ => self.word(i),
+        }
+    }
+
+    /// Token `i` as a value: a name ([`Code::name`]) or a `'…'` string's text, in lowercase.
+    pub(crate) fn literal(&self, i: usize) -> Option<String> {
+        match self.text(i)? {
+            text if text.starts_with('\'') => self.quoted(i, text).map(|value| value.to_lowercase()),
+            _ => self.name(i),
+        }
+    }
+
+    /// The tokens that name `name` ([`Code::name`]).
+    pub(crate) fn naming(&self, name: &str) -> Vec<usize> {
+        (0..self.tokens.len()).filter(|&i| self.name(i).is_some_and(|n| n == name)).collect()
+    }
+
+    /// Where each assignment of a `SET` starts: right after `SET`, or after a `,` outside
+    /// parentheses. None in another statement.
+    pub(crate) fn assignments(&self) -> Vec<usize> {
+        if !self.is(0, "set") {
+            return Vec::new();
+        }
+        let depths = self.depths();
+        (1..self.tokens.len()).filter(|&i| i == 1 || (self.text(i - 1) == Some(",") && depths.get(i - 1) == Some(&0))).collect()
     }
 
     /// Token `i` is the keyword `w`, unquoted.
@@ -360,6 +393,57 @@ mod tests {
             "SHOW WARNINGS",
             "COMMIT AND NO CHAIN",
             "/* CALL p() */ SELECT 1",
+        ] {
+            assert_eq!(refused(my, sql, true), None, "{sql}");
+        }
+    }
+
+    /// A read-only MySQL session keeps reading statements in UTF-8: a `SET` of the client's
+    /// character set to anything else is refused, however it is spelled; reading it, and a
+    /// character set inside an expression, are not.
+    #[test]
+    fn mysql_keeps_the_character_set_utf8_on_read_only() {
+        let my = Dialect::MySql;
+        for sql in [
+            "SET NAMES sjis",
+            "set names 'gbk'",
+            "SET NAMES \"big5\" COLLATE big5_chinese_ci",
+            "SET NAMES DEFAULT",
+            "SET NAMES utf8mb4 sjis",
+            "/*!40101 SET NAMES cp932 */",
+            "SET CHARACTER SET gbk",
+            "SET CHARSET sjis",
+            "SET @a = 1, NAMES sjis",
+            "SET @a = (SELECT 1), CHARACTER SET gb18030",
+            "SET character_set_client = sjis",
+            "SET @@character_set_client = 'big5'",
+            "SET SESSION character_set_client = DEFAULT",
+            "SET LOCAL character_set_client = @x",
+            "SET character_set_client=@x",
+            "SET @@local.character_set_client := 'cp932'",
+            "SET @@SESSION.`character_set_client` = 'sjis'",
+            "SET @@SESSION.\"character_set_client\" = 'sjis'",
+            "SET @a = 1, character_set_client = 'gbk'",
+            "SET character_set_client = 'utf8mb4' COLLATE utf8mb4_bin",
+        ] {
+            let why = refused(my, sql, true).map(Refusal::message).unwrap_or_default();
+            assert!(why.contains("character set"), "{sql}: {why}");
+            assert_eq!(refused(my, sql, false), None, "{sql}");
+        }
+        for sql in [
+            "SET NAMES utf8mb4",
+            "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_bin'",
+            "set names utf8mb3",
+            "SET NAMES `utf8`, @a = 1",
+            "SET CHARACTER SET utf8mb4",
+            "SET CHARSET \"utf8\"",
+            "SET @@SESSION.character_set_client = 'UTF8MB4'",
+            "SET character_set_client = utf8mb4, @a = 1",
+            "SET @old = @@character_set_client",
+            "SET @names = 'sjis', @charset = 'gbk'",
+            "SET @a = CAST('x' AS CHAR CHARACTER SET sjis), @b = CONVERT('y' USING gbk)",
+            "SELECT @@character_set_client = 'sjis'",
+            "SHOW CHARACTER SET LIKE 'sjis'",
         ] {
             assert_eq!(refused(my, sql, true), None, "{sql}");
         }
