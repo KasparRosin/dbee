@@ -11,11 +11,10 @@
 
 use std::sync::atomic::Ordering;
 
-use dbee_driver::{DbError, Meaning};
+use dbee_driver::{DbError, Limits, Meaning};
 use dbee_sql::Dialect;
-use tokio_postgres::SimpleQueryMessage;
 
-use crate::PgConnection;
+use crate::{PgConnection, query};
 
 /// Both `on` while the session and its transaction are read-only.
 const READ_MODE: &str = "SHOW default_transaction_read_only; SHOW transaction_read_only";
@@ -83,23 +82,20 @@ pub(crate) async fn after<T>(conn: &PgConnection, ran: Result<T, DbError>) -> Re
 }
 
 async fn mode(conn: &PgConnection) -> Mode {
-    match conn.client().simple_query(READ_MODE).await {
-        Ok(messages) => {
-            let on: Vec<bool> = messages
-                .iter()
-                .filter_map(|m| match m {
-                    SimpleQueryMessage::Row(row) => Some(row.get(0) == Some("on")),
-                    _ => None,
-                })
-                .collect();
+    match read(conn, READ_MODE).await {
+        Ok(cells) => {
+            let on: Vec<bool> = cells.iter().map(|cell| cell.as_deref() == Some("on")).collect();
             if on == [true, true] { Mode::ReadOnly } else { Mode::Changed }
         }
-        Err(e) => match conn.error(&e) {
-            DbError::Cancelled => Mode::Stopped,
-            DbError::Server(s) if s.meaning == Some(Meaning::TransactionAborted) => Mode::Aborted,
-            other => Mode::Failed(other),
-        },
+        Err(DbError::Cancelled) => Mode::Stopped,
+        Err(DbError::Server(s)) if s.meaning == Some(Meaning::TransactionAborted) => Mode::Aborted,
+        Err(other) => Mode::Failed(other),
     }
+}
+
+/// A setting or two the guard reads ([`query::own_read`]): short values, one row each.
+async fn read(conn: &PgConnection, sql: &str) -> Result<Vec<Option<String>>, DbError> {
+    query::own_read(conn.client(), sql, Limits { max_rows: 2, max_bytes: 4 * 1024 }, |e| conn.error(e)).await
 }
 
 /// Rolls back what is open and turns read-only on again; the error to report, `said` when it
@@ -129,8 +125,7 @@ pub(crate) const ENCODING_CHANGED_DURING: &str = "client_encoding changed during
 
 /// The session's `client_encoding` is UTF8, in which dbee writes every value.
 pub(crate) async fn is_utf8(conn: &PgConnection) -> Result<bool, DbError> {
-    let messages = conn.client().simple_query("SHOW client_encoding").await.map_err(|e| conn.error(&e))?;
-    Ok(messages.iter().any(|m| matches!(m, SimpleQueryMessage::Row(row) if row.get(0) == Some("UTF8"))))
+    Ok(read(conn, "SHOW client_encoding").await?.iter().any(|cell| cell.as_deref() == Some("UTF8")))
 }
 
 /// Sets the session's `client_encoding` back to UTF8.
@@ -152,6 +147,5 @@ pub(crate) async fn utf8(conn: &PgConnection) -> Result<(), DbError> {
 
 /// The session still has `standard_conforming_strings` on.
 async fn conforming(conn: &PgConnection) -> Result<bool, DbError> {
-    let messages = conn.client().simple_query("SHOW standard_conforming_strings").await.map_err(|e| conn.error(&e))?;
-    Ok(messages.iter().any(|m| matches!(m, SimpleQueryMessage::Row(row) if row.get(0) == Some("on"))))
+    Ok(read(conn, "SHOW standard_conforming_strings").await?.iter().any(|cell| cell.as_deref() == Some("on")))
 }

@@ -4,13 +4,17 @@
 use dbee_core::{Cell, Column, ResultSet, TypeClass};
 use dbee_driver::{DbError, Limits, QUERY_LIMITS, ROW_COST, cell_cost, column_cost};
 use futures_util::StreamExt;
-use tokio_postgres::SimpleQueryMessage;
 use tokio_postgres::types::{Kind, Type};
+use tokio_postgres::{Client, SimpleQueryMessage};
 
 use crate::{PgConnection, guard};
 
 /// The most columns a Postgres query returns ("target lists can have at most 1664 entries").
 pub const MAX_COLUMNS: usize = 1664;
+
+/// The longest name Postgres has, of a column, a type or a schema: longer ones it cuts to this
+/// (measured on both test servers), so only a hostile server sends one.
+pub(crate) const MAX_NAME: usize = 63;
 
 /// Run `sql` (one or more statements) as one simple-query message, holding the connection lock.
 ///
@@ -74,6 +78,45 @@ pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -
         }
     }
     Ok(result)
+}
+
+/// dbee's own reads, of a known shape: the first cell of every row of every statement of `sql`,
+/// for the session setup and the read-only guard. A result of other than one column, or past
+/// `limits`, which only a hostile server sends, ends the read in an error; `map` maps the errors
+/// of the session.
+pub(crate) async fn own_read(
+    client: &Client,
+    sql: &str,
+    limits: Limits,
+    map: impl Fn(&tokio_postgres::Error) -> DbError,
+) -> Result<Vec<Option<String>>, DbError> {
+    const CHECK: &str = "Check that this is the server you meant to reach.";
+    let stream = client.simple_query_raw(sql).await.map_err(|e| map(&e))?;
+    let mut stream = std::pin::pin!(stream);
+    let mut cells = Vec::new();
+    let mut bytes: usize = 0;
+    while let Some(message) = stream.next().await {
+        match message.map_err(|e| map(&e))? {
+            SimpleQueryMessage::RowDescription(columns) if columns.len() != 1 => {
+                return Err(DbError::Other(format!(
+                    "the server answered a query of dbee's own with {} columns, where it asked for 1. {CHECK}",
+                    columns.len()
+                )));
+            }
+            SimpleQueryMessage::Row(row) => {
+                let cell = row.try_get(0).map_err(|_| DbError::Other("the server sent a value that is not valid UTF-8".into()))?;
+                bytes = bytes.saturating_add(ROW_COST).saturating_add(cell_cost(cell.map(str::len)));
+                if cells.len() >= limits.max_rows || bytes > limits.max_bytes {
+                    return Err(DbError::Other(format!(
+                        "the server answered a query of dbee's own with more than such an answer holds, so dbee stopped reading. {CHECK}"
+                    )));
+                }
+                cells.push(cell.map(str::to_owned));
+            }
+            _ => {}
+        }
+    }
+    Ok(cells)
 }
 
 /// The columns `sql` would return, typed by name (`base_type` and `type_label` are the type's

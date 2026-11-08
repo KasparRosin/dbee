@@ -8,15 +8,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 
 use dbee_config::ConnectionConfig;
-use dbee_driver::{CONNECT_TIMEOUT, DbError, MAX_MESSAGE, MAX_VERSION, ServerInfo, Target, cancel_not_delivered, connect_first, kept_text, within};
+use dbee_driver::{
+    CONNECT_TIMEOUT, DbError, Limits, MAX_MESSAGE, MAX_VERSION, ServerInfo, Target, cancel_not_delivered, connect_first, kept_text, within,
+};
 use dbee_ssh::Tunnel;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_postgres::tls::MakeTlsConnect;
-use tokio_postgres::{CancelToken, Client, Connection, SimpleQueryMessage};
+use tokio_postgres::{CancelToken, Client, Connection};
 
 use crate::error::{self, Phase};
+use crate::query::{self, MAX_NAME};
 use crate::tls::{self, Tls};
 use crate::watch::{Rule, Watched};
 
@@ -443,6 +446,12 @@ where
     closed
 }
 
+/// The most the setup's read of its settings holds: one short value each, and a search path.
+const SETTINGS_LIMITS: Limits = Limits { max_rows: 6, max_bytes: 64 * 1024 };
+
+/// The most its read of the schemas the search path finds holds.
+const SCHEMAS_LIMITS: Limits = Limits { max_rows: 1024, max_bytes: 256 * 1024 };
+
 /// The settings the setup reads back, in order.
 const SHOW_SETTINGS: &str = "SHOW default_transaction_read_only; SHOW standard_conforming_strings; SHOW client_encoding; \
                              SHOW server_version; SHOW server_version_num; SHOW search_path";
@@ -499,12 +508,12 @@ async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<Stri
         "SET standard_conforming_strings = on"
     };
     client.batch_execute(set).await.map_err(fail)?;
-    let mut answers = Vec::new();
-    for message in client.simple_query(SHOW_SETTINGS).await.map_err(fail)? {
-        if let SimpleQueryMessage::Row(row) = message {
-            answers.push(kept_text(row.try_get(0).ok().flatten().unwrap_or_default(), MAX_MESSAGE));
-        }
-    }
+    let map = |e: &tokio_postgres::Error| error::map(e, Phase::Connect);
+    let answers: Vec<String> = query::own_read(client, SHOW_SETTINGS, SETTINGS_LIMITS, map)
+        .await?
+        .into_iter()
+        .map(|cell| kept_text(cell.as_deref().unwrap_or_default(), MAX_MESSAGE))
+        .collect();
     let [ro, conforming, encoding, version, num, path] = answers.as_slice() else {
         return Err(DbError::Other(format!("the server answered {} of 6 settings", answers.len())));
     };
@@ -525,12 +534,8 @@ async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<Stri
         )));
     }
     let warnings = version_warning(version_num).into_iter().chain(search_path_warning(path)).collect();
-    let mut visible = Vec::new();
-    for message in client.simple_query(VISIBLE_SCHEMAS).await.map_err(fail)? {
-        if let SimpleQueryMessage::Row(row) = message {
-            visible.extend(row.try_get(0).ok().flatten().map(str::to_owned));
-        }
-    }
+    let visible =
+        query::own_read(client, VISIBLE_SCHEMAS, SCHEMAS_LIMITS, map).await?.into_iter().flatten().map(|name| kept_text(&name, MAX_NAME)).collect();
     let version = kept_text(version, MAX_VERSION);
     Ok((ServerInfo { product: PRODUCT.into(), version, version_num, read_only: server_read_only, warnings, tls: None }, visible))
 }

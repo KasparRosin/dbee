@@ -421,13 +421,14 @@ async fn more_columns_than_postgres_returns_are_refused() {
 async fn long_server_text_is_cut_where_it_is_kept() {
     let long = "\u{e9}".repeat(500_000);
     let (l, port) = listener();
-    let version = long.clone();
     let server = std::thread::spawn(move || {
         let mut s = accept(&l);
         read_untyped(&mut s).unwrap();
         logged_in(&mut s);
+        // Within what the setup's read holds, past what it keeps of a version.
+        let version = "\u{e9}".repeat(10_000);
         serve_as(&mut s, &version, &mut |w, _| {
-            let fields = format!("SERROR\0VERROR\0C42P01\0M{version}\0D{version}\0H{version}\0\0");
+            let fields = format!("SERROR\0VERROR\0C42P01\0M{long}\0D{long}\0H{long}\0\0");
             w.write_all(&[msg(b'E', fields.as_bytes()), ready()].concat()).is_ok()
         });
     });
@@ -477,4 +478,96 @@ async fn prefer_after_a_broken_handshake_still_refuses_the_password_in_clear() {
     assert!(!asked, "the second connection is plain, as libpq's");
     assert_eq!(answer, None, "the password went in clear text");
     assert_eq!(e, Some(DbError::ClearPassword));
+}
+
+/// A server that logs anyone in and answers dbee's own reads as given: its settings, the schemas
+/// its search path finds, and the read-only guard's read of the mode; any other query with a row.
+fn own_reads_server(l: TcpListener, settings: Vec<u8>, schemas: Vec<u8>, mode: Vec<u8>) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut s = accept(&l);
+        read_untyped(&mut s).unwrap();
+        logged_in(&mut s);
+        while let Some((b'Q', body)) = read_typed(&mut s) {
+            let sql = String::from_utf8_lossy(&body);
+            let out = if sql.starts_with("SET ") {
+                let sets: Vec<u8> = sql.split(';').flat_map(|_| complete("SET")).collect();
+                [sets, ready()].concat()
+            } else if sql.contains("standard_conforming_strings") {
+                [settings.clone(), ready()].concat()
+            } else if sql.contains("current_schemas") {
+                [schemas.clone(), ready()].concat()
+            } else if sql.contains("transaction_read_only") {
+                [mode.clone(), ready()].concat()
+            } else {
+                [one_column("v", &["1"]), ready()].concat()
+            };
+            if s.write_all(&out).is_err() {
+                return;
+            }
+        }
+    })
+}
+
+fn settings(read_only: &str) -> Vec<u8> {
+    [read_only, "on", "UTF8", "16.0", "160000", "\"$user\", public"].iter().flat_map(|v| one_column("setting", &[v])).collect()
+}
+
+/// A result of `columns` columns and `rows` rows of NULL.
+fn wide(columns: usize, rows: usize) -> Vec<u8> {
+    let names: Vec<String> = (0..columns).map(|i| format!("c{i}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let row = data_row(&vec![None; columns]);
+    let mut out = row_description(&names);
+    for _ in 0..rows {
+        out.extend_from_slice(&row);
+    }
+    out.extend(complete("SELECT"));
+    out
+}
+
+/// Important 2: the session setup holds no more than it asked for, whatever the server sends: a
+/// hostile server's answer ends the connect in a plain error, before it can grow.
+#[tokio::test]
+async fn the_setup_holds_no_more_than_it_asked_for() {
+    let many_rows = one_column("unnest", &["s"; 5_000]);
+    let cases: [(Vec<u8>, Vec<u8>, &str); 4] = [
+        (settings("off"), wide(65_535, 3), "65535 columns"),
+        (settings("off"), many_rows, "more than"),
+        (wide(2, 1), one_column("unnest", &["public"]), "2 columns"),
+        ([settings("off"), one_column("setting", &["extra"])].concat(), one_column("unnest", &["public"]), "more than"),
+    ];
+    for (settings, schemas, says) in cases {
+        let (l, port) = listener();
+        let server = own_reads_server(l, settings, schemas, Vec::new());
+        let e = open(&config(port, SslMode::Disable, None)).await.err();
+        let shown = e.as_ref().map(ToString::to_string).unwrap_or_default();
+        assert!(shown.contains("a query of dbee's own") && shown.contains(says), "{says}: {shown:?}");
+        joined(server).await;
+    }
+}
+
+/// Each schema the search path finds is kept to the longest name Postgres has.
+#[tokio::test]
+async fn a_schema_name_is_cut() {
+    let long = "n".repeat(1_000);
+    let (l, port) = listener();
+    let server = own_reads_server(l, settings("off"), one_column("unnest", &[&long]), Vec::new());
+    let conn = open(&config(port, SslMode::Disable, None)).await.unwrap();
+    let kept = conn.visible_schemas().to_vec();
+    drop(conn);
+    joined(server).await;
+    assert!(kept.len() == 1 && kept[0].len() <= 63 + '\u{2026}'.len_utf8() && kept[0].starts_with("nnn"), "{} bytes", kept[0].len());
+}
+
+/// Important 2: so does the read-only guard's read of the mode after a statement.
+#[tokio::test]
+async fn the_read_only_guard_holds_no_more_than_it_asked_for() {
+    let (l, port) = listener();
+    let server = own_reads_server(l, settings("on"), one_column("unnest", &["public"]), one_column("setting", &["on"; 5_000]));
+    let c = ConnectionConfig { read_only: true, ..config(port, SslMode::Disable, None) };
+    let conn = open(&c).await.unwrap();
+    let e = dbee_pg::query::run_untyped(&conn, "SELECT 1", dbee_driver::QUERY_LIMITS).await.unwrap_err();
+    assert!(e.to_string().contains("a query of dbee's own") && e.to_string().contains("more than"), "{e}");
+    drop(conn);
+    joined(server).await;
 }
