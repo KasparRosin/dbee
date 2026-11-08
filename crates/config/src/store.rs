@@ -7,7 +7,7 @@
 use crate::connection::{ConfigError, ConnectionConfig, Unknown, keep};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, TryLockError};
-use std::io::Write;
+use std::io::{Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,9 @@ pub const LOCK_FILE: &str = "connections.json.lock";
 /// Most recent entries kept.
 pub const MAX_RECENT: usize = 20;
 /// How long a change waits for another dbee's change to the file.
-const LOCK_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(5);
+/// The largest file dbee reads; a larger one is left untouched.
+const MAX_FILE: u64 = 4 * 1024 * 1024;
 /// The warning for a file whose version is newer than [`VERSION`].
 const NEWER: &str = "A newer dbee wrote the connections file, so changes here won't be saved.";
 
@@ -49,9 +51,8 @@ pub struct ConnectionStore {
     extra: Unknown,
 }
 
-/// The file as entries, each decoded on its own.
-#[derive(Serialize, Deserialize)]
-#[serde(default)]
+/// The file as written: entries, each encoded on its own.
+#[derive(Serialize)]
 struct FileBody {
     version: u32,
     saved: Vec<serde_json::Value>,
@@ -87,12 +88,12 @@ fn recent_value(r: &RecentEntry) -> Result<serde_json::Value, serde_json::Error>
 }
 
 /// Decoded entries, and the ones that would not decode.
-fn decode_each<T: serde::de::DeserializeOwned>(values: Vec<serde_json::Value>) -> (Vec<T>, Vec<serde_json::Value>) {
+fn decode_each<T: serde::de::DeserializeOwned>(values: &[serde_json::Value]) -> (Vec<T>, Vec<serde_json::Value>) {
     let (mut ok, mut kept) = (Vec::new(), Vec::new());
     for v in values {
-        match serde_json::from_value::<T>(v.clone()) {
+        match T::deserialize(v) {
             Ok(t) => ok.push(t),
-            Err(_) => kept.push(v),
+            Err(_) => kept.push(v.clone()),
         }
     }
     (ok, kept)
@@ -108,12 +109,6 @@ fn free_bad_name(dir: &Path) -> Option<PathBuf> {
     (1..100).map(|n| dir.join(format!("{FILE}.bad.{n}"))).find(|p| !taken(p))
 }
 
-impl Default for FileBody {
-    fn default() -> Self {
-        FileBody { version: VERSION, saved: Vec::new(), recent: Vec::new(), extra: Unknown::new() }
-    }
-}
-
 /// What reading the file gave.
 enum Read {
     /// Its entries (none when there is no file yet), and a warning when some are kept unread.
@@ -126,61 +121,80 @@ enum Read {
     Unusable(String),
 }
 
-/// Reads `dir/connections.json`, moving a damaged one aside.
+/// `path`'s bytes; `None` when there are more than [`MAX_FILE`].
+fn read_capped(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    File::open(path)?.take(MAX_FILE.saturating_add(1)).read_to_end(&mut bytes)?;
+    Ok(u64::try_from(bytes.len()).is_ok_and(|n| n <= MAX_FILE).then_some(bytes))
+}
+
+/// Reads `dir/connections.json`, moving a damaged one aside. Its `version` is read first: a newer
+/// file is never moved aside, whatever its shape. A file is damaged when it is no JSON object, or
+/// when this build's version of it has no lists where `saved` and `recent` should be.
 fn read(dir: &Path) -> Read {
     let mut store = ConnectionStore { dir: Some(dir.to_path_buf()), ..ConnectionStore::default() };
     let path = dir.join(FILE);
-    let text = match std::fs::read(&path) {
-        Ok(t) => t,
+    let untouched = |why: String| Read::Unusable(format!("{why}; the file was left untouched and changes will not be saved"));
+    let text = match read_capped(&path) {
+        Ok(Some(t)) => t,
+        Ok(None) => return untouched(format!("{} is larger than {} MiB", path.display(), MAX_FILE / (1024 * 1024))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Entries(store, None),
-        Err(e) => {
-            return Read::Unusable(format!("could not read {}: {e}; the file was left untouched and changes will not be saved", path.display()));
-        }
+        Err(e) => return untouched(format!("could not read {}: {e}", path.display())),
     };
-    match serde_json::from_slice::<FileBody>(&text) {
-        Ok(body) => {
-            (store.saved, store.kept_saved) = decode_each(body.saved);
-            (store.recent, store.kept_recent) = decode_each(body.recent);
-            store.recent.truncate(MAX_RECENT);
-            store.extra = body.extra;
-            if body.version > VERSION {
-                return Read::Newer(ConnectionStore { dir: None, ..store });
-            }
-            let kept = store.kept_saved.len() + store.kept_recent.len();
-            let warning =
-                (kept > 0).then(|| format!("{kept} saved or recent connection entries could not be read and are kept unchanged in the file"));
-            Read::Entries(store, warning)
-        }
-        Err(e) => {
-            let damaged = format!("{} is damaged ({e})", path.display());
-            match free_bad_name(dir)
-                .ok_or_else(|| "every .bad name is taken".to_string())
-                .and_then(|bad| std::fs::rename(&path, &bad).map(|()| bad).map_err(|re| re.to_string()))
-            {
-                Ok(bad) => Read::MovedAside(format!("{damaged}; moved it to {}", bad.display())),
-                Err(re) => {
-                    Read::Unusable(format!("{damaged}; could not move it aside ({re}); the file was left untouched and changes will not be saved"))
-                }
-            }
-        }
+    let mut top = match serde_json::from_slice::<serde_json::Value>(&text) {
+        Ok(serde_json::Value::Object(top)) => top,
+        Ok(_) => return damaged(dir, &path, "not a JSON object"),
+        Err(e) => return damaged(dir, &path, &e.to_string()),
+    };
+    // A version this build cannot read as a number is not one it wrote.
+    let newer = top.get("version").is_some_and(|v| v.as_u64().is_none_or(|n| n > u64::from(VERSION)));
+    let list = |key: &str| match top.get(key) {
+        None => Some(&[][..]),
+        Some(serde_json::Value::Array(entries)) => Some(entries.as_slice()),
+        Some(_) => None,
+    };
+    let (saved, recent) = (list("saved"), list("recent"));
+    if !newer && (saved.is_none() || recent.is_none()) {
+        return damaged(dir, &path, "`saved` and `recent` must be lists");
+    }
+    (store.saved, store.kept_saved) = decode_each(saved.unwrap_or_default());
+    (store.recent, store.kept_recent) = decode_each(recent.unwrap_or_default());
+    store.recent.truncate(MAX_RECENT);
+    for known in ["version", "saved", "recent"] {
+        top.remove(known);
+    }
+    store.extra = top;
+    if newer {
+        return Read::Newer(ConnectionStore { dir: None, ..store });
+    }
+    let kept = store.kept_saved.len() + store.kept_recent.len();
+    let warning = (kept > 0).then(|| format!("{kept} saved or recent connection entries could not be read and are kept unchanged in the file"));
+    Read::Entries(store, warning)
+}
+
+/// `dir`'s damaged file (`why`), moved aside; or left untouched when it can't be.
+fn damaged(dir: &Path, path: &Path, why: &str) -> Read {
+    let damaged = format!("{} is damaged ({why})", path.display());
+    match free_bad_name(dir)
+        .ok_or_else(|| "every .bad name is taken".to_string())
+        .and_then(|bad| std::fs::rename(path, &bad).map(|()| bad).map_err(|re| re.to_string()))
+    {
+        Ok(bad) => Read::MovedAside(format!("{damaged}; moved it to {}", bad.display())),
+        Err(re) => Read::Unusable(format!("{damaged}; could not move it aside ({re}); the file was left untouched and changes will not be saved")),
     }
 }
 
-/// The lock on `dir`'s file, once another dbee has let it go (within [`LOCK_WAIT`]); `None` where
-/// the file system has no locks.
-fn lock(dir: &Path) -> Result<Option<File>, ConfigError> {
+/// The lock on `dir`'s file, once another dbee has let it go (within [`LOCK_WAIT`]).
+fn lock(dir: &Path) -> Result<File, ConfigError> {
     let io = |what: &str, e: std::io::Error| ConfigError::Io(format!("{what}: {e}"));
     std::fs::create_dir_all(dir).map_err(|e| io("create directory", e))?;
     let file = File::options().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE)).map_err(|e| io("lock", e))?;
     let deadline = Instant::now().checked_add(LOCK_WAIT);
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(Some(file)),
+            Ok(()) => return Ok(file),
             Err(TryLockError::WouldBlock) if deadline.is_some_and(|d| Instant::now() < d) => std::thread::sleep(Duration::from_millis(20)),
-            Err(TryLockError::WouldBlock) => {
-                return Err(ConfigError::Io(format!("another dbee kept it locked for {} s, so nothing was changed", LOCK_WAIT.as_secs())));
-            }
-            Err(TryLockError::Error(e)) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(None),
+            Err(TryLockError::WouldBlock) => return Err(ConfigError::Locked),
             Err(TryLockError::Error(e)) => return Err(io("lock", e)),
         }
     }

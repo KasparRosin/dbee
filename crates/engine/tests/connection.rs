@@ -160,8 +160,11 @@ fn a_config_key_this_build_does_not_know_is_refused() {
     let tunnel = SshConfig { host: "b".into(), user: "u".into(), ..SshConfig::default() };
     let mut ssh_typo = serde_json::to_value(ConnectionConfig { ssh: Some(tunnel), ..refused_config("typo") }).unwrap();
     ssh_typo["ssh"]["jumpHost"] = json!("j");
+    let mut auth_typo = ssh_typo.clone();
+    auth_typo["ssh"].as_object_mut().unwrap().remove("jumpHost");
+    auth_typo["ssh"]["auth"] = json!({ "method": "key", "paht": "/k/id" });
     for id in ["connection.save", "connection.test", "connection.open", "connection.listDatabases", "connection.sshKey"] {
-        for (config, key) in [(&typo, "hots"), (&ssh_typo, "ssh.jumpHost")] {
+        for (config, key) in [(&typo, "hots"), (&ssh_typo, "ssh.jumpHost"), (&auth_typo, "ssh.auth.paht")] {
             let e = s.execute(id, json!({ "config": config })).unwrap_err();
             assert_eq!(e.code(), "badParams", "{id}: {e}");
             assert!(e.to_string().ends_with(&format!(": `{key}` in `config` is not a connection setting")), "{id}: {e}");
@@ -420,6 +423,30 @@ fn password_in_params_beats_the_stored_one() {
         open(&mut s, json!({ "id": id, "password": pw() }));
         assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap().as_deref(), Some("stale"), "not saved without savePassword");
     }
+}
+
+/// The password typed at an open is kept only for the settings the file holds when it is kept: a
+/// second dbee that moved the connection to another host meanwhile wins.
+#[test]
+fn save_password_on_open_checks_the_settings_the_file_holds_then() {
+    let _db = require_testdb!();
+    let mut a = session();
+    let mut b = second_session(&a.home);
+    let id = save(&mut a, ConnectionConfig { save_secrets: false, ..pg14_config() }, None);
+    let Outcome::Started(job) = a.execute("connection.open", json!({ "id": id, "password": pw(), "savePassword": true })).unwrap() else {
+        panic!("a job")
+    };
+    // While it opens, the other dbee points the connection at another host name.
+    save(&mut b, ConnectionConfig { id: id.clone(), host: "localhost".into(), save_secrets: false, ..pg14_config() }, None);
+    let r = a.wait(job, T).unwrap();
+    assert_eq!(
+        (&r["secretsSaved"], &r["secretsNote"]),
+        (&json!(false), &json!("the settings differ from the saved connection; save them to keep the secrets")),
+        "{r}"
+    );
+    assert_eq!(a.secrets.get(&id, SecretKind::DbPassword).unwrap(), None, "no password kept for the other host");
+    let file: Json = serde_json::from_str(&std::fs::read_to_string(a.home.home.join("config").join(dbee_config::store::FILE)).unwrap()).unwrap();
+    assert_eq!((&file["saved"][0]["host"], &file["saved"][0]["saveSecrets"]), (&json!("localhost"), &json!(false)), "{file}");
 }
 
 #[test]

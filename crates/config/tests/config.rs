@@ -492,7 +492,7 @@ fn a_change_waits_for_another_dbees_and_then_says_so() {
     let other = std::fs::File::options().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE)).unwrap();
     other.lock().unwrap();
     let e = s.change(|s| s.upsert(cfg("b"))).unwrap_err();
-    assert_eq!(e.to_string(), "connections file: another dbee kept it locked for 5 s, so nothing was changed");
+    assert_eq!(e.to_string(), "Another dbee window was changing the connections file for over 5 seconds, so nothing was changed.");
     assert_eq!((ids(&s.saved), std::fs::read(dir.join(FILE)).unwrap()), (vec!["a"], before), "neither the copy nor the file changed");
     other.unlock().unwrap();
     s.change(|s| s.upsert(cfg("b"))).unwrap();
@@ -559,4 +559,57 @@ fn fields_this_build_does_not_know_survive_a_save() {
     // They never show outside the file.
     let shown = serde_json::to_string(&(&s.saved, &s.recent)).unwrap();
     assert!(!shown.contains("work") && !shown.contains("pinned") && !shown.contains("jumpHosts") && !shown.contains("UTC"), "{shown}");
+}
+
+#[test]
+fn a_newer_file_whose_shape_changed_is_never_moved_aside() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let newer = "A newer dbee wrote the connections file, so changes here won't be saved.";
+    // `saved` became an object keyed by id; then `version` stopped being a number.
+    let by_id = serde_json::json!({"version": 2, "saved": {"a": {"host": "h"}}, "recent": []});
+    let text_version = serde_json::json!({"version": "2.0", "saved": [], "recent": []});
+    for file in [by_id, text_version] {
+        let bytes = serde_json::to_vec_pretty(&file).unwrap();
+        std::fs::write(dir.join(FILE), &bytes).unwrap();
+        let (mut s, warn) = ConnectionStore::load(Some(&dir));
+        assert_eq!((warn.as_deref(), s.dir.as_ref()), (Some(newer), None), "{file}");
+        s.change(|s| s.upsert(cfg("mine"))).unwrap();
+        // A store that read the file while it was this build's finds it newer at its next change.
+        std::fs::write(dir.join(FILE), b"{\"version\": 1}").unwrap();
+        let (mut before, _) = ConnectionStore::load(Some(&dir));
+        std::fs::write(dir.join(FILE), &bytes).unwrap();
+        let (_, warn) = before.change(|s| s.upsert(cfg("mine"))).unwrap();
+        assert_eq!((warn.as_deref(), before.dir.as_ref()), (Some(newer), None), "{file}");
+        assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), bytes, "{file}");
+        assert!(!dir.join("connections.json.bad").exists(), "{file}");
+    }
+    // This build's version with a body it cannot read, and JSON that is no object, are damaged.
+    for damaged in [r#"{"version": 1, "saved": {"a": {}}}"#, "[]"] {
+        std::fs::write(dir.join(FILE), damaged).unwrap();
+        let (_, warn) = ConnectionStore::load(Some(&dir));
+        assert!(warn.is_some_and(|w| w.contains("is damaged")), "{damaged}");
+        assert_eq!(std::fs::read_to_string(dir.join("connections.json.bad")).unwrap(), damaged);
+        std::fs::remove_file(dir.join("connections.json.bad")).unwrap();
+    }
+}
+
+#[test]
+fn a_connections_file_past_the_cap_is_left_alone() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    // Valid JSON, one byte past 4 MiB.
+    let head = br#"{"version": 1, "saved": [], "recent": []}"#;
+    let mut bytes = vec![b' '; 4 * 1024 * 1024 + 1 - head.len()];
+    bytes.extend_from_slice(head);
+    std::fs::write(dir.join(FILE), &bytes).unwrap();
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    let warn = warn.unwrap_or_default();
+    assert!(warn.ends_with("is larger than 4 MiB; the file was left untouched and changes will not be saved"), "{warn}");
+    assert!(s.dir.is_none());
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), bytes);
+    // One byte less loads.
+    std::fs::write(dir.join(FILE), &bytes[1..]).unwrap();
+    assert_eq!(ConnectionStore::load(Some(&dir)).1, None);
 }

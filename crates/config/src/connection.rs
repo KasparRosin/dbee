@@ -17,6 +17,8 @@ pub enum ConfigError {
     Url(String),
     /// The connections file could not be read or written.
     Io(String),
+    /// Another dbee held the connections file's lock past [`LOCK_WAIT`](crate::store::LOCK_WAIT).
+    Locked,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -25,6 +27,11 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Invalid(m) => write!(f, "invalid connection settings: {m}"),
             ConfigError::Url(m) => write!(f, "invalid connection URL: {m}"),
             ConfigError::Io(m) => write!(f, "connections file: {m}"),
+            ConfigError::Locked => write!(
+                f,
+                "Another dbee window was changing the connections file for over {} seconds, so nothing was changed.",
+                crate::store::LOCK_WAIT.as_secs()
+            ),
         }
     }
 }

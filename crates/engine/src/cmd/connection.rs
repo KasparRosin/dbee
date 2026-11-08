@@ -260,6 +260,14 @@ fn parse_config(params: &Json, key: &str) -> Result<Option<ConnectionConfig>, En
     if let Some(unknown) = config.unknown_fields().first() {
         return Err(bad(format!("`{unknown}` in `{key}` is not a connection setting")));
     }
+    // The tunnel's login keeps no unknown fields: its keys are those it serializes back to.
+    let given_auth = v.get("ssh").and_then(|ssh| ssh.get("auth")).and_then(Json::as_object);
+    if let (Some(ssh), Some(given_auth)) = (&config.ssh, given_auth) {
+        let known = serde_json::to_value(&ssh.auth).ok();
+        if let Some(unknown) = given_auth.keys().find(|k| !known.as_ref().and_then(Json::as_object).is_some_and(|m| m.contains_key(*k))) {
+            return Err(bad(format!("`ssh.auth.{unknown}` in `{key}` is not a connection setting")));
+        }
+    }
     Ok(Some(config))
 }
 
@@ -752,7 +760,11 @@ fn change_store<R>(s: &mut Session, f: impl FnOnce(&mut ConnectionStore) -> R) -
 fn record_use(s: &mut Session, config: &ConnectionConfig) {
     if let Err(e) = change_store(s, |store| store.touch_recent(config, unix_now())) {
         log::warn!("the connections file could not be written");
-        s.ui_requests.push(UiRequest::Notice(format!("The recent connections could not be saved: {e}")));
+        let notice = match e {
+            ConfigError::Locked => e.to_string(),
+            e => format!("The recent connections could not be saved: {e}"),
+        };
+        s.ui_requests.push(UiRequest::Notice(notice));
     }
 }
 
@@ -1203,21 +1215,27 @@ fn apply_open(
 /// `config`'s, for the recent list and the session). `Err` says why nothing was kept.
 fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credentials) -> Result<(), String> {
     let Some(secret_store) = s.secrets.clone() else { return Err("there is no secret store, so dbee asks each time".into()) };
-    let Some(saved) = s.state.store.saved.iter().find(|c| c.id == config.id).cloned() else {
+    if !s.state.store.is_saved(&config.id) {
         return Err("the connection is not saved; save it to keep its secrets".into());
-    };
-    let r = reuse(&saved, config);
-    if (typed.password.is_some() && !r.db) || (typed.ssh.password.is_some() && !r.ssh_password) || (typed.ssh.passphrase.is_some() && !r.passphrase) {
-        return Err("the settings differ from the saved connection; save them to keep the secrets".into());
     }
-    if !saved.save_secrets {
-        let id = config.id.clone();
-        let still_saved = change_store(s, |store| store.saved.iter_mut().find(|c| c.id == id).map(|c| c.save_secrets = true).is_some())
-            .map_err(|e| format!("the connections file could not be written: {e}"))?;
-        if !still_saved {
-            return Err("the connection is not saved any more; save it to keep its secrets".into());
+    // Checked against the settings as the file holds them now, which another dbee may have changed.
+    let given = config.clone();
+    let kept = change_store(s, |store| {
+        let Some(saved) = store.saved.iter_mut().find(|c| c.id == given.id) else {
+            return Err("the connection is not saved any more; save it to keep its secrets");
+        };
+        let r = reuse(saved, &given);
+        if (typed.password.is_some() && !r.db)
+            || (typed.ssh.password.is_some() && !r.ssh_password)
+            || (typed.ssh.passphrase.is_some() && !r.passphrase)
+        {
+            return Err("the settings differ from the saved connection; save them to keep the secrets");
         }
-    }
+        saved.save_secrets = true;
+        Ok(())
+    })
+    .map_err(|e| format!("the connections file could not be written: {e}"))?;
+    kept?;
     config.save_secrets = true;
     if !store_secrets(secret_store.as_ref(), &config.id, typed) {
         secret_store_failed(s, "save the password");
