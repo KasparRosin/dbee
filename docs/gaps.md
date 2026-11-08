@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** trivial (two pointers to a private plan dropped)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (entry 11: the Flatpak and the keyring; entry 35: a catalog over 60 s; import and export are M4)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -12,8 +12,8 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Missing:** exporting a table or a query result to a file (CSV, JSON, SQL) and importing one. The alpha gate's last row ([`roadmap.md`](roadmap.md)).
 - **Evidence:** `engine.commands` lists no export or import command; the way out today is the clipboard, at most 8 MiB of text (entry 8).
-- **Impact:** results larger than a copy, or meant for a file, cannot leave dbee. The maintainer switches to dbee fully once this lands (M3).
-- **Estimate:** M3 "Import and export"; not estimated yet.
+- **Impact:** results larger than a copy, or meant for a file, cannot leave dbee. The maintainer switches to dbee fully once this lands (M4).
+- **Estimate:** M4 "Import and export"; not estimated yet.
 
 ## After alpha
 
@@ -64,15 +64,15 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Limit:** a query keeps at most 10,000 rows per result and 256 MiB of cell text per run, and says `First 10,000 of N rows`.
 - **Evidence:** `QUERY_LIMITS` (`crates/driver/src/api.rs`), the same on every engine; `a_result_cut_at_the_cap_says_so` (`crates/ui-egui/tests/query_tab.rs`).
-- **Impact:** a larger result cannot be read through in the query tab. A table tab pages through any number of rows (100 a page; the next page of a million-row table loads in 1.06–1.09 ms, [`target-app-parity.md`](target-app-parity.md), "Performance"), and file export comes in M3.
-- **Estimate:** part of M3's export; paging query results is not estimated.
+- **Impact:** a larger result cannot be read through in the query tab. A table tab pages through any number of rows (100 a page; the next page of a million-row table loads in 1.06–1.09 ms, [`target-app-parity.md`](target-app-parity.md), "Performance"), and file export comes in M4.
+- **Estimate:** part of M4's export; paging query results is not estimated.
 
 ### 8. A copy is at most 8 MiB of text (F)
 
 - **Limit:** one copy (Ctrl+C, Ctrl+Shift+C, the grid menu's formats) holds at most 8 MiB of text, counting everything (quotes, escapes, `NULL`, column names). A larger one copies nothing and says how many rows fit.
 - **Evidence:** `COPY_MAX_BYTES` (`crates/engine/src/cmd/selection.rs`); `a_copy_over_the_cap_copies_nothing_and_says_why` (`crates/ui-egui/tests/clipboard.rs`).
-- **Impact:** large selections need several copies until file export lands in M3 (entry 1).
-- **Estimate:** M3.
+- **Impact:** large selections need several copies until file export lands in M4 (entry 1).
+- **Estimate:** M4.
 
 ### 9. Postgres and SQLite: unique indexes without a constraint are not row keys (F)
 
@@ -88,12 +88,12 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** large JSON documents or long texts cannot be fixed in the grid.
 - **Estimate:** 6–10 h (estimated): an editor that lays out only the lines in view, as the value panel does.
 
-### 11. The Flatpak cannot reach `~/.ssh`, the SSH agent or the keyring (H)
+### 11. The Flatpak cannot reach the keyring (H)
 
-- **Missing:** Flatpak permissions for the user's SSH keys and `known_hosts`, the agent socket and the secret service.
-- **Evidence:** `packaging/linux/flatpak/dev.rosin.dbee.yml` grants no home access, no `--socket=ssh-auth` and no secret-service bus name (left for later in M1).
-- **Impact:** in the Flatpak, SSH tunnels with the user's key and saved passwords do not work. The tarball and the AppImage are expected to (not measured: key logins through the tunnel were exercised in the dev build only, by `m1_day` and `crates/ssh/tests/tunnel.rs`).
-- **Estimate:** 2–4 h (estimated), plus a check on a Flatpak host.
+- **Missing:** a Flatpak permission for the secret service (the keyring). The manifest now grants read-only `~/.ssh` and the SSH agent socket; it grants no secret-service bus name.
+- **Evidence:** `packaging/linux/flatpak/dev.rosin.dbee.yml` (`--filesystem=~/.ssh:ro`, `--socket=ssh-auth`; no `--talk-name=org.freedesktop.secrets`). Not built or run here (unverified).
+- **Impact:** in the Flatpak, saved passwords do not work. SSH tunnels with the user's key and the agent should; a Flatpak host has not checked it. The tarball and the AppImage are expected to work (not measured: key logins through the tunnel were exercised in the dev build only, by `m1_day` and `crates/ssh/tests/tunnel.rs`).
+- **Estimate:** 1–2 h (estimated), plus a check on a Flatpak host.
 
 ### 12. One very long line in the query editor is slow to type in (P)
 
@@ -263,10 +263,18 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** a case-insensitive filter on text outside ASCII misses rows that differ in case.
 - **Estimate:** 1–2 h (estimated): a Unicode case fold registered as a function on the connection.
 
+### 35. A catalog that takes more than 60 s cannot be opened (P)
+
+- **Limit:** the catalog load is one step bounded at 60 s (`CATALOG_TIMEOUT`, `crates/engine/src/cmd/connection.rs`), and dbee loads every table, column and key before the tree shows. On a server whose catalog is very large the load can take longer, and the connection fails with a message that names the 60 s.
+- **Evidence:** the bound and its message (`crates/engine/src/cmd/connection.rs`, tested there). No test uses a catalog that large: the seeds hold 300 tables, and the driver tests load them in under 2 s.
+- **Impact:** such a server cannot be opened at all.
+- **Estimate:** not estimated: a light load of the table list and details per table, which the Structure view needs too.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Entry 11 now says the Flatpak reads `~/.ssh` and the agent and lacks only the keyring; entry 35 (a catalog that takes more than 60 s cannot be opened); import and export are M4 (M3 is the Redesign). |
 | 2026-11-08 | trivial | Entries 19 and 20 no longer point to the private M2 plan. |
 | 2026-11-06 | minor | M2's final review: entry 14 now says query tabs share one session, whose transaction outlives a tab (and MySQL's DDL commits it); entries 25–34: MySQL's `CALL` results and warning count, read-only undone in a query tab, idle timeouts, refused login methods, `lower_case_table_names`, MariaDB's system-versioned tables, the catalog read without one snapshot, no `COM_QUIT`, SQLite's case folding. |
 | 2026-11-05 | minor | M2 done: entries 19 (no Unix socket for MySQL and MariaDB), 20 (SQLite: no attached databases, extensions or encrypted files), 21 (Ctrl+P finds saved connections only, tables first with nothing typed), 22 (SQLite rowid keys and VACUUM), 23 (zenity's "All files" picker), 24 (the cramped form at the smallest window); entries 3, 6, 7, 9, 14 and 15 say which engines they hold for. |

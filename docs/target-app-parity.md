@@ -1,10 +1,10 @@
 # Target app parity
 
-> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-06 · **Change:** minor (the tarball rebuilt; the launch check right after a release build) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the platforms after the first test release; M2 effort; import and export are M4) · **Target:** Beekeeper Studio 5.5.7
 
 ## Summary
 
-dbee covers the daily workflow on PostgreSQL, MySQL, MariaDB and SQLite files: connect (a server also through an SSH tunnel), find a table, filter it, read its JSON, follow a foreign key, edit rows, run queries and copy results. It works end to end in the real window: the M1 day on Postgres (`apps/dbee/tests/m1_day.rs`) and the M2 day on MySQL through SSH, MariaDB and a SQLite file (`apps/dbee/tests/m2_day.rs`), measured. There is no file export or import yet (M3).
+dbee covers the daily workflow on PostgreSQL, MySQL, MariaDB and SQLite files: connect (a server also through an SSH tunnel), find a table, filter it, read its JSON, follow a foreign key, edit rows, run queries and copy results. It works end to end in the real window: the M1 day on Postgres (`apps/dbee/tests/m1_day.rs`) and the M2 day on MySQL through SSH, MariaDB and a SQLite file (`apps/dbee/tests/m2_day.rs`), measured. There is no file export or import yet (M4).
 
 Overall parity with Beekeeper Studio: **~29 % (estimated)**, from the weights and dimension scores below. Breadth comes from grading Beekeeper's observed feature list row by row. Readiness stays low until dbee has been used on real databases (a day of real use on the maintainer's own databases, the last check of M1 and of M2).
 
@@ -12,9 +12,9 @@ Overall parity with Beekeeper Studio: **~29 % (estimated)**, from the weights an
 
 | Audience | Ready % | Agent wall-clock hours to ~95% | Work that dominates |
 |---|---|---|---|
-| Developer querying a local SQLite file | ~30 % (estimated): the daily workflow on a file (`dbee <file>`, a dropped file, Open with), not yet used on real files | not estimated yet | file export and import (M3), structure views, saved queries and history |
-| Backend developer on Postgres/MySQL | ~35 % (estimated): the daily workflow on Postgres, MySQL and MariaDB, not yet used on real databases | not estimated yet | file export and import (M3), structure views, saved queries and history |
-| Data analyst exporting results | ~10 % (estimated): copies of up to 8 MiB only | not estimated yet | file export (M3), results past 10,000 rows |
+| Developer querying a local SQLite file | ~30 % (estimated): the daily workflow on a file (`dbee <file>`, a dropped file, Open with), not yet used on real files | not estimated yet | file export and import (M4), structure views, saved queries and history |
+| Backend developer on Postgres/MySQL | ~35 % (estimated): the daily workflow on Postgres, MySQL and MariaDB, not yet used on real databases | not estimated yet | file export and import (M4), structure views, saved queries and history |
+| Data analyst exporting results | ~10 % (estimated): copies of up to 8 MiB only | not estimated yet | file export (M4), results past 10,000 rows |
 
 ## What we measured against and how
 
@@ -41,10 +41,10 @@ Beekeeper Studio 5.5.7, observed black-box in a sandbox, using synthetic databas
 | Connections | 15 | 62 % (7.5 of 12 rows; estimated) | ~45 % (estimated) | not estimated yet | Done: read-only mode, test, save with name, colour and passwords, saved and recent lists with a filter, Fill from URL. Partial: no socket mode or IAM; SSL without client certificates; SSH without a jump host; no Copy URL. Missing: a sample database, team workspaces. Also on every engine: the database type's cards, the server's databases listed under the Database field, a database file opened from the command line or a drop. `crates/engine/tests/connection.rs`, `crates/ui-egui/tests/connections.rs`, `m1_day` step 1, `m2_day`. |
 | Navigation | 10 | 50 % (3 of 6; estimated) | ~40 % (estimated) | not estimated yet | Done: the schema tree, quick search. Partial: the tree's filter and refresh only; tabs without reopen or restore. Missing: database switcher, several windows. Ctrl+P finds saved connections too, and switches to one. `crates/ui-egui/tests/workspace.rs`, `m1_day` step 2, `m2_day`. |
 | Query | 20 | 32 % (3.5 of 11; estimated) | ~25 % (estimated) | not estimated yet | Done: run all and run current, several result sets, errors. Partial: the editor has no autocomplete. Missing: manual transactions, saved queries, history, Vim keymap and wrap, find, run to file, AI shell. On MySQL and MariaDB a query tab's database chip. `crates/ui-egui/tests/query_tab.rs`, `m1_day` step 7, `m2_day`. |
-| Results | 10 | 33 % (1 of 3; estimated) | ~30 % (estimated) | M3 | Done: copy as TSV (with or without header), CSV, JSON, Markdown. Missing: downloads. `crates/ui-egui/tests/clipboard.rs`. |
+| Results | 10 | 33 % (1 of 3; estimated) | ~30 % (estimated) | M4 | Done: copy as TSV (with or without header), CSV, JSON, Markdown. Missing: downloads. `crates/ui-egui/tests/clipboard.rs`. |
 | Data | 25 | 59 % (6.5 of 11; estimated) | ~45 % (estimated) | not estimated yet | Done: the filter builder (any number of filters, raw `WHERE`), paging with counts, following a foreign key. Partial: the grid has no tooltips; editing has no copy as SQL, and rows have no clone; the value panel (pretty JSON, copy) stands in for two rows, the edit modal and the JSON row viewer, but it is read-only and shows one cell, not the row; copy has no SQL or IN list formats; columns resize only. Missing: quick filter. `crates/ui-egui/tests/table_tab.rs`, `editing.rs`, `value_panel.rs`, `m1_day` steps 3–6, `m2_day`. |
 | Structure | 8 | 0 % (0 of 5) | 0 % | not estimated yet | Not started. |
-| Import/export | 7 | 0 % (0 of 3) | 0 % | M3 | Not started ([gaps.md](gaps.md) 1). |
+| Import/export | 7 | 0 % (0 of 3) | 0 % | M4 | Not started ([gaps.md](gaps.md) 1). |
 | Tools | 3 | 0 % (0 of 2) | 0 % | not estimated yet | Backup, restore and plugins not started. |
 | App | 2 | 0 % (0 of 4) | 0 % | not estimated yet | One light theme of dbee's own; no zoom or help menus. |
 
@@ -61,7 +61,7 @@ Features, weighted by area: **39 %**, put at **~35 % (estimated)**.
 | Stability | 8 | ~25 % | estimated | Never-crash rules and the panic guard; the command-sequence fuzz at 20,000 steps (again on 2026-11-06, seed 1793954111563178215) and every command with empty params pass (measured). No use on real databases yet. |
 | File formats (import/export) | 4 | 0 % | measured | none ([file-format-parity.md](file-format-parity.md)) |
 | Localization | 4 | 0 % | measured | English only ([localization-parity.md](localization-parity.md)) |
-| Platforms | 2 | ~25 % | estimated | Linux x86_64 built, packaged and run; macOS, Windows and FreeBSD not built in M1 ([hardware-parity.md](hardware-parity.md)) |
+| Platforms | 2 | ~25 % | estimated | Linux x86_64 built, packaged and run; macOS, Windows, FreeBSD and the other Linux builds built in the first test release (2026-10-29), not run except Windows ARM64 ([hardware-parity.md](hardware-parity.md)) |
 | Ecosystem and AI | 2 | ~25 % | estimated | The localhost control channel drives every command and the window (`docs/control-protocol.md`); the CLI's database commands are planned; no AI features |
 
 Weighted: 0.40 × 35 + 0.20 × 20 + 0.12 × 45 + 0.08 × 30 + 0.08 × 25 + 0.02 × 25 + 0.02 × 25 = **28.8 %**, given as **~29 % (estimated)**.
@@ -114,7 +114,7 @@ Beekeeper Studio's own timings were not measured.
 
 ## Platforms
 
-Linux x86_64: built, packaged (tarball, AppImage) and started from the tarball on 2026-10-26; the M2 app's tarball built on 2026-11-06 from `df2f3ca` (sha256 `38051b3c89fde4a1213fb9a0c80297f173c9d322ea5297a4c439f4ae74f441fa`; the AppImage was not rebuilt: its tool now downloads the AppImage runtime while it builds). The rest of the matrix was not built in M1 or M2. CI builds wait for the GitHub repository. See [hardware-parity.md](hardware-parity.md).
+Linux x86_64: built, packaged (tarball, AppImage) and started from the tarball on 2026-10-26; the M2 app's tarball built on 2026-11-06 from `df2f3ca` (sha256 `38051b3c89fde4a1213fb9a0c80297f173c9d322ea5297a4c439f4ae74f441fa`; the AppImage was not rebuilt: its tool now downloads the AppImage runtime while it builds). The rest of the matrix was built by the release pipeline in its first test release (2026-10-29, version 0.1.0, from the M1 code); only Windows ARM64 was installed and started. Regular CI builds Linux only. See [hardware-parity.md](hardware-parity.md).
 
 ## Ecosystem and AI
 
@@ -122,13 +122,13 @@ The control channel (`dbee --control <port>`) reaches every command and drives t
 
 ## Stage
 
-Pre-alpha. M1 and M2 are built: five of the six alpha gate rows pass, on all four engines ([roadmap.md](roadmap.md)), and file export (M3) is the sixth. Both wait for a day of real use on the maintainer's own databases.
+Pre-alpha. M1 and M2 are built: five of the six alpha gate rows pass, on all four engines ([roadmap.md](roadmap.md)), and file export (M4, after the M3 redesign) is the sixth. Both wait for a day of real use on the maintainer's own databases.
 
 ## Effort and calibration
 
 M1 ran from 2026-10-19 to 2026-10-27 (measured, git): 28 planned tasks in 59 commits: 54 for the first 27 tasks (each reviewed, then fixed where the review found problems), one toolchain pin and four for the last task. The M1 review fixes followed in seven more, 66 commits in all.
 
-M2 ran from 2026-10-28 to 2026-11-05 (measured, git): 20 planned tasks and one added (M2.5b) in 70 commits on its branch, each task reviewed and fixed where the review found problems. The whole-branch review and the security review come next.
+M2 ran from 2026-10-28 to 2026-11-08 (measured, git): 20 planned tasks and one added (M2.5b), each reviewed and fixed where the review found problems. The whole-branch review and its fix round, a larger review and a bugs task followed; connection ids and the security review come next. At 2026-11-08 the branch holds 92 commits of its own (`git rev-list --count --no-merges 4663d95..m2`) and one merge of `main`.
 
 Agent hours were not logged in either, so per-area hours are not estimated yet. The first milestone that logs them gives the calibration.
 
@@ -151,6 +151,7 @@ Beekeeper Studio's own timings; dbee on macOS, Windows and FreeBSD; a day of rea
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | Platforms: the first test release built every row (2026-10-29), regular CI builds Linux only; M2 effort through the review rounds; import and export are M4 (M3 is the Redesign). |
 | 2026-11-06 | minor | The M2 tarball as rebuilt from `df2f3ca`, with its sha256; the launch check right after its release build (948 and 347 ms at a load of 8.5–9.5). |
 | 2026-11-06 | minor | The launch check measured at a low load (199–228 ms); the M2 day's runs with their loads; the 20,000-step fuzz run again. |
 | 2026-11-05 | major | M2 built: MySQL, MariaDB and SQLite (4 of 20 engines, ~29 % overall, estimated); readiness for SQLite and MySQL users; M1's targets measured again on every engine, in a release build, with the load; the M2 day; effort for M2. |

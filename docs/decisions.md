@@ -1,6 +1,6 @@
 # Decisions
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the connections file: a change re-reads it under a lock; its version, and fields a build does not know)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (SQLite foreign keys, the cancel, files opening as saved, the new milestone numbers)
 
 Significant decisions, newest last. Add an entry for every significant dependency, platform or process choice.
 
@@ -102,7 +102,7 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 ## 2026-10-28: M2 is three databases, before import and export
 
-- **Decision:** M2 is "Three databases": a driver interface, then MySQL/MariaDB and SQLite with the full M1 workflow. Import and export move to M3.
+- **Decision:** M2 is "Three databases": a driver interface, then MySQL/MariaDB and SQLite with the full M1 workflow. Import and export move to M3 (M4 since 2026-11-08).
 - **Why:** The engine still names Postgres types, and export and import should be written once against the interface, not once per engine. Two more databases also widen who can use dbee daily.
 
 ## 2026-10-28: SQLite's public-domain code is allowed
@@ -114,7 +114,7 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** `dbee-driver` (L3) holds the interface every database driver implements: the `Driver`, `Connection` and `Cancel` traits, one error type (`DbError`), `ServerInfo`, `Target`, the caps, the apply gate, the shared TLS setup and the `CatalogBuilder`. The drivers (`dbee-pg` now; MySQL/MariaDB and SQLite next) sit at L4, and `dbee-drivers` (L4) is their one list, which only the apps and test code use. `cargo xtask layers` keeps the engine and the UIs from taking a driver crate except as a dev-dependency.
 - **Families:** A driver serves a family of database types: the MySQL driver serves MySQL and MariaDB, and the Postgres driver can later serve Postgres-like servers. It names the types it opens, and each connection says which SQL dialect its server speaks.
-- **Why:** Each engine plugs in the same way, and shared logic (TLS, the apply gate, catalog building) exists once. Adding an engine is one driver crate, one dialect file and one registry line.
+- **Why:** Each engine plugs in the same way, and shared logic (TLS, the apply gate, catalog building) exists once. Adding an engine is one driver crate, one dialect file and one registry line. More exactly, as "Adding an engine" in `architecture.md` lists it: one driver crate, one dialect file, one kind file, one registry line, the enum variants and the layers line.
 
 ## 2026-10-30: dbee's own MySQL client on mysql_common
 
@@ -202,6 +202,21 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 - **Decision:** The filter bar's `like`, `not like`, `ilike` and `not ilike` take `\` as the escape on every engine, as Postgres's `LIKE` does by default: MySQL's and MariaDB's patterns end in `ESCAPE _utf8mb4 X'5C'`, SQLite's in `ESCAPE '\'`, Postgres's in nothing. Each is a field of the engine's dialect `Rules`.
 - **Why:** measured on the seven test servers and SQLite, `50\%` found "50%" on Postgres, MySQL 5.7 and MariaDB, but nothing on MySQL 8.0 and later (no escape under `NO_BACKSLASH_ESCAPES`) and SQLite (no escape unless one is named). The hex form reads the same whether or not `NO_BACKSLASH_ESCAPES` is set, where `'\'` would not.
 
+## 2026-11-06: Foreign keys are on for every SQLite connection
+
+- **Decision:** dbee runs `PRAGMA foreign_keys = ON` when it opens a SQLite file, so `ON DELETE CASCADE` and the other foreign key actions run, and an edit that breaks a foreign key fails. The setting belongs to the connection, not to the file.
+- **Why:** the schema's foreign keys mean what they say, and other database tools do the same. A program that keeps foreign keys off against the same file sees cascades it did not expect after dbee deletes a row.
+
+## 2026-11-06: A cancel is sent again until the statement ends, and never reaches a later one
+
+- **Decision:** the job that runs a statement sends the cancel itself, again after 1 s and then every 2 s while the statement has not ended, and waits for each request to arrive before it goes on. Each driver starts no statement while a request is on its way.
+- **Why:** a cancel that reaches the server before the statement does is lost. A cancel that lands on the next statement would stop work the user did not stop.
+
+## 2026-11-06: A file opens as it was saved
+
+- **Decision:** a database file that a saved connection names (links followed, `.` and `..` gone) opens with that connection's name, colour and read-only setting, and a file dropped on the window while connected goes through the questions of closing the open connection.
+- **Why:** opening a file that was saved as read-only must not make it writable.
+
 ## 2026-11-08: Each change to the connections file re-reads it under a lock
 
 - **Decision:** A save, a delete, a duplicate and the recent list's touch at each open read `connections.json` again, apply only that change to what it holds, write it atomically (temp file, then rename) and keep the result as the session's copy, all under an advisory lock on `connections.json.lock` beside it (std's `File::lock`, no dependency), held for the read and the write only. A lock another dbee keeps for 5 s is an error the user sees, and nothing changes; so is a lock the file system refuses. A file over 4 MiB is not read: the store keeps its changes in memory, as for an unreadable file. The connection screen reads the file again after a disconnect.
@@ -211,3 +226,8 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** The file says its `version` (1). Adding a field is free; renaming one, or changing what it means, moves `version` on; a build never writes a file whose version is newer than its own. The version is read before the rest, so a newer file is never moved aside as damaged, whatever its shape: the build reads what it can of it and keeps its changes in memory, with the warning "A newer dbee wrote the connections file, so changes here won't be saved." Fields a build does not know (at the top, in an entry, its tunnel, a recent entry) are kept and written back, and never reach the UI or a command's reply; the tunnel's login (`ssh.auth`) is not covered, so a field a build does not know there is dropped at a save. A command's `config` with a key the build does not know is refused (`badParams`, naming it, `ssh.auth.<key>` included), so a script's `"hots"` is not saved quietly.
 - **Why:** builds of different ages share one file (a Flatpak and a package, dotfiles on two machines, a downgrade), and what the first public build does to a newer file it does for good.
+
+## 2026-11-08: The Redesign is M3, import and export is M4
+
+- **Decision:** the milestone after M2 is M3, the Redesign. Import and export moves from M3 to M4, and the alpha gate's last row (file export) lands in M4.
+- **Why:** the owner's order of work: the redesign renames and moves many things that export and import would otherwise have to name twice.

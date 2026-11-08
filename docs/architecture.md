@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the connections file under a lock, with its version; the browse connection's queue; the Postgres cancel's address)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (Platforms: every row built in the first test release)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -73,7 +73,7 @@ What a fourth engine touches, in the product and in the test kit. Nothing in the
 
 ## Platforms
 
-Desktop only: macOS, Windows, Linux and FreeBSD, of which only Linux x86_64 has been built and run so far ([`hardware-parity.md`](hardware-parity.md)). There is no web build and no wasm target, because a browser cannot open database connections. See [`releasing.md`](releasing.md) for the platform matrix and [`decisions.md`](decisions.md).
+Desktop only: macOS, Windows, Linux and FreeBSD, of which every row was built in the first test release (2026-10-29, from the M1 code) and only Linux x86_64 has been run, apart from Windows ARM64, which was installed and started ([`hardware-parity.md`](hardware-parity.md)). There is no web build and no wasm target, because a browser cannot open database connections. See [`releasing.md`](releasing.md) for the platform matrix and [`decisions.md`](decisions.md).
 
 ## Known gaps
 
@@ -83,6 +83,7 @@ M1's and M2's crates are all in place. The driver interface exists, and the engi
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | trivial | Platforms: every row was built in the first test release (2026-10-29). |
 | 2026-11-08 | minor | The bugs' review fixes: the MySQL KILL goes to the address the connection reached; an Apply waits for its turn as a load does, and a catalog refresh's limit counts from its turn. |
 | 2026-11-08 | minor | The larger review's bugs: the connections file is changed by a read-modify-write under a lock, with its `version` checked and unknown fields kept; the browse connection's queue in the engine; the Postgres cancel goes to the address the connection reached; "Known gaps" names the four engines. |
 | 2026-11-06 | minor | M2's final review: `crates/sql` describes its per-engine dialects and `Rules`, `config` its per-engine kind files; a stopped statement's cancel is sent again until it ends and never reaches a later statement; a stored password needs the same CA file and no weaker option; only dbee's own crates log below `info`; "Adding an engine". |
