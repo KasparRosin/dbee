@@ -25,8 +25,6 @@ pub(crate) const CHUNK: usize = 0xFF_FFFF;
 /// The largest packet out of turn dbee reads, to see whether it is the server's goodbye.
 const MAX_GOODBYE: usize = 64 * 1024;
 
-const MIB: usize = 1024 * 1024;
-
 /// Framed packets on a stream, with the sequence ids of the exchange in progress.
 pub struct Packets {
     io: BufReader<Stream>,
@@ -96,7 +94,7 @@ impl Packets {
             }
             self.seq = self.seq.wrapping_add(1);
             if payload.len().saturating_add(len) > max {
-                return Err(DbError::Other(format!("the server sent a {what} larger than {}", size_text(max))));
+                return Err(DbError::Other(format!("the server sent a {what} larger than {}", dbee_driver::size_text(max))));
             }
             let want = payload.len().saturating_add(len);
             (&mut self.io).take(len as u64).read_to_end(&mut payload).await.map_err(|_| DbError::ConnectionLost)?;
@@ -133,14 +131,6 @@ impl Packets {
             }
         }
         self.io.get_mut().flush().await.map_err(|_| DbError::ConnectionLost)
-    }
-}
-
-pub(crate) fn size_text(bytes: usize) -> String {
-    match bytes {
-        b if b >= MIB => format!("{} MiB", b / MIB),
-        b if b >= 1024 => format!("{} KiB", b / 1024),
-        b => format!("{b} bytes"),
     }
 }
 

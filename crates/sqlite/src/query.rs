@@ -120,7 +120,7 @@ fn statement(
             let named = describe(row.as_ref(), columns)?;
             bytes = named.iter().map(column_cost).fold(0, usize::saturating_add);
             if bytes > limits.max_bytes {
-                return Err(DbError::Other("the result's columns are larger than the cap".into()));
+                return Err(DbError::TooLarge { left: limits.max_bytes });
             }
             described = Some(named);
         }

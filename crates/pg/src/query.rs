@@ -2,7 +2,7 @@
 //! Postgres prints them.
 
 use dbee_core::{Cell, Column, ResultSet, TypeClass};
-use dbee_driver::{DbError, Limits, QUERY_LIMITS, ROW_COST, cell_cost, column_cost};
+use dbee_driver::{DbError, Limits, QUERY_LIMITS, ROW_COST, cell_cost, column_cost, kept_text};
 use futures_util::StreamExt;
 use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::{Client, SimpleQueryMessage};
@@ -22,9 +22,10 @@ pub(crate) const MAX_NAME: usize = 63;
 /// `rows_affected` is the count of the last `CommandComplete`. The first failing statement ends
 /// the run with its error. Rows past `limits` are still read (so the connection stays in sync)
 /// and counted in `rows_seen`, but not kept, and `complete` becomes false. The byte cap counts
-/// what the columns and the rows kept hold ([`dbee_driver::cell_cost`]); a result of more than
-/// [`MAX_COLUMNS`] columns is refused before its rows. What dbee refuses is not sent, and a
-/// read-only connection's mode is read back after it ([`crate::guard`]).
+/// what the columns and the rows kept hold ([`dbee_driver::cell_cost`]). A result of more than
+/// [`MAX_COLUMNS`] columns, or whose columns do not fit in `limits`, ends the run in an error once
+/// its answer is read to the end. What dbee refuses is not sent, and a read-only connection's mode
+/// is read back after it ([`crate::guard`]).
 pub async fn run_untyped(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
     let _guard = conn.lock().await?;
     guard::before(conn, sql).await?;
@@ -39,20 +40,29 @@ pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -
     let mut stream = std::pin::pin!(stream);
     let mut result = ResultSet { complete: true, ..ResultSet::default() };
     let mut bytes: usize = 0;
+    let mut refused = None;
     while let Some(message) = stream.next().await {
-        match message.map_err(|e| conn.error(&e))? {
+        let message = message.map_err(|e| conn.error(&e))?;
+        // Read to the end, so the next statement finds the session in step.
+        if refused.is_some() {
+            continue;
+        }
+        match message {
+            SimpleQueryMessage::RowDescription(columns) if columns.len() > MAX_COLUMNS => {
+                refused = Some(DbError::Other(format!(
+                    "the server sent a result of {} columns, more than the {MAX_COLUMNS} a Postgres query can return",
+                    columns.len()
+                )));
+            }
             SimpleQueryMessage::RowDescription(columns) => {
-                if columns.len() > MAX_COLUMNS {
-                    return Err(DbError::Other(format!(
-                        "the server sent a result of {} columns, more than the {MAX_COLUMNS} a Postgres query can return",
-                        columns.len()
-                    )));
-                }
-                result.columns = columns.iter().map(|c| Column::untyped(c.name())).collect();
+                result.columns = columns.iter().map(|c| Column::untyped(&kept_text(c.name(), MAX_NAME))).collect();
                 result.rows.clear();
                 result.rows_seen = 0;
                 result.complete = true;
                 bytes = result.columns.iter().map(column_cost).fold(0, usize::saturating_add);
+                if bytes > limits.max_bytes {
+                    refused = Some(DbError::TooLarge { left: limits.max_bytes });
+                }
             }
             SimpleQueryMessage::Row(row) => {
                 result.rows_seen = result.rows_seen.saturating_add(1);
@@ -77,7 +87,10 @@ pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -
             _ => {}
         }
     }
-    Ok(result)
+    match refused {
+        Some(e) => Err(e),
+        None => Ok(result),
+    }
 }
 
 /// dbee's own reads, of a known shape: the first cell of every row of every statement of `sql`,
@@ -131,9 +144,9 @@ pub async fn describe(conn: &PgConnection, sql: &str) -> Option<Vec<Column>> {
         .map(|c| {
             let base = base_type(c.type_());
             Column {
-                name: c.name().to_owned(),
-                base_type: base.name().to_owned(),
-                type_label: c.type_().name().to_owned(),
+                name: kept_text(c.name(), MAX_NAME),
+                base_type: kept_text(base.name(), MAX_NAME),
+                type_label: kept_text(c.type_().name(), MAX_NAME),
                 class: class_of_type(base),
             }
         })

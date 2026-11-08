@@ -19,10 +19,15 @@ const FORMAT: u8 = 0x01;
 /// The most of MariaDB's type name dbee keeps: no real one comes near it.
 const MAX_TYPE_NAME: usize = 64;
 
+/// The longest column name MySQL and MariaDB send, in bytes: longer ones they cut to this
+/// (measured on all five test servers), so only a hostile server sends one.
+const MAX_NAME: usize = 256;
+
 /// A result column as its definition (Protocol::ColumnDefinition41) gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ColumnDefinition {
-    /// The name the result gives the column (its alias), as UTF-8 with invalid bytes replaced.
+    /// The name the result gives the column (its alias), as UTF-8 with invalid bytes replaced,
+    /// kept to [`MAX_NAME`] bytes.
     pub(crate) name: String,
     pub(crate) facts: TypeFacts,
     /// MariaDB's name for the column's type, when its extended metadata gives one.
@@ -78,7 +83,7 @@ pub(crate) fn parse_column(def: &[u8], extended_metadata: bool) -> Result<Column
         json,
     };
     let type_name = type_name.map(|n| kept_bytes(n, MAX_TYPE_NAME));
-    Ok(ColumnDefinition { name: String::from_utf8_lossy(name).into_owned(), facts, type_name })
+    Ok(ColumnDefinition { name: kept_bytes(name, MAX_NAME), facts, type_name })
 }
 
 #[cfg(test)]
@@ -128,9 +133,10 @@ mod tests {
     fn same_as_mysql_common(def: &[u8], ours: &ColumnDefinition) -> Result<(), TestCaseError> {
         let theirs = ParseBuf(def).parse::<mysql_common::packets::Column>(()).map_err(|e| TestCaseError::fail(e.to_string()))?;
         let f = &ours.facts;
+        let name = dbee_driver::kept_bytes(theirs.name_ref(), MAX_NAME);
         prop_assert_eq!(
             (ours.name.as_str(), f.column_type, f.flags, f.charset, f.length),
-            (&*theirs.name_str(), theirs.column_type(), theirs.flags(), theirs.character_set(), theirs.column_length())
+            (name.as_str(), theirs.column_type(), theirs.flags(), theirs.character_set(), theirs.column_length())
         );
         Ok(())
     }

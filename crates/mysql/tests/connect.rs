@@ -1411,3 +1411,25 @@ async fn long_server_text_is_cut_where_it_is_kept() {
     server.await.unwrap();
     assert!(e.to_string().contains("unreadable version") && e.to_string().len() < 1024, "{} bytes", e.to_string().len());
 }
+
+/// Minor 7: columns that do not fit in what is left of a run's budget end the statement in a plain
+/// error, once its answer is read to the end, and the next statement runs: the connection is not
+/// lost.
+#[tokio::test]
+async fn columns_that_do_not_fit_fail_the_statement_and_the_next_one_runs() {
+    let answer = |payload: &[u8]| -> Vec<Vec<u8>> {
+        if payload.get(1..) == Some(&b"wide"[..]) { one_value("c", Some("x"), true) } else { answer_as_mariadb(payload) }
+    };
+    let (port, server) = fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0), answer).await;
+    let conn = connect_fake(port).await.unwrap();
+    for max_bytes in [0, 50] {
+        let e = conn.run("wide", dbee_driver::Limits { max_rows: 10, max_bytes }).await.unwrap_err();
+        assert_eq!(e, DbError::TooLarge { left: max_bytes });
+        assert!(e.to_string().contains("Run the statement on its own"), "{e}");
+        assert!(!conn.is_closed());
+    }
+    let r = conn.run("wide", QUERY_LIMITS).await.unwrap();
+    assert_eq!(r.rows, [[Some("x".to_owned())]]);
+    drop(conn);
+    server.await.unwrap();
+}

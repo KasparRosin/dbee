@@ -24,9 +24,10 @@ impl Drop for Closes<'_> {
     }
 }
 
-/// An error the server reported leaves the session in step; any other leaves it unusable.
+/// An error the server reported leaves the session in step, and so does a result whose columns
+/// did not fit, which was read to its end; any other leaves it unusable.
 fn session_survives(e: &DbError) -> bool {
-    matches!(e, DbError::Server(_) | DbError::Auth { .. } | DbError::Cancelled | DbError::ReadOnly { .. })
+    matches!(e, DbError::Server(_) | DbError::Auth { .. } | DbError::Cancelled | DbError::ReadOnly { .. } | DbError::TooLarge { .. })
 }
 
 impl MySqlConnection {
@@ -37,7 +38,8 @@ impl MySqlConnection {
     /// packet, `None` when every result returned rows. The first error ends the run. Rows past
     /// `limits` are still read (so the connection stays in step) and counted in `rows_seen`, but
     /// not kept, and `complete` becomes false. The byte cap counts what the columns and the rows
-    /// kept hold ([`dbee_driver::cell_cost`]). A statement that a cancel's `KILL QUERY` targeted and that still returned
+    /// kept hold ([`dbee_driver::cell_cost`]); columns that do not fit end the run in
+    /// [`DbError::TooLarge`], once its answer is read to the end. A statement that a cancel's `KILL QUERY` targeted and that still returned
     /// rows (`SELECT SLEEP(…)` returns 1 when killed) is [`DbError::Cancelled`]. What dbee
     /// refuses is not sent, and a read-only connection's mode is read back ([`crate::guard`]).
     pub async fn run(&self, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {

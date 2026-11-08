@@ -571,3 +571,38 @@ async fn the_read_only_guard_holds_no_more_than_it_asked_for() {
     drop(conn);
     joined(server).await;
 }
+
+/// Important 3: a result's column names are cut to the longest name Postgres has, and its columns
+/// count against what is left of the cap. When they don't fit, the statement ends in a plain error
+/// and the next one runs.
+#[tokio::test]
+async fn column_names_are_cut_and_columns_that_do_not_fit_fail_the_statement() {
+    let (l, port) = listener();
+    let server = std::thread::spawn(move || {
+        let mut s = accept(&l);
+        read_untyped(&mut s).unwrap();
+        logged_in(&mut s);
+        let names: Vec<String> = (0..100).map(|i| format!("{i}{}", "n".repeat(100_000))).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        serve(&mut s, &mut |w, _| {
+            let mut out = row_description(&names);
+            out.extend(data_row(&vec![None; 100]));
+            out.extend([complete("SELECT 1"), ready()].concat());
+            w.write_all(&out).is_ok()
+        });
+    });
+    let conn = open(&config(port, SslMode::Disable, None)).await.unwrap();
+    let limits = dbee_driver::Limits { max_rows: 1000, max_bytes: 1 << 20 };
+    let r = dbee_pg::query::run_untyped(&conn, "SELECT * FROM wide", limits).await.unwrap();
+    assert_eq!((r.columns.len(), r.rows.len(), r.complete), (100, 1, true));
+    assert!(r.columns.iter().all(|c| c.name.len() <= 63 + '\u{2026}'.len_utf8()), "{} bytes", r.columns[0].name.len());
+    assert!(dbee_driver::result_cost(&r) <= limits.max_bytes);
+    // The run's budget is spent: the columns do not fit, and the connection goes on.
+    let spent = dbee_pg::query::run_untyped(&conn, "SELECT * FROM wide", dbee_driver::Limits { max_rows: 0, max_bytes: 0 }).await;
+    assert_eq!(spent.err(), Some(DbError::TooLarge { left: 0 }));
+    assert!(!conn.is_closed());
+    let next = dbee_pg::query::run_untyped(&conn, "SELECT * FROM wide", limits).await.unwrap();
+    assert_eq!(next.rows.len(), 1);
+    drop(conn);
+    joined(server).await;
+}

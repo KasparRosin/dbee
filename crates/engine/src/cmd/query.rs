@@ -9,7 +9,9 @@
 //! each in auto-commit, and stops at the first error. Every result is kept
 //! ([`QueryTab::results`]) and the last one is shown; all the
 //! results of one run together keep at most [`RUN_LIMITS`] (10,000 rows each, 256 MiB held
-//! for the whole run: each statement gets what the ones before left). One run goes at a time on a
+//! for the whole run: each statement gets what the ones before left, so a result whose rows do not
+//! fit keeps those that do and says it is cut, and once what is left does not hold a result's
+//! columns, that statement ends the run in a `tooLarge` error and the connection goes on). One run goes at a time on a
 //! connection (`Busy`): its query connection runs one statement at a time, and a cancel request hits
 //! whatever statement runs on it.
 //!
@@ -255,8 +257,9 @@ struct RunSetup {
 
 /// Runs `ranges` of `text` on the connection `via` gives, until one fails or `stop` is set; the
 /// `USE` of `setup` first, a failure of which is the first statement's. The results together keep
-/// at most `budget` bytes held: each statement gets what the ones before left, and once it
-/// is spent, later results keep no rows (and say they are incomplete).
+/// at most `budget` bytes held: each statement gets what the ones before left. Once a statement's
+/// rows do not fit its result is cut (and says so); once its columns do not fit it fails, and the
+/// run ends there ([`DbError::TooLarge`]). A statement without columns still runs.
 async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup: RunSetup, stop: Arc<Stop>, budget: usize) -> Ran {
     let mut ran = Ran { conn: None, outcomes: Vec::with_capacity(ranges.len()), failure: None, current: setup.current.clone(), past_use: false };
     let stopped = |statement| Some(Failure { statement, error: DbError::Cancelled, position: None });
@@ -750,39 +753,53 @@ mod tests {
     #[tokio::test]
     async fn one_byte_budget_for_the_whole_run() {
         let db = dbee_testkit::require_testdb!();
-        let server = db.server("pg14").unwrap();
-        let config = ConnectionConfig {
-            host: "127.0.0.1".into(),
-            port: server.port,
-            user: "postgres".into(),
-            database: "dbee".into(),
-            ..ConnectionConfig::default()
-        };
-        let driver = driver_for(&dbee_drivers::all(), config.kind).unwrap();
-        let via = || Via::Connect {
-            driver: Arc::clone(&driver),
-            config: Box::new(config.clone()),
-            password: Some(db.password.clone()),
-            tunnel: None,
-            allowed_dirs: None,
-            browse_tls: None,
-        };
-        let text = "select repeat('x', 60) as a; select repeat('y', 600) as b; select 'z' as c".to_owned();
-        let ranges = lexer::statements(Dialect::Postgres, &text);
-        let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();
-        let setup = || RunSetup { use_database: None, dialect: Dialect::Postgres, current: CurrentDatabase::default() };
-        let whole = run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), RUN_LIMITS.max_bytes).await;
-        assert_eq!(kept(&whole), [(1, 1, true), (1, 1, true), (1, 1, true)]);
-        let held = |i: usize| dbee_driver::result_cost(&whole.outcomes[i].result);
-        // The first result, the second's column and the third: the second's row does not fit in
-        // what the first left, and the third does in what the second's column left.
-        let second_column = dbee_driver::column_cost(&whole.outcomes[1].result.columns[0]);
-        let ran = run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), held(0) + second_column + held(2)).await;
-        assert!(ran.failure.is_none());
-        assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (1, 1, true)]);
-        // Spent by the first result: the later ones keep nothing.
-        let ran = run_statements(via(), text, ranges, setup(), Arc::new(Stop::default()), held(0)).await;
-        assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (0, 1, false)]);
+        let (pg, mysql) = (db.server("pg14").unwrap(), db.server("mysql80").unwrap());
+        let servers = [
+            (pg.port, dbee_config::DbKind::Postgres, "postgres", "dbee", Dialect::Postgres),
+            (mysql.port, dbee_config::DbKind::MySql, "root", "", Dialect::MySql),
+        ];
+        for (port, kind, user, database, dialect) in servers {
+            let config = ConnectionConfig {
+                kind,
+                host: "127.0.0.1".into(),
+                port,
+                user: user.into(),
+                database: database.into(),
+                ..ConnectionConfig::default()
+            };
+            let driver = driver_for(&dbee_drivers::all(), config.kind).unwrap();
+            let via = || Via::Connect {
+                driver: Arc::clone(&driver),
+                config: Box::new(config.clone()),
+                password: Some(db.password.clone()),
+                tunnel: None,
+                allowed_dirs: None,
+                browse_tls: None,
+            };
+            let text = "select repeat('x', 60) as a; select repeat('y', 600) as b; select 'z' as c".to_owned();
+            let ranges = lexer::statements(dialect, &text);
+            let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();
+            let setup = || RunSetup { use_database: None, dialect, current: CurrentDatabase::default() };
+            let run = |budget: usize| run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), budget);
+            let whole = run(RUN_LIMITS.max_bytes).await;
+            assert_eq!(kept(&whole), [(1, 1, true), (1, 1, true), (1, 1, true)], "{dialect:?}");
+            let held = |i: usize| dbee_driver::result_cost(&whole.outcomes[i].result);
+            // The first result, the second's column and the third: the second's row does not fit in
+            // what the first left, and the third does in what the second's column left.
+            let second_column = dbee_driver::column_cost(&whole.outcomes[1].result.columns[0]);
+            let ran = run(held(0) + second_column + held(2)).await;
+            assert!(ran.failure.is_none(), "{dialect:?}");
+            assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (1, 1, true)], "{dialect:?}");
+            // Spent by the first result: the second's columns do not fit, so it fails and the run
+            // ends there, with the connection still good.
+            let ran = run(held(0)).await;
+            assert_eq!(kept(&ran), [(1, 1, true)], "{dialect:?}");
+            let failed = ran.failure.as_ref().map(|f| (f.statement, f.error.clone()));
+            assert_eq!(failed, Some((1, DbError::TooLarge { left: 0 })), "{dialect:?}");
+            let (conn, _) = ran.conn.as_ref().unwrap();
+            assert!(!conn.is_closed(), "{dialect:?}");
+            assert_eq!(conn.scalar_u64("select 7").await, Ok(7), "{dialect:?}");
+        }
         assert_eq!(RUN_LIMITS, QUERY_LIMITS, "a whole run gets the query editor's caps");
     }
 }

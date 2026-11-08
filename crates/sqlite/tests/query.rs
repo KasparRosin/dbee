@@ -226,6 +226,16 @@ async fn null_cells_count_against_the_cap() {
     assert!(dbee_driver::result_cost(&r) <= limits.max_bytes);
 }
 
+/// Columns that do not fit in what is left of a run's budget end the statement in a plain error,
+/// and the next statement runs.
+#[tokio::test]
+async fn columns_that_do_not_fit_fail_the_statement_and_the_next_one_runs() {
+    let (_file, c) = Fresh::new().await;
+    let e = c.run("SELECT 1 AS a", Limits { max_rows: 10, max_bytes: 0 }).await.unwrap_err();
+    assert_eq!(e, DbError::TooLarge { left: 0 });
+    assert_eq!(ok(&c, "SELECT 1 AS a", QUERY_LIMITS).await.rows.len(), 1);
+}
+
 #[tokio::test]
 async fn page_limit_of_101_rows_is_exact() {
     let seed = seeded();

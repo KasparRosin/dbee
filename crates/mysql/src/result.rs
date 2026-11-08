@@ -11,7 +11,7 @@ use crate::column::parse_column;
 use crate::errors;
 use crate::flavor::Flavor;
 use crate::values::{self, CellText};
-use crate::wire::{CHUNK, Packets, lenenc_int, malformed, size_text};
+use crate::wire::{CHUNK, Packets, lenenc_int, malformed};
 
 /// The most columns dbee reads in one result. A table has at most 4096, but a `SELECT` can return
 /// more (70,000 measured on every test server).
@@ -136,7 +136,9 @@ impl Said {
 /// typed columns and rows, values as text ([`CellText`], counted against the caps before it is
 /// built), and the affected rows of the last OK packet (matched rows, as dbee logs in with
 /// `CLIENT_FOUND_ROWS`), `None` when no OK packet came. An ERR packet ends it with its error.
-/// Rows past `limits` are read but not kept. MariaDB's extended metadata is in each column
+/// Rows past `limits` are read but not kept; a result whose columns do not fit in them is read
+/// to its end and dropped, and the answer ends in [`DbError::TooLarge`] once all of it is read, so
+/// the session stays in step. MariaDB's extended metadata is in each column
 /// definition when `extended_metadata` was agreed. When the server reports the current
 /// database (`tracks_schema`), the result says where the command left it, and untold when a
 /// report does not decode. What the OK packets say of the session goes in `said`, also when the
@@ -151,6 +153,7 @@ pub(crate) async fn read_result(
     said: &mut Said,
 ) -> Result<ResultSet, DbError> {
     let mut kept: Option<ResultSet> = None;
+    let mut too_large = false;
     let mut affected = None;
     let mut moved = SchemaReport::Silent;
     loop {
@@ -169,7 +172,10 @@ pub(crate) async fn read_result(
                 // The new result set replaces the one kept: no need to hold both.
                 drop(kept.take());
                 let (set, status, schema, mode) = read_rows(p, &first, caps, flavor, extended_metadata, limits).await?;
-                kept = Some(set);
+                match set {
+                    Some(set) => kept = Some(set),
+                    None => too_large = true,
+                }
                 moved = moved.then(schema);
                 said.note(mode, status);
                 status
@@ -178,6 +184,9 @@ pub(crate) async fn read_result(
         if !status.contains(StatusFlags::SERVER_MORE_RESULTS_EXISTS) {
             break;
         }
+    }
+    if too_large {
+        return Err(DbError::TooLarge { left: limits.max_bytes });
     }
     let mut result = kept.unwrap_or(ResultSet { complete: true, ..ResultSet::default() });
     result.rows_affected = affected;
@@ -191,7 +200,9 @@ pub(crate) async fn read_result(
 
 /// One result set after its column count `first`: the column definitions, then the rows until
 /// the terminator, whose status says whether more results follow, and which may report a change of
-/// database ([`schema_change`]) and of read-only mode ([`mode_report`]).
+/// database ([`schema_change`]) and of read-only mode ([`mode_report`]). The set is `None` when
+/// its columns did not fit in `limits`: nothing of it is kept, and it is read to its end all the
+/// same.
 async fn read_rows(
     p: &mut Packets,
     first: &[u8],
@@ -199,7 +210,7 @@ async fn read_rows(
     flavor: Flavor,
     extended_metadata: bool,
     limits: Limits,
-) -> Result<(ResultSet, StatusFlags, SchemaReport, ModeReport), DbError> {
+) -> Result<(Option<ResultSet>, StatusFlags, SchemaReport, ModeReport), DbError> {
     let count = match lenenc_int(first) {
         Some((n, [])) if (1..=MAX_COLUMNS).contains(&n) => usize::try_from(n).map_err(|_| malformed("column count"))?,
         _ => return Err(malformed("column count")),
@@ -207,15 +218,18 @@ async fn read_rows(
     let mut columns = Vec::new();
     // The columns count against the byte cap, with the rows.
     let mut bytes: usize = 0;
+    let mut fits = true;
     for _ in 0..count {
         let def = p.read_up_to(MAX_COLUMN_DEFINITION, "column definition").await?;
         let column = parse_column(&def, extended_metadata)?;
         let column = values::column(column.name, &column.facts, column.type_name.as_deref());
         bytes = bytes.saturating_add(column_cost(&column));
-        if bytes > limits.max_bytes {
-            return Err(DbError::Other(format!("the server sent columns larger than {}", size_text(limits.max_bytes))));
+        fits = fits && bytes <= limits.max_bytes;
+        if fits {
+            columns.push(column);
+        } else {
+            columns = Vec::new();
         }
-        columns.push(column);
     }
     let old_eof = !caps.contains(CapabilityFlags::CLIENT_DEPRECATE_EOF);
     if old_eof {
@@ -225,7 +239,7 @@ async fn read_rows(
         }
         parse_ok::<OldEofPacket>(&eof, caps)?;
     }
-    let mut set = ResultSet { columns, complete: true, ..ResultSet::default() };
+    let mut set = ResultSet { columns, complete: fits, ..ResultSet::default() };
     loop {
         let packet = p.read().await?;
         match packet.first() {
@@ -233,7 +247,7 @@ async fn read_rows(
             // A row starting 0xFE has a first value of 16 MiB or more, so it is that long too.
             Some(0xFE) if packet.len() < CHUNK => {
                 let end = if old_eof { parse_ok::<OldEofPacket>(&packet, caps)? } else { parse_ok::<ResultSetTerminator>(&packet, caps)? };
-                return Ok((set, end.status_flags(), schema_change(&end), mode_report(&end)));
+                return Ok((fits.then_some(set), end.status_flags(), schema_change(&end), mode_report(&end)));
             }
             _ => {}
         }
@@ -545,8 +559,8 @@ pub(crate) mod tests {
         let r = read(result_set("abcdef", &["xyz", "xyz"]), small).await.unwrap();
         let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!((names, r.rows, r.rows_seen, r.complete), (vec!["abcdef"], vec![vec![Some("xyz".to_owned())]], 2, false));
-        let e = read(result_set("abcdef", &[]), Limits { max_bytes: dbee_driver::column_cost(&column) - 1, ..small }).await.unwrap_err();
-        assert!(matches!(&e, DbError::Other(m) if m.contains("columns larger than")), "{e:?}");
+        let tight = Limits { max_bytes: dbee_driver::column_cost(&column) - 1, ..small };
+        assert_eq!(read(result_set("abcdef", &[]), tight).await.unwrap_err(), DbError::TooLarge { left: tight.max_bytes });
         let e = read(result_set(&"n".repeat(70_000), &[]), dbee_driver::QUERY_LIMITS).await.unwrap_err();
         assert_eq!(e, DbError::Other("the server sent a column definition larger than 64 KiB".into()));
     }
@@ -594,6 +608,41 @@ pub(crate) mod tests {
         let c = &r.columns[0];
         assert!(c.base_type.len() <= 64 + 3 && c.type_label.len() <= 64 + 3, "{} and {} bytes", c.base_type.len(), c.type_label.len());
         assert!(c.base_type.starts_with("uuu") && c.base_type.ends_with('\u{2026}'), "{}", c.base_type);
+    }
+
+    /// Important 3: a column's name is kept to the longest the servers send.
+    #[tokio::test]
+    async fn a_column_name_is_kept_cut() {
+        let long = "n".repeat(1_000);
+        let r = read(result_set(&long, &[]), dbee_driver::QUERY_LIMITS).await.unwrap();
+        let kept = &r.columns[0].name;
+        assert!(kept.len() <= 256 + '\u{2026}'.len_utf8() && kept.starts_with("nnn"), "{} bytes", kept.len());
+    }
+
+    /// Minor 7: a result whose columns do not fit is read to the end of the answer, later results
+    /// included, before the statement fails, so the next command reads its own answer.
+    #[tokio::test]
+    async fn columns_that_do_not_fit_are_read_to_the_end_of_the_answer() {
+        let more = [0xFE, 0, 0, 0x0A, 0, 0, 0];
+        let payloads = [
+            vec![1],
+            column_def_of("c", VAR_STRING),
+            vec![1, b'x'],
+            more.to_vec(),
+            vec![1],
+            column_def_of("d", VAR_STRING),
+            vec![0xFE, 0, 0, 2, 0, 0, 0],
+            // The next command's answer.
+            vec![0x00, 0, 0, 2, 0, 0, 0],
+        ];
+        let input = payloads.iter().enumerate().map(|(i, p)| frame(p, u8::try_from(i).unwrap())).collect::<Vec<_>>().concat();
+        let (mut p, _) = packets(input);
+        let caps = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF;
+        let spent = Limits { max_rows: 10, max_bytes: 0 };
+        let e = read_result(&mut p, caps, Flavor::MySql, false, false, spent, &mut Said::default()).await.unwrap_err();
+        assert_eq!(e, DbError::TooLarge { left: 0 });
+        let next = read_result(&mut p, caps, Flavor::MySql, false, false, spent, &mut Said::default()).await.unwrap();
+        assert!(next.columns.is_empty());
     }
 
     #[test]

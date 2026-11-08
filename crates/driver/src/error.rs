@@ -31,6 +31,17 @@ pub fn kept_bytes(bytes: &[u8], max: usize) -> String {
     kept_text(&String::from_utf8_lossy(head), max)
 }
 
+/// `bytes` as people read a size: `256 MiB`, `64 KiB`, `10 bytes`.
+pub fn size_text(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
+    match bytes {
+        b if b >= MIB => format!("{} MiB", b / MIB),
+        b if b >= KIB => format!("{} KiB", b / KIB),
+        b => format!("{b} bytes"),
+    }
+}
+
 /// What a server error means, for the code that acts on it, so none of it matches an engine's
 /// own codes. A new meaning is a new variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +106,9 @@ pub enum DbError {
     ReadOnly { message: String },
     /// Statement `statement` (0-based) of an apply did not change exactly one row.
     RowNotFound { statement: usize },
+    /// A result's columns do not fit in what is left of the byte cap. The driver read and dropped
+    /// the rest of the answer, so the connection goes on.
+    TooLarge { left: usize },
     /// The run may not reach it: a file outside an isolated run's allowed folders.
     NotAllowed(String),
     /// Anything else.
@@ -115,6 +129,7 @@ impl DbError {
             DbError::Cancelled => "cancelled",
             DbError::ReadOnly { .. } => "readOnly",
             DbError::RowNotFound { .. } => "rowNotFound",
+            DbError::TooLarge { .. } => "tooLarge",
             DbError::NotAllowed(_) => "config",
             DbError::Other(_) => "other",
         }
@@ -146,6 +161,11 @@ impl std::fmt::Display for DbError {
                 f,
                 "change {} did not match exactly one row (it may have been changed or deleted since it was loaded), so nothing was written",
                 statement.saturating_add(1)
+            ),
+            DbError::TooLarge { left } => write!(
+                f,
+                "the result's columns take more than the {} dbee may still keep for this run, so it dropped the result. Run the statement on its own.",
+                size_text(*left)
             ),
             DbError::NotAllowed(m) | DbError::Other(m) => write!(f, "{m}"),
         }
@@ -233,6 +253,7 @@ mod tests {
             (DbError::Cancelled, "cancelled"),
             (DbError::ReadOnly { message: "m".into() }, "readOnly"),
             (DbError::RowNotFound { statement: 0 }, "rowNotFound"),
+            (DbError::TooLarge { left: 10 }, "tooLarge"),
             (DbError::NotAllowed("m".into()), "config"),
             (DbError::Other("m".into()), "other"),
         ];
