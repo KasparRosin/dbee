@@ -1,6 +1,6 @@
 //! SQLite's test SQL.
 
-use crate::KindInfo;
+use crate::{KindInfo, Unseen};
 
 // SQLite has no sleep: a count that takes about that long, at least on this machine.
 pub(crate) const INFO: KindInfo = KindInfo {
@@ -38,6 +38,11 @@ pub(crate) const INFO: KindInfo = KindInfo {
     row_lock_waits_sql: |_| String::new(),
     commit_wait: None,
     read_only_sql: ("PRAGMA query_only", "1"),
+    read_only_breakers: &["PRAGMA query_only = 0", "PRAGMA main.query_only = OFF", "ATTACH ':memory:' AS other"],
+    read_only_unseen: Unseen::None(
+        "a read-only SQLite file is its open flags and query_only: no SQL changes the first, and the authorizer refuses setting the second \
+         whatever runs it",
+    ),
     connection_id_sql: "",
     running_with_sql: |_| String::new(),
     take_lock_sql: |_| String::new(),

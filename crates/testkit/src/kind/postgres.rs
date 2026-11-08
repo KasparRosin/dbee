@@ -1,7 +1,7 @@
 //! PostgreSQL's test SQL.
 
 use super::{copy_keyed_by_id, two_rows_when};
-use crate::{Client, CommitWait, KindInfo};
+use crate::{Client, CommitWait, KindInfo, Unseen};
 
 pub(crate) const INFO: KindInfo = KindInfo {
     id: "postgres",
@@ -35,6 +35,28 @@ pub(crate) const INFO: KindInfo = KindInfo {
     },
     commit_wait: Some(CommitWait::AdvisoryLock),
     read_only_sql: ("SHOW default_transaction_read_only", "on"),
+    read_only_breakers: &[
+        "DO $$ BEGIN COMMIT; SET TRANSACTION READ WRITE; INSERT INTO {t} VALUES (1); END $$",
+        "CALL anything()",
+        "SET default_transaction_read_only = off",
+        "/* pasted */ set \"transaction_read_only\" TO off",
+        r#"SET U&"default_transaction_read_onl!0079" UESCAPE '!' = off"#,
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+        "BEGIN READ WRITE",
+        "START TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE",
+        "RESET ALL",
+        "COMMIT AND CHAIN",
+        "SELECT set_config('default_transaction_read_only', 'off', false)",
+        "SELECT lo_from_bytea(0, 'dbee')",
+        r#"SELECT U&"lo_from_byte\0061"(0, 'dbee')"#,
+        "ALTER SYSTEM RESET work_mem",
+        "COPY (SELECT 1) TO PROGRAM 'cat > /dev/null'",
+    ],
+    read_only_unseen: Unseen::Function {
+        make: "CREATE FUNCTION {f}() RETURNS text LANGUAGE sql AS $$ SELECT pg_catalog.set_config('default_transaction_re' || 'ad_only', 'off', false) $$",
+        call: "SELECT {f}()",
+        drop: "FUNCTION IF EXISTS {f}()",
+    },
     connection_id_sql: "SELECT pg_backend_pid()",
     running_with_sql: |m| {
         format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND state = 'active' AND query LIKE '%{m}%'")

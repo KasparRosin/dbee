@@ -114,6 +114,13 @@ pub struct KindInfo {
     commit_wait: Option<CommitWait>,
     /// A query a session runs to show whether it is read-only, and what it prints when it is.
     pub read_only_sql: (&'static str, &'static str),
+    /// Statements that turn read-only off, or write in spite of it, on this engine: on a read-only
+    /// connection dbee refuses each, or catches it after it ran, and the session stays read-only.
+    /// `{t}` stands for a table of the test's own.
+    pub read_only_breakers: &'static [&'static str],
+    /// A way to turn read-only off that no check of the text can see, which dbee must catch after
+    /// it ran, or why the engine has none.
+    pub read_only_unseen: Unseen,
     /// A query a session runs to print its own connection's id (the one `kill_sql` takes).
     pub connection_id_sql: &'static str,
     /// Counts dbee's statements running now whose text holds `marker`.
@@ -136,6 +143,17 @@ pub struct KindInfo {
     pub int_literal_type: &'static str,
     /// the start of the error of [`KindInfo::failing_when_sql`] once its condition holds.
     pub failing_error: &'static str,
+}
+
+/// A way to turn read-only off that dbee's check of a statement's text cannot see
+/// ([`KindInfo::read_only_unseen`]). `{f}` stands for the function's schema-qualified name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unseen {
+    /// A function that turns it off: the SQL that makes it (on a writable connection), the call,
+    /// and what a guard drops afterwards (`DROP <that>`).
+    Function { make: &'static str, call: &'static str, drop: &'static str },
+    /// The engine has none, and why.
+    None(&'static str),
 }
 
 /// How a [`CommitGate`] holds a COMMIT, from before the update it commits starts.

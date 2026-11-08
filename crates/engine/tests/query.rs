@@ -585,6 +585,52 @@ fn read_only_mysql_reads_a_skipped_version_comment_as_the_server_does() {
     }
 }
 
+/// Every engine's read-only refuses, or catches after it ran, each statement its test kind lists as
+/// turning read-only off ([`KindInfo::read_only_breakers`](dbee_testkit::KindInfo)), and catches a
+/// function that turns it off unseen; nothing is written and the mode still reads read-only. It
+/// runs on every engine, a new one too, whose kind must list both.
+#[test]
+fn read_only_holds_on_every_engine() {
+    use dbee_testkit::Unseen;
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let info = t.kind().info();
+        let sc = t.schema("scratch");
+        let (table, function) = (format!("{sc}.{}", unique("t_ro_all")), format!("{sc}.{}", unique("f_ro_all")));
+        let mut drops = vec![format!("TABLE IF EXISTS {table}")];
+        if let Unseen::Function { drop, .. } = info.read_only_unseen {
+            drops.push(drop.replace("{f}", &function));
+        }
+        let _drop = Scratch(&t, drops);
+        q(&t, &format!("CREATE TABLE {table} (id int)"));
+        if let Unseen::Function { make, .. } = info.read_only_unseen {
+            let mut w = connected_to(&t);
+            tab(&mut w, &make.replace("{f}", &function));
+            run(&mut w, "query.run", json!({}));
+        }
+        let mut s = read_only_session(&t);
+        let insert = format!("INSERT INTO {table} VALUES (1)");
+        for breaker in info.read_only_breakers {
+            let sql = breaker.replace("{t}", &table);
+            let e = run_text(&mut s, &sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
+            assert!(matches!(e.code(), "readOnly" | "server"), "{}: {sql}: {e}", t.name());
+            assert!(run_text(&mut s, &insert).is_err(), "{}: written after {sql}", t.name());
+        }
+        match info.read_only_unseen {
+            Unseen::Function { call, .. } => {
+                let e = run_text(&mut s, &call.replace("{f}", &function)).expect_err("caught after it ran");
+                assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
+            }
+            Unseen::None(why) => println!("{}: no unseen way: {why}", t.name()),
+        }
+        assert!(run_text(&mut s, &insert).is_err(), "{}", t.name());
+        let (sql, on) = info.read_only_sql;
+        run_text(&mut s, sql).unwrap();
+        assert_eq!(first_value(&s).as_deref(), Some(on), "{}", t.name());
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {table}")), "0", "{}", t.name());
+    }
+}
+
 /// A read-only SQLite file's connection attaches no file, so `VACUUM INTO` makes none, and keeps
 /// `query_only` on: SQLite's authorizer refuses both, whatever the text looks like.
 #[test]

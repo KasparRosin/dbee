@@ -1,7 +1,7 @@
 //! MySQL's and MariaDB's test SQL.
 
 use super::{copy_keyed_by_id, two_rows_when};
-use crate::{Client, CommitWait, KindInfo};
+use crate::{Client, CommitWait, KindInfo, Unseen};
 
 /// What MySQL and MariaDB share.
 const MYSQL: KindInfo = KindInfo {
@@ -37,6 +37,27 @@ const MYSQL: KindInfo = KindInfo {
     // holds both, and taken between the two it loses the race with a COMMIT sent at once.
     commit_wait: None,
     read_only_sql: ("SELECT @@SESSION.transaction_read_only", "1"),
+    read_only_breakers: &[
+        "START TRANSACTION READ WRITE",
+        "/*!40101 START TRANSACTION READ WRITE */",
+        "/*M!999999 SELECT */ START TRANSACTION READ WRITE",
+        "/*!99999 SELECT */ START TRANSACTION READ WRITE",
+        "SET SESSION TRANSACTION READ WRITE",
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE",
+        "SET @@SESSION.`transaction_read_only` = 0",
+        "/*M!999999 SELECT */ SET @@transaction_read_only = 0",
+        "CALL anything()",
+        "PREPARE p FROM 'START TRANSACTION READ WRITE'",
+        "EXECUTE p",
+        "COMMIT AND CHAIN",
+        "SET GLOBAL max_connections = @@GLOBAL.max_connections",
+        "SELECT 1 INTO OUTFILE '/var/lib/mysql-files/dbee-never-written'",
+    ],
+    read_only_unseen: Unseen::Function {
+        make: "CREATE FUNCTION {f}() RETURNS INT DETERMINISTIC BEGIN SET SESSION transaction_read_only = 0; RETURN 1; END",
+        call: "SELECT {f}()",
+        drop: "FUNCTION IF EXISTS {f}",
+    },
     connection_id_sql: "SELECT CONNECTION_ID()",
     running_with_sql: |m| format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{m}%' AND ID <> CONNECTION_ID()"),
     take_lock_sql: |key| format!("SELECT GET_LOCK('{key}', 0)"),
@@ -58,6 +79,24 @@ pub(crate) const MARIADB: KindInfo = KindInfo {
     id: "mariadb",
     client: Some(Client::MySql("mariadb")),
     read_only_sql: ("SELECT @@SESSION.tx_read_only", "1"),
+    read_only_breakers: &[
+        "START TRANSACTION READ WRITE",
+        "/*M!999999 SELECT */ START TRANSACTION READ WRITE",
+        "/*M! START TRANSACTION READ WRITE */",
+        "SET SESSION TRANSACTION READ WRITE",
+        "SET @@SESSION.`tx_read_only` = 0",
+        "SET STATEMENT tx_read_only=0 FOR INSERT INTO {t} VALUES (1)",
+        "/*M!999999 SELECT */ SET STATEMENT tx_read_only=0 FOR INSERT INTO {t} VALUES (1)",
+        "CALL anything()",
+        "EXECUTE IMMEDIATE 'START TRANSACTION READ WRITE'",
+        "COMMIT AND CHAIN",
+        "SET GLOBAL max_connections = @@GLOBAL.max_connections",
+    ],
+    read_only_unseen: Unseen::Function {
+        make: "CREATE FUNCTION {f}() RETURNS INT DETERMINISTIC BEGIN SET SESSION tx_read_only = 0; RETURN 1; END",
+        call: "SELECT {f}()",
+        drop: "FUNCTION IF EXISTS {f}",
+    },
     commit_wait: Some(CommitWait::BackupStage),
     // Its JSON is a LONGTEXT with a json_valid check, kept as written.
     json_type_label: "longtext",
