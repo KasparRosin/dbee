@@ -286,6 +286,30 @@ fn column<R>(ui: &mut egui::Ui, width: f32, label: &str, add: impl FnOnce(&mut e
     .inner
 }
 
+/// [`column`] with `note` after the label, on the label's row, cut to the room there is with the
+/// whole note on hover; tagged `id`.
+fn column_noted<R>(
+    ui: &mut egui::Ui,
+    width: f32,
+    label: &str,
+    note: &str,
+    tags: &mut Tags,
+    id: &str,
+    add: impl FnOnce(&mut egui::Ui, &mut Tags) -> R,
+) -> R {
+    ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
+        ui.set_width(width);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
+        let shown = ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), TOKENS.text_muted);
+        let room = Rect::from_min_max(pos2((shown.right() + 8.0).min(rect.right()), rect.top()), rect.max);
+        let note_ui = UiBuilder::new().max_rect(room).layout(Layout::left_to_right(Align::Center));
+        let r = ui.scope_builder(note_ui, |ui| ui.add(Label::new(RichText::new(note).size(12.0).color(TOKENS.text_muted)).truncate())).inner;
+        tags.tag_value(id, &r, note);
+        add(ui, tags)
+    })
+    .inner
+}
+
 /// The form's text fields: Enter in one of them connects.
 const FORM_FIELDS: [&str; 9] =
     ["conn-name", "conn-host", "conn-port", "conn-user", "conn-password", "conn-database", "conn-ssh-host", "conn-ssh-port", "conn-ssh-user"];
@@ -703,7 +727,18 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
     });
 }
 
-/// SSL mode and CA file.
+/// What each SSL mode protects against, shown under the modes (`conn-ssl-note`).
+fn ssl_note(mode: SslMode) -> &'static str {
+    match mode {
+        SslMode::Disable => "No encryption: anyone on the network can read and change what is sent.",
+        SslMode::Prefer => "Encrypts when the server offers TLS, but does not check who answers.",
+        SslMode::Require => "Encrypts, but checks who answers only against a CA file, when one is set.",
+        SslMode::VerifyCa => "Encrypts, and checks the certificate against the CA file, but not the server's name.",
+        SslMode::VerifyFull => "Encrypts, and checks the server's certificate and its name.",
+    }
+}
+
+/// SSL mode, what it checks, and the CA file.
 fn tls_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let picking = picking(conn);
     let f = &mut conn.form;
@@ -714,7 +749,8 @@ fn tls_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mu
         (SslMode::VerifyCa, "verify-ca", "verify-ca"),
         (SslMode::VerifyFull, "verify-full", "verify-full"),
     ];
-    column(ui, w, "SSL mode", |ui| segments(ui, tags, "conn-ssl", &mut f.ssl_mode, &modes, w));
+    let note = ssl_note(f.ssl_mode);
+    column_noted(ui, w, "SSL mode", note, tags, "conn-ssl-note", |ui, tags| segments(ui, tags, "conn-ssl", &mut f.ssl_mode, &modes, w));
     column(ui, w, "CA file (optional)", |ui| {
         ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;

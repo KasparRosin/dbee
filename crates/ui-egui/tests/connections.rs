@@ -789,6 +789,31 @@ fn read_only_says_what_it_guards_against() {
     }
 }
 
+/// Under SSL mode the form says what the chosen mode checks: prefer and require encrypt without
+/// checking who answers, verify-ca and verify-full check the certificate.
+#[test]
+fn the_ssl_mode_says_what_it_checks() {
+    let mut ui = cards();
+    ui.click("conn-kind-postgres");
+    let modes = [
+        ("disable", "No encryption"),
+        ("prefer", "does not check who answers"),
+        ("require", "checks who answers only against a CA file"),
+        ("verify-ca", "checks the certificate against the CA file"),
+        ("verify-full", "checks the server's certificate and its name"),
+    ];
+    for (mode, says) in modes {
+        ui.click(&format!("conn-ssl-{mode}"));
+        let note = ui.tag("conn-ssl-note").unwrap_or_else(|| panic!("{mode}: the note shows under the modes"));
+        assert!(note["value"].as_str().unwrap_or_default().contains(says), "{mode}: {note}");
+        assert!(note.get("visible").is_none(), "{mode}: the note is in view: {note}");
+    }
+    // A file has no SSL mode.
+    let mut ui = cards();
+    ui.click("conn-kind-sqlite");
+    assert!(ui.tag("conn-ssl-note").is_none());
+}
+
 #[test]
 fn no_secret_store_turns_saving_off() {
     let mut without = ui_in(temp_home(None, None), false);
