@@ -62,7 +62,7 @@ use serde_json::json;
 use super::{CommandSpec, LOST, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
 use crate::allowed;
 use crate::state::{Connected, Credentials, CurrentDatabase, server_text};
-use crate::turns::InTurn;
+use crate::turns::{self, InTurn};
 use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
 
 const LIST: &str = "connection.list";
@@ -689,6 +689,12 @@ async fn read_within<T>(conn: &dyn Connection, limit: Duration, mut read: DbFutu
 /// The connection's catalog, bounded by `limit` ([`read_within`]).
 async fn load_catalog_within(conn: &dyn Connection, limit: Duration) -> Result<Catalog, CatalogLoad> {
     read_within(conn, limit, conn.load_catalog()).await
+}
+
+/// [`load_catalog_within`] on the browse connection, once its turn comes: the limit counts from
+/// then, as waiting behind another tab's statement is no reason to give up on the connection.
+async fn load_catalog_in_turn(conn: &InTurn, limit: Duration) -> Result<Catalog, CatalogLoad> {
+    turns::in_turn(conn, |c| load_catalog_within(c, limit)).await
 }
 
 /// A refresh whose catalog load timed out: its connection was discarded and the session is lost,
@@ -1341,13 +1347,15 @@ fn tell(s: &mut Session, note: Option<String>) {
 }
 
 /// `{}` → a job returning `{tables}`: reloads the catalog on the browse connection. Tabs keep
-/// their tables. A load past [`CATALOG_TIMEOUT`] is cancelled and the connection is discarded:
+/// their tables. A load past [`CATALOG_TIMEOUT`], counted from its turn on the connection, is
+/// cancelled and the connection is discarded:
 /// the session is marked lost, and the error (code `timeout`) names the reconnect in
 /// `data.action`.
 fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
-    let conn = s.browse()?;
+    let turned = s.browse_in_turn()?;
     let job = s.spawn_job(REFRESH, async move {
-        let result = load_catalog_within(conn.as_ref(), CATALOG_TIMEOUT).await;
+        let result = load_catalog_in_turn(&turned, CATALOG_TIMEOUT).await;
+        let conn: Arc<dyn Connection> = turned;
         let apply: Apply = Box::new(move |s: &mut Session| {
             if !s.is_current_browse(&conn) {
                 return Ok(ignored());
@@ -1588,6 +1596,28 @@ mod tests {
         assert_eq!(e.code(), "timeout");
         assert_eq!(e.data(), json!({ "action": "connection.reconnect" }));
         assert!(e.to_string().contains("60 s"), "{e}");
+    }
+
+    /// A refresh behind another tab's statement waits for its turn; its limit counts from then.
+    #[tokio::test]
+    async fn a_catalog_load_counts_its_time_from_its_turn() {
+        let quick = Arc::new(crate::turns::tests::Quick::default());
+        let conn = InTurn::new(Arc::clone(&quick) as Arc<dyn Connection>);
+        let held = conn.turn().await;
+        let loading = tokio::spawn({
+            let conn = Arc::clone(&conn);
+            async move { load_catalog_in_turn(&conn, Duration::from_millis(50)).await.is_ok() }
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while conn.waiting() == 0 {
+            assert!(Instant::now() < deadline, "the load never waited for its turn");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        // Longer than its limit, behind another operation: no reason to give up.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(held);
+        assert!(loading.await.unwrap(), "the load timed out while it waited for its turn");
+        assert_eq!(quick.cancels(), 0, "no cancel request went out");
     }
 
     #[tokio::test]

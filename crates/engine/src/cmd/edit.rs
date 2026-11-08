@@ -50,7 +50,9 @@ use serde_json::json;
 use super::table::{Loaded, NO_TABLE_TAB, Reload, active_table, catalog, lookup, not_editable, table_tab_mut};
 use super::{CommandSpec, bad, disabled, ignored, p};
 use crate::edits::{Edits, Failed, UNKNOWN_OUTCOME};
+use crate::jobs::Stop;
 use crate::state::{TableTab, Total};
+use crate::turns;
 use crate::{Apply, EngineError, Json, Need, Outcome, Session, Tab, TabId};
 
 const EDIT: &str = "cell.edit";
@@ -458,8 +460,10 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
     let gate = Arc::new(dbee_driver::ApplyGate::default());
     let job_gate = Arc::clone(&gate);
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
     let job = s.spawn_job(APPLY, async move {
-        let written = job_conn.apply(&sql, &job_gate).await;
+        let written = turns::apply_in_turn(&job_conn, &sql, &job_gate, &job_stop).await;
         let page = match written {
             Ok(_) => Some(reload.run(job_conn.as_ref()).await),
             Err(_) => None,
@@ -470,7 +474,7 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if let Some(t) = table_tab_mut(s, tab) {
         t.applying = Some(job);
     }
-    s.apply_gate = Some((job, gate));
+    s.apply_gate = Some((job, gate, stop));
     Ok(Outcome::Started(job))
 }
 
@@ -484,7 +488,7 @@ fn applied(
     page: Option<Loaded>,
 ) -> Result<Json, EngineError> {
     let me = s.applying_job();
-    if s.apply_gate.as_ref().is_some_and(|(job, _)| Some(*job) == me) {
+    if s.apply_gate.as_ref().is_some_and(|(job, _, _)| Some(*job) == me) {
         s.apply_gate = None;
     }
     if !s.is_current_browse(conn) {

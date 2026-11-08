@@ -329,11 +329,17 @@ pub fn q(t: &TestTarget, sql: &str) -> String {
     t.sql(sql).unwrap_or_else(|e| panic!("{}: {e}", t.name())).trim().to_owned()
 }
 
-/// Polls `sql` on `t`'s server until it prints `want` (up to 20 s).
+/// Polls `sql` on `t`'s server until it prints `want` (up to 20 s). A poll that fails is tried
+/// again: MySQL's processlist will not show another session's statement that holds a four-byte
+/// character.
 pub fn until_sql(t: &TestTarget, sql: &str, want: &str, what: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while q(t, sql) != want {
-        assert!(std::time::Instant::now() < deadline, "{}: gave up waiting for {what}", t.name());
+    loop {
+        let got = t.sql(sql).map(|out| out.trim().to_owned());
+        if got.as_deref() == Ok(want) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{}: gave up waiting for {what} (last poll: {got:?})", t.name());
         std::thread::sleep(Duration::from_millis(50));
     }
 }

@@ -544,13 +544,20 @@ pub fn hold(server: &Server, sql: &str) -> Result<Held, String> {
     let child = c.spawn().map_err(|e| format!("docker compose exec {}: {e}", server.name))?;
     let held = Held { server: server.clone(), marker, child };
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while crate::sql(server, &sleeping)?.trim() != "1" {
+    // A poll can fail now and then: MySQL's processlist will not show another session's statement
+    // that holds a four-byte character.
+    let mut last;
+    loop {
+        match crate::sql(server, &sleeping) {
+            Ok(out) if out.trim() == "1" => return Ok(held),
+            Ok(out) => last = out,
+            Err(e) => last = e,
+        }
         if std::time::Instant::now() > deadline {
-            return Err(format!("the client session on {} did not get to its sleep within 20 s", server.name));
+            return Err(format!("the client session on {} did not get to its sleep within 20 s (last poll: {})", server.name, last.trim()));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Ok(held)
 }
 
 /// Polls `sql` on `server` until it prints `want` (up to 20 s).

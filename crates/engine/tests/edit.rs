@@ -660,31 +660,6 @@ fn reconnect_during_apply_marks_the_outcome_unknown() {
 }
 
 #[test]
-fn table_cancel_never_cancels_an_apply() {
-    let _db = require_testdb!();
-    for t in engine_targets() {
-        let sc = t.schema("scratch");
-        let (name, mut scratch) = make_table(&t);
-        let lock = hold_row(&t, &mut scratch, &name, 1);
-        let mut s = opened(&t, &name);
-        set_cell(&mut s, 0, "name", "kept");
-        let Outcome::Started(apply) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
-        until_update_waits(&t, &name);
-        // Another tab's page load waits behind the Apply on the browse connection; cancelling it
-        // would cancel the Apply's statement instead.
-        let Outcome::Started(load) = s.execute("table.open", json!({ "schema": sc, "table": name })).unwrap() else {
-            panic!("table.open starts a job")
-        };
-        let e = refused(&mut s, "table.cancel", json!({}));
-        assert_eq!((e.code(), e.to_string().as_str()), ("busy", "busy: apply in progress"));
-        drop(lock);
-        assert_eq!(s.wait(apply, T).unwrap()["written"], 1, "{}", t.name());
-        assert_eq!(s.wait(load, T).unwrap()["rows"], 3);
-        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "kept");
-    }
-}
-
-#[test]
 fn reset_undo_redo_work_when_the_tab_is_no_longer_editable() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
@@ -779,6 +754,71 @@ fn over_long_values_are_refused_not_cut() {
         set_cell(&mut s, 0, "c", "x");
         assert_eq!(apply(&mut s)["written"], 1, "{on}");
         assert!(row().starts_with("1|xyz|x"), "{on}: {}", row());
+    }
+}
+
+/// Waits until an operation waits for its turn on the browse connection.
+fn until_queued(s: &Session, t: &TestTarget) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while s.browse_waiting() == 0 {
+        assert!(std::time::Instant::now() < deadline, "{}: nothing ever waited for its turn", t.name());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// An Apply cancelled while it waits for its turn behind another tab's load leaves the queue: it
+/// sends no cancel request, which would stop that load, and writes nothing.
+#[test]
+fn an_apply_cancelled_in_the_queue_stops_no_other_tab() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let sc = t.schema("scratch");
+        let (name, _drop) = make_table(&t);
+        let mut s = opened(&t, &name);
+        let first = s.inspect()["active"].clone();
+        set_cell(&mut s, 0, "name", "queued");
+        // Another tab's load holds the connection: it waits for the lock, or on a file counts.
+        open_table(&mut s, t.schema("shop"), "orders");
+        let key = unique("dbee_gate");
+        let gate = t.server().map(|_| t.hold_lock(&key).unwrap());
+        let slow = if t.is_file() { t.slow_condition_sql(5) } else { t.waits_for_lock_sql(&key) };
+        let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
+        until_running(&t, &key);
+        run(&mut s, "tab.activate", json!({ "tab": first }));
+        let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
+        until_queued(&s, &t);
+        assert_eq!(run(&mut s, "table.cancel", json!({})), json!({ "sent": true, "apply": true }));
+        let applied = s.wait(job, T);
+        drop(gate);
+        let loaded = s.wait(load, T).unwrap_or_else(|e| panic!("{}: the other tab's load: {e}", t.name()));
+        assert_eq!(loaded["rows"], 100, "{}: {loaded}", t.name());
+        assert_eq!(applied.map_err(|e| e.code()), Err("cancelled"), "{}: the Apply", t.name());
+        assert_eq!(rows_of(&t, &format!("SELECT name FROM {sc}.{name} ORDER BY id")), "Alice,Bob,Cy", "{}: nothing was written", t.name());
+    }
+}
+
+/// A tab's load can be stopped while another tab's Apply runs: it waits behind the Apply, leaves
+/// the queue, and the Apply writes.
+#[test]
+fn a_load_stops_while_another_tabs_apply_runs() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let sc = t.schema("scratch");
+        let (name, mut scratch) = make_table(&t);
+        let mut s = opened(&t, &name);
+        let held = hold_row(&t, &mut scratch, &name, 1);
+        set_cell(&mut s, 0, "name", "written");
+        let Outcome::Started(job) = s.execute("edit.apply", json!({})).unwrap() else { panic!("edit.apply starts a job") };
+        until_update_waits(&t, &name);
+        let Outcome::Started(load) = s.execute("table.open", json!({ "schema": t.schema("shop"), "table": "orders" })).unwrap() else {
+            panic!("a job")
+        };
+        until_queued(&s, &t);
+        assert_eq!(run(&mut s, "table.cancel", json!({})), json!({ "sent": true }), "{}", t.name());
+        assert_eq!(s.wait(load, T).map_err(|e| e.code()), Err("cancelled"), "{}: the load", t.name());
+        drop(held);
+        assert_eq!(s.wait(job, T).unwrap_or_else(|e| panic!("{}: the Apply: {e}", t.name()))["written"], 1);
+        assert_eq!(q(&t, &format!("SELECT name FROM {sc}.{name} WHERE id = 1")), "written", "{}", t.name());
     }
 }
 

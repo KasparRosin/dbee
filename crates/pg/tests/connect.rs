@@ -291,8 +291,10 @@ async fn a_cancel_goes_to_the_address_the_connection_reached() {
         let conn = Arc::new(open(&ConnectionConfig { host: "localhost".into(), ..config(s, SslMode::Disable) }, db).await);
         let server = std::net::SocketAddr::from(([127, 0, 0, 1], s.port));
         let hits = Arc::new(AtomicUsize::new(0));
+        let mut stand_ins = 0;
         for addr in tokio::net::lookup_host(("localhost", s.port)).await.unwrap().filter(|a| *a != server) {
-            let Ok(listener) = tokio::net::TcpListener::bind(addr).await else { continue };
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| panic!("a stand-in on {addr}: {e}"));
+            stand_ins += 1;
             let hits = Arc::clone(&hits);
             tokio::spawn(async move {
                 while let Ok((mut socket, _)) = listener.accept().await {
@@ -303,6 +305,7 @@ async fn a_cancel_goes_to_the_address_the_connection_reached() {
                 }
             });
         }
+        assert!(stand_ins > 0, "`localhost` names no address but the server's here, so nothing would show where the request went");
         let watcher = open(&config(s, SslMode::Prefer), db).await;
         cancel_sleep(conn, &watcher).await;
         assert_eq!(hits.load(Ordering::SeqCst), 0, "pg{}: a cancel request went to another address", s.major());

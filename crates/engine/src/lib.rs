@@ -250,7 +250,7 @@ pub struct Session {
     pub(crate) drivers: Drivers,
     /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
     /// decides to commit (one Apply runs at a time).
-    pub(crate) apply_gate: Option<(JobId, Arc<dbee_driver::ApplyGate>)>,
+    pub(crate) apply_gate: Option<(JobId, Arc<dbee_driver::ApplyGate>, Arc<jobs::Stop>)>,
     journal: Vec<(String, Json)>,
     value_cache: view::Cache,
 }

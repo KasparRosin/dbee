@@ -54,7 +54,6 @@ use dbee_sql::filter::{Condition, Filter, Op, Sort, SortDir, where_sql};
 use dbee_sql::select::{PAGE_SIZE, count_sql, page_sql};
 use serde_json::json;
 
-use super::connection::cancel_statements;
 use super::edit;
 use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needs_db, p};
 use crate::jobs::Stop;
@@ -827,24 +826,23 @@ fn apply_count(
 /// the same.
 ///
 /// While the tab's own Apply runs, `{sent: true, apply: true}`: the Apply is cancelled (it writes
-/// nothing, and keeps its edits) and a cancel request stops the statement it waits on, as long as
-/// its statements before `COMMIT` run. Once the Apply has decided to commit, nothing is sent and
-/// the result is `Busy` ([`edit::COMMITTING`]): a cancel never meets the `COMMIT`, so the outcome
-/// stays known.
-///
-/// While another tab's `edit.apply` job runs (or one of a tab closed meanwhile), nothing is
-/// stopped and the result is `Busy`.
+/// nothing, and keeps its edits). Still waiting for its turn, it leaves the queue; with its turn,
+/// its job sends a cancel request for the statement it waits on, as long as its statements before
+/// `COMMIT` run ([`turns::apply_in_turn`]). Once the Apply has decided to commit, nothing is sent
+/// and the result is `Busy` ([`edit::COMMITTING`]): a cancel never meets the `COMMIT`, so the
+/// outcome stays known. Another tab's Apply is no reason to refuse: a load waiting behind it
+/// leaves the queue too.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));
     if let Some(job) = t.applying.filter(|&job| s.jobs.is_running(job)) {
-        let gate = s.apply_gate.as_ref().filter(|(of, _)| *of == job).map(|(_, gate)| Arc::clone(gate));
-        let Some(gate) = gate else { return Err(EngineError::Busy(edit::APPLYING.into())) };
-        let conn = s.browse()?;
+        let gate = s.apply_gate.as_ref().filter(|(of, _, _)| *of == job).map(|(_, gate, stop)| (Arc::clone(gate), Arc::clone(stop)));
+        let Some((gate, stop)) = gate else { return Err(EngineError::Busy(edit::APPLYING.into())) };
+        s.browse()?;
         if !gate.cancel() {
             return Err(EngineError::Busy(edit::COMMITTING.into()));
         }
-        cancel_statements(s, std::iter::once(conn));
+        stop.stop();
         return Ok(Outcome::Done(json!({ "sent": true, "apply": true })));
     }
     let running = alive(t.loading) || alive(t.counting);
@@ -852,9 +850,6 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
         return Ok(Outcome::Done(json!({ "sent": false })));
     }
     let jobs = [t.loading, t.counting.filter(|&c| Some(c) != t.loading)];
-    if s.jobs.is_running_label(edit::APPLY) {
-        return Err(EngineError::Busy(edit::APPLYING.into()));
-    }
     s.browse()?;
     let stopped: Vec<bool> = jobs.into_iter().flatten().filter_map(|job| s.jobs.stop(job)).collect();
     Ok(Outcome::Done(match (stopped.contains(&true), stopped.is_empty()) {

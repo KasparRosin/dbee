@@ -185,8 +185,9 @@ async fn open_stream(route: &Route) -> Result<(Stream, Option<SocketAddr>), DbEr
     };
     let tcp = connecting.map_err(|e| DbError::Connect(e.to_string()))?;
     tune(&tcp).map_err(|e| DbError::Connect(e.to_string()))?;
-    let reached = tcp.peer_addr().ok();
-    Ok((Box::new(tcp), reached))
+    // Without the address it reached, a cancel's KILL would look the name up again.
+    let reached = tcp.peer_addr().map_err(|e| DbError::Connect(e.to_string()))?;
+    Ok((Box::new(tcp), Some(reached)))
 }
 
 /// A direct connection's socket options: no delay for small packets, and keepalive probes.
@@ -568,6 +569,19 @@ mod tests {
         assert!(tcp.nodelay().unwrap() && sock.keepalive().unwrap());
         let set = (sock.tcp_keepalive_time().unwrap(), sock.tcp_keepalive_interval().unwrap(), sock.tcp_keepalive_retries().unwrap());
         assert_eq!(set, (KEEPALIVE_IDLE, KEEPALIVE_INTERVAL, KEEPALIVE_RETRIES));
+    }
+
+    /// A route that knows the address reached connects there, without looking its name up.
+    #[tokio::test]
+    async fn a_route_with_an_address_reached_connects_there() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let route = Route { host: "nohost.invalid".into(), port: addr.port(), tunnel: None, reached: Some(addr) };
+        let ((_stream, reached), accepted) = tokio::join!(async { open_stream(&route).await.unwrap() }, listener.accept());
+        assert_eq!(reached, Some(addr));
+        assert!(accepted.is_ok(), "the listener took it");
+        // Without it, the name is looked up: this one has no address.
+        assert_eq!(open_stream(&Route { reached: None, ..route }).await.err().map(|e| e.code()), Some("connect"));
     }
 
     /// The KILL goes to the address the connection reached, not to whichever its host name gives
