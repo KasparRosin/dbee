@@ -631,6 +631,34 @@ fn read_only_mysql_refuses_a_set_with_a_name_outside_plain_ascii() {
     }
 }
 
+/// On a read-only MySQL or MariaDB connection a statement that still holds a `;` after dbee's
+/// split (only `DELIMITER` lets one through) is refused: MariaDB runs a block such as
+/// `BEGIN NOT ATOMIC … END` or `IF … END IF` as one statement, whose writes are done before the
+/// server's one report, and which can set read-only back before it ends.
+#[test]
+fn read_only_mysql_refuses_a_block_of_several_statements() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_block"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut s = read_only_session(&t);
+        for block in [
+            format!("BEGIN NOT ATOMIC SET SESSION {variable} = 0; INSERT INTO {sc}.{name} VALUES (1); SET SESSION {variable} = 1; END"),
+            format!("IF 1 THEN SET @@{variable} = 0; INSERT INTO {sc}.{name} VALUES (2); END IF"),
+            format!("BEGIN NOT ATOMIC START TRANSACTION READ WRITE; INSERT INTO {sc}.{name} VALUES (3); COMMIT; END"),
+        ] {
+            let sql = format!("DELIMITER //\n{block}//\nDELIMITER ;");
+            let e = run_text(&mut s, &sql).err().unwrap_or_else(|| panic!("{}: ran {block}", t.name()));
+            assert!(e.code() == "readOnly" && e.to_string().contains("several statements"), "{}: {block}: {e}", t.name());
+        }
+        run_text(&mut s, &format!("SELECT @@SESSION.{variable}")).unwrap();
+        assert_eq!(first_value(&s).as_deref(), Some("1"), "{}", t.name());
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "{}", t.name());
+    }
+}
+
 /// After a statement that turned read-only off and then failed (an error carries no report), the
 /// mode is read before the next statement that is not a diagnostic one; a version comment the
 /// server skips cannot make an `INSERT` look like `SHOW WARNINGS` to dbee: it reads the statement

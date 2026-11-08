@@ -50,6 +50,10 @@ const NESTED: &str = "a version comment this server skips holds another comment,
 const TRACKING: &str = "the server reports read-only mode to dbee through session tracking, which this statement names, so dbee does not \
                         run it here. To run it, turn Read-only off in the connection's settings.";
 
+const BLOCK: &str = "a block of several statements (BEGIN NOT ATOMIC … END, IF … END IF) can turn read-only off and write before the \
+                    server reports it, so dbee does not run one here. Run its statements one by one, or turn Read-only off in the \
+                    connection's settings.";
+
 const LOOKALIKE: &str = "on a read-only connection dbee runs no SET with a character outside plain ASCII outside its '…' strings, since \
                         the server can read a name spelled with such a letter as one of its own settings. Spell names in plain ASCII, or \
                         turn Read-only off in the connection's settings.";
@@ -107,11 +111,19 @@ fn sets_a_lookalike(sql: &str) -> bool {
         })
 }
 
+/// `sql` still holds a `;` outside strings and comments, read with backslash escapes and without:
+/// after dbee's split only a `DELIMITER` leaves one in, as a block of several statements needs.
+fn holds_a_semicolon(sql: &str) -> bool {
+    [true, false].into_iter().any(|escapes| tokenize_with(Dialect::MySql, sql, escapes).iter().any(|t| t.kind == TokenKind::Semicolon))
+}
+
 /// Why dbee does not send `sql` on a read-only connection, from its raw text, comments included:
 /// what no reading of it can show.
 fn raw_refusal(sql: &str, flavor: Flavor) -> Option<&'static str> {
     let holds = |part: &str| sql.as_bytes().windows(part.len()).any(|w| w.eq_ignore_ascii_case(part.as_bytes()));
-    if sets_a_lookalike(sql) {
+    if holds_a_semicolon(sql) {
+        Some(BLOCK)
+    } else if sets_a_lookalike(sql) {
         Some(LOOKALIKE)
     } else if names_session_track(sql) {
         Some(TRACKING)
@@ -323,6 +335,23 @@ mod tests {
             "SET @a = _utf8mb4'\u{e9}', @b = N'\u{e9}'",
         ] {
             assert_eq!(raw_refusal(sql, Flavor::MySql), None, "{sql}");
+        }
+    }
+
+    /// A statement that still holds a `;` is a block of several: refused, also when a character
+    /// set could end a string at a `\` dbee reads as an escape. One in a string or a comment is not.
+    #[test]
+    fn a_block_of_several_statements_is_refused() {
+        for sql in [
+            "BEGIN NOT ATOMIC SET SESSION tx_read_only = 0; INSERT INTO t VALUES (1); END",
+            "IF 1 THEN SET @@tx_read_only = 0; END IF",
+            "SELECT 1 /*! ; */",
+            "SET @a = '\u{c1}\\'; INSERT INTO t VALUES (1)",
+        ] {
+            assert_eq!(raw_refusal(sql, Flavor::MariaDb), Some(BLOCK), "{sql}");
+        }
+        for sql in ["SELECT ';'", "SELECT 1 /* ; */", "SELECT 1 -- ;", "SELECT `a;b` FROM t"] {
+            assert_eq!(raw_refusal(sql, Flavor::MariaDb), None, "{sql}");
         }
     }
 

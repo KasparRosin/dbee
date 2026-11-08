@@ -63,6 +63,7 @@ const MYSQL: KindInfo = KindInfo {
         "/*!99999 session_track */ SELECT 1",
         "SET SESSION s\u{eb}ssion_track_system_variables = ''",
         "SET SESSION `transaction_r\u{eb}ad_only` = 0",
+        "DELIMITER //\nBEGIN NOT ATOMIC SET SESSION transaction_read_only = 0; INSERT INTO {t} VALUES (1); END//\nDELIMITER ;",
     ],
     read_only_unseen: Unseen::Function {
         make: "CREATE FUNCTION {f}() RETURNS INT DETERMINISTIC BEGIN SET SESSION transaction_read_only = 0; RETURN 1; END",
@@ -112,6 +113,8 @@ pub(crate) const MARIADB: KindInfo = KindInfo {
         "SET SESSION session_track_system_variables = ''",
         "SET SESSION \u{17f}ession_track_system_variables = ''",
         "SET @@transact\u{131}on_read_only = 0",
+        "DELIMITER //\nBEGIN NOT ATOMIC SET SESSION tx_read_only = 0; INSERT INTO {t} VALUES (1); SET SESSION tx_read_only = 1; END//\nDELIMITER ;",
+        "DELIMITER //\nIF 1 THEN SET @@tx_read_only = 0; INSERT INTO {t} VALUES (2); END IF//\nDELIMITER ;",
     ],
     read_only_unseen: Unseen::Function {
         make: "CREATE FUNCTION {f}() RETURNS INT DETERMINISTIC BEGIN SET SESSION tx_read_only = 0; RETURN 1; END",
