@@ -992,13 +992,13 @@ fn saving_new_settings_forgets_the_secrets_that_no_longer_apply() {
     save(&mut s, ConnectionConfig { ssl_mode: SslMode::Disable, ..moved.clone() }, None);
     assert_eq!(stored(&s), [false, true, false]);
     // Another SSH host is another tunnel: the database password and the SSH secrets go.
-    save(&mut s, moved.clone(), Some("db3".into()));
+    save(&mut s, moved.clone(), Some("db3-three".into()));
     assert_eq!(stored(&s), [true, true, false]);
     let mut jump = moved;
     jump.ssh.as_mut().unwrap().host = "127.0.0.3".into();
     save(&mut s, jump, None);
     assert_eq!(stored(&s), [false, false, false]);
-    assert_secret_hidden(&s, "db3");
+    assert_secret_hidden(&s, "db3-three");
 }
 
 /// No connection is made: the stored password's rules are the engine's, the same for every engine.
