@@ -1,6 +1,6 @@
 //! The mapping from tokio-postgres errors to [`DbError`].
 
-use dbee_driver::{DbError, Meaning, ServerError};
+use dbee_driver::{DbError, MAX_MESSAGE, Meaning, ServerError, kept_text};
 use tokio_postgres::error::{DbError as PgServerError, ErrorPosition, Severity};
 
 use crate::watch::Refusal;
@@ -62,9 +62,11 @@ pub(crate) fn map(e: &tokio_postgres::Error, phase: Phase) -> DbError {
     }
 }
 
+/// The server's error, its message, detail and hint each cut to [`MAX_MESSAGE`].
 fn from_server(db: &PgServerError, phase: Phase) -> DbError {
-    let code = db.code().code();
-    let message = db.message().to_owned();
+    let code = kept_text(db.code().code(), MAX_MESSAGE);
+    let code = code.as_str();
+    let message = kept_text(db.message(), MAX_MESSAGE);
     match code {
         "28P01" | "28000" => return DbError::Auth { message },
         "57014" => return DbError::Cancelled,
@@ -89,8 +91,8 @@ fn from_server(db: &PgServerError, phase: Phase) -> DbError {
         code: code.to_owned(),
         code_label: Some(SQLSTATE),
         message,
-        detail: db.detail().map(str::to_owned),
-        hint: db.hint().map(str::to_owned),
+        detail: db.detail().map(|d| kept_text(d, MAX_MESSAGE)),
+        hint: db.hint().map(|h| kept_text(h, MAX_MESSAGE)),
         position,
         meaning,
     }))

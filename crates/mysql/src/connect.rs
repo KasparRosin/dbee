@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use dbee_config::{ALLOW_PUBLIC_KEY, ConnectionConfig, SslMode};
 use dbee_core::ResultSet;
-use dbee_driver::{CONNECT_TIMEOUT, DbError, Limits, Purpose, QUERY_LIMITS, ServerInfo, Target, tls};
+use dbee_driver::{CONNECT_TIMEOUT, DbError, Limits, MAX_MESSAGE, MAX_VERSION, Purpose, QUERY_LIMITS, ServerInfo, Target, kept_text, tls};
 use dbee_ssh::Tunnel;
 use mysql_common::constants::{CapabilityFlags, Command, MariadbCapabilities};
 use rustls::pki_types::ServerName;
@@ -375,12 +375,13 @@ async fn attempt(
     }
 }
 
-/// The first row's cells of a setup query, `n` of them.
+/// The first row's cells of a setup query, `n` of them, each kept to [`MAX_MESSAGE`].
 fn setup_row<const N: usize>(r: ResultSet, what: &str) -> Result<[Option<String>; N], DbError> {
     r.rows
         .into_iter()
         .next()
         .and_then(|row| <[Option<String>; N]>::try_from(row).ok())
+        .map(|cells| cells.map(|cell| cell.map(|text| kept_text(&text, MAX_MESSAGE))))
         .ok_or_else(|| DbError::Other(format!("the server sent no {what}")))
 }
 
@@ -395,7 +396,7 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
         session.query("SET SESSION TRANSACTION READ ONLY", QUERY_LIMITS).await?;
     }
     let [id, version] = setup_row(session.query("SELECT CONNECTION_ID(), @@version", QUERY_LIMITS).await?, "version")?;
-    let version = version.unwrap_or_default();
+    let version = kept_text(&version.unwrap_or_default(), MAX_VERSION);
     let flavor = Flavor::from_version(&version);
     session.flavor = flavor;
     let version_num =

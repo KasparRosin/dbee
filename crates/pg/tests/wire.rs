@@ -160,6 +160,11 @@ fn one_column(name: &str, rows: &[&str]) -> Vec<u8> {
 /// Serves dbee's session setup as Postgres 16 answers it, and any other query through `other`,
 /// until the client hangs up or `other` says to stop.
 fn serve(s: &mut (impl Read + Write), other: &mut dyn FnMut(&mut dyn Write, &str) -> bool) {
+    serve_as(s, "16.0", other);
+}
+
+/// [`serve`], with `version` as `server_version`.
+fn serve_as(s: &mut (impl Read + Write), version: &str, other: &mut dyn FnMut(&mut dyn Write, &str) -> bool) {
     while let Some((tag, body)) = read_typed(s) {
         if tag != b'Q' {
             return;
@@ -171,7 +176,7 @@ fn serve(s: &mut (impl Read + Write), other: &mut dyn FnMut(&mut dyn Write, &str
             out
         } else if sql.starts_with("SHOW default_transaction_read_only") {
             let mut out = Vec::new();
-            for value in ["off", "on", "UTF8", "16.0", "160000", "\"$user\", public"] {
+            for value in ["off", "on", "UTF8", version, "160000", "\"$user\", public"] {
                 out.extend(one_column("setting", &[value]));
             }
             out.extend(ready());
@@ -406,4 +411,33 @@ async fn more_columns_than_postgres_returns_are_refused() {
     assert!(!conn.is_closed());
     drop(conn);
     joined(server).await;
+}
+
+/// L4: server text is kept to a size where dbee keeps it: an error's message, detail and hint,
+/// and the version.
+#[tokio::test]
+async fn long_server_text_is_cut_where_it_is_kept() {
+    let long = "\u{e9}".repeat(500_000);
+    let (l, port) = listener();
+    let version = long.clone();
+    let server = std::thread::spawn(move || {
+        let mut s = accept(&l);
+        read_untyped(&mut s).unwrap();
+        logged_in(&mut s);
+        serve_as(&mut s, &version, &mut |w, _| {
+            let fields = format!("SERROR\0VERROR\0C42P01\0M{version}\0D{version}\0H{version}\0\0");
+            w.write_all(&[msg(b'E', fields.as_bytes()), ready()].concat()).is_ok()
+        });
+    });
+    let conn = open(&config(port, SslMode::Disable, None)).await.unwrap();
+    let kept = conn.info().version.clone();
+    let e = dbee_pg::query::run_untyped(&conn, "SELECT 1", dbee_driver::QUERY_LIMITS).await.unwrap_err();
+    drop(conn);
+    joined(server).await;
+    assert!(kept.len() <= dbee_driver::MAX_VERSION + 3 && kept.ends_with('\u{2026}'), "{} bytes", kept.len());
+    let DbError::Server(e) = e else { panic!("{e:?}") };
+    for text in [Some(&e.message), e.detail.as_ref(), e.hint.as_ref()] {
+        let text = text.unwrap();
+        assert!(text.len() <= dbee_driver::MAX_MESSAGE + 3 && text.starts_with("\u{e9}\u{e9}"), "{} bytes", text.len());
+    }
 }

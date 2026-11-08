@@ -1,7 +1,7 @@
 //! A result column's definition (Protocol::ColumnDefinition41), read by dbee itself on MySQL and
 //! MariaDB alike, with MariaDB's extended metadata when it was agreed.
 
-use dbee_driver::DbError;
+use dbee_driver::{DbError, kept_bytes};
 use mysql_common::constants::{ColumnFlags, ColumnType};
 
 use crate::values::{TypeFacts, type_of_name};
@@ -15,6 +15,9 @@ const FIXED_FIELDS: u64 = 0x0C;
 /// and the format (`json`).
 const TYPE_NAME: u8 = 0x00;
 const FORMAT: u8 = 0x01;
+
+/// The most of MariaDB's type name dbee keeps: no real one comes near it.
+const MAX_TYPE_NAME: usize = 64;
 
 /// A result column as its definition (Protocol::ColumnDefinition41) gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +36,8 @@ pub(crate) struct ColumnDefinition {
 /// the format `json`), then the 12 bytes of fixed fields. Every length is checked against the
 /// packet, and nothing may follow. A type byte dbee does not know (a newer server's type) is
 /// `MYSQL_TYPE_UNKNOWN`; a type name, the last one given, decides the type as the catalog's
-/// `DATA_TYPE` does, so MariaDB's `uuid` is a type dbee does not know either.
+/// `DATA_TYPE` does, so MariaDB's `uuid` is a type dbee does not know either. The name is kept to
+/// [`MAX_TYPE_NAME`] bytes.
 pub(crate) fn parse_column(def: &[u8], extended_metadata: bool) -> Result<ColumnDefinition, DbError> {
     let bad = || malformed("column definition");
     let mut rest = def;
@@ -73,7 +77,7 @@ pub(crate) fn parse_column(def: &[u8], extended_metadata: bool) -> Result<Column
         length: u32::from_le_bytes([l0, l1, l2, l3]),
         json,
     };
-    let type_name = type_name.map(|n| String::from_utf8_lossy(n).into_owned());
+    let type_name = type_name.map(|n| kept_bytes(n, MAX_TYPE_NAME));
     Ok(ColumnDefinition { name: String::from_utf8_lossy(name).into_owned(), facts, type_name })
 }
 
@@ -218,7 +222,7 @@ mod tests {
                 let json = pairs.iter().any(|(key, value)| *key == 1 && value == b"json");
                 let type_name = pairs.iter().rev().find(|(key, _)| *key == 0).map(|(_, value)| value);
                 let column_type = type_name.map_or(ours.facts.column_type, |name| type_of_name(name));
-                let type_name = type_name.map(|name| String::from_utf8_lossy(name).into_owned());
+                let type_name = type_name.map(|name| dbee_driver::kept_bytes(name, MAX_TYPE_NAME));
                 prop_assert_eq!(ext, ColumnDefinition { facts: TypeFacts { json, column_type, ..ours.facts }, type_name, ..ours });
             }
         }

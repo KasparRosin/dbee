@@ -3,6 +3,30 @@
 use dbee_sql::Refusal;
 use dbee_ssh::SshError;
 
+/// The most of a server's message dbee keeps: an error's text, and a Postgres error's detail and
+/// hint each. MySQL's own messages end at 512 bytes.
+pub const MAX_MESSAGE: usize = 8 * 1024;
+
+/// The most of a server's version text dbee keeps.
+pub const MAX_VERSION: usize = 256;
+
+/// `text` as dbee keeps server text: at most `max` bytes, cut at a character boundary, with `…`
+/// after a cut.
+pub fn kept_text(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let end = text.floor_char_boundary(max);
+    format!("{}…", text.get(..end).unwrap_or_default())
+}
+
+/// [`kept_text`] of `bytes`, each invalid UTF-8 sequence replaced, without decoding what is cut.
+pub fn kept_bytes(bytes: &[u8], max: usize) -> String {
+    // A character is at most 4 bytes: one cut at `max` is still whole in the bytes decoded.
+    let head = bytes.get(..max.saturating_add(4)).unwrap_or(bytes);
+    kept_text(&String::from_utf8_lossy(head), max)
+}
+
 /// What a server error means, for the code that acts on it, so none of it matches an engine's
 /// own codes. A new meaning is a new variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,5 +240,18 @@ mod tests {
         let (db, apply) = (std::mem::size_of::<DbError>(), std::mem::size_of::<crate::ApplyError>());
         println!("DbError {db} bytes, ApplyError {apply} bytes");
         assert!(db < 128 && apply < 128, "DbError {db}, ApplyError {apply}");
+    }
+
+    #[test]
+    fn server_text_is_cut_at_a_character_boundary() {
+        assert_eq!(kept_text("short", 5), "short");
+        assert_eq!(kept_text("abcdef", 4), "abcd\u{2026}");
+        // é is two bytes: a cut inside it keeps the whole character out.
+        assert_eq!(kept_text("aéé", 4), "a\u{e9}\u{2026}");
+        assert_eq!(kept_text("\u{e9}", 1), "\u{2026}");
+        assert_eq!(kept_bytes(b"abc", 8), "abc");
+        assert_eq!(kept_bytes(&[b'a', 0xFF, b'b', b'c', b'd'], 4), "a\u{FFFD}\u{2026}");
+        let long = vec![b'x'; 1 << 20];
+        assert_eq!(kept_bytes(&long, MAX_MESSAGE).len(), MAX_MESSAGE + '\u{2026}'.len_utf8());
     }
 }

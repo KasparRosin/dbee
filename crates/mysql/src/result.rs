@@ -575,6 +575,27 @@ pub(crate) mod tests {
         assert_eq!(r.rows.len(), (limits.max_bytes - columns) / (dbee_driver::ROW_COST + null_cells(1000)));
     }
 
+    /// L4: MariaDB's type name, from its extended metadata, is kept to 64 bytes.
+    #[tokio::test]
+    async fn a_type_name_is_kept_cut() {
+        let long = vec![b'u'; 60 * 1024];
+        let meta = [&[0x00, 0xFC][..], &u16::try_from(long.len()).unwrap().to_le_bytes(), &long].concat();
+        let mut def = Vec::new();
+        for part in [&b"def"[..], b"", b"", b"", b"c", b"c"] {
+            def.push(u8::try_from(part.len()).unwrap());
+            def.extend_from_slice(part);
+        }
+        def.extend([&[0xFD][..], &u32::try_from(meta.len()).unwrap().to_le_bytes()[..3], &meta].concat());
+        def.extend_from_slice(&[0x0C, 45, 0, 0, 4, 0, 0, VAR_STRING, 0, 0, 0, 0, 0]);
+        let input = [frame(&[1], 0), frame(&def, 1), frame(&[0xFE, 0, 0, 2, 0, 0, 0], 2)].concat();
+        let (mut p, _) = packets(input);
+        let caps = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF;
+        let r = read_result(&mut p, caps, Flavor::MariaDb, true, false, dbee_driver::QUERY_LIMITS, &mut Said::default()).await.unwrap();
+        let c = &r.columns[0];
+        assert!(c.base_type.len() <= 64 + 3 && c.type_label.len() <= 64 + 3, "{} and {} bytes", c.base_type.len(), c.type_label.len());
+        assert!(c.base_type.starts_with("uuu") && c.base_type.ends_with('\u{2026}'), "{}", c.base_type);
+    }
+
     #[test]
     fn rows_hold_exactly_their_values() {
         let row = [&[1, b'a', 0xFB, 0][..], &[0xFC, 3, 0], b"xyz"].concat();

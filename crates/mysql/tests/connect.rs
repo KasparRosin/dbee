@@ -1386,3 +1386,34 @@ async fn prefer_after_a_failed_handshake_warns() {
     assert_eq!(info.tls, Some(TlsState::Off));
     assert!(info.warnings.len() == 1 && info.warnings[0].contains("not encrypted"), "{info:?}");
 }
+
+/// L4: an error of a megabyte is kept cut, and a version dbee cannot read is quoted cut.
+#[tokio::test]
+async fn long_server_text_is_cut_where_it_is_kept() {
+    let long = "\u{e9}".repeat(500_000);
+    let message = long.clone();
+    let answer = move |payload: &[u8]| -> Vec<Vec<u8>> {
+        if payload.get(1..) == Some(&b"qlong"[..]) { vec![err_packet(1146, &message)] } else { answer_as_mariadb(payload) }
+    };
+    let (port, server) = fake_server(frame(&greeting("5.5.5-11.4.2-MariaDB", "mysql_native_password", server_caps(true)), 0), answer).await;
+    let conn = connect_fake(port).await.unwrap();
+    let e = conn.run("qlong", QUERY_LIMITS).await.unwrap_err();
+    drop(conn);
+    server.await.unwrap();
+    let DbError::Server(e) = e else { panic!("{e:?}") };
+    assert!(e.message.len() <= dbee_driver::MAX_MESSAGE + 3 && e.message.starts_with("\u{e9}\u{e9}"), "{} bytes", e.message.len());
+
+    let digits = "9".repeat(1_000_000);
+    let answer = move |payload: &[u8]| -> Vec<Vec<u8>> {
+        let sql = String::from_utf8_lossy(payload.get(1..).unwrap_or_default()).into_owned();
+        if payload.first() == Some(&0x03) && sql.starts_with("SELECT CONNECTION_ID()") {
+            vec![lenenc(2), column_def("a"), column_def("b"), [lenenc_str(b"7"), lenenc_str(digits.as_bytes())].concat(), ok_packet(0xFE, 0)]
+        } else {
+            answer_as_mariadb(payload)
+        }
+    };
+    let (port, server) = fake_server(frame(&greeting("8.0.99", "mysql_native_password", server_caps(true)), 0), answer).await;
+    let e = connect_fake(port).await.unwrap_err();
+    server.await.unwrap();
+    assert!(e.to_string().contains("unreadable version") && e.to_string().len() < 1024, "{} bytes", e.to_string().len());
+}

@@ -9,7 +9,7 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use dbee_config::ConnectionConfig;
-use dbee_driver::{CONNECT_TIMEOUT, DbError, ServerInfo, Target, cancel_not_delivered};
+use dbee_driver::{CONNECT_TIMEOUT, DbError, MAX_MESSAGE, MAX_VERSION, ServerInfo, Target, cancel_not_delivered, kept_text};
 use dbee_ssh::Tunnel;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -508,7 +508,7 @@ async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<Stri
     let mut answers = Vec::new();
     for message in client.simple_query(SHOW_SETTINGS).await.map_err(fail)? {
         if let SimpleQueryMessage::Row(row) = message {
-            answers.push(row.try_get(0).ok().flatten().unwrap_or_default().to_owned());
+            answers.push(kept_text(row.try_get(0).ok().flatten().unwrap_or_default(), MAX_MESSAGE));
         }
     }
     let [ro, conforming, encoding, version, num, path] = answers.as_slice() else {
@@ -520,7 +520,10 @@ async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<Stri
             "the session runs with standard_conforming_strings = {conforming} and client_encoding = {encoding}; dbee needs on and UTF8"
         )));
     }
-    let version_num = num.trim().parse::<u32>().map_err(|_| DbError::Other(format!("the server sent an unreadable server_version_num ({num:?})")))?;
+    let version_num = num.trim().parse::<u32>().map_err(|_| {
+        let num = kept_text(num, MAX_VERSION);
+        DbError::Other(format!("the server sent an unreadable server_version_num ({num:?})"))
+    })?;
     let server_read_only = ro == "on";
     if read_only && !server_read_only {
         return Err(DbError::Other(format!(
@@ -534,7 +537,8 @@ async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<Stri
             visible.extend(row.try_get(0).ok().flatten().map(str::to_owned));
         }
     }
-    Ok((ServerInfo { product: PRODUCT.into(), version: version.clone(), version_num, read_only: server_read_only, warnings, tls: None }, visible))
+    let version = kept_text(version, MAX_VERSION);
+    Ok((ServerInfo { product: PRODUCT.into(), version, version_num, read_only: server_read_only, warnings, tls: None }, visible))
 }
 
 #[cfg(test)]

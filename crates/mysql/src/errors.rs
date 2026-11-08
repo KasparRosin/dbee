@@ -1,6 +1,6 @@
 //! The MySQL and MariaDB error numbers dbee acts on, and an ERR packet as a [`DbError`].
 
-use dbee_driver::{DbError, ServerError};
+use dbee_driver::{DbError, MAX_MESSAGE, ServerError, kept_bytes};
 use mysql_common::constants::CapabilityFlags;
 use mysql_common::io::ParseBuf;
 use mysql_common::packets::ErrPacket;
@@ -44,10 +44,11 @@ pub(crate) fn is_errno(e: &DbError, errno: u16) -> bool {
     matches!(e, DbError::Server(s) if s.code == errno.to_string())
 }
 
-/// The ERR packet `payload` (header `0xFF` included) as a [`DbError`].
+/// The ERR packet `payload` (header `0xFF` included) as a [`DbError`], its message cut to
+/// [`MAX_MESSAGE`].
 pub(crate) fn from_err_packet(payload: &[u8], caps: CapabilityFlags, flavor: Flavor) -> DbError {
     match ParseBuf(payload).parse::<ErrPacket>(caps) {
-        Ok(ErrPacket::Error(e)) => from_errno(e.error_code(), e.message_str().into_owned(), flavor),
+        Ok(ErrPacket::Error(e)) => from_errno(e.error_code(), kept_bytes(e.message_ref(), MAX_MESSAGE), flavor),
         Ok(ErrPacket::Progress(_)) => DbError::Other("the server sent a progress report dbee did not ask for".into()),
         Err(_) => DbError::Other("the server sent a malformed error packet".into()),
     }

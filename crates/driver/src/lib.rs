@@ -26,6 +26,6 @@ pub use api::{
 };
 pub use apply::{ApplyError, ApplyGate, ApplySession};
 pub use catalog::{CatalogBudget, CatalogBuilder};
-pub use error::{DbError, Meaning, ServerError};
+pub use error::{DbError, MAX_MESSAGE, MAX_VERSION, Meaning, ServerError, kept_bytes, kept_text};
 pub use files::{allowed_file, plain_file};
 pub use registry::Drivers;
