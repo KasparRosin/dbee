@@ -123,3 +123,39 @@ async fn a_search_path_with_another_schema_before_pg_catalog_gets_a_warning() {
         }
     }
 }
+
+/// An `oid = oid` that logs each call, in `public`: the same signature as `pg_catalog`'s, so it is
+/// found only where `public` comes before `pg_catalog` on the search path.
+const PLANTED_OID_EQ: &str = r#"
+CREATE TABLE public.calls (what text);
+CREATE FUNCTION public.oid_eq(oid, oid) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO public.calls VALUES ('oid = oid');
+  RETURN $1 OPERATOR(pg_catalog.=) $2;
+END $$;
+CREATE OPERATOR public.= (LEFTARG = oid, RIGHTARG = oid, FUNCTION = public.oid_eq);
+"#;
+
+/// The catalog read runs with its own search path, `pg_catalog, pg_temp`: a database whose path
+/// puts `public` first, with an operator of `pg_catalog`'s exact signature planted there, still
+/// gets none of it called while dbee reads the catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_catalog_read_keeps_its_own_search_path() {
+    let db = require_testdb!();
+    for s in db.servers_of(&[Kind::Postgres]) {
+        let own = OwnDatabase::new(s, db).await;
+        let planted = conn(s, db, &own.name).await;
+        sql(&planted, PLANTED_OID_EQ).await;
+        sql(&planted, "CREATE TABLE public.t (id int PRIMARY KEY)").await;
+        sql(&planted, &format!("ALTER DATABASE {} SET search_path = public, pg_catalog", own.name)).await;
+        let c = conn(s, db, &own.name).await;
+        // On this path an unqualified oid comparison finds the planted operator.
+        sql(&c, "SELECT 1 WHERE 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid = 1259::pg_catalog.oid").await;
+        assert_eq!(sql(&c, "SELECT pg_catalog.count(*)::pg_catalog.text FROM public.calls").await, [[Some("1".to_owned())]], "{}", s.name);
+        sql(&c, "DELETE FROM public.calls").await;
+        load_catalog(&c).await.unwrap_or_else(|e| panic!("{}: {e}", s.name));
+        let calls = sql(&c, "SELECT pg_catalog.count(*)::pg_catalog.text FROM public.calls").await;
+        println!("{}: calls of the planted oid = oid while dbee read the catalog: {calls:?}", s.name);
+        assert_eq!(calls, [[Some("0".to_owned())]], "{}: the catalog read used the session's search path", s.name);
+    }
+}
