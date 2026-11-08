@@ -16,12 +16,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// The SSLRequest message: its length, 8, and its code, 80877103.
 const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xD2, 0x16, 0x2F];
 
-/// Why the login stops when the server asks for the password in clear text on a plain link.
-pub(crate) const CLEAR_PASSWORD: &str = "the server asks for the password in clear text, which dbee sends only over TLS, and this connection has none. Set SSL mode to require \
-     or verify-full";
-
 /// Why a cancel request is not sent when the server will not take it over TLS.
-pub(crate) const PLAIN_CANCEL: &str = "the server would not take the cancel request over TLS, which the connection uses, so the request was not sent";
+pub(crate) const PLAIN_CANCEL: &str = "the server would not take the cancel request over TLS, which the connection uses, so dbee did not send \
+                                       it. Try again; if it keeps happening, something on the network may be stopping TLS.";
 
 /// What the watch refuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,11 +33,7 @@ pub(crate) enum Refusal {
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Refusal::ClearPassword => CLEAR_PASSWORD,
-            Refusal::PlainCancel => PLAIN_CANCEL,
-            Refusal::Malformed => "the server sent a malformed message during the login",
-        })
+        write!(f, "{}", self.error())
     }
 }
 
@@ -59,9 +52,9 @@ impl Refusal {
 
     pub(crate) fn error(self) -> DbError {
         match self {
-            Refusal::ClearPassword => DbError::Auth { message: CLEAR_PASSWORD.into() },
-            Refusal::PlainCancel => DbError::Tls(PLAIN_CANCEL.into()),
-            Refusal::Malformed => DbError::Connect(self.to_string()),
+            Refusal::ClearPassword => DbError::ClearPassword,
+            Refusal::PlainCancel => DbError::Other(PLAIN_CANCEL.into()),
+            Refusal::Malformed => DbError::Connect("the server sent a malformed message during the login".into()),
         }
     }
 }

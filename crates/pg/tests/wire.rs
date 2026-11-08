@@ -223,10 +223,7 @@ async fn a_plain_link_never_carries_the_password_in_clear() {
         let e = open(&config(port, mode, None)).await.err();
         let answer = joined(server).await;
         assert_eq!(answer, None, "{mode:?}: the man in the middle got an answer");
-        let e = e.unwrap();
-        assert_eq!(e.code(), "auth", "{mode:?}: {e:?}");
-        let shown = e.to_string();
-        assert!(shown.contains("in clear text") && shown.contains("only over TLS") && shown.contains("verify-full"), "{shown}");
+        assert_eq!(e, Some(DbError::ClearPassword), "{mode:?}");
     }
 }
 
@@ -266,41 +263,44 @@ async fn the_password_in_clear_text_goes_over_checked_tls() {
     assert_eq!(answer, Some((b'p', [PASSWORD.as_bytes(), &[0]].concat())));
 }
 
-/// L1: the cancel request of a session over TLS goes over TLS or not at all. A man in the middle
-/// who answers its SSL request with `N` gets no cancel key, and the cancel says why it failed.
+/// L1: the cancel request of a session over TLS goes over TLS or not at all, under `prefer` as
+/// under `verify-full`. A man in the middle who answers its SSL request with `N` gets no cancel
+/// key, and the cancel says what happened and what to do.
 #[tokio::test]
 async fn the_cancel_of_a_tls_session_never_goes_in_plain() {
     let db = require_testdb!();
-    let tls = tls_config(db);
-    let (l, port) = listener();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let server = std::thread::spawn(move || {
-        let mut s = accept(&l);
-        read_untyped(&mut s).unwrap();
-        s.write_all(b"S").unwrap();
-        let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(tls).unwrap(), s);
-        read_untyped(&mut tls).unwrap();
-        logged_in(&mut tls);
-        // The cancel's own connection: no TLS this time.
-        let cancel = std::thread::spawn(move || {
-            let mut c = accept(&l);
-            let asked = read_untyped(&mut c);
-            c.write_all(b"N").unwrap();
-            tx.send((asked, read_untyped(&mut c))).unwrap();
+    for (mode, ca_file) in [(SslMode::Prefer, None), (SslMode::VerifyFull, Some(db.ca_file.clone()))] {
+        let tls = tls_config(db);
+        let (l, port) = listener();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut s = accept(&l);
+            read_untyped(&mut s).unwrap();
+            s.write_all(b"S").unwrap();
+            let mut tls = rustls::StreamOwned::new(rustls::ServerConnection::new(tls).unwrap(), s);
+            read_untyped(&mut tls).unwrap();
+            logged_in(&mut tls);
+            // The cancel's own connection: no TLS this time.
+            let cancel = std::thread::spawn(move || {
+                let mut c = accept(&l);
+                let asked = read_untyped(&mut c);
+                c.write_all(b"N").unwrap();
+                tx.send((asked, read_untyped(&mut c))).unwrap();
+            });
+            serve(&mut tls, &mut |_, _| true);
+            cancel.join().unwrap();
         });
-        serve(&mut tls, &mut |_, _| true);
-        cancel.join().unwrap();
-    });
-    let conn = open(&config(port, SslMode::Prefer, None)).await.unwrap();
-    let cancelled = conn.canceller().cancel().await;
-    let (asked, sent) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert_eq!(asked.as_ref().and_then(|a| a.get(..4)), Some(&SSL_REQUEST[..]), "the cancel asked for TLS");
-    assert_eq!(sent, None, "the cancel key went in plain");
-    let e = cancelled.unwrap_err();
-    assert_eq!(e.code(), "tls", "{e:?}");
-    assert!(e.to_string().contains("not sent"), "{e}");
-    drop(conn);
-    joined(server).await;
+        let conn = open(&config(port, mode, ca_file)).await.unwrap();
+        let cancelled = conn.canceller().cancel().await;
+        let (asked, sent) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(asked.as_ref().and_then(|a| a.get(..4)), Some(&SSL_REQUEST[..]), "{mode:?}: the cancel asked for TLS");
+        assert_eq!(sent, None, "{mode:?}: the cancel key went in plain");
+        let e = cancelled.unwrap_err();
+        let shown = e.to_string();
+        assert!(shown.contains("did not send it") && shown.contains("Try again") && !shown.contains("could not set up TLS"), "{mode:?}: {shown}");
+        drop(conn);
+        joined(server).await;
+    }
 }
 
 /// A server that takes no TLS (`N`, or no SSL request under `disable`) and logs anyone in.
@@ -440,4 +440,39 @@ async fn long_server_text_is_cut_where_it_is_kept() {
         let text = text.unwrap();
         assert!(text.len() <= dbee_driver::MAX_MESSAGE + 3 && text.starts_with("\u{e9}\u{e9}"), "{} bytes", text.len());
     }
+}
+
+/// A TLS handshake that fails on the server's side: its fatal alert, after the ClientHello.
+fn break_handshake(s: &mut TcpStream) {
+    let mut head = [0u8; 5];
+    if s.read_exact(&mut head).is_ok() {
+        let mut body = vec![0; usize::from(u16::from_be_bytes([head[3], head[4]]))];
+        let _ = s.read_exact(&mut body);
+    }
+    let _ = s.write_all(&[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28]);
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    let _ = s.read_to_end(&mut Vec::new());
+}
+
+/// `prefer` connects again without TLS after a broken handshake, as libpq does; that second
+/// connection is watched too, so its request for the password in clear text gets no answer.
+#[tokio::test]
+async fn prefer_after_a_broken_handshake_still_refuses_the_password_in_clear() {
+    let (l, port) = listener();
+    let server = std::thread::spawn(move || {
+        let mut s = accept(&l);
+        assert_eq!(read_untyped(&mut s).unwrap().get(..4), Some(&SSL_REQUEST[..]));
+        s.write_all(b"S").unwrap();
+        break_handshake(&mut s);
+        let mut s = accept(&l);
+        let first = read_untyped(&mut s).unwrap();
+        let asked = first.get(..4) == Some(&SSL_REQUEST[..]);
+        s.write_all(&auth(3, &[])).unwrap();
+        (asked, read_typed(&mut s))
+    });
+    let e = open(&config(port, SslMode::Prefer, None)).await.err();
+    let (asked, answer) = joined(server).await;
+    assert!(!asked, "the second connection is plain, as libpq's");
+    assert_eq!(answer, None, "the password went in clear text");
+    assert_eq!(e, Some(DbError::ClearPassword));
 }

@@ -342,11 +342,8 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
     let connect_error = |e: tokio_postgres::Error| error::map(&e, Phase::Connect);
     let (client, closed, way, over_tls) = match &t.tunnel {
         Some(tunnel) => {
-            let stream = Watched::new(tunnel.connect(&cfg.host, cfg.port).await?, Rule::Login);
-            let over_tls = stream.tls();
-            let connect = tls_connect(tls, &cfg.host, &stream);
-            let (client, connection) = pg.connect_raw(stream, connect).await.map_err(connect_error)?;
-            (client, drive(runtime, connection), Way::Tunnel { tunnel: Arc::clone(tunnel), port: cfg.port }, over_tls.load(Ordering::Acquire))
+            let (client, closed, over_tls) = login(tunnel.connect(&cfg.host, cfg.port).await?, &pg, tls, &cfg.host, runtime).await?;
+            (client, closed, Way::Tunnel { tunnel: Arc::clone(tunnel), port: cfg.port }, over_tls)
         }
         // The socket never leaves the machine, and Postgres has no TLS on it: the password may go
         // in clear text there, as libpq sends it.
@@ -383,21 +380,32 @@ async fn connect_tcp(
     let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| DbError::Connect(e.to_string()))?;
     let mut last = DbError::Connect("the host name gave no address".into());
     for addr in addrs {
-        let stream = match TcpStream::connect(addr).await.and_then(|tcp| tune(&tcp).map(|()| tcp)) {
-            Ok(tcp) => Watched::new(tcp, Rule::Login),
+        let tcp = match TcpStream::connect(addr).await.and_then(|tcp| tune(&tcp).map(|()| tcp)) {
+            Ok(tcp) => tcp,
             Err(e) => {
                 last = DbError::Connect(e.to_string());
                 continue;
             }
         };
-        let over_tls = stream.tls();
-        let connect = tls_connect(tls, host, &stream);
-        match pg.connect_raw(stream, connect).await {
-            Ok((client, connection)) => return Ok((client, drive(runtime, connection), addr, over_tls.load(Ordering::Acquire))),
-            Err(e) => last = error::map(&e, Phase::Connect),
+        match login(tcp, pg, tls, host, runtime).await {
+            Ok((client, closed, over_tls)) => return Ok((client, closed, addr, over_tls)),
+            Err(e) => last = e,
         }
     }
     Err(last)
+}
+
+/// Logs in over `stream`, a direct one or the tunnel's channel, watched ([`Watched`]): the
+/// client, the flag that tells when its connection ended, and whether the link runs over TLS.
+async fn login<S>(stream: S, pg: &tokio_postgres::Config, tls: &Tls, host: &str, runtime: &Handle) -> Result<(Client, Arc<AtomicBool>, bool), DbError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let stream = Watched::new(stream, Rule::Login);
+    let over_tls = stream.tls();
+    let connect = tls_connect(tls, host, &stream);
+    let (client, connection) = pg.connect_raw(stream, connect).await.map_err(|e| error::map(&e, Phase::Connect))?;
+    Ok((client, drive(runtime, connection), over_tls.load(Ordering::Acquire)))
 }
 
 /// A direct connection's socket options, as tokio-postgres sets its own: no delay for small

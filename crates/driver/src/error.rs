@@ -3,6 +3,10 @@
 use dbee_sql::Refusal;
 use dbee_ssh::SshError;
 
+/// What [`DbError::ClearPassword`] says.
+const CLEAR_PASSWORD: &str = "dbee stopped the login: the server asked for the password in clear text, which dbee sends only over TLS, and \
+                              this connection has none. Set SSL mode to verify-full.";
+
 /// The most of a server's message dbee keeps: an error's text, and a Postgres error's detail and
 /// hint each. MySQL's own messages end at 512 bytes.
 pub const MAX_MESSAGE: usize = 8 * 1024;
@@ -73,6 +77,9 @@ pub enum DbError {
     Server(Box<ServerError>),
     /// The server refused the login, or asked for a password and none was given.
     Auth { message: String },
+    /// dbee stopped the login: the server asked for the password in clear text on a link without
+    /// TLS. Not a refused login: a password typed again would be refused the same way.
+    ClearPassword,
     /// The server could not be reached, or did not answer like the server it should be.
     Connect(String),
     /// TLS could not be set up: no TLS on the server, a certificate that is not trusted, or an
@@ -100,6 +107,7 @@ impl DbError {
         match self {
             DbError::Server(_) => "server",
             DbError::Auth { .. } => "auth",
+            DbError::ClearPassword => "clearPassword",
             DbError::Connect(_) => "connect",
             DbError::Tls(_) => "tls",
             DbError::Ssh(_) => "ssh",
@@ -127,6 +135,7 @@ impl std::fmt::Display for DbError {
                 Ok(())
             }
             DbError::Auth { message } => write!(f, "the server refused the login: {message}"),
+            DbError::ClearPassword => f.write_str(CLEAR_PASSWORD),
             DbError::Connect(m) => write!(f, "could not connect to the server: {m}"),
             DbError::Tls(m) => write!(f, "could not set up TLS: {m}"),
             DbError::Ssh(e) => write!(f, "{e}"),
@@ -216,6 +225,7 @@ mod tests {
         let all = [
             (boxed(server("42703", Some("SQLSTATE"))), "server"),
             (DbError::Auth { message: "m".into() }, "auth"),
+            (DbError::ClearPassword, "clearPassword"),
             (DbError::Connect("m".into()), "connect"),
             (DbError::Tls("m".into()), "tls"),
             (DbError::Ssh(dbee_ssh::SshError::NoKey), "ssh"),
@@ -233,6 +243,15 @@ mod tests {
         let aborted = boxed(ServerError { meaning: Some(Meaning::TransactionAborted), ..server("25P02", Some("SQLSTATE")) });
         assert_eq!((aborted.code(), aborted.to_string().as_str()), ("server", "m (SQLSTATE 25P02)"));
         assert_eq!(DbError::from(dbee_ssh::SshError::NoKey), DbError::Ssh(dbee_ssh::SshError::NoKey));
+    }
+
+    /// dbee's own refusal says that dbee stopped the login, and points to the mode that checks who
+    /// answers: `require` without a CA file would take the same man in the middle's certificate.
+    #[test]
+    fn the_clear_password_refusal_is_dbees_and_points_to_verify_full() {
+        let shown = DbError::ClearPassword.to_string();
+        assert!(shown.starts_with("dbee stopped the login") && shown.contains("verify-full") && !shown.contains("require"), "{shown}");
+        assert!(!shown.contains("refused the login"), "{shown}");
     }
 
     #[test]

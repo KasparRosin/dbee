@@ -319,7 +319,7 @@ impl Method {
 /// empty.
 fn cleartext(password: &[u8], tls: bool) -> Result<Vec<u8>, DbError> {
     if !tls && !password.is_empty() {
-        return Err(DbError::Auth { message: "the server asks for the password in clear text, which dbee sends only over TLS".into() });
+        return Err(DbError::ClearPassword);
     }
     Ok([password, &[0]].concat())
 }
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn the_password_goes_in_clear_only_over_tls() {
-        assert_eq!(cleartext(b"pw", false).unwrap_err().code(), "auth");
+        assert_eq!(cleartext(b"pw", false).unwrap_err(), DbError::ClearPassword);
         assert_eq!(cleartext(b"pw", true).unwrap(), b"pw\0");
         assert_eq!(cleartext(b"", false).unwrap(), b"\0");
     }
