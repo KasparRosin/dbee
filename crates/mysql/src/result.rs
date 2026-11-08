@@ -1,7 +1,7 @@
 //! The server's answer to a command: OK and ERR packets, and result sets with their rows.
 
 use dbee_core::{DatabaseAfter, ResultSet};
-use dbee_driver::{DbError, Limits, ROW_COST, cell_cost, column_cost};
+use dbee_driver::{DbError, Limits, ROW_COST, cell_cost, column_cost, kept_text};
 use mysql_common::constants::{CapabilityFlags, SessionStateType, StatusFlags};
 use mysql_common::io::ParseBuf;
 use mysql_common::packets::session_state_change::SessionStateChange;
@@ -16,6 +16,9 @@ use crate::wire::{CHUNK, Packets, lenenc_int, malformed};
 /// The most columns dbee reads in one result. A table has at most 4096, but a `SELECT` can return
 /// more (70,000 measured on every test server).
 const MAX_COLUMNS: u64 = 65_535;
+
+/// The longest database name MySQL and MariaDB have, in bytes: 64 characters of utf8mb4.
+const MAX_DATABASE_NAME: usize = 256;
 
 /// The largest column definition dbee reads: names of up to 64 characters, far under this.
 const MAX_COLUMN_DEFINITION: usize = 64 * 1024;
@@ -55,7 +58,9 @@ pub(crate) fn schema_change(ok: &OkPacket<'_>) -> SchemaReport {
     let mut report = SchemaReport::Silent;
     for entry in entries.iter().filter(|entry| matches!(entry.data_type(), SessionStateType::SESSION_TRACK_SCHEMA)) {
         report = match entry.decode() {
-            Ok(SessionStateChange::Schema(schema)) => SchemaReport::Said(Some(schema.as_str().into_owned()).filter(|name| !name.is_empty())),
+            Ok(SessionStateChange::Schema(schema)) => {
+                SchemaReport::Said(Some(kept_text(&schema.as_str(), MAX_DATABASE_NAME)).filter(|name| !name.is_empty()))
+            }
             _ => return SchemaReport::Unreadable,
         };
     }
@@ -643,6 +648,19 @@ pub(crate) mod tests {
         assert_eq!(e, DbError::TooLarge { left: 0 });
         let next = read_result(&mut p, caps, Flavor::MySql, false, false, spent, &mut Said::default()).await.unwrap();
         assert!(next.columns.is_empty());
+    }
+
+    /// Minor 6: the database a session state names is kept to what a server can name.
+    #[tokio::test]
+    async fn a_session_tracked_database_name_is_kept_cut() {
+        let lenenc = |b: &[u8]| [&[0xFC][..], &u16::try_from(b.len()).unwrap().to_le_bytes(), b].concat();
+        let entry = [&[0x01][..], &lenenc(&lenenc("d".repeat(1_000).as_bytes()))].concat();
+        let changed = (StatusFlags::SERVER_STATUS_AUTOCOMMIT | StatusFlags::SERVER_SESSION_STATE_CHANGED).bits().to_le_bytes();
+        let ok = [&[0x00, 0, 0][..], &changed, &[0, 0, 0], &lenenc(&entry)].concat();
+        let (mut p, _) = packets(frame(&ok, 0));
+        let r = read_result(&mut p, TRACKING, Flavor::MySql, false, true, dbee_driver::QUERY_LIMITS, &mut Said::default()).await.unwrap();
+        let DatabaseAfter::Changed(Some(name)) = r.database_after else { panic!("{:?}", r.database_after) };
+        assert!(name.len() <= 256 + '\u{2026}'.len_utf8() && name.starts_with("ddd"), "{} bytes", name.len());
     }
 
     #[test]

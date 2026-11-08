@@ -36,7 +36,8 @@ pub(crate) fn map(e: &tokio_postgres::Error, phase: Phase) -> DbError {
         return refusal.error();
     }
     let kind = e.to_string();
-    let cause = std::error::Error::source(e).map(ToString::to_string);
+    // tokio-postgres's causes can quote the server: a SCRAM error is its own words.
+    let cause = std::error::Error::source(e).map(|cause| kept_text(&cause.to_string(), MAX_MESSAGE));
     let because = || cause.clone().unwrap_or_else(|| kind.clone());
     if e.is_closed() {
         return match phase {

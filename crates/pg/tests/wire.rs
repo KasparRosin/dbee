@@ -608,3 +608,26 @@ async fn column_names_are_cut_and_columns_that_do_not_fit_fail_the_statement() {
     drop(conn);
     joined(server).await;
 }
+
+/// Minor 6: every text taken from tokio-postgres is cut: here the error a SCRAM exchange ends in,
+/// the server's own words.
+#[tokio::test]
+async fn a_scram_error_is_cut() {
+    let (l, port) = listener();
+    let server = std::thread::spawn(move || {
+        let mut s = accept(&l);
+        read_untyped(&mut s)?;
+        s.write_all(&auth(10, b"SCRAM-SHA-256\0\0")).ok()?;
+        let (_, first) = read_typed(&mut s)?;
+        let first = String::from_utf8_lossy(&first).into_owned();
+        let nonce = first.rsplit("r=").next()?.to_owned();
+        s.write_all(&auth(11, format!("r={nonce}server,s=c2FsdA==,i=4096").as_bytes())).ok()?;
+        read_typed(&mut s)?;
+        s.write_all(&auth(12, format!("e={}", "x".repeat(1_000_000)).as_bytes())).ok()?;
+        read_typed(&mut s)
+    });
+    let e = open(&config(port, SslMode::Disable, None)).await.err().unwrap();
+    joined(server).await;
+    let DbError::Auth { message } = &e else { panic!("{e:?}") };
+    assert!(message.contains("xxx") && message.len() <= dbee_driver::MAX_MESSAGE + '\u{2026}'.len_utf8(), "{} bytes", message.len());
+}
