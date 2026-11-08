@@ -429,6 +429,177 @@ fn mysql_executable_comments_run_as_the_editor_shows_them() {
     }
 }
 
+/// A query tab of a new read-only connection to `t`.
+fn read_only_session(t: &TestTarget) -> TestSession {
+    let mut s = session();
+    let config = dbee_config::ConnectionConfig { read_only: true, ..config_for(t) };
+    open(&mut s, json!({ "config": config, "password": pw() }));
+    tab(&mut s, "");
+    s
+}
+
+/// `text` run in the active query tab.
+fn run_text(s: &mut Session, text: &str) -> Result<Json, EngineError> {
+    run(s, "query.setText", json!({ "text": text }));
+    s.run_blocking("query.run", json!({}), T)
+}
+
+/// On a read-only Postgres connection the statements that can end read-only, or write in spite of
+/// it, are refused before they are sent, a `pg_dumpall` script's first line among them; one that
+/// turned it off all the same (a `set_config` whose setting dbee cannot read) is caught after it
+/// ran: rolled back, read-only turned on again, and said. Nothing is written.
+#[test]
+fn read_only_postgres_refuses_what_turns_it_off_and_reads_it_back() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| t.kind().id() == "postgres") {
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_pg"));
+        let _drop = scratch_table(&t, &name, "CREATE TABLE {t} (id int)");
+        let objects = q(&t, "SELECT count(*) FROM pg_largeobject_metadata");
+        let mut s = read_only_session(&t);
+        let insert = format!("INSERT INTO {sc}.{name} VALUES (1)");
+        let refused = [
+            format!("DO $$ BEGIN COMMIT; SET TRANSACTION READ WRITE; {insert}; END $$"),
+            "CALL anything()".to_owned(),
+            "SET default_transaction_read_only = off".to_owned(),
+            "/* pasted */ set \"transaction_read_only\" TO off".to_owned(),
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE".to_owned(),
+            "BEGIN READ WRITE".to_owned(),
+            "START TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ WRITE".to_owned(),
+            "RESET ALL".to_owned(),
+            "COMMIT AND CHAIN".to_owned(),
+            "SELECT set_config('default_transaction_read_only', 'off', false)".to_owned(),
+            "SELECT lo_from_bytea(0, 'dbee')".to_owned(),
+        ];
+        for sql in &refused {
+            let e = run_text(&mut s, sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
+            assert_eq!(e.code(), "readOnly", "{}: {sql}: {e}", t.name());
+        }
+        let e = run_text(&mut s, "SELECT set_config('default_transaction_re' || 'ad_only', 'off', false)").expect_err("caught after it ran");
+        assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
+        assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}", t.name());
+        run_text(&mut s, "SELECT current_setting('default_transaction_read_only') || '/' || current_setting('transaction_read_only')").unwrap();
+        assert_eq!(first_value(&s).as_deref(), Some("on/on"), "{}", t.name());
+        // Reading the mode back takes no snapshot: a transaction can still set its isolation level.
+        for sql in ["BEGIN", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", "SELECT 1", "COMMIT"] {
+            run_text(&mut s, sql).unwrap_or_else(|e| panic!("{}: {sql}: {e}", t.name()));
+        }
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "{}", t.name());
+        assert_eq!(q(&t, "SELECT count(*) FROM pg_largeobject_metadata"), objects, "{}: no large object", t.name());
+    }
+}
+
+/// On a read-only MySQL or MariaDB connection the statements that can end read-only, or hide what
+/// they run, are refused before they are sent, also inside an executable comment; one that turned
+/// it off all the same (a function that sets the variable) is caught after it ran. A statement's
+/// warnings stay for `SHOW WARNINGS`: the check waits for the statement after it. Nothing is
+/// written.
+#[test]
+fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let (sc, name, off) = (t.schema("scratch"), unique("t_ro_my"), unique("f_ro_off"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}"), format!("FUNCTION IF EXISTS {sc}.{off}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut w = connected_to(&t);
+        tab(&mut w, &format!("CREATE FUNCTION {sc}.{off}() RETURNS INT DETERMINISTIC BEGIN SET SESSION {variable} = 0; RETURN 1; END"));
+        run(&mut w, "query.run", json!({}));
+        drop(w);
+        let mut s = read_only_session(&t);
+        let insert = format!("INSERT INTO {sc}.{name} VALUES (1)");
+        let refused = [
+            "START TRANSACTION READ WRITE".to_owned(),
+            "/*!40101 START TRANSACTION READ WRITE */".to_owned(),
+            "SET SESSION TRANSACTION READ WRITE".to_owned(),
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE".to_owned(),
+            format!("SET @@SESSION.`{variable}` = 0"),
+            format!("SET STATEMENT {variable}=0 FOR {insert}"),
+            "CALL anything()".to_owned(),
+            "PREPARE p FROM 'START TRANSACTION READ WRITE'".to_owned(),
+            "EXECUTE p".to_owned(),
+            "COMMIT AND CHAIN".to_owned(),
+        ];
+        for sql in &refused {
+            let e = run_text(&mut s, sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
+            assert_eq!(e.code(), "readOnly", "{}: {sql}: {e}", t.name());
+        }
+        let e = run_text(&mut s, &format!("SELECT {sc}.{off}()")).expect_err("caught after it ran");
+        assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
+        assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}", t.name());
+        let (sql, on) = t.kind().info().read_only_sql;
+        run_text(&mut s, sql).unwrap();
+        assert_eq!(first_value(&s).as_deref(), Some(on), "{}", t.name());
+        run_text(&mut s, "SELECT CAST('1x' AS SIGNED)").unwrap();
+        run_text(&mut s, "SHOW WARNINGS").unwrap();
+        let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
+        assert_eq!(qt.shown_result().map(|r| r.result.rows.len()), Some(1), "{}: the cast's warning", t.name());
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "{}", t.name());
+    }
+}
+
+/// A read-only SQLite file's connection attaches no file, so `VACUUM INTO` makes none, and keeps
+/// `query_only` on: SQLite's authorizer refuses both, whatever the text looks like.
+#[test]
+fn read_only_sqlite_attaches_nothing_and_keeps_query_only() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(TestTarget::is_file) {
+        let dir = dbee_testkit::repo_root().join("target").join("testkit");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (copy, other) = (dir.join(unique("ro_vacuum_into")), dir.join(unique("ro_attach")));
+        let _gone = Removed(vec![copy.clone(), other.clone()]);
+        std::fs::copy(t.file().unwrap(), &other).unwrap();
+        let literal = |path: &std::path::Path| dbee_sql::Dialect::Sqlite.literal(&path.display().to_string()).unwrap();
+        let mut s = read_only_session(&t);
+        for sql in [
+            format!("VACUUM INTO {}", literal(&copy)),
+            "PRAGMA query_only = 0".to_owned(),
+            "PRAGMA main.query_only = OFF".to_owned(),
+            format!("ATTACH {} AS other", literal(&other)),
+        ] {
+            let e = run_text(&mut s, &sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
+            assert!(e.data()["hint"].as_str().is_some_and(|h| h.contains("read-only")), "{}: {sql}: {e} {}", t.name(), e.data());
+        }
+        assert!(!copy.exists(), "{}: VACUUM INTO made no file", t.name());
+        run_text(&mut s, "PRAGMA query_only").unwrap();
+        assert_eq!(first_value(&s).as_deref(), Some("1"), "{}", t.name());
+    }
+}
+
+/// A query tab cannot turn `standard_conforming_strings` off, which dbee's editor and splitter
+/// read as on; after a function turned it off, a statement whose `'…'` strings hold a backslash
+/// runs only once dbee has turned it on again. Text the editor shows as one string never runs as
+/// two statements.
+#[test]
+fn postgres_query_tabs_keep_standard_conforming_strings_on() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| t.kind().id() == "postgres") {
+        let (made, off) = (unique("t_hidden"), unique("f_scs_off"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS scratch.{made}"), format!("FUNCTION IF EXISTS scratch.{off}()")]);
+        let function = format!(
+            "CREATE FUNCTION scratch.{off}() RETURNS text LANGUAGE sql AS $$ SELECT pg_catalog.set_config('standard_conforming_strings', 'off', false) $$"
+        );
+        q(&t, &function);
+        let mut s = connected_to(&t);
+        tab(&mut s, "");
+        for sql in [
+            "SET standard_conforming_strings = off",
+            "RESET standard_conforming_strings",
+            "SELECT set_config('standard_conforming_strings', 'off', false)",
+        ] {
+            let e = run_text(&mut s, sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
+            assert!(e.to_string().contains("standard_conforming_strings"), "{}: {sql}: {e}", t.name());
+        }
+        run_text(&mut s, "SET standard_conforming_strings = on").unwrap();
+        run_text(&mut s, &format!("SELECT scratch.{off}()")).unwrap();
+        let hiding = format!("SELECT 'a\\' || '; CREATE TABLE scratch.{made} (x int); --'");
+        let e = run_text(&mut s, &hiding).expect_err("not run while it was off");
+        assert!(e.to_string().contains("turned it on again"), "{}: {e}", t.name());
+        run_text(&mut s, &hiding).unwrap();
+        assert_eq!(first_value(&s), Some(format!("a\\; CREATE TABLE scratch.{made} (x int); --")), "{}", t.name());
+        assert_eq!(q(&t, &format!("SELECT to_regclass('scratch.{made}') IS NULL")), "t", "{}: nothing hidden ran", t.name());
+    }
+}
+
 /// A read-only connection's query tab refuses `CREATE TABLE`, `ALTER TABLE` and `DROP TABLE` on
 /// every engine: on MySQL and MariaDB the session's `SET SESSION TRANSACTION READ ONLY` holds them
 /// too (measured on 5.7, 8.0, 26.10, 10.11 and 13.0).

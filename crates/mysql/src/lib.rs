@@ -27,6 +27,7 @@ pub mod connect;
 pub mod driver;
 mod errors;
 pub mod flavor;
+mod guard;
 mod query;
 mod result;
 mod rsa;

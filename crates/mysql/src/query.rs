@@ -38,10 +38,13 @@ impl MySqlConnection {
     /// `limits` are still read (so the connection stays in step) and counted in `rows_seen`, but
     /// not kept, and `complete` becomes false. The byte cap counts the column names and the
     /// cell text kept. A statement that a cancel's `KILL QUERY` targeted and that still returned
-    /// rows (`SELECT SLEEP(…)` returns 1 when killed) is [`DbError::Cancelled`].
+    /// rows (`SELECT SLEEP(…)` returns 1 when killed) is [`DbError::Cancelled`]. What dbee
+    /// refuses is not sent, and a read-only connection's mode is read back ([`crate::guard`]).
     pub async fn run(&self, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
         let mut session = self.lock().await?;
-        self.statement(&mut session, sql, limits).await
+        self.before(&mut session, sql).await?;
+        let ran = self.statement(&mut session, sql, limits).await;
+        self.after(&mut session, sql, ran).await
     }
 
     /// [`MySqlConnection::run`], with the columns untyped (table pages take them from the

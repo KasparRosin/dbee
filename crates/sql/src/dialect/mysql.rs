@@ -4,6 +4,7 @@ use super::{BinaryLiteral, Bodies, DoubleQuote, ILike, InsertDefaults, LexRules,
 use crate::SqlError;
 use crate::filter::Op;
 use crate::lexer::{Token, TokenKind, code, is_word, word};
+use crate::refusal::{CHAIN, CHANGES_MODE, Code, READ_WRITE, Refusal};
 
 pub(crate) const RULES: Rules = Rules {
     ident_quote: '`',
@@ -48,6 +49,7 @@ pub(crate) const RULES: Rules = Rules {
         lookahead: 4,
     },
     keywords: KEYWORDS,
+    refuse,
 };
 
 /// `'value'`, but `_utf8mb4 X'…'` when it holds a backslash, whose escaping depends on the
@@ -151,6 +153,34 @@ impl Compound {
             }
         }
     }
+}
+
+/// The session variables that hold read-only mode: MySQL's and MariaDB's spellings.
+const READ_ONLY_VARIABLES: &[&str] = &["transaction_read_only", "tx_read_only"];
+
+/// Why dbee does not send a statement on a read-only connection: those that can turn read-only
+/// off, or hide what they run. Nothing is refused on another connection.
+fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
+    if !read_only {
+        return None;
+    }
+    let why = if s.starts(&["call"]) {
+        "a procedure can start a read-write transaction, so dbee does not call one here. To call it, turn Read-only off in the connection's settings."
+    } else if s.starts(&["prepare", "execute"]) {
+        "dbee cannot see what a prepared statement runs, so it does not prepare or execute one here. To run it, turn Read-only off in the \
+         connection's settings."
+    } else if s.starts(&["set"]) && s.is(1, "statement") {
+        "SET STATEMENT can turn read-only off for the statement it runs, so dbee does not run it here. Run the statement without it."
+    } else if s.starts(&["set"]) && (s.names(READ_ONLY_VARIABLES) || s.pair("read", "write")) {
+        CHANGES_MODE
+    } else if s.starts(&["start"]) && s.pair("read", "write") {
+        READ_WRITE
+    } else if s.starts(&["commit", "rollback"]) && s.names(&["chain"]) && !s.pair("no", "chain") {
+        CHAIN
+    } else {
+        return None;
+    };
+    Some(Refusal::ReadOnly(why))
 }
 
 /// MySQL's reserved words, from the Keywords and Reserved Words page of the MySQL Reference Manual

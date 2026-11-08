@@ -4,6 +4,7 @@
 use crate::SqlError;
 use crate::filter::Op;
 use crate::lexer::{Token, TokenKind, tokenize};
+use crate::refusal::{Code, Refusal};
 use dbee_core::{ColumnInfo, TableRef, TypeClass};
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +68,8 @@ pub(crate) struct Rules {
     pub lex: LexRules,
     /// The keywords for highlighting: lowercase, sorted, unique.
     pub keywords: &'static [&'static str],
+    /// Why a statement is not sent, on a connection that is read-only or not ([`Dialect::refusal`]).
+    pub refuse: fn(&Code<'_>, bool) -> Option<Refusal>,
 }
 
 /// What the lexer reads: features, never the engine's name.

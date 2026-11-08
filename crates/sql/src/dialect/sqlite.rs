@@ -3,6 +3,7 @@
 use super::{BinaryLiteral, Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, Paging, Rules, Separator, StringLiteral, Values};
 use crate::filter::Op;
 use crate::lexer::{Token, is_word, significant, word};
+use crate::refusal::{Code, Refusal};
 use dbee_core::{ColumnInfo, TypeClass};
 
 pub(crate) const RULES: Rules = Rules {
@@ -45,6 +46,7 @@ pub(crate) const RULES: Rules = Rules {
         lookahead: 4,
     },
     keywords: KEYWORDS,
+    refuse,
 };
 
 /// A number column's value that goes in bare: a plain decimal, with no exponent or hex.
@@ -80,6 +82,12 @@ impl Trigger {
             self.depth = self.depth.saturating_sub(1);
         }
     }
+}
+
+/// Nothing is refused by its text: on a read-only connection the driver's authorizer refuses what
+/// could write, whatever the text looks like.
+fn refuse(_: &Code<'_>, _: bool) -> Option<Refusal> {
+    None
 }
 
 /// SQLite's keywords, from the SQLite Keywords page of sqlite.org, lowercase and sorted.

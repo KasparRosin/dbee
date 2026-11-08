@@ -760,12 +760,16 @@ fn file_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Ve
     ui.add_space(4.0);
 }
 
-/// Read-only, then the type's own on/off settings, one check box each (`conn-option-<id>`), on
-/// one line while they fit.
+/// What Read-only does, and what it is not.
+const READ_ONLY_NOTE: &str = "Read-only guards against mistakes: dbee refuses edits, and the statements that would turn read-only off. It is \
+                              not a lock: to be sure nothing is written, connect as a database user without write rights.";
+
+/// Read-only (its note on hover), then the type's own on/off settings, one check box each
+/// (`conn-option-<id>`), on one line while they fit.
 fn read_only_and_options(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
     ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
         ui.spacing_mut().item_spacing.x = 2.0 * GAP;
-        let r = ui.checkbox(&mut f.read_only, "Read-only");
+        let r = ui.checkbox(&mut f.read_only, "Read-only").on_hover_text(READ_ONLY_NOTE);
         tags.tag_value("conn-readonly", &r, f.read_only);
         for option in f.kind.info().options {
             let mut on = f.option_on(option.id);

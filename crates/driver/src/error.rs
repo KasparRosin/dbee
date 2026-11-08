@@ -1,5 +1,6 @@
 //! [`DbError`]: why a connection or a statement failed, the same type for every driver.
 
+use dbee_sql::Refusal;
 use dbee_ssh::SshError;
 
 /// What a server error means, for the code that acts on it, so none of it matches an engine's
@@ -123,6 +124,17 @@ impl std::error::Error for DbError {}
 impl From<SshError> for DbError {
     fn from(e: SshError) -> Self {
         DbError::Ssh(e)
+    }
+}
+
+/// A statement dbee does not send: on a read-only connection the user's mode, else something
+/// that would make the server misread what follows.
+impl From<Refusal> for DbError {
+    fn from(r: Refusal) -> Self {
+        match r {
+            Refusal::ReadOnly(message) => DbError::ReadOnly { message: message.into() },
+            Refusal::Misread(message) => DbError::Other(message.into()),
+        }
     }
 }
 

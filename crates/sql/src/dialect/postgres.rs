@@ -2,6 +2,7 @@
 
 use super::{Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, Paging, Rules, Separator, StringLiteral, Values, quoted};
 use crate::SqlError;
+use crate::refusal::{CHAIN, CHANGES_MODE, Code, READ_WRITE, Refusal};
 use dbee_core::ColumnInfo;
 
 pub(crate) const RULES: Rules = Rules {
@@ -45,6 +46,7 @@ pub(crate) const RULES: Rules = Rules {
         lookahead: 4,
     },
     keywords: KEYWORDS,
+    refuse,
 };
 
 /// `'value'`, but `E'…'` with each `\` doubled too when it holds one: an escape string reads the
@@ -111,6 +113,59 @@ fn filter_type(column: &ColumnInfo) -> &str {
         "_bit" => "\"bit\"[]",
         _ => write_type(column),
     }
+}
+
+/// The settings that hold read-only mode: the transaction's, the session's default, and
+/// `SESSION CHARACTERISTICS`, which sets that default.
+const READ_ONLY_SETTINGS: &[&str] = &["default_transaction_read_only", "transaction_read_only", "characteristics"];
+
+/// The large-object functions that write; Postgres 14 runs them in a read-only transaction too
+/// (measured; 18 refuses them).
+const LARGE_OBJECT_WRITERS: &[&str] =
+    &["lo_create", "lo_creat", "lo_from_bytea", "lo_import", "lo_put", "lowrite", "lo_truncate", "lo_truncate64", "lo_unlink"];
+
+const CONFORMING: &str = "standard_conforming_strings";
+
+/// The values that turn a setting on.
+const ON: &[&str] = &["on", "true", "yes", "1"];
+
+const CONFORMING_OFF: &str = "dbee keeps standard_conforming_strings on: with it off the server reads backslashes in strings differently \
+                              from how dbee shows and splits statements. This statement turns it off, so dbee did not run it.";
+
+/// Why dbee does not send a statement: on any connection, one that turns
+/// `standard_conforming_strings` off, which dbee's lexer and literals read as on; on a read-only
+/// one, those that can turn read-only off or write in spite of it.
+fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
+    let turns_conforming_off = (s.starts(&["set"]) && s.names(&[CONFORMING]) && !s.value_of(CONFORMING).is_some_and(|v| ON.contains(&v.as_str())))
+        || (s.starts(&["reset"]) && s.names(&[CONFORMING]))
+        || (s.names(&["set_config"]) && s.string_holds(CONFORMING));
+    if turns_conforming_off {
+        return Some(Refusal::Misread(CONFORMING_OFF));
+    }
+    if !read_only {
+        return None;
+    }
+    let why = if s.starts(&["do"]) {
+        "a DO block can commit and turn read-only off, so dbee does not run one here. To run it, turn Read-only off in the connection's settings."
+    } else if s.starts(&["call"]) {
+        "a procedure can commit and turn read-only off, so dbee does not call one here. To call it, turn Read-only off in the connection's settings."
+    } else if s.starts(&["reset", "discard"]) && s.names(&["all"]) {
+        "this statement resets the session's settings, read-only among them. Reset each setting by its name instead."
+    } else if s.starts(&["set", "reset"]) && (s.names(READ_ONLY_SETTINGS) || s.pair("read", "write"))
+        || s.names(&["set_config"]) && s.string_holds("read_only")
+    {
+        CHANGES_MODE
+    } else if s.starts(&["begin", "start"]) && s.pair("read", "write") {
+        READ_WRITE
+    } else if s.starts(&["commit", "rollback", "end", "abort"]) && s.names(&["chain"]) && !s.pair("no", "chain") {
+        CHAIN
+    } else if s.names(LARGE_OBJECT_WRITERS) {
+        "large-object functions can write in a read-only transaction on some Postgres versions, so dbee does not run them here. To run them, \
+         turn Read-only off in the connection's settings."
+    } else {
+        return None;
+    };
+    Some(Refusal::ReadOnly(why))
 }
 
 /// Common PostgreSQL keywords (reserved and non-reserved, from the SQL Key Words appendix of the

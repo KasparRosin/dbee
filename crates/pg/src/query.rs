@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use tokio_postgres::SimpleQueryMessage;
 use tokio_postgres::types::{Kind, Type};
 
-use crate::PgConnection;
+use crate::{PgConnection, guard};
 
 /// Run `sql` (one or more statements) as one simple-query message, holding the connection lock.
 ///
@@ -15,10 +15,13 @@ use crate::PgConnection;
 /// `rows_affected` is the count of the last `CommandComplete`. The first failing statement ends
 /// the run with its error. Rows past `limits` are still read (so the connection stays in sync)
 /// and counted in `rows_seen`, but not kept, and `complete` becomes false. The byte cap counts
-/// the cell text kept.
+/// the cell text kept. What dbee refuses is not sent, and a read-only connection's mode is read
+/// back after it ([`crate::guard`]).
 pub async fn run_untyped(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
     let _guard = conn.lock().await?;
-    run_locked(conn, sql, limits).await
+    guard::before(conn, sql).await?;
+    let ran = run_locked(conn, sql, limits).await;
+    guard::after(conn, ran).await
 }
 
 /// [`run_untyped`] for a caller that already holds the connection lock (an apply, which keeps

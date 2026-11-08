@@ -69,7 +69,7 @@ pub(crate) fn schema_change(ok: &OkPacket<'_>) -> SchemaReport {
 /// Rows past `limits` are read but not kept. MariaDB's extended metadata is in each column
 /// definition when `extended_metadata` was agreed. When the server reports the current
 /// database (`tracks_schema`), the result says where the command left it, and untold when a
-/// report does not decode.
+/// report does not decode. With it, the warning count the answer's last packet gives.
 pub(crate) async fn read_result(
     p: &mut Packets,
     caps: CapabilityFlags,
@@ -77,10 +77,11 @@ pub(crate) async fn read_result(
     extended_metadata: bool,
     tracks_schema: bool,
     limits: Limits,
-) -> Result<ResultSet, DbError> {
+) -> Result<(ResultSet, u16), DbError> {
     let mut kept: Option<ResultSet> = None;
     let mut affected = None;
     let mut moved = SchemaReport::Silent;
+    let mut warnings;
     loop {
         let first = p.read().await?;
         let status = match first.first() {
@@ -88,6 +89,7 @@ pub(crate) async fn read_result(
                 let ok = parse_ok::<CommonOkPacket>(&first, caps)?;
                 affected = Some(ok.affected_rows());
                 moved = moved.then(schema_change(&ok));
+                warnings = ok.warnings();
                 ok.status_flags()
             }
             Some(0xFF) => return Err(errors::from_err_packet(&first, caps, flavor)),
@@ -95,9 +97,10 @@ pub(crate) async fn read_result(
             _ => {
                 // The new result set replaces the one kept: no need to hold both.
                 drop(kept.take());
-                let (set, status, schema) = read_rows(p, &first, caps, flavor, extended_metadata, limits).await?;
+                let (set, status, schema, set_warnings) = read_rows(p, &first, caps, flavor, extended_metadata, limits).await?;
                 kept = Some(set);
                 moved = moved.then(schema);
+                warnings = set_warnings;
                 status
             }
         };
@@ -112,12 +115,12 @@ pub(crate) async fn read_result(
         (true, SchemaReport::Silent) => DatabaseAfter::Unchanged,
         (true, SchemaReport::Said(database)) => DatabaseAfter::Changed(database),
     };
-    Ok(result)
+    Ok((result, warnings))
 }
 
 /// One result set after its column count `first`: the column definitions, then the rows until
-/// the terminator, whose status says whether more results follow, and which may report a change
-/// of database ([`schema_change`]).
+/// the terminator, whose status says whether more results follow, which may report a change of
+/// database ([`schema_change`]), and which gives a warning count.
 async fn read_rows(
     p: &mut Packets,
     first: &[u8],
@@ -125,7 +128,7 @@ async fn read_rows(
     flavor: Flavor,
     extended_metadata: bool,
     limits: Limits,
-) -> Result<(ResultSet, StatusFlags, SchemaReport), DbError> {
+) -> Result<(ResultSet, StatusFlags, SchemaReport, u16), DbError> {
     let count = match lenenc_int(first) {
         Some((n, [])) if (1..=MAX_COLUMNS).contains(&n) => usize::try_from(n).map_err(|_| malformed("column count"))?,
         _ => return Err(malformed("column count")),
@@ -158,7 +161,7 @@ async fn read_rows(
             // A row starting 0xFE has a first value of 16 MiB or more, so it is that long too.
             Some(0xFE) if packet.len() < CHUNK => {
                 let end = if old_eof { parse_ok::<OldEofPacket>(&packet, caps)? } else { parse_ok::<ResultSetTerminator>(&packet, caps)? };
-                return Ok((set, end.status_flags(), schema_change(&end)));
+                return Ok((set, end.status_flags(), schema_change(&end), end.warnings()));
             }
             _ => {}
         }
@@ -379,7 +382,7 @@ pub(crate) mod tests {
     async fn a_result_says_where_the_statement_left_the_connection() {
         let read = |payload: Vec<u8>, tracks: bool| async move {
             let (mut p, _) = packets(frame(&payload, 0));
-            read_result(&mut p, TRACKING, Flavor::MySql, false, tracks, dbee_driver::QUERY_LIMITS).await.unwrap().database_after
+            read_result(&mut p, TRACKING, Flavor::MySql, false, tracks, dbee_driver::QUERY_LIMITS).await.unwrap().0.database_after
         };
         assert_eq!(read(ok_with_state(&schema_entry("many")), true).await, DatabaseAfter::Changed(Some("many".into())));
         assert_eq!(read(vec![0x00, 0, 0, 2, 0, 0, 0], true).await, DatabaseAfter::Unchanged);
@@ -421,7 +424,9 @@ pub(crate) mod tests {
 
     async fn read(input: Vec<u8>, limits: Limits) -> Result<ResultSet, DbError> {
         let (mut p, _) = packets(input);
-        read_result(&mut p, CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF, Flavor::MySql, false, false, limits).await
+        read_result(&mut p, CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF, Flavor::MySql, false, false, limits)
+            .await
+            .map(|(r, _)| r)
     }
 
     #[tokio::test]
@@ -449,7 +454,7 @@ pub(crate) mod tests {
         let small = Limits { max_rows: 100, max_bytes: 10 };
         let read = |input: Vec<u8>, limits: Limits| async move {
             let (mut p, _) = packets(input);
-            read_result(&mut p, caps, Flavor::MySql, false, false, limits).await
+            read_result(&mut p, caps, Flavor::MySql, false, false, limits).await.map(|(r, _)| r)
         };
         // The name's 6 bytes count with the cells': the second row does not fit in 10.
         let r = read(result_set("abcdef", &["xyz", "xyz"]), small).await.unwrap();

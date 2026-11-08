@@ -23,8 +23,11 @@ const CODE_LABEL: &str = "SQLite error";
 
 pub(crate) const PARAMETERS: &str = "the statement has parameters (such as ?), which dbee does not fill";
 
-/// The hint of `SQLITE_AUTH`, which only the authorizer of an isolated run's connection gives.
-const OWN_FILE_ONLY: &str = "This isolated run lets SQL open no other file, so ATTACH and VACUUM are refused.";
+/// The hint of `SQLITE_AUTH`, which only dbee's authorizer gives: on a read-only connection, or
+/// in an isolated run.
+const REFUSED_HERE: &str = "On a read-only connection SQL may not attach a file (VACUUM INTO attaches the one it writes) or turn query_only \
+                            off; turn Read-only off in the connection's settings to do so. In an isolated run SQL may open no other file, so \
+                            ATTACH and VACUUM are refused there.";
 
 /// `e`, from running the statement at byte `start` of `sql`, the text the caller ran; a syntax
 /// error's offset becomes a character position in `sql`.
@@ -59,7 +62,7 @@ fn from_code(extended: c_int, message: String, position: Option<u32>) -> DbError
             code_label: Some(CODE_LABEL),
             message,
             detail: None,
-            hint: (primary(extended) == ffi::SQLITE_AUTH).then(|| OWN_FILE_ONLY.to_owned()),
+            hint: (primary(extended) == ffi::SQLITE_AUTH).then(|| REFUSED_HERE.to_owned()),
             position,
             meaning: None,
         })),
@@ -109,10 +112,11 @@ mod tests {
         // Without SQLite's message, its text for the code.
         let bare = from_sqlite(rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_FULL), None));
         assert_eq!(bare.to_string(), "database or disk is full (SQLite error 13)");
-        // Refused by the authorizer of a run whose SQL may open no other file: the hint says why.
+        // Refused by dbee's authorizer, on a read-only connection or in an isolated run: the hint says why.
         let hint = |e: DbError| if let DbError::Server(s) = e { s.hint } else { None };
         let refused = hint(from_sqlite(failure(ffi::SQLITE_AUTH, "not authorized")));
-        assert_eq!(refused.as_deref(), Some("This isolated run lets SQL open no other file, so ATTACH and VACUUM are refused."));
+        assert_eq!(refused.as_deref(), Some(REFUSED_HERE));
+        assert!(REFUSED_HERE.contains("read-only") && REFUSED_HERE.contains("isolated run") && REFUSED_HERE.contains("ATTACH"));
         assert_eq!(hint(unique), None);
     }
 

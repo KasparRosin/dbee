@@ -97,6 +97,12 @@ pub(crate) struct Session {
     tracks_schema: bool,
     /// The address a direct connection reached; `None` through a tunnel.
     reached: Option<SocketAddr>,
+    /// The last command left warnings or an error, which `SHOW WARNINGS` lists until the next
+    /// statement.
+    pub(crate) conditions: bool,
+    /// The session variable that says whether transactions are read-only, as the server spells it
+    /// ([`Flavor::read_only_variables`]); the session setup finds it.
+    pub(crate) read_only_variable: &'static str,
 }
 
 impl Session {
@@ -135,15 +141,19 @@ impl Session {
         let used_server_key = auth::login(&mut packets, &greeting, who, caps, mariadb, config.is_some(), key).await?;
         packets.set_max(MAX_PAYLOAD);
         let extended_metadata = mariadb.contains(MariadbCapabilities::MARIADB_CLIENT_EXTENDED_METADATA);
+        let flavor = Flavor::from_version(&greeting.version);
+        let [read_only_variable, _] = flavor.read_only_variables();
         Ok(Session {
             packets,
             caps,
-            flavor: Flavor::from_version(&greeting.version),
+            flavor,
             extended_metadata,
             tls: config,
             used_server_key,
             tracks_schema: false,
             reached,
+            conditions: false,
+            read_only_variable,
         })
     }
 
@@ -157,7 +167,9 @@ impl Session {
         command.push(Command::COM_QUERY as u8);
         command.extend_from_slice(sql.as_bytes());
         self.packets.write(&command).await?;
-        result::read_result(&mut self.packets, self.caps, self.flavor, self.extended_metadata, self.tracks_schema, limits).await
+        let answer = result::read_result(&mut self.packets, self.caps, self.flavor, self.extended_metadata, self.tracks_schema, limits).await;
+        self.conditions = answer.as_ref().map_or(true, |(_, warnings)| *warnings > 0);
+        answer.map(|(result, _)| result)
     }
 
     /// Say goodbye (`COM_QUIT`); the server closes the connection.
@@ -296,6 +308,8 @@ pub async fn connect(t: Target<'_>) -> Result<MySqlConnection, DbError> {
         closed: AtomicBool::new(false),
         statements,
         canceller,
+        read_only: cfg.read_only,
+        check_due: AtomicBool::new(false),
     })
 }
 
@@ -374,6 +388,7 @@ async fn setup(session: &mut Session, read_only: bool, purpose: Purpose) -> Resu
     let connection_id =
         id.and_then(|id| id.parse::<u64>().ok()).ok_or_else(|| DbError::Other("the server sent an unreadable connection id".into()))?;
     let (variable, value) = read_only_state(session, flavor).await?;
+    session.read_only_variable = variable;
     let server_read_only = value == "1";
     if read_only && !server_read_only {
         return Err(DbError::Other(format!("read-only mode did not stick (@@session.{variable} is {value:?})")));
@@ -414,6 +429,12 @@ pub struct MySqlConnection {
     closed: AtomicBool,
     pub(crate) statements: Arc<Statements>,
     canceller: Canceller,
+    /// dbee made the session read-only, and reads the mode back after each statement
+    /// ([`crate::guard`]).
+    pub(crate) read_only: bool,
+    /// The mode is read before the next statement: the last one left warnings, which reading it
+    /// would clear, or a cancel stopped the read.
+    pub(crate) check_due: AtomicBool,
 }
 
 impl std::fmt::Debug for MySqlConnection {
@@ -485,6 +506,8 @@ mod tests {
             used_server_key: false,
             tracks_schema: true,
             reached: None,
+            conditions: false,
+            read_only_variable: "transaction_read_only",
         }
     }
 

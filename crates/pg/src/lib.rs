@@ -13,6 +13,7 @@ pub mod catalog;
 pub mod connect;
 pub mod driver;
 mod error;
+mod guard;
 pub mod query;
 pub mod tls;
 

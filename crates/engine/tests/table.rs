@@ -898,3 +898,50 @@ fn next_page_on_a_million_rows_is_fast() {
         assert!(median < Duration::from_millis(200), "median {median:?}");
     });
 }
+
+/// Unlinks, when dropped, the large objects made after it was.
+struct LargeObjectsAfter<'a>(&'a TestTarget, String);
+
+impl LargeObjectsAfter<'_> {
+    fn new(t: &TestTarget) -> LargeObjectsAfter<'_> {
+        LargeObjectsAfter(t, q(t, "SELECT coalesce(max(oid::bigint), 0) FROM pg_largeobject_metadata"))
+    }
+
+    fn made(&self) -> String {
+        q(self.0, &format!("SELECT count(*) FROM pg_largeobject_metadata WHERE oid::bigint > {}", self.1))
+    }
+}
+
+impl Drop for LargeObjectsAfter<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.sql(&format!("SELECT lo_unlink(oid) FROM pg_largeobject_metadata WHERE oid::bigint > {}", self.1));
+    }
+}
+
+/// A raw filter runs on the browse connection: on a read-only connection it can no more write a
+/// large object (which Postgres 14 allows in a read-only transaction) or turn read-only off than a
+/// query tab can. A `set_config` whose setting dbee cannot read is caught after the page loaded.
+#[test]
+fn a_raw_filter_on_a_read_only_connection_writes_nothing() {
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| t.kind().id() == "postgres") {
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_raw"));
+        let _drop = scratch_table(&t, &name, "CREATE TABLE {t} (id int PRIMARY KEY); INSERT INTO {t} VALUES (1)");
+        let objects = LargeObjectsAfter::new(&t);
+        let mut s = session();
+        let config = dbee_config::ConnectionConfig { read_only: true, ..config_for(&t) };
+        open(&mut s, json!({ "config": config, "password": pw() }));
+        open_table(&mut s, sc, &name);
+        let raw = |raw: &str| json!({ "raw": raw, "rawMode": true });
+        for refused in ["lo_from_bytea(0, 'dbee')::text <> ''", "set_config('default_transaction_read_only', 'off', false) IS NOT NULL"] {
+            let e = s.run_blocking("table.setFilters", raw(refused), T).err().unwrap_or_else(|| panic!("{}: ran {refused}", t.name()));
+            assert_eq!(e.code(), "readOnly", "{}: {refused}: {e}", t.name());
+        }
+        let flip = "set_config('default_transaction_re' || 'ad_only', 'off', false) IS NOT NULL";
+        let e = s.run_blocking("table.setFilters", raw(flip), T).expect_err("caught after the page");
+        assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
+        run(&mut s, "table.setFilters", raw("current_setting('default_transaction_read_only') = 'on'"));
+        assert_eq!(rows(&read(&mut s)), 1, "{}: the browse session is read-only again", t.name());
+        assert_eq!(objects.made(), "0", "{}: no large object", t.name());
+    }
+}

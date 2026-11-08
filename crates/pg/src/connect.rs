@@ -53,6 +53,11 @@ pub struct PgConnection {
     /// Set when the connection task ended, or an error showed the session is gone.
     closed: Arc<AtomicBool>,
     canceller: Canceller,
+    /// dbee made the session read-only, and reads the mode back after each statement
+    /// ([`crate::guard`]).
+    pub(crate) read_only: bool,
+    /// The mode could not be read after the last statement; it is read before the next one.
+    pub(crate) check_due: AtomicBool,
 }
 
 impl std::fmt::Debug for PgConnection {
@@ -346,7 +351,7 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
     let info = setup(&client, cfg.read_only).await?;
     let route = Route { host: cfg.host.clone(), way };
     let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), route, on_its_way: Arc::default() };
-    Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller })
+    Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller, read_only: cfg.read_only, check_due: AtomicBool::new(false) })
 }
 
 /// Connects to the addresses `host` gives, in turn, as tokio-postgres does (TLS still checks

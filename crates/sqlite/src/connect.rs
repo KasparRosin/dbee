@@ -30,11 +30,12 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// keeps it from temporary tables too. A read of `sqlite_schema` turns a file that is not a
 /// database, or one whose schema is damaged, into [`DbError::Connect`] naming the file; damage
 /// elsewhere shows when it is read. A file the system lets dbee read only opens read-only, and says
-/// so. With `t.allowed_dirs` (an isolated
-/// run), the file must lie in one of those folders ([`dbee_driver::allowed_file`]), and the path
-/// that check resolved is the one opened; SQL may then open no other file: every `ATTACH` is
-/// refused, and with it `VACUUM`, which attaches the file it writes, and the pragmas that move
-/// SQLite's temporary files. All of it within [`CONNECT_TIMEOUT`].
+/// so; SQL on it may attach no file (`VACUUM INTO` writes one) nor turn `query_only` off. With
+/// `t.allowed_dirs` (an isolated run), the file must lie in one of those folders
+/// ([`dbee_driver::allowed_file`]), and the path that check resolved is the one opened; SQL may
+/// then open no other file: every `ATTACH` is refused, and with it `VACUUM`, which attaches the
+/// file it writes, and the pragmas that move SQLite's temporary files. All of it within
+/// [`CONNECT_TIMEOUT`].
 /// The file is opened by its absolute path, so a name that starts with `file:` is a file name,
 /// never a URI.
 pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
@@ -91,16 +92,6 @@ fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>
         Some(ErrorCode::DatabaseCorrupt) => DbError::Connect(format!("{shown} is damaged: {e}")),
         _ => DbError::Connect(format!("{shown}: {e}")),
     };
-    if allowed.is_some() {
-        conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
-            AuthAction::Attach { .. } => Authorization::Deny,
-            AuthAction::Pragma { pragma_name, pragma_value: Some(_) } if FOLDER_PRAGMAS.iter().any(|p| pragma_name.eq_ignore_ascii_case(p)) => {
-                Authorization::Deny
-            }
-            _ => Authorization::Allow,
-        }))
-        .map_err(setup)?;
-    }
     conn.execute_batch("PRAGMA foreign_keys = ON").map_err(setup)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(setup)?;
     conn.query_row("SELECT count(*) FROM main.sqlite_schema", [], |_| Ok(())).map_err(setup)?;
@@ -108,8 +99,28 @@ fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>
     if read_only {
         conn.execute_batch("PRAGMA query_only = ON").map_err(setup)?;
     }
+    let isolated = allowed.is_some();
+    if isolated || read_only {
+        conn.authorizer(Some(move |ctx: AuthContext<'_>| authorize(&ctx.action, isolated, read_only))).map_err(setup)?;
+    }
     let handle = conn.get_interrupt_handle();
     Ok((conn, handle, read_only))
+}
+
+/// What SQL may do on a connection: in an isolated run it opens no other file (no `ATTACH`, and so
+/// no `VACUUM`, which attaches the file it writes) and moves none of SQLite's own; on a read-only
+/// one it attaches no file (`VACUUM INTO` writes one wherever it names) and keeps `query_only` on.
+fn authorize(action: &AuthAction<'_>, isolated: bool, read_only: bool) -> Authorization {
+    match *action {
+        AuthAction::Attach { .. } => Authorization::Deny,
+        AuthAction::Pragma { pragma_name, pragma_value: Some(_) }
+            if (isolated && FOLDER_PRAGMAS.iter().any(|p| pragma_name.eq_ignore_ascii_case(p)))
+                || (read_only && pragma_name.eq_ignore_ascii_case("query_only")) =>
+        {
+            Authorization::Deny
+        }
+        _ => Authorization::Allow,
+    }
 }
 
 /// An open file. Every operation holds the connection's turn for its whole run, so operations

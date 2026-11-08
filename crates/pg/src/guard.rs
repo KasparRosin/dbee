@@ -1,0 +1,122 @@
+//! What runs around each statement on a connection: the statements dbee does not send
+//! ([`Dialect::refusal`]), the check that `standard_conforming_strings` is still on before a
+//! statement whose `'…'` strings hold a backslash, and, on a connection dbee made read-only, the
+//! check after each statement that it still is.
+//!
+//! The read-only check reads both settings with `SHOW`, which takes no snapshot, so a transaction
+//! the user began can still set its isolation level after it. When the check cannot run (the
+//! transaction failed, whose setting changes end with it, or a cancel stopped the check) it runs
+//! before the next statement instead.
+
+use std::sync::atomic::Ordering;
+
+use dbee_driver::{DbError, Meaning};
+use dbee_sql::Dialect;
+use tokio_postgres::SimpleQueryMessage;
+
+use crate::PgConnection;
+
+/// Both `on` while the session and its transaction are read-only.
+const READ_MODE: &str = "SHOW default_transaction_read_only; SHOW transaction_read_only";
+
+const TURNED_OFF: &str = "the statement turned read-only off, so dbee rolled back the open transaction and turned read-only on again. To write, turn \
+                          Read-only off in the connection's settings.";
+
+const TURNED_OFF_BEFORE: &str = "an earlier statement turned read-only off, so dbee rolled back the open transaction, turned read-only on again \
+                                 and did not run this statement. Run it again; to write, turn Read-only off in the connection's settings.";
+
+const NOT_RESTORED: &str = "read-only was turned off and dbee could not turn it on again, so it closed the connection. Reconnect to go on.";
+
+const CONFORMING_OFF: &str = "standard_conforming_strings was off in this session, so the server would read the backslashes in this statement's \
+                              strings differently from how dbee shows them. dbee turned it on again and did not run the statement; run it again.";
+
+/// What reading the mode back found.
+enum Mode {
+    ReadOnly,
+    Changed,
+    /// Not readable now; read it before the next statement.
+    Later,
+    Failed(DbError),
+}
+
+/// Before a statement runs, with the connection's lock held.
+pub(crate) async fn before(conn: &PgConnection, sql: &str) -> Result<(), DbError> {
+    if let Some(refused) = Dialect::Postgres.refusal(sql, conn.read_only) {
+        return Err(refused.into());
+    }
+    if conn.read_only && conn.check_due.load(Ordering::Acquire) {
+        match mode(conn).await {
+            Mode::ReadOnly => conn.check_due.store(false, Ordering::Release),
+            Mode::Changed => return Err(restore(conn, TURNED_OFF_BEFORE).await),
+            Mode::Later => {}
+            Mode::Failed(e) => return Err(e),
+        }
+    }
+    if Dialect::Postgres.backslash_in_plain_string(sql) && !conforming(conn).await? {
+        conn.client().batch_execute("SET standard_conforming_strings = on").await.map_err(|e| conn.error(&e))?;
+        return Err(DbError::Other(CONFORMING_OFF.into()));
+    }
+    Ok(())
+}
+
+/// After a statement ran, with the lock still held: on a read-only connection, the mode read back.
+pub(crate) async fn after<T>(conn: &PgConnection, ran: Result<T, DbError>) -> Result<T, DbError> {
+    if !conn.read_only || ran.as_ref().err() == Some(&DbError::ConnectionLost) {
+        return ran;
+    }
+    match mode(conn).await {
+        Mode::ReadOnly => {
+            conn.check_due.store(false, Ordering::Release);
+            ran
+        }
+        Mode::Changed => Err(restore(conn, TURNED_OFF).await),
+        Mode::Later => {
+            conn.check_due.store(true, Ordering::Release);
+            ran
+        }
+        Mode::Failed(e) => Err(e),
+    }
+}
+
+async fn mode(conn: &PgConnection) -> Mode {
+    match conn.client().simple_query(READ_MODE).await {
+        Ok(messages) => {
+            let on: Vec<bool> = messages
+                .iter()
+                .filter_map(|m| match m {
+                    SimpleQueryMessage::Row(row) => Some(row.get(0) == Some("on")),
+                    _ => None,
+                })
+                .collect();
+            if on == [true, true] { Mode::ReadOnly } else { Mode::Changed }
+        }
+        Err(e) => match conn.error(&e) {
+            DbError::Cancelled => Mode::Later,
+            DbError::Server(s) if s.meaning == Some(Meaning::TransactionAborted) => Mode::Later,
+            other => Mode::Failed(other),
+        },
+    }
+}
+
+/// Rolls back what is open and turns read-only on again; the error to report, `said` when it
+/// worked. When it did not, the connection is closed.
+async fn restore(conn: &PgConnection, said: &str) -> DbError {
+    let client = conn.client();
+    let set = async {
+        client.batch_execute("ROLLBACK").await?;
+        client.batch_execute("SET default_transaction_read_only = on").await
+    };
+    if set.await.is_ok() && matches!(mode(conn).await, Mode::ReadOnly) {
+        conn.check_due.store(false, Ordering::Release);
+        log::info!("pg: a statement turned read-only off; turned it on again");
+        return DbError::ReadOnly { message: said.into() };
+    }
+    conn.mark_closed();
+    DbError::Other(NOT_RESTORED.into())
+}
+
+/// The session still has `standard_conforming_strings` on.
+async fn conforming(conn: &PgConnection) -> Result<bool, DbError> {
+    let messages = conn.client().simple_query("SHOW standard_conforming_strings").await.map_err(|e| conn.error(&e))?;
+    Ok(messages.iter().any(|m| matches!(m, SimpleQueryMessage::Row(row) if row.get(0) == Some("on"))))
+}
