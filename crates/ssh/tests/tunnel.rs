@@ -138,10 +138,18 @@ async fn a_key_of_another_type_than_the_recorded_one_refuses() {
     let line = format!("{} ecdsa-sha2-nistp256 {ECDSA_KEY}\n", host_entry(db));
     let home = temp_home(Some(&db.keys.plain), Some(&line));
     let c = cfg(db, SshAuth::Key { path: None });
-    let want = SshError::HostKeyOtherType { host: host_entry(db), key_type: "ssh-ed25519".into(), recorded: vec!["ecdsa-sha2-nistp256".into()] };
+    let want = SshError::HostKeyOtherType {
+        host: host_entry(db),
+        key_type: "ssh-ed25519".into(),
+        recorded: vec!["ecdsa-sha2-nistp256".into()],
+        lines: vec![1],
+    };
     let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), None).await.unwrap_err();
     assert_eq!(e, want);
-    assert!(e.to_string().contains("interception") && !e.to_string().contains("not known yet"), "{e}");
+    assert!(
+        e.to_string().contains("interception") && e.to_string().contains("known_hosts line 1") && !e.to_string().contains("not known yet"),
+        "{e}"
+    );
     // Trusting the new key's fingerprint is not an answer, and nothing is learned.
     let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), Some(&server_fingerprint(db))).await.unwrap_err();
     assert_eq!(e, want);
@@ -412,7 +420,12 @@ fn errors_read_plainly() {
         SshError::AuthFailed { tried: vec!["agent".into(), "key /k/id".into()] },
         SshError::KnownHosts("bad line".into()),
         SshError::Channel("prohibited".into()),
-        SshError::HostKeyOtherType { host: "h".into(), key_type: "ssh-ed25519".into(), recorded: vec!["ecdsa-sha2-nistp256".into()] },
+        SshError::HostKeyOtherType {
+            host: "h".into(),
+            key_type: "ssh-ed25519".into(),
+            recorded: vec!["ecdsa-sha2-nistp256".into()],
+            lines: vec![1, 4],
+        },
         SshError::HostKeyRevoked { host: "h".into(), line: 3 },
     ];
     for e in &all {
@@ -423,6 +436,8 @@ fn errors_read_plainly() {
     assert!(all[2].to_string().contains("line 7"));
     assert!(all[3].to_string().contains("/k/id"));
     assert!(all[7].to_string().contains("agent, key /k/id"));
+    assert!(all[10].to_string().contains("known_hosts lines 1, 4") && all[10].to_string().contains("remove the old lines"));
+    assert!(all[11].to_string().contains("line 3") && all[11].to_string().contains("Ask the server's administrator for its current key"));
     let _: &dyn std::error::Error = &all[0];
 }
 

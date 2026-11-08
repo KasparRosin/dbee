@@ -46,7 +46,7 @@ pub(crate) enum Verdict {
     Changed { line: usize },
     /// Keys of other types only are recorded for this host: what a man in the middle that
     /// cannot show the recorded key looks like. Never overridable.
-    OtherType { key_type: String, recorded: Vec<String> },
+    OtherType { key_type: String, recorded: Vec<String>, lines: Vec<usize> },
     /// This key is marked `@revoked` for this host at this 1-based line.
     Revoked { line: usize },
     /// `known_hosts` exists but could not be read, or a line for this host is malformed.
@@ -210,7 +210,7 @@ pub(crate) fn check(host: &str, port: u16, key: &PublicKey, file: Option<&Path>,
                 types.push(t);
             }
         }
-        return Verdict::OtherType { key_type: key_type(key), recorded: types };
+        return Verdict::OtherType { key_type: key_type(key), recorded: types, lines: keys.iter().map(|e| e.line).collect() };
     }
     let fingerprint = fingerprint(key);
     if trust != Some(fingerprint.as_str()) {
@@ -314,7 +314,7 @@ mod tests {
         // A recorded key of another type only: refused, whatever `trust` says, and nothing is learned.
         let other = format!("[h]:2222 ecdsa-sha2-nistp256 {ECDSA}\n");
         std::fs::write(&file, &other).unwrap();
-        let refused = Verdict::OtherType { key_type: "ssh-ed25519".into(), recorded: vec!["ecdsa-sha2-nistp256".into()] };
+        let refused = Verdict::OtherType { key_type: "ssh-ed25519".into(), recorded: vec!["ecdsa-sha2-nistp256".into()], lines: vec![1] };
         assert_eq!(check("h", 2222, &k1, Some(&file), None), refused);
         assert_eq!(check("h", 2222, &k1, Some(&file), Some(K1_FP)), refused);
         assert!(!refused.accepts());
