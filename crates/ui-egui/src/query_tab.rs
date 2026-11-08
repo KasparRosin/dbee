@@ -200,7 +200,7 @@ fn rows_text(result: &ResultSet) -> String {
 fn cap_hover() -> String {
     let limits = dbee_engine::cmd::query::RUN_LIMITS;
     format!(
-        "A run keeps at most {} rows of each result, and {} MiB of cell text for all its results together.",
+        "A run keeps at most {} rows of each result, and {} MiB of memory for all its results together.",
         thousands(limits.max_rows as u64),
         limits.max_bytes / (1024 * 1024)
     )

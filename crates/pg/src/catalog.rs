@@ -16,14 +16,15 @@
 //!
 //! Limits: a catalog must never be truncated, so the queries run with `CATALOG_LIMITS`, which no
 //! real catalog reaches, instead of the 10,000-row query cap: a database with a few hundred
-//! tables already has more columns than that.
+//! tables already has more columns than that. Its bytes are shared by every query of one read
+//! ([`CatalogBudget`]): the read holds all their results.
 
 use dbee_config::ConnectionConfig;
 use dbee_core::cell::Cell;
 use dbee_core::cell::{ResultSet, TypeClass};
 use dbee_core::schema::{Catalog, ColumnInfo, Generated, Operators, RelKind, TableRef, TypeOperators};
-use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
-use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError, Target};
+use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, text};
+use dbee_driver::{CatalogBudget, CatalogBuilder, DbError, Target};
 
 use crate::connect::{self, PgConnection};
 use crate::query;
@@ -175,9 +176,10 @@ fn estimate(s: &str) -> Option<u64> {
 /// after it) is searched, until the implicit transaction of the query's message ends.
 const CATALOG_PATH: &str = "SET LOCAL search_path TO pg_catalog, pg_temp; ";
 
-/// Runs the catalog query `sql` with [`CATALOG_PATH`]; a cut result is an error.
-async fn run(conn: &PgConnection, sql: &str) -> Result<ResultSet, DbError> {
-    require_complete(query::run_untyped(conn, &format!("{CATALOG_PATH}{sql}"), CATALOG_LIMITS).await?)
+/// Runs the catalog query `sql` with [`CATALOG_PATH`], within what `budget` has left; a cut
+/// result is an error.
+async fn run(conn: &PgConnection, budget: &mut CatalogBudget, sql: &str) -> Result<ResultSet, DbError> {
+    budget.take(query::run_untyped(conn, &format!("{CATALOG_PATH}{sql}"), budget.limits()).await?)
 }
 
 /// The databases a connection can open: templates and those that take no connections left out.
@@ -207,7 +209,7 @@ pub async fn list_connection(target: Target<'_>) -> Result<PgConnection, DbError
 
 /// The server's databases, by name.
 pub async fn list_databases(conn: &PgConnection) -> Result<Vec<String>, DbError> {
-    run(conn, DATABASES_SQL).await?.rows.iter().map(|row| owned(row, 0, "database name")).collect()
+    run(conn, &mut CatalogBudget::default(), DATABASES_SQL).await?.rows.iter().map(|row| owned(row, 0, "database name")).collect()
 }
 
 /// Load every schema, relation, column and key. User schemas come first by name, then
@@ -224,9 +226,10 @@ pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, DbError> {
 
 /// The catalog queries' rows, not yet built into a [`Catalog`].
 pub async fn catalog_rows(conn: &PgConnection) -> Result<CatalogBuilder, DbError> {
-    let relations = run(conn, RELATIONS_SQL).await?;
-    let columns = run(conn, COLUMNS_SQL).await?;
-    let constraints = run(conn, CONSTRAINTS_SQL).await?;
+    let budget = &mut CatalogBudget::default();
+    let relations = run(conn, budget, RELATIONS_SQL).await?;
+    let columns = run(conn, budget, COLUMNS_SQL).await?;
+    let constraints = run(conn, budget, CONSTRAINTS_SQL).await?;
     let mut catalog = CatalogBuilder::new(SYSTEM_SCHEMAS);
 
     for row in &relations.rows {

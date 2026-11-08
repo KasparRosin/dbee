@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use dbee_config::{ConnectionConfig, DbKind};
 use dbee_core::{ResultSet, TypeClass};
-use dbee_driver::{DbError, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, Target};
+use dbee_driver::{DbError, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, ROW_COST, Target, cell_cost, column_cost};
 use dbee_sqlite::{SqliteConnection, connect};
 use dbee_testkit::{Kind, TestTarget, repo_root, targets_of, unique};
 
@@ -140,10 +140,13 @@ async fn text_that_is_not_utf8_is_replaced_and_counted() {
     // SQLite keeps a TEXT's bytes unchecked.
     let r = ok(&c, "SELECT CAST(X'61FF62' AS TEXT) AS e, typeof(CAST(X'61FF62' AS TEXT)) AS t", QUERY_LIMITS).await;
     assert_eq!(r.rows[0], [some("a\u{FFFD}b"), some("text")]);
-    // The replacement's 3 bytes count: with the name's 1 byte, 6 fit and 5 do not.
-    let sql = "SELECT CAST(X'61FF62' AS TEXT) AS e";
-    let fits = ok(&c, sql, Limits { max_rows: 10, max_bytes: 6 }).await;
-    let cut = ok(&c, sql, Limits { max_rows: 10, max_bytes: 5 }).await;
+    // The replacements' 3 bytes each count: 20 of them hold 60 bytes, where the file holds 20.
+    let sql = "SELECT CAST(X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' AS TEXT) AS e";
+    let whole = ok(&c, sql, QUERY_LIMITS).await;
+    assert_eq!(whole.rows[0][0].as_ref().map(String::len), Some(60));
+    let held = column_cost(&whole.columns[0]) + ROW_COST + cell_cost(Some(60));
+    let fits = ok(&c, sql, Limits { max_rows: 10, max_bytes: held }).await;
+    let cut = ok(&c, sql, Limits { max_rows: 10, max_bytes: held - 1 }).await;
     assert_eq!((fits.rows.len(), fits.complete, cut.rows.len(), cut.complete, cut.rows_seen), (1, true, 0, false, 1));
 }
 
@@ -203,9 +206,24 @@ async fn byte_cap_stops_collecting() {
     let r = ok(&c, sql, Limits { max_rows: 1000, max_bytes: 1 << 20 }).await;
     assert_eq!((r.rows.len(), r.rows_seen, r.complete), (10, 100, false));
     // A blob counts as its literal: 1000 bytes are 2003 characters.
-    let r = ok(&c, "SELECT zeroblob(1000) AS b FROM big_rows LIMIT 10", Limits { max_rows: 1000, max_bytes: 1 + 3 * 2003 }).await;
+    let sql = "SELECT zeroblob(1000) AS b FROM big_rows LIMIT 10";
+    let column = ok(&c, sql, Limits { max_rows: 0, ..QUERY_LIMITS }).await.columns.remove(0);
+    let r = ok(&c, sql, Limits { max_rows: 1000, max_bytes: column_cost(&column) + 3 * (ROW_COST + cell_cost(Some(2003))) }).await;
     assert_eq!((r.rows.len(), r.rows_seen, r.complete), (3, 10, false));
     assert_eq!(r.rows[0][0].as_ref().map(String::len), Some(2003));
+}
+
+/// M3: a NULL cell holds its slot, so the cap counts it: a result of wide NULL rows stops at the
+/// cap instead of holding every row.
+#[tokio::test]
+async fn null_cells_count_against_the_cap() {
+    let (_file, c) = Fresh::new().await;
+    let nulls = vec!["NULL"; 100].join(", ");
+    let sql = format!("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 100) SELECT {nulls} FROM r");
+    let limits = Limits { max_rows: 1000, max_bytes: 24_000 };
+    let r = ok(&c, &sql, limits).await;
+    assert_eq!((r.rows_seen, r.complete), (100, false), "{} rows kept", r.rows.len());
+    assert!(dbee_driver::result_cost(&r) <= limits.max_bytes);
 }
 
 #[tokio::test]

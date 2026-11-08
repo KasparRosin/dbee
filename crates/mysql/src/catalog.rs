@@ -8,15 +8,16 @@
 //! written with the MySQL dialect's literal writer. Results are text as the server prints it:
 //! flags `YES`/`NO`, numbers in decimal.
 //!
-//! Limits: a catalog must never be truncated, so the queries run with `CATALOG_LIMITS`.
+//! Limits: a catalog must never be truncated, so the queries run with `CATALOG_LIMITS`, its bytes
+//! shared by every query of one read ([`CatalogBudget`]): the read holds all their results.
 
 use std::collections::{HashMap, HashSet};
 
 use dbee_config::ConnectionConfig;
 use dbee_core::cell::{Cell, ResultSet};
 use dbee_core::schema::{Catalog, ColumnInfo, Generated, RelKind, TableRef};
-use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, require_complete, text};
-use dbee_driver::{CATALOG_LIMITS, CatalogBuilder, DbError, Target};
+use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, text};
+use dbee_driver::{CatalogBudget, CatalogBuilder, DbError, Target};
 use dbee_sql::Dialect;
 
 use crate::connect::{self, MySqlConnection};
@@ -167,13 +168,14 @@ pub async fn list_connection(target: Target<'_>) -> Result<MySqlConnection, DbEr
 }
 
 impl MySqlConnection {
-    async fn catalog_query(&self, sql: &str) -> Result<ResultSet, DbError> {
-        require_complete(self.run_untyped(sql, CATALOG_LIMITS).await?)
+    /// A catalog query's result, within what `budget` has left; a cut one is an error.
+    async fn catalog_query(&self, budget: &mut CatalogBudget, sql: &str) -> Result<ResultSet, DbError> {
+        budget.take(self.run_untyped(sql, budget.limits()).await?)
     }
 
     /// The databases the server shows the user, its own last.
     pub async fn list_databases(&self) -> Result<Vec<String>, DbError> {
-        let listed = self.catalog_query("SHOW DATABASES").await?;
+        let listed = self.catalog_query(&mut CatalogBudget::default(), "SHOW DATABASES").await?;
         Ok(system_last(listed.rows.iter().map(|row| owned(row, 0, "database name")).collect::<Result<_, _>>()?))
     }
 
@@ -198,14 +200,16 @@ impl MySqlConnection {
     async fn rows(&self) -> Result<(CatalogBuilder, Option<String>), DbError> {
         let database = self.database.as_deref();
         let flavor = self.flavor();
-        let schemata = self.catalog_query(&SCHEMATA.sql(database)?).await?;
-        let tables = self.catalog_query(&TABLES.sql(database)?).await?;
-        let columns = self.catalog_query(&COLUMNS.sql(database)?).await?;
-        let keys = self.catalog_query(&KEYS.sql(database)?).await?;
-        let key_columns = self.catalog_query(&KEY_COLUMNS.sql(database)?).await?;
-        let functional = self.catalog_query(&FUNCTIONAL_KEYS.sql(database)?).await?;
-        let engines = self.catalog_query(ENGINES_SQL).await?;
-        let json_checks = if flavor.json_is_checked_text() { self.catalog_query(&JSON_CHECKS.sql(database)?).await?.rows } else { Vec::new() };
+        let budget = &mut CatalogBudget::default();
+        let schemata = self.catalog_query(budget, &SCHEMATA.sql(database)?).await?;
+        let tables = self.catalog_query(budget, &TABLES.sql(database)?).await?;
+        let columns = self.catalog_query(budget, &COLUMNS.sql(database)?).await?;
+        let keys = self.catalog_query(budget, &KEYS.sql(database)?).await?;
+        let key_columns = self.catalog_query(budget, &KEY_COLUMNS.sql(database)?).await?;
+        let functional = self.catalog_query(budget, &FUNCTIONAL_KEYS.sql(database)?).await?;
+        let engines = self.catalog_query(budget, ENGINES_SQL).await?;
+        let json_checks =
+            if flavor.json_is_checked_text() { self.catalog_query(budget, &JSON_CHECKS.sql(database)?).await?.rows } else { Vec::new() };
 
         let mut catalog = CatalogBuilder::new(SYSTEM_SCHEMAS);
         let listed = schemata.rows.iter().map(|row| owned(row, 0, "database name")).collect::<Result<Vec<_>, _>>()?;

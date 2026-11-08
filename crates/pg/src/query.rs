@@ -2,12 +2,15 @@
 //! Postgres prints them.
 
 use dbee_core::{Cell, Column, ResultSet, TypeClass};
-use dbee_driver::{DbError, Limits, QUERY_LIMITS};
+use dbee_driver::{DbError, Limits, QUERY_LIMITS, ROW_COST, cell_cost, column_cost};
 use futures_util::StreamExt;
 use tokio_postgres::SimpleQueryMessage;
 use tokio_postgres::types::{Kind, Type};
 
 use crate::{PgConnection, guard};
+
+/// The most columns a Postgres query returns ("target lists can have at most 1664 entries").
+pub const MAX_COLUMNS: usize = 1664;
 
 /// Run `sql` (one or more statements) as one simple-query message, holding the connection lock.
 ///
@@ -15,8 +18,9 @@ use crate::{PgConnection, guard};
 /// `rows_affected` is the count of the last `CommandComplete`. The first failing statement ends
 /// the run with its error. Rows past `limits` are still read (so the connection stays in sync)
 /// and counted in `rows_seen`, but not kept, and `complete` becomes false. The byte cap counts
-/// the cell text kept. What dbee refuses is not sent, and a read-only connection's mode is read
-/// back after it ([`crate::guard`]).
+/// what the columns and the rows kept hold ([`dbee_driver::cell_cost`]); a result of more than
+/// [`MAX_COLUMNS`] columns is refused before its rows. What dbee refuses is not sent, and a
+/// read-only connection's mode is read back after it ([`crate::guard`]).
 pub async fn run_untyped(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
     let _guard = conn.lock().await?;
     guard::before(conn, sql).await?;
@@ -34,29 +38,35 @@ pub(crate) async fn run_locked(conn: &PgConnection, sql: &str, limits: Limits) -
     while let Some(message) = stream.next().await {
         match message.map_err(|e| conn.error(&e))? {
             SimpleQueryMessage::RowDescription(columns) => {
+                if columns.len() > MAX_COLUMNS {
+                    return Err(DbError::Other(format!(
+                        "the server sent a result of {} columns, more than the {MAX_COLUMNS} a Postgres query can return",
+                        columns.len()
+                    )));
+                }
                 result.columns = columns.iter().map(|c| Column::untyped(c.name())).collect();
                 result.rows.clear();
                 result.rows_seen = 0;
                 result.complete = true;
-                bytes = 0;
+                bytes = result.columns.iter().map(column_cost).fold(0, usize::saturating_add);
             }
             SimpleQueryMessage::Row(row) => {
                 result.rows_seen = result.rows_seen.saturating_add(1);
                 if !result.complete {
                     continue;
                 }
-                let mut cells: Vec<Cell> = Vec::with_capacity(row.len());
-                let mut row_bytes: usize = 0;
+                let not_utf8 = |_| DbError::Other("the server sent a value that is not valid UTF-8".into());
+                let mut row_bytes = ROW_COST;
                 for i in 0..row.len() {
-                    let value = row.try_get(i).map_err(|_| DbError::Other("the server sent a value that is not valid UTF-8".into()))?;
-                    row_bytes = row_bytes.saturating_add(value.map_or(0, str::len));
-                    cells.push(value.map(str::to_owned));
+                    row_bytes = row_bytes.saturating_add(cell_cost(row.try_get(i).map_err(not_utf8)?.map(str::len)));
                 }
                 if result.rows.len() >= limits.max_rows || bytes.saturating_add(row_bytes) > limits.max_bytes {
                     result.complete = false;
                     continue;
                 }
-                bytes += row_bytes;
+                bytes = bytes.saturating_add(row_bytes);
+                let cells =
+                    (0..row.len()).map(|i| row.try_get(i).map(|v| v.map(str::to_owned)).map_err(not_utf8)).collect::<Result<Vec<Cell>, _>>()?;
                 result.rows.push(cells);
             }
             SimpleQueryMessage::CommandComplete(n) => result.rows_affected = Some(n),

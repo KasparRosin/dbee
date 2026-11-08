@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use dbee_core::{Catalog, Cell, ColumnInfo, ForeignKey, RelKind, ResultSet, SchemaInfo, TableInfo, TableRef};
 
-use crate::DbError;
+use crate::{CATALOG_LIMITS, DbError, Limits, result_cost};
 
 /// A catalog row that is not what the query promised.
 pub fn bad(what: &str) -> DbError {
@@ -34,6 +34,34 @@ pub fn number<T: FromStr>(row: &[Cell], i: usize, what: &str) -> Result<T, DbErr
 /// A catalog result that was cut by the limits is an error: a partial catalog would be wrong.
 pub fn require_complete(r: ResultSet) -> Result<ResultSet, DbError> {
     if r.complete { Ok(r) } else { Err(DbError::Other(format!("catalog too large: stopped after {} rows", r.rows_seen))) }
+}
+
+/// What one catalog read may still hold: its queries' results are held together until the
+/// catalog is built, so [`CATALOG_LIMITS`]'s bytes are for all of them, and each query gets what
+/// the ones before left.
+#[derive(Debug, Clone)]
+pub struct CatalogBudget {
+    left: usize,
+}
+
+impl Default for CatalogBudget {
+    fn default() -> CatalogBudget {
+        CatalogBudget { left: CATALOG_LIMITS.max_bytes }
+    }
+}
+
+impl CatalogBudget {
+    /// The limits of the next query.
+    pub fn limits(&self) -> Limits {
+        Limits { max_rows: CATALOG_LIMITS.max_rows, max_bytes: self.left }
+    }
+
+    /// `r`, which must be complete ([`require_complete`]), taken out of the budget.
+    pub fn take(&mut self, r: ResultSet) -> Result<ResultSet, DbError> {
+        let r = require_complete(r)?;
+        self.left = self.left.saturating_sub(result_cost(&r));
+        Ok(r)
+    }
 }
 
 /// A table, view or other relation.
@@ -422,5 +450,19 @@ mod tests {
         let err = require_complete(cut).err();
         assert!(err.is_some_and(|e| e.to_string().contains("catalog too large")));
         assert!(require_complete(ResultSet { complete: true, ..ResultSet::default() }).is_ok());
+    }
+
+    /// One read's queries share the catalog's bytes: each gets what the ones before left.
+    #[test]
+    fn a_catalog_read_holds_its_queries_within_one_budget() {
+        let mut budget = CatalogBudget::default();
+        assert_eq!(budget.limits(), CATALOG_LIMITS);
+        let r = ResultSet { rows: vec![vec![Some("x".repeat(1000)), None]; 3], complete: true, ..ResultSet::default() };
+        let held = result_cost(&r);
+        assert_eq!(budget.take(r).map(|r| r.rows.len()), Ok(3));
+        assert_eq!(budget.limits().max_bytes, CATALOG_LIMITS.max_bytes - held);
+        assert_eq!(budget.limits().max_rows, CATALOG_LIMITS.max_rows);
+        let cut = budget.take(ResultSet { complete: false, ..ResultSet::default() });
+        assert!(cut.is_err_and(|e| e.to_string().contains("catalog too large")));
     }
 }

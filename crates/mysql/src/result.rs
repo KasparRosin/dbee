@@ -1,7 +1,7 @@
 //! The server's answer to a command: OK and ERR packets, and result sets with their rows.
 
 use dbee_core::{DatabaseAfter, ResultSet};
-use dbee_driver::{DbError, Limits};
+use dbee_driver::{DbError, Limits, ROW_COST, cell_cost, column_cost};
 use mysql_common::constants::{CapabilityFlags, SessionStateType, StatusFlags};
 use mysql_common::io::ParseBuf;
 use mysql_common::packets::session_state_change::SessionStateChange;
@@ -13,7 +13,8 @@ use crate::flavor::Flavor;
 use crate::values::{self, CellText};
 use crate::wire::{CHUNK, Packets, lenenc_int, malformed, size_text};
 
-/// More columns than any table can have (MySQL's limit is 4096).
+/// The most columns dbee reads in one result. A table has at most 4096, but a `SELECT` can return
+/// more (70,000 measured on every test server).
 const MAX_COLUMNS: u64 = 65_535;
 
 /// The largest column definition dbee reads: names of up to 64 characters, far under this.
@@ -204,16 +205,17 @@ async fn read_rows(
         _ => return Err(malformed("column count")),
     };
     let mut columns = Vec::new();
-    // The column names count against the byte cap, with the cells.
+    // The columns count against the byte cap, with the rows.
     let mut bytes: usize = 0;
     for _ in 0..count {
         let def = p.read_up_to(MAX_COLUMN_DEFINITION, "column definition").await?;
         let column = parse_column(&def, extended_metadata)?;
-        bytes = bytes.saturating_add(column.name.len());
+        let column = values::column(column.name, &column.facts, column.type_name.as_deref());
+        bytes = bytes.saturating_add(column_cost(&column));
         if bytes > limits.max_bytes {
-            return Err(DbError::Other(format!("the server sent column names larger than {}", size_text(limits.max_bytes))));
+            return Err(DbError::Other(format!("the server sent columns larger than {}", size_text(limits.max_bytes))));
         }
-        columns.push(values::column(column.name, &column.facts, column.type_name.as_deref()));
+        columns.push(column);
     }
     let old_eof = !caps.contains(CapabilityFlags::CLIENT_DEPRECATE_EOF);
     if old_eof {
@@ -246,7 +248,7 @@ async fn read_rows(
         let row = parse_row(&packet, count)?;
         let cells: Vec<Option<CellText<'_>>> =
             row.into_iter().zip(&set.columns).map(|(value, column)| value.map(|v| CellText::of(column.class, v))).collect();
-        let row_bytes = cells.iter().fold(0usize, |sum, cell| sum.saturating_add(cell.as_ref().map_or(0, CellText::len)));
+        let row_bytes = cells.iter().fold(ROW_COST, |sum, cell| sum.saturating_add(cell_cost(cell.as_ref().map(CellText::len))));
         if bytes.saturating_add(row_bytes) > limits.max_bytes {
             set.complete = false;
             continue;
@@ -508,11 +510,15 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn invalid_text_counts_as_its_replacements_at_the_cap() {
-        // E9 61 FF is shown as U+FFFD a U+FFFD: 7 bytes, and 8 with the name.
-        let value: &[u8] = &[0xE9, b'a', 0xFF];
-        let fits = read(result_set_of("c", VAR_STRING, &[value]), Limits { max_rows: 10, max_bytes: 8 }).await.unwrap();
-        assert_eq!((fits.rows, fits.complete), (vec![vec![Some("\u{FFFD}a\u{FFFD}".to_owned())]], true));
-        let cut = read(result_set_of("c", VAR_STRING, &[value, b"x"]), Limits { max_rows: 10, max_bytes: 7 }).await.unwrap();
+        // 20 bytes of FF are shown as 20 U+FFFD: 60 bytes.
+        let value: &[u8] = &[0xFF; 20];
+        let whole = read(result_set_of("c", VAR_STRING, &[value]), dbee_driver::QUERY_LIMITS).await.unwrap();
+        assert_eq!(whole.rows, [[Some("\u{FFFD}".repeat(20))]]);
+        let held = dbee_driver::column_cost(&whole.columns[0]) + dbee_driver::ROW_COST + dbee_driver::cell_cost(Some(60));
+        assert_eq!(dbee_driver::result_cost(&whole), held);
+        let fits = read(result_set_of("c", VAR_STRING, &[value]), Limits { max_rows: 10, max_bytes: held }).await.unwrap();
+        assert_eq!((fits.rows.len(), fits.complete), (1, true));
+        let cut = read(result_set_of("c", VAR_STRING, &[value, b"x"]), Limits { max_rows: 10, max_bytes: held - 1 }).await.unwrap();
         assert_eq!((cut.rows.len(), cut.rows_seen, cut.complete), (0, 2, false));
     }
 
@@ -528,19 +534,45 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn column_definitions_and_names_are_capped() {
         let caps = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_DEPRECATE_EOF;
-        let small = Limits { max_rows: 100, max_bytes: 10 };
         let read = |input: Vec<u8>, limits: Limits| async move {
             let (mut p, _) = packets(input);
             read_result(&mut p, caps, Flavor::MySql, false, false, limits, &mut Said::default()).await
         };
-        // The name's 6 bytes count with the cells': the second row does not fit in 10.
+        // The column counts with the rows: with it, one row fits and the second does not.
+        let column = read(result_set("abcdef", &[]), dbee_driver::QUERY_LIMITS).await.unwrap().columns.remove(0);
+        let one_row = dbee_driver::ROW_COST + dbee_driver::cell_cost(Some(3));
+        let small = Limits { max_rows: 100, max_bytes: dbee_driver::column_cost(&column) + one_row };
         let r = read(result_set("abcdef", &["xyz", "xyz"]), small).await.unwrap();
         let names: Vec<&str> = r.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!((names, r.rows, r.rows_seen, r.complete), (vec!["abcdef"], vec![vec![Some("xyz".to_owned())]], 2, false));
-        let e = read(result_set("abcdefghijk", &[]), small).await.unwrap_err();
-        assert!(matches!(&e, DbError::Other(m) if m.contains("column names larger than")), "{e:?}");
+        let e = read(result_set("abcdef", &[]), Limits { max_bytes: dbee_driver::column_cost(&column) - 1, ..small }).await.unwrap_err();
+        assert!(matches!(&e, DbError::Other(m) if m.contains("columns larger than")), "{e:?}");
         let e = read(result_set(&"n".repeat(70_000), &[]), dbee_driver::QUERY_LIMITS).await.unwrap_err();
         assert_eq!(e, DbError::Other("the server sent a column definition larger than 64 KiB".into()));
+    }
+
+    /// What `n` NULL cells hold.
+    fn null_cells(n: usize) -> usize {
+        n * dbee_driver::cell_cost(None)
+    }
+
+    /// M3: a NULL cell holds its slot, so the cap counts it: a result of wide NULL rows stops at
+    /// the cap instead of holding every row.
+    #[tokio::test]
+    async fn null_cells_count_against_the_cap() {
+        let (columns, rows) = (1000usize, 100usize);
+        let mut payloads = vec![vec![0xFC, 0xE8, 0x03]];
+        payloads.extend((0..columns).map(|_| column_def_of("c", VAR_STRING)));
+        payloads.extend((0..rows).map(|_| vec![0xFB; columns]));
+        payloads.push(vec![0xFE, 0, 0, 2, 0, 0, 0]);
+        let input = payloads.iter().enumerate().map(|(i, p)| frame(p, i as u8)).collect::<Vec<_>>().concat();
+        let limits = Limits { max_rows: 1000, max_bytes: 1 << 20 };
+        let r = read(input, limits).await.unwrap();
+        assert_eq!((r.rows_seen, r.complete), (100, false), "{} rows kept", r.rows.len());
+        assert!(dbee_driver::result_cost(&r) <= limits.max_bytes);
+        // Each row holds its 1000 slots: what the columns leave of 1 MiB holds that many rows.
+        let columns = r.columns.iter().map(dbee_driver::column_cost).sum::<usize>();
+        assert_eq!(r.rows.len(), (limits.max_bytes - columns) / (dbee_driver::ROW_COST + null_cells(1000)));
     }
 
     #[test]

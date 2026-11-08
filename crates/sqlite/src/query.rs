@@ -2,7 +2,7 @@
 //! with values as text by fixed rules ([`crate::values`]).
 
 use dbee_core::{Column, ResultSet};
-use dbee_driver::{DbError, Limits, QUERY_LIMITS};
+use dbee_driver::{DbError, Limits, QUERY_LIMITS, ROW_COST, cell_cost, column_cost};
 use dbee_sql::Dialect;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Statement};
@@ -33,8 +33,8 @@ impl SqliteConnection {
     /// one: the rows an `INSERT`, `UPDATE` or `DELETE` changed (SQLite's `changes()`), 0 for any
     /// other statement without rows, none for a query. The first error ends the run. Rows past
     /// `limits` are still stepped and counted in `rows_seen`, but not kept, and `complete`
-    /// becomes false. The byte cap counts the column names and the cell text kept. Text with a NUL
-    /// is refused before anything runs.
+    /// becomes false. The byte cap counts what the columns and the rows kept hold
+    /// ([`dbee_driver::cell_cost`]). Text with a NUL is refused before anything runs.
     pub async fn run(&self, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
         self.run_as(sql, limits, Columns::Typed).await
     }
@@ -118,9 +118,9 @@ fn statement(
         // Read after the first step, which prepares the statement again if the schema changed.
         if described.is_none() {
             let named = describe(row.as_ref(), columns)?;
-            bytes = named.iter().fold(0usize, |sum, c| sum.saturating_add(c.name.len()));
+            bytes = named.iter().map(column_cost).fold(0, usize::saturating_add);
             if bytes > limits.max_bytes {
-                return Err(DbError::Other("the result's column names are larger than the cap".into()));
+                return Err(DbError::Other("the result's columns are larger than the cap".into()));
             }
             described = Some(named);
         }
@@ -137,7 +137,7 @@ fn statement(
         for i in 0..width {
             cells.push(cell(row.get_ref(i).map_err(errors::from_sqlite)?, &mut reals).map_err(failed)?);
         }
-        let row_bytes = cells.iter().fold(0usize, |sum, cell| sum.saturating_add(cell.as_ref().map_or(0, CellText::len)));
+        let row_bytes = cells.iter().fold(ROW_COST, |sum, cell| sum.saturating_add(cell_cost(cell.as_ref().map(CellText::len))));
         if bytes.saturating_add(row_bytes) > limits.max_bytes {
             set.complete = false;
             continue;

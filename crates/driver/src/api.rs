@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, DbKind};
-use dbee_core::{Catalog, ResultSet};
+use dbee_core::{Catalog, Cell, Column, ResultSet};
 use dbee_sql::Dialect;
 use dbee_ssh::Tunnel;
 pub use futures_util::future::BoxFuture;
@@ -20,21 +20,51 @@ pub type DbFuture<'a, T> = BoxFuture<'a, Result<T, DbError>>;
 /// and delivering a cancel may take.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Caps on what one run keeps: rows, and bytes of cell text.
+/// Caps on what one run keeps: rows, and bytes of memory its columns and kept rows hold, as
+/// [`column_cost`], [`ROW_COST`] and [`cell_cost`] count them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub max_rows: usize,
     pub max_bytes: usize,
 }
 
-/// The query editor's caps: 10,000 rows or 256 MiB of cell text.
+/// The smallest heap block a cell's text is counted at: an allocator hands out no smaller one.
+const MIN_TEXT_BLOCK: usize = 16;
+
+/// What a kept cell holds, as the byte caps count it: its slot, and its text of `len` bytes
+/// (`None` for NULL) in at least [`MIN_TEXT_BLOCK`]. An empty text takes no heap block.
+pub fn cell_cost(len: Option<usize>) -> usize {
+    let text = match len {
+        None | Some(0) => 0,
+        Some(len) => len.max(MIN_TEXT_BLOCK),
+    };
+    size_of::<Cell>().saturating_add(text)
+}
+
+/// What a kept row holds beside its cells.
+pub const ROW_COST: usize = size_of::<Vec<Cell>>();
+
+/// What a result column holds, as the byte caps count it: the column and its names.
+pub fn column_cost(c: &Column) -> usize {
+    [size_of::<Column>(), c.name.len(), c.base_type.len(), c.type_label.len()].into_iter().fold(0, usize::saturating_add)
+}
+
+/// What `r`'s columns and rows hold, as the byte caps count it.
+pub fn result_cost(r: &ResultSet) -> usize {
+    let columns = r.columns.iter().map(column_cost).fold(0, usize::saturating_add);
+    let rows = r.rows.iter().map(|row| row.iter().map(|c| cell_cost(c.as_ref().map(String::len))).fold(ROW_COST, usize::saturating_add));
+    rows.fold(columns, usize::saturating_add)
+}
+
+/// The query editor's caps: 10,000 rows or 256 MiB held.
 pub const QUERY_LIMITS: Limits = Limits { max_rows: 10_000, max_bytes: 256 * 1024 * 1024 };
 
 /// A table page: 100 rows plus one, so the caller can tell whether another page exists.
 pub const PAGE_LIMITS: Limits = Limits { max_rows: 101, max_bytes: 256 * 1024 * 1024 };
 
-/// Catalog queries: far above any real catalog (5 million rows, 512 MiB of text), since a
-/// catalog is never cut. A result that still hits them is an error, never a partial catalog.
+/// Catalog queries: far above any real catalog (5 million rows a query, 512 MiB held by all the
+/// queries of one read together, [`crate::catalog::CatalogBudget`]), since a catalog is never
+/// cut. A result that still hits them is an error, never a partial catalog.
 pub const CATALOG_LIMITS: Limits = Limits { max_rows: 5_000_000, max_bytes: 512 * 1024 * 1024 };
 
 /// What protects the link to the server, as the connection found it.
@@ -177,6 +207,21 @@ mod tests {
         let e = cancel_not_delivered();
         assert_eq!(e.to_string(), "the cancel request was not delivered within 15 s");
         assert_eq!(e.code(), "other");
+    }
+
+    #[test]
+    fn a_kept_cell_costs_its_slot_and_its_block() {
+        // A NULL or empty cell holds its 24-byte slot, though it has no text.
+        assert_eq!(cell_cost(None), 24);
+        assert_eq!(cell_cost(Some(0)), 24);
+        // A short text takes a whole heap block.
+        assert_eq!(cell_cost(Some(1)), 24 + 16);
+        assert_eq!(cell_cost(Some(100)), 24 + 100);
+        assert_eq!(cell_cost(Some(usize::MAX)), usize::MAX);
+        let c = Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into(), class: dbee_core::TypeClass::Number };
+        assert_eq!(column_cost(&c), size_of::<Column>() + 2 + 4 + 7);
+        let r = ResultSet { columns: vec![c.clone()], rows: vec![vec![None], vec![Some("x".into())]], ..ResultSet::default() };
+        assert_eq!(result_cost(&r), column_cost(&c) + 2 * ROW_COST + 24 + 40);
     }
 
     #[test]

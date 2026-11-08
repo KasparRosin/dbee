@@ -8,7 +8,7 @@
 //! tab text in the connection's dialect (all of them, or the one under the cursor) one by one,
 //! each in auto-commit, and stops at the first error. Every result is kept
 //! ([`QueryTab::results`]) and the last one is shown; all the
-//! results of one run together keep at most [`RUN_LIMITS`] (10,000 rows each, 256 MiB of cell text
+//! results of one run together keep at most [`RUN_LIMITS`] (10,000 rows each, 256 MiB held
 //! for the whole run: each statement gets what the ones before left). One run goes at a time on a
 //! connection (`Busy`): its query connection runs one statement at a time, and a cancel request hits
 //! whatever statement runs on it.
@@ -83,8 +83,8 @@ const SET_DATABASE: &str = "query.setDatabase";
 /// Why `query.run` does not start: the text holds no statement.
 pub const NOTHING_TO_RUN: &str = "there is no statement to run";
 
-/// What one run keeps at most: `max_rows` per result, and `max_bytes` of cell text for all its
-/// results together.
+/// What one run keeps at most: `max_rows` per result, and `max_bytes` held by all its results
+/// together, as [`dbee_driver::result_cost`] counts it.
 pub const RUN_LIMITS: Limits = QUERY_LIMITS;
 
 /// The error of a run whose query connection was lost while the session was not (see the module
@@ -236,11 +236,6 @@ fn byte_position(text: &str, range: &Range<usize>, chars: u32) -> Option<usize> 
     range.start.checked_add(within)
 }
 
-/// The cell text `result` keeps, as the caps count it.
-fn text_bytes(result: &ResultSet) -> usize {
-    result.rows.iter().flatten().flatten().map(String::len).fold(0, usize::saturating_add)
-}
-
 /// What a run sends besides the statements, from the tab and the connection's dialect.
 struct RunSetup {
     /// Sent before the first statement: the tab's database, and its `USE`.
@@ -254,7 +249,7 @@ struct RunSetup {
 
 /// Runs `ranges` of `text` on the connection `via` gives, until one fails or `stop` is set; the
 /// `USE` of `setup` first, a failure of which is the first statement's. The results together keep
-/// at most `budget` bytes of cell text: each statement gets what the ones before left, and once it
+/// at most `budget` bytes held: each statement gets what the ones before left, and once it
 /// is spent, later results keep no rows (and say they are incomplete).
 async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup: RunSetup, stop: Arc<Stop>, budget: usize) -> Ran {
     let mut ran = Ran { conn: None, outcomes: Vec::with_capacity(ranges.len()), failure: None, current: setup.current.clone(), past_use: false };
@@ -329,7 +324,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
             match run_one(conn.as_ref(), sql, limits, &stop).await {
                 Ok(result) => {
                     ran.current = ran.current.after(&result.database_after, moves);
-                    left = left.saturating_sub(text_bytes(&result));
+                    left = left.saturating_sub(dbee_driver::result_cost(&result));
                     ran.outcomes.push(StatementOutcome { range, result: Arc::new(result) });
                 }
                 Err(error) => {
@@ -757,16 +752,21 @@ mod tests {
             tunnel: None,
             allowed_dirs: None,
         };
-        let text = "select repeat('x', 60) as a; select repeat('y', 60) as b; select 'z' as c".to_owned();
+        let text = "select repeat('x', 60) as a; select repeat('y', 600) as b; select 'z' as c".to_owned();
         let ranges = lexer::statements(Dialect::Postgres, &text);
         let kept = |ran: &Ran| ran.outcomes.iter().map(|o| (o.result.rows.len(), o.result.rows_seen, o.result.complete)).collect::<Vec<_>>();
-        // 100 bytes for the run: the second result does not fit in what the first left, the third does.
         let setup = || RunSetup { use_database: None, dialect: Dialect::Postgres, current: CurrentDatabase::default() };
-        let ran = run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), 100).await;
+        let whole = run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), RUN_LIMITS.max_bytes).await;
+        assert_eq!(kept(&whole), [(1, 1, true), (1, 1, true), (1, 1, true)]);
+        let held = |i: usize| dbee_driver::result_cost(&whole.outcomes[i].result);
+        // The first result, the second's column and the third: the second's row does not fit in
+        // what the first left, and the third does in what the second's column left.
+        let second_column = dbee_driver::column_cost(&whole.outcomes[1].result.columns[0]);
+        let ran = run_statements(via(), text.clone(), ranges.clone(), setup(), Arc::new(Stop::default()), held(0) + second_column + held(2)).await;
         assert!(ran.failure.is_none());
         assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (1, 1, true)]);
         // Spent by the first result: the later ones keep nothing.
-        let ran = run_statements(via(), text, ranges, setup(), Arc::new(Stop::default()), 60).await;
+        let ran = run_statements(via(), text, ranges, setup(), Arc::new(Stop::default()), held(0)).await;
         assert_eq!(kept(&ran), [(1, 1, true), (0, 1, false), (0, 1, false)]);
         assert_eq!(RUN_LIMITS, QUERY_LIMITS, "a whole run gets the query editor's caps");
     }

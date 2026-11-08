@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use dbee_config::{ConnectionConfig, DbKind, SslMode};
 use dbee_core::{ResultSet, TypeClass};
-use dbee_driver::{DbError, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, Target};
+use dbee_driver::{DbError, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, ROW_COST, Target, cell_cost, column_cost};
 use dbee_mysql::{MySqlConnection, connect};
 use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
 
@@ -74,9 +74,13 @@ async fn text_that_is_not_utf8_is_replaced_and_counted() {
         ok(&c, "SET character_set_results = latin1", QUERY_LIMITS).await;
         let r = ok(&c, "SELECT 'é' AS e", QUERY_LIMITS).await;
         assert_eq!((r.rows[0][0].as_deref(), r.columns[0].class), (Some("\u{FFFD}"), TypeClass::Text), "{}", s.name);
-        // The replacement's 3 bytes count: with the name's 1 byte, 4 fit and 3 do not.
-        let fits = ok(&c, "SELECT 'é' AS e", Limits { max_rows: 10, max_bytes: 4 }).await;
-        let cut = ok(&c, "SELECT 'é' AS e", Limits { max_rows: 10, max_bytes: 3 }).await;
+        // The replacements' 3 bytes each count: 20 of them hold 60 bytes, where the server sent 20.
+        let sql = "SELECT REPEAT('é', 20) AS e";
+        let whole = ok(&c, sql, QUERY_LIMITS).await;
+        assert_eq!(whole.rows[0][0].as_ref().map(String::len), Some(60), "{}", s.name);
+        let held = column_cost(&whole.columns[0]) + ROW_COST + cell_cost(Some(60));
+        let fits = ok(&c, sql, Limits { max_rows: 10, max_bytes: held }).await;
+        let cut = ok(&c, sql, Limits { max_rows: 10, max_bytes: held - 1 }).await;
         assert_eq!((fits.rows.len(), fits.complete, cut.rows.len(), cut.complete, cut.rows_seen), (1, true, 0, false, 1), "{}", s.name);
     }
 }
@@ -242,7 +246,8 @@ async fn byte_cap_stops_collecting() {
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (10, 100, false), "{}", s.name);
         // A binary value counts as its text: 1000 bytes are 2002 characters of hex.
         let sql = "SELECT CAST(REPEAT('a', 1000) AS BINARY) b FROM shop.big_rows LIMIT 10";
-        let r = ok(&c, sql, Limits { max_rows: 1000, max_bytes: 1 + 3 * 2002 }).await;
+        let column = ok(&c, sql, Limits { max_rows: 0, ..QUERY_LIMITS }).await.columns.remove(0);
+        let r = ok(&c, sql, Limits { max_rows: 1000, max_bytes: column_cost(&column) + 3 * (ROW_COST + cell_cost(Some(2002))) }).await;
         assert_eq!((r.rows.len(), r.rows_seen, r.complete), (3, 10, false), "{}", s.name);
         assert_eq!(r.rows[0][0].as_ref().map(String::len), Some(2002), "{}", s.name);
         assert_eq!(c.scalar_u64("SELECT 1").await.unwrap(), 1, "{}", s.name);

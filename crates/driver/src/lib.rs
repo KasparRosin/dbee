@@ -21,11 +21,11 @@ pub mod registry;
 pub mod tls;
 
 pub use api::{
-    BoxFuture, CATALOG_LIMITS, CONNECT_TIMEOUT, Cancel, Connection, DbFuture, Driver, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, ServerInfo, Target,
-    TlsState, cancel_not_delivered,
+    BoxFuture, CATALOG_LIMITS, CONNECT_TIMEOUT, Cancel, Connection, DbFuture, Driver, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, ROW_COST,
+    ServerInfo, Target, TlsState, cancel_not_delivered, cell_cost, column_cost, result_cost,
 };
 pub use apply::{ApplyError, ApplyGate, ApplySession};
-pub use catalog::CatalogBuilder;
+pub use catalog::{CatalogBudget, CatalogBuilder};
 pub use error::{DbError, Meaning, ServerError};
 pub use files::{allowed_file, plain_file};
 pub use registry::Drivers;

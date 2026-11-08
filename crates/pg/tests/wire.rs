@@ -358,3 +358,52 @@ async fn the_link_says_whether_it_is_encrypted_and_checked() {
         assert_eq!((info.tls, info.warnings.as_slice()), (Some(state), &[][..]), "{mode:?}");
     }
 }
+
+/// A server that answers any other query with `columns` text columns and `rows` rows of NULL.
+fn wide_server(l: TcpListener, columns: usize, rows: usize) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut s = accept(&l);
+        read_untyped(&mut s).unwrap();
+        logged_in(&mut s);
+        let names: Vec<String> = (0..columns).map(|i| format!("c{i}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let row = data_row(&vec![None; columns]);
+        serve(&mut s, &mut |w, _| {
+            let mut out = row_description(&names);
+            for _ in 0..rows {
+                out.extend_from_slice(&row);
+            }
+            out.extend([complete("SELECT"), ready()].concat());
+            w.write_all(&out).is_ok()
+        });
+    })
+}
+
+/// M3: a NULL cell holds its slot, so the cap counts it: a result of wide NULL rows stops at the
+/// cap instead of holding every row.
+#[tokio::test]
+async fn null_cells_count_against_the_cap() {
+    let (l, port) = listener();
+    let server = wide_server(l, 1000, 100);
+    let conn = open(&config(port, SslMode::Disable, None)).await.unwrap();
+    let limits = dbee_driver::Limits { max_rows: 1000, max_bytes: 1 << 20 };
+    let r = dbee_pg::query::run_untyped(&conn, "SELECT * FROM wide", limits).await.unwrap();
+    drop(conn);
+    joined(server).await;
+    assert_eq!((r.rows_seen, r.complete), (100, false), "{} rows kept", r.rows.len());
+    assert!(dbee_driver::result_cost(&r) <= limits.max_bytes);
+}
+
+/// M3: a result of more columns than a Postgres query can return is refused before its rows, and
+/// the connection goes on.
+#[tokio::test]
+async fn more_columns_than_postgres_returns_are_refused() {
+    let (l, port) = listener();
+    let server = wide_server(l, 1665, 10);
+    let conn = open(&config(port, SslMode::Disable, None)).await.unwrap();
+    let e = dbee_pg::query::run_untyped(&conn, "SELECT * FROM wide", dbee_driver::QUERY_LIMITS).await.unwrap_err();
+    assert!(e.to_string().contains("1665 columns") && e.to_string().contains("1664"), "{e}");
+    assert!(!conn.is_closed());
+    drop(conn);
+    joined(server).await;
+}

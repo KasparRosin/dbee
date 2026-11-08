@@ -36,8 +36,8 @@ impl MySqlConnection {
     /// definitions, and rows; `rows_affected` is the affected (matched) rows of the last OK
     /// packet, `None` when every result returned rows. The first error ends the run. Rows past
     /// `limits` are still read (so the connection stays in step) and counted in `rows_seen`, but
-    /// not kept, and `complete` becomes false. The byte cap counts the column names and the
-    /// cell text kept. A statement that a cancel's `KILL QUERY` targeted and that still returned
+    /// not kept, and `complete` becomes false. The byte cap counts what the columns and the rows
+    /// kept hold ([`dbee_driver::cell_cost`]). A statement that a cancel's `KILL QUERY` targeted and that still returned
     /// rows (`SELECT SLEEP(…)` returns 1 when killed) is [`DbError::Cancelled`]. What dbee
     /// refuses is not sent, and a read-only connection's mode is read back ([`crate::guard`]).
     pub async fn run(&self, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
