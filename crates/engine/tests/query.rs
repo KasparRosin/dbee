@@ -561,13 +561,13 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
                 assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}: after {sql}", t.name());
             }
         }
-        // With backslash escapes off, as the server then reads strings: `'\'` is a whole string.
-        run_text(&mut s, "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',NO_BACKSLASH_ESCAPES')").unwrap();
+        // The session cannot turn backslash escapes off, under which `'\'` would be a whole string.
+        let e = run_text(&mut s, "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',NO_BACKSLASH_ESCAPES')").expect_err("refused");
+        assert!(e.code() == "readOnly" && e.to_string().contains("sql_mode"), "{}: {e}", t.name());
         let hidden = format!(r"SET @a = '\', @@{variable} = 0, @b = '\'");
-        let e = run_text(&mut s, &hidden).expect_err("refused");
-        assert!(e.code() == "readOnly" && e.to_string().contains("changes read-only mode"), "{}: {hidden}: {e}", t.name());
+        let e = run_text(&mut s, &hidden).expect_err("refused or a syntax error");
+        assert!(matches!(e.code(), "readOnly" | "server"), "{}: {hidden}: {e}", t.name());
         assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}: after {hidden}", t.name());
-        run_text(&mut s, "SET SESSION sql_mode = DEFAULT").unwrap();
         let e = run_text(&mut s, &format!("SELECT {sc}.{off}()")).expect_err("caught after it ran");
         assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
         assert_eq!(run_text(&mut s, &insert).err().map(|e| e.code()), Some("readOnly"), "{}", t.name());
@@ -722,18 +722,72 @@ fn read_only_mysql_keeps_the_character_set_utf8() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// On a read-only MySQL or MariaDB connection `sql_mode` stays as it was at connect: a statement
+/// that holds the words `SET` and `sql_mode` is refused, in comments and strings too. Under
+/// `ANSI_QUOTES` the server reads a `"…"` as a name where dbee read a string, so a MariaDB block's
+/// `;`s, or a `SET NAMES` before one, hid from the check.
+#[test]
+fn read_only_mysql_keeps_sql_mode() {
+    let _db = require_testdb!();
+    let mut wrong = Vec::new();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
+        let (sc, name) = (t.schema("scratch"), unique("t_ro_mode"));
+        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}")]);
+        q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
+        let mut s = read_only_session(&t);
+        run_text(&mut s, "SELECT @@SESSION.sql_mode").unwrap();
+        let mode = first_value(&s);
+        let write = |n: u32| format!("START TRANSACTION READ WRITE; INSERT INTO {sc}.{name} VALUES ({n}); COMMIT");
+        // Fix round 4's concern 1: none of these may run.
+        for sql in [
+            "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')".to_owned(),
+            format!("BEGIN NOT ATOMIC DECLARE \"\\\" CHAR(1) DEFAULT '\\''; {}; END -- '\"", write(1)),
+            "SET @a = (SELECT '\\'' AS \"\\\"), NAMES sjis, @b = '\"'".to_owned(),
+            format!("BEGIN NOT ATOMIC DO '\\'', 1, '\u{c1}\\'; {}; END -- '", write(2)),
+        ] {
+            if run_text(&mut s, &sql).is_ok() {
+                wrong.push(format!("{}: ran {sql}", t.name()));
+            }
+        }
+        for sql in [
+            "SET @@sql_mode = 'ANSI'",
+            "/*!40101SET SESSION sql_mode='ANSI_QUOTES'*/",
+            "SET @a = 1, @@SESSION.`SQL_MODE` = 'NO_BACKSLASH_ESCAPES'",
+            "set session sql_mode = default",
+        ] {
+            match run_text(&mut s, sql) {
+                Err(e) if e.code() == "readOnly" && e.to_string().contains("sql_mode") => {}
+                other => wrong.push(format!("{}: {sql} -> {}", t.name(), other.err().map_or("ran".into(), |e| e.to_string()))),
+            }
+        }
+        run_text(&mut s, &format!("SELECT @@SESSION.sql_mode = '{}', @@SESSION.{variable}", mode.clone().unwrap_or_default())).unwrap();
+        let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
+        let shown = qt.shown_result().and_then(|r| r.result.rows.first().cloned());
+        if shown != Some(vec![Some("1".to_owned()), Some("1".to_owned())]) {
+            wrong.push(format!("{}: the mode is still {mode:?}, and the session read-only: {shown:?}", t.name()));
+        }
+        let written = q(&t, &format!("SELECT COALESCE(GROUP_CONCAT(id ORDER BY id), '') FROM {sc}.{name}"));
+        if !written.is_empty() {
+            wrong.push(format!("{}: rows written {written}", t.name()));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// A function turns session tracking off and read-only off in a statement that fails: dbee finds
 /// the change before the next statement, turns read-only on again and sets the tracking up again,
-/// so a later `SET` whose name the text check reads as a string (a `"…"` under `ANSI_QUOTES`) is
-/// caught by the server's report. Nothing is written, and the current database is still told.
+/// so a later function's change of read-only mode is caught by the server's report right after it
+/// ran. Nothing is written, and the current database is still told.
 #[test]
 fn read_only_mysql_sets_the_tracking_up_again_after_a_caught_change() {
     let _db = require_testdb!();
     let mut wrong = Vec::new();
     for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
         let variable = if t.kind().id() == "mariadb" { "tx_read_only" } else { "transaction_read_only" };
-        let (sc, name, off) = (t.schema("scratch"), unique("t_ro_retrack"), unique("f_ro_untrack"));
-        let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {sc}.{name}"), format!("FUNCTION IF EXISTS {sc}.{off}")]);
+        let (sc, name, off, then) = (t.schema("scratch"), unique("t_ro_retrack"), unique("f_ro_untrack"), unique("f_ro_off"));
+        let drops = vec![format!("TABLE IF EXISTS {sc}.{name}"), format!("FUNCTION IF EXISTS {sc}.{off}"), format!("FUNCTION IF EXISTS {sc}.{then}")];
+        let _drop = Scratch(&t, drops);
         q(&t, &format!("CREATE TABLE {sc}.{name} (id int)"));
         let mut w = connected_to(&t);
         tab(
@@ -744,28 +798,33 @@ fn read_only_mysql_sets_the_tracking_up_again_after_a_caught_change() {
             ),
         );
         run(&mut w, "query.run", json!({}));
+        tab(&mut w, &format!("CREATE FUNCTION {sc}.{then}() RETURNS INT DETERMINISTIC BEGIN SET SESSION {variable} = 0; RETURN 1; END"));
+        run(&mut w, "query.run", json!({}));
         drop(w);
         let mut s = read_only_session(&t);
         run_text(&mut s, &format!("SELECT {sc}.{off}(), (SELECT 1 UNION SELECT 2)")).expect_err("more than one row");
         let e = run_text(&mut s, &format!("SELECT @@SESSION.{variable}")).expect_err("caught before it ran");
         assert!(e.code() == "readOnly" && e.to_string().contains("turned read-only on again"), "{}: {e}", t.name());
-        run_text(&mut s, "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')").unwrap();
-        let set = format!("SET @@SESSION.\"{variable}\" = 0");
-        match run_text(&mut s, &set) {
+        let call = format!("SELECT {sc}.{then}()");
+        match run_text(&mut s, &call) {
             Err(e) if e.code() == "readOnly" && e.to_string().contains("turned read-only on again") => {}
-            other => wrong.push(format!("{}: {set} -> {}", t.name(), other.err().map_or("ran".into(), |e| e.to_string()))),
+            other => wrong.push(format!("{}: {call} -> {}", t.name(), other.err().map_or("ran".into(), |e| e.to_string()))),
         }
         if run_text(&mut s, &format!("INSERT INTO {sc}.{name} VALUES (1)")).is_ok() {
-            wrong.push(format!("{}: the insert after {set} ran", t.name()));
+            wrong.push(format!("{}: the insert after {call} ran", t.name()));
         }
-        run_text(&mut s, "SET SESSION sql_mode = DEFAULT").unwrap();
-        run_text(&mut s, &format!("USE {sc}")).unwrap();
-        if starts_in(&s) != (json!(sc), json!(true)) {
-            wrong.push(format!("{}: after USE {sc} the connection starts in {:?}", t.name(), starts_in(&s)));
+        match run_text(&mut s, &format!("SELECT @@SESSION.{variable}")) {
+            Ok(_) if first_value(&s).as_deref() == Some("1") => {}
+            other => wrong.push(format!("{}: reading the mode -> {:?}", t.name(), other.map(|_| first_value(&s)).map_err(|e| e.to_string()))),
         }
-        run_text(&mut s, &format!("SELECT @@SESSION.{variable}")).unwrap();
-        if first_value(&s).as_deref() != Some("1") {
-            wrong.push(format!("{}: the session reads {:?}", t.name(), first_value(&s)));
+        match run_text(&mut s, &format!("USE {sc}")) {
+            Ok(_) if starts_in(&s) == (json!(sc), json!(true)) => {}
+            other => wrong.push(format!(
+                "{}: USE {sc} -> {:?}, then it starts in {:?}",
+                t.name(),
+                other.map(|_| ()).map_err(|e| e.to_string()),
+                starts_in(&s)
+            )),
         }
         let written = q(&t, &format!("SELECT count(*) FROM {sc}.{name}"));
         if written != "0" {

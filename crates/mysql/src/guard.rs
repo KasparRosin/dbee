@@ -59,6 +59,10 @@ const LOOKALIKE: &str = "on a read-only connection dbee runs no SET with a chara
                         the server can read a name spelled with such a letter as one of its own settings. Spell names in plain ASCII, or \
                         turn Read-only off in the connection's settings.";
 
+const SQL_MODE: &str = "on a read-only connection dbee keeps sql_mode as it was at connect, since the mode decides how the server reads \
+                        dbee's text (ANSI_QUOTES, NO_BACKSLASH_ESCAPES), so it does not run a statement that holds both SET and \
+                        sql_mode. To change the mode, turn Read-only off in the connection's settings.";
+
 const SET_STATEMENT: &str = "SET STATEMENT can turn read-only off for the statement it runs, before the server can report it, so dbee does not \
                              run a statement that names STATEMENT and the read-only variable here. Run the statement without them.";
 
@@ -96,6 +100,21 @@ fn holds_word(sql: &str, word: &str) -> bool {
     })
 }
 
+/// How often `sql` holds `word` in any case, as the server reads words: with no letter, digit,
+/// `_`, `$` or character outside ASCII after it, and none of these but a digit before it, since a
+/// version comment's number runs into the code after it (`/*!40101SET`).
+fn code_words(sql: &str, word: &str) -> usize {
+    let b = sql.as_bytes();
+    let part = |c: &u8| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$' || *c >= 0x80;
+    (0..b.len().saturating_sub(word.len()).saturating_add(1))
+        .filter(|&at| {
+            b.get(at..at.saturating_add(word.len())).is_some_and(|w| w.eq_ignore_ascii_case(word.as_bytes()))
+                && !b.get(at.saturating_add(word.len())).is_some_and(part)
+                && !at.checked_sub(1).and_then(|before| b.get(before)).is_some_and(|c| part(c) && !c.is_ascii_digit())
+        })
+        .count()
+}
+
 /// `sql` holds the word `SET` and a character outside plain ASCII outside its `'…'` strings, read
 /// with backslash escapes and without: every system variable's name is ASCII, while the server
 /// folds a name spelled with a letter like `ë` or `ſ` to one of them. A `"…"` counts as outside
@@ -128,6 +147,8 @@ fn raw_refusal(sql: &str, flavor: Flavor) -> Option<&'static str> {
         Some(LOOKALIKE)
     } else if names_session_track(sql) {
         Some(TRACKING)
+    } else if code_words(sql, "set") > 0 && code_words(sql, "sql_mode") > 0 {
+        Some(SQL_MODE)
     } else if flavor == Flavor::MariaDb && holds("statement") && flavor.read_only_variables().iter().any(|v| holds(v)) {
         Some(SET_STATEMENT)
     } else {
@@ -357,6 +378,27 @@ mod tests {
         for sql in ["SELECT ';'", "SELECT 1 /* ; */", "SELECT 1 -- ;", "SELECT `a;b` FROM t"] {
             assert_eq!(raw_refusal(sql, Flavor::MariaDb), None, "{sql}");
         }
+    }
+
+    /// A statement that holds the words `SET` and `sql_mode`, wherever they are, is refused; a
+    /// version comment's number before a word does not hide it.
+    #[test]
+    fn a_set_of_sql_mode_is_refused() {
+        for sql in [
+            "SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES')",
+            "set @@SQL_MODE = 'ANSI'",
+            "/*!40101SET SESSION sql_mode='ANSI_QUOTES'*/",
+            "SET @a = 1, @@SESSION.`sql_mode` = ''",
+            "SET SESSION \"sql_mode\" = DEFAULT",
+            "SET /*!40101sql_mode*/ = ''",
+            "SELECT 'set sql_mode'",
+        ] {
+            assert_eq!(raw_refusal(sql, Flavor::MySql), Some(SQL_MODE), "{sql}");
+        }
+        for sql in ["SELECT @@SESSION.sql_mode", "SHOW VARIABLES LIKE 'sql_mode'", "SET @sql_modes = 1", "SET @x = 'presql_mode'"] {
+            assert_eq!(raw_refusal(sql, Flavor::MySql), None, "{sql}");
+        }
+        assert_eq!(code_words("/*!40101SET x*/ SET; asset set_x", "set"), 2);
     }
 
     #[test]
