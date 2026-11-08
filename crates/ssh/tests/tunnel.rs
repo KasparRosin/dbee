@@ -128,6 +128,45 @@ async fn changed_host_key_refuses() {
     assert_eq!(std::fs::read_to_string(home.ssh_dir().join("known_hosts")).unwrap(), line);
 }
 
+const ECDSA_KEY: &str =
+    "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEgM887NED7wEb/MfE1ApBUZTo5U5rrM+GKiL5PUNYDLkBOGN04gQ3YHkVjeKWfn3h/SpPODL2xHfQ5A+U7EeiE=";
+
+#[tokio::test]
+async fn a_key_of_another_type_than_the_recorded_one_refuses() {
+    let db = require_testdb!();
+    // known_hosts has an ECDSA key for the server; the server shows Ed25519 only.
+    let line = format!("{} ecdsa-sha2-nistp256 {ECDSA_KEY}\n", host_entry(db));
+    let home = temp_home(Some(&db.keys.plain), Some(&line));
+    let c = cfg(db, SshAuth::Key { path: None });
+    let want = SshError::HostKeyOtherType { host: host_entry(db), key_type: "ssh-ed25519".into(), recorded: vec!["ecdsa-sha2-nistp256".into()] };
+    let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), None).await.unwrap_err();
+    assert_eq!(e, want);
+    assert!(e.to_string().contains("interception") && !e.to_string().contains("not known yet"), "{e}");
+    // Trusting the new key's fingerprint is not an answer, and nothing is learned.
+    let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), Some(&server_fingerprint(db))).await.unwrap_err();
+    assert_eq!(e, want);
+    assert_eq!(std::fs::read_to_string(home.ssh_dir().join("known_hosts")).unwrap(), line);
+}
+
+#[tokio::test]
+async fn a_tab_separated_or_revoked_line_is_read_as_openssh_reads_it() {
+    let db = require_testdb!();
+    let other = load_secret_key(&db.keys.plain, None).unwrap().public_key().public_key_base64();
+    let c = cfg(db, SshAuth::Key { path: None });
+    let tabbed = format!("{}\tssh-ed25519\t{other}\n", host_entry(db));
+    let home = temp_home(Some(&db.keys.plain), Some(&tabbed));
+    let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), None).await.unwrap_err();
+    assert_eq!(e, SshError::HostKeyChanged { host: host_entry(db), line: 1 }, "a tab-separated line is a recorded key");
+
+    let revoked = format!("@revoked {} ssh-ed25519 {}\n", host_entry(db), server_key_base64(db));
+    let home = temp_home(Some(&db.keys.plain), Some(&revoked));
+    for trust in [None, Some(server_fingerprint(db))] {
+        let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), trust.as_deref()).await.unwrap_err();
+        assert_eq!(e, SshError::HostKeyRevoked { host: host_entry(db), line: 1 });
+    }
+    assert_eq!(std::fs::read_to_string(home.ssh_dir().join("known_hosts")).unwrap(), revoked);
+}
+
 #[tokio::test]
 async fn encrypted_key_needs_passphrase() {
     let db = require_testdb!();
@@ -373,6 +412,8 @@ fn errors_read_plainly() {
         SshError::AuthFailed { tried: vec!["agent".into(), "key /k/id".into()] },
         SshError::KnownHosts("bad line".into()),
         SshError::Channel("prohibited".into()),
+        SshError::HostKeyOtherType { host: "h".into(), key_type: "ssh-ed25519".into(), recorded: vec!["ecdsa-sha2-nistp256".into()] },
+        SshError::HostKeyRevoked { host: "h".into(), line: 3 },
     ];
     for e in &all {
         let text = e.to_string();

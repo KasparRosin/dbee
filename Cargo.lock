@@ -1229,10 +1229,13 @@ dependencies = [
 name = "dbee-ssh"
 version = "0.0.0"
 dependencies = [
+ "data-encoding",
  "dbee-config",
  "dbee-testkit",
+ "hmac",
  "log",
  "russh",
+ "sha1",
  "tokio",
 ]
 

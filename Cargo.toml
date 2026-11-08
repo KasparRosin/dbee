@@ -40,6 +40,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 getrandom = "0.4"
 
 # network
+# Hashed names in known_hosts; already in the tree through russh, at these versions.
+hmac = "0.13"
+sha1 = "0.11"
+data-encoding = "2"
 russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 # Pinned exactly: dbee-pg classifies its errors by their Display texts (its error kinds are private),

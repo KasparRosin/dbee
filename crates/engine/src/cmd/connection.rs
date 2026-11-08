@@ -548,6 +548,10 @@ pub(crate) fn ssh_error(e: &SshError) -> EngineError {
         SshError::NeedPassphrase { key } => return EngineError::Needs { need: Need::Passphrase { key: key.display().to_string() }, message },
         SshError::NeedPassword => return EngineError::Needs { need: Need::SshPassword, message },
         SshError::HostKeyChanged { host, line } => json!({ "reason": "hostKeyChanged", "host": host, "line": line }),
+        SshError::HostKeyOtherType { host, key_type, recorded } => {
+            json!({ "reason": "hostKeyOtherType", "host": host, "keyType": key_type, "recorded": recorded })
+        }
+        SshError::HostKeyRevoked { host, line } => json!({ "reason": "hostKeyRevoked", "host": host, "line": line }),
         SshError::WrongPassphrase { key } => json!({ "reason": "wrongPassphrase", "key": key.display().to_string() }),
         SshError::AuthFailed { tried } => json!({ "reason": "authFailed", "tried": tried }),
         SshError::NoKey => json!({ "reason": "noKey" }),

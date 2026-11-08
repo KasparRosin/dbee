@@ -142,6 +142,11 @@ pub enum SshError {
     /// `known_hosts` holds another key of this type for the server, at `line` (1-based). Never
     /// overridable.
     HostKeyChanged { host: String, line: usize },
+    /// `known_hosts` holds keys of other types for the server and none of the type it showed
+    /// (`key_type`). Never overridable.
+    HostKeyOtherType { host: String, key_type: String, recorded: Vec<String> },
+    /// `known_hosts` marks the key the server showed `@revoked`, at `line` (1-based).
+    HostKeyRevoked { host: String, line: usize },
     /// The key file is encrypted; open again with `SshSecrets::passphrase`.
     NeedPassphrase { key: PathBuf },
     /// The passphrase does not open the key file.
@@ -170,6 +175,16 @@ impl std::fmt::Display for SshError {
                 "the host key of the SSH server {host} has changed since it was saved (known_hosts line {line}); \
                  this can mean someone is intercepting the connection, so dbee will not connect"
             ),
+            SshError::HostKeyOtherType { host, key_type, recorded } => write!(
+                f,
+                "the SSH server {host} showed a {key_type} host key, but known_hosts records only {} for it; \
+                 this is what an interception looks like, so dbee will not connect. \
+                 Ask the server's administrator whether its key changed; if it did, remove the old line from known_hosts",
+                recorded.join(", ")
+            ),
+            SshError::HostKeyRevoked { host, line } => {
+                write!(f, "known_hosts line {line} marks the host key of the SSH server {host} as revoked, so dbee will not connect")
+            }
             SshError::NeedPassphrase { key } => write!(f, "the SSH key {} is protected by a passphrase", key.display()),
             SshError::WrongPassphrase { key } => write!(f, "the passphrase does not open the SSH key {}", key.display()),
             SshError::NeedPassword => write!(f, "the SSH login needs a password"),
@@ -266,6 +281,8 @@ impl Tunnel {
                 return Err(match verdict {
                     Some(Verdict::Unknown { key_type, fingerprint }) => SshError::HostKeyUnknown { host: entry, key_type, fingerprint },
                     Some(Verdict::Changed { line }) => SshError::HostKeyChanged { host: entry, line },
+                    Some(Verdict::OtherType { key_type, recorded }) => SshError::HostKeyOtherType { host: entry, key_type, recorded },
+                    Some(Verdict::Revoked { line }) => SshError::HostKeyRevoked { host: entry, line },
                     Some(Verdict::Failed(m)) => SshError::KnownHosts(m),
                     Some(Verdict::Unsupported(m)) => SshError::Connect(format!("{addr}: {m}")),
                     _ => SshError::Connect(format!("{addr}: {e}")),
