@@ -39,6 +39,7 @@ pub(crate) const RULES: Rules = Rules {
         hash_comment: false,
         dash_comment_needs_space: false,
         nested_block_comments: false,
+        executable_comments: false,
         separator: Separator::Semicolon,
         bodies: Bodies::TriggerOnly,
         lookahead: 4,

@@ -19,6 +19,10 @@ pub enum TokenKind {
     Whitespace,
     Param,
     Other,
+    /// The start (`/*!`, MariaDB's `/*M!`, and a version) or the end (`*/`) of a MySQL executable
+    /// comment, where the dialect has them: the server runs the text between, which is lexed as
+    /// code.
+    ExecutableMark,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +45,29 @@ fn is_op_byte(lex: &LexRules, b: u8) -> bool {
 
 fn at(b: &[u8], i: usize) -> u8 {
     b.get(i).copied().unwrap_or(0)
+}
+
+/// The end of an executable comment's start at `i` (`/*!` or `/*M!`, and the digits of a version
+/// after it), where the dialect has them.
+fn executable_open(lex: &LexRules, b: &[u8], i: usize) -> Option<usize> {
+    if !lex.executable_comments || at(b, i) != b'/' || at(b, i + 1) != b'*' {
+        return None;
+    }
+    let mut j = match (at(b, i + 2), at(b, i + 3)) {
+        (b'!', _) => i + 3,
+        (b'M', b'!') => i + 4,
+        _ => return None,
+    };
+    while at(b, j).is_ascii_digit() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// The end of an executable comment (`*/`) at `i`, where the dialect has them: outside one it is
+/// no operator either.
+fn executable_close(lex: &LexRules, b: &[u8], i: usize) -> bool {
+    lex.executable_comments && at(b, i) == b'*' && at(b, i + 1) == b'/'
 }
 
 /// A `--` at `i` starts a comment; with `dash_comment_needs_space`, only before a space, a control
@@ -109,6 +136,12 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
                 i += 1;
             }
             kind = TokenKind::Comment;
+        } else if let Some(end) = executable_open(lex, b, i) {
+            i = end;
+            kind = TokenKind::ExecutableMark;
+        } else if executable_close(lex, b, i) {
+            i += 2;
+            kind = TokenKind::ExecutableMark;
         } else if c == b'/' && at(b, i + 1) == b'*' {
             let mut depth = 1usize;
             i += 2;
@@ -200,7 +233,12 @@ pub fn tokenize(d: Dialect, sql: &str) -> Vec<Token> {
             kind = TokenKind::Semicolon;
         } else if is_op_byte(lex, c) {
             i += 1;
-            while i < b.len() && is_op_byte(lex, b[i]) && !dash_comment(lex, b, i) && !(b[i] == b'/' && at(b, i + 1) == b'*') {
+            while i < b.len()
+                && is_op_byte(lex, b[i])
+                && !dash_comment(lex, b, i)
+                && !(b[i] == b'/' && at(b, i + 1) == b'*')
+                && !executable_close(lex, b, i)
+            {
                 i += 1;
             }
             kind = TokenKind::Operator;
@@ -235,6 +273,12 @@ pub(crate) fn is_word(sql: &str, t: &Token, w: &str) -> bool {
 
 pub(crate) fn significant(t: &Token) -> bool {
     !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment)
+}
+
+/// A significant token the server reads as part of the statement's words: not the mark of an
+/// executable comment, whose text the server reads as code.
+pub(crate) fn code(t: &Token) -> bool {
+    significant(t) && t.kind != TokenKind::ExecutableMark
 }
 
 fn ws_end(b: &[u8], mut at: usize) -> usize {
@@ -594,6 +638,46 @@ mod tests {
         assert_eq!(kinds_in(Dialect::MySql, "\"a\\\"b;\" 'c''d'"), [(String, "\"a\\\"b;\""), (String, "'c''d'")]);
         assert_eq!(kinds_in(Dialect::Postgres, "'a\\' b"), [(String, "'a\\'"), (Ident, "b")]);
         assert_eq!(kinds_in(Dialect::Sqlite, "'a\\' b"), [(String, "'a\\'"), (Ident, "b")]);
+    }
+
+    /// MySQL and MariaDB run what `/*! … */` and `/*M! … */` hold: it is code, coloured and split
+    /// as such, and the statement sent keeps it, also at its end. Elsewhere it is a comment.
+    #[test]
+    fn mysql_executable_comments_are_code() {
+        use TokenKind::*;
+        let code = kinds_in(Dialect::MySql, "WHERE /*! 1 = 1 OR */ id = 2");
+        assert!(code.contains(&(Number, "1")) && code.contains(&(Operator, "=")) && code.contains(&(Keyword, "OR")), "{code:?}");
+        assert!(code.iter().all(|(k, _)| *k != Comment), "{code:?}");
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            assert_eq!(kinds_in(d, "WHERE /*! 1 = 1 OR */ id"), [(Keyword, "WHERE"), (Comment, "/*! 1 = 1 OR */"), (Ident, "id")], "{d:?}");
+        }
+        let trailing = "DELETE FROM t WHERE id = 1 /*! OR 1 = 1 */; SELECT 1";
+        assert_eq!(pieces(Dialect::MySql, trailing), ["DELETE FROM t WHERE id = 1 /*! OR 1 = 1 */", "SELECT 1"]);
+        assert_eq!(
+            pieces(Dialect::MySql, "/*!40101 SET NAMES utf8 */;\n/*M!100100 SELECT 2 */"),
+            ["/*!40101 SET NAMES utf8 */", "/*M!100100 SELECT 2 */"]
+        );
+        assert_eq!(pieces(Dialect::Postgres, trailing), ["DELETE FROM t WHERE id = 1", "SELECT 1"]);
+        assert_eq!(
+            kinds_in(Dialect::MySql, "/*!50003 SELECT*/ /*M!100100 x */ /*+ hint */ 2*/3"),
+            [
+                (ExecutableMark, "/*!50003"),
+                (Keyword, "SELECT"),
+                (ExecutableMark, "*/"),
+                (ExecutableMark, "/*M!100100"),
+                (Ident, "x"),
+                (ExecutableMark, "*/"),
+                (Comment, "/*+ hint */"),
+                (Number, "2"),
+                (ExecutableMark, "*/"),
+                (Number, "3")
+            ]
+        );
+        // mysqldump's trigger: the marks do not hide the body's BEGIN … END.
+        let trigger = "CREATE /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER tr BEFORE INSERT ON t FOR EACH ROW BEGIN SET NEW.a = 1; SET NEW.b = 2; END */";
+        assert_eq!(pieces(Dialect::MySql, &format!("{trigger}; SELECT 1")), [trigger, "SELECT 1"]);
+        // A NUL in one is outside a string literal.
+        assert_eq!(Dialect::MySql.misplaced_nul("SELECT 1 /*! \0 */"), Some(13));
     }
 
     #[test]

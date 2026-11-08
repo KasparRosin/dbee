@@ -101,6 +101,8 @@ pub(crate) struct LexRules {
     pub dash_comment_needs_space: bool,
     /// `/* … */` comments nest.
     pub nested_block_comments: bool,
+    /// `/*! … */` and `/*M! … */` hold code the server runs ([`TokenKind::ExecutableMark`]).
+    pub executable_comments: bool,
     pub separator: Separator,
     pub bodies: Bodies,
     /// How far past a token's end the lexer may read to decide it, with one byte to spare: a

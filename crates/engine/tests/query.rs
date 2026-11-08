@@ -406,6 +406,29 @@ fn read_only_refuses_insert() {
     }
 }
 
+/// MySQL and MariaDB run what an executable comment (`/*! … */`) holds, so the editor shows it as
+/// code and the statement sent keeps it, also at its end: `WHERE id = 1 /*! OR 1 = 1 */` deletes
+/// every row, as the editor shows (measured on all five servers).
+#[test]
+fn mysql_executable_comments_run_as_the_editor_shows_them() {
+    use dbee_sql::Dialect;
+    use dbee_sql::lexer::{TokenKind, tokenize};
+    let _db = require_testdb!();
+    for t in engine_targets().into_iter().filter(|t| matches!(t.kind().id(), "mysql" | "mariadb")) {
+        let (sc, name) = (t.schema("scratch"), unique("t_exec_comment"));
+        let _drop = scratch_table(&t, &name, "CREATE TABLE {t} (id int)");
+        q(&t, &format!("INSERT INTO {sc}.{name} VALUES (1), (2), (3)"));
+        let text = format!("DELETE FROM {sc}.{name} WHERE id = 1 /*! OR 1 = 1 */");
+        let clause = text.find("OR 1 = 1").unwrap();
+        let comments = tokenize(Dialect::MySql, &text).into_iter().filter(|k| k.kind == TokenKind::Comment).collect::<Vec<_>>();
+        assert!(comments.iter().all(|k| !k.range.contains(&clause)), "{}: the editor shows the clause as a comment", t.name());
+        let mut s = connected_to(&t);
+        tab(&mut s, &text);
+        run(&mut s, "query.run", json!({}));
+        assert_eq!(q(&t, &format!("SELECT count(*) FROM {sc}.{name}")), "0", "{}: the server ran the clause the editor shows", t.name());
+    }
+}
+
 /// A read-only connection's query tab refuses `CREATE TABLE`, `ALTER TABLE` and `DROP TABLE` on
 /// every engine: on MySQL and MariaDB the session's `SET SESSION TRANSACTION READ ONLY` holds them
 /// too (measured on 5.7, 8.0, 26.10, 10.11 and 13.0).

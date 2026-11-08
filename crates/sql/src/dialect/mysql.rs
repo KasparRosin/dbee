@@ -3,7 +3,7 @@
 use super::{BinaryLiteral, Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, Paging, Rules, Separator, StringLiteral, Values, quoted};
 use crate::SqlError;
 use crate::filter::Op;
-use crate::lexer::{Token, TokenKind, is_word, significant, word};
+use crate::lexer::{Token, TokenKind, code, is_word, word};
 
 pub(crate) const RULES: Rules = Rules {
     ident_quote: '`',
@@ -42,6 +42,7 @@ pub(crate) const RULES: Rules = Rules {
         hash_comment: true,
         dash_comment_needs_space: true,
         nested_block_comments: false,
+        executable_comments: true,
         separator: Separator::DelimiterCommand,
         bodies: Bodies::Compound,
         lookahead: 4,
@@ -62,7 +63,7 @@ pub(super) fn literal(value: &str) -> Result<String, SqlError> {
 /// True when the statement whose first token is `toks[k]` creates a procedure, function, trigger
 /// or event: one whose body may hold `;`.
 pub(super) fn routine_header(sql: &str, toks: &[Token], k: usize) -> bool {
-    let mut sig = toks.get(k..).unwrap_or_default().iter().filter(|t| significant(t)).take(16);
+    let mut sig = toks.get(k..).unwrap_or_default().iter().filter(|t| code(t)).take(16);
     if !sig.next().is_some_and(|t| is_word(sql, t, "create")) {
         return false;
     }
@@ -112,10 +113,10 @@ pub(crate) struct Compound {
 
 impl Compound {
     pub(super) fn step(&mut self, sql: &str, toks: &[Token], k: usize) {
-        let Some(t) = toks.get(k) else { return };
+        let Some(t) = toks.get(k).filter(|t| code(t)) else { return };
         if let Some(w) = word(sql, t).filter(|_| self.taken != Some(k)) {
             let is = |x: &str| w.eq_ignore_ascii_case(x);
-            let next = toks.get(k + 1..).unwrap_or_default().iter().position(significant).map(|p| k + 1 + p);
+            let next = toks.get(k + 1..).unwrap_or_default().iter().position(code).map(|p| k + 1 + p);
             if is("begin") || is("case") {
                 self.depth += 1;
             } else if is("end") {

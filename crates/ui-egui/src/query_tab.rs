@@ -240,7 +240,7 @@ fn style(kind: TokenKind, syntax: &SqlSyntax, plain: Color32) -> Option<(Color32
         TokenKind::Comment => (syntax.comment, true),
         TokenKind::QuotedIdent => (syntax.quoted, false),
         TokenKind::Whitespace => return None,
-        TokenKind::Ident | TokenKind::Operator | TokenKind::Semicolon | TokenKind::Other => (plain, false),
+        TokenKind::Ident | TokenKind::Operator | TokenKind::Semicolon | TokenKind::Other | TokenKind::ExecutableMark => (plain, false),
     })
 }
 
@@ -1363,9 +1363,10 @@ mod tests {
 
     #[test]
     fn incremental_tokens_match_a_full_lex() {
-        // Pieces that end tokens late: exponents, `--` and `/*` after an operator, `U&` and `E'`,
-        // a lone `$` before a tag word of any length (its tag read to the end), dollar quotes,
-        // quotes that open strings running on, and characters of several bytes (in tags too).
+        // Pieces that end tokens late: exponents, `--`, `/*` and `*/` after an operator, `U&` and
+        // `E'`, MySQL's executable comments and their versions, a lone `$` before a tag word of any
+        // length (its tag read to the end), dollar quotes, quotes that open strings running on, and
+        // characters of several bytes (in tags too).
         let pieces = [
             "select ",
             "1e",
@@ -1429,6 +1430,11 @@ mod tests {
             "create trigger ",
             "begin ",
             "end ",
+            "!",
+            "M!",
+            "/*!",
+            "/*M!1",
+            "50003",
         ];
         for dialect in Dialect::ALL {
             for seed in [0x9E37_79B9_7F4A_7C15, 12_345, 777, 42, 0xDEAD_BEEF] {
