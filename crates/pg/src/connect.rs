@@ -454,16 +454,17 @@ fn search_path_schemas(path: &str) -> Vec<String> {
 }
 
 /// The warning for a search path that names another schema before `pg_catalog` (the session's
-/// own temporary schema aside), or `None`: dbee's filters and saved changes name built-in types
-/// and operators unqualified, as users do, and such a path finds that schema's first.
+/// own temporary schema aside), or `None`. dbee names `pg_catalog`'s functions and operators
+/// itself, whatever the path, but its casts name built-in types such as `jsonb` and `uuid` as the
+/// server prints them, and such a path finds that schema's first.
 fn search_path_warning(path: &str) -> Option<String> {
     let schemas = search_path_schemas(path);
     let at = schemas.iter().position(|s| s == "pg_catalog")?;
     schemas.get(..at)?.iter().any(|s| s != "pg_temp").then(|| {
         format!(
-            "The search path ({path}) puts other schemas before pg_catalog, so a function or type someone made in one of them could run in \
-             place of a built-in one when dbee filters or saves rows. Ask the database owner to put pg_catalog first in the \
-             search path, or to leave it out."
+            "The search path ({path}) puts other schemas before pg_catalog, so a type someone made in one of them could take the place \
+             of a built-in one in the values dbee filters by and saves. Ask the database owner to put pg_catalog first in the search \
+             path, or to leave it out."
         )
     })
 }

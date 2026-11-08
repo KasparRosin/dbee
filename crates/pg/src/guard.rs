@@ -35,8 +35,10 @@ const CONFORMING_OFF: &str = "standard_conforming_strings was off in this sessio
 enum Mode {
     ReadOnly,
     Changed,
-    /// Not readable now; read it before the next statement.
-    Later,
+    /// A cancel stopped the read.
+    Stopped,
+    /// The transaction failed: nothing runs in it but its end, which undoes its setting changes.
+    Aborted,
     Failed(DbError),
 }
 
@@ -49,7 +51,8 @@ pub(crate) async fn before(conn: &PgConnection, sql: &str) -> Result<(), DbError
         match mode(conn).await {
             Mode::ReadOnly => conn.check_due.store(false, Ordering::Release),
             Mode::Changed => return Err(restore(conn, TURNED_OFF_BEFORE).await),
-            Mode::Later => {}
+            Mode::Stopped => return Err(DbError::Cancelled),
+            Mode::Aborted => {}
             Mode::Failed(e) => return Err(e),
         }
     }
@@ -71,7 +74,7 @@ pub(crate) async fn after<T>(conn: &PgConnection, ran: Result<T, DbError>) -> Re
             ran
         }
         Mode::Changed => Err(restore(conn, TURNED_OFF).await),
-        Mode::Later => {
+        Mode::Stopped | Mode::Aborted => {
             conn.check_due.store(true, Ordering::Release);
             ran
         }
@@ -92,8 +95,8 @@ async fn mode(conn: &PgConnection) -> Mode {
             if on == [true, true] { Mode::ReadOnly } else { Mode::Changed }
         }
         Err(e) => match conn.error(&e) {
-            DbError::Cancelled => Mode::Later,
-            DbError::Server(s) if s.meaning == Some(Meaning::TransactionAborted) => Mode::Later,
+            DbError::Cancelled => Mode::Stopped,
+            DbError::Server(s) if s.meaning == Some(Meaning::TransactionAborted) => Mode::Aborted,
             other => Mode::Failed(other),
         },
     }

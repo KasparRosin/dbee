@@ -173,8 +173,14 @@ fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
          connection's settings."
     } else if s.starts(&["set"]) && s.is(1, "statement") {
         "SET STATEMENT can turn read-only off for the statement it runs, so dbee does not run it here. Run the statement without it."
-    } else if s.starts(&["set"]) && (s.names(READ_ONLY_VARIABLES) || s.pair("read", "write")) {
+    } else if s.starts(&["set"]) && (s.sets_off(READ_ONLY_VARIABLES) || s.pair("read", "write")) {
         CHANGES_MODE
+    } else if s.starts(&["set"]) && s.names_not_after(&["global", "persist", "persist_only"], "@") {
+        "SET GLOBAL and SET PERSIST change the server's settings for every session, so dbee does not run them here. To run them, turn \
+         Read-only off in the connection's settings."
+    } else if s.pair("into", "outfile") || s.pair("into", "dumpfile") {
+        "INTO OUTFILE and INTO DUMPFILE write a file on the server, so dbee does not run them here. To run one, turn Read-only off in the \
+         connection's settings."
     } else if s.starts(&["start"]) && s.pair("read", "write") {
         READ_WRITE
     } else if s.starts(&["commit", "rollback"]) && s.names(&["chain"]) && !s.pair("no", "chain") {

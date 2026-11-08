@@ -23,11 +23,46 @@ const CODE_LABEL: &str = "SQLite error";
 
 pub(crate) const PARAMETERS: &str = "the statement has parameters (such as ?), which dbee does not fill";
 
-/// The hint of `SQLITE_AUTH`, which only dbee's authorizer gives: on a read-only connection, or
-/// in an isolated run.
-const REFUSED_HERE: &str = "On a read-only connection SQL may not attach a file (VACUUM INTO attaches the one it writes) or turn query_only \
-                            off; turn Read-only off in the connection's settings to do so. In an isolated run SQL may open no other file, so \
-                            ATTACH and VACUUM are refused there.";
+/// Why dbee's authorizer refused a statement (`SQLITE_AUTH`), which its error's hint says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Refused {
+    ReadOnlyAttach = 1,
+    ReadOnlyQueryOnly = 2,
+    IsolatedAttach = 3,
+    IsolatedFolder = 4,
+}
+
+impl Refused {
+    const ALL: [Refused; 4] = [Refused::ReadOnlyAttach, Refused::ReadOnlyQueryOnly, Refused::IsolatedAttach, Refused::IsolatedFolder];
+
+    fn hint(self) -> &'static str {
+        match self {
+            Refused::ReadOnlyAttach => {
+                "This connection is read-only, so its SQL may attach no file, and VACUUM INTO attaches the one it writes. To do so, turn \
+                 Read-only off in the connection's settings."
+            }
+            Refused::ReadOnlyQueryOnly => {
+                "This connection is read-only, so its SQL may not set query_only. To write, turn Read-only off in the \
+                 connection's settings."
+            }
+            Refused::IsolatedAttach => "This isolated run lets SQL open no other file, so ATTACH and VACUUM are refused.",
+            Refused::IsolatedFolder => "This isolated run lets SQL move none of SQLite's own files, so this pragma is refused.",
+        }
+    }
+}
+
+/// `e` with the hint of why dbee's authorizer refused it, `why` as the authorizer stored it.
+pub(crate) fn refused(e: DbError, why: u8) -> DbError {
+    let reason = Refused::ALL.into_iter().find(|r| *r as u8 == why);
+    match (e, reason) {
+        (DbError::Server(mut s), Some(reason)) if s.code.parse::<c_int>().is_ok_and(|c| primary(c) == ffi::SQLITE_AUTH) => {
+            s.hint = Some(reason.hint().to_owned());
+            DbError::Server(s)
+        }
+        (e, _) => e,
+    }
+}
 
 /// `e`, from running the statement at byte `start` of `sql`, the text the caller ran; a syntax
 /// error's offset becomes a character position in `sql`.
@@ -62,7 +97,7 @@ fn from_code(extended: c_int, message: String, position: Option<u32>) -> DbError
             code_label: Some(CODE_LABEL),
             message,
             detail: None,
-            hint: (primary(extended) == ffi::SQLITE_AUTH).then(|| REFUSED_HERE.to_owned()),
+            hint: None,
             position,
             meaning: None,
         })),
@@ -112,12 +147,18 @@ mod tests {
         // Without SQLite's message, its text for the code.
         let bare = from_sqlite(rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_FULL), None));
         assert_eq!(bare.to_string(), "database or disk is full (SQLite error 13)");
-        // Refused by dbee's authorizer, on a read-only connection or in an isolated run: the hint says why.
+        // Refused by dbee's authorizer: the hint names the one case that applies.
         let hint = |e: DbError| if let DbError::Server(s) = e { s.hint } else { None };
-        let refused = hint(from_sqlite(failure(ffi::SQLITE_AUTH, "not authorized")));
-        assert_eq!(refused.as_deref(), Some(REFUSED_HERE));
-        assert!(REFUSED_HERE.contains("read-only") && REFUSED_HERE.contains("isolated run") && REFUSED_HERE.contains("ATTACH"));
-        assert_eq!(hint(unique), None);
+        let auth = || from_sqlite(failure(ffi::SQLITE_AUTH, "not authorized"));
+        assert_eq!(hint(auth()), None);
+        for reason in Refused::ALL {
+            let said = hint(refused(auth(), reason as u8)).unwrap_or_default();
+            assert_eq!(said, reason.hint());
+            assert!(said.contains("read-only") != said.contains("isolated run"), "{said}");
+            assert!(!said.contains("turn query_only off"), "{said}");
+        }
+        assert_eq!(hint(refused(auth(), 0)), None);
+        assert_eq!(hint(refused(unique.clone(), Refused::ReadOnlyAttach as u8)), None);
     }
 
     #[test]

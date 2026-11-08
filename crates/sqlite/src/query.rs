@@ -70,7 +70,9 @@ pub(crate) fn run_text(s: &mut Session, running: &Running, sql: &str, limits: Li
         if running.interrupted() {
             return Err(DbError::Cancelled);
         }
-        let result = statement(s, running, sql, range.start, range.end, limits, columns)?;
+        s.refused.store(0, std::sync::atomic::Ordering::Relaxed);
+        let result = statement(s, running, sql, range.start, range.end, limits, columns)
+            .map_err(|e| errors::refused(e, s.refused.load(std::sync::atomic::Ordering::Relaxed)))?;
         affected = result.rows_affected.or(affected);
         if !result.columns.is_empty() || kept.as_ref().is_none_or(|k| k.columns.is_empty()) {
             // A result with rows outranks one without.

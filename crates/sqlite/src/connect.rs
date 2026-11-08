@@ -3,7 +3,7 @@
 //! interrupts the call running on it.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{InterruptHandle, OpenFlags};
 use tokio::runtime::Handle;
 
+use crate::errors::Refused;
 use crate::query::NamesChecked;
 
 /// The pragmas that set a folder SQLite makes its own files in.
@@ -55,19 +56,20 @@ pub async fn connect(t: Target<'_>) -> Result<SqliteConnection, DbError> {
         Ok(Err(_)) => Err(DbError::Other("opening the file stopped unexpectedly".into())),
         Err(_) => Err(DbError::Connect(format!("{shown} did not open within {} s", CONNECT_TIMEOUT.as_secs()))),
     };
-    let (conn, handle, read_only) = opened.inspect_err(|e| log::info!("sqlite: opening a file failed ({})", e.code()))?;
+    let (conn, handle, read_only, refused) = opened.inspect_err(|e| log::info!("sqlite: opening a file failed ({})", e.code()))?;
     let version_num = u32::try_from(rusqlite::version_number()).unwrap_or_default();
     let info = ServerInfo { product: "SQLite".into(), version: rusqlite::version().into(), version_num, read_only, warnings: Vec::new() };
     log::info!("sqlite: opened a file (SQLite {version_num}{})", if read_only { ", read-only" } else { "" });
     let running = Arc::new(Running::new(handle));
-    let shared = Shared { conn: Mutex::new(Session::new(conn)), closed: AtomicBool::new(false), running: Arc::clone(&running) };
+    let session = Session { refused, ..Session::new(conn) };
+    let shared = Shared { conn: Mutex::new(session), closed: AtomicBool::new(false), running: Arc::clone(&running) };
     Ok(SqliteConnection { shared: Some(Arc::new(shared)), running, info, turn: tokio::sync::Mutex::new(()), runtime })
 }
 
 /// Open the file at `given` (checked against `allowed` first, when there are allowed folders) and
-/// set its session up, on the calling (blocking) thread; the connection, its interrupt handle, and
-/// whether it is read-only.
-fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>) -> Result<(rusqlite::Connection, InterruptHandle, bool), DbError> {
+/// set its session up, on the calling (blocking) thread; the connection, its interrupt handle,
+/// whether it is read-only, and where its authorizer says why it refused a statement.
+fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>) -> Result<Opened, DbError> {
     let shown = given.display();
     let path = match allowed {
         Some(dirs) => dbee_driver::allowed_file(dirs, given)?,
@@ -98,12 +100,25 @@ fn open(given: &Path, read_only: bool, create: bool, allowed: Option<&[PathBuf]>
         conn.execute_batch("PRAGMA query_only = ON").map_err(setup)?;
     }
     let isolated = allowed.is_some();
+    let refused = Arc::new(AtomicU8::new(0));
     if isolated || read_only {
-        conn.authorizer(Some(move |ctx: AuthContext<'_>| authorize(&ctx.action, isolated, read_only))).map_err(setup)?;
+        let why = Arc::clone(&refused);
+        conn.authorizer(Some(move |ctx: AuthContext<'_>| match authorize(&ctx.action, isolated, read_only) {
+            Some(reason) => {
+                why.store(reason as u8, Ordering::Relaxed);
+                Authorization::Deny
+            }
+            None => Authorization::Allow,
+        }))
+        .map_err(setup)?;
     }
     let handle = conn.get_interrupt_handle();
-    Ok((conn, handle, read_only))
+    Ok((conn, handle, read_only, refused))
 }
+
+/// What [`open`] gives: the connection, its interrupt handle, whether it is read-only, and the
+/// last [`Refused`] reason its authorizer gave.
+type Opened = (rusqlite::Connection, InterruptHandle, bool, Arc<AtomicU8>);
 
 /// The flags a file opens with: read-only, read-write, or read-write making a missing one. In an
 /// isolated run the path its check resolved, which holds no link, opens with
@@ -130,19 +145,23 @@ fn harden(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA cell_size_check = ON")
 }
 
-/// What SQL may do on a connection: in an isolated run it opens no other file (no `ATTACH`, and so
-/// no `VACUUM`, which attaches the file it writes) and moves none of SQLite's own; on a read-only
-/// one it attaches no file (`VACUUM INTO` writes one wherever it names) and keeps `query_only` on.
-fn authorize(action: &AuthAction<'_>, isolated: bool, read_only: bool) -> Authorization {
+/// Why SQL may not do `action` on a connection, or `None` when it may: in an isolated run it opens
+/// no other file (no `ATTACH`, and so no `VACUUM`, which attaches the file it writes) and moves none
+/// of SQLite's own; on a read-only one it attaches no file (`VACUUM INTO` writes one wherever it
+/// names) and keeps `query_only` on.
+fn authorize(action: &AuthAction<'_>, isolated: bool, read_only: bool) -> Option<Refused> {
     match *action {
-        AuthAction::Attach { .. } => Authorization::Deny,
+        AuthAction::Attach { .. } if isolated => Some(Refused::IsolatedAttach),
+        AuthAction::Attach { .. } if read_only => Some(Refused::ReadOnlyAttach),
         AuthAction::Pragma { pragma_name, pragma_value: Some(_) }
-            if (isolated && FOLDER_PRAGMAS.iter().any(|p| pragma_name.eq_ignore_ascii_case(p)))
-                || (read_only && pragma_name.eq_ignore_ascii_case("query_only")) =>
+            if isolated && FOLDER_PRAGMAS.iter().any(|p| pragma_name.eq_ignore_ascii_case(p)) =>
         {
-            Authorization::Deny
+            Some(Refused::IsolatedFolder)
         }
-        _ => Authorization::Allow,
+        AuthAction::Pragma { pragma_name, pragma_value: Some(_) } if read_only && pragma_name.eq_ignore_ascii_case("query_only") => {
+            Some(Refused::ReadOnlyQueryOnly)
+        }
+        _ => None,
     }
 }
 
@@ -172,11 +191,13 @@ struct Shared {
 pub(crate) struct Session {
     pub(crate) conn: rusqlite::Connection,
     pub(crate) names: NamesChecked,
+    /// Why the authorizer last refused a statement ([`Refused`] as a number, 0 for none).
+    pub(crate) refused: Arc<AtomicU8>,
 }
 
 impl Session {
     pub(crate) fn new(conn: rusqlite::Connection) -> Session {
-        Session { conn, names: NamesChecked::default() }
+        Session { conn, names: NamesChecked::default(), refused: Arc::default() }
     }
 }
 
@@ -381,11 +402,11 @@ mod tests {
         let file = scratch_file("open-setup");
         let _ = std::fs::remove_file(&file);
         assert_eq!(open(&file, false, false, None).err(), Some(DbError::Connect(format!("no file at {}", file.display()))));
-        let (conn, _, read_only) = open(&file, false, true, None).unwrap();
+        let (conn, _, read_only, _) = open(&file, false, true, None).unwrap();
         let pragma = |name: &str| conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get::<_, i64>(0)).unwrap();
         assert_eq!((pragma("foreign_keys"), pragma("busy_timeout"), pragma("query_only"), read_only), (1, 5000, 0, false));
         drop(conn);
-        let (ro, _, read_only) = open(&file, true, false, None).unwrap();
+        let (ro, _, read_only, _) = open(&file, true, false, None).unwrap();
         assert_eq!((ro.query_row("PRAGMA query_only", [], |row| row.get::<_, i64>(0)).unwrap(), read_only), (1, true));
         drop(ro);
         // A trailing separator names a folder: refused, not opened, nor made.
@@ -406,7 +427,7 @@ mod tests {
         let file = scratch_file("hardened");
         let _ = std::fs::remove_file(&file);
         for (read_only, create) in [(false, true), (true, false)] {
-            let (conn, _, _) = open(&file, read_only, create, None).unwrap();
+            let (conn, _, _, _) = open(&file, read_only, create, None).unwrap();
             let pragma = |name: &str| conn.query_row(&format!("PRAGMA {name}"), [], |row| row.get::<_, i64>(0)).unwrap();
             assert_eq!((pragma("trusted_schema"), pragma("cell_size_check")), (1, 1), "read-only {read_only}");
             assert_eq!(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).ok(), Some(true), "read-only {read_only}");

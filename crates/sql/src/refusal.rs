@@ -32,6 +32,9 @@ pub(crate) const CHANGES_MODE: &str =
 pub(crate) const READ_WRITE: &str =
     "this statement makes a transaction read-write, so dbee does not run it here. To write, turn Read-only off in the connection's settings.";
 
+/// The values that turn a setting on.
+pub(crate) const ON: &[&str] = &["on", "true", "yes", "1"];
+
 pub(crate) const CHAIN: &str = "AND CHAIN starts the next transaction in the mode of the one it ends, so dbee does not run it here. End the \
                                 transaction, then begin the next one.";
 
@@ -48,22 +51,34 @@ impl<'a> Code<'a> {
         Code { sql, tokens }
     }
 
-    /// Token `i` as a word: a keyword or an identifier, or a quoted identifier without its quotes,
-    /// in lowercase.
+    /// Token `i` as a word: a keyword or an identifier, or a quoted identifier without its quotes
+    /// (a `U&` one spelled out), in lowercase.
     pub(crate) fn word(&self, i: usize) -> Option<String> {
         let t = self.tokens.get(i)?;
         let text = self.sql.get(t.range.clone())?;
         match t.kind {
             TokenKind::Keyword | TokenKind::Ident => Some(text.to_lowercase()),
-            TokenKind::QuotedIdent => {
-                let text = text.strip_prefix(['U', 'u']).and_then(|t| t.strip_prefix('&')).unwrap_or(text);
-                let quote = text.chars().next()?;
-                let inner = text.get(quote.len_utf8()..)?;
-                let inner = inner.strip_suffix(quote).unwrap_or(inner);
-                Some(inner.replace(&format!("{quote}{quote}"), &quote.to_string()).to_lowercase())
-            }
+            TokenKind::QuotedIdent => self.quoted(i, text).map(|name| name.to_lowercase()),
             _ => None,
         }
+    }
+
+    /// What the quoted name or string `text` at token `i` holds: without its quotes, each doubled
+    /// quote one, and a `U&` one's escapes spelled out (with the `UESCAPE` character after it).
+    fn quoted(&self, i: usize, text: &str) -> Option<String> {
+        let unicode = text.strip_prefix(['U', 'u']).and_then(|t| t.strip_prefix('&'));
+        let text = unicode.unwrap_or(text);
+        let quote = text.chars().next()?;
+        let inner = text.get(quote.len_utf8()..)?;
+        let inner = inner.strip_suffix(quote).unwrap_or(inner).replace(&format!("{quote}{quote}"), &quote.to_string());
+        if unicode.is_none() {
+            return Some(inner);
+        }
+        let escape = match (self.is(i + 1, "uescape"), self.tokens.get(i + 2).and_then(|t| self.sql.get(t.range.clone()))) {
+            (true, Some(c)) => c.strip_prefix('\'').and_then(|c| c.strip_suffix('\'')).and_then(|c| c.chars().next()).unwrap_or('\\'),
+            _ => '\\',
+        };
+        Some(unescape(&inner, escape).unwrap_or(inner))
     }
 
     /// Token `i` is the word `w`.
@@ -86,18 +101,27 @@ impl<'a> Code<'a> {
         (1..self.tokens.len()).any(|i| self.is(i - 1, a) && self.is(i, b))
     }
 
-    /// Some string literal holds `part`, in any case.
+    /// Some string literal holds `part`, in any case (a `U&` one spelled out).
     pub(crate) fn string_holds(&self, part: &str) -> bool {
-        self.tokens
-            .iter()
-            .filter(|t| t.kind == TokenKind::String)
-            .any(|t| self.sql.get(t.range.clone()).is_some_and(|s| s.to_lowercase().contains(part)))
+        (0..self.tokens.len()).any(|i| {
+            let Some(t) = self.tokens.get(i).filter(|t| t.kind == TokenKind::String) else { return false };
+            let text = self.sql.get(t.range.clone()).unwrap_or_default();
+            let unicode = text.starts_with(['U', 'u']).then(|| self.quoted(i, text)).flatten();
+            unicode.as_deref().unwrap_or(text).to_lowercase().contains(part)
+        })
     }
 
-    /// The value after the word `name` and `=` or `TO`: a word, a number, or a string without its
+    /// Some token is one of `words`, and the one before it is not the operator `op`.
+    pub(crate) fn names_not_after(&self, words: &[&str], op: &str) -> bool {
+        (0..self.tokens.len()).any(|i| {
+            let after = i.checked_sub(1).and_then(|b| self.tokens.get(b)).and_then(|t| self.sql.get(t.range.clone()));
+            self.word(i).is_some_and(|x| words.contains(&x.as_str())) && after != Some(op)
+        })
+    }
+
+    /// The value after token `at` and `=` or `TO`: a word, a number, or a string without its
     /// quotes, in lowercase.
-    pub(crate) fn value_of(&self, name: &str) -> Option<String> {
-        let at = (0..self.tokens.len()).find(|&i| self.is(i, name))?;
+    fn value_at(&self, at: usize) -> Option<String> {
         let sign = self.tokens.get(at.checked_add(1)?)?;
         if !(self.is(at + 1, "to") || self.sql.get(sign.range.clone()) == Some("=")) {
             return None;
@@ -107,6 +131,49 @@ impl<'a> Code<'a> {
         let text = if value.kind == TokenKind::String { text.trim_matches('\'') } else { text };
         Some(text.to_lowercase())
     }
+
+    /// The value after the word `name` and `=` or `TO`, as [`Code::value_at`] reads it.
+    pub(crate) fn value_of(&self, name: &str) -> Option<String> {
+        self.value_at((0..self.tokens.len()).find(|&i| self.is(i, name))?)
+    }
+
+    /// Some setting of `names` is set to a value that is not on ([`ON`]), or to none dbee reads.
+    pub(crate) fn sets_off(&self, names: &[&str]) -> bool {
+        (0..self.tokens.len())
+            .filter(|&i| self.word(i).is_some_and(|x| names.contains(&x.as_str())))
+            .any(|i| !self.value_at(i).is_some_and(|v| ON.contains(&v.as_str())))
+    }
+}
+
+/// The text a `U&` name or string spells: `escape` and four hex digits, or `escape+` and six, is
+/// that character, and `escape` twice is `escape`; `None` when an escape is not one.
+fn unescape(body: &str, escape: char) -> Option<String> {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c != escape {
+            out.push(c);
+            continue;
+        }
+        let rest = chars.as_str();
+        if rest.starts_with(escape) {
+            chars.next();
+            out.push(escape);
+            continue;
+        }
+        let (digits, len) = match rest.strip_prefix('+') {
+            Some(six) => (six.get(..6)?, 7),
+            None => (rest.get(..4)?, 4),
+        };
+        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        out.push(char::from_u32(u32::from_str_radix(digits, 16).ok()?)?);
+        for _ in 0..len {
+            chars.next();
+        }
+    }
+    Some(out)
 }
 
 impl Dialect {
@@ -245,6 +312,82 @@ mod tests {
         ] {
             assert_eq!(refused(my, sql, true), None, "{sql}");
         }
+    }
+
+    /// Names spelled with Unicode escapes, `UESCAPE` too, are the names they spell.
+    #[test]
+    fn postgres_reads_names_spelled_with_unicode_escapes() {
+        let pg = Dialect::Postgres;
+        for sql in [
+            r#"SET U&"default_transaction_read_onl\0079" = off"#,
+            r#"SET U&"default_transaction_read_onl!0079" UESCAPE '!' = off"#,
+            r#"SELECT U&"lo_from_byte\0061"(0, 'x')"#,
+            r#"SELECT pg_catalog.U&"lo_from_byte\+000061"(0, 'x')"#,
+            r#"SELECT set_config(U&'default_transaction_read\005Fonly', 'off', false)"#,
+        ] {
+            assert!(matches!(refused(pg, sql, true), Some(Refusal::ReadOnly(_))), "{sql}");
+        }
+        assert!(matches!(refused(pg, r#"SET U&"standard_conforming_string\0073" = off"#, false), Some(Refusal::Misread(_))));
+        assert_eq!(refused(pg, r#"SELECT U&"d\0061ta" FROM t"#, true), None);
+    }
+
+    /// Statements that write outside the database: the server's files and settings.
+    #[test]
+    fn read_only_refuses_writes_outside_the_database() {
+        for (d, sql) in [
+            (Dialect::Postgres, "ALTER SYSTEM SET work_mem = '4MB'"),
+            (Dialect::Postgres, "COPY (SELECT 1) TO '/tmp/x'"),
+            (Dialect::Postgres, "COPY t TO PROGRAM 'cat'"),
+            (Dialect::MySql, "SELECT 1 INTO OUTFILE '/tmp/x'"),
+            (Dialect::MySql, "SELECT 1 FROM t INTO DUMPFILE '/tmp/x'"),
+            (Dialect::MySql, "SET GLOBAL max_connections = 10"),
+            (Dialect::MySql, "SET @@global.max_connections = 10"),
+            (Dialect::MySql, "SET PERSIST max_connections = 10"),
+            (Dialect::MySql, "SET PERSIST_ONLY max_connections = 10"),
+        ] {
+            assert!(matches!(refused(d, sql, true), Some(Refusal::ReadOnly(_))), "{d:?}: {sql}");
+            assert_eq!(refused(d, sql, false), None, "{d:?}: {sql}");
+        }
+        for (d, sql) in [
+            (Dialect::Postgres, "COPY t TO STDOUT"),
+            (Dialect::Postgres, "ALTER TABLE t ADD COLUMN x int"),
+            (Dialect::MySql, "SELECT 1 INTO @a"),
+            (Dialect::MySql, "SET @global = 1"),
+            (Dialect::MySql, "SET SESSION sql_mode = ''"),
+        ] {
+            assert_eq!(refused(d, sql, true), None, "{d:?}: {sql}");
+        }
+    }
+
+    /// A `SET` that turns read-only on, with no `READ WRITE` in it, changes nothing that matters.
+    #[test]
+    fn a_set_that_turns_read_only_on_is_let_through() {
+        for (d, sql) in [
+            (Dialect::Postgres, "SET default_transaction_read_only = on"),
+            (Dialect::Postgres, "SET transaction_read_only TO true"),
+            (Dialect::Postgres, "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"),
+            (Dialect::Postgres, "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE"),
+            (Dialect::MySql, "SET SESSION TRANSACTION READ ONLY"),
+            (Dialect::MySql, "SET @@SESSION.transaction_read_only = 1"),
+            (Dialect::MySql, "SET SESSION tx_read_only = ON"),
+        ] {
+            assert_eq!(refused(d, sql, true), None, "{d:?}: {sql}");
+        }
+        for (d, sql) in [
+            (Dialect::Postgres, "SET default_transaction_read_only TO DEFAULT"),
+            (Dialect::Postgres, "RESET transaction_read_only"),
+            (Dialect::Postgres, "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE"),
+            (Dialect::MySql, "SET @@transaction_read_only = 1, @@transaction_read_only = 0"),
+            (Dialect::MySql, "SET SESSION TRANSACTION READ ONLY, READ WRITE"),
+        ] {
+            assert!(matches!(refused(d, sql, true), Some(Refusal::ReadOnly(_))), "{d:?}: {sql}");
+        }
+    }
+
+    #[test]
+    fn turning_standard_conforming_strings_off_says_what_to_do() {
+        let Some(Refusal::Misread(m)) = refused(Dialect::Postgres, "SET standard_conforming_strings = off", false) else { panic!("refused") };
+        assert!(m.contains("E'"), "{m}");
     }
 
     #[test]

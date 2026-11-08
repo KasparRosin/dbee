@@ -2,7 +2,7 @@
 
 use super::{Bodies, DoubleQuote, ILike, InsertDefaults, LexRules, LikeOperators, Paging, Rules, Separator, StringLiteral, Values, quoted};
 use crate::SqlError;
-use crate::refusal::{CHAIN, CHANGES_MODE, Code, READ_WRITE, Refusal};
+use crate::refusal::{CHAIN, CHANGES_MODE, Code, ON, READ_WRITE, Refusal};
 use dbee_core::ColumnInfo;
 
 pub(crate) const RULES: Rules = Rules {
@@ -99,7 +99,9 @@ pub(super) fn filter_value(column: &ColumnInfo, text: &str) -> Result<String, Sq
 /// to a domain over such a type) refuses a value that does not fit. So these, their arrays
 /// and domains over them are cast to the type without its length: `text`, `bit varying`,
 /// `text[]` or `bit varying[]`. Every other type is cast to `type_sql` itself. A key value the
-/// server sent fits its column, so key comparisons keep `type_sql`.
+/// server sent fits its column, so key comparisons keep `type_sql`. `text` is named in
+/// `pg_catalog`, as are `bpchar` and `"bit"` in [`filter_type`]: `bit varying` and
+/// `character varying` are SQL's own words, which always mean `pg_catalog`'s.
 fn write_type(column: &ColumnInfo) -> &str {
     match column.base_type.as_str() {
         "varchar" | "bpchar" => "pg_catalog.text",
@@ -128,9 +130,8 @@ fn filter_type(column: &ColumnInfo) -> &str {
     }
 }
 
-/// The settings that hold read-only mode: the transaction's, the session's default, and
-/// `SESSION CHARACTERISTICS`, which sets that default.
-const READ_ONLY_SETTINGS: &[&str] = &["default_transaction_read_only", "transaction_read_only", "characteristics"];
+/// The settings that hold read-only mode: the transaction's and the session's default.
+const READ_ONLY_SETTINGS: &[&str] = &["default_transaction_read_only", "transaction_read_only"];
 
 /// The large-object functions that write; Postgres 14 runs them in a read-only transaction too
 /// (measured; 18 refuses them).
@@ -139,11 +140,9 @@ const LARGE_OBJECT_WRITERS: &[&str] =
 
 const CONFORMING: &str = "standard_conforming_strings";
 
-/// The values that turn a setting on.
-const ON: &[&str] = &["on", "true", "yes", "1"];
-
 const CONFORMING_OFF: &str = "dbee keeps standard_conforming_strings on: with it off the server reads backslashes in strings differently \
-                              from how dbee shows and splits statements. This statement turns it off, so dbee did not run it.";
+                              from how dbee shows and splits statements. This statement turns it off, so dbee did not run it. Write a string \
+                              with backslash escapes as E'…' instead.";
 
 /// Why dbee does not send a statement: on any connection, one that turns
 /// `standard_conforming_strings` off, which dbee's lexer and literals read as on; on a read-only
@@ -164,7 +163,8 @@ fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
         "a procedure can commit and turn read-only off, so dbee does not call one here. To call it, turn Read-only off in the connection's settings."
     } else if s.starts(&["reset", "discard"]) && s.names(&["all"]) {
         "this statement resets the session's settings, read-only among them. Reset each setting by its name instead."
-    } else if s.starts(&["set", "reset"]) && (s.names(READ_ONLY_SETTINGS) || s.pair("read", "write"))
+    } else if s.starts(&["reset"]) && s.names(READ_ONLY_SETTINGS)
+        || s.starts(&["set"]) && (s.pair("read", "write") || s.sets_off(READ_ONLY_SETTINGS))
         || s.names(&["set_config"]) && s.string_holds("read_only")
     {
         CHANGES_MODE
@@ -172,6 +172,12 @@ fn refuse(s: &Code<'_>, read_only: bool) -> Option<Refusal> {
         READ_WRITE
     } else if s.starts(&["commit", "rollback", "end", "abort"]) && s.names(&["chain"]) && !s.pair("no", "chain") {
         CHAIN
+    } else if s.starts(&["alter"]) && s.is(1, "system") {
+        "ALTER SYSTEM writes the server's configuration file, so dbee does not run it here. To run it, turn Read-only off in the \
+         connection's settings."
+    } else if s.starts(&["copy"]) && s.names(&["to"]) && !s.pair("to", "stdout") {
+        "COPY … TO writes a file on the server or runs a program there, so dbee does not run it here. To run it, turn Read-only off in \
+         the connection's settings."
     } else if s.names(LARGE_OBJECT_WRITERS) {
         "large-object functions can write in a read-only transaction on some Postgres versions, so dbee does not run them here. To run them, \
          turn Read-only off in the connection's settings."

@@ -34,8 +34,10 @@ const TOO_MANY_VERSIONS: &str = "this statement has more version comments than d
 enum Mode {
     ReadOnly,
     Changed,
-    /// Not read now; read it before the next statement.
-    Later,
+    /// A cancel stopped the read.
+    Stopped,
+    /// The server refused the read: the mode is unknown.
+    Unread(DbError),
     Failed(DbError),
 }
 
@@ -72,8 +74,8 @@ impl MySqlConnection {
             match self.mode(session).await {
                 Mode::ReadOnly => self.check_due.store(false, Ordering::Release),
                 Mode::Changed => return Err(self.restore(session, TURNED_OFF_BEFORE).await),
-                Mode::Later => {}
-                Mode::Failed(e) => return Err(e),
+                Mode::Stopped => return Err(DbError::Cancelled),
+                Mode::Unread(e) | Mode::Failed(e) => return Err(e),
             }
         }
         Ok(())
@@ -97,7 +99,7 @@ impl MySqlConnection {
                 ran
             }
             Mode::Changed => Err(self.restore(session, TURNED_OFF).await),
-            Mode::Later => {
+            Mode::Stopped | Mode::Unread(_) => {
                 self.check_due.store(true, Ordering::Release);
                 ran
             }
@@ -110,7 +112,8 @@ impl MySqlConnection {
         match self.statement(session, &sql, ONE_ROW).await {
             Ok(r) if r.rows.first().and_then(|row| row.first()).is_some_and(|v| v.as_deref() == Some("1")) => Mode::ReadOnly,
             Ok(_) => Mode::Changed,
-            Err(DbError::Cancelled | DbError::Server(_)) => Mode::Later,
+            Err(DbError::Cancelled) => Mode::Stopped,
+            Err(e @ DbError::Server(_)) => Mode::Unread(e),
             Err(e) => Mode::Failed(e),
         }
     }

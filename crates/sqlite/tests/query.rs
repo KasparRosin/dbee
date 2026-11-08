@@ -472,7 +472,8 @@ async fn sql_opens_no_other_file_when_the_run_allows_only_its_own() {
         let e = conn.run(&sql, QUERY_LIMITS).await.unwrap_err();
         let DbError::Server(s) = &e else { panic!("{sql}: {e}") };
         assert_eq!(s.code, "23", "{sql}: {e}");
-        assert!(s.hint.as_deref().is_some_and(|h| h.contains("ATTACH") && h.contains("VACUUM")), "{sql}: {:?}", s.hint);
+        let says = if sql.starts_with("PRAGMA") { ["SQLite's own files", "pragma"] } else { ["ATTACH", "VACUUM"] };
+        assert!(s.hint.as_deref().is_some_and(|h| says.iter().all(|w| h.contains(w))), "{sql}: {:?}", s.hint);
     }
     // Reading where the temporary files go sets nothing.
     ok(&conn, "PRAGMA temp_store_directory", QUERY_LIMITS).await;

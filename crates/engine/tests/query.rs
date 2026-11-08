@@ -469,6 +469,10 @@ fn read_only_postgres_refuses_what_turns_it_off_and_reads_it_back() {
             "COMMIT AND CHAIN".to_owned(),
             "SELECT set_config('default_transaction_read_only', 'off', false)".to_owned(),
             "SELECT lo_from_bytea(0, 'dbee')".to_owned(),
+            r#"SELECT U&"lo_from_byte\0061"(0, 'dbee')"#.to_owned(),
+            r#"SET U&"default_transaction_read_onl!0079" UESCAPE '!' = off"#.to_owned(),
+            "ALTER SYSTEM RESET work_mem".to_owned(),
+            "COPY (SELECT 1) TO PROGRAM 'cat > /dev/null'".to_owned(),
         ];
         for sql in &refused {
             let e = run_text(&mut s, sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
@@ -518,6 +522,8 @@ fn read_only_mysql_refuses_what_turns_it_off_and_reads_it_back() {
             "PREPARE p FROM 'START TRANSACTION READ WRITE'".to_owned(),
             "EXECUTE p".to_owned(),
             "COMMIT AND CHAIN".to_owned(),
+            "SET GLOBAL max_connections = @@GLOBAL.max_connections".to_owned(),
+            "SELECT 1 INTO OUTFILE '/var/lib/mysql-files/dbee-never-written'".to_owned(),
         ];
         for sql in &refused {
             let e = run_text(&mut s, sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
@@ -592,14 +598,16 @@ fn read_only_sqlite_attaches_nothing_and_keeps_query_only() {
         std::fs::copy(t.file().unwrap(), &other).unwrap();
         let literal = |path: &std::path::Path| dbee_sql::Dialect::Sqlite.literal(&path.display().to_string()).unwrap();
         let mut s = read_only_session(&t);
-        for sql in [
-            format!("VACUUM INTO {}", literal(&copy)),
-            "PRAGMA query_only = 0".to_owned(),
-            "PRAGMA main.query_only = OFF".to_owned(),
-            format!("ATTACH {} AS other", literal(&other)),
+        for (sql, about) in [
+            (format!("VACUUM INTO {}", literal(&copy)), "attach"),
+            ("PRAGMA query_only = 0".to_owned(), "query_only"),
+            ("PRAGMA main.query_only = OFF".to_owned(), "query_only"),
+            (format!("ATTACH {} AS other", literal(&other)), "attach"),
         ] {
             let e = run_text(&mut s, &sql).err().unwrap_or_else(|| panic!("{}: ran {sql}", t.name()));
-            assert!(e.data()["hint"].as_str().is_some_and(|h| h.contains("read-only")), "{}: {sql}: {e} {}", t.name(), e.data());
+            // The hint names the case that applies, and only it.
+            let hint = e.data()["hint"].as_str().unwrap_or_default().to_owned();
+            assert!(hint.contains("read-only") && hint.contains(about) && !hint.contains("isolated"), "{}: {sql}: {e} {hint}", t.name());
         }
         assert!(!copy.exists(), "{}: VACUUM INTO made no file", t.name());
         run_text(&mut s, "PRAGMA query_only").unwrap();
