@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (entry 38: a read-only session keeps `sql_mode` and the character set, the guard reads `"…"` as the session does, and the raw rules find `SET` after a version comment's number; 27: a function that changes `sql_mode` or the character set; 40: `SET NAMES utf8mb4` refused on read-only)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane A: entries 41 to 44, a tunnelled cancel's host name, a statement a server never ends, MySQL's server key without a word, the password held as a plain `String`)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -305,10 +305,39 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** wrong text in a query tab's results, and in rows it writes, until `SET NAMES utf8mb4` or a reconnect.
 - **Estimate:** 1 h (estimated): refuse such a `SET` on every connection, or read results in the character set the session reports.
 
+### 41. Through an SSH tunnel, each cancel names the host again (D)
+
+- **Limit:** a direct connection's cancel goes to the address the connection reached. Through the tunnel, each cancel opens a new channel to the host *name*, which the SSH server resolves again: when the name leads to another server by then (a failed-over primary, round-robin DNS), MySQL logs in there with the user's password and sends `KILL QUERY <id>`, which can stop another session's statement there, and Postgres sends the cancel key there.
+- **Evidence:** code reading (security review, lane A, L2): `crates/mysql/src/cancel.rs` and `crates/pg/src/connect.rs` open the cancel's channel with `Tunnel::connect(host, port)`; the SSH server's resolver cannot be steered from a test.
+- **Impact:** a cancel that stops nothing, or a statement of another session stopped, while a name moves between servers.
+- **Estimate:** 2 h (estimated): on MySQL and MariaDB, check `@@server_uuid` (MariaDB: `@@server_id` and `@@hostname`), read at connect, on the KILL connection before the KILL; Postgres has no identity to check.
+
+### 42. A server can keep a statement running forever (S)
+
+- **Limit:** a server that answers a statement with result after result (MySQL's `SERVER_MORE_RESULTS_EXISTS`, Postgres alike), or never ends it, keeps the run going: queries have no read timeout, and a cancel's `KILL QUERY` goes to that same server, which can take it and go on. The run's task and socket live until the server stops; the rows past the caps are read and not kept, so memory stays bounded.
+- **Evidence:** security review, lane A, L3: a stand-in that sent OK packets with more results for ever took the KILL with an OK, and the statement still ran 3.5 s later.
+- **Impact:** a hostile or broken server holds a query tab's run until the connection closes; nothing else is lost.
+- **Estimate:** 2 h (estimated): after a delivered cancel, a grace period (10 s, say), then the connection is marked lost and its socket dropped.
+
+### 43. MySQL fetches the server's RSA key without a word under `disable` or through a tunnel (D)
+
+- **Limit:** with SSL mode `disable`, or through the SSH tunnel, a `caching_sha2_password` or `sha256_password` login takes the server's RSA key without a warning (2026-10-31). A man in the middle of a `disable` link, or between the SSH server and the database, can hand over a key of his own and decrypt the password, not only read the session. MySQL's own client refuses this unless `--get-server-public-key` is given. `allowPublicKey` stays the user's own choice.
+- **Evidence:** security review, lane A, L5; the repository's `the_servers_key_when_allowed_comes_with_a_warning` connects under `disable` with no warning.
+- **Impact:** the password, on a link the user chose to leave plain or that is plain past the SSH server.
+- **Estimate:** 1 h (estimated), the owner's call: a warning under `disable`, as under `allowPublicKey`, or a refusal unless `allowPublicKey` is on.
+
+### 44. The password is held as a plain `String` (S)
+
+- **Limit:** an open connection keeps the database password in memory for the connection's life, as a plain `String`: MySQL's KILL route for its cancel's login (`crates/mysql/src/cancel.rs`), and tokio-postgres's `Config` on Postgres; the engine keeps it for reconnects too. Nothing clears it when it is dropped.
+- **Evidence:** code reading (security review, lane A, L6).
+- **Impact:** theoretical: whoever can read dbee's memory can open the keyring as well.
+- **Estimate:** 1 h (estimated): a wrapper that zeroes the password when it is dropped.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | The security review's lane A: entries 41 (a tunnelled cancel names the host again), 42 (a server can keep a statement running forever), 43 (MySQL takes the server's RSA key without a word under `disable` or a tunnel) and 44 (the password held as a plain `String`). |
 | 2026-11-08 | minor | The security review's fix round 5, adjudicated fix: entry 38 says the raw rules find `SET` also after a version comment's number, which had hidden a lookalike name, while `_` and `$` stay part of a name (`SELECT @@character_set_client` runs). |
 | 2026-11-08 | minor | The security review's fix round 5: entry 38 says a read-only session keeps `sql_mode` and the character set as at connect and the guard reads `"…"` as the session does, and that a version comment glued to `SET` still hides a lookalike name; 27 puts a function that changes `sql_mode` or the character set out of reach; 40 says read-only refuses `SET NAMES utf8mb4` too. |
 | 2026-11-08 | minor | The security review's fix round 4: entry 38 says a read-only connection keeps the character set at utf8mb4 and sets the tracking up again after a caught change, and that under `ANSI_QUOTES` a MariaDB block can still slip past the check and write; 27 adds a statement that slips past the check after a function turned the tracking off; 40 (another character set on a read-write connection). |
