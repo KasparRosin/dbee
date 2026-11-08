@@ -54,7 +54,7 @@ use std::sync::{Arc, Weak};
 
 use dbee_core::{ColumnInfo, ResultSet, TypeClass};
 use dbee_engine::cmd::edit::can_edit;
-use dbee_engine::{EngineError, Json, Screen, Session, Tab, TabId};
+use dbee_engine::{EngineError, Json, Screen, Session, Tab, TabId, Which};
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
 use egui::widgets::text_edit::TextEditState;
 use egui::{
@@ -383,7 +383,7 @@ pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>
     if let Some(v) = value.filter(|v| v.len() > MAX_INLINE_BYTES) {
         return Err(format!("This value is too large to edit inline ({}; at most {}).", size_text(v.len()), size_text(MAX_INLINE_BYTES)));
     }
-    let info = s.state().connected.as_ref().and_then(|c| c.catalog.table(&t.table)).and_then(|i| i.column(data.column_name(col)));
+    let info = s.state().connection(Which::Tab(t.id)).and_then(|c| c.catalog.table(&t.table)).and_then(|i| i.column(data.column_name(col)));
     if let Some(why) = info.and_then(|i| i.not_editable()) {
         return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why: why.into() }));
     }

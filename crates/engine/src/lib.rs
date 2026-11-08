@@ -37,7 +37,9 @@ pub use cmd::{CommandInfo, CommandSpec};
 pub use dbee_driver::Meaning;
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
-pub use state::{Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total};
+pub use state::{
+    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total, Which,
+};
 pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};
 
 /// Params, results and error data.
@@ -50,6 +52,11 @@ pub struct JobId(pub u64);
 /// A tab, unique within a session (ids are never reused).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct TabId(pub u64);
+
+/// An open connection, unique within a session: each open gets a fresh one (ids are never
+/// reused), and a reconnect keeps it. It is not the saved connection's id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct ConnectionId(pub u64);
 
 /// What a command did.
 #[derive(Clone, Debug, PartialEq)]
@@ -248,9 +255,6 @@ pub struct Session {
     pub(crate) allowed_targets: Option<Vec<(String, u16)>>,
     pub(crate) allowed_dirs: Option<Vec<PathBuf>>,
     pub(crate) drivers: Drivers,
-    /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
-    /// decides to commit (one Apply runs at a time).
-    pub(crate) apply_gate: Option<(JobId, Arc<dbee_driver::ApplyGate>, Arc<jobs::Stop>)>,
     journal: Vec<(String, Json)>,
     value_cache: view::Cache,
 }
@@ -280,7 +284,6 @@ impl Session {
             allowed_targets: o.allowed_targets,
             allowed_dirs: o.allowed_dirs,
             drivers: o.drivers,
-            apply_gate: None,
             journal: Vec::new(),
             value_cache: view::Cache::default(),
         })
@@ -485,7 +488,7 @@ impl Session {
     /// How many operations wait for their turn on the browse connection (for tests of the queue).
     #[doc(hidden)]
     pub fn browse_waiting(&self) -> usize {
-        self.state.connected.as_ref().map_or(0, |c| c.browse.waiting())
+        self.state.connection(Which::Active).map_or(0, |c| c.browse.waiting())
     }
 
     /// How many value views this session has built (for tests of the caching).
@@ -499,10 +502,10 @@ impl Session {
     /// detail, and the running jobs. Never contains a secret.
     pub fn inspect(&self) -> Json {
         let st = &self.state;
-        let connection = st.connected.as_ref().map(|c| c.summary(st.store.is_saved(&c.config.id)));
+        let connection = st.connection(Which::Active).map(|c| c.summary(st.store.is_saved(&c.config.id)));
         let active = st.active_tab();
         let query = match active {
-            Some(Tab::Query(q)) => cmd::query::summary(q, st.connected.as_ref()),
+            Some(Tab::Query(q)) => cmd::query::summary(q, st.connection(Which::Tab(q.id))),
             _ => Json::Null,
         };
         let table = match active {
@@ -578,11 +581,11 @@ impl Session {
     /// marker that still names it is cleared. A query run whose marker is still there was not
     /// applied, so where it left the query connection is not known.
     fn job_ended(&mut self, job: JobId) {
-        if let Some(c) = self.state.connected.as_mut()
-            && c.query_run.as_ref().is_some_and(|run| run.job == job)
-        {
-            c.query_run = None;
-            c.query_database.known = false;
+        for c in &mut self.state.connections {
+            if c.query_run.as_ref().is_some_and(|run| run.job == job) {
+                c.query_run = None;
+                c.query_database.known = false;
+            }
         }
         for tab in &mut self.state.tabs {
             match tab {

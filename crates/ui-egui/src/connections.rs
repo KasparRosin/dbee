@@ -55,7 +55,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dbee_config::{ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
-use dbee_engine::{EngineError, JobId, Json, Screen, State};
+use dbee_engine::{EngineError, JobId, Json, Screen, State, Which};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
     Align, Button, Color32, CornerRadius, FontId, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat,
@@ -482,7 +482,7 @@ pub(crate) fn fill_from_url(app: &mut DbeeApp, parts: &Json) {
 /// file opens (`connection.openFile`); else `connection.close` runs first, with its questions, and
 /// the open follows once it closed ([`switch_pending`]).
 pub(crate) fn switch_to(app: &mut DbeeApp, to: SwitchTo) {
-    if app.session.state().connected.is_none() {
+    if app.session.state().connection(Which::Active).is_none() {
         open_switch(app, &to);
         return;
     }
@@ -499,7 +499,7 @@ pub(crate) fn switch_pending(app: &mut DbeeApp) {
         return;
     }
     let Some(to) = app.view.conn.switch.take() else { return };
-    if app.session.state().connected.is_none() {
+    if app.session.state().connection(Which::Active).is_none() {
         open_switch(app, &to);
     }
 }

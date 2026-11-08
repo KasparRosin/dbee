@@ -59,7 +59,7 @@ use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needs_db, p};
 use crate::jobs::Stop;
 use crate::state::{PageView, TableTab, Total};
 use crate::turns::{self, InTurn};
-use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
+use crate::{Apply, ConnectionId, EngineError, JobId, Json, Outcome, Session, Tab, TabId, Which};
 
 const OPEN: &str = "table.open";
 const SET_FILTERS: &str = "table.setFilters";
@@ -216,8 +216,9 @@ fn sql_bad(e: SqlError) -> EngineError {
     bad(e.to_string())
 }
 
-pub(crate) fn catalog(s: &Session) -> Result<Arc<Catalog>, EngineError> {
-    s.state.connected.as_ref().map(|c| Arc::clone(&c.catalog)).ok_or_else(|| disabled(NOT_CONNECTED))
+/// The catalog of the connection `which` names.
+pub(crate) fn catalog(s: &Session, which: Which) -> Result<Arc<Catalog>, EngineError> {
+    s.state.connection(which).map(|c| Arc::clone(&c.catalog)).ok_or_else(|| disabled(NOT_CONNECTED))
 }
 
 pub(crate) fn lookup<'a>(catalog: &'a Catalog, table: &TableRef) -> Result<&'a TableInfo, EngineError> {
@@ -299,7 +300,7 @@ fn last_page(rows: u64) -> u64 {
 /// Why the tab's rows cannot be edited, or `None` when they can (`notEditableReason`): the
 /// connection, the relation's kind, the table's own reason (`noEditReason`), or its key.
 pub fn not_editable<'a>(s: &'a Session, t: &TableTab) -> Option<Cow<'a, str>> {
-    let Some(c) = s.state.connected.as_ref() else { return Some(NOT_CONNECTED.into()) };
+    let Some(c) = s.state.connection(Which::Tab(t.id)) else { return Some(NOT_CONNECTED.into()) };
     if c.info.read_only || c.config.read_only {
         return Some("read-only connection".into());
     }
@@ -321,7 +322,7 @@ pub fn not_editable<'a>(s: &'a Session, t: &TableTab) -> Option<Cow<'a, str>> {
 
 /// The table's own reason it cannot be edited, whatever the connection (`noEditReason`).
 fn no_edit_reason<'a>(s: &'a Session, t: &TableTab) -> Option<&'a str> {
-    s.state.connected.as_ref()?.catalog.table(&t.table)?.no_edit_reason.as_deref()
+    s.state.connection(Which::Tab(t.id))?.catalog.table(&t.table)?.no_edit_reason.as_deref()
 }
 
 /// The tab as `inspect()` shows it.
@@ -360,6 +361,8 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
 
 /// A page load, checked and ready to start.
 struct Plan {
+    /// The open connection `conn` belongs to.
+    id: ConnectionId,
     conn: Arc<InTurn>,
     dialect: Dialect,
     info: TableInfo,
@@ -377,18 +380,19 @@ fn check(dialect: Dialect, info: &TableInfo, view: &PageView, last: bool) -> Res
     Ok(())
 }
 
-/// [`check`], then takes the browse connection. Changes nothing but a lost mark.
-fn prepare(s: &mut Session, info: &TableInfo, view: PageView, last: bool) -> Result<Plan, EngineError> {
-    let dialect = s.state.dialect();
+/// [`check`], then takes the browse connection of the connection `which` names. Changes nothing
+/// but a lost mark.
+fn prepare(s: &mut Session, which: Which, info: &TableInfo, view: PageView, last: bool) -> Result<Plan, EngineError> {
+    let dialect = s.state.dialect(which);
     check(dialect, info, &view, last)?;
-    let conn = s.browse_in_turn()?;
-    Ok(Plan { conn, dialect, info: info.clone(), view, last })
+    let (id, conn) = s.browse_in_turn(which)?;
+    Ok(Plan { id, conn, dialect, info: info.clone(), view, last })
 }
 
 /// Starts `plan` for tab `tab`: the tab asks for its view (a new condition forgets the total,
 /// `last` shows it as counting), its `seq` moves on, and the job runs.
 fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result<Outcome, EngineError> {
-    let Plan { conn, dialect, info, view, last } = plan;
+    let Plan { id, conn, dialect, info, view, last } = plan;
     let Some(t) = table_tab_mut(s, tab) else { return Err(bad(format!("no tab {} is open", tab.0))) };
     if t.applied != view.applied {
         t.total = Total::Unknown;
@@ -409,7 +413,7 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     let job_stop = Arc::clone(&stop);
     let job = s.spawn_stoppable_job(label, stop, async move {
         let loaded = load(job_conn.as_ref(), dialect, &info, &view, last, &job_stop).await;
-        let apply: Apply = Box::new(move |s: &mut Session| apply_load(s, &conn, tab, seq, view, last, columns, loaded));
+        let apply: Apply = Box::new(move |s: &mut Session| apply_load(s, id, &conn, tab, seq, view, last, columns, loaded));
         apply
     });
     if let Some(t) = table_tab_mut(s, tab) {
@@ -495,6 +499,7 @@ fn split_hidden(mut rs: ResultSet, visible: usize) -> (ResultSet, ResultSet) {
 
 fn apply_load(
     s: &mut Session,
+    id: ConnectionId,
     conn: &Arc<dyn Connection>,
     tab: TabId,
     seq: u64,
@@ -503,7 +508,7 @@ fn apply_load(
     columns: PageColumns,
     loaded: Loaded,
 ) -> Result<Json, EngineError> {
-    if !s.is_current_browse(conn) {
+    if !s.is_current_browse(id, conn) {
         return Ok(ignored());
     }
     let me = s.applying_job();
@@ -559,7 +564,7 @@ fn apply_load(
         Err(e) => {
             t.error = Some(e.to_string());
             t.back_to_shown();
-            Err(s.db_failed(conn, &e))
+            Err(s.db_failed(id, conn, &e))
         }
     }
 }
@@ -578,7 +583,7 @@ pub(crate) struct Reload {
 impl Reload {
     pub(crate) fn prepare(s: &mut Session, tab: TabId, info: &TableInfo) -> Result<Reload, EngineError> {
         let view = table_tab_mut(s, tab).map(|t| t.shown.clone()).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
-        let dialect = s.state.dialect();
+        let dialect = s.state.dialect(Which::Tab(tab));
         check(dialect, info, &view, false)?;
         let t = table_tab_mut(s, tab).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
         t.seq = t.seq.wrapping_add(1);
@@ -589,19 +594,27 @@ impl Reload {
         load(conn, self.dialect, &self.info, &self.view, false, &Stop::default()).await
     }
 
-    pub(crate) fn finish(self, s: &mut Session, conn: &Arc<dyn Connection>, tab: TabId, loaded: Loaded) -> Result<Json, EngineError> {
-        apply_load(s, conn, tab, self.seq, self.view, false, self.columns, loaded)
+    pub(crate) fn finish(
+        self,
+        s: &mut Session,
+        id: ConnectionId,
+        conn: &Arc<dyn Connection>,
+        tab: TabId,
+        loaded: Loaded,
+    ) -> Result<Json, EngineError> {
+        apply_load(s, id, conn, tab, self.seq, self.view, false, self.columns, loaded)
     }
 }
 
-/// Opens `table` in a new active tab with `filters` applied, and loads its first page.
-fn open_tab(s: &mut Session, label: &'static str, table: TableRef, filters: Vec<Filter>) -> Result<Outcome, EngineError> {
-    let catalog = catalog(s)?;
+/// Opens `table` of the connection `which` names in a new active tab with `filters` applied, and
+/// loads its first page.
+fn open_tab(s: &mut Session, label: &'static str, which: Which, table: TableRef, filters: Vec<Filter>) -> Result<Outcome, EngineError> {
+    let catalog = catalog(s, which)?;
     let info = lookup(&catalog, &table)?;
     let view = PageView { applied: condition(&filters, "", false), sort: None, page: 0 };
-    let plan = prepare(s, info, view.clone(), false)?;
+    let plan = prepare(s, which, info, view.clone(), false)?;
     let id = s.state.take_tab_id();
-    s.state.tabs.push(Tab::Table(TableTab::new(id, table, filters, view)));
+    s.state.tabs.push(Tab::Table(TableTab::new(id, plan.id, table, filters, view)));
     s.state.active = Some(id);
     start(s, label, id, plan)
 }
@@ -612,8 +625,8 @@ fn reload(s: &mut Session, label: &'static str, view: PageView, last: bool) -> R
         let t = active(s)?;
         (t.id, t.table.clone())
     };
-    let catalog = catalog(s)?;
-    let plan = prepare(s, lookup(&catalog, &table)?, view, last)?;
+    let catalog = catalog(s, Which::Tab(tab))?;
+    let plan = prepare(s, Which::Tab(tab), lookup(&catalog, &table)?, view, last)?;
     start(s, label, tab, plan)
 }
 
@@ -627,7 +640,7 @@ fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         Some(v) => parse_filters(v)?,
         None => Vec::new(),
     };
-    open_tab(s, OPEN, table, filters)
+    open_tab(s, OPEN, Which::Active, table, filters)
 }
 
 /// `{filters?, raw?, rawMode?, apply? = true}`: sets what is given in the filter bar. With
@@ -648,9 +661,9 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let raw_mode = raw_mode.unwrap_or(t.raw_mode);
     // SQL dbee will not build leaves the bar as it was; past that check the bar keeps what was
     // typed, even when the connection then turns out to be lost.
-    let dialect = s.state.dialect();
+    let dialect = s.state.dialect(Which::Tab(tab));
     let checked = if apply {
-        let catalog = catalog(s)?;
+        let catalog = catalog(s, Which::Tab(tab))?;
         let info = lookup(&catalog, &table)?;
         let view = PageView { applied: condition(&filters, &raw, raw_mode), sort, page: 0 };
         check(dialect, info, &view, false)?;
@@ -664,8 +677,8 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     t.raw_mode = raw_mode;
     match checked {
         Some((info, view)) => {
-            let conn = s.browse_in_turn()?;
-            start(s, SET_FILTERS, tab, Plan { conn, dialect, info, view, last: false })
+            let (id, conn) = s.browse_in_turn(Which::Tab(tab))?;
+            start(s, SET_FILTERS, tab, Plan { id, conn, dialect, info, view, last: false })
         }
         None => Ok(Outcome::Done(json!({ "tab": tab, "filters": t.filters, "raw": t.raw, "rawMode": t.raw_mode }))),
     }
@@ -734,7 +747,7 @@ fn sort(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let column = p::str(params, "column")?;
     let dir = p::opt_str(params, "dir")?;
     let t = active(s)?;
-    let catalog = catalog(s)?;
+    let catalog = catalog(s, Which::Tab(t.id))?;
     let info = lookup(&catalog, &t.table)?;
     if info.visible_column(column).is_none() {
         return Err(bad("the table has no such `column`"));
@@ -760,18 +773,18 @@ fn sort(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let (tab, condition) = (t.id, t.applied.clone());
-    let catalog = catalog(s)?;
+    let catalog = catalog(s, Which::Tab(tab))?;
     let info = lookup(&catalog, &t.table)?;
-    let dialect = s.state.dialect();
+    let dialect = s.state.dialect(Which::Tab(tab));
     let sql = count_sql(dialect, info, &condition).map_err(sql_bad)?;
     let estimate = quick_estimate(dialect, info, &condition);
-    let job_conn = s.browse_in_turn()?;
+    let (id, job_conn) = s.browse_in_turn(Which::Tab(tab))?;
     let conn: Arc<dyn Connection> = job_conn.clone();
     let stop = Arc::new(Stop::default());
     let job_stop = Arc::clone(&stop);
     let job = s.spawn_stoppable_job(COUNT, stop, async move {
         let rows = turns::stoppable_in_turn(&job_conn, |c| c.scalar_u64(&sql), &job_stop).await;
-        let apply: Apply = Box::new(move |s: &mut Session| apply_count(s, &conn, tab, &condition, rows));
+        let apply: Apply = Box::new(move |s: &mut Session| apply_count(s, id, &conn, tab, &condition, rows));
         apply
     });
     if let Some(t) = table_tab_mut(s, tab) {
@@ -783,12 +796,13 @@ fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 
 fn apply_count(
     s: &mut Session,
+    id: ConnectionId,
     conn: &Arc<dyn Connection>,
     tab: TabId,
     condition: &Condition,
     rows: Result<u64, DbError>,
 ) -> Result<Json, EngineError> {
-    if !s.is_current_browse(conn) {
+    if !s.is_current_browse(id, conn) {
         return Ok(ignored());
     }
     let me = s.applying_job();
@@ -810,7 +824,7 @@ fn apply_count(
                 // No newer count runs: back to the estimate.
                 t.total = t.total.settled();
             }
-            Err(s.db_failed(conn, &e))
+            Err(s.db_failed(id, conn, &e))
         }
     }
 }
@@ -834,11 +848,14 @@ fn apply_count(
 /// leaves the queue too.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
+    let which = Which::Tab(t.id);
     let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));
     if let Some(job) = t.applying.filter(|&job| s.jobs.is_running(job)) {
-        let gate = s.apply_gate.as_ref().filter(|(of, _, _)| *of == job).map(|(_, gate, stop)| (Arc::clone(gate), Arc::clone(stop)));
-        let Some((gate, stop)) = gate else { return Err(EngineError::Busy(edit::APPLYING.into())) };
-        s.browse()?;
+        let gate = s.state.connection(which).and_then(|c| c.apply_gate.as_ref()).filter(|(of, _, _)| *of == job);
+        let Some((gate, stop)) = gate.map(|(_, gate, stop)| (Arc::clone(gate), Arc::clone(stop))) else {
+            return Err(EngineError::Busy(edit::APPLYING.into()));
+        };
+        s.browse(which)?;
         if !gate.cancel() {
             return Err(EngineError::Busy(edit::COMMITTING.into()));
         }
@@ -850,7 +867,7 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
         return Ok(Outcome::Done(json!({ "sent": false })));
     }
     let jobs = [t.loading, t.counting.filter(|&c| Some(c) != t.loading)];
-    s.browse()?;
+    s.browse(which)?;
     let stopped: Vec<bool> = jobs.into_iter().flatten().filter_map(|job| s.jobs.stop(job)).collect();
     Ok(Outcome::Done(match (stopped.contains(&true), stopped.is_empty()) {
         (true, _) => json!({ "sent": true }),
@@ -879,7 +896,7 @@ fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let (columns, rows) = match &t.data {
         Some(d) => (json!(d.columns), json!(d.rows.iter().skip(offset).take(limit).collect::<Vec<_>>())),
         None => {
-            let catalog = catalog(s)?;
+            let catalog = catalog(s, Which::Tab(t.id))?;
             let columns: Vec<Column> = catalog.table(&t.table).map(|i| i.visible_columns().map(ColumnInfo::column).collect()).unwrap_or_default();
             (json!(columns), json!([]))
         }
@@ -920,7 +937,8 @@ fn follow(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             .ok_or_else(|| bad("`column` is not a column of the page"))?,
         _ => return Err(bad("`column` is required (a name or a 0-based index)")),
     };
-    let catalog = catalog(s)?;
+    let which = Which::Tab(t.id);
+    let catalog = catalog(s, which)?;
     let info = lookup(&catalog, &t.table)?;
     let fk = info.fk_for(name).ok_or_else(|| bad("`column` is not part of a foreign key"))?;
     let values = data.rows.get(row).ok_or_else(|| bad("`row` is not a loaded row"))?;
@@ -934,7 +952,7 @@ fn follow(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         }
     }
     let target = fk.target.clone();
-    open_tab(s, FOLLOW, target, filters)
+    open_tab(s, FOLLOW, which, target, filters)
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use std::time::Duration;
 use common::*;
 use dbee_config::{ConnectionColor, ConnectionConfig, SecretError, SecretKind, SecretStore, Settings, SshAuth, SshConfig, SslMode};
 use dbee_driver::Drivers;
-use dbee_engine::{EngineError, Json, Outcome, Session, UiRequest};
+use dbee_engine::{EngineError, Json, Outcome, Session, UiRequest, Which};
 use dbee_testkit::{TestTarget, require_testdb, temp_home, unique};
 use serde_json::json;
 
@@ -301,7 +301,7 @@ fn a_session_reports_the_kinds_it_can_open() {
 fn summary_names_product_and_kind() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
-        let c = s.state().connected.as_ref().unwrap();
+        let c = s.state().connection(Which::Active).unwrap();
         let j = c.summary(true);
         let info = t.kind().info();
         assert_eq!(j["kind"], info.id);
@@ -367,7 +367,7 @@ fn open_returns_the_connection_server_and_tables() {
         assert!(r["server"].as_str().unwrap().starts_with(t.kind().info().product), "{r}");
         let tables = r["tables"].as_u64().unwrap();
         assert!(tables > 10, "the seed has the shop tables: {r}");
-        let c = s.state().connected.as_ref().unwrap();
+        let c = s.state().connection(Which::Active).unwrap();
         assert_eq!(c.catalog.table_count() as u64, tables);
         assert!(c.catalog.table(&dbee_core::TableRef { schema: t.schema("shop").into(), name: "orders".into() }).is_some(), "{}", t.name());
         assert!(!c.lost);
@@ -695,11 +695,11 @@ fn schema_refresh_reloads_and_keeps_tabs() {
         let guard = scratch_table(t, &table, "CREATE TABLE {t} (id int)");
         let r = s.run_blocking("schema.refresh", json!({}), T);
         let scratch = dbee_core::TableRef { schema: t.schema("scratch").into(), name: table.clone() };
-        let found = s.state().connected.as_ref().unwrap().catalog.table(&scratch).is_some();
+        let found = s.state().connection(Which::Active).unwrap().catalog.table(&scratch).is_some();
         drop(guard);
         let r = r.unwrap();
         assert!(found, "{}: the refreshed catalog has the new table", t.name());
-        assert_eq!(r["tables"].as_u64().map(|n| n as usize), Some(s.state().connected.as_ref().unwrap().catalog.table_count()));
+        assert_eq!(r["tables"].as_u64().map(|n| n as usize), Some(s.state().connection(Which::Active).unwrap().catalog.table_count()));
         assert_eq!(s.inspect()["query"]["text"], "select 2");
         assert_eq!(s.state().tabs.len(), 1);
     });
@@ -774,9 +774,9 @@ fn reconnect_through_ssh_after_connection_killed() {
 fn reconnect_while_connected_replaces_the_connection() {
     let _db = require_testdb!();
     for_each_engine(|_, s| {
-        let before = s.state().connected.as_ref().unwrap().info.clone();
+        let before = s.state().connection(Which::Active).unwrap().info.clone();
         s.run_blocking("connection.reconnect", json!({}), T).unwrap();
-        assert_eq!(s.state().connected.as_ref().unwrap().info, before);
+        assert_eq!(s.state().connection(Which::Active).unwrap().info, before);
         s.run_blocking("schema.refresh", json!({}), T).unwrap();
     });
 }
@@ -1649,12 +1649,12 @@ fn listing_leaves_the_session_as_it_is() {
     let mut s = connected();
     s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
     let before = (s.inspect()["connection"].clone(), s.inspect()["tabs"].clone(), s.state().store.clone());
-    let catalog = Arc::clone(&s.state().connected.as_ref().unwrap().catalog);
+    let catalog = Arc::clone(&s.state().connection(Which::Active).unwrap().catalog);
     let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
     let r = s.run_blocking(LIST, json!({ "config": config_for(&mysql), "password": pw() }), T).unwrap();
     assert!(names(&r).contains(&"shop"), "{r}");
     assert_eq!((s.inspect()["connection"].clone(), s.inspect()["tabs"].clone(), s.state().store.clone()), before);
-    let c = s.state().connected.as_ref().unwrap();
+    let c = s.state().connection(Which::Active).unwrap();
     assert!(Arc::ptr_eq(&catalog, &c.catalog) && !c.lost, "the open connection is as it was");
     assert_eq!(run(&mut s, "query.run", json!({}))["results"].as_array().map(Vec::len), Some(1), "the query tab still runs");
     assert_eq!(s.inspect()["screen"], "workspace");

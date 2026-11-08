@@ -40,7 +40,7 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use dbee_engine::cmd::connection::{OPEN, OPEN_FILE, RECONNECT};
-use dbee_engine::{CommandInfo, EngineError, JobId, Json, Outcome, Screen, Session};
+use dbee_engine::{CommandInfo, EngineError, JobId, Json, Outcome, Screen, Session, Which};
 use egui::{CornerRadius, Frame, Margin, RichText, vec2};
 use serde_json::json;
 
@@ -366,7 +366,7 @@ impl DbeeApp {
     /// of `connection.close` first, as a switch in the quick search is ([`connections::switch_to`]),
     /// unless the file would be refused anyway (that refusal is the notice, and nothing closes).
     fn dropped_file(&mut self, path: &Path) {
-        if self.session.state().connected.is_none() {
+        if self.session.state().connection(Which::Active).is_none() {
             self.open_file(path);
             return;
         }
@@ -400,7 +400,7 @@ impl DbeeApp {
     /// engine uses it where the dialect has `USE`.
     fn with_selection(&self, command: &str, mut params: Json) -> Json {
         if command == NEW_QUERY
-            && let Some(c) = self.session.state().connected.as_ref()
+            && let Some(c) = self.session.state().connection(Which::Active)
             && let Some(schema) = self.view.work.tree.selected_schema(&c.catalog)
             && let Some(p) = params.as_object_mut()
         {

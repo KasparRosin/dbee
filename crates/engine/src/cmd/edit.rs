@@ -53,7 +53,7 @@ use crate::edits::{Edits, Failed, UNKNOWN_OUTCOME};
 use crate::jobs::Stop;
 use crate::state::{TableTab, Total};
 use crate::turns;
-use crate::{Apply, EngineError, Json, Need, Outcome, Session, Tab, TabId};
+use crate::{Apply, ConnectionId, EngineError, Json, Need, Outcome, Session, Tab, TabId, Which};
 
 const EDIT: &str = "cell.edit";
 const SET_NULL: &str = "cell.setNull";
@@ -336,7 +336,7 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
     let row = p::usize(params, "row")?;
     let (tab, data) = target(s)?;
     let col = column(params, &data)?;
-    let catalog = catalog(s)?;
+    let catalog = catalog(s, Which::Tab(tab))?;
     let table = match s.state.tab(tab) {
         Some(Tab::Table(t)) => t.table.clone(),
         _ => return Err(disabled(NO_TABLE_TAB)),
@@ -345,7 +345,7 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
     // The cell's column in the catalog: what clearing stages, and whether the engine computes it.
     let info = lookup(&catalog, &table).ok().and_then(|t| t.column(name));
     let value = match what {
-        Staging::Value => value(params, class, s.state.dialect())?,
+        Staging::Value => value(params, class, s.state.dialect(Which::Tab(tab)))?,
         Staging::Null => NewValue::Null,
         Staging::Clear => {
             let info = info.ok_or_else(|| bad("the column is no longer in the schema (refresh it)"))?;
@@ -435,9 +435,9 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         }
         _ => return Err(disabled(NO_TABLE_TAB)),
     };
-    let catalog = catalog(s)?;
+    let catalog = catalog(s, Which::Tab(tab))?;
     let info = lookup(&catalog, &table)?;
-    let statements = edits.statements(s.state.dialect(), info, &data, &hidden).map_err(|e| bad(e.to_string()))?;
+    let statements = edits.statements(s.state.dialect(Which::Tab(tab)), info, &data, &hidden).map_err(|e| bad(e.to_string()))?;
     if statements.is_empty() {
         return Err(disabled(NOTHING_STAGED));
     }
@@ -450,7 +450,7 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         reshaped: !edits.new_rows.is_empty() || !edits.deleted.is_empty(),
     };
     let sql: Vec<String> = statements.into_iter().map(|(_, sql)| sql).collect();
-    let job_conn = s.browse_in_turn()?;
+    let (id, job_conn) = s.browse_in_turn(Which::Tab(tab))?;
     let conn: Arc<dyn Connection> = job_conn.clone();
     let reload = Reload::prepare(s, tab, info)?;
     if let Some(t) = table_tab_mut(s, tab)
@@ -468,18 +468,21 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             Ok(_) => Some(reload.run(job_conn.as_ref()).await),
             Err(_) => None,
         };
-        let apply: Apply = Box::new(move |s: &mut Session| applied(s, &conn, tab, applying, reload, written, page));
+        let apply: Apply = Box::new(move |s: &mut Session| applied(s, id, &conn, tab, applying, reload, written, page));
         apply
     });
     if let Some(t) = table_tab_mut(s, tab) {
         t.applying = Some(job);
     }
-    s.apply_gate = Some((job, gate, stop));
+    if let Some(c) = s.state.connection_mut(Which::Id(id)) {
+        c.apply_gate = Some((job, gate, stop));
+    }
     Ok(Outcome::Started(job))
 }
 
 fn applied(
     s: &mut Session,
+    id: ConnectionId,
     conn: &Arc<dyn Connection>,
     tab: TabId,
     applying: Applying,
@@ -488,10 +491,12 @@ fn applied(
     page: Option<Loaded>,
 ) -> Result<Json, EngineError> {
     let me = s.applying_job();
-    if s.apply_gate.as_ref().is_some_and(|(job, _, _)| Some(*job) == me) {
-        s.apply_gate = None;
+    if let Some(c) = s.state.connection_mut(Which::Id(id))
+        && c.apply_gate.as_ref().is_some_and(|(job, _, _)| Some(*job) == me)
+    {
+        c.apply_gate = None;
     }
-    if !s.is_current_browse(conn) {
+    if !s.is_current_browse(id, conn) {
         return Ok(ignored());
     }
     let Some(t) = table_tab_mut(s, tab) else { return Ok(ignored()) };
@@ -507,7 +512,7 @@ fn applied(
                 t.total = Total::Unknown;
             }
             let shown = match page {
-                Some(page) => reload.finish(s, conn, tab, page),
+                Some(page) => reload.finish(s, id, conn, tab, page),
                 None => Err(bad("the page was not loaded again")),
             };
             Ok(match shown {
@@ -535,7 +540,7 @@ fn applied(
                 message
             };
             let column = if lost { None } else { column };
-            Err(match s.db_failed(conn, &error) {
+            Err(match s.db_failed(id, conn, &error) {
                 EngineError::Db { code, mut data, .. } => {
                     if let Json::Object(map) = &mut data {
                         map.insert("row".into(), json!(row));

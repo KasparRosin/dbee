@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use dbee_engine::cmd::query::QUERY_SESSION_LOST;
-use dbee_engine::{EngineError, JobId, Json, Meaning, Outcome, Session, Tab};
+use dbee_engine::{EngineError, JobId, Json, Meaning, Outcome, Session, Tab, Which};
 use dbee_testkit::{ORDERS_COUNT, TestTarget, require_testdb, unique};
 use serde_json::json;
 
@@ -632,7 +632,7 @@ fn mysql_query_tab_uses_the_tree_database() {
     let mut seen = 0;
     for t in engine_targets() {
         let mut s = connected_to(&t);
-        let dialect = s.state().dialect();
+        let dialect = s.state().dialect(Which::Active);
         // The tree's schema becomes the tab's database only where the engine has `USE`.
         if !dialect.has_use_database() {
             tab(&mut s, "select 1");
@@ -725,7 +725,7 @@ fn with_use(mut each: impl FnMut(&TestTarget, &mut Session)) {
     let mut seen = 0;
     for t in engine_targets() {
         let mut s = connected_to(&t);
-        if s.state().dialect().has_use_database() {
+        if s.state().dialect(Which::Active).has_use_database() {
             seen += 1;
             each(&t, &mut s);
         }
@@ -1002,7 +1002,7 @@ fn a_nul_in_a_statement_runs_where_the_engine_takes_it() {
         assert_eq!(q(t, &format!("SELECT count(*) FROM {sc}.{name}")), "2", "{}", t.name());
         // Inside a string literal: a character where the engine takes it.
         let text = "select 1;\nselect 'a\u{0}b' as v";
-        if !s.state().dialect().statement_may_hold_nul() {
+        if !s.state().dialect(Which::Active).statement_may_hold_nul() {
             refused(s, text);
             return;
         }

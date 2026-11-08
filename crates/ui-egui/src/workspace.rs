@@ -35,7 +35,7 @@
 
 use std::sync::Arc;
 
-use dbee_engine::{Session, State, Tab, TabId};
+use dbee_engine::{Session, State, Tab, TabId, Which};
 use dbee_sql::filter::Condition;
 use egui::{Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, pos2, vec2};
 use serde_json::json;
@@ -185,7 +185,7 @@ enum Act {
 pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let t = TOKENS;
     // A new connection starts with a fresh tree.
-    let id = app.session.state().connected.as_ref().map(|c| c.config.id.clone());
+    let id = app.session.state().connection(Which::Active).map(|c| c.config.id.clone());
     if app.view.work.connection != id {
         app.view.work = Workspace { connection: id, ..Workspace::default() };
     }
@@ -238,7 +238,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
 /// The status bar; true when the value panel's toggle was clicked.
 fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool {
     let t = TOKENS;
-    let Some(c) = app.session.state().connected.as_ref() else { return false };
+    let Some(c) = app.session.state().connection(Which::Active) else { return false };
     let name = c.config.display_name();
     let label = if c.info.read_only { format!("{name} · read-only") } else { name };
     let colour = connection_color(c.config.color);
@@ -324,12 +324,12 @@ fn readable_on(fill: Color32) -> Color32 {
 /// The tree on the left.
 fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let t = TOKENS;
-    let Some(catalog) = app.session.state().connected.as_ref().map(|c| Arc::clone(&c.catalog)) else { return };
-    let dialect = app.session.state().dialect();
+    let Some(catalog) = app.session.state().connection(Which::Active).map(|c| Arc::clone(&c.catalog)) else { return };
+    let dialect = app.session.state().dialect(Which::Active);
     let refresh = if app.session.running("schema.refresh") {
         Refresh::Running
     } else {
-        match app.session.state().connected.as_ref().map(|c| c.lost) {
+        match app.session.state().connection(Which::Active).map(|c| c.lost) {
             Some(true) => Refresh::Disabled("the connection is lost; reconnect first".into()),
             _ => Refresh::Ready,
         }

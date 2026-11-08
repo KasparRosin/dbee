@@ -24,7 +24,7 @@ pub mod tabs;
 
 use serde::Serialize;
 
-use crate::{EngineError, Json, Outcome, Session};
+use crate::{EngineError, Json, Outcome, Session, Which};
 
 /// One command.
 pub struct CommandSpec {
@@ -151,19 +151,25 @@ pub const NOT_CONNECTED: &str = "not connected";
 /// Why a command that needs the database cannot run after the connection broke.
 pub const LOST: &str = "connection lost — reconnect";
 
+/// How many connections may be open at once.
+pub(crate) const MAX_OPEN: usize = 1;
+
+/// Why another connection cannot open while [`MAX_OPEN`] are.
+pub(crate) const ALREADY_CONNECTED: &str = "already connected; disconnect first";
+
 /// A connection is open, lost or not.
 pub fn connected(s: &Session) -> Result<(), String> {
-    if s.state.connected.is_some() { Ok(()) } else { Err(NOT_CONNECTED.into()) }
+    if s.state.connection(Which::Active).is_some() { Ok(()) } else { Err(NOT_CONNECTED.into()) }
 }
 
-/// No connection is open (one connection per window).
+/// Another connection may open: fewer than [`MAX_OPEN`] are.
 pub fn not_connected(s: &Session) -> Result<(), String> {
-    if s.state.connected.is_some() { Err("already connected; disconnect first".into()) } else { Ok(()) }
+    if s.state.connections.len() >= MAX_OPEN { Err(ALREADY_CONNECTED.into()) } else { Ok(()) }
 }
 
 /// A connection is open and not lost: for every command that needs the database.
 pub fn needs_db(s: &Session) -> Result<(), String> {
-    match &s.state.connected {
+    match s.state.connection(Which::Active) {
         None => Err(NOT_CONNECTED.into()),
         Some(c) if c.lost => Err(LOST.into()),
         Some(_) => Ok(()),

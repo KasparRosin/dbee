@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionColor, ConnectionConfig};
 use dbee_core::{Catalog, RelKind, TableRef};
-use dbee_engine::{Json, Outcome, Screen, State};
+use dbee_engine::{Json, Outcome, Screen, State, Which};
 use egui::{Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Modifiers, Rect, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
@@ -107,7 +107,7 @@ struct FoundFor {
 
 impl FoundFor {
     fn now(state: &State, query: &str) -> FoundFor {
-        let open = state.connected.as_ref();
+        let open = state.connection(Which::Active);
         FoundFor {
             tables: open.filter(|c| !c.lost).map(|c| Arc::clone(&c.catalog)),
             open: open.map(|c| c.config.id.clone()),
@@ -118,7 +118,7 @@ impl FoundFor {
 
     /// The results found for `self` still hold in `state` for `query`.
     fn holds(&self, state: &State, query: &str) -> bool {
-        let open = state.connected.as_ref();
+        let open = state.connection(Which::Active);
         let tables = open.filter(|c| !c.lost).map(|c| &c.catalog);
         let same_tables = match (&self.tables, tables) {
             (Some(had), Some(now)) => Arc::ptr_eq(had, now),
@@ -176,7 +176,7 @@ impl QuickSearch {
 
 /// What `state` shows, as a [`Place`].
 fn place_of(state: &State) -> Place {
-    (state.screen, state.connected.as_ref().map(|c| c.config.id.clone()))
+    (state.screen, state.connection(Which::Active).map(|c| c.config.id.clone()))
 }
 
 /// When the keyboard goes back to the widget that had it before the search.

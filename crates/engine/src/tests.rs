@@ -176,7 +176,7 @@ fn started(o: Outcome) -> crate::JobId {
 /// counting with an estimate of 5, and one new row staged.
 fn table_tab(s: &mut Session) -> TabId {
     let id = s.state.take_tab_id();
-    let mut t = TableTab::new(id, TableRef { schema: "s".into(), name: "t".into() }, vec![], PageView::default());
+    let mut t = TableTab::new(id, crate::ConnectionId(0), TableRef { schema: "s".into(), name: "t".into() }, vec![], PageView::default());
     t.page = 3;
     t.total = Total::Counting { estimate: Some(5) };
     Arc::make_mut(&mut t.edits).add_row(&dbee_core::ResultSet::default());
@@ -631,14 +631,14 @@ fn a_query_run_left_unapplied_leaves_the_database_not_known() {
     s.run_blocking("connection.open", json!({ "config": config, "createFile": true }), Duration::from_secs(30)).unwrap();
     let shop = || CurrentDatabase::known(Some("shop".into()));
     let (run, other) = (crate::JobId(901), crate::JobId(902));
-    let c = s.state.connected.as_mut().unwrap();
+    let c = s.state.connection_mut(crate::Which::Active).unwrap();
     c.query_database = shop();
     c.query_run = Some(QueryRun { job: run, stop: Arc::default() });
     s.job_ended(other);
-    let c = s.state.connected.as_ref().unwrap();
+    let c = s.state.connection(crate::Which::Active).unwrap();
     assert_eq!((c.query_run.as_ref().map(|r| r.job), &c.query_database), (Some(run), &shop()), "another job's end");
     s.job_ended(run);
-    let c = s.state.connected.as_ref().unwrap();
+    let c = s.state.connection(crate::Which::Active).unwrap();
     assert_eq!((c.query_run.as_ref().map(|r| r.job), &c.query_database), (None, &CurrentDatabase { known: false, ..shop() }));
 }
 

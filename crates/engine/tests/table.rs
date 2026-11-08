@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use dbee_core::TableRef;
-use dbee_engine::{Json, Outcome, Session};
+use dbee_engine::{Json, Outcome, Session, Which};
 use dbee_testkit::{Held, TestTarget, require_testdb, unique};
 use serde_json::json;
 
@@ -58,8 +58,7 @@ fn opens_first_page_of_100() {
         // The columns come from the catalog, with their types; rows in primary key order.
         let info = s
             .state()
-            .connected
-            .as_ref()
+            .connection(Which::Active)
             .unwrap()
             .catalog
             .table(&TableRef { schema: t.schema("shop").into(), name: "orders".into() })
@@ -144,7 +143,7 @@ fn filters_on_mysql() {
         assert_eq!(found(s, "notIlike", "customer %").len(), 0, "{}", t.name());
         // eq and like keep the engine's own meaning: they ignore case where the dialect's note on
         // the operator says so (MySQL's case-insensitive collations).
-        let dialect = s.state().dialect();
+        let dialect = s.state().dialect(Which::Active);
         let folding = |op| if dialect.op_note(op).is_some() { vec!["Customer 7"] } else { vec![] };
         assert_eq!(found(s, "eq", "customer 7"), folding(dbee_sql::filter::Op::Eq), "{}", t.name());
         assert_eq!(found(s, "like", "CUSTOMER 7"), folding(dbee_sql::filter::Op::Like), "{}", t.name());
@@ -552,7 +551,7 @@ fn myisam_table_reports_why_it_is_read_only() {
     for_each_engine(|t, s| {
         // Only the MySQL seed has a table whose engine keeps no transactions.
         let audit = TableRef { schema: "shop".into(), name: "audit_log".into() };
-        if s.state().connected.as_ref().unwrap().catalog.table(&audit).is_none() {
+        if s.state().connection(Which::Active).unwrap().catalog.table(&audit).is_none() {
             return;
         }
         seen += 1;

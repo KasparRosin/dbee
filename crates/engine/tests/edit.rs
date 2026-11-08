@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use common::*;
 use dbee_core::TableRef;
-use dbee_engine::{EngineError, Json, Outcome, Session, Tab};
+use dbee_engine::{EngineError, Json, Outcome, Session, Tab, Which};
 use dbee_testkit::{Held, TestTarget, require_testdb, unique};
 use serde_json::json;
 
@@ -167,7 +167,7 @@ fn a_json_boolean_stages_the_engines_own_spelling() {
     let _db = require_testdb!();
     on_each_table(|t, name, s| {
         let sc = t.schema("scratch");
-        let (yes, no) = s.state().dialect().bool_literals();
+        let (yes, no) = s.state().dialect(Which::Active).bool_literals();
         set_cell(s, 1, "flag", true);
         set_cell(s, 2, "flag", false);
         assert_eq!((staged(s, 1, 4), staged(s, 2, 4)), (Some(json!(yes)), Some(json!(no))), "as the engine prints a bool");
@@ -197,7 +197,7 @@ fn a_json_boolean_keeps_its_text_outside_bool_columns() {
         );
         apply(s);
         // As text a JSON true is `true`; a JSON string would be `"true"`.
-        let doc = s.state().dialect().as_text("doc");
+        let doc = s.state().dialect(Which::Active).as_text("doc");
         assert_eq!(q(t, &format!("SELECT CONCAT(name, '|', {doc}) FROM {sc}.{name} WHERE id IN (1, 2) ORDER BY id")), "true|{\"a\": 1}\nBob|true");
     });
 }
@@ -333,7 +333,7 @@ fn a_nul_in_a_value_is_written_where_the_engine_takes_it() {
     on_each_table(|t, name, s| {
         let sc = t.schema("scratch");
         let value = "nul\u{0}x";
-        if !s.state().dialect().statement_may_hold_nul() {
+        if !s.state().dialect(Which::Active).statement_may_hold_nul() {
             let e = refused(s, "cell.edit", json!({ "row": 0, "column": "name", "value": value }));
             assert_eq!(e.code(), "badParams", "{}: {e}", t.name());
             assert!(e.to_string().contains("which this database can't take"), "{}: {e}", t.name());
@@ -458,7 +458,7 @@ fn editing_one_column_leaves_exotic_types_unchanged() {
         let _drop = scratch_table(&t, &name, &t.copy_table_sql("{t}", &format!("{}.all_types", t.schema("shop"))));
         let mut s = opened(&t, &name);
         // Every column but `note`, as the server's own client prints it.
-        let d = s.state().dialect();
+        let d = s.state().dialect(Which::Active);
         let before = read(&mut s);
         let note = col(&before, "note");
         let names: Vec<&str> = before["columns"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str()).filter(|n| *n != "note").collect();
@@ -493,7 +493,7 @@ fn editing_one_column_leaves_zero_date_unchanged() {
         let sc = t.schema("scratch");
         let mut s = connected_to(&t);
         let legacy = TableRef { schema: "shop".into(), name: "legacy_dates".into() };
-        if s.state().connected.as_ref().unwrap().catalog.table(&legacy).is_none() {
+        if s.state().connection(Which::Active).unwrap().catalog.table(&legacy).is_none() {
             continue;
         }
         seen += 1;
@@ -537,7 +537,7 @@ fn odd_table_edit_round_trip() {
         let odd = t.kind().info().odd_table;
         let name = format!("{} {odd}", unique("t_odd"));
         let mut s = connected_to(&t);
-        let d = s.state().dialect();
+        let d = s.state().dialect(Which::Active);
         let quoted = d.table(&TableRef { schema: sc.into(), name: name.clone() }).unwrap();
         let source = d.table(&TableRef { schema: t.schema("odd").into(), name: odd.into() }).unwrap();
         let _drop = Scratch(&t, vec![format!("TABLE IF EXISTS {quoted}")]);
@@ -1166,8 +1166,14 @@ fn filters_on_length_types_compare_as_postgres_does() {
             assert_eq!(r["rows"], matches, "{on}: {column} {op} {value:?}: {r}");
         }
         // The condition dbee builds lets Postgres use the column's index.
-        let info =
-            s.state().connected.as_ref().unwrap().catalog.table(&dbee_core::TableRef { schema: "scratch".into(), name: t.clone() }).cloned().unwrap();
+        let info = s
+            .state()
+            .connection(Which::Active)
+            .unwrap()
+            .catalog
+            .table(&dbee_core::TableRef { schema: "scratch".into(), name: t.clone() })
+            .cloned()
+            .unwrap();
         for (column, value) in [("c", "ab"), ("b", "10")] {
             let filter = dbee_sql::filter::Filter { column: column.into(), op: dbee_sql::filter::Op::Eq, value: value.into() };
             let cond = dbee_sql::filter::where_sql(dbee_sql::Dialect::Postgres, &dbee_sql::filter::Condition::Filters(vec![filter]), &info)

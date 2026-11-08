@@ -9,8 +9,8 @@
 //! each in auto-commit, and stops at the first error. Every result is kept
 //! ([`QueryTab::results`]) and the last one is shown; all the
 //! results of one run together keep at most [`RUN_LIMITS`] (10,000 rows each, 256 MiB of cell text
-//! for the whole run: each statement gets what the ones before left). One run goes at a time in a
-//! session (`Busy`): the query connection runs one statement at a time, and a cancel request hits
+//! for the whole run: each statement gets what the ones before left). One run goes at a time on a
+//! connection (`Busy`): its query connection runs one statement at a time, and a cancel request hits
 //! whatever statement runs on it.
 //!
 //! **A lost connection.** When the browse connection or the tunnel has closed, the run is refused
@@ -73,7 +73,7 @@ use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, bad, disable
 use crate::jobs::{self, Stop};
 use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, Selection, StatementOutcome};
 use crate::turns::InTurn;
-use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
+use crate::{Apply, ConnectionId, EngineError, JobId, Json, Outcome, Session, Tab, TabId, Which};
 
 const RUN: &str = "query.run";
 const CANCEL: &str = "query.cancel";
@@ -155,22 +155,22 @@ pub fn can_run(s: &Session) -> Result<(), String> {
 
 /// `query.setDatabase`'s enabled check: a connection is open whose dialect has `USE`.
 pub fn can_set_database(s: &Session) -> Result<(), String> {
-    let c = s.state.connected.as_ref().ok_or(NOT_CONNECTED)?;
+    let c = s.state.connection(Which::Active).ok_or(NOT_CONNECTED)?;
     if c.dialect.has_use_database() { Ok(()) } else { Err(NO_DATABASE_SWITCH.into()) }
 }
 
 // ---- stopping a run --------------------------------------------------------------------------
 
-/// Stops the session's query run when it is `job`.
-pub(crate) fn stop_run(s: &Session, job: JobId) {
-    if let Some(run) = s.state.connected.as_ref().and_then(|c| c.query_run.as_ref()).filter(|run| run.job == job) {
+/// Stops the query run of connection `connection` when it is `job`.
+pub(crate) fn stop_run(s: &Session, connection: ConnectionId, job: JobId) {
+    if let Some(run) = s.state.connection(Which::Id(connection)).and_then(|c| c.query_run.as_ref()).filter(|run| run.job == job) {
         run.stop.stop();
     }
 }
 
-/// Why another run cannot start now: one is in progress.
-fn busy(s: &Session) -> Option<String> {
-    let run = s.state.connected.as_ref()?.query_run.as_ref()?;
+/// Why another run cannot start now on connection `connection`: one is in progress.
+fn busy(s: &Session, connection: ConnectionId) -> Option<String> {
+    let run = s.state.connection(Which::Id(connection))?.query_run.as_ref()?;
     if !s.jobs.is_running(run.job) {
         return None;
     }
@@ -420,12 +420,12 @@ fn session_lost() -> EngineError {
     EngineError::Db { code: DbError::ConnectionLost.code(), message: QUERY_SESSION_LOST.into(), data: json!({}) }
 }
 
-/// The error `f` gives, on the query connection `conn` (`None` when it could not be opened). A
-/// lost query connection is let go: alone, it is [`session_lost`]; with the browse connection or
-/// the tunnel, which an unopened query connection can also have failed on, the session is lost
-/// (see the module docs).
-fn failed(s: &mut Session, conn: Option<&Arc<dyn Connection>>, f: &Failure) -> EngineError {
-    let Some(c) = s.state.connected.as_mut() else { return db_error(&f.error) };
+/// The error `f` gives, on the query connection `conn` of open connection `id` (`None` when it
+/// could not be opened). A lost query connection is let go: alone, it is [`session_lost`]; with
+/// the browse connection or the tunnel, which an unopened query connection can also have failed
+/// on, the connection is lost (see the module docs).
+fn failed(s: &mut Session, id: ConnectionId, conn: Option<&Arc<dyn Connection>>, f: &Failure) -> EngineError {
+    let Some(c) = s.state.connection_mut(Which::Id(id)) else { return db_error(&f.error) };
     let query_lost = f.error == DbError::ConnectionLost || conn.is_some_and(|q| q.is_closed());
     if query_lost && c.query.as_ref().zip(conn).is_some_and(|(mine, used)| Arc::ptr_eq(mine, used)) {
         c.query = None;
@@ -460,14 +460,15 @@ fn same_connection(generation: &Weak<InTurn>, conn: &Arc<InTurn>) -> bool {
     std::ptr::eq(Weak::as_ptr(generation), Arc::as_ptr(conn))
 }
 
-/// Applies a run: first to the session's query connection, also when the run's tab has closed
-/// (where the run left it, and the connection the job opened), then to the tab, when it is still
-/// open and running this job (its results, and its error, which lets a lost query connection go).
-fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<InTurn>, ran: Ran) -> Result<Json, EngineError> {
+/// Applies a run on open connection `id`: first to its query connection, also when the run's tab
+/// has closed (where the run left it, and the connection the job opened), then to the tab, when
+/// it is still open and running this job (its results, and its error, which lets a lost query
+/// connection go).
+fn apply_run(s: &mut Session, tab: TabId, id: ConnectionId, generation: &Weak<InTurn>, ran: Ran) -> Result<Json, EngineError> {
     let me = s.applying_job();
     let for_tab = matches!(s.state.tab(tab), Some(Tab::Query(q)) if me.is_some() && q.running == me);
-    // The session's connection is still the one the run started on: not closed, not replaced.
-    let Some(c) = s.state.connected.as_mut().filter(|c| same_connection(generation, &c.browse)) else { return Ok(ignored()) };
+    // The connection is still the one the run started on: not closed, not replaced.
+    let Some(c) = s.state.connection_mut(Which::Id(id)).filter(|c| same_connection(generation, &c.browse)) else { return Ok(ignored()) };
     // The run is over (clearing the marker of a job that ended is not applying its result).
     if me.is_some() && c.query_run.as_ref().map(|run| run.job) == me {
         c.query_run = None;
@@ -489,10 +490,10 @@ fn apply_run(s: &mut Session, tab: TabId, generation: &Weak<InTurn>, ran: Ran) -
         return Ok(ignored());
     }
     let error = failure.map(|f| {
-        let e = failed(s, conn.as_ref().map(|(conn, _)| conn), &f);
+        let e = failed(s, id, conn.as_ref().map(|(conn, _)| conn), &f);
         (query_error(&e, &f), run_error(e, &f))
     });
-    let has_use = s.state.dialect().has_use_database();
+    let has_use = s.state.dialect(Which::Id(id)).has_use_database();
     let Some(Tab::Query(q)) = s.state.tab_mut(tab) else { return Ok(ignored()) };
     if has_use && past_use && current.known {
         q.database = current.database;
@@ -531,10 +532,11 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     {
         return Err(bad("`cursor` must be a byte offset into the text, from 0 to its length, on a character boundary"));
     }
-    if let Some(why) = busy(s) {
+    let id = s.state.connection(Which::Tab(tab)).map(|c| c.id).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    if let Some(why) = busy(s, id) {
         return Err(EngineError::Busy(why));
     }
-    let dialect = s.state.dialect();
+    let dialect = s.state.dialect(Which::Id(id));
     let ranges = if current {
         let cursor = cursor.ok_or_else(|| bad("`cursor` is required with `current` (a byte offset into the text)"))?;
         lexer::statement_at(dialect, &text, cursor).into_iter().collect()
@@ -544,9 +546,9 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if ranges.is_empty() {
         return Err(disabled(NOTHING_TO_RUN));
     }
-    // A closed browse connection or tunnel marks the session lost.
-    s.browse()?;
-    let c = s.state.connected.as_mut().ok_or_else(|| disabled(NOT_CONNECTED))?;
+    // A closed browse connection or tunnel marks the connection lost.
+    s.browse(Which::Id(id))?;
+    let c = s.state.connection_mut(Which::Id(id)).ok_or_else(|| disabled(NOT_CONNECTED))?;
     let current = if c.query.is_some() { c.query_database.clone() } else { CurrentDatabase::of_settings(&c.config) };
     let use_database = match database.filter(|name| !current.is(name)) {
         Some(name) => dialect.use_database(&name).map_err(|e| bad(format!("the tab's database: {e}")))?.map(|sql| (name, sql)),
@@ -581,10 +583,10 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let job_stop = Arc::clone(&stop);
     let job = s.spawn_stoppable_job(RUN, Arc::clone(&stop), async move {
         let ran = run_statements(via, text, ranges, setup, job_stop, RUN_LIMITS.max_bytes).await;
-        let apply: Apply = Box::new(move |s: &mut Session| apply_run(s, tab, &generation, ran));
+        let apply: Apply = Box::new(move |s: &mut Session| apply_run(s, tab, id, &generation, ran));
         apply
     });
-    if let Some(c) = s.state.connected.as_mut() {
+    if let Some(c) = s.state.connection_mut(Which::Id(id)) {
         c.query_run = Some(QueryRun { job, stop });
     }
     if let Some(Tab::Query(q)) = s.state.tab_mut(tab) {
@@ -601,7 +603,7 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
         Some(Tab::Query(q)) => (q.id, q.running),
         _ => return Err(disabled(NO_QUERY_TAB)),
     };
-    let run = s.state.connected.as_ref().and_then(|c| c.query_run.as_ref());
+    let run = s.state.connection(Which::Tab(tab)).and_then(|c| c.query_run.as_ref());
     let stopped = match (running, run) {
         (Some(job), Some(run)) if run.job == job && s.jobs.is_running(job) => Some(run.stop.stop()),
         _ => None,
@@ -617,7 +619,6 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// the dialect can write in its `USE`. A run that gets past it sets it to where it ends, so it is
 /// `Busy` while the tab runs.
 fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
-    let dialect = s.state.dialect();
     let tab = match p::opt_tab_id(params, "tab")? {
         Some(id) => match s.state.tab(id) {
             Some(Tab::Query(q)) => q.id,
@@ -629,6 +630,7 @@ fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> 
             _ => return Err(disabled(NO_QUERY_TAB)),
         },
     };
+    let dialect = s.state.dialect(Which::Tab(tab));
     let database = match params.get("database") {
         Some(Json::Null) => None,
         Some(Json::String(name)) if !name.is_empty() => {
@@ -724,7 +726,7 @@ mod tests {
         s.execute("tab.newQuery", json!({ "text": "select 1" })).unwrap();
         s.run_blocking(RUN, json!({}), T).unwrap();
         // The SSH connection ends: the test closes the session's own tunnel.
-        let tunnel = s.state.connected.as_ref().and_then(|c| c.tunnel.clone()).unwrap();
+        let tunnel = s.state.connection(Which::Active).and_then(|c| c.tunnel.clone()).unwrap();
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(tunnel.close());
         assert!(tunnel.is_closed());
         let e = s.run_blocking(RUN, json!({}), T).unwrap_err();

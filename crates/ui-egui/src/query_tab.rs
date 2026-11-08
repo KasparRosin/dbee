@@ -84,7 +84,7 @@ use std::sync::{Arc, Weak};
 use dbee_core::ResultSet;
 use dbee_engine::cmd::query::{can_run, can_set_database};
 use dbee_engine::state::NO_CONNECTION_DIALECT;
-use dbee_engine::{CurrentDatabase, Json, Meaning, QueryError, StatementOutcome, Tab, TabId};
+use dbee_engine::{CurrentDatabase, Json, Meaning, QueryError, StatementOutcome, Tab, TabId, Which};
 use dbee_sql::Dialect;
 use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
@@ -1042,7 +1042,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         if focus_now {
             state.editor.focus();
         }
-        state.editor.set_dialect(session.state().dialect());
+        state.editor.set_dialect(session.state().dialect(Which::Tab(id)));
         let full = ui.available_rect_before_wrap();
         let h = full.height();
         // The split first, so a drag moves the editor in this frame.
@@ -1084,7 +1084,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-bar", id.0)).max_rect(bar_rect).layout(Layout::left_to_right(Align::Center)));
         bar.spacing_mut().item_spacing.x = 6.0;
         let running = q.running.is_some();
-        if let Some(c) = session.state().connected.as_ref().filter(|c| c.dialect.has_use_database()) {
+        if let Some(c) = session.state().connection(Which::Tab(id)).filter(|c| c.dialect.has_use_database()) {
             let chip = Chip {
                 database: c.starts_in(q),
                 choices: c.catalog.schemas.iter().filter(|s| !s.system).map(|s| s.name.as_str()).collect(),

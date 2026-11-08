@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use serde_json::json;
 
 use super::{CommandSpec, active_query, always, bad, has_tabs, p};
-use crate::{EngineError, Json, Need, Outcome, QueryTab, Session, Tab, TabId};
+use crate::{ConnectionId, EngineError, Json, Need, Outcome, QueryTab, Session, Tab, TabId, Which};
 
 pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -73,7 +73,8 @@ const QUERY_TITLE: &str = "Query ";
 /// schema), else the settings' database, else none.
 fn new_query(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let text = p::opt_str(params, "text")?.unwrap_or_default().to_string();
-    let database = new_tab_database(s, p::opt_str(params, "schema")?)?;
+    let connection = s.state.connection(Which::Active).map(|c| c.id);
+    let database = new_tab_database(s, connection, p::opt_str(params, "schema")?)?;
     let used: HashSet<u64> = s
         .state
         .tabs
@@ -86,14 +87,15 @@ fn new_query(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     // At most `used.len()` numbers are taken, so a free one is found within `used.len() + 1`.
     let number = (1..=u64::MAX).find(|n| !used.contains(n)).unwrap_or(u64::MAX);
     let id = s.state.take_tab_id();
-    s.state.tabs.push(Tab::Query(QueryTab { database, ..QueryTab::new(id, format!("{QUERY_TITLE}{number}"), text) }));
+    s.state.tabs.push(Tab::Query(QueryTab { connection, database, ..QueryTab::new(id, format!("{QUERY_TITLE}{number}"), text) }));
     s.state.active = Some(id);
     Ok(Outcome::Done(json!({ "tab": id })))
 }
 
-/// The database a new query tab runs in (see [`new_query`]): none off an engine with `USE`.
-fn new_tab_database(s: &Session, schema: Option<&str>) -> Result<Option<String>, EngineError> {
-    let Some(c) = s.state.connected.as_ref().filter(|c| c.dialect.has_use_database()) else { return Ok(None) };
+/// The database a new query tab on `connection` runs in (see [`new_query`]): none off an engine
+/// with `USE`.
+fn new_tab_database(s: &Session, connection: Option<ConnectionId>, schema: Option<&str>) -> Result<Option<String>, EngineError> {
+    let Some(c) = connection.and_then(|id| s.state.connection(Which::Id(id))).filter(|c| c.dialect.has_use_database()) else { return Ok(None) };
     let Some(name) = schema.filter(|n| !n.is_empty()).or(Some(c.config.database.as_str()).filter(|d| !d.is_empty())) else { return Ok(None) };
     c.dialect.use_database(name).map_err(|e| bad(format!("`schema`: {e}")))?;
     Ok(Some(name.to_owned()))
@@ -156,9 +158,9 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         }
     }
     if let Tab::Query(q) = s.state.tabs.remove(at)
-        && let Some(job) = q.running
+        && let (Some(job), Some(connection)) = (q.running, q.connection)
     {
-        super::query::stop_run(s, job);
+        super::query::stop_run(s, connection, job);
     }
     if s.state.active == Some(id) {
         s.state.active = s.state.tabs.get(at).or_else(|| at.checked_sub(1).and_then(|i| s.state.tabs.get(i))).map(Tab::id);

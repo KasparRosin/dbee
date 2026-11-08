@@ -24,7 +24,7 @@ use dbee_core::{ResultSet, TableInfo};
 use dbee_engine::cmd::LOST;
 use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
-use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab};
+use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab, Which};
 use dbee_sql::Dialect;
 use dbee_sql::select::PAGE_SIZE;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, RichText, Stroke, UiBuilder, pos2};
@@ -227,7 +227,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     {
         let DbeeApp { session, view, tags, .. } = app;
         let Some(Tab::Table(tab)) = session.state().tab(id) else { return };
-        let connected = session.state().connected.as_ref();
+        let connected = session.state().connection(Which::Tab(id));
         let info = connected.and_then(|c| c.catalog.table(&tab.table));
         let lost = connected.is_none_or(|c| c.lost);
         let full = ui.available_rect_before_wrap();
@@ -261,7 +261,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             raw_mode: tab.raw_mode,
             disabled: lost.then_some(LOST),
             blocked: blocked(tab, lost),
-            dialect: session.state().dialect(),
+            dialect: session.state().dialect(Which::Tab(id)),
         };
         runs.extend(filter_bar::show(&mut top, &bar, tags));
         top.add_space(6.0);
@@ -323,7 +323,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         }
         let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(full.left(), split), full.max)));
         if tab.data.is_some() {
-            runs.extend(paging::show(&mut bottom, &paging(tab, session.state().dialect(), info, lost, edit_blocked), tags));
+            runs.extend(paging::show(&mut bottom, &paging(tab, session.state().dialect(Which::Tab(id)), info, lost, edit_blocked), tags));
         }
     }
     for (command, params) in runs {
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn a_cancelled_apply_has_a_note_of_its_own() {
         let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
-        let mut t = TableTab::new(TabId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
+        let mut t = TableTab::new(TabId(1), dbee_engine::ConnectionId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
         let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "m".into(), code };
         std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("server"));
         assert_eq!(card_text(&t), Some(("The changes were not applied", "m", FAILED_NOTE)));

@@ -59,11 +59,11 @@ use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
 
-use super::{CommandSpec, LOST, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
+use super::{CommandSpec, LOST, MAX_OPEN, NOT_CONNECTED, always, bad, connected, disabled, ignored, needs_db, not_connected, p};
 use crate::allowed;
 use crate::state::{Connected, Credentials, CurrentDatabase, server_text};
 use crate::turns::{self, InTurn};
-use crate::{Apply, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest};
+use crate::{Apply, ConnectionId, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest, Which};
 
 const LIST: &str = "connection.list";
 const SAVE: &str = "connection.save";
@@ -502,17 +502,18 @@ pub(crate) fn db_error(e: &DbError) -> EngineError {
 }
 
 impl Session {
-    /// The browse connection, for a command that needs the database. `Disabled` when there is
-    /// none or it is lost; when it or the tunnel it runs through has closed since its last use,
-    /// the session is marked lost and the error is `connectionLost`.
-    pub(crate) fn browse(&mut self) -> Result<Arc<dyn Connection>, EngineError> {
-        Ok(self.browse_in_turn()?)
+    /// The browse connection of the connection `which` names, for a command that needs the
+    /// database. `Disabled` when there is none or it is lost; when it or the tunnel it runs
+    /// through has closed since its last use, the connection is marked lost and the error is
+    /// `connectionLost`.
+    pub(crate) fn browse(&mut self, which: Which) -> Result<Arc<dyn Connection>, EngineError> {
+        Ok(self.browse_in_turn(which)?.1)
     }
 
     /// [`Session::browse`] as the queue it is, for a job that waits for its turn itself
-    /// ([`stoppable_in_turn`](crate::turns::stoppable_in_turn)).
-    pub(crate) fn browse_in_turn(&mut self) -> Result<Arc<InTurn>, EngineError> {
-        let c = self.state.connected.as_mut().ok_or_else(|| disabled(NOT_CONNECTED))?;
+    /// ([`stoppable_in_turn`](crate::turns::stoppable_in_turn)), with the connection's id.
+    pub(crate) fn browse_in_turn(&mut self, which: Which) -> Result<(ConnectionId, Arc<InTurn>), EngineError> {
+        let c = self.state.connection_mut(which).ok_or_else(|| disabled(NOT_CONNECTED))?;
         if c.lost {
             return Err(disabled(LOST));
         }
@@ -521,21 +522,21 @@ impl Session {
             log::info!("the browse connection or its tunnel has closed; the session is marked lost");
             return Err(db_error(&DbError::ConnectionLost));
         }
-        Ok(Arc::clone(&c.browse))
+        Ok((c.id, Arc::clone(&c.browse)))
     }
 
-    /// `conn` is still the session's browse connection; a job that used another one (closed or
-    /// replaced since) must drop its result.
-    pub(crate) fn is_current_browse(&self, conn: &Arc<dyn Connection>) -> bool {
-        self.state.connected.as_ref().is_some_and(|c| c.is_browse(conn))
+    /// `conn` is still the browse connection of open connection `id`; a job that used another one
+    /// (closed or replaced since) must drop its result.
+    pub(crate) fn is_current_browse(&self, id: ConnectionId, conn: &Arc<dyn Connection>) -> bool {
+        self.state.connection(Which::Id(id)).is_some_and(|c| c.is_browse(conn))
     }
 
-    /// An operation on `conn` failed with `e`. When the connection is gone, the session lets go
-    /// of it: a lost browse connection marks the session lost, and a lost query connection is
-    /// dropped (the next query run opens a new one).
-    pub(crate) fn db_failed(&mut self, conn: &Arc<dyn Connection>, e: &DbError) -> EngineError {
+    /// An operation on `conn`, of open connection `id`, failed with `e`. When the connection is
+    /// gone, the session lets go of it: a lost browse connection marks the connection lost, and a
+    /// lost query connection is dropped (the next query run opens a new one).
+    pub(crate) fn db_failed(&mut self, id: ConnectionId, conn: &Arc<dyn Connection>, e: &DbError) -> EngineError {
         if (*e == DbError::ConnectionLost || conn.is_closed())
-            && let Some(c) = self.state.connected.as_mut()
+            && let Some(c) = self.state.connection_mut(Which::Id(id))
         {
             if c.is_browse(conn) && !c.lost {
                 c.lost = true;
@@ -1152,7 +1153,7 @@ pub fn file_config(s: &Session, path: &Path) -> Result<ConnectionConfig, EngineE
 
 /// A connection is open and the saved list doesn't hold it.
 fn unsaved_open(s: &Session) -> Result<(), String> {
-    match &s.state.connected {
+    match s.state.connection(Which::Active) {
         None => Err(NOT_CONNECTED.into()),
         Some(c) if s.state.store.is_saved(&c.config.id) => Err("the open connection is saved already".into()),
         Some(_) => Ok(()),
@@ -1163,7 +1164,7 @@ fn unsaved_open(s: &Session) -> Result<(), String> {
 /// would with the secrets it was opened with: its settings as opened (its id, no name when it had
 /// none), and with `saveSecrets` and a secret store its password and SSH secrets.
 fn save_open(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
-    let c = s.state.connected.as_ref().ok_or_else(|| disabled(NOT_CONNECTED))?;
+    let c = s.state.connection(Which::Active).ok_or_else(|| disabled(NOT_CONNECTED))?;
     let (config, secrets) = (c.config.clone(), c.credentials.clone());
     let id = save_with_secrets(s, config, &secrets)?;
     Ok(Outcome::Done(json!({ "id": id })))
@@ -1177,9 +1178,9 @@ fn apply_open(
     keep: Option<Credentials>,
 ) -> Result<Json, EngineError> {
     let (opened, catalog) = result?;
-    if s.state.connected.is_some() {
-        // Open is disabled while connected and runs one at a time, so this cannot happen; the new
-        // connection closes as it is dropped.
+    if s.state.connections.len() >= MAX_OPEN {
+        // Open is disabled then and runs one at a time, so this cannot happen; the new connection
+        // closes as it is dropped.
         return Err(EngineError::Busy("already connected".into()));
     }
     let kept = keep.map(|typed| keep_secrets(s, &mut config, &typed));
@@ -1187,6 +1188,7 @@ fn apply_open(
     let (info, dialect) = (conn.info().clone(), conn.dialect());
     let used = config.clone();
     let c = Connected {
+        id: s.state.take_connection_id(),
         config,
         info,
         dialect,
@@ -1198,6 +1200,7 @@ fn apply_open(
         query_run: None,
         tunnel,
         credentials,
+        apply_gate: None,
     };
     let mut result = opened_json(&c, s.state.store.is_saved(&c.config.id));
     if let (Json::Object(map), Some(kept)) = (&mut result, kept) {
@@ -1210,7 +1213,15 @@ fn apply_open(
         s.ui_requests.push(UiRequest::Notice(w.clone()));
     }
     tell(s, unsaved_host_key(c.tunnel.as_ref()));
-    s.state.connected = Some(c);
+    // Query tabs opened while no connection was open run on this one.
+    for tab in &mut s.state.tabs {
+        if let Tab::Query(q) = tab
+            && q.connection.is_none()
+        {
+            q.connection = Some(c.id);
+        }
+    }
+    s.state.connections.push(c);
     s.state.screen = Screen::Workspace;
     record_use(s, &used);
     Ok(result)
@@ -1266,7 +1277,8 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         return Err(EngineError::Busy("a reconnect is in progress".into()));
     }
     let answers = given(params)?;
-    let c = s.state.connected.as_ref().ok_or_else(|| disabled(NOT_CONNECTED))?;
+    let c = s.state.connection(Which::Active).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    let id = c.id;
     let mut creds = c.credentials.clone();
     creds.password = answers.password.or(creds.password);
     creds.ssh.password = answers.ssh.password.or(creds.ssh.password);
@@ -1281,7 +1293,7 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let job = s.spawn_job(RECONNECT, async move {
         let creds = fill_from_store(creds, store, &config, allowed).await;
         let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), false, &env, &creds).await;
-        let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, &old, creds, result));
+        let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, id, &old, creds, result));
         apply
     });
     Ok(Outcome::Started(job))
@@ -1289,11 +1301,13 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 
 fn apply_reconnect(
     s: &mut Session,
+    id: ConnectionId,
     old: &Arc<InTurn>,
     credentials: Credentials,
     result: Result<(Opened, Catalog), EngineError>,
 ) -> Result<Json, EngineError> {
-    let Some(c) = s.state.connected.as_mut().filter(|c| Arc::ptr_eq(&c.browse, old)) else {
+    let saved = s.state.connection(Which::Id(id)).is_some_and(|c| s.state.store.is_saved(&c.config.id));
+    let Some(c) = s.state.connection_mut(Which::Id(id)).filter(|c| Arc::ptr_eq(&c.browse, old)) else {
         // Closed or reconnected meanwhile: ignored, whatever the outcome (a new connection closes
         // as it is dropped, and a prompt is answered by nobody).
         return Ok(ignored());
@@ -1310,13 +1324,13 @@ fn apply_reconnect(
     c.tunnel = tunnel;
     c.credentials = credentials;
     c.lost = false;
-    let mut result = opened_json(c, s.state.store.is_saved(&c.config.id));
+    let mut result = opened_json(c, saved);
     if query_reset && let Some(o) = result.as_object_mut() {
         // The query session (an open transaction, SETs, temporary tables) went with its connection.
         o.insert("querySessionReset".into(), Json::Bool(true));
     }
-    // Every job started before the swap ran on the old connections: it is dead.
-    for tab in &mut s.state.tabs {
+    // Every job of its tabs started before the swap ran on the old connections: it is dead.
+    for tab in s.state.tabs.iter_mut().filter(|t| t.connection() == Some(id)) {
         match tab {
             Tab::Table(t) => t.drop_dead_jobs(),
             Tab::Query(q) => q.running = None,
@@ -1355,27 +1369,27 @@ fn tell(s: &mut Session, note: Option<String>) {
 /// the session is marked lost, and the error (code `timeout`) names the reconnect in
 /// `data.action`.
 fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
-    let turned = s.browse_in_turn()?;
+    let (id, turned) = s.browse_in_turn(Which::Active)?;
     let job = s.spawn_job(REFRESH, async move {
         let result = load_catalog_in_turn(&turned, CATALOG_TIMEOUT).await;
         let conn: Arc<dyn Connection> = turned;
         let apply: Apply = Box::new(move |s: &mut Session| {
-            if !s.is_current_browse(&conn) {
+            if !s.is_current_browse(id, &conn) {
                 return Ok(ignored());
             }
             let catalog = match result {
                 Ok(catalog) => catalog,
-                Err(CatalogLoad::Failed(e)) => return Err(s.db_failed(&conn, &e)),
+                Err(CatalogLoad::Failed(e)) => return Err(s.db_failed(id, &conn, &e)),
                 Err(CatalogLoad::TimedOut) => {
-                    // The connection is discarded: the session is lost until a reconnect.
-                    if let Some(c) = s.state.connected.as_mut() {
+                    // The connection is discarded: it is lost until a reconnect.
+                    if let Some(c) = s.state.connection_mut(Which::Id(id)) {
                         c.lost = true;
                     }
                     return Err(lost_by_timeout());
                 }
             };
             let tables = catalog.table_count();
-            if let Some(c) = s.state.connected.as_mut() {
+            if let Some(c) = s.state.connection_mut(Which::Id(id)) {
                 c.catalog = Arc::new(catalog);
             }
             Ok(json!({ "tables": tables }))
@@ -1394,9 +1408,11 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// dbee may have changed meanwhile.
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
-    let c = s.state.connected.as_ref().ok_or_else(|| disabled(NOT_CONNECTED))?;
-    let with_text = s.state.tabs.iter().filter(|t| matches!(t, Tab::Query(q) if !q.text.trim().is_empty())).count();
-    let with_edits = s.state.tabs.iter().filter(|t| matches!(t, Tab::Table(t) if t.has_staged_edits())).count();
+    let c = s.state.connection(Which::Active).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    let id = c.id;
+    let its = || s.state.tabs.iter().filter(|t| t.connection() == Some(id));
+    let with_text = its().filter(|t| matches!(t, Tab::Query(q) if !q.text.trim().is_empty())).count();
+    let with_edits = its().filter(|t| matches!(t, Tab::Table(t) if t.has_staged_edits())).count();
     if (with_text > 0 || with_edits > 0) && !force {
         let tabs = |n: usize, what: &str| if n == 1 { format!("1 {what} tab") } else { format!("{n} {what} tabs") };
         let mut lost = Vec::new();
@@ -1412,14 +1428,19 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             message: format!("Disconnect from {}? The {} will be lost.", c.config.display_name(), lost.join(" and the ")),
         });
     }
-    let Some(c) = s.state.connected.take() else { return Err(disabled(NOT_CONNECTED)) };
-    s.state.screen = Screen::Connections;
+    let Some(at) = s.state.connections.iter().position(|c| c.id == id) else { return Err(disabled(NOT_CONNECTED)) };
+    let c = s.state.connections.remove(at);
+    if s.state.connections.is_empty() {
+        s.state.screen = Screen::Connections;
+    }
     if let Some(warning) = s.state.store.reload() {
         log::warn!("the connections file could not be used as it is");
         s.state.store_warning = Some(warning);
     }
-    s.state.tabs.clear();
-    s.state.active = None;
+    s.state.tabs.retain(|t| t.connection() != Some(id));
+    if s.state.active.is_none_or(|a| s.state.tab(a).is_none()) {
+        s.state.active = s.state.tabs.last().map(Tab::id);
+    }
     stop_statements(s, c.browse);
     Ok(Outcome::Done(json!({ "closed": c.config.id })))
 }

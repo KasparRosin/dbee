@@ -1,4 +1,4 @@
-//! The session state: screen, saved connections, the open connection and the tabs.
+//! The session state: screen, saved connections, the open connections and the tabs.
 //!
 //! [`State`] is cloned before every command (the panic guard's snapshot), so large data sits
 //! behind `Arc`.
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
 use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
-use dbee_driver::{Connection, DbError, Meaning, ServerInfo};
+use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::edits::Edits;
 use crate::jobs::Stop;
 use crate::turns::InTurn;
-use crate::{JobId, Json, TabId};
+use crate::{ConnectionId, JobId, Json, TabId};
 
 /// The dialect SQL is read with while no connection is open (the query editor's colours then).
 pub const NO_CONNECTION_DIALECT: Dialect = Dialect::Postgres;
@@ -37,13 +37,14 @@ pub enum Screen {
     Workspace,
 }
 
-/// The open connection.
+/// An open connection, with what belongs to it alone.
 ///
 /// The connections are crate-private: commands reach them through the session, and a job that
 /// used one checks that it is still the session's before applying its result. `Debug` shows no
 /// secret.
 #[derive(Clone)]
 pub struct Connected {
+    pub id: ConnectionId,
     pub config: ConnectionConfig,
     pub info: ServerInfo,
     /// The server's SQL rules, from the browse connection: every statement the engine builds or
@@ -69,6 +70,9 @@ pub struct Connected {
     pub(crate) tunnel: Option<Arc<Tunnel>>,
     /// What the connect used, kept in memory for reconnects (and the query connection).
     pub(crate) credentials: Credentials,
+    /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
+    /// decides to commit (one Apply runs at a time).
+    pub(crate) apply_gate: Option<(JobId, Arc<ApplyGate>, Arc<Stop>)>,
 }
 
 impl Connected {
@@ -81,6 +85,7 @@ impl Connected {
 impl std::fmt::Debug for Connected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Connected")
+            .field("id", &self.id)
             .field("config", &self.config)
             .field("info", &self.info)
             .field("dialect", &self.dialect)
@@ -92,6 +97,7 @@ impl std::fmt::Debug for Connected {
             .field("query_run", &self.query_run)
             .field("tunnel", &self.tunnel)
             .field("credentials", &self.credentials)
+            .field("apply_gate", &self.apply_gate.as_ref().map(|(job, _, _)| job))
             .finish()
     }
 }
@@ -231,6 +237,9 @@ pub struct Selection {
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryTab {
     pub id: TabId,
+    /// The connection it runs on; `None` for a tab opened while no connection was open, until one
+    /// opens.
+    pub connection: Option<ConnectionId>,
     pub title: String,
     pub text: String,
     /// The job running this tab's statements.
@@ -251,9 +260,9 @@ pub struct QueryTab {
 }
 
 impl QueryTab {
-    /// A tab with `text` that has not run, with no database of its own.
+    /// A tab with `text` that has not run, on no connection, with no database of its own.
     pub fn new(id: TabId, title: String, text: String) -> QueryTab {
-        QueryTab { id, title, text, running: None, selection: None, results: Vec::new(), shown: 0, error: None, database: None }
+        QueryTab { id, connection: None, title, text, running: None, selection: None, results: Vec::new(), shown: 0, error: None, database: None }
     }
 
     /// The result the grid shows, when there is one.
@@ -347,8 +356,8 @@ pub struct PageView {
 /// `shown` is what `data` was loaded with; number the rows from `shown.page`. A load that fails
 /// puts `applied`, `sort` and `page` back to `shown` and sets `error`; `data` stays.
 ///
-/// `loading`, `counting` and `applying` name the jobs in flight for the tab, always on the
-/// session's current browse connection: a job clears its own when its result arrives (stale or
+/// `loading`, `counting` and `applying` name the jobs in flight for the tab, always on its
+/// connection's current browse connection: a job clears its own when its result arrives (stale or
 /// not), the session clears any left once the job has ended (its future or its `Apply`
 /// panicked, [`TableTab::job_ended`]), and a reconnect clears them all
 /// ([`TableTab::drop_dead_jobs`]).
@@ -359,6 +368,8 @@ pub struct PageView {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableTab {
     pub id: TabId,
+    /// The connection whose table it shows.
+    pub connection: ConnectionId,
     pub table: TableRef,
     pub selection: Option<Selection>,
     /// The filter bar's rows, as edited (applied or not).
@@ -402,10 +413,11 @@ pub struct TableTab {
 }
 
 impl TableTab {
-    /// A tab for `table` about to load `view`; nothing loaded yet.
-    pub fn new(id: TabId, table: TableRef, filters: Vec<Filter>, view: PageView) -> TableTab {
+    /// A tab for `table` of connection `connection` about to load `view`; nothing loaded yet.
+    pub fn new(id: TabId, connection: ConnectionId, table: TableRef, filters: Vec<Filter>, view: PageView) -> TableTab {
         TableTab {
             id,
+            connection,
             table,
             selection: None,
             filters,
@@ -506,6 +518,14 @@ impl Tab {
         }
     }
 
+    /// The connection the tab belongs to; `None` for a query tab opened while none was open.
+    pub fn connection(&self) -> Option<ConnectionId> {
+        match self {
+            Tab::Table(t) => Some(t.connection),
+            Tab::Query(q) => q.connection,
+        }
+    }
+
     /// `query` or `table`.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -535,16 +555,31 @@ impl Tab {
     }
 }
 
+/// Which open connection: read them all through [`State::connection`] with one of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Which {
+    /// The one tab `TabId` belongs to.
+    Tab(TabId),
+    /// The one with this id.
+    Id(ConnectionId),
+    /// The active tab's; with no tab active, the one opened last.
+    Active,
+}
+
 #[derive(Clone, Debug)]
 pub struct State {
     pub screen: Screen,
     pub store: ConnectionStore,
-    pub connected: Option<Connected>,
+    /// The open connections, in the order they opened: at most one for now (`connection.open`
+    /// refuses another).
+    pub connections: Vec<Connected>,
     /// In tab-strip order.
     pub tabs: Vec<Tab>,
     pub active: Option<TabId>,
     /// The id the next tab gets; ids are never reused.
     pub next_tab: u64,
+    /// The id the next connection gets; ids are never reused.
+    pub next_connection: u64,
     /// Why the connections file could not be used, at the start or at a later change (then the
     /// store may be empty, or memory only), for the UI to show.
     pub store_warning: Option<String>,
@@ -552,7 +587,16 @@ pub struct State {
 
 impl State {
     pub(crate) fn new(store: ConnectionStore, store_warning: Option<String>) -> State {
-        State { screen: Screen::Connections, store, connected: None, tabs: Vec::new(), active: None, next_tab: 1, store_warning }
+        State {
+            screen: Screen::Connections,
+            store,
+            connections: Vec::new(),
+            tabs: Vec::new(),
+            active: None,
+            next_tab: 1,
+            next_connection: 1,
+            store_warning,
+        }
     }
 
     pub fn tab(&self, id: TabId) -> Option<&Tab> {
@@ -567,15 +611,42 @@ impl State {
         self.active.and_then(|id| self.tab(id))
     }
 
-    /// The SQL rules of the open connection; [`NO_CONNECTION_DIALECT`] when none is open.
-    pub fn dialect(&self) -> Dialect {
-        self.connected.as_ref().map_or(NO_CONNECTION_DIALECT, |c| c.dialect)
+    /// The open connection `which` names; `None` when it names none that is open.
+    pub fn connection(&self, which: Which) -> Option<&Connected> {
+        let id = self.connection_id(which)?;
+        self.connections.iter().find(|c| c.id == id)
+    }
+
+    /// [`State::connection`], to change.
+    pub(crate) fn connection_mut(&mut self, which: Which) -> Option<&mut Connected> {
+        let id = self.connection_id(which)?;
+        self.connections.iter_mut().find(|c| c.id == id)
+    }
+
+    fn connection_id(&self, which: Which) -> Option<ConnectionId> {
+        match which {
+            Which::Tab(tab) => self.tab(tab)?.connection(),
+            Which::Id(id) => Some(id),
+            Which::Active => self.active_tab().and_then(Tab::connection).or_else(|| self.connections.last().map(|c| c.id)),
+        }
+    }
+
+    /// The SQL rules of the connection `which` names; [`NO_CONNECTION_DIALECT`] when it names none.
+    pub fn dialect(&self, which: Which) -> Dialect {
+        self.connection(which).map_or(NO_CONNECTION_DIALECT, |c| c.dialect)
     }
 
     /// A fresh tab id.
     pub(crate) fn take_tab_id(&mut self) -> TabId {
         let id = TabId(self.next_tab);
         self.next_tab = self.next_tab.saturating_add(1);
+        id
+    }
+
+    /// A fresh connection id.
+    pub(crate) fn take_connection_id(&mut self) -> ConnectionId {
+        let id = ConnectionId(self.next_connection);
+        self.next_connection = self.next_connection.saturating_add(1);
         id
     }
 }
