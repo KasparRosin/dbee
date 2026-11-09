@@ -58,8 +58,8 @@ use dbee_engine::{EngineError, Json, Screen, Session, Tab, TabId, Which};
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
 use egui::widgets::text_edit::TextEditState;
 use egui::{
-    Area, CornerRadius, Event, EventFilter, FontId, Frame, Id, Key, KeyboardShortcut, Margin, Modifiers, Order, Rect, ScrollArea, Sense, Stroke,
-    TextEdit, pos2, vec2,
+    Area, CornerRadius, Event, EventFilter, Frame, Id, Key, KeyboardShortcut, Margin, Modifiers, Order, Rect, ScrollArea, Sense, Stroke, TextEdit,
+    pos2, vec2,
 };
 use serde_json::json;
 
@@ -68,7 +68,7 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::grid::{CELL, GridSource, ROW_H};
 use crate::shortcuts;
-use crate::theme;
+use crate::theme::{self, Text};
 
 /// The longest value an editor opens inline, in bytes of text (see the module docs).
 pub const MAX_INLINE_BYTES: usize = 32 * 1024;
@@ -714,7 +714,7 @@ fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
         // The text sits where the grid draws it (the frame's margin is the text's; `margin` is
         // not used with a frame of one's own).
         .frame(Frame::NONE.inner_margin(Margin::symmetric((PAD - BORDER) as i8, 2)))
-        .font(FontId::proportional(13.0))
+        .font(Text::Data.font())
         .desired_width(f32::INFINITY)
         .min_size(size)
         .vertical_align(egui::Align::Center)
@@ -751,7 +751,7 @@ fn choices(ui: &mut egui::Ui, ed: &mut CellEditor, width: f32, tags: &mut Tags) 
         ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
         let null = choice == Choice::Null;
         let colour = if null { t.text_muted } else { t.text };
-        let format = TextFormat { font_id: FontId::proportional(13.0), color: colour, italics: null, ..TextFormat::default() };
+        let format = TextFormat { italics: null, ..Text::Data.format(colour) };
         let galley = ui.painter().layout_job(LayoutJob::single_section(choice.label().to_string(), format));
         ui.painter().galley(pos2(row.left() + PAD - BORDER, row.center().y - galley.size().y / 2.0), galley, colour);
         tags.tag_value(&format!("{EDITOR}-{}", choice.id()), &r, choice.label());

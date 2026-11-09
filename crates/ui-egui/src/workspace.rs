@@ -37,16 +37,17 @@ use std::sync::Arc;
 
 use dbee_engine::{Session, State, Tab, TabId, Which};
 use dbee_sql::filter::Condition;
-use egui::{Align, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, pos2, vec2};
+use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 
 use crate::app::Origin;
-use crate::connections::line_galley;
+use crate::connections::{line_galley, line_job};
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
 use crate::table_tab::{self, Grids};
 use crate::theme::{
-    self, connection_color,
+    self, Text, connection_color,
+    size::SPINNER,
     size::{RADIUS_CONTROL, RADIUS_FLOAT},
 };
 use crate::tree::{self, Refresh, Tree, TreeAct};
@@ -243,7 +244,9 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let t = theme::tokens(ui.ctx());
     let Some(c) = app.session.state().connection(Which::Active) else { return false };
     let name = c.config.display_name();
-    let label = if c.info.read_only { format!("{name} · read-only") } else { name };
+    let own_name = !c.config.name.is_empty();
+    let read_only = c.info.read_only;
+    let label = if c.info.read_only { format!("{name} · read-only") } else { name.clone() };
     let colour = connection_color(c.config.color).zip(theme::on_connection_color(c.config.color));
     let server = dbee_engine::state::server_text(&c.info);
     let tls = dbee_engine::state::tls_text(&c.info, c.config.ssh.is_some());
@@ -263,16 +266,22 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
                 Some((fill, text)) => (fill, text),
                 None => (t.fill, t.text),
             };
-            let galley = line_galley(ui, &label, FontId::proportional(12.5), text, 360.0);
+            // A name the user gave may be drawn in capitals; one made from the user, host, database
+            // or file is case-sensitive.
+            let mut name_job = if own_name { Text::Label.job(&name, text) } else { Text::Label.job_as_written(&name, text) };
+            if read_only {
+                name_job.append(&Text::Label.job(" · read-only", text).text, 0.0, Text::Label.format(text));
+            }
+            let galley = line_job(ui, name_job, 360.0);
             let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x + 18.0, STATUS_ITEM_H), Sense::hover());
             ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_FLOAT), fill);
             ui.painter().galley(pos2(rect.left() + 9.0, rect.center().y - galley.size().y / 2.0), galley, text);
             tags.tag_value("status-connection", &r, label.as_str());
-            let r = ui.label(RichText::new(server.as_str()).size(12.0).color(t.text_muted));
+            let r = ui.label(Text::Label.rich_as_written(server.as_str()).color(t.text_muted));
             tags.tag_value("status-server", &r, server.as_str());
             if let Some((text, hover)) = tls {
                 ui.add_space(6.0);
-                let r = ui.label(RichText::new(text).size(12.0).color(t.text_muted)).on_hover_text(hover);
+                let r = ui.label(Text::Label.rich(text).color(t.text_muted)).on_hover_text(hover);
                 tags.tag_value("status-tls", &r, text);
             }
             if !saved {
@@ -285,7 +294,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
             }
             if lost {
                 ui.add_space(8.0);
-                let r = ui.label(RichText::new("Connection lost").size(12.5).strong().color(t.danger));
+                let r = ui.label(Text::Label.rich("Connection lost").color(t.danger));
                 tags.tag_value("status-lost", &r, "Connection lost");
                 let text = if reconnecting { "Reconnecting…" } else { "Reconnect" };
                 let r = status_button(ui, text, !reconnecting);
@@ -305,9 +314,9 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
                         acts.push(Act::Cancel(command));
                     }
                 }
-                let r = ui.label(RichText::new(job.text.as_str()).size(12.0).color(t.text_muted));
+                let r = ui.label(Text::Label.rich_as_written(job.text.as_str()).color(t.text_muted));
                 tags.tag_value("status-job", &r, job.text.as_str());
-                ui.add(egui::Spinner::new().size(12.0).color(t.text_muted));
+                ui.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
             });
         });
     });
@@ -319,7 +328,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
 fn status_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
     ui.scope(|ui| {
         ui.spacing_mut().button_padding.y = 0.0;
-        ui.add_enabled(enabled, egui::Button::new(RichText::new(text).size(12.0)).min_size(vec2(0.0, STATUS_ITEM_H)))
+        ui.add_enabled(enabled, egui::Button::new(Text::Label.rich(text)).min_size(vec2(0.0, STATUS_ITEM_H)))
     })
     .inner
 }
@@ -426,9 +435,8 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
 /// Draws `tab` on the band; returns its rect when it is the active one.
 fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags, acts: &mut Vec<Act>) -> Option<Rect> {
     let t = theme::tokens(ui.ctx());
-    let font = FontId::proportional(13.0);
     let colour = if tab.active { t.text } else { t.text_muted };
-    let galley = line_galley(ui, &tab.title, font, colour, TITLE_MAX);
+    let galley = line_galley(ui, &tab.title, Text::Button, colour, TITLE_MAX);
     let width = 10.0 + 16.0 + 6.0 + galley.size().x + 6.0 + if tab.dirty { 10.0 } else { 0.0 } + 20.0 + 6.0;
     let (rect, r) = ui.allocate_exact_size(vec2(width, TAB_H), Sense::click());
     let p = ui.painter().clone();
@@ -444,7 +452,7 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     }
     let icon_rect = Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 8.0), vec2(16.0, 16.0));
     if tab.busy {
-        egui::Spinner::new().size(13.0).color(t.text_muted).paint_at(ui, icon_rect);
+        egui::Spinner::new().size(SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
     } else if tab.query {
         icons::query(&p, icon_rect, t.text_muted);
     } else {
@@ -494,7 +502,7 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui) {
         let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
         ui.add_space(content.height() * 0.3);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("No tab is open").size(16.0).color(t.text_muted));
+            ui.label(Text::Body.rich("No tab is open").color(t.text_muted));
             ui.add_space(6.0);
             ui.label(RichText::new("Double-click a table in the tree, find one with Ctrl+P, or start a query with Ctrl+T.").color(t.text_muted));
         });

@@ -35,13 +35,16 @@ use std::sync::Arc;
 
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
 use dbee_sql::Dialect;
-use egui::{Align, Color32, CornerRadius, FontId, Margin, Rect, ScrollArea, Sense, TextEdit, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, Margin, Rect, ScrollArea, Sense, TextEdit, pos2, vec2};
 use serde_json::json;
 
 use crate::automation::Tags;
 use crate::connections::line_galley;
 use crate::icons;
-use crate::theme::{self, size::RADIUS_CONTROL};
+use crate::theme::{
+    self, Text,
+    size::{RADIUS_CONTROL, SPINNER},
+};
 
 /// The height of a row.
 pub const ROW_H: f32 = 22.0;
@@ -417,7 +420,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         let icon_rect = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
         match &tree.refresh {
             Refresh::Running => {
-                egui::Spinner::new().size(14.0).color(t.text_muted).paint_at(ui, icon_rect);
+                egui::Spinner::new().size(SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
             }
             Refresh::Ready => icons::refresh(ui.painter(), icon_rect, t.text_muted),
             Refresh::Disabled(_) => icons::refresh(ui.painter(), icon_rect, t.text_faint),
@@ -443,7 +446,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         format!("{} tables", thousands(total as u64))
     };
     ui.add_space(2.0);
-    ui.label(egui::RichText::new(count).size(11.5).color(t.text_muted));
+    ui.label(Text::Small.rich(count).color(t.text_muted));
     ui.add_space(2.0);
     let mut click = Click::None;
     let selected = tree.selected.clone();
@@ -570,13 +573,12 @@ fn draw_row(
     let p = ui.painter().clone();
     p.rect_filled(rect.shrink2(vec2(2.0, 0.0)), CornerRadius::same(RADIUS_CONTROL), fill);
     let text_w = |right: f32| (right - text_left).max(1.0);
-    let font = FontId::proportional(13.0);
     let label = |text: &str, color: Color32, right: f32| {
-        let g = line_galley(ui, text, font.clone(), color, text_w(right));
+        let g = line_galley(ui, text, Text::Body, color, text_w(right));
         p.galley(pos2(text_left, rect.center().y - g.size().y / 2.0), g, color);
     };
-    let muted_right = |text: &str| -> f32 {
-        let g = line_galley(ui, text, FontId::proportional(11.5), t.text_muted, (rect.width() * 0.45).max(1.0));
+    let muted_right = |text: &str, style: Text| -> f32 {
+        let g = line_galley(ui, text, style, t.text_muted, (rect.width() * 0.45).max(1.0));
         let x = rect.right() - 8.0 - g.size().x;
         let w = g.size().x;
         p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, t.text_muted);
@@ -586,7 +588,7 @@ fn draw_row(
         Row::System { open, schemas } => {
             icons::chevron(&p, chevron_rect, t.text_muted, open);
             icons::schema(&p, icon_rect, t.text_muted);
-            let right = muted_right(&schemas.to_string());
+            let right = muted_right(&schemas.to_string(), Text::Small);
             label(system_label, t.text_muted, right);
             tags.tag_value(id, &r, json!({ "open": open }));
             if r.clicked() {
@@ -597,7 +599,7 @@ fn draw_row(
             let name = catalog.schemas.get(s).map_or("", |x| x.name.as_str());
             icons::chevron(&p, chevron_rect, t.text_muted, open);
             icons::schema(&p, icon_rect, t.text_muted);
-            let right = muted_right(&thousands(tables as u64));
+            let right = muted_right(&thousands(tables as u64), Text::Small);
             label(name, t.text, right);
             tags.tag_value(id, &r, json!({ "open": open, "tables": tables }));
             if r.clicked() {
@@ -643,7 +645,7 @@ fn draw_row(
                 Some(_) => icons::key_foreign(&p, icon_rect, t.text_muted),
                 None => icons::column(&p, icon_rect, t.text_muted),
             }
-            let right = muted_right(col.label());
+            let right = muted_right(col.label(), Text::Label);
             label(&col.name, t.text, right);
             let r = match info.fk_for(&col.name) {
                 Some(fk) => r.on_hover_text(format!("{} → {}", col.name, fk.target.display())),

@@ -3,8 +3,10 @@
 
 mod fonts;
 pub mod size;
+mod text;
 mod tokens;
 pub use fonts::{INTER_MEDIUM, MONO_MEDIUM};
+pub use text::Text;
 pub use tokens::{DARK, LIGHT, Tokens, connection_color, on_connection_color, tokens};
 
 use egui::{Color32, CornerRadius, Shadow, Stroke};
@@ -50,6 +52,16 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
         state.corner_radius = CornerRadius::same(RADIUS_CONTROL);
         state.fg_stroke = Stroke::new(1.0, t.text);
     }
+    style.text_styles = [
+        (egui::TextStyle::Heading, Text::Title),
+        (egui::TextStyle::Body, Text::Body),
+        (egui::TextStyle::Button, Text::Button),
+        (egui::TextStyle::Small, Text::Small),
+        (egui::TextStyle::Monospace, Text::Data),
+    ]
+    .into_iter()
+    .map(|(style, text)| (style, text.font()))
+    .collect();
     style.spacing.scroll.foreground_color = false;
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
@@ -62,6 +74,19 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Light);
     ctx.style_mut_of(egui::Theme::Light, |style| style_for(style, &LIGHT, false));
     ctx.style_mut_of(egui::Theme::Dark, |style| style_for(style, &DARK, true));
+}
+
+/// For a test harness whose first frame runs before it can set fonts: applies the theme once and
+/// says whether it had been applied already.
+#[cfg(test)]
+pub(crate) fn applied(ctx: &egui::Context) -> bool {
+    let id = egui::Id::new("dbee-test-theme-applied");
+    if ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false) {
+        return true;
+    }
+    apply(ctx);
+    ctx.data_mut(|d| d.insert_temp(id, true));
+    false
 }
 
 #[cfg(test)]

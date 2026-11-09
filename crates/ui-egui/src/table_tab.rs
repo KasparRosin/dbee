@@ -37,7 +37,10 @@ use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{self, BAR_H, Paging};
-use crate::theme::{self, size::RADIUS_CONTROL};
+use crate::theme::{
+    self, Text,
+    size::{RADIUS_CONTROL, SPINNER},
+};
 
 /// The commands that load a page, whose database errors the tab's card shows.
 const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "table.refresh"];
@@ -161,7 +164,7 @@ fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, 
 /// sentence and shows as written; dbee's are phrases.
 fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str, own: Option<&str>) {
     let text = if own == Some(why) { why.to_owned() } else { format!("These rows can't be edited: {why}.") };
-    let r = ui.add(egui::Label::new(RichText::new(text.as_str()).size(12.0).color(theme::tokens(ui.ctx()).text_muted)).truncate());
+    let r = ui.add(egui::Label::new(Text::Small.rich(text.as_str()).color(theme::tokens(ui.ctx()).text_muted)).truncate());
     tags.tag_value("table-note", &r, text.as_str());
 }
 
@@ -198,10 +201,10 @@ fn error_card(ui: &mut egui::Ui, tags: &mut Tags, (heading, error, note): (&str,
     let r = frame
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(heading).strong().color(t.danger));
+            ui.label(Text::Subtitle.rich(heading).color(t.danger));
             ui.add(egui::Label::new(RichText::new(error).color(t.danger)).wrap());
             if !note.is_empty() {
-                ui.add(egui::Label::new(RichText::new(note).size(11.5).color(t.text_muted)).wrap());
+                ui.add(egui::Label::new(Text::Small.rich(note).color(t.text_muted)).wrap());
             }
         })
         .response;
@@ -316,7 +319,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             }
             None if tab.loading.is_some() => {
                 top.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0).color(t.text_muted));
+                    ui.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
                     ui.label(RichText::new(format!("Loading {}…", tab.table.display())).color(t.text_muted));
                 });
             }

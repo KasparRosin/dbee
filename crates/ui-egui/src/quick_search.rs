@@ -29,7 +29,7 @@ use std::sync::Arc;
 use dbee_config::{ConnectionColor, ConnectionConfig};
 use dbee_core::{Catalog, RelKind, TableRef};
 use dbee_engine::{Json, Outcome, Screen, State, Which};
-use egui::{Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Modifiers, Rect, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, Frame, Key, Margin, Modifiers, Rect, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -37,7 +37,7 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::connections::{self, line_galley};
 use crate::theme::{
-    self, connection_color,
+    self, Text, connection_color,
     size::{RADIUS_CONTROL, RADIUS_FLOAT},
 };
 use crate::tree::kind_icon;
@@ -347,7 +347,7 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
                 .id(egui::Id::new(INPUT))
                 .hint_text(if qs.tables { "Find a table or connection by name" } else { "Find a connection by name" })
                 .desired_width(WIDTH)
-                .font(FontId::proportional(16.0))
+                .font(Text::Body.font())
                 .margin(Margin::symmetric(8, 6)),
         );
         tags.tag_value_as(INPUT, &field, qs.query.as_str(), true);
@@ -384,14 +384,13 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
                 p.rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), fill);
                 let mark = pos2(rect.left() + 16.0, rect.center().y);
                 let x = rect.left() + 32.0;
-                let font = FontId::proportional(14.0);
                 match hit {
                     Hit::Table { table, kind } => {
                         kind_icon(*kind)(p, Rect::from_center_size(mark, vec2(16.0, 16.0)), t.text_muted);
-                        let schema = line_galley(ui, &format!("{}.", table.schema), font.clone(), t.text_muted, WIDTH * 0.4);
+                        let schema = line_galley(ui, &format!("{}.", table.schema), Text::Body, t.text_muted, WIDTH * 0.4);
                         let schema_w = schema.size().x;
                         p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);
-                        let name = line_galley(ui, &table.name, font, t.text, (rect.right() - 8.0 - x - schema_w).max(1.0));
+                        let name = line_galley(ui, &table.name, Text::Body, t.text, (rect.right() - 8.0 - x - schema_w).max(1.0));
                         p.galley(pos2(x + schema_w, rect.center().y - name.size().y / 2.0), name, t.text);
                     }
                     Hit::Connection { name, label, color, .. } => {
@@ -404,9 +403,9 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
                                 p.circle_stroke(mark, DOT_R - 0.75, Stroke::new(1.5, t.text_muted));
                             }
                         }
-                        let kind = line_galley(ui, label, font.clone(), t.text_muted, WIDTH * 0.3);
+                        let kind = line_galley(ui, label, Text::Body, t.text_muted, WIDTH * 0.3);
                         let kind_x = rect.right() - 8.0 - kind.size().x;
-                        let name = line_galley(ui, name, font, t.text, (kind_x - 12.0 - x).max(1.0));
+                        let name = line_galley(ui, name, Text::Body, t.text, (kind_x - 12.0 - x).max(1.0));
                         p.galley(pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
                         p.galley(pos2(kind_x, rect.center().y - kind.size().y / 2.0), kind, t.text_muted);
                         tags.tag_value_as(&format!("qs-item-{n}-kind"), &r, label.as_str(), true);
@@ -452,6 +451,7 @@ mod tests {
         let why = app.commands().into_iter().find(|c| c.id == "ui.quickSearch").and_then(|c| c.disabled_reason);
         assert!(why.as_deref().is_some_and(|w| w.contains("dialog")), "no quick search over a dialog: {why:?}");
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         // The window's order: the workspace (and the search), then the dialog.
         let frame = |app: &mut DbeeApp, events: Vec<Event>| {
             ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| {

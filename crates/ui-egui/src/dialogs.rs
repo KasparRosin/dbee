@@ -30,7 +30,7 @@ use serde_json::json;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::connections;
-use crate::theme::{self, size::RADIUS_FLOAT};
+use crate::theme::{self, Text, size::RADIUS_FLOAT};
 use crate::{DbeeApp, connections::tilde};
 
 /// The width of a dialog's content.
@@ -327,7 +327,7 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
 }
 
 fn title(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(17.0).strong());
+    ui.label(Text::Title.rich(text));
     ui.add_space(6.0);
 }
 
@@ -337,7 +337,7 @@ fn text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, text: &str) {
 }
 
 fn muted(ui: &mut egui::Ui, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).size(12.0).color(theme::tokens(ui.ctx()).text_muted)).wrap());
+    ui.add(egui::Label::new(Text::Small.rich(text).color(theme::tokens(ui.ctx()).text_muted)).wrap());
 }
 
 /// The OK and Cancel buttons, right-aligned: `(ok clicked, cancel clicked)`. Without `cancel`
@@ -393,7 +393,7 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             // A reserved line for the reason a URL did not parse.
             let (rect, line) = ui.allocate_exact_size(vec2(WIDTH, 20.0), egui::Sense::hover());
             if let Some(e) = error {
-                let mut job = egui::text::LayoutJob::single_section(e.clone(), egui::TextFormat::simple(egui::FontId::proportional(12.0), t.danger));
+                let mut job = Text::Small.job(e, t.danger);
                 job.wrap = egui::text::TextWrapping::truncate_at_width(WIDTH);
                 let galley = ui.painter().layout_job(job);
                 ui.painter().galley(egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.danger);
@@ -412,7 +412,7 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             title(ui, "Unknown SSH server");
             text(ui, tags, "dialog-text", &format!("dbee has not connected to {host} before. Its {key_type} host key has this fingerprint:"));
             ui.add_space(6.0);
-            let r = ui.add(egui::Label::new(RichText::new(fingerprint.as_str()).monospace()).selectable(true));
+            let r = ui.add(egui::Label::new(Text::Data.rich(fingerprint.as_str())).selectable(true));
             tags.tag_value_as("dialog-fingerprint", &r, fingerprint.as_str(), true);
             ui.add_space(6.0);
             muted(ui, "Trust it only if it is the fingerprint the server's administrator gave you. dbee then adds it to ~/.ssh/known_hosts.");
@@ -453,7 +453,7 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                     ui.horizontal_top(|ui| {
                         let r = ui.add_enabled(false, Checkbox::new(&mut off, "Save in keyring"));
                         tags.tag_value_as("dialog-save", &r, false, false);
-                        ui.label(RichText::new(*why).size(12.0).color(t.text_muted));
+                        ui.label(Text::Small.rich(*why).color(t.text_muted));
                     });
                 }
             }

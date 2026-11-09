@@ -17,15 +17,15 @@ use std::path::{Path, PathBuf};
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
-    Align, Button, Checkbox, CornerRadius, FontId, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect, RectAlign,
-    RichText, ScrollArea, Sense, Stroke, TextEdit, UiBuilder, pos2, vec2,
+    Align, Button, Checkbox, CornerRadius, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect, RectAlign, RichText,
+    ScrollArea, Sense, Stroke, TextEdit, UiBuilder, pos2, vec2,
 };
 
 use crate::automation::Tags;
 use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
 use crate::filter_bar;
 use crate::picker::Pick;
-use crate::theme::{self, connection_color, size::RADIUS_CONTROL};
+use crate::theme::{self, Text, connection_color, size::RADIUS_CONTROL};
 
 /// The height of a label above a field.
 const LABEL_H: f32 = 16.0;
@@ -280,7 +280,7 @@ fn column<R>(ui: &mut egui::Ui, width: f32, label: &str, add: impl FnOnce(&mut e
     ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
         let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
-        ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), theme::tokens(ui.ctx()).text_muted);
+        Text::Small.paint(ui.painter(), rect.left_center(), egui::Align2::LEFT_CENTER, label, theme::tokens(ui.ctx()).text_muted);
         add(ui)
     })
     .inner
@@ -300,13 +300,10 @@ fn column_noted<R>(
     ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
         let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
-        let shown =
-            ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), theme::tokens(ui.ctx()).text_muted);
+        let shown = Text::Small.paint(ui.painter(), rect.left_center(), egui::Align2::LEFT_CENTER, label, theme::tokens(ui.ctx()).text_muted);
         let room = Rect::from_min_max(pos2((shown.right() + 8.0).min(rect.right()), rect.top()), rect.max);
         let note_ui = UiBuilder::new().max_rect(room).layout(Layout::left_to_right(Align::Center));
-        let r = ui
-            .scope_builder(note_ui, |ui| ui.add(Label::new(RichText::new(note).size(12.0).color(theme::tokens(ui.ctx()).text_muted)).truncate()))
-            .inner;
+        let r = ui.scope_builder(note_ui, |ui| ui.add(Label::new(Text::Small.rich(note).color(theme::tokens(ui.ctx()).text_muted)).truncate())).inner;
         tags.tag_value(id, &r, note);
         add(ui, tags)
     })
@@ -372,7 +369,7 @@ fn path_box(ui: &mut egui::Ui, tags: &mut Tags, id: &str, width: f32, path: Opti
             None => ("None".to_string(), t.text_muted),
         }
     };
-    let galley = line_galley(ui, &text, FontId::proportional(13.0), color, width - 14.0);
+    let galley = line_galley(ui, &text, Text::Body, color, width - 14.0);
     let y = rect.center().y - galley.size().y / 2.0;
     p.galley(pos2(rect.left() + 7.0, y), galley, color);
     let r = if text.chars().count() > 40 { r.on_hover_text(text.as_str()) } else { r };
@@ -397,9 +394,9 @@ const TITLE_MIN_W: f32 = 160.0;
 
 /// `text` in `font`, cut to `width` with "…" (then the whole text shows on hover), in a slot of
 /// that width, on its left or its `right`; tagged `id` with `value`.
-fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, font): (&str, FontId), value: &str, width: f32, right: bool) {
+fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, style): (&str, Text), value: &str, width: f32, right: bool) {
     let t = theme::tokens(ui.ctx());
-    let galley = line_galley(ui, text, font, t.text, width);
+    let galley = line_galley(ui, text, style, t.text, width);
     let elided = galley.elided;
     let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
     let x = if right { rect.right() - galley.size().x } else { rect.left() };
@@ -415,15 +412,14 @@ fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, font): (&str, F
 /// own under it, Change engine under Fill from URL.
 pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let t = theme::tokens(ui.ctx());
-    let kind_font = FontId::proportional(15.0);
     let change = form && !conn.form.engine_fixed;
     // As wide as the widest type's name, so the layout is the same whichever type the form has.
-    let kind_w = DbKind::ALL.iter().map(|k| line_galley(ui, k.label(), kind_font.clone(), t.text, w).size().x).fold(0.0, f32::max).min(w / 3.0);
+    let kind_w = DbKind::ALL.iter().map(|k| line_galley(ui, k.label(), Text::Subtitle, t.text, w).size().x).fold(0.0, f32::max).min(w / 3.0);
     let spacing = ui.spacing().item_spacing.x;
     let buttons = f32::from(u8::from(url) + u8::from(change)) * (SIDE_BUTTON_W + spacing);
     let one_row = form && TITLE_MIN_W + GAP + kind_w + buttons <= w;
     let kind = |ui: &mut egui::Ui, tags: &mut Tags, width: f32, right: bool| {
-        row_text(ui, tags, "conn-kind", (conn.form.kind.label(), kind_font.clone()), conn.form.kind.id(), width, right);
+        row_text(ui, tags, "conn-kind", (conn.form.kind.label(), Text::Subtitle), conn.form.kind.id(), width, right);
     };
     let change_engine = |ui: &mut egui::Ui, tags: &mut Tags, acts: &mut Vec<Act>| {
         if change && side_button(ui, tags, "conn-change-engine", "Change engine", conn.running.is_none()) {
@@ -441,7 +437,7 @@ pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             let title = conn.form.title();
             let width = ui.available_width().max(1.0);
-            row_text(ui, tags, "conn-title", (&title, FontId::proportional(19.0)), &title, width, false);
+            row_text(ui, tags, "conn-title", (&title, Text::Title), &title, width, false);
         });
     });
     if form && !one_row {
@@ -602,7 +598,7 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
             let r = ui.add_enabled(false, Checkbox::new(&mut off, "Save passwords"));
             tags.tag_value("conn-save-secrets", &r, false);
             let note = "No keyring found, so passwords are asked each time.";
-            let r = ui.label(RichText::new(note).size(12.0).color(t.text_muted));
+            let r = ui.label(Text::Small.rich(note).color(t.text_muted));
             tags.tag_value("conn-no-keyring", &r, note);
         }
     });
@@ -821,7 +817,7 @@ fn read_only_and_options(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f3
         }
     });
     if f.read_only {
-        let r = ui.add(Label::new(RichText::new(READ_ONLY_NOTE).size(12.0).color(theme::tokens(ui.ctx()).text_muted)).wrap());
+        let r = ui.add(Label::new(Text::Small.rich(READ_ONLY_NOTE).color(theme::tokens(ui.ctx()).text_muted)).wrap());
         tags.tag_value("conn-readonly-note", &r, READ_ONLY_NOTE);
     }
 }
@@ -837,7 +833,7 @@ fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut
             let w = w - 20.0;
             ui.set_width(w);
             ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
-                let r = ui.checkbox(&mut f.ssh_on, RichText::new("SSH tunnel").strong());
+                let r = ui.checkbox(&mut f.ssh_on, Text::Button.rich("SSH tunnel"));
                 tags.tag_value("conn-ssh-on", &r, f.ssh_on);
             });
             if !f.ssh_on {
@@ -868,7 +864,7 @@ fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut
                     ("Looking for the key…".to_string(), t.text_muted)
                 };
                 let (rect, r) = ui.allocate_exact_size(vec2(line_w, FIELD_H), Sense::hover());
-                let galley = line_galley(ui, &text, FontId::proportional(13.0), color, line_w);
+                let galley = line_galley(ui, &text, Text::Body, color, line_w);
                 ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
                 let r = if text.chars().count() > 50 { r.on_hover_text(text.as_str()) } else { r };
                 tags.tag_value("conn-ssh-key", &r, text.as_str());

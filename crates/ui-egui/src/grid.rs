@@ -52,14 +52,14 @@ use dbee_core::{ResultSet, TypeClass};
 use dbee_engine::Selection;
 use dbee_sql::filter::SortDir;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Button, Color32, CornerRadius, FontId, Layout, Rect, Response, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
+use egui::{Align, Button, Color32, CornerRadius, Layout, Rect, Response, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
 use egui_extras::{Column, TableBuilder};
 use serde_json::{Map, json};
 
 use crate::automation::{CellBlock, Tags};
-use crate::connections::line_galley;
+use crate::connections::{line_galley, line_galley_as_written};
 use crate::icons;
-use crate::theme;
+use crate::theme::{self, Text};
 
 /// A row's height.
 pub const ROW_H: f32 = 24.0;
@@ -332,7 +332,7 @@ fn paint_text(ui: &egui::Ui, p: &egui::Painter, text: &str, (x, y, right): (f32,
 
 /// A one-line galley of `text` cut with `…` at `width`, italic when `italics`.
 fn galley(ui: &egui::Ui, text: &str, color: Color32, width: f32, italics: bool) -> std::sync::Arc<egui::Galley> {
-    let format = TextFormat { font_id: FontId::proportional(13.0), color, italics, ..TextFormat::default() };
+    let format = TextFormat { italics, ..Text::Data.format(color) };
     let mut job = LayoutJob::single_section(text.to_string(), format);
     job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
     ui.painter().layout_job(job)
@@ -562,12 +562,12 @@ impl Grid<'_> {
         }
         let sort_w = if self.sort_of(col).is_some() { 16.0 } else { 0.0 };
         let right = rect.right() - PAD - sort_w;
-        let name = line_galley(ui, self.source.column_name(col), FontId::proportional(13.0), t.text, (right - x).max(1.0));
+        let name = line_galley_as_written(ui, self.source.column_name(col), Text::Header, t.text, (right - x).max(1.0));
         let name_w = name.size().x;
         p.galley(pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
         x += name_w + 6.0;
         if right - x > 12.0 {
-            let ty = line_galley(ui, self.source.column_type(col), FontId::proportional(11.0), t.text_muted, right - x);
+            let ty = line_galley(ui, self.source.column_type(col), Text::Label, t.text_muted, right - x);
             p.galley(pos2(x, rect.center().y - ty.size().y / 2.0 + 1.0), ty, t.text_muted);
         }
         if let Some(dir) = self.sort_of(col) {
@@ -588,7 +588,7 @@ impl Grid<'_> {
         } else {
             crate::tree::thousands(self.first_number.saturating_add(row as u64))
         };
-        let g = line_galley(ui, &label, FontId::proportional(11.5), t.text_muted, rect.width());
+        let g = line_galley(ui, &label, Text::Data, t.text_muted, rect.width());
         p.galley(pos2(rect.right() - PAD - g.size().x, rect.center().y - g.size().y / 2.0), g, t.text_muted);
     }
 

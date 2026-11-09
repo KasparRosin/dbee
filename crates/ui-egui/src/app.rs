@@ -275,6 +275,12 @@ impl DbeeApp {
     }
 
     /// Frames drawn so far.
+    /// Marks the theme as set, for a test whose context has it already.
+    #[cfg(test)]
+    pub(crate) fn themed_for_test(&mut self) {
+        self.themed = true;
+    }
+
     pub fn frames(&self) -> u64 {
         self.frames
     }
@@ -479,10 +485,12 @@ impl DbeeApp {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if !self.themed {
-            // Panels started this frame keep the old style: draw again with the theme.
+            // The fonts load at the start of the next frame, and the screens name them: draw
+            // nothing until then.
             theme::apply(&ctx);
             self.themed = true;
             ctx.request_repaint();
+            return;
         }
         // 1. Job results.
         let finished = self.session.pump();
@@ -633,9 +641,14 @@ mod tests {
         })
         .unwrap();
         let (tx, rx) = mpsc::channel();
-        let mut h = Harness::builder()
-            .with_size(egui::vec2(1000.0, 700.0))
-            .build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), DbeeApp::new(session, Some(rx)));
+        let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
+            |ui, app: &mut DbeeApp| {
+                if crate::theme::applied(ui.ctx()) {
+                    app.ui(ui);
+                }
+            },
+            DbeeApp::new(session, Some(rx)),
+        );
         let frame = |h: &mut Harness<'_, DbeeApp>| {
             let mut raw = h.input().clone();
             h.state_mut().feed_input(&mut raw);
@@ -668,7 +681,14 @@ mod tests {
         let home = temp_home(None, None);
         let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
         let (tx, rx) = mpsc::channel();
-        let mut h = Harness::builder().build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), DbeeApp::new(session, Some(rx)));
+        let mut h = Harness::builder().build_ui_state(
+            |ui, app: &mut DbeeApp| {
+                if crate::theme::applied(ui.ctx()) {
+                    app.ui(ui);
+                }
+            },
+            DbeeApp::new(session, Some(rx)),
+        );
         h.step();
         let closes = |h: &Harness<'_, DbeeApp>| {
             h.output().viewport_output.values().flat_map(|v| v.commands.iter()).any(|c| *c == egui::ViewportCommand::Close)
@@ -787,7 +807,8 @@ mod tests {
         let mut app = DbeeApp::new(session, None);
         let ctx = egui::Context::default();
         ctx.run_ui(egui::RawInput::default(), |ui| app.ui(ui)).drop_without_applying_deltas();
-        assert_eq!(app.frames(), 1);
+        ctx.run_ui(egui::RawInput::default(), |ui| app.ui(ui)).drop_without_applying_deltas();
+        assert_eq!(app.frames(), 1, "the first frame only sets the theme");
         assert!(!app.session().busy());
         // A UI command runs through `run`, like the panels' clicks.
         assert_eq!(app.run("ui.toggleValuePanel", json!({})).unwrap(), Outcome::Done(json!({ "visible": false })));

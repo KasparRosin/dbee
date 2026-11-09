@@ -90,8 +90,8 @@ use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
 use egui::text_edit::TextEditState;
 use egui::{
-    Align, Button, Color32, CornerRadius, CursorIcon, Event, FontId, Frame, Id, Key, Label, Layout, Margin, Popup, Rect, Response, RichText,
-    ScrollArea, Sense, Stroke, StrokeKind, TextEdit, UiBuilder, pos2, vec2,
+    Align, Button, Color32, CornerRadius, CursorIcon, Event, Frame, Id, Key, Label, Layout, Margin, Popup, Rect, Response, RichText, ScrollArea,
+    Sense, Stroke, StrokeKind, TextEdit, UiBuilder, pos2, vec2,
 };
 use serde_json::json;
 
@@ -99,7 +99,10 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
-use crate::theme::{self, size::RADIUS_CONTROL};
+use crate::theme::{
+    self, Text,
+    size::{RADIUS_CONTROL, SPINNER},
+};
 use crate::tree::thousands;
 use crate::{DbeeApp, filter_bar, icons};
 
@@ -121,9 +124,8 @@ pub const AFFECTED: &str = "query-affected";
 pub const ERROR: &str = "query-error";
 pub const HINT: &str = "query-hint";
 
-/// The editor's text size, in the monospace font, and the height of a line.
-const FONT_SIZE: f32 = 13.0;
-const LINE_H: f32 = 18.0;
+/// The height of an editor line.
+const LINE_H: f32 = Text::Code.line();
 /// What Tab inserts.
 const INDENT: &str = "    ";
 /// The editor's share of the tab's height until the split is dragged.
@@ -403,11 +405,10 @@ impl Tokens {
     /// the tokens never make) give one plain section rather than a job egui could not lay out.
     fn job(&self, lines: Range<usize>, syntax: &theme::Tokens, plain: Color32) -> LayoutJob {
         let text = self.text.as_str();
-        let font = FontId::monospace(FONT_SIZE);
         let section = |start: usize, end: usize, color: Color32, italics: bool| LayoutSection {
             leading_space: 0.0,
             byte_range: ByteIndex(start)..ByteIndex(end),
-            format: TextFormat { font_id: font.clone(), color, italics, line_height: Some(LINE_H), ..TextFormat::default() },
+            format: TextFormat { italics, ..Text::Code.format(color) },
         };
         let mut job = LayoutJob { text: text.to_owned(), keep_trailing_whitespace: true, ..LayoutJob::default() };
         let from = self.line_starts.get(lines.start).copied().unwrap_or(text.len());
@@ -631,8 +632,7 @@ fn take_tabs(ui: &egui::Ui) {
 /// The width of the gutter for `lines` lines.
 fn gutter_width(ui: &egui::Ui, lines: usize) -> f32 {
     let digits = lines.max(1).ilog10().saturating_add(1).max(2);
-    let font = FontId::monospace(FONT_SIZE - 1.0);
-    let digit = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+    let digit = ui.fonts_mut(|f| f.glyph_width(&Text::Data.font(), '0'));
     digits as f32 * digit + 2.0 * GUTTER_PAD
 }
 
@@ -680,7 +680,7 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
             let out = TextEdit::multiline(text)
                 .id(id)
                 .code_editor()
-                .font(FontId::monospace(FONT_SIZE))
+                .font(Text::Code.font())
                 .frame(Frame::NONE.inner_margin(TEXT_MARGIN))
                 .hint_text("Write or paste SQL here.")
                 .desired_width(f32::INFINITY)
@@ -712,14 +712,13 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
     let gutter_p = ui.painter_at(Rect::from_min_max(pos2(gutter.left(), view.top()), pos2(gutter.right(), view.bottom())));
     let origin = out.galley_pos;
     let first = galley.rows.partition_point(|row| origin.y + row.pos.y + row.row.size.y < view.top());
-    let font = FontId::monospace(FONT_SIZE - 1.0);
     for (i, row) in galley.rows.iter().enumerate().skip(first) {
         let top = origin.y + row.pos.y;
         if top > view.bottom() {
             break;
         }
         let colour = if cursor_row == Some(i) { t.text } else { t.text_muted };
-        let number = gutter_p.layout_no_wrap(i.saturating_add(1).to_string(), font.clone(), colour);
+        let number = gutter_p.layout_job(Text::Data.job(&i.saturating_add(1).to_string(), colour));
         let at = pos2(gutter.right() - GUTTER_PAD - number.size().x, top + (row.row.size.y - number.size().y) / 2.0);
         gutter_p.galley(at, number, colour);
     }
@@ -769,8 +768,8 @@ pub(crate) type Queries = HashMap<TabId, QueryState>;
 fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover, why_not): (&str, Option<&str>), main: bool) -> bool {
     let t = theme::tokens(ui.ctx());
     let enabled = why_not.is_none();
-    let text = if main && enabled { RichText::new(label).color(t.on_ink) } else { RichText::new(label) };
-    let mut button = Button::new(text.size(12.5)).min_size(vec2(0.0, BUTTON_H));
+    let text = if main && enabled { Text::ButtonCaps.rich(label).color(t.on_ink) } else { Text::ButtonCaps.rich(label) };
+    let mut button = Button::new(text).min_size(vec2(0.0, BUTTON_H));
     if main && enabled {
         button = button.fill(t.ink);
     }
@@ -820,7 +819,7 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
             None => (unknown.as_str(), t.text_muted),
         };
         let left = icon.right() + 6.0;
-        let g = line_galley(ui, text, FontId::proportional(12.5), ink, (arrow.left() - 4.0 - left).max(1.0));
+        let g = line_galley(ui, text, Text::Body, ink, (arrow.left() - 4.0 - left).max(1.0));
         ui.painter().galley(pos2(left, rect.center().y - g.size().y / 2.0), g, ink);
         let hover = match shown {
             Some(name) => format!("The next run starts in the {one} {name}. Click to choose another."),
@@ -839,7 +838,7 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
             return;
         }
         Popup::menu(&r).width(CHIP_W).show(|ui| {
-            ui.add(Label::new(RichText::new(many).size(11.5).color(t.text_muted)).selectable(false));
+            ui.add(Label::new(Text::Label.rich(many).color(t.text_muted)).selectable(false));
             ScrollArea::vertical().max_height(CHIP_LIST_H).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
                 for name in &chip.choices {
@@ -895,23 +894,23 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: us
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.add(Label::new(RichText::new(title.as_str()).strong().color(ink)).selectable(false));
+                ui.add(Label::new(Text::Subtitle.rich(title.as_str()).color(ink)).selectable(false));
                 if let Some((line, column)) = at {
-                    ui.add(Label::new(RichText::new(format!("line {line}, column {column}")).size(12.0).color(t.text_muted)).selectable(false));
+                    ui.add(Label::new(Text::Small.rich(format!("line {line}, column {column}")).color(t.text_muted)).selectable(false));
                 }
             });
             label(ui, RichText::new(e.message.as_str()).color(if cancelled { t.text_muted } else { t.danger }));
             if let Some(detail) = &e.detail {
-                label(ui, RichText::new(format!("Detail: {detail}")).size(12.0).color(t.text));
+                label(ui, Text::Small.rich(format!("Detail: {detail}")).color(t.text));
             }
             if let Some(hint) = &e.hint {
-                label(ui, RichText::new(format!("Hint: {hint}")).size(12.0).color(t.text));
+                label(ui, Text::Small.rich(format!("Hint: {hint}")).color(t.text));
             }
             if note.is_some() {
-                label(ui, RichText::new(ROLLBACK_NOTE).size(12.0).color(t.text));
+                label(ui, Text::Small.rich(ROLLBACK_NOTE).color(t.text));
             }
             if jump {
-                ui.add(Label::new(RichText::new("Click to put the cursor there.").size(11.5).color(t.text_muted)).selectable(false));
+                ui.add(Label::new(Text::Small.rich("Click to put the cursor there.").color(t.text_muted)).selectable(false));
             }
         })
         .response;
@@ -980,9 +979,9 @@ fn selector_fit(results: usize, shown: usize, room: f32, label_w: f32) -> Select
 fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], shown: usize, room: f32) -> Option<usize> {
     let t = theme::tokens(ui.ctx());
     let mut picked = None;
-    let muted = |text: &str| RichText::new(text).size(12.0).color(t.text_muted);
+    let muted = |text: &str| Text::Label.rich(text).color(t.text_muted);
     let label = |ui: &mut egui::Ui, text: &str| ui.add(Label::new(muted(text)).selectable(false));
-    let label_w = ui.painter().layout_no_wrap("Results".to_owned(), FontId::proportional(12.0), t.text_muted).size().x + ui.spacing().item_spacing.x;
+    let label_w = ui.painter().layout_job(Text::Label.job("Results", t.text_muted)).size().x + ui.spacing().item_spacing.x;
     let fit = selector_fit(results.len(), shown, room, label_w);
     if fit.label {
         label(ui, "Results");
@@ -994,7 +993,7 @@ fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], sh
             label(ui, "·");
         }
         let n = i.saturating_add(1);
-        let r = ui.add(Button::selectable(i == shown, RichText::new(n.to_string()).size(12.5)).min_size(vec2(22.0, 22.0)));
+        let r = ui.add(Button::selectable(i == shown, Text::Data.rich(n.to_string())).min_size(vec2(22.0, 22.0)));
         let r = r.on_hover_text(format!("Statement {n}: {}", what(o)));
         tags.tag_value(&format!("{RESULT}{n}"), &r, value(i, o));
         if r.clicked() && i != shown {
@@ -1002,7 +1001,7 @@ fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], sh
         }
     }
     if fit.more {
-        let r = ui.add(Button::new(RichText::new("…").size(12.5)).min_size(vec2(22.0, 22.0)));
+        let r = ui.add(Button::new(Text::Data.rich("…")).min_size(vec2(22.0, 22.0)));
         let r = r.on_hover_text(format!("Choose one of the {} results", results.len()));
         tags.tag_value(RESULT_MORE, &r, results.len());
         Popup::menu(&r).width(RESULT_LIST_W).show(|ui| {
@@ -1124,14 +1123,11 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let shown = q.shown_result();
         let summary = shown.filter(|o| !o.result.columns.is_empty()).map(|o| (rows_text(&o.result), !o.result.complete));
         // The summary's own width at the right, measured as it is drawn.
-        let right_room = summary.as_ref().map_or(0.0, |(text, _)| {
-            let font = FontId::proportional(12.5);
-            bar.painter().layout_no_wrap(text.clone(), font, t.text).size().x + 16.0
-        });
+        let right_room = summary.as_ref().map_or(0.0, |(text, _)| bar.painter().layout_job(Text::Label.job(text, t.text)).size().x + 16.0);
         if running {
-            let spinner = bar.add(egui::Spinner::new().size(13.0).color(t.text_muted));
-            let words = RichText::new("Running…").size(12.5).color(t.text_muted);
-            let words_w = bar.painter().layout_no_wrap("Running…".to_owned(), FontId::proportional(12.5), t.text_muted).size().x;
+            let spinner = bar.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
+            let words = Text::Label.rich("Running…").color(t.text_muted);
+            let words_w = bar.painter().layout_job(Text::Label.job("Running…", t.text_muted)).size().x;
             let after = bar.cursor().min.x + bar.spacing().item_spacing.x + words_w + 10.0;
             if q.results.len() < 2 || bar_rect.right() - right_room - after >= MORE_W + result_width(q.results.len()) {
                 bar.label(words);
@@ -1158,11 +1154,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 bar.new_child(UiBuilder::new().id_salt(("dbee-query-summary", id.0)).max_rect(at).layout(Layout::right_to_left(Align::Center)));
             {
                 let ui = &mut sum;
-                let rich = if *cut {
-                    RichText::new(text.as_str()).size(12.5).strong().color(t.text)
-                } else {
-                    RichText::new(text.as_str()).size(12.5).color(t.text_muted)
-                };
+                let rich = if *cut { Text::Label.rich(text.as_str()).color(t.text) } else { Text::Label.rich(text.as_str()).color(t.text_muted) };
                 let r = ui.add(Label::new(rich).selectable(false));
                 let r = if *cut { r.on_hover_text(cap_hover()) } else { r };
                 tags.tag_value(ROWS, &r, text.as_str());
@@ -1217,7 +1209,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             Some(o) => {
                 let text = affected_text(o.result.rows_affected);
                 rest_ui.add_space(4.0);
-                let r = rest_ui.add(Label::new(RichText::new(text.as_str()).size(13.0).color(t.text)).selectable(false));
+                let r = rest_ui.add(Label::new(Text::Body.rich(text.as_str()).color(t.text)).selectable(false));
                 tags.tag_value(AFFECTED, &r, text.as_str());
             }
             // The toolbar says it runs.

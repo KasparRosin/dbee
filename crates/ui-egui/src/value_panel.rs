@@ -62,17 +62,17 @@ use dbee_engine::{Screen, ValueView};
 use egui::containers::scroll_area::{DragScroll, ScrollSource};
 use egui::text::{CCursor, LayoutJob, TextFormat};
 use egui::{
-    Align, Color32, CornerRadius, Event, FontId, Frame, Galley, Id, Key, Label, Layout, Modifiers, Pos2, Rect, Response, RichText, ScrollArea, Sense,
-    Stroke, StrokeKind, UiBuilder, pos2, vec2,
+    Align, Color32, CornerRadius, Event, Frame, Galley, Id, Key, Label, Layout, Modifiers, Pos2, Rect, Response, ScrollArea, Sense, Stroke,
+    StrokeKind, UiBuilder, pos2, vec2,
 };
 use serde_json::{Value as Json, json};
 
 use crate::DbeeApp;
 use crate::automation::Tags;
-use crate::connections::line_galley;
+use crate::connections::{line_galley, line_galley_as_written};
 use crate::editors::size_text;
 use crate::theme::{
-    self,
+    self, Text,
     size::{RADIUS_CONTROL, RADIUS_FLOAT},
 };
 use crate::{icons, shortcuts};
@@ -87,10 +87,8 @@ pub const DEFAULT_WIDTH: f32 = 360.0;
 pub const MIN_WIDTH: f32 = 240.0;
 pub const MAX_WIDTH: f32 = 960.0;
 /// The height of a row of text, and the text's inset from the left of its box.
-pub const LINE_H: f32 = 18.0;
+pub const LINE_H: f32 = Text::Code.line();
 pub const PAD: f32 = 8.0;
-/// The text's size, in the monospace font.
-pub const FONT_SIZE: f32 = 12.5;
 /// How much of the text the `value-text` tag carries.
 pub const TAG_BYTES: usize = 4 * 1024;
 /// The longest JSON text coloured in the frame that shows it; longer is coloured on a thread.
@@ -739,9 +737,9 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
         tags.tag_value(PANEL, &panel, Json::Null);
         ui.add_space(full.height() * 0.3);
         ui.vertical_centered(|ui| {
-            ui.add(Label::new(RichText::new("No cell is selected").size(14.0).color(t.text_muted)));
+            ui.add(Label::new(Text::Body.rich("No cell is selected").color(t.text_muted)));
             ui.add_space(4.0);
-            ui.add(Label::new(RichText::new("Select a cell to see its whole value here.").size(12.0).color(t.text_muted)).wrap());
+            ui.add(Label::new(Text::Small.rich("Select a cell to see its whole value here.").color(t.text_muted)).wrap());
         });
         return;
     };
@@ -749,7 +747,7 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
     let note = note(view);
     if let Some(n) = &note {
         ui.add_space(2.0);
-        ui.add(Label::new(RichText::new(n.as_str()).size(12.0).color(t.text_muted)).wrap());
+        ui.add(Label::new(Text::Small.rich(n.as_str()).color(t.text_muted)).wrap());
     }
     ui.add_space(6.0);
     body(&mut ui, view, state, tags);
@@ -770,18 +768,18 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
 fn header(ui: &mut egui::Ui, view: &ValueView) {
     let t = theme::tokens(ui.ctx());
     let width = ui.available_width();
-    let name = line_galley(ui, &view.column, FontId::proportional(14.0), t.text, width * 0.7);
+    let name = line_galley_as_written(ui, &view.column, Text::Subtitle, t.text, width * 0.7);
     let name_w = name.size().x;
     let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
     ui.painter().galley(pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, t.text);
     let left = rect.left() + name_w + 8.0;
     if rect.right() - left > 12.0 {
-        let ty = line_galley(ui, &view.type_label, FontId::proportional(12.0), t.text_muted, rect.right() - left);
+        let ty = line_galley(ui, &view.type_label, Text::Label, t.text_muted, rect.right() - left);
         ui.painter().galley(pos2(left, rect.center().y - ty.size().y / 2.0 + 1.0), ty, t.text_muted);
     }
     if !view.kind_label.is_empty() {
         ui.add_space(2.0);
-        let label = line_galley(ui, &view.kind_label, FontId::proportional(11.5), t.ink, width - 12.0);
+        let label = line_galley(ui, &view.kind_label, Text::Label, t.ink, width - 12.0);
         let (pill, _) = ui.allocate_exact_size(vec2(label.size().x + 12.0, 18.0), Sense::hover());
         ui.painter().rect_filled(pill, CornerRadius::same(RADIUS_FLOAT), t.selection);
         ui.painter().galley(pos2(pill.left() + 6.0, pill.center().y - label.size().y / 2.0), label, t.ink);
@@ -791,7 +789,7 @@ fn header(ui: &mut egui::Ui, view: &ValueView) {
 /// A dim, italic word in the text's box where there is no text (NULL, an empty value).
 fn placeholder(ui: &mut egui::Ui, area: Rect, word: &str) -> Response {
     let t = theme::tokens(ui.ctx());
-    let format = TextFormat { font_id: FontId::monospace(FONT_SIZE), color: t.text_muted, italics: true, ..TextFormat::default() };
+    let format = TextFormat { italics: true, ..Text::Code.format(t.text_muted) };
     let galley = ui.painter().layout_job(LayoutJob::single_section(word.to_string(), format));
     // Where the first row of text would be.
     ui.painter().galley(pos2(area.left() + PAD, area.top() + (LINE_H - galley.size().y) / 2.0), galley, t.text_muted);
@@ -830,13 +828,13 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
         tag(&r, None, false, usize::from(!view.is_null), 0);
         return;
     }
-    let font = FontId::monospace(FONT_SIZE);
+    let font = Text::Code.font();
     let change = state.change(view);
     // An `x`'s width is a column; a new text's characters are measured in columns.
     let known = &mut state.columns;
     let glyph = ui.fonts_mut(|f| {
         let x = f.glyph_width(&font, 'x');
-        let x = if x.is_finite() && x > 0.0 { x } else { FONT_SIZE * 0.6 };
+        let x = if x.is_finite() && x > 0.0 { x } else { font.size * 0.6 };
         let columns = known.get_or_insert_with(|| {
             let tab = f.glyph_width(&font, '\t') / x;
             Columns::new(if tab > 0.0 { usize::from(whole_columns(tab)) } else { 4 })
@@ -884,7 +882,7 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
             .into_iter()
             .enumerate()
             .map(|(i, range)| {
-                let galley = ui.painter().layout_job(row_job(text, range.clone(), &doc.colours, &font, t.text, palette));
+                let galley = ui.painter().layout_job(row_job(text, range.clone(), &doc.colours, t.text, palette));
                 Drawn { range, galley, top: top_of(first + i) }
             })
             .collect();
@@ -966,12 +964,12 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
 
 /// The layout of row `range` of `text`: the JSON colours over it when it has them, else one
 /// colour; never wrapped (the row is as long as fits).
-fn row_job(text: &str, range: Range<usize>, colours: &Colours, font: &FontId, plain: Color32, palette: &theme::Tokens) -> LayoutJob {
+fn row_job(text: &str, range: Range<usize>, colours: &Colours, plain: Color32, palette: &theme::Tokens) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     let mut add = |from: usize, to: usize, color: Color32| {
         if let Some(s) = text.get(from..to).filter(|s| !s.is_empty()) {
-            job.append(s, 0.0, TextFormat::simple(font.clone(), color));
+            job.append(s, 0.0, Text::Code.format(color));
         }
     };
     let Colours::Ready(spans) = colours else {
@@ -1258,6 +1256,7 @@ mod tests {
     #[test]
     fn a_selection_belongs_to_its_value_and_debug_leaves_the_value_out() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let a = Arc::new(ValueView::new(&col("t", "text"), Some("first secret value")));
         let b = Arc::new(ValueView::new(&col("t", "text"), Some("second")));
@@ -1281,6 +1280,7 @@ mod tests {
     #[test]
     fn small_json_is_coloured_at_once_and_large_json_off_the_frame() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let small = Arc::new(ValueView::new(&col("j", "jsonb"), Some(r#"{"a": [1, 2]}"#)));
         frame(&ctx, &mut state, &mut tags, Some(&small));
@@ -1307,6 +1307,7 @@ mod tests {
     /// `width` wide (two frames: the fonts load in the first), and the text box's rect.
     fn drawn_rows(view: &Arc<ValueView>, width: f32) -> (Vec<f32>, egui::Rect) {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 600.0))), ..Default::default() };
         let mut shapes = Vec::new();
@@ -1355,6 +1356,7 @@ mod tests {
     fn the_same_text_again_keeps_its_colours_and_selection() {
         // A staged edit elsewhere, an undo: the engine builds a new view of the same text.
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let raw = format!("[{}]", vec![r#"{"a": 1, "b": "text"}"#; 40_000].join(","));
         let a = Arc::new(ValueView::new(&col("j", "jsonb"), Some(&raw)));
@@ -1378,6 +1380,7 @@ mod tests {
     #[test]
     fn the_tag_carries_the_start_of_a_long_text() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
         let (mut state, mut tags) = (PanelState::default(), Tags::default());
         let long = Arc::new(ValueView::new(&col("t", "text"), Some(&"é".repeat(TAG_BYTES))));
         frame(&ctx, &mut state, &mut tags, Some(&long));

@@ -35,14 +35,14 @@ use dbee_engine::{Json, TabId};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Filter, Op};
 use egui::{
-    Align, Button, ComboBox, CornerRadius, InnerResponse, Key, Layout, Rect, Response, RichText, Sense, TextEdit, TextStyle, TextWrapMode,
-    WidgetInfo, WidgetType, pos2, vec2,
+    Align, Button, ComboBox, CornerRadius, InnerResponse, Key, Layout, Rect, Response, RichText, Sense, TextEdit, TextWrapMode, WidgetInfo,
+    WidgetType, pos2, vec2,
 };
 use serde_json::json;
 
 use crate::automation::Tags;
 use crate::icons;
-use crate::theme::{self, size::RADIUS_CONTROL};
+use crate::theme::{self, Text, size::RADIUS_CONTROL};
 
 /// The height of every control in a row: the toggle, the choices, the value field and the
 /// buttons.
@@ -101,9 +101,8 @@ fn value_width(available: f32, column: f32, op: f32) -> f32 {
 
 /// The width an operator choice needs to show its longest label whole, in `ui`'s button font.
 fn op_fit(ui: &egui::Ui) -> f32 {
-    let font = TextStyle::Button.resolve(ui.style());
-    let widest =
-        Op::ALL.into_iter().map(|o| ui.painter().layout_no_wrap(op_text(o), font.clone(), theme::tokens(ui.ctx()).text).size().x).fold(0.0, f32::max);
+    let color = theme::tokens(ui.ctx()).text;
+    let widest = Op::ALL.into_iter().map(|o| ui.painter().layout_job(Text::Button.job(&op_text(o), color)).size().x).fold(0.0, f32::max);
     // One point more than the text, so rounding never cuts the widest label short.
     (widest + ARROW_GAP + ARROW_W + 2.0 * CHOICE_PAD + 1.0).ceil()
 }
@@ -165,7 +164,7 @@ pub(crate) fn show(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags) -> Vec<Run
         }
     });
     if let Some(why) = bar.disabled {
-        ui.label(RichText::new(format!("The filters can't change now: {why}.")).size(11.5).color(theme::tokens(ui.ctx()).text_muted));
+        ui.label(Text::Small.rich(format!("The filters can't change now: {why}.")).color(theme::tokens(ui.ctx()).text_muted));
     }
     runs
 }
@@ -258,7 +257,7 @@ fn choice<R>(
 ) -> InnerResponse<Option<R>> {
     ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::left_to_right(Align::Center), |ui| {
         // The text centred on the row: as much room above and below it as the row leaves.
-        let text_h = ui.text_style_height(&TextStyle::Button).max(ARROW_W);
+        let text_h = ui.fonts_mut(|f| f.row_height(&Text::Button.font())).max(ARROW_W);
         let s = ui.spacing_mut();
         s.icon_width = ARROW_W;
         s.icon_spacing = ARROW_GAP;
@@ -283,7 +282,7 @@ pub(crate) fn item(ui: &mut egui::Ui, selected: bool, text: &str) -> Response {
 /// keys, whose items take no focus.
 pub(crate) fn item_sensing(ui: &mut egui::Ui, selected: bool, text: &str, sense: Sense) -> Response {
     let t = theme::tokens(ui.ctx());
-    let galley = ui.painter().layout_no_wrap(text.to_string(), TextStyle::Button.resolve(ui.style()), t.text);
+    let galley = ui.painter().layout_job(Text::Button.job(text, t.text));
     let width = ui.available_width().max(galley.size().x + 2.0 * ITEM_PAD);
     let (rect, r) = ui.allocate_exact_size(vec2(width, ITEM_H), sense);
     let fill = if selected {
@@ -319,7 +318,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                 toggle(ui, bar, tags, runs);
             } else {
                 let (rect, _) = ui.allocate_exact_size(vec2(SQUARE, ROW_H), Sense::hover());
-                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "AND", egui::FontId::proportional(11.5), t.text_muted);
+                Text::Label.paint(ui.painter(), rect.center(), egui::Align2::CENTER_CENTER, "AND", t.text_muted);
             }
             let mut changed: Option<Filter> = None;
             // The column.

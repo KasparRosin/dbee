@@ -32,7 +32,10 @@ use serde_json::json;
 
 use crate::automation::Tags;
 use crate::icons::{self, Step};
-use crate::theme::{self, size::RADIUS_CONTROL};
+use crate::theme::{
+    self, Text,
+    size::{RADIUS_CONTROL, SPINNER},
+};
 use crate::tree::thousands;
 
 /// The bar's height.
@@ -122,14 +125,10 @@ const SPACE: f32 = 10.0;
 const GAP: f32 = 12.0;
 /// A square button's side.
 const SQUARE: f32 = 26.0;
-/// A spinner's side.
-const SPIN: f32 = 12.0;
 /// Apply's least width.
 const APPLY_W: f32 = 64.0;
 /// The narrowest a cut page's note is shown in (it truncates, with its whole text on hover).
 const MIN_NOTE: f32 = 24.0;
-/// The size of the bar's labels and of its smaller buttons' text.
-const TEXT: f32 = 12.5;
 
 /// The width the bar's two groups take in each of their forms, measured before they are drawn
 /// ([`widths`]).
@@ -172,19 +171,15 @@ fn row(widths: &[f32]) -> f32 {
     widths.iter().sum::<f32>() + SPACING * widths.len().saturating_sub(1) as f32
 }
 
-/// The width of `text` in the body font, at `size` when given.
-fn text_width(ui: &egui::Ui, text: &str, size: Option<f32>) -> f32 {
-    let mut font = egui::TextStyle::Body.resolve(ui.style());
-    if let Some(size) = size {
-        font.size = size;
-    }
-    ui.painter().layout_no_wrap(text.to_owned(), font, egui::Color32::PLACEHOLDER).size().x.ceil()
+/// The width of `text` drawn in `style`.
+fn text_width(ui: &egui::Ui, text: &str, style: Text) -> f32 {
+    ui.painter().layout_job(style.job(text, egui::Color32::PLACEHOLDER)).size().x.ceil()
 }
 
 /// A text button's width: its text with the button's padding on both sides, rounded up. The
 /// bar draws its buttons at least this wide (`min_size`), so its sums are what they take.
-fn button_width(ui: &egui::Ui, text: &str, size: Option<f32>) -> f32 {
-    (text_width(ui, text, size) + 2.0 * ui.spacing().button_padding.x + 1.0).ceil()
+fn button_width(ui: &egui::Ui, text: &str, style: Text) -> f32 {
+    (text_width(ui, text, style) + 2.0 * ui.spacing().button_padding.x + 1.0).ceil()
 }
 
 /// The texts the bar shows, and the widths of its buttons.
@@ -203,34 +198,34 @@ impl Parts {
         let count = count_text(p.total, p.estimate);
         Parts {
             page: page_text(p.page, p.total),
-            count_w: button_width(ui, &count, Some(TEXT)),
+            count_w: button_width(ui, &count, Text::Label),
             count,
             edits: edits_text(p.edits),
-            add_w: button_width(ui, "+ Row", Some(TEXT)),
-            reset_w: button_width(ui, "Reset", None),
-            apply_w: button_width(ui, "Apply", None).max(APPLY_W),
+            add_w: button_width(ui, "+ Row", Text::Label),
+            reset_w: button_width(ui, "Reset", Text::Button),
+            apply_w: button_width(ui, "Apply", Text::Button).max(APPLY_W),
         }
     }
 }
 
 /// What each group takes, in each form; the same parts, spaces and spinners [`show`] draws.
 fn widths(ui: &egui::Ui, p: &Paging, parts: &Parts) -> Widths {
-    let mut paging = vec![SQUARE, SQUARE, text_width(ui, &parts.page, Some(TEXT))];
+    let mut paging = vec![SQUARE, SQUARE, text_width(ui, &parts.page, Text::Label)];
     if p.loading {
-        paging.push(SPIN);
+        paging.push(SPINNER);
     }
     paging.extend([SQUARE, SQUARE]);
     let counting = matches!(p.total, Total::Counting { .. });
     let left = |count: f32| {
         let mut tail = vec![count];
         if counting {
-            tail.push(SPIN);
+            tail.push(SPINNER);
         }
         tail.push(SQUARE);
         row(&paging) + SPACING + SPACE + row(&tail)
     };
     let (right_text, right_bare) = if p.edits > 0 {
-        let text = text_width(ui, &parts.edits, Some(TEXT));
+        let text = text_width(ui, &parts.edits, Text::Label);
         let start = parts.add_w + SPACING + SPACE;
         (start + row(&[text, parts.reset_w, parts.apply_w]), start + row(&[parts.reset_w, parts.apply_w]))
     } else {
@@ -304,7 +299,7 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
         let room = Rect::from_min_max(pos2(left_end + SPACE, inner.top()), pos2(start - GAP, inner.bottom()));
         if room.width() >= MIN_NOTE {
             let mut n = child(ui, "dbee-paging-note", room, clip.intersect(room));
-            let r = n.add(egui::Label::new(RichText::new(note.as_str()).size(12.0).color(t.text_muted)).truncate());
+            let r = n.add(egui::Label::new(Text::Small.rich(note.as_str()).color(t.text_muted)).truncate());
             tags.tag_value("page-cut", &r, note.as_str());
         }
     }
@@ -323,10 +318,10 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     if step_button(ui, tags, "page-prev", Step::Prev, back, "Previous page") {
         runs.push(("table.page", json!({ "to": "prev" })));
     }
-    let r = ui.add(egui::Label::new(RichText::new(parts.page.as_str()).size(TEXT)).selectable(false));
+    let r = ui.add(egui::Label::new(Text::Label.rich(parts.page.as_str()).color(t.text_muted)).selectable(false));
     tags.tag_value("page-number", &r, parts.page.as_str());
     if p.loading {
-        ui.add(egui::Spinner::new().size(SPIN).color(t.text_muted));
+        ui.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
     }
     if step_button(ui, tags, "page-next", Step::Next, on, "Next page") {
         runs.push(("table.page", json!({ "to": "next" })));
@@ -346,7 +341,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
             (None, false) => r.on_hover_text(format!("{count}: count the rows exactly")),
         }
     } else {
-        let r = ui.add_enabled(enabled, Button::new(RichText::new(count).size(TEXT)).min_size(vec2(parts.count_w, SQUARE)));
+        let r = ui.add_enabled(enabled, Button::new(Text::Label.rich(count)).min_size(vec2(parts.count_w, SQUARE)));
         match p.count_blocked {
             Some(why) => r.on_disabled_hover_text(format!("Can't count now: {why}.")),
             None => r.on_hover_text("Count the rows exactly"),
@@ -357,7 +352,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
         runs.push(("table.count", json!({})));
     }
     if counting {
-        ui.add(egui::Spinner::new().size(SPIN).color(t.text_muted));
+        ui.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
     }
     let refresh_enabled = p.blocked.is_none();
     let r = square_button(ui, refresh_enabled, icons::refresh);
@@ -375,7 +370,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
 fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit: Fit, runs: &mut Vec<Run>) {
     let t = theme::tokens(ui.ctx());
     let enabled = p.add_blocked.is_none();
-    let r = ui.add_enabled(enabled, Button::new(RichText::new("+ Row").size(TEXT)).min_size(vec2(parts.add_w, SQUARE)));
+    let r = ui.add_enabled(enabled, Button::new(Text::Label.rich("+ Row")).min_size(vec2(parts.add_w, SQUARE)));
     let r = match &p.add_blocked {
         Some(why) => r.on_disabled_hover_text(format!("Cannot add a row now: {why}")),
         None => r.on_hover_text("Add a row, written with the other changes on Apply"),
@@ -389,7 +384,7 @@ fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fi
     }
     ui.add_space(SPACE);
     if fit.edits_text {
-        let r = ui.label(RichText::new(parts.edits.as_str()).size(TEXT).color(t.text_muted));
+        let r = ui.label(Text::Label.rich(parts.edits.as_str()).color(t.text_muted));
         tags.tag_value("edits-count", &r, parts.edits.as_str());
     } else {
         // The label's one widget id, so Reset and Apply keep theirs when it is left out.
@@ -469,6 +464,9 @@ mod tests {
         let state = State { p, tags: Tags::default(), bar: Rect::NOTHING };
         let mut h = egui_kittest::Harness::builder().with_size(vec2(width, BAR_H)).build_ui_state(
             |ui, s: &mut State| {
+                if !crate::theme::applied(ui.ctx()) {
+                    return;
+                }
                 s.tags.begin_frame();
                 s.bar = ui.max_rect();
                 let _ = show(ui, &s.p, &mut s.tags);
@@ -555,6 +553,9 @@ mod tests {
     fn right_ids(p: Paging, width: f32) -> (Vec<(&'static str, Option<egui::Id>)>, bool, bool) {
         let mut h = egui_kittest::Harness::builder().with_size(vec2(width, BAR_H)).build_ui_state(
             |ui, s: &mut (Paging, Tags)| {
+                if !crate::theme::applied(ui.ctx()) {
+                    return;
+                }
                 s.1.begin_frame();
                 let _ = show(ui, &s.0, &mut s.1);
             },

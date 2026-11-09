@@ -57,10 +57,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use dbee_config::{ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, JobId, Json, Screen, State, Which};
 use egui::text::{LayoutJob, TextWrapping};
-use egui::{
-    Align, Button, Color32, CornerRadius, FontId, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, TextFormat,
-    pos2, vec2,
-};
+use egui::{Align, Button, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
 use crate::app::{Origin, sentence};
@@ -69,7 +66,7 @@ use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
 use crate::theme::{
-    self, connection_color,
+    self, Text, connection_color,
     size::{RADIUS_CONTROL, RADIUS_FLOAT},
 };
 use crate::{DbeeApp, icons};
@@ -748,10 +745,18 @@ fn ago(used_at: u64) -> String {
     }
 }
 
-/// One line of text cut to `width` with an ellipsis.
-/// `text` on one line in `font` and `color`, cut with "…" to `width`.
-pub(crate) fn line_galley(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
-    let mut job = LayoutJob::single_section(text.to_string(), TextFormat::simple(font, color));
+/// `text` on one line in `style` and `color`, cut with "…" to `width`.
+pub(crate) fn line_galley(ui: &egui::Ui, text: &str, style: Text, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+    line_job(ui, style.job(text, color), width)
+}
+
+/// [`line_galley`] with the case untouched, for what came from a database or the user.
+pub(crate) fn line_galley_as_written(ui: &egui::Ui, text: &str, style: Text, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+    line_job(ui, style.job_as_written(text, color), width)
+}
+
+/// `job` on one line, cut with "…" to `width`.
+pub(crate) fn line_job(ui: &egui::Ui, mut job: LayoutJob, width: f32) -> std::sync::Arc<egui::Galley> {
     job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
     ui.painter().layout_job(job)
 }
@@ -772,7 +777,7 @@ fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, Rect, Co
     p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
     let icon_rect = Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0));
     icon(p, icon_rect, t.ink);
-    p.text(pos2(rect.left() + 36.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), t.text);
+    Text::ButtonCaps.paint(p, pos2(rect.left() + 36.0, rect.center().y), egui::Align2::LEFT_CENTER, label, t.text);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response
 }
@@ -781,8 +786,8 @@ fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, Rect, Co
 fn section(ui: &mut egui::Ui, title: &str, count: usize) {
     let t = theme::tokens(ui.ctx());
     ui.horizontal(|ui| {
-        ui.label(RichText::new(title).small().strong().color(t.text_muted));
-        ui.label(RichText::new(count.to_string()).small().color(t.text_muted));
+        ui.label(Text::Label.rich(title).color(t.text_muted));
+        ui.label(Text::Label.rich(count.to_string()).color(t.text_muted));
     });
     ui.add_space(2.0);
 }
@@ -809,7 +814,7 @@ fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, a
             tags.tag_value("conn-filter", &filter, conn.filter.as_str());
             if let Some(w) = &st.store_warning {
                 ui.add_space(8.0);
-                let r = ui.add(Label::new(RichText::new(w.as_str()).size(12.0).color(t.danger)).wrap());
+                let r = ui.add(Label::new(Text::Small.rich(w.as_str()).color(t.danger)).wrap());
                 tags.tag_value("conn-store-warning", &r, w.as_str());
             }
             ui.add_space(14.0);
@@ -859,7 +864,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     p.rect_filled(bar, CornerRadius::same(2), connection_color(c.color).unwrap_or(t.line));
     let text_w = rect.width() - 22.0;
     let name = c.display_name();
-    p.galley(pos2(rect.left() + 16.0, rect.top() + 6.0), line_galley(ui, &name, FontId::proportional(14.0), t.text, text_w), t.text);
+    p.galley(pos2(rect.left() + 16.0, rect.top() + 6.0), line_galley(ui, &name, Text::Body, t.text, text_w), t.text);
     let mut sub = card_line(c);
     if c.ssh.is_some() && c.kind.takes_ssh() {
         sub.push_str(" · SSH");
@@ -867,7 +872,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     if let Some(at) = used_at {
         sub = format!("{} · {sub}", ago(at));
     }
-    p.galley(pos2(rect.left() + 16.0, rect.top() + 25.0), line_galley(ui, &sub, FontId::proportional(12.0), t.text_muted, text_w), t.text_muted);
+    p.galley(pos2(rect.left() + 16.0, rect.top() + 25.0), line_galley(ui, &sub, Text::Small, t.text_muted, text_w), t.text_muted);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
     tags.tag_value(id, &r, name.as_str());
     tags.tag_value(&format!("{id}-kind"), &r, c.kind.label());
@@ -945,7 +950,7 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
                 ui.painter().rect_filled(strip, CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 }, color);
             }
             ui.add_space(10.0);
-            ui.label(RichText::new(format!("dbee {}", env!("CARGO_PKG_VERSION"))).small().color(t.text_muted));
+            ui.label(Text::Small.rich(format!("dbee {}", env!("CARGO_PKG_VERSION"))).color(t.text_muted));
         });
     });
 }
@@ -960,7 +965,7 @@ const ENGINE_MIN_W: f32 = 110.0;
 /// window is short; those of `kinds` can be chosen.
 fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     ui.add_space(4.0);
-    ui.label(RichText::new("Choose a database type").size(15.0));
+    ui.label(Text::Subtitle.rich("Choose a database type"));
     ui.add_space(6.0);
     let gap = 8.0;
     let per_row = (((w + gap) / (ENGINE_MIN_W + gap)).floor() as usize).clamp(1, DbKind::ALL.len());
@@ -996,10 +1001,10 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &
     let p = ui.painter();
     p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
     let color = if available { t.text } else { t.text_muted };
-    let name = line_galley(ui, kind.label(), FontId::proportional(16.0), color, w - 28.0);
+    let name = line_galley(ui, kind.label(), Text::Subtitle, color, w - 28.0);
     p.galley(pos2(rect.left() + 14.0, rect.center().y - name.size().y / 2.0), name, color);
     if !available {
-        let chip = line_galley(ui, "Upcoming", FontId::proportional(11.0), t.text_muted, w);
+        let chip = line_galley(ui, "Upcoming", Text::Label, t.text_muted, w);
         let size = vec2(chip.size().x + 12.0, 18.0);
         let pill = Rect::from_min_size(pos2(rect.right() - 8.0 - size.x, rect.top() + 8.0), size);
         p.rect_filled(pill, CornerRadius::same(RADIUS_FLOAT), t.bg);
@@ -1034,6 +1039,14 @@ mod tests {
 
     use super::*;
 
+    /// A context whose fonts are loaded, as the app's second frame has them.
+    fn themed_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        ctx
+    }
+
     fn app() -> (DbeeApp, TempHome) {
         let home = temp_home(None, None);
         let session = Session::new(SessionOptions {
@@ -1042,7 +1055,9 @@ mod tests {
             ..SessionOptions::default()
         })
         .unwrap();
-        (DbeeApp::new(session, None), home)
+        let mut app = DbeeApp::new(session, None);
+        app.themed_for_test();
+        (app, home)
     }
 
     /// [`app`] with every driver dbee ships.
@@ -1055,7 +1070,9 @@ mod tests {
             ..SessionOptions::default()
         })
         .unwrap();
-        (DbeeApp::new(session, None), home)
+        let mut app = DbeeApp::new(session, None);
+        app.themed_for_test();
+        (app, home)
     }
 
     /// Frames until `done` holds.
@@ -1110,7 +1127,7 @@ mod tests {
     #[test]
     fn a_quick_empty_answer_keeps_the_key_line_and_says_so_neutrally() {
         let (mut app, _home) = app();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         with_key_line(&mut app);
         let (tx, picker) = Picker::for_test(Pick::Key, app.view.conn.generation);
         app.view.conn.picker = Some(picker);
@@ -1129,7 +1146,7 @@ mod tests {
     #[test]
     fn a_stopped_picker_still_lands_its_choice_and_only_one_opens() {
         let (mut app, _home) = app();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         with_key_line(&mut app);
         let (tx, picker) = Picker::for_test(Pick::Key, app.view.conn.generation);
         app.view.conn.picker = Some(picker);
@@ -1158,7 +1175,7 @@ mod tests {
     #[test]
     fn new_file_is_asked_for_until_a_connect_succeeds() {
         let (mut app, home) = app_with_drivers();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         apply(&mut app, Act::ChooseKind(DbKind::Sqlite), &ctx);
         let file = home.home.join("new.sqlite");
         let pick = |app: &mut DbeeApp, target: Pick| {
@@ -1226,7 +1243,7 @@ mod tests {
     #[test]
     fn a_late_database_list_is_dropped_when_the_form_changed() {
         let (mut app, _home) = app_with_drivers();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
         let job = |n| Some(dbee_engine::JobId(n));
         // The form as it was at the click: the list opens.
@@ -1295,7 +1312,7 @@ mod tests {
     #[test]
     fn a_server_that_lists_nothing_says_so() {
         let (mut app, _home) = app_with_drivers();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
         let (params, generation) = listing(&mut app, 1);
         form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(1)), listed(&[]));
@@ -1313,7 +1330,7 @@ mod tests {
     /// listing's result opens it.
     fn open_list(names: &[String]) -> (DbeeApp, TempHome, egui::Context) {
         let (mut app, home) = app_with_drivers();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
         app.view.conn.form.host = "127.0.0.1".into();
         app.view.conn.form.port = "1".into();
@@ -1404,7 +1421,7 @@ mod tests {
     fn the_highlight_starts_on_the_typed_name_and_escape_closes() {
         let names: Vec<String> = ["many", "odd", "shop", "sys"].map(String::from).to_vec();
         let (mut app, _home) = app_with_drivers();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
         app.view.conn.form.database = "shop".into();
         let (params, generation) = listing(&mut app, 1);
@@ -1425,7 +1442,7 @@ mod tests {
     #[test]
     fn a_list_that_lands_after_a_connect_never_opens() {
         let (mut app, _home) = app_with_drivers();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
         let (params, generation) = listing(&mut app, 1);
         let seed = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
@@ -1462,7 +1479,7 @@ mod tests {
     #[test]
     fn a_saved_type_is_fixed_only_where_the_form_says_so() {
         let (mut app, _home) = app_with_drivers();
-        let ctx = egui::Context::default();
+        let ctx = themed_ctx();
         apply(&mut app, Act::ChooseKind(DbKind::MySql), &ctx);
         // Neither act moves a fixed type, whatever sends it.
         app.view.conn.form.engine_fixed = true;
