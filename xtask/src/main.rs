@@ -15,6 +15,7 @@ mod licenses;
 mod provenance;
 mod stats;
 mod testdb;
+mod tokens;
 mod version;
 
 use std::path::{Path, PathBuf};
@@ -24,10 +25,11 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
 
 commands:
-  ci              fmt --check, clippy -D warnings, testdb up (when `docker info` answers), test, assets, layers,
+  ci              fmt --check, clippy -D warnings, testdb up (when `docker info` answers), test, assets, tokens, layers,
                   provenance (stops at the first failure); after testdb up the tests run with
                   DBEE_REQUIRE_ORACLES=1, so a driver test that skips fails
   assets          check that every icon/image/font/sample file is attributed in ATTRIBUTION.md
+  tokens          check that colours and font sizes stay in crates/ui-egui/src/theme/
   layers          enforce the crate dependency layering (AGENTS.md \"Layering\")
   licenses        list dependencies outside the licence allowlist (docs/standards/licensing.md); not a ci step
   provenance      fail on brand names in tracked files: the ones in the
@@ -56,6 +58,7 @@ fn main() -> ExitCode {
         Some("layers") => cmd_layers(),
         Some("licenses") => licenses::run(&root()),
         Some("provenance") => provenance::run(&root()),
+        Some("tokens") => tokens::run(&root()),
         Some("ci") => cmd_ci(),
         Some("stats") => stats::run(&root(), rest.contains(&"--exact")),
         Some("testdb") => testdb::run(&root(), &rest),
@@ -194,6 +197,7 @@ fn cmd_ci() -> Result<(), String> {
             }),
         ),
         ("assets", Box::new(|| assets::run(&root()))),
+        ("tokens", Box::new(|| tokens::run(&root()))),
         ("layers", Box::new(cmd_layers)),
         ("provenance", Box::new(|| provenance::run(&root()))),
     ];

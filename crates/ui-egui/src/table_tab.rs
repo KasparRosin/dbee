@@ -39,7 +39,7 @@ use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdit
 use crate::paging::{self, BAR_H, Paging};
 use crate::theme::{
     self, Text,
-    size::{RADIUS_CONTROL, SPINNER},
+    size::{self, RADIUS_CONTROL},
 };
 
 /// The commands that load a page, whose database errors the tab's card shows.
@@ -319,7 +319,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             }
             None if tab.loading.is_some() => {
                 top.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
+                    ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
                     ui.label(RichText::new(format!("Loading {}…", tab.table.display())).color(t.text_muted));
                 });
             }

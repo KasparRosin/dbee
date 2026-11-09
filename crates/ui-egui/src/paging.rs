@@ -34,7 +34,7 @@ use crate::automation::Tags;
 use crate::icons::{self, Step};
 use crate::theme::{
     self, Text,
-    size::{RADIUS_CONTROL, SPINNER},
+    size::{self, RADIUS_CONTROL, SPINNER},
 };
 use crate::tree::thousands;
 
@@ -321,7 +321,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     let r = ui.add(egui::Label::new(Text::Label.rich(parts.page.as_str()).color(t.text_muted)).selectable(false));
     tags.tag_value("page-number", &r, parts.page.as_str());
     if p.loading {
-        ui.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
+        ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
     }
     if step_button(ui, tags, "page-next", Step::Next, on, "Next page") {
         runs.push(("table.page", json!({ "to": "next" })));
@@ -352,7 +352,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
         runs.push(("table.count", json!({})));
     }
     if counting {
-        ui.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
+        ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
     }
     let refresh_enabled = p.blocked.is_none();
     let r = square_button(ui, refresh_enabled, icons::refresh);

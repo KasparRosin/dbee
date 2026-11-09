@@ -4,7 +4,7 @@
 
 ```sh
 cargo xtask testdb up                                         # start the Docker test servers (§3); ci does it when Docker answers
-cargo xtask ci                                                # all gates (fmt, clippy, testdb, test, assets, layers, provenance); after testdb up a skipped driver test fails
+cargo xtask ci                                                # all gates (fmt, clippy, testdb, test, assets, tokens, layers, provenance); after testdb up a skipped driver test fails
 DBEE_REQUIRE_ORACLES=1 cargo xtask ci                         # the same, and without Docker ci fails instead of skipping the driver tests
 cargo test --workspace                                        # every test; tests that need the servers print SKIPPED without them
 cargo test --workspace --test table_tab                       # one test file (of any crate)

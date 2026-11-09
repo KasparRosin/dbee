@@ -43,7 +43,7 @@ use crate::connections::line_galley;
 use crate::icons;
 use crate::theme::{
     self, Text,
-    size::{RADIUS_CONTROL, SPINNER},
+    size::{self, RADIUS_CONTROL},
 };
 
 /// The height of a row.
@@ -420,7 +420,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         let icon_rect = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
         match &tree.refresh {
             Refresh::Running => {
-                egui::Spinner::new().size(SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
+                egui::Spinner::new().size(size::SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
             }
             Refresh::Ready => icons::refresh(ui.painter(), icon_rect, t.text_muted),
             Refresh::Disabled(_) => icons::refresh(ui.painter(), icon_rect, t.text_faint),

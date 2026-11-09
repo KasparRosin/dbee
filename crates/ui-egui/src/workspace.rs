@@ -47,8 +47,7 @@ use crate::query_tab::{self, Queries};
 use crate::table_tab::{self, Grids};
 use crate::theme::{
     self, Text, connection_color,
-    size::SPINNER,
-    size::{RADIUS_CONTROL, RADIUS_FLOAT},
+    size::{self, RADIUS_CONTROL, RADIUS_FLOAT},
 };
 use crate::tree::{self, Refresh, Tree, TreeAct};
 use crate::{DbeeApp, icons, menu, value_panel};
@@ -316,7 +315,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
                 }
                 let r = ui.label(Text::Label.rich_as_written(job.text.as_str()).color(t.text_muted));
                 tags.tag_value("status-job", &r, job.text.as_str());
-                ui.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
+                ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
             });
         });
     });
@@ -452,7 +451,7 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     }
     let icon_rect = Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 8.0), vec2(16.0, 16.0));
     if tab.busy {
-        egui::Spinner::new().size(SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
+        egui::Spinner::new().size(size::SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
     } else if tab.query {
         icons::query(&p, icon_rect, t.text_muted);
     } else {
