@@ -1389,7 +1389,7 @@ mod tests {
         let (mut app, _home, ctx) = open_list(&names);
         frame(&mut app, &ctx);
         let rerun = dialogs::Rerun { command: TEST, params: json!({}), origin: Origin::Form(app.view.conn.generation) };
-        app.view.dialog = Some(Dialog::Confirm { message: "Go on?".into(), rerun });
+        app.view.dialog = Some(Dialog::Confirm { message: "Go on?".into(), what: String::new(), rerun });
         frame_with(&mut app, &ctx, vec![key(Key::ArrowDown)]);
         assert!(!app.view.conn.databases.open && app.view.conn.databases.highlight == 0, "the list closed and took no key");
         frame_with(&mut app, &ctx, vec![key(Key::Escape)]);

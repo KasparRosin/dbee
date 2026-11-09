@@ -4,6 +4,9 @@
 //! ([`SqlSyntax`]) come in a light and a dark set already; [`syntax`] and [`sql_syntax`] pick the
 //! one for the visuals in use.
 
+mod fonts;
+pub use fonts::{INTER_MEDIUM, MONO_MEDIUM};
+
 use egui::{Color32, CornerRadius, Stroke};
 
 /// The colours every screen uses.
@@ -198,9 +201,10 @@ pub fn connection_color(c: dbee_config::ConnectionColor) -> Option<Color32> {
 /// Corner radius of buttons, fields and cards.
 pub const RADIUS: u8 = 4;
 
-/// Applies the theme to `ctx`: light visuals from [`TOKENS`], egui's default fonts.
+/// Applies the theme to `ctx`: light visuals from [`TOKENS`], Inter and JetBrains Mono with egui's fonts behind them.
 pub fn apply(ctx: &egui::Context) {
     let t = TOKENS;
+    ctx.set_fonts(fonts::definitions());
     ctx.set_theme(egui::Theme::Light);
     ctx.style_mut_of(egui::Theme::Light, |style| {
         let v = &mut style.visuals;

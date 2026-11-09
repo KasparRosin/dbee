@@ -60,7 +60,7 @@ const LEAD_W: f32 = SQUARE + GAP;
 /// rows line up).
 const FIXED_W: f32 = LEAD_W + 2.0 * SQUARE + APPLY_W + 5.0 * GAP;
 /// The narrowest and the widest the column choice gets.
-const COLUMN_W: (f32, f32) = (80.0, 180.0);
+const COLUMN_W: (f32, f32) = (77.0, 180.0);
 /// The narrowest the operator choice gets (its labels cut short), in a tab too narrow for its
 /// longest label.
 const OP_MIN_W: f32 = 90.0;

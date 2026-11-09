@@ -452,7 +452,7 @@ mod tests {
         let mut app = DbeeApp::new(session, None);
         app.view.quick.show_new(app.session.state());
         let rerun = Rerun { command: "tab.close", params: json!({}), origin: Origin::Menu };
-        app.view.dialog = Some(Dialog::Confirm { message: "Close it?".into(), rerun });
+        app.view.dialog = Some(Dialog::Confirm { message: "Close it?".into(), what: String::new(), rerun });
         let why = app.commands().into_iter().find(|c| c.id == "ui.quickSearch").and_then(|c| c.disabled_reason);
         assert!(why.as_deref().is_some_and(|w| w.contains("dialog")), "no quick search over a dialog: {why:?}");
         let ctx = egui::Context::default();
