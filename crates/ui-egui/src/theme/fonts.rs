@@ -58,21 +58,18 @@ mod tests {
             }
             ctx.fonts_mut(|f| f.has_glyph(&FontId::new(12.0, family.clone()), c))
         };
-        for family in [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name(INTER_MEDIUM.into()), FontFamily::Name(MONO_MEDIUM.into())] {
-            for c in ['é', 'Ж', 'Ω', '→'] {
-                assert!(has(definitions(), &family, c), "{family:?} {c}");
+        let mut new_only = definitions();
+        let families = [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name(INTER_MEDIUM.into()), FontFamily::Name(MONO_MEDIUM.into())];
+        for family in &families {
+            if let Some(list) = new_only.families.get_mut(family) {
+                list.truncate(1);
             }
         }
-        // egui's own fonts draw no 🙂 in its Proportional family, so it is held to what they draw.
-        for (family, theirs) in [
-            (FontFamily::Proportional, FontFamily::Proportional),
-            (FontFamily::Monospace, FontFamily::Monospace),
-            (FontFamily::Name(INTER_MEDIUM.into()), FontFamily::Proportional),
-            (FontFamily::Name(MONO_MEDIUM.into()), FontFamily::Monospace),
-        ] {
-            if has(FontDefinitions::default(), &theirs, '🙂') {
-                assert!(has(definitions(), &family, '🙂'), "{family:?} 🙂");
-            }
+        // The gear is in none of the four new files, and egui's fonts draw it in every family.
+        let gear = '\u{2699}';
+        for family in &families {
+            assert!(!has(new_only.clone(), family, gear), "{family:?}: the new file alone lacks the gear");
+            assert!(has(definitions(), family, gear), "{family:?}: egui's fonts behind it draw the gear");
         }
     }
 }
