@@ -4,6 +4,9 @@
 //!
 //! - `ui.quickSearch` (Ctrl+P): opens the quick search over either screen → `{open: true}`.
 //! - `ui.toggleValuePanel`: hides or shows the value panel → `{visible}`.
+//! - `ui.themeSystem`, `ui.themeLight`, `ui.themeDark` (View > Theme): choose how the window is
+//!   coloured and keep the choice → `{choice, mode}`; `System` follows what the desktop said at
+//!   startup. A choice that cannot be kept still applies, and a notice says so.
 //! - `clipboard.copy {format}` (Ctrl+C `tsv`, Ctrl+Shift+C `tsvHeader`, the grid's menu): runs
 //!   `copy.selection`, puts its text on the clipboard and shows "Copied n rows" →
 //!   `{rows, columns, bytes}` (`bytes`: the length of the text). The text itself is not in the
@@ -11,6 +14,7 @@
 //!   (`COPY_MAX_BYTES`) is `Disabled` with the engine's reason, which a shortcut or the menu shows
 //!   as a notice.
 
+use dbee_config::ThemeChoice;
 use dbee_engine::{CommandInfo, EngineError, Json, Outcome};
 use serde_json::json;
 
@@ -50,6 +54,33 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params: "{} -> {visible}",
         enabled: |_| Ok(()),
         run: toggle_value_panel,
+    },
+    UiCommand {
+        id: "ui.themeSystem",
+        label: "System",
+        menu: &["View", "Theme"],
+        shortcut: None,
+        params: "{} -> {choice, mode}",
+        enabled: |_| Ok(()),
+        run: |app, _| choose(app, ThemeChoice::System),
+    },
+    UiCommand {
+        id: "ui.themeLight",
+        label: "Light",
+        menu: &["View", "Theme"],
+        shortcut: None,
+        params: "{} -> {choice, mode}",
+        enabled: |_| Ok(()),
+        run: |app, _| choose(app, ThemeChoice::Light),
+    },
+    UiCommand {
+        id: "ui.themeDark",
+        label: "Dark",
+        menu: &["View", "Theme"],
+        shortcut: None,
+        params: "{} -> {choice, mode}",
+        enabled: |_| Ok(()),
+        run: |app, _| choose(app, ThemeChoice::Dark),
     },
     UiCommand {
         id: COPY,
@@ -114,6 +145,21 @@ fn quick_search(app: &mut DbeeApp, _: Json) -> Result<Outcome, EngineError> {
 fn toggle_value_panel(app: &mut DbeeApp, _: Json) -> Result<Outcome, EngineError> {
     app.view.value_panel = !app.view.value_panel;
     Ok(Outcome::Done(json!({ "visible": app.view.value_panel })))
+}
+
+/// The command id of `choice`, which the menu marks.
+pub(crate) fn theme_id(choice: ThemeChoice) -> &'static str {
+    match choice {
+        ThemeChoice::System => "ui.themeSystem",
+        ThemeChoice::Light => "ui.themeLight",
+        ThemeChoice::Dark => "ui.themeDark",
+    }
+}
+
+fn choose(app: &mut DbeeApp, choice: ThemeChoice) -> Result<Outcome, EngineError> {
+    app.choose_theme(choice);
+    let mode = if app.mode() == egui::Theme::Dark { "dark" } else { "light" };
+    Ok(Outcome::Done(json!({ "choice": choice.as_str(), "mode": mode })))
 }
 
 fn copy(app: &mut DbeeApp, params: Json) -> Result<Outcome, EngineError> {

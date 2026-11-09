@@ -119,6 +119,13 @@ pub struct DbeeApp {
     /// With [`Clipboard::Memory`], the last text copied (`Some(None)` before any copy).
     memory: Option<Option<String>>,
     themed: bool,
+    /// The theme choice and the folder that keeps it ([`DbeeApp::with_settings_dir`]).
+    pub(crate) theme_choice: dbee_config::ThemeChoice,
+    settings_dir: Option<PathBuf>,
+    /// What the desktop said at startup ([`DbeeApp::with_desktop_mode`]), and, once the first frame
+    /// has settled it, the mode `System` means.
+    desktop_mode: Option<egui::Theme>,
+    pub(crate) system_mode: Option<egui::Theme>,
     /// Keyboard events held back for the next frame: those after a cell editor's key in the same
     /// frame ([`crate::editors::before_frame`]).
     pub(crate) carry: Vec<egui::Event>,
@@ -245,6 +252,10 @@ impl DbeeApp {
             clipboard: Vec::new(),
             memory: None,
             themed: false,
+            theme_choice: dbee_config::ThemeChoice::System,
+            settings_dir: None,
+            desktop_mode: None,
+            system_mode: None,
             carry: Vec::new(),
             file: None,
         }
@@ -268,6 +279,34 @@ impl DbeeApp {
     pub fn with_screenshot_dir(mut self, dir: Option<PathBuf>) -> DbeeApp {
         self.screenshot_dir = dir;
         self
+    }
+
+    /// This app keeping the theme choice in `dir` (`settings.json`), and starting with the one
+    /// kept there; without a folder it keeps nothing.
+    pub fn with_settings_dir(mut self, dir: Option<PathBuf>) -> DbeeApp {
+        self.theme_choice = dbee_config::load_theme(dir.as_deref());
+        self.settings_dir = dir;
+        self
+    }
+
+    /// This app taking `mode` as the desktop's, for `System`; without one, egui's own reading.
+    pub fn with_desktop_mode(mut self, mode: Option<egui::Theme>) -> DbeeApp {
+        self.desktop_mode = mode;
+        self
+    }
+
+    /// The mode the window draws in now.
+    pub(crate) fn mode(&self) -> egui::Theme {
+        theme::mode_for(self.theme_choice, self.system_mode)
+    }
+
+    /// Takes `choice` and keeps it; the next frame draws it. A choice that cannot be kept still
+    /// applies, and a notice says so.
+    pub(crate) fn choose_theme(&mut self, choice: dbee_config::ThemeChoice) {
+        self.theme_choice = choice;
+        if let Err(e) = dbee_config::save_theme(self.settings_dir.as_deref(), choice) {
+            self.notice_again(format!("The theme is set for now, but it couldn't be saved: {e}"));
+        }
     }
 
     pub fn session(&self) -> &Session {
@@ -488,9 +527,14 @@ impl DbeeApp {
             // The fonts load at the start of the next frame, and the screens name them: draw
             // nothing until then.
             theme::apply(&ctx);
+            self.system_mode = self.desktop_mode.or_else(|| ctx.system_theme());
+            ctx.set_theme(self.mode());
             self.themed = true;
             ctx.request_repaint();
             return;
+        }
+        if ctx.theme() != self.mode() {
+            ctx.set_theme(self.mode());
         }
         // 1. Job results.
         let finished = self.session.pump();

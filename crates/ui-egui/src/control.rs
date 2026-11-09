@@ -337,7 +337,7 @@ fn document(app: &DbeeApp) -> Json {
     d
 }
 
-/// `{screen, dialog, window: [width, height], frame, editor, automation: [{id, rect, …}]}`;
+/// `{screen, dialog, window: [width, height], frame, editor, theme: {choice, mode}, automation: [{id, rect, …}]}`;
 /// `frame` counts the frames drawn so far, `editor` is the open cell editor's `{row, column}` (also
 /// while it is not drawn) or null, `automation` is the last drawn frame's tags
 /// ([`crate::automation::Tags::to_json`]).
@@ -349,6 +349,7 @@ fn ui_inspect(app: &DbeeApp, ctx: &egui::Context) -> Json {
         "window": [r.width(), r.height()],
         "frame": app.frames(),
         "editor": app.view.work.editor.as_ref().map(|e| e.tag_cell()),
+        "theme": { "choice": app.theme_choice.as_str(), "mode": if app.mode() == egui::Theme::Dark { "dark" } else { "light" } },
         "automation": app.tags.to_json(),
     })
 }

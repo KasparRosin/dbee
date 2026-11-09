@@ -9,7 +9,8 @@
 //! copies as tab-separated values); without a shortcut, with `{}`.
 //!
 //! Automation ids: `menu-<Top>` for the top menus (`menu-File`) and `menu-<command id>` for the
-//! entries (`menu-tab.newQuery`), with the value `{label, shortcut, why?}`. Entries are drawn
+//! entries (`menu-tab.newQuery`), with the value `{label, shortcut, why?, checked?}`; a submenu's
+//! button is tagged with its path (`menu-View-Theme`). Entries are drawn
 //! (and tagged) only while their menu is open.
 
 use dbee_engine::{CommandInfo, Json};
@@ -47,12 +48,13 @@ fn tops(commands: &[CommandInfo]) -> Vec<&str> {
 pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let commands = app.commands();
     let mut chosen: Option<&'static str> = None;
+    let checked = crate::ui_commands::theme_id(app.theme_choice);
     let tags = &mut app.tags;
     MenuBar::new().ui(ui, |ui| {
         for top in tops(&commands) {
             let (r, _) = MenuButton::new(top).ui(ui, |ui| {
                 ui.set_min_width(260.0);
-                entries(ui, &commands, &[top], tags, &mut chosen);
+                entries(ui, &commands, &[top], checked, tags, &mut chosen);
             });
             tags.tag(&format!("menu-{top}"), &r);
         }
@@ -65,7 +67,7 @@ pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
 
 /// The entries under menu `path`: the commands whose menu is exactly `path`, and a submenu for
 /// each deeper path, in registry order.
-fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], tags: &mut Tags, chosen: &mut Option<&'static str>) {
+fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], checked: &str, tags: &mut Tags, chosen: &mut Option<&'static str>) {
     let mut subs: Vec<&str> = Vec::new();
     for c in commands {
         if c.menu.len() > path.len() && c.menu.starts_with(path) {
@@ -74,7 +76,8 @@ fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], tags: &mu
             {
                 subs.push(sub);
                 let deeper: Vec<&str> = path.iter().copied().chain(std::iter::once(*sub)).collect();
-                ui.menu_button(*sub, |ui| entries(ui, commands, &deeper, tags, chosen));
+                let r = ui.menu_button(*sub, |ui| entries(ui, commands, &deeper, checked, tags, chosen));
+                tags.tag(&format!("menu-{}", deeper.join("-")), &r.response);
             }
             continue;
         }
@@ -85,8 +88,14 @@ fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], tags: &mu
         if let Some(keys) = c.shortcut {
             button = button.shortcut_text(keys);
         }
+        if c.id == checked {
+            button = button.right_text("✔");
+        }
         let mut r = ui.add_enabled(c.enabled, button);
         let mut value = json!({ "label": c.label, "shortcut": c.shortcut });
+        if c.id == checked {
+            value["checked"] = json!(true);
+        }
         if let Some(why) = &c.disabled_reason {
             r = r.on_disabled_hover_text(why.as_str());
             value["why"] = json!(why);

@@ -68,12 +68,21 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
 }
 
 /// Applies the theme to `ctx`: fonts, and both modes' styles from [`LIGHT`] and [`DARK`].
-/// It draws in light until the mode follows the system.
 pub fn apply(ctx: &egui::Context) {
     ctx.set_fonts(fonts::definitions());
-    ctx.set_theme(egui::Theme::Light);
     ctx.style_mut_of(egui::Theme::Light, |style| style_for(style, &LIGHT, false));
     ctx.style_mut_of(egui::Theme::Dark, |style| style_for(style, &DARK, true));
+}
+
+/// The mode `choice` draws in: Light and Dark as chosen, System as `system` says, Light when
+/// it says nothing.
+pub fn mode_for(choice: dbee_config::ThemeChoice, system: Option<egui::Theme>) -> egui::Theme {
+    use dbee_config::ThemeChoice;
+    match choice {
+        ThemeChoice::Light => egui::Theme::Light,
+        ThemeChoice::Dark => egui::Theme::Dark,
+        ThemeChoice::System => system.unwrap_or(egui::Theme::Light),
+    }
 }
 
 /// For a test harness whose first frame runs before it can set fonts: applies the theme once and
@@ -92,6 +101,18 @@ pub(crate) fn applied(ctx: &egui::Context) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_for_follows_the_choice() {
+        use dbee_config::ThemeChoice::{Dark, Light, System};
+        use egui::Theme;
+        assert_eq!(mode_for(Light, Some(Theme::Dark)), Theme::Light);
+        assert_eq!(mode_for(Dark, Some(Theme::Light)), Theme::Dark);
+        assert_eq!(mode_for(Dark, None), Theme::Dark);
+        assert_eq!(mode_for(System, Some(Theme::Dark)), Theme::Dark);
+        assert_eq!(mode_for(System, Some(Theme::Light)), Theme::Light);
+        assert_eq!(mode_for(System, None), Theme::Light);
+    }
 
     #[test]
     fn apply_sets_both_modes() {

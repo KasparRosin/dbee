@@ -2,11 +2,14 @@
 
 mod common;
 
+use std::path::PathBuf;
+
 use common::*;
+use dbee_ui_egui::DbeeApp;
 use serde_json::json;
 
 fn dark(ui: &mut Ui) {
-    ui.harness.ctx.set_theme(egui::Theme::Dark);
+    ui.execute("ui.themeDark", json!({}));
     ui.frame();
     ui.frame();
 }
@@ -146,4 +149,115 @@ fn the_gutters_numbers_sit_level_with_the_editors_lines() {
             .unwrap_or_else(|| panic!("line number {number}"));
         assert!((n.center().y - line_y).abs() < 0.5, "number {number} at {} against its line at {line_y}", n.center().y);
     }
+}
+
+fn window_with(settings: Option<PathBuf>, desktop: Option<egui::Theme>, home: Option<dbee_testkit::TempHome>) -> Ui {
+    let make: MakeApp = Box::new(move |session, rx| DbeeApp::new(session, Some(rx)).with_settings_dir(settings).with_desktop_mode(desktop));
+    Ui::window(Setup { size: egui::vec2(1100.0, 720.0), app: Some(make), home, ..Setup::default() })
+}
+
+fn state(ui: &mut Ui) -> serde_json::Value {
+    ui.inspect()["theme"].clone()
+}
+
+#[test]
+fn the_three_choices_set_the_mode() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    assert_eq!(state(&mut ui), json!({ "choice": "system", "mode": "light" }));
+    assert_eq!(ui.execute("ui.themeDark", json!({})), json!({ "choice": "dark", "mode": "dark" }));
+    ui.frame();
+    assert_eq!(ui.harness.ctx.theme(), egui::Theme::Dark);
+    assert_eq!(ui.harness.ctx.style_of(egui::Theme::Dark).visuals.panel_fill, dbee_ui_egui::theme::DARK.bg);
+    assert_eq!(ui.execute("ui.themeLight", json!({})), json!({ "choice": "light", "mode": "light" }));
+    ui.frame();
+    assert_eq!(ui.harness.ctx.theme(), egui::Theme::Light);
+    assert_eq!(ui.execute("ui.themeSystem", json!({})), json!({ "choice": "system", "mode": "light" }));
+}
+
+#[test]
+fn system_uses_what_the_desktop_said_at_startup() {
+    let mut ui = window_with(None, Some(egui::Theme::Dark), None);
+    assert_eq!(state(&mut ui), json!({ "choice": "system", "mode": "dark" }));
+    ui.frame();
+    assert_eq!(ui.harness.ctx.theme(), egui::Theme::Dark);
+    assert_eq!(ui.execute("ui.themeLight", json!({})), json!({ "choice": "light", "mode": "light" }));
+    assert_eq!(ui.execute("ui.themeSystem", json!({})), json!({ "choice": "system", "mode": "dark" }));
+}
+
+#[test]
+fn the_choice_is_remembered_between_runs() {
+    let dir = std::env::temp_dir().join(dbee_testkit::unique("theme-settings"));
+    let mut first = window_with(Some(dir.clone()), None, None);
+    first.execute("ui.themeDark", json!({}));
+    drop(first);
+    let mut second = window_with(Some(dir.clone()), None, None);
+    assert_eq!(state(&mut second), json!({ "choice": "dark", "mode": "dark" }));
+    assert!(dir.join("settings.json").exists());
+    drop(second);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_run_without_a_settings_folder_writes_nothing() {
+    let home = dbee_testkit::temp_home(None, None);
+    let config = home.home.join("config");
+    let mut ui = window_with(None, None, Some(home));
+    assert_eq!(ui.execute("ui.themeDark", json!({}))["mode"], "dark");
+    assert!(!config.join("settings.json").exists());
+}
+
+#[test]
+fn a_choice_that_cannot_be_saved_still_applies_and_says_so() {
+    let file = std::env::temp_dir().join(dbee_testkit::unique("theme-not-a-dir"));
+    std::fs::write(&file, "x").unwrap();
+    let mut ui = window_with(Some(file.clone()), None, None);
+    assert_eq!(ui.execute("ui.themeDark", json!({}))["mode"], "dark");
+    ui.frame();
+    assert_eq!(ui.harness.ctx.theme(), egui::Theme::Dark);
+    let notice = ui.value("notice");
+    let notice = notice.as_str().unwrap();
+    assert!(notice.starts_with("The theme is set for now, but it couldn't be saved: "), "{notice}");
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn the_menu_marks_the_chosen_entry() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.execute("ui.themeDark", json!({}));
+    ui.frame();
+    ui.click("menu-View");
+    ui.frame();
+    ui.click("menu-View-Theme");
+    ui.frame();
+    ui.frame();
+    assert_eq!(ui.tag("menu-ui.themeDark").expect("Dark is listed")["value"]["checked"], true);
+    assert!(ui.tag("menu-ui.themeLight").expect("Light is listed")["value"].get("checked").is_none());
+    ui.click("menu-ui.themeLight");
+    ui.frame();
+    assert_eq!(state(&mut ui)["choice"], "light");
+}
+
+#[test]
+fn switching_recolours_what_is_already_open() {
+    let db = dbee_testkit::require_testdb!();
+    let (l, d) = (dbee_ui_egui::theme::LIGHT, dbee_ui_egui::theme::DARK);
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "orders");
+    ui.until("the grid", |ui| ui.tag("grid-cell-0-5").is_some());
+    ui.click("grid-cell-0-5");
+    ui.frame();
+    ui.execute("tab.newQuery", json!({ "text": "select 'x' -- note" }));
+    ui.frame();
+    ui.frame();
+    let colours = |ui: &Ui| -> Vec<egui::Color32> {
+        ui.texts().iter().flat_map(|(_, g)| g.job.sections.iter().map(|s| s.format.color).collect::<Vec<_>>()).collect()
+    };
+    assert!(colours(&ui).contains(&l.syn_keyword) && colours(&ui).contains(&l.syn_string), "the editor is coloured in light");
+    ui.execute("ui.themeDark", json!({}));
+    ui.frame();
+    ui.frame();
+    let after = colours(&ui);
+    assert!(after.contains(&d.syn_keyword) && after.contains(&d.syn_string), "the editor is coloured in dark");
+    assert!(!after.contains(&l.syn_keyword) && !after.contains(&l.syn_string), "no light syntax colour is left");
 }

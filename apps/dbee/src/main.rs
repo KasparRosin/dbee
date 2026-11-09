@@ -305,7 +305,10 @@ fn main() -> ExitCode {
                 let ctx = cc.egui_ctx.clone();
                 let session = Session::new(session_options(Arc::new(move || ctx.request_repaint())))?;
                 let shots = screenshot_dir(std::env::var_os("DBEE_SCREENSHOT_DIR"), config_dir());
-                let app = DbeeApp::new(session, control.take()).with_clipboard(clipboard).with_screenshot_dir(shots);
+                let app = DbeeApp::new(session, control.take())
+                    .with_clipboard(clipboard)
+                    .with_screenshot_dir(shots)
+                    .with_settings_dir(config_dir().filter(|_| prefs_enabled()));
                 Ok(Box::new(match file.take() {
                     Some(path) => app.with_file(path),
                     None => app,

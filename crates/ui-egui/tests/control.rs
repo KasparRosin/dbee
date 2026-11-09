@@ -88,7 +88,7 @@ fn shortcut_table_names_registered_commands() {
         assert!(params.is_object(), "{keys}: params must be an object");
         assert!(shortcuts::parse(keys).is_some(), "{keys} does not parse");
     }
-    for id in ["ui.quickSearch", "ui.toggleValuePanel", "clipboard.copy"] {
+    for id in ["ui.quickSearch", "ui.toggleValuePanel", "ui.themeSystem", "ui.themeLight", "ui.themeDark", "clipboard.copy"] {
         assert!(ids.contains(id), "engine.commands lists the UI-only command {id}");
     }
     // Every shortcut a menu shows has a binding with the same keys.
