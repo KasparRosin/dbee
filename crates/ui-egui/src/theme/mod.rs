@@ -3,9 +3,11 @@
 
 mod fonts;
 pub mod size;
+mod system;
 mod text;
 mod tokens;
 pub use fonts::{INTER_MEDIUM, MONO_MEDIUM};
+pub use system::desktop_mode;
 pub use text::Text;
 pub use tokens::{DARK, LIGHT, Tokens, connection_color, on_connection_color, tokens};
 

@@ -324,3 +324,8 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 - **Decision:** the app draws in Inter 4.1 (Regular, Medium) and JetBrains Mono 2.304 (Regular, Medium), compiled in from `assets/fonts/` (SIL OFL 1.1). Each is first in its family, with egui's default fonts behind it for what they lack (symbols and emoji, for example). The Medium weights are the named families `inter-medium` and `mono-medium`. This replaces "fonts are never committed" in AGENTS.md; no other font file is committed.
 - **Why:** the M3 design is drawn in these two typefaces. The Medium weights come as separate files because egui has no font weights.
 - **Before any release with them:** the licence texts (`OFL-Inter.txt`, `OFL-JetBrainsMono.txt`) must ship with the binaries, as the OFL requires, like the other fonts' texts (issue #12). Each file has a row in `ATTRIBUTION.md`.
+
+## 2026-11-09: The desktop's light or dark setting comes from the settings portal
+
+- **Decision:** on Linux and FreeBSD dbee asks `org.freedesktop.portal.Settings` for `org.freedesktop.appearance` `color-scheme` once, before the window opens (`ReadOne`, then `Read` for older portals): 1 is dark, 2 is light, anything else or no answer is "the desktop doesn't say". The read runs on its own thread and the app waits at most 500 ms, so a missing or slow bus can't hold the window; a thread left behind ends with the process. `zbus` (blocking, `async-io`, no default features) is a direct dependency of `dbee-ui-egui` on those two systems only; it was already in the tree through accesskit and the keyring store. Elsewhere egui's own `system_theme` is used.
+- **Why:** winit reports nothing on X11 and only an override on Wayland, so System would otherwise always draw light there.

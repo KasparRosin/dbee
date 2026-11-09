@@ -33,3 +33,6 @@ dbee-testkit = { workspace = true }
 dbee-ssh = { workspace = true }
 dbee-driver = { workspace = true }
 dbee-drivers = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
