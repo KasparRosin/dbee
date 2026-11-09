@@ -344,6 +344,32 @@ fn the_status_bar_cancels_an_apply_that_waits_for_a_lock() {
 }
 
 #[test]
+fn the_prompt_after_an_unknown_apply_says_apply_again() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("SELECT id FROM scratch.{} WHERE id = 1 FOR UPDATE", t.0)).unwrap();
+    let mut ui = opened(db, &t);
+    ui.double_click("grid-cell-0-1");
+    ui.text("waited");
+    ui.ctrl("Enter");
+    ui.ctrl("S");
+    let waiting = format!(
+        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'dbee' AND wait_event_type = 'Lock' AND query LIKE 'UPDATE \"scratch\".\"{}\"%'",
+        t.0
+    );
+    ui.until("the Apply to wait for the lock", |_| q(db, &waiting) == "1");
+    ui.execute("connection.reconnect", json!({}));
+    drop(lock);
+    ui.ctrl("S");
+    let i = ui.inspect();
+    assert_eq!(i["dialog"], "confirm", "{i}");
+    assert_eq!(tag_in(&i, "dialog-ok").unwrap()["value"], "Apply again");
+    let texts = ui.texts();
+    assert!(texts.iter().any(|(_, g)| g.text() == "Apply again?"));
+    assert!(!texts.iter().any(|(_, g)| g.text().contains("Close anyway")));
+}
+
+#[test]
 fn cells_that_cannot_be_edited_say_why() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected(db);

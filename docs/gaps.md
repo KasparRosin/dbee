@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-09 · **Change:** minor (entries 53 to 60: what the M3 design draws that the code can't do yet)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-09 · **Change:** minor (entry 60 fixed and dropped)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -441,17 +441,11 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** a user learns of a new version only by looking on GitHub.
 - **Estimate:** 8 h (estimated), once drawn: the check is a new network request to GitHub, and each package format updates in its own way. Left out until it's drawn (the maintainer's call, 2026-11-09).
 
-### 60. The prompt after an unknown Apply says "Close anyway" but applies again (S)
-
-- **Limit:** when the connection is lost during Apply and the user presses Apply again, the prompt's title and button read `Close anyway`, while the button runs the Apply again with `force`. Its message says "Apply again to retry".
-- **Evidence:** `Dialog::Confirm` (`crates/ui-egui/src/dialogs.rs`) words every `needsConfirm` the same; `applyAfterUnknownOutcome` (`crates/engine/src/cmd/edit.rs`).
-- **Impact:** a user who means to close can write the same changes again, so a new row can be inserted twice if the first Apply did get through.
-- **Estimate:** 0.5 h (estimated). Planned for M3.
-
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Entry 60 fixed and dropped: the prompt after an unknown Apply reads "Apply again?" with an "Apply again" button, and "Close anyway" stays for the other prompts. |
 | 2026-11-09 | minor | Entries 53 to 60: what the M3 design draws that the code can't do yet (rollback, a cancel dbee didn't send, the structure view, cancelling a connect, last-used order, the saved cell's mark, the update button), and the "Close anyway" prompt that applies again. Entry 1 names what M3 draws for it. |
 | 2026-11-08 | minor | The security review's lane C fix round: entries 50 (a client with no token can keep the 16 places), 51 (two small control channel test gaps) and 52 (the log's end-to-end test); entry 46 says OpenSSH's fall-back to a line with no port and `!` exclusions are not done; entry 47 names the right crate. |
 | 2026-11-08 | minor | The security review's lane C, job 3: entries 46 (`/etc/ssh/ssh_known_hosts` is not read), 47 (Windows Credential Manager entries roam), 48 (macOS ad-hoc signing, channels an SSH server opens) and 49 (the control channel answers only while the window draws); entry 11 says the Flatpak keeps no trusted host key. |

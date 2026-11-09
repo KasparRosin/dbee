@@ -8,7 +8,7 @@
 //! - `needsPassphrase`, `needsPassword`, `needsSshPassword` → [`Dialog::Secret`]: a secret field
 //!   (`sshPassphrase`, `password`, `sshPassword`) and, for `connection.open`, "Save in keyring"
 //!   (`savePassword`), which the engine honours for saved connections only;
-//! - `needsConfirm` → [`Dialog::Confirm`]: Close anyway (`force`).
+//! - `needsConfirm` → [`Dialog::Confirm`]: Close anyway, or Apply again after an unknown outcome (`force`).
 //!
 //! The connection screen also opens [`Dialog::FillFromUrl`] (runs `connection.parseUrl`, and takes
 //! only a URL of the database types it was opened for) and [`Dialog::DeleteConnection`].
@@ -96,7 +96,7 @@ pub(crate) enum Dialog {
     /// A password or passphrase; `line` says whose.
     Secret { ask: SecretAsk, line: String, value: String, keep: Keep, save: bool, focused: bool, rerun: Rerun },
     /// Something will be lost.
-    Confirm { message: String, rerun: Rerun },
+    Confirm { message: String, what: String, rerun: Rerun },
     /// Deleting a saved connection (and its secrets).
     DeleteConnection { id: String, name: String },
     /// A dialog a command asked for (`UiRequest::Dialog`) that this window does not draw.
@@ -160,10 +160,18 @@ pub(crate) fn ask(app: &mut DbeeApp, e: &EngineError, rerun: Rerun) -> bool {
             let keep = keep_of(app, &rerun);
             secret(SecretAsk::SshPassword, keep, rerun, app)
         }
-        Need::Confirm { .. } => Dialog::Confirm { message: message.clone(), rerun },
+        Need::Confirm { what } => Dialog::Confirm { message: message.clone(), what: what.clone(), rerun },
     };
     app.view.dialog = Some(dialog);
     true
+}
+
+/// The title and button of a confirm dialog; both re-run the command with `force`.
+fn confirm_words(what: &str) -> (&'static str, &'static str) {
+    match what {
+        "applyAfterUnknownOutcome" => ("Apply again?", "Apply again"),
+        _ => ("Close anyway?", "Close anyway"),
+    }
 }
 
 /// The connection `rerun`'s command is about: its `config`, or the saved or recent connection
@@ -466,10 +474,11 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 Act::None
             }
         }
-        Dialog::Confirm { message, rerun } => {
-            title(ui, "Close anyway?");
+        Dialog::Confirm { message, what, rerun } => {
+            let (heading, button) = confirm_words(what);
+            title(ui, heading);
             text(ui, tags, "dialog-text", message);
-            let (ok, cancel) = buttons(ui, tags, "Close anyway", true, true, true);
+            let (ok, cancel) = buttons(ui, tags, button, true, true, true);
             if cancel {
                 Act::Cancel
             } else if ok {
