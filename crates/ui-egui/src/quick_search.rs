@@ -340,7 +340,7 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
         .corner_radius(CornerRadius::same(RADIUS_FLOAT))
         .inner_margin(Margin::same(PAD));
     let mut act = Act::None;
-    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(t.text.gamma_multiply(0.25)).show(ctx, |ui| {
+    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(t.scrim).show(ctx, |ui| {
         ui.set_width(WIDTH);
         let field = ui.add(
             TextEdit::singleline(&mut qs.query)

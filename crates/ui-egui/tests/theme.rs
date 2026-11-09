@@ -56,3 +56,26 @@ fn every_screen_in_dark_paints_no_light_ground() {
     assert_eq!(ui.inspect()["dialog"], "confirm");
     assert_dark(&ui, "a confirm dialog");
 }
+
+#[test]
+fn a_dialog_sits_on_card_over_the_scrim() {
+    let db = dbee_testkit::require_testdb!();
+    let d = dbee_ui_egui::theme::DARK;
+    let mut ui = Ui::connected(db);
+    dark(&mut ui);
+    let has = |ui: &Ui, fill: egui::Color32, stroke: Option<egui::Color32>| {
+        ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == fill && stroke.is_none_or(|c| r.stroke.color == c)))
+    };
+    ui.ctrl("P");
+    ui.frame();
+    assert!(ui.tag("qs-input").is_some());
+    assert!(has(&ui, d.scrim, None), "the quick search's scrim");
+    assert!(has(&ui, d.raised, None), "the quick search on raised");
+    ui.key("Escape");
+    ui.frame();
+    ui.execute("tab.newQuery", json!({ "text": "select 1" }));
+    ui.ok("ui.key", json!({ "key": "Q", "cmd": true, "shift": true }));
+    assert_eq!(ui.inspect()["dialog"], "confirm");
+    assert!(has(&ui, d.scrim, None), "the dialog's scrim");
+    assert!(has(&ui, d.card, Some(d.line)), "the dialog on card with a line");
+}
