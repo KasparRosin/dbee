@@ -202,6 +202,26 @@ impl App {
         self.ok("ui.click", json!({ "id": id, "button": "right" }));
     }
 
+    /// Selects the whole of a line of the value panel's text the way a user does: a click at its
+    /// first row's start, then a shift-click at the right end of each row below until the
+    /// selection ends where the line does (a line wider than the panel wraps onto more rows).
+    /// `row` is the line's first row, `start` its byte offset and `len` its length in bytes.
+    pub fn select_value_line(&mut self, row: usize, start: usize, len: usize, pad: f64, line_h: f64) {
+        let [x, y, w, _] = self.rect("value-text");
+        let at = |r: usize| y + line_h * (r as f64 + 0.5);
+        self.click_at(x + 1.0, at(row), false);
+        let mut seen = Vec::new();
+        for r in row..row + 6 {
+            self.click_at(x + w - pad, at(r), true);
+            let selection = self.value("value-text")["selection"].clone();
+            if selection == json!([start, start + len]) {
+                return;
+            }
+            seen.push(selection);
+        }
+        panic!("no row's right end selected the line at {start}..{}: {seen:?}", start + len);
+    }
+
     /// A click at window point `(x, y)`, with Shift held when `shift`.
     pub fn click_at(&mut self, x: f64, y: f64, shift: bool) {
         self.ok("ui.click", json!({ "x": x, "y": y, "modifiers": { "shift": shift } }));

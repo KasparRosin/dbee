@@ -317,12 +317,8 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let lines: Vec<&str> = text.split('\n').collect();
     let line = lines[1];
     assert!(line.contains(&day.typo), "{name}: the second line holds the name: {text}");
-    let [x, y, w, _] = app.rect("value-text");
-    let second = y + f64::from(LINE_H) * 1.5;
-    app.click_at(x + 1.0, second, false);
-    app.click_at(x + w - f64::from(PAD), second, true);
     let start = lines[0].len() + 1;
-    assert_eq!(app.value("value-text")["selection"], json!([start, start + line.len()]));
+    app.select_value_line(1, start, line.len(), f64::from(PAD), f64::from(LINE_H));
     app.ctrl("C");
     let d = app.document();
     assert_eq!((d["clipboard"].as_str(), d["clipboardBytes"].as_u64()), (Some(line), Some(line.len() as u64)), "{name}: the line was copied");
