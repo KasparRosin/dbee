@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** trivial (entry 14 is planned for M3)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-09 · **Change:** minor (entries 53 to 60: what the M3 design draws that the code can't do yet)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -12,6 +12,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Missing:** exporting a table or a query result to a file (CSV, JSON, SQL) and importing one. The alpha gate's last row ([`roadmap.md`](roadmap.md)).
 - **Evidence:** `engine.commands` lists no export or import command; the way out today is the clipboard, at most 8 MiB of text (entry 8).
+- **Drawn:** the M3 screens have EXPORT and IMPORT buttons, the footer's EXPORTING and IMPORTING, and a toast's OPEN FOLDER. They start working with this entry.
 - **Impact:** results larger than a copy, or meant for a file, cannot leave dbee. The maintainer switches to dbee fully once this lands (M4).
 - **Estimate:** M4 "Import and export"; not estimated yet.
 
@@ -391,10 +392,67 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** a new log call could leak without a test saying so.
 - **Estimate:** 1.5 h (estimated).
 
+### 53. No ROLLBACK button after a failed transaction (F)
+
+- **Missing:** a rollback command, and the ROLLBACK button on the error card that runs it. After a failed statement in a Postgres transaction (25P02), the card only has a note saying a rollback ends it. The maintainer wants this, and the M3 error card draws it.
+- **Evidence:** `engine.commands` lists no rollback command; `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
+- **Impact:** the user has to type `ROLLBACK` before that session can run anything else.
+- **Estimate:** 1.5 h (estimated). Planned for M3.
+
+### 54. A cancel dbee didn't send reads as cancelled (D)
+
+- **Limit:** Postgres's 57014 and MySQL's and MariaDB's 1317 all become `DbError::Cancelled`, so a `statement_timeout` or a `KILL QUERY` from another session reads the same as the user pressing Cancel. The maintainer wants only dbee's own cancel to read as cancelled, and any other as an error. The M3 design shows no band for a cancel, so this has to land with it.
+- **Evidence:** `"57014"` in `crates/pg/src/error.rs`, `ER_QUERY_INTERRUPTED` in `crates/mysql/src/errors.rs`, and `DbError::Cancelled` carries no message (`crates/driver/src/error.rs`).
+- **Impact:** a statement the server stopped looks like the user's own choice, and the server's reason isn't shown.
+- **Estimate:** 2 h (estimated). Planned for M3.
+
+### 55. No structure view (F)
+
+- **Missing:** the table tab's DATA / STRUCTURE switch and its read-only page, on all four engines: COLUMNS, INDEXES, FOREIGN KEYS, REFERENCED BY and TRIGGERS. The M3 table tab draws the switch and the page.
+- **Evidence:** `docs/ui-parity.md` ("Structure and new table": None). The catalog (`crates/driver/src/catalog.rs`) holds tables, columns and foreign keys, so REFERENCED BY can be worked out from them, but it holds no list of a table's indexes or triggers.
+- **Impact:** seeing a table's indexes or triggers means querying the system catalogs by hand.
+- **Estimate:** 6-10 h (estimated): reading indexes and triggers per engine, and the page. Planned for M3.
+
+### 56. A connection attempt can't be cancelled (F)
+
+- **Missing:** a command that stops a connect, and the CANCEL the M3 connection screen draws beside `CONNECTING`.
+- **Evidence:** `engine.commands` has `query.cancel` and `table.cancel` but none for a connect; the form only relabels its button `Connecting…` (`crates/ui-egui/src/conn_form.rs`).
+- **Impact:** a host that doesn't answer keeps the user waiting until the connect limit passes.
+- **Estimate:** 1.5 h (estimated). Planned for M3.
+
+### 57. Saved connections aren't ordered by last use (F)
+
+- **Missing:** a stored last-used time, so that the M3 sidebar's one flat list can show the last used first.
+- **Evidence:** no such field in `crates/config/src/connection.rs`.
+- **Impact:** with many saved connections, the one you use most can be far down the list.
+- **Estimate:** 1 h (estimated). Left out of M3 at the start (the maintainer's call, 2026-11-09).
+
+### 58. A saved cell has no mark (U)
+
+- **Missing:** the state the M3 grid draws for a cell just saved by Apply: green, fading after about 1.5 s.
+- **Evidence:** `Mark` (`crates/ui-egui/src/grid.rs`) has no such state.
+- **Impact:** a successful Apply is less visible on the cells it changed.
+- **Estimate:** 1 h (estimated). Planned for M3.
+
+### 59. No update check or update button (F)
+
+- **Missing:** a button that always shows dbee's version and, when a new version is out, an icon that starts the update with one click. If it needs root, the system asks for the password. A copy that can't update itself says to download the new version. The maintainer's request of 2026-11-08; not drawn yet.
+- **Evidence:** no update code in the tree; the version shows only on the connection screen (`crates/ui-egui/src/connections.rs`).
+- **Impact:** a user learns of a new version only by looking on GitHub.
+- **Estimate:** 8 h (estimated), once drawn: the check is a new network request to GitHub, and each package format updates in its own way. Left out until it's drawn (the maintainer's call, 2026-11-09).
+
+### 60. The prompt after an unknown Apply says "Close anyway" but applies again (S)
+
+- **Limit:** when the connection is lost during Apply and the user presses Apply again, the prompt's title and button read `Close anyway`, while the button runs the Apply again with `force`. Its message says "Apply again to retry".
+- **Evidence:** `Dialog::Confirm` (`crates/ui-egui/src/dialogs.rs`) words every `needsConfirm` the same; `applyAfterUnknownOutcome` (`crates/engine/src/cmd/edit.rs`).
+- **Impact:** a user who means to close can write the same changes again, so a new row can be inserted twice if the first Apply did get through.
+- **Estimate:** 0.5 h (estimated). Planned for M3.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Entries 53 to 60: what the M3 design draws that the code can't do yet (rollback, a cancel dbee didn't send, the structure view, cancelling a connect, last-used order, the saved cell's mark, the update button), and the "Close anyway" prompt that applies again. Entry 1 names what M3 draws for it. |
 | 2026-11-08 | minor | The security review's lane C fix round: entries 50 (a client with no token can keep the 16 places), 51 (two small control channel test gaps) and 52 (the log's end-to-end test); entry 46 says OpenSSH's fall-back to a line with no port and `!` exclusions are not done; entry 47 names the right crate. |
 | 2026-11-08 | minor | The security review's lane C, job 3: entries 46 (`/etc/ssh/ssh_known_hosts` is not read), 47 (Windows Credential Manager entries roam), 48 (macOS ad-hoc signing, channels an SSH server opens) and 49 (the control channel answers only while the window draws); entry 11 says the Flatpak keeps no trusted host key. |
 | 2026-11-08 | minor | The security review's lane A, fix round 1: entry 45 (tokio-postgres keeps every ParameterStatus a server sends). |
