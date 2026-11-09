@@ -59,7 +59,7 @@ use serde_json::{Map, json};
 use crate::automation::{CellBlock, Tags};
 use crate::connections::line_galley;
 use crate::icons;
-use crate::theme::TOKENS;
+use crate::theme;
 
 /// A row's height.
 pub const ROW_H: f32 = 24.0;
@@ -395,7 +395,7 @@ impl Grid<'_> {
             content_left = ui.max_rect().left();
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
             // The resize lines run down the whole table: keep them faint.
-            ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::new(1.0, TOKENS.hover);
+            ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::new(1.0, theme::tokens(ui.ctx()).line);
             let mut table = TableBuilder::new(ui)
                 .id_salt("dbee-grid")
                 .resizable(true)
@@ -414,8 +414,8 @@ impl Grid<'_> {
             let table = table.header(HEADER_H, |mut header| {
                 header.col(|ui| {
                     let r = ui.max_rect();
-                    ui.painter().rect_filled(r, CornerRadius::ZERO, TOKENS.grid_header);
-                    ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, TOKENS.border));
+                    ui.painter().rect_filled(r, CornerRadius::ZERO, theme::tokens(ui.ctx()).card);
+                    ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, theme::tokens(ui.ctx()).line));
                 });
                 for (col, head) in heads.iter_mut().enumerate() {
                     let mut resp = None;
@@ -543,18 +543,18 @@ impl Grid<'_> {
 
     /// Draws column `col`'s header and returns its response.
     fn draw_head(&self, ui: &mut egui::Ui, col: usize) -> Response {
-        let t = TOKENS;
+        let t = theme::tokens(ui.ctx());
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.id().with("dbee-head"), Sense::click());
         let p = ui.painter().clone();
-        p.rect_filled(rect, CornerRadius::ZERO, t.grid_header);
-        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.border));
-        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, t.border));
+        p.rect_filled(rect, CornerRadius::ZERO, t.card);
+        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.line));
+        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, t.line));
         let mut x = rect.left() + PAD;
         let icon = |x: f32| Rect::from_min_size(pos2(x, rect.center().y - 7.0), vec2(14.0, 14.0));
         match self.key(col) {
-            Key::Primary => icons::key_primary(&p, icon(x), t.key_primary),
-            Key::Foreign => icons::key_foreign(&p, icon(x), t.key_foreign),
+            Key::Primary => icons::key_primary(&p, icon(x), t.key),
+            Key::Foreign => icons::key_foreign(&p, icon(x), t.text_muted),
             Key::None => {}
         }
         if self.key(col) != Key::None {
@@ -572,17 +572,17 @@ impl Grid<'_> {
         }
         if let Some(dir) = self.sort_of(col) {
             let r = Rect::from_min_size(pos2(rect.right() - PAD - 12.0, rect.center().y - 6.0), vec2(12.0, 12.0));
-            icons::sort(&p, r, t.accent, dir == SortDir::Asc);
+            icons::sort(&p, r, t.ink, dir == SortDir::Asc);
         }
         resp
     }
 
     fn draw_gutter(&self, ui: &mut egui::Ui, row: usize) {
-        let t = TOKENS;
+        let t = theme::tokens(ui.ctx());
         let rect = ui.max_rect();
         let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::ZERO, t.grid_header);
-        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, t.border));
+        p.rect_filled(rect, CornerRadius::ZERO, t.card);
+        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, t.line));
         let label = if self.source.columns() > 0 && self.source.mark(row, 0) == Mark::New {
             "+".to_string()
         } else {
@@ -594,7 +594,7 @@ impl Grid<'_> {
 
     /// Draws cell `(row, col)` into its `ui`; `focus` is the selection's focus cell.
     fn draw_cell(&self, ui: &mut egui::Ui, row: usize, col: usize, focus: Option<(usize, usize)>) -> Drawn {
-        let t = TOKENS;
+        let t = theme::tokens(ui.ctx());
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.id().with("dbee-cell"), Sense::click_and_drag());
         let p = ui.painter().clone();
@@ -608,16 +608,15 @@ impl Grid<'_> {
                 Mark::New => t.new_row,
                 Mark::Deleted => t.deleted,
                 Mark::Failed => t.failed,
-                Mark::Plain if row % 2 == 1 => t.stripe,
                 Mark::Plain => t.card,
             }
         };
         p.rect_filled(rect, CornerRadius::ZERO, fill);
-        let line = Stroke::new(1.0, t.hover);
+        let line = Stroke::new(1.0, t.line);
         p.line_segment([rect.right_top(), rect.right_bottom()], line);
         p.line_segment([rect.left_bottom(), rect.right_bottom()], line);
         if focus == Some((row, col)) {
-            p.rect_stroke(rect.shrink(0.5), CornerRadius::ZERO, Stroke::new(1.5, t.accent), StrokeKind::Inside);
+            p.rect_stroke(rect.shrink(0.5), CornerRadius::ZERO, Stroke::new(1.5, t.ink), StrokeKind::Inside);
         }
         let value = self.source.cell(row, col);
         let link = self.links && value.is_some() && self.key(col) == Key::Foreign && focus.is_some_and(|f| f.0 == row);
@@ -645,7 +644,7 @@ impl Grid<'_> {
         let link = link.then(|| {
             let r = Rect::from_min_size(pos2(rect.right() - PAD - 15.0, rect.center().y - 8.0), vec2(16.0, 16.0));
             let resp = ui.interact(r, ui.id().with(("dbee-fk-link", row, col)), Sense::click());
-            icons::follow(&p, r.shrink(1.0), if resp.hovered() { t.accent } else { t.key_foreign });
+            icons::follow(&p, r.shrink(1.0), if resp.hovered() { t.ink } else { t.text_muted });
             resp
         });
         Drawn { text, null, resp, link }

@@ -49,9 +49,9 @@ use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
 use crate::dialogs::{self, Dialog, Rerun};
 use crate::quick_search::{self, QuickSearch};
-use crate::theme::{RADIUS, TOKENS};
+use crate::theme::{self, size::RADIUS_CONTROL};
 use crate::workspace::Workspace;
-use crate::{editors, shortcuts, theme, ui_commands, workspace};
+use crate::{editors, shortcuts, ui_commands, workspace};
 
 /// The Apply command, whose job errors the table tab's card shows.
 const APPLY: &str = "edit.apply";
@@ -569,7 +569,7 @@ impl DbeeApp {
         }
         let Some((text, shown)) = self.view.notices.front_mut() else { return };
         let since = *shown.get_or_insert(now);
-        let t = TOKENS;
+        let t = theme::tokens(ui.ctx());
         // Above the status bar, and above a table tab's paging bar (its Apply and Reset).
         let lift = match (self.session.state().screen, self.session.state().active_tab()) {
             (Screen::Workspace, Some(dbee_engine::Tab::Table(_))) => workspace::STATUS_H + crate::paging::BAR_H,
@@ -583,9 +583,9 @@ impl DbeeApp {
             .fade_in(false);
         let r = area
             .show(ui.ctx(), |ui| {
-                Frame::new().fill(t.text).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+                Frame::new().fill(t.ink).corner_radius(CornerRadius::same(RADIUS_CONTROL)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
                     ui.set_max_width(420.0);
-                    ui.label(RichText::new(text.as_str()).color(t.card));
+                    ui.label(RichText::new(text.as_str()).color(t.on_ink));
                 })
             })
             .response;
@@ -604,8 +604,8 @@ impl eframe::App for DbeeApp {
         self.feed_input(raw);
     }
 
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        TOKENS.bg.to_normalized_gamma_f32()
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        visuals.panel_fill.to_normalized_gamma_f32()
     }
 }
 

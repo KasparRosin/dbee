@@ -30,7 +30,7 @@ use serde_json::json;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::connections;
-use crate::theme::{RADIUS, TOKENS};
+use crate::theme::{self, size::RADIUS_FLOAT};
 use crate::{DbeeApp, connections::tilde};
 
 /// The width of a dialog's content.
@@ -302,7 +302,7 @@ fn with(mut params: Json, key: &str, value: Json) -> Json {
 }
 
 fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
-    let t = TOKENS;
+    let t = theme::tokens(ctx);
     let screen = ctx.content_rect();
     let outer = WIDTH + 2.0 * f32::from(MARGIN) + 2.0;
     // Fixed left-top corner: the first frame (egui's sizing pass) puts every widget where the
@@ -315,9 +315,9 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
     // No fade-in: a screenshot right after a dialog opens shows it as it is.
     let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, offset).default_size(vec2(outer, below)).fade_in(false);
     let frame = Frame::new()
-        .fill(t.card)
-        .stroke(Stroke::new(1.0, t.border))
-        .corner_radius(CornerRadius::same(RADIUS.saturating_mul(2)))
+        .fill(t.raised)
+        .stroke(Stroke::new(1.0, t.raised_line))
+        .corner_radius(CornerRadius::same(RADIUS_FLOAT))
         .inner_margin(Margin::same(MARGIN));
     let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(t.text.gamma_multiply(0.35)).show(ctx, |ui| {
         ui.set_width(WIDTH);
@@ -340,19 +340,19 @@ fn text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, text: &str) {
 }
 
 fn muted(ui: &mut egui::Ui, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).size(12.0).color(TOKENS.text_muted)).wrap());
+    ui.add(egui::Label::new(RichText::new(text).size(12.0).color(theme::tokens(ui.ctx()).text_muted)).wrap());
 }
 
 /// The OK and Cancel buttons, right-aligned: `(ok clicked, cancel clicked)`. Without `cancel`
 /// only OK shows.
 fn buttons(ui: &mut egui::Ui, tags: &mut Tags, ok: &str, ok_enabled: bool, danger: bool, cancel: bool) -> (bool, bool) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     ui.add_space(12.0);
     // Top-aligned: egui centres nothing in a dialog's first frame (its sizing pass), so a centred
     // row would sit a pixel off there.
     ui.allocate_ui_with_layout(vec2(WIDTH, 30.0), Layout::right_to_left(Align::Min), |ui| {
-        let fill = if danger { t.danger } else { t.accent };
-        let button = Button::new(RichText::new(ok).color(t.accent_text)).fill(fill).min_size(vec2(96.0, 30.0));
+        let fill = if danger { t.danger } else { t.ink };
+        let button = Button::new(RichText::new(ok).color(t.on_ink)).fill(fill).min_size(vec2(96.0, 30.0));
         let ok_r = ui.add_enabled(ok_enabled, button);
         tags.tag_value_as("dialog-ok", &ok_r, ok, ok_enabled);
         let cancelled = if cancel {
@@ -376,7 +376,7 @@ fn focus(r: &egui::Response, focused: &mut bool) {
 }
 
 fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     match dialog {
         Dialog::FillFromUrl { url, error, focused, kinds } => {
             title(ui, "Fill from URL");

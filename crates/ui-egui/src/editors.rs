@@ -68,7 +68,7 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::grid::{CELL, GridSource, ROW_H};
 use crate::shortcuts;
-use crate::theme::TOKENS;
+use crate::theme;
 
 /// The longest value an editor opens inline, in bytes of text (see the module docs).
 pub const MAX_INLINE_BYTES: usize = 32 * 1024;
@@ -622,7 +622,7 @@ pub(crate) fn after_draw(app: &mut DbeeApp, ctx: &egui::Context) {
 
 /// Draws `ed` over its cell, whose rect is `cell`, kept inside `view` (the grid's rows in view).
 pub(crate) fn show(ctx: &egui::Context, ed: &mut CellEditor, cell: Rect, view: Rect, tags: &mut Tags) {
-    let t = TOKENS;
+    let t = theme::tokens(ctx);
     let width = match ed.kind {
         Kind::Line => cell.width(),
         Kind::Lines => cell.width().max(LINES_W),
@@ -642,7 +642,7 @@ pub(crate) fn show(ctx: &egui::Context, ed: &mut CellEditor, cell: Rect, view: R
     let area = Area::new(Id::new("dbee-cell-editor")).order(Order::Foreground).fixed_pos(at).constrain(false).movable(false).fade_in(false);
     let r = area
         .show(ctx, |ui| {
-            Frame::new().fill(t.card).stroke(Stroke::new(BORDER, t.accent)).show(ui, |ui| {
+            Frame::new().fill(t.card).stroke(Stroke::new(BORDER, t.ink)).show(ui, |ui| {
                 ui.set_width(inner_w);
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
                 match ed.kind {
@@ -728,7 +728,7 @@ fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
 
 /// The boolean choice: three rows, the current one highlighted.
 fn choices(ui: &mut egui::Ui, ed: &mut CellEditor, width: f32, tags: &mut Tags) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let id = choice_id();
     let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_H * Choice::ALL.len() as f32), Sense::hover());
     // Holds the keyboard (so Tab and the arrows do not move it elsewhere) without taking clicks.

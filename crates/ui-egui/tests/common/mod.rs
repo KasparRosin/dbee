@@ -331,6 +331,21 @@ impl Ui {
         }
     }
 
+    /// The shapes of the last frame in paint order, each with the rect it is clipped to.
+    pub fn shapes(&self) -> Vec<(egui::Rect, egui::Shape)> {
+        fn walk(clip: egui::Rect, shape: &egui::Shape, out: &mut Vec<(egui::Rect, egui::Shape)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(clip, s, out)),
+                s => out.push((clip, s.clone())),
+            }
+        }
+        let mut out = Vec::new();
+        for c in &self.harness.output().shapes {
+            walk(c.clip_rect, &c.shape, &mut out);
+        }
+        out
+    }
+
     /// The text shapes of the last frame: each galley where it was drawn.
     pub fn texts(&self) -> Vec<(egui::Rect, Arc<egui::Galley>)> {
         fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, Arc<egui::Galley>)>) {

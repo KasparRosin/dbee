@@ -32,7 +32,7 @@ use serde_json::json;
 
 use crate::automation::Tags;
 use crate::icons::{self, Step};
-use crate::theme::{RADIUS, TOKENS};
+use crate::theme::{self, size::RADIUS_CONTROL};
 use crate::tree::thousands;
 
 /// The bar's height.
@@ -256,11 +256,11 @@ fn count_icon(p: &egui::Painter, rect: Rect, color: egui::Color32) {
 
 /// A square button framed like the paging arrows, drawn with `icon`.
 fn square_button(ui: &mut egui::Ui, enabled: bool, icon: impl FnOnce(&egui::Painter, Rect, egui::Color32)) -> egui::Response {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(SQUARE, SQUARE), if enabled { Sense::click() } else { Sense::hover() });
     let fill = if enabled && r.hovered() { t.hover } else { t.card };
-    ui.painter().rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), StrokeKind::Inside);
-    icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), if enabled { t.text } else { t.border });
+    ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
+    icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), if enabled { t.text } else { t.text_faint });
     r
 }
 
@@ -273,11 +273,11 @@ fn square_button(ui: &mut egui::Ui, enabled: bool, icon: impl FnOnce(&egui::Pain
 /// group starts after the left one and is cut at the bar's edge. So no control is ever drawn over
 /// another, and nothing is drawn past the bar.
 pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let mut runs: Vec<Run> = Vec::new();
     let rect = ui.max_rect();
-    ui.painter().rect_filled(rect, CornerRadius::ZERO, t.panel);
-    ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, t.border));
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, t.bg);
+    ui.painter().line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, t.line));
     let inner = rect.shrink2(vec2(8.0, 0.0));
     let clip = ui.clip_rect().intersect(inner);
     let child = |ui: &mut egui::Ui, salt: &str, max: Rect, clip: Rect| {
@@ -313,7 +313,7 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
 
 /// First · prev · the page · next · last, the row count and refresh.
 fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit: Fit, runs: &mut Vec<Run>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let first = p.page == 0;
     let back = p.blocked.or(if first { Some("this is the first page") } else { None });
     let on = p.blocked.or(if p.at_end { Some("this is the last page") } else { None });
@@ -373,7 +373,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
 
 /// "+ Row", then with staged changes their count, Reset and Apply.
 fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit: Fit, runs: &mut Vec<Run>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let enabled = p.add_blocked.is_none();
     let r = ui.add_enabled(enabled, Button::new(RichText::new("+ Row").size(TEXT)).min_size(vec2(parts.add_w, SQUARE)));
     let r = match &p.add_blocked {
@@ -401,7 +401,7 @@ fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fi
         runs.push(("edit.reset", json!({})));
     }
     let apply_enabled = p.apply_blocked.is_none();
-    let b = Button::new(RichText::new("Apply").color(t.accent_text)).fill(t.accent).min_size(vec2(parts.apply_w, SQUARE));
+    let b = Button::new(RichText::new("Apply").color(t.on_ink)).fill(t.ink).min_size(vec2(parts.apply_w, SQUARE));
     let r = ui.add_enabled(apply_enabled, b);
     let r = match p.apply_blocked {
         Some(why) => r.on_disabled_hover_text(format!("Cannot apply {} now: {why}", parts.edits)),

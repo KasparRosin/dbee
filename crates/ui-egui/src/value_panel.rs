@@ -21,7 +21,7 @@
 //! or more, which is accepted.
 //!
 //! **Colours.** JSON that parsed (or the start of one that was cut) gets syntax colours from
-//! `json::highlight` ([`spans`], theme [`crate::theme::Syntax`]); up to [`SYNC_COLOUR_BYTES`]
+//! `json::highlight` ([`spans`], colours from [`crate::theme::Tokens`]); up to [`SYNC_COLOUR_BYTES`]
 //! they are worked out in the frame, above that by one worker thread ([`ColourWorker`]) while
 //! the text shows uncoloured. The worker takes one value at a time, and a value asked for while
 //! it works replaces any still waiting, so at most one `highlight` runs.
@@ -71,7 +71,10 @@ use crate::DbeeApp;
 use crate::automation::Tags;
 use crate::connections::line_galley;
 use crate::editors::size_text;
-use crate::theme::{RADIUS, Syntax, TOKENS, syntax};
+use crate::theme::{
+    self,
+    size::{RADIUS_CONTROL, RADIUS_FLOAT},
+};
 use crate::{icons, shortcuts};
 
 /// The automation ids.
@@ -647,7 +650,7 @@ pub(crate) fn reserve(app: &DbeeApp, ui: &mut egui::Ui) -> Option<Rect> {
     if !app.view.value_panel {
         return None;
     }
-    let frame = Frame::new().fill(TOKENS.panel);
+    let frame = Frame::new().fill(theme::tokens(ui.ctx()).bg);
     let start = start_width(ui.ctx().content_rect().width());
     let panel = egui::Panel::right(panel_id()).resizable(true).default_size(start).size_range(MIN_WIDTH..=MAX_WIDTH).frame(frame);
     let out = panel.show(ui, |ui| {
@@ -677,12 +680,12 @@ pub(crate) fn fill(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
 
 /// The toggle at the right end of the status bar; true when it was clicked.
 pub(crate) fn toggle(ui: &mut egui::Ui, open: bool, tags: &mut Tags) -> bool {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
     if r.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), t.hover);
+        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), t.hover);
     }
-    let colour = if open { t.accent } else { t.text_muted };
+    let colour = if open { t.ink } else { t.text_muted };
     icons::side_panel(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), colour, open);
     let r = r.on_hover_text(if open { "Hide the value panel" } else { "Show the value panel" });
     tags.tag_value(TOGGLE, &r, open);
@@ -727,7 +730,7 @@ pub(crate) fn take_keys(app: &mut DbeeApp, ctx: &egui::Context) {
 
 /// The panel's contents for `view` (`None`: no cell is selected), in all of `ui`.
 pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut PanelState, tags: &mut Tags) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let full = ui.max_rect();
     let panel = ui.interact(full, ui.id().with("dbee-value-panel"), Sense::hover());
     let mut ui = ui.new_child(UiBuilder::new().max_rect(full.shrink(MARGIN)).layout(Layout::top_down(Align::Min)));
@@ -765,7 +768,7 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
 
 /// The column's name and type, and the JSON label when one applies.
 fn header(ui: &mut egui::Ui, view: &ValueView) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let width = ui.available_width();
     let name = line_galley(ui, &view.column, FontId::proportional(14.0), t.text, width * 0.7);
     let name_w = name.size().x;
@@ -778,16 +781,16 @@ fn header(ui: &mut egui::Ui, view: &ValueView) {
     }
     if !view.kind_label.is_empty() {
         ui.add_space(2.0);
-        let label = line_galley(ui, &view.kind_label, FontId::proportional(11.5), t.accent, width - 12.0);
+        let label = line_galley(ui, &view.kind_label, FontId::proportional(11.5), t.ink, width - 12.0);
         let (pill, _) = ui.allocate_exact_size(vec2(label.size().x + 12.0, 18.0), Sense::hover());
-        ui.painter().rect_filled(pill, CornerRadius::same(RADIUS.saturating_mul(2)), t.selection);
-        ui.painter().galley(pos2(pill.left() + 6.0, pill.center().y - label.size().y / 2.0), label, t.accent);
+        ui.painter().rect_filled(pill, CornerRadius::same(RADIUS_FLOAT), t.selection);
+        ui.painter().galley(pos2(pill.left() + 6.0, pill.center().y - label.size().y / 2.0), label, t.ink);
     }
 }
 
 /// A dim, italic word in the text's box where there is no text (NULL, an empty value).
 fn placeholder(ui: &mut egui::Ui, area: Rect, word: &str) -> Response {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let format = TextFormat { font_id: FontId::monospace(FONT_SIZE), color: t.text_muted, italics: true, ..TextFormat::default() };
     let galley = ui.painter().layout_job(LayoutJob::single_section(word.to_string(), format));
     // Where the first row of text would be.
@@ -805,9 +808,9 @@ struct Drawn {
 
 /// The text's box: the rows in view, the selection, and the pointer's part in it.
 fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: &mut Tags) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let rect = ui.available_rect_before_wrap();
-    ui.painter().rect(rect, CornerRadius::same(RADIUS), t.card, Stroke::new(1.0, t.border), StrokeKind::Inside);
+    ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), t.card, Stroke::new(1.0, t.line), StrokeKind::Inside);
     let area = rect.shrink(1.0);
     let mut tag = |resp: &Response, selection: Option<Range<usize>>, highlighted: bool, rows: usize, first: usize| {
         let shown = cut(&view.text, TAG_BYTES);
@@ -857,7 +860,7 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
     }
     let text = doc.view.text.as_str();
     let total = doc.rows.count();
-    let palette = syntax(ui.visuals().dark_mode);
+    let palette = theme::tokens(ui.ctx());
     let mut scroll = ScrollArea::vertical()
         .id_salt("dbee-value-scroll")
         .auto_shrink([false, false])
@@ -963,7 +966,7 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
 
 /// The layout of row `range` of `text`: the JSON colours over it when it has them, else one
 /// colour; never wrapped (the row is as long as fits).
-fn row_job(text: &str, range: Range<usize>, colours: &Colours, font: &FontId, plain: Color32, palette: Syntax) -> LayoutJob {
+fn row_job(text: &str, range: Range<usize>, colours: &Colours, font: &FontId, plain: Color32, palette: &theme::Tokens) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     let mut add = |from: usize, to: usize, color: Color32| {
@@ -979,18 +982,18 @@ fn row_job(text: &str, range: Range<usize>, colours: &Colours, font: &FontId, pl
     let from = spans.partition_point(|s| s.end as usize <= range.start);
     for s in spans.get(from..).unwrap_or_default().iter().take_while(|s| (s.start as usize) < range.end) {
         let (a, b) = ((s.start as usize).max(range.start), (s.end as usize).min(range.end));
-        add(at, a, palette.punct);
+        add(at, a, palette.text_muted);
         let colour = match s.token {
-            JsonToken::Key => palette.key,
-            JsonToken::String => palette.string,
-            JsonToken::Number => palette.number,
-            JsonToken::Literal => palette.literal,
-            JsonToken::Punct => palette.punct,
+            JsonToken::Key => palette.syn_keyword,
+            JsonToken::String => palette.syn_string,
+            JsonToken::Number => palette.syn_number,
+            JsonToken::Literal => palette.syn_literal,
+            JsonToken::Punct => palette.text_muted,
         };
         add(a, b, colour);
         at = b;
     }
-    add(at, range.end, palette.punct);
+    add(at, range.end, palette.text_muted);
     job
 }
 

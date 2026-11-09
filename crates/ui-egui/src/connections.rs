@@ -68,7 +68,10 @@ use crate::automation::Tags;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
-use crate::theme::{RADIUS, TOKENS, connection_color};
+use crate::theme::{
+    self, connection_color,
+    size::{RADIUS_CONTROL, RADIUS_FLOAT},
+};
 use crate::{DbeeApp, icons};
 
 pub(crate) const OPEN: &str = "connection.open";
@@ -755,7 +758,7 @@ pub(crate) fn line_galley(ui: &egui::Ui, text: &str, font: FontId, color: Color3
 
 /// A full-width button with a code-drawn icon left of its label.
 fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, Rect, Color32)) -> egui::Response {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let size = vec2(ui.available_width(), 36.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if response.is_pointer_button_down_on() {
@@ -766,9 +769,9 @@ fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, Rect, Co
         t.card
     };
     let p = ui.painter();
-    p.rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
     let icon_rect = Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0));
-    icon(p, icon_rect, t.accent);
+    icon(p, icon_rect, t.ink);
     p.text(pos2(rect.left() + 36.0, rect.center().y), egui::Align2::LEFT_CENTER, label, FontId::proportional(14.0), t.text);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response
@@ -776,7 +779,7 @@ fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, Rect, Co
 
 /// A small, muted section heading with a count.
 fn section(ui: &mut egui::Ui, title: &str, count: usize) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).small().strong().color(t.text_muted));
         ui.label(RichText::new(count.to_string()).small().color(t.text_muted));
@@ -786,8 +789,8 @@ fn section(ui: &mut egui::Ui, title: &str, count: usize) {
 
 /// The left side: New connection, the filter, the store warning, the saved and recent cards.
 fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>) {
-    let t = TOKENS;
-    egui::Panel::left("connections-side").resizable(false).exact_size(300.0).frame(Frame::new().fill(t.panel).inner_margin(Margin::same(14))).show(
+    let t = theme::tokens(ui.ctx());
+    egui::Panel::left("connections-side").resizable(false).exact_size(300.0).frame(Frame::new().fill(t.bg).inner_margin(Margin::same(14))).show(
         ui,
         |ui| {
             let new = icon_button(ui, "New connection", icons::plus);
@@ -841,7 +844,7 @@ fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, a
 
 /// One connection card: its colour on the left edge, the name and where it goes.
 fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used_at: Option<u64>, selected: bool, busy: bool, acts: &mut Vec<Act>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), CARD_H), Sense::click());
     let fill = if selected {
         t.selection
@@ -851,9 +854,9 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
         Color32::TRANSPARENT
     };
     let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(RADIUS), fill);
+    p.rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), fill);
     let bar = Rect::from_min_size(pos2(rect.left() + 3.0, rect.top() + 7.0), vec2(4.0, rect.height() - 14.0));
-    p.rect_filled(bar, CornerRadius::same(2), connection_color(c.color).unwrap_or(t.border));
+    p.rect_filled(bar, CornerRadius::same(2), connection_color(c.color).unwrap_or(t.line));
     let text_w = rect.width() - 22.0;
     let name = c.display_name();
     p.galley(pos2(rect.left() + 16.0, rect.top() + 6.0), line_galley(ui, &name, FontId::proportional(14.0), t.text, text_w), t.text);
@@ -907,15 +910,15 @@ const SCROLL_GAP: i8 = 12;
 /// The right side: the title row, then the engine cards or the form, in a card as tall as the
 /// window allows either way.
 fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     egui::CentralPanel::default().frame(Frame::new().fill(t.bg).inner_margin(Margin::symmetric(24, 20))).show(ui, |ui| {
         // The card adds its margins and border to the form's width.
         let width = (ui.available_width() - 46.0).clamp(240.0, FORM_WIDTH);
         ui.vertical_centered(|ui| {
             let card = Frame::new()
                 .fill(t.card)
-                .stroke(Stroke::new(1.0, t.border))
-                .corner_radius(CornerRadius::same(RADIUS.saturating_mul(2)))
+                .stroke(Stroke::new(1.0, t.line))
+                .corner_radius(CornerRadius::same(RADIUS_FLOAT))
                 // Less on the right: the fields' scroll bar sits there, beside them.
                 .inner_margin(Margin { left: 22, right: 22 - SCROLL_GAP, top: 22, bottom: 22 })
                 .show(ui, |ui| {
@@ -938,7 +941,7 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
             if let Some(color) = connection_color(conn.form.color) {
                 let r = card.response.rect;
                 let strip = Rect::from_min_size(r.min, vec2(r.width(), 5.0));
-                let radius = RADIUS.saturating_mul(2);
+                let radius = RADIUS_FLOAT;
                 ui.painter().rect_filled(strip, CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 }, color);
             }
             ui.add_space(10.0);
@@ -979,7 +982,7 @@ fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<
 /// The card of the database type `kind`, `w` wide: its name, and "Upcoming" in the corner when
 /// it is not `available` (this build has no driver for it), greyed and not clickable.
 fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &mut Tags, acts: &mut Vec<Act>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(w, ENGINE_H), if available { Sense::click() } else { Sense::hover() });
     let fill = if !available {
         t.card
@@ -991,7 +994,7 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &
         t.card
     };
     let p = ui.painter();
-    p.rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
     let color = if available { t.text } else { t.text_muted };
     let name = line_galley(ui, kind.label(), FontId::proportional(16.0), color, w - 28.0);
     p.galley(pos2(rect.left() + 14.0, rect.center().y - name.size().y / 2.0), name, color);
@@ -999,7 +1002,7 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &
         let chip = line_galley(ui, "Upcoming", FontId::proportional(11.0), t.text_muted, w);
         let size = vec2(chip.size().x + 12.0, 18.0);
         let pill = Rect::from_min_size(pos2(rect.right() - 8.0 - size.x, rect.top() + 8.0), size);
-        p.rect_filled(pill, CornerRadius::same(RADIUS.saturating_mul(2)), t.panel);
+        p.rect_filled(pill, CornerRadius::same(RADIUS_FLOAT), t.bg);
         p.galley(pos2(pill.left() + 6.0, pill.center().y - chip.size().y / 2.0), chip, t.text_muted);
     }
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, available, kind.label()));

@@ -36,7 +36,10 @@ use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::connections::{self, line_galley};
-use crate::theme::{RADIUS, TOKENS, connection_color};
+use crate::theme::{
+    self, connection_color,
+    size::{RADIUS_CONTROL, RADIUS_FLOAT},
+};
 use crate::tree::kind_icon;
 
 /// The most results shown.
@@ -309,7 +312,7 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
 }
 
 fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
-    let t = TOKENS;
+    let t = theme::tokens(ctx);
     // The search's own keys, before the field could take them.
     let (down, up, enter) = ctx.input_mut(|i| {
         (
@@ -332,9 +335,9 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
     let offset = vec2(((screen.width() - outer) / 2.0).max(0.0), TOP.min(screen.height() * 0.1));
     let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, offset).fade_in(false);
     let frame = Frame::new()
-        .fill(t.card)
-        .stroke(Stroke::new(1.0, t.border))
-        .corner_radius(CornerRadius::same(RADIUS.saturating_mul(2)))
+        .fill(t.raised)
+        .stroke(Stroke::new(1.0, t.raised_line))
+        .corner_radius(CornerRadius::same(RADIUS_FLOAT))
         .inner_margin(Margin::same(PAD));
     let mut act = Act::None;
     let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(t.text.gamma_multiply(0.25)).show(ctx, |ui| {
@@ -376,22 +379,15 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
         let shown = list.show(ui, |ui| {
             for (n, hit) in qs.hits.iter().enumerate() {
                 let (rect, r) = ui.allocate_exact_size(vec2(WIDTH, ITEM_H), Sense::click());
-                let fill = if n == qs.selected {
-                    t.selection
-                } else if r.hovered() {
-                    t.hover
-                } else {
-                    Color32::TRANSPARENT
-                };
+                let fill = if n == qs.selected || r.hovered() { t.raised_hover } else { Color32::TRANSPARENT };
                 let p = ui.painter();
-                p.rect_filled(rect, CornerRadius::same(RADIUS), fill);
+                p.rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), fill);
                 let mark = pos2(rect.left() + 16.0, rect.center().y);
                 let x = rect.left() + 32.0;
                 let font = FontId::proportional(14.0);
                 match hit {
                     Hit::Table { table, kind } => {
-                        let (icon, color) = kind_icon(*kind);
-                        icon(p, Rect::from_center_size(mark, vec2(16.0, 16.0)), color);
+                        kind_icon(*kind)(p, Rect::from_center_size(mark, vec2(16.0, 16.0)), t.text_muted);
                         let schema = line_galley(ui, &format!("{}.", table.schema), font.clone(), t.text_muted, WIDTH * 0.4);
                         let schema_w = schema.size().x;
                         p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);

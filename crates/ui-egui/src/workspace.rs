@@ -12,9 +12,9 @@
 //!
 //! The quick search (Ctrl+P) is drawn over it by the window ([`crate::quick_search`]).
 //!
-//! **Tabs strip.** The strip is a band of its own (`tab_band`) with a line along its bottom; the
-//! tabs stand on the band's bottom edge, and the active one takes the content's fill and opens
-//! into the content below it: no line under it, its sides and top drawn, the accent along its top.
+//! **Tabs strip.** The strip is a band (`card`) with a line along its bottom; the tabs stand on
+//! the band's bottom edge, and the active one opens into the content below it: no line under it,
+//! its sides and top drawn, the `ink` line along its top.
 //! A tab shows its kind's icon, its title (a table tab its table's name, with the number of
 //! applied filters as `orders [2]`), a dot when closing it would lose something (query text,
 //! staged edits), a spinner while one of its jobs runs, and × to close it; a middle click closes
@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use dbee_engine::{Session, State, Tab, TabId, Which};
 use dbee_sql::filter::Condition;
-use egui::{Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, pos2, vec2};
+use egui::{Align, CornerRadius, FontId, Frame, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 
 use crate::app::Origin;
@@ -45,7 +45,10 @@ use crate::connections::line_galley;
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
 use crate::table_tab::{self, Grids};
-use crate::theme::{RADIUS, TOKENS, connection_color};
+use crate::theme::{
+    self, connection_color,
+    size::{RADIUS_CONTROL, RADIUS_FLOAT},
+};
 use crate::tree::{self, Refresh, Tree, TreeAct};
 use crate::{DbeeApp, icons, menu, value_panel};
 
@@ -183,7 +186,7 @@ enum Act {
 
 /// Draws the workspace and acts on it.
 pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     // A new connection starts with a fresh tree.
     let id = app.session.state().connection(Which::Active).map(|c| c.config.id.clone());
     if app.view.work.connection != id {
@@ -192,7 +195,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let tabs = &app.session.state().tabs;
     app.view.work.grids.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     app.view.work.queries.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
-    egui::Panel::top("dbee-menubar").frame(Frame::new().fill(t.panel).inner_margin(Margin::symmetric(8, 3))).show(ui, |ui| menu::bar(app, ui));
+    egui::Panel::top("dbee-menubar").frame(Frame::new().fill(t.bg).inner_margin(Margin::symmetric(8, 3))).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();
     if status_bar(app, ui, &mut acts) {
         // At once, so the panel goes or comes in this frame.
@@ -237,11 +240,11 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
 
 /// The status bar; true when the value panel's toggle was clicked.
 fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let Some(c) = app.session.state().connection(Which::Active) else { return false };
     let name = c.config.display_name();
     let label = if c.info.read_only { format!("{name} · read-only") } else { name };
-    let colour = connection_color(c.config.color);
+    let colour = connection_color(c.config.color).zip(theme::on_connection_color(c.config.color));
     let server = dbee_engine::state::server_text(&c.info);
     let tls = dbee_engine::state::tls_text(&c.info, c.config.ssh.is_some());
     let saved = app.session.state().store.is_saved(&c.config.id);
@@ -251,18 +254,18 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let panel_open = app.view.value_panel;
     let mut toggled = false;
     let tags = &mut app.tags;
-    let frame = Frame::new().fill(t.panel).inner_margin(Margin::symmetric(8, 3)).stroke(Stroke::new(1.0, t.border));
+    let frame = Frame::new().fill(t.bg).inner_margin(Margin::symmetric(8, 3)).stroke(Stroke::new(1.0, t.line));
     egui::Panel::bottom("dbee-status").exact_size(STATUS_H).frame(frame).show(ui, |ui| {
         ui.horizontal_centered(|ui| {
             // The name on the connection's colour, so a live database is never mistaken for
             // another.
             let (fill, text) = match colour {
-                Some(c) => (c, readable_on(c)),
-                None => (t.border, t.text),
+                Some((fill, text)) => (fill, text),
+                None => (t.fill, t.text),
             };
             let galley = line_galley(ui, &label, FontId::proportional(12.5), text, 360.0);
             let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x + 18.0, STATUS_ITEM_H), Sense::hover());
-            ui.painter().rect_filled(rect, CornerRadius::same(RADIUS.saturating_mul(2)), fill);
+            ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_FLOAT), fill);
             ui.painter().galley(pos2(rect.left() + 9.0, rect.center().y - galley.size().y / 2.0), galley, text);
             tags.tag_value("status-connection", &r, label.as_str());
             let r = ui.label(RichText::new(server.as_str()).size(12.0).color(t.text_muted));
@@ -321,15 +324,9 @@ fn status_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response
     .inner
 }
 
-/// Dark or light text, whichever reads better on `fill`.
-fn readable_on(fill: Color32) -> Color32 {
-    let lum = 0.2126 * f32::from(fill.r()) + 0.7152 * f32::from(fill.g()) + 0.0722 * f32::from(fill.b());
-    if lum > 150.0 { TOKENS.text } else { Color32::WHITE }
-}
-
 /// The tree on the left.
 fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let Some(catalog) = app.session.state().connection(Which::Active).map(|c| Arc::clone(&c.catalog)) else { return };
     let dialect = app.session.state().dialect(Which::Active);
     let refresh = if app.session.running("schema.refresh") {
@@ -344,7 +341,7 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let mut acts = Vec::new();
     {
         let DbeeApp { view, tags, .. } = app;
-        let frame = Frame::new().fill(t.panel).inner_margin(Margin::same(8));
+        let frame = Frame::new().fill(t.bg).inner_margin(Margin::same(8));
         egui::Panel::left("dbee-tree").resizable(true).default_size(280.0).size_range(200.0..=600.0).frame(frame).show(ui, |ui| {
             acts = tree::show(ui, &catalog, dialect, &mut view.work.tree, tags);
         });
@@ -363,7 +360,7 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
 
 /// The tabs strip.
 fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let st: &State = app.session.state();
     let tabs: Vec<TabView> = st
         .tabs
@@ -383,7 +380,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     app.view.work.strip_active = st.active;
     let tags = &mut app.tags;
     let (strip, _) = ui.allocate_exact_size(vec2(ui.available_width(), STRIP_H), Sense::hover());
-    ui.painter().rect_filled(strip, CornerRadius::ZERO, t.tab_band);
+    ui.painter().rect_filled(strip, CornerRadius::ZERO, t.card);
     let mut strip_ui = ui.new_child(egui::UiBuilder::new().max_rect(strip).layout(Layout::left_to_right(Align::Max)));
     let mut active = None;
     ScrollArea::horizontal().id_salt("tab-strip").auto_shrink([false, false]).show(&mut strip_ui, |ui| {
@@ -402,7 +399,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             let (slot, r) = ui.allocate_exact_size(vec2(28.0, TAB_H), Sense::click());
             let rect = Rect::from_center_size(slot.center(), vec2(24.0, 24.0));
             if r.hovered() {
-                ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), t.tab_hover);
+                ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), t.hover);
             }
             icons::plus(ui.painter(), Rect::from_center_size(rect.center(), vec2(14.0, 14.0)), t.text_muted);
             let r = r.on_hover_text("New query tab (Ctrl+T)");
@@ -415,7 +412,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     // The line along the band's bottom, but not under the active tab (the part of it in view),
     // which opens into the content.
     let y = strip.bottom() - 0.5;
-    let line = Stroke::new(1.0, t.border);
+    let line = Stroke::new(1.0, t.line);
     let open = active.map(|a| a.intersect(strip)).filter(|a| a.width() > 0.0);
     let (left, right) = open.map_or((strip.right(), strip.right()), |a| (a.left(), a.right()));
     if left > strip.left() {
@@ -428,30 +425,30 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
 
 /// Draws `tab` on the band; returns its rect when it is the active one.
 fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags, acts: &mut Vec<Act>) -> Option<Rect> {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let font = FontId::proportional(13.0);
     let colour = if tab.active { t.text } else { t.text_muted };
     let galley = line_galley(ui, &tab.title, font, colour, TITLE_MAX);
     let width = 10.0 + 16.0 + 6.0 + galley.size().x + 6.0 + if tab.dirty { 10.0 } else { 0.0 } + 20.0 + 6.0;
     let (rect, r) = ui.allocate_exact_size(vec2(width, TAB_H), Sense::click());
     let p = ui.painter().clone();
-    let corners = CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 };
+    let corners = CornerRadius { nw: RADIUS_CONTROL, ne: RADIUS_CONTROL, sw: 0, se: 0 };
     if tab.active {
         // The content's fill, its sides and top in the border colour. The shape runs past the
         // band's bottom, where the strip's clip cuts it off: no edge under the tab.
         let open = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.max.y + 2.0));
-        p.rect(open, corners, t.bg, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-        p.line_segment([rect.left_top() + vec2(2.0, 1.0), rect.right_top() + vec2(-2.0, 1.0)], Stroke::new(2.0, t.accent));
+        p.rect(open, corners, t.bg, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+        p.line_segment([rect.left_top() + vec2(2.0, 1.0), rect.right_top() + vec2(-2.0, 1.0)], Stroke::new(2.0, t.ink));
     } else if r.hovered() {
-        p.rect_filled(rect, corners, t.tab_hover);
+        p.rect_filled(rect, corners, t.hover);
     }
     let icon_rect = Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 8.0), vec2(16.0, 16.0));
     if tab.busy {
         egui::Spinner::new().size(13.0).color(t.text_muted).paint_at(ui, icon_rect);
     } else if tab.query {
-        icons::query(&p, icon_rect, t.icon_query);
+        icons::query(&p, icon_rect, t.text_muted);
     } else {
-        icons::table(&p, icon_rect, t.icon_table);
+        icons::table(&p, icon_rect, t.text_muted);
     }
     let text_left = icon_rect.right() + 6.0;
     let galley_w = galley.size().x;
@@ -469,9 +466,9 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     let close_rect = Rect::from_min_size(pos2(x, rect.center().y - 9.0), vec2(18.0, 18.0));
     let close = ui.interact(close_rect, egui::Id::new(("dbee-tab-close", tab.id.0)), Sense::click());
     if close.hovered() {
-        p.rect_filled(close_rect, CornerRadius::same(RADIUS), t.border);
+        p.rect_filled(close_rect, CornerRadius::same(RADIUS_CONTROL), t.line);
     }
-    let cross = if tab.active || r.hovered() || close.hovered() { t.text_muted } else { t.border };
+    let cross = if tab.active || r.hovered() || close.hovered() { t.text_muted } else { t.line };
     icons::close(&p, close_rect.shrink(3.0), cross);
     let close = close.on_hover_text("Close (Ctrl+W)");
     tags.tag(&format!("tab-close-{}", tab.id.0), &close);
@@ -485,7 +482,7 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
 
 /// The active tab's body (see the module docs), or a hint when no tab is open.
 fn body(app: &mut DbeeApp, ui: &mut egui::Ui) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let active = app.session.state().active_tab().map(|tab| (tab.id(), matches!(tab, Tab::Query(_))));
     if active.is_none_or(|(_, query)| !query) {
         // The next query tab to become the active one takes the keyboard.
@@ -526,24 +523,5 @@ mod tests {
         assert_eq!(applied_filters(&f(2)), 2);
         assert_eq!(applied_filters(&Condition::Raw("id > 1".into())), 1);
         assert_eq!(applied_filters(&Condition::Raw("  ".into())), 0);
-    }
-
-    #[test]
-    fn text_on_a_connection_colour_stays_readable() {
-        use dbee_config::ConnectionColor as C;
-        for c in [C::Red, C::Orange, C::Yellow, C::Green, C::Blue, C::Purple, C::Gray] {
-            let Some(fill) = connection_color(c) else { continue };
-            let text = readable_on(fill);
-            let lum = |c: Color32| {
-                let lin = |v: u8| {
-                    let v = f64::from(v) / 255.0;
-                    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-                };
-                0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
-            };
-            let (a, b) = (lum(text), lum(fill));
-            let contrast = (a.max(b) + 0.05) / (a.min(b) + 0.05);
-            assert!(contrast >= 3.0, "{c:?}: {contrast}");
-        }
     }
 }

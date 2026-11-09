@@ -37,7 +37,7 @@ use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{self, BAR_H, Paging};
-use crate::theme::{RADIUS, TOKENS};
+use crate::theme::{self, size::RADIUS_CONTROL};
 
 /// The commands that load a page, whose database errors the tab's card shows.
 const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "table.refresh"];
@@ -161,7 +161,7 @@ fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, 
 /// sentence and shows as written; dbee's are phrases.
 fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str, own: Option<&str>) {
     let text = if own == Some(why) { why.to_owned() } else { format!("These rows can't be edited: {why}.") };
-    let r = ui.add(egui::Label::new(RichText::new(text.as_str()).size(12.0).color(TOKENS.text_muted)).truncate());
+    let r = ui.add(egui::Label::new(RichText::new(text.as_str()).size(12.0).color(theme::tokens(ui.ctx()).text_muted)).truncate());
     tags.tag_value("table-note", &r, text.as_str());
 }
 
@@ -189,9 +189,12 @@ fn card_text(t: &TableTab) -> Option<(&'static str, &str, &'static str)> {
 
 /// The tab's card: something failed (see [`card_text`]).
 fn error_card(ui: &mut egui::Ui, tags: &mut Tags, (heading, error, note): (&str, &str, &str)) {
-    let t = TOKENS;
-    let frame =
-        Frame::new().fill(t.card).stroke(Stroke::new(1.0, t.danger)).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(12, 8));
+    let t = theme::tokens(ui.ctx());
+    let frame = Frame::new()
+        .fill(t.card)
+        .stroke(Stroke::new(1.0, t.danger))
+        .corner_radius(CornerRadius::same(RADIUS_CONTROL))
+        .inner_margin(Margin::symmetric(12, 8));
     let r = frame
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -221,7 +224,7 @@ fn add_row(app: &mut DbeeApp) {
 
 /// Draws table tab `id` into `ui` and runs what it asks for.
 pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
     let mut edit: Option<(usize, usize)> = None;
     {

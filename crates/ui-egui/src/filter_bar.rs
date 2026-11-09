@@ -42,7 +42,7 @@ use serde_json::json;
 
 use crate::automation::Tags;
 use crate::icons;
-use crate::theme::{RADIUS, TOKENS};
+use crate::theme::{self, size::RADIUS_CONTROL};
 
 /// The height of every control in a row: the toggle, the choices, the value field and the
 /// buttons.
@@ -102,7 +102,8 @@ fn value_width(available: f32, column: f32, op: f32) -> f32 {
 /// The width an operator choice needs to show its longest label whole, in `ui`'s button font.
 fn op_fit(ui: &egui::Ui) -> f32 {
     let font = TextStyle::Button.resolve(ui.style());
-    let widest = Op::ALL.into_iter().map(|o| ui.painter().layout_no_wrap(op_text(o), font.clone(), TOKENS.text).size().x).fold(0.0, f32::max);
+    let widest =
+        Op::ALL.into_iter().map(|o| ui.painter().layout_no_wrap(op_text(o), font.clone(), theme::tokens(ui.ctx()).text).size().x).fold(0.0, f32::max);
     // One point more than the text, so rounding never cuts the widest label short.
     (widest + ARROW_GAP + ARROW_W + 2.0 * CHOICE_PAD + 1.0).ceil()
 }
@@ -136,7 +137,7 @@ fn apply() -> Run {
 
 /// A square button with an icon; `true` when clicked.
 fn icon_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, hover: &str, selected: bool, icon: impl Fn(&egui::Painter, Rect)) -> bool {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(SQUARE, ROW_H), Sense::click());
     let fill = if selected {
         t.selection
@@ -145,7 +146,7 @@ fn icon_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, hover: &str, select
     } else {
         t.card
     };
-    ui.painter().rect(rect, CornerRadius::same(RADIUS), fill, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, egui::Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
     icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)));
     let r = r.on_hover_text(hover);
     tags.tag_value(id, &r, selected);
@@ -164,13 +165,13 @@ pub(crate) fn show(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags) -> Vec<Run
         }
     });
     if let Some(why) = bar.disabled {
-        ui.label(RichText::new(format!("The filters can't change now: {why}.")).size(11.5).color(TOKENS.text_muted));
+        ui.label(RichText::new(format!("The filters can't change now: {why}.")).size(11.5).color(theme::tokens(ui.ctx()).text_muted));
     }
     runs
 }
 
 fn toggle(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let hover = if bar.raw_mode { "Back to filter rows" } else { "Write a raw WHERE condition" };
     if icon_button(ui, tags, "filter-raw-toggle", hover, bar.raw_mode, |p, r| icons::brackets(p, r, t.text_muted)) {
         runs.push(("table.setFilters", json!({ "rawMode": !bar.raw_mode, "apply": false })));
@@ -178,9 +179,9 @@ fn toggle(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>
 }
 
 fn apply_button(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let enabled = bar.blocked.is_none();
-    let b = Button::new(RichText::new("Apply").color(t.accent_text)).fill(t.accent).min_size(vec2(APPLY_W, ROW_H));
+    let b = Button::new(RichText::new("Apply").color(t.on_ink)).fill(t.ink).min_size(vec2(APPLY_W, ROW_H));
     let r = ui.add_enabled(enabled, b);
     let r = match bar.blocked {
         Some(why) => r.on_disabled_hover_text(format!("Apply the filters: not now, {why}")),
@@ -281,7 +282,7 @@ pub(crate) fn item(ui: &mut egui::Ui, selected: bool, text: &str) -> Response {
 /// [`item`] sensing `sense`: `Sense::CLICK` for a list the keyboard moves through by its own
 /// keys, whose items take no focus.
 pub(crate) fn item_sensing(ui: &mut egui::Ui, selected: bool, text: &str, sense: Sense) -> Response {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let galley = ui.painter().layout_no_wrap(text.to_string(), TextStyle::Button.resolve(ui.style()), t.text);
     let width = ui.available_width().max(galley.size().x + 2.0 * ITEM_PAD);
     let (rect, r) = ui.allocate_exact_size(vec2(width, ITEM_H), sense);
@@ -292,16 +293,16 @@ pub(crate) fn item_sensing(ui: &mut egui::Ui, selected: bool, text: &str, sense:
     } else {
         egui::Color32::TRANSPARENT
     };
-    let stroke = if r.hovered() { egui::Stroke::new(1.0, t.accent) } else { egui::Stroke::NONE };
+    let stroke = if r.hovered() { egui::Stroke::new(1.0, t.ink) } else { egui::Stroke::NONE };
     // The stroke inside the rect: the item's size never changes.
-    ui.painter().rect(rect, CornerRadius::same(RADIUS), fill, stroke, egui::StrokeKind::Inside);
+    ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, stroke, egui::StrokeKind::Inside);
     ui.painter().galley(pos2(rect.left() + ITEM_PAD, rect.center().y - galley.size().y / 2.0), galley, t.text);
     r.widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, text));
     r
 }
 
 fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let blank = || Filter { column: bar.columns.first().map_or_else(String::new, |(name, _)| (*name).to_string()), op: Op::Eq, value: String::new() };
     let rows: Vec<Filter> = if bar.filters.is_empty() { vec![blank()] } else { bar.filters.to_vec() };
     let available = ui.available_width();

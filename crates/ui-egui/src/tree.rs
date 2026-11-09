@@ -41,7 +41,7 @@ use serde_json::json;
 use crate::automation::Tags;
 use crate::connections::line_galley;
 use crate::icons;
-use crate::theme::{RADIUS, TOKENS};
+use crate::theme::{self, size::RADIUS_CONTROL};
 
 /// The height of a row.
 pub const ROW_H: f32 = 22.0;
@@ -200,14 +200,12 @@ pub fn kind_name(kind: RelKind) -> &'static str {
     }
 }
 
-/// The icon and its colour for a relation of `kind`.
-pub fn kind_icon(kind: RelKind) -> (fn(&egui::Painter, Rect, Color32), Color32) {
-    let t = TOKENS;
+/// The icon for a relation of `kind`; every kind draws in `text_muted`.
+pub fn kind_icon(kind: RelKind) -> fn(&egui::Painter, Rect, Color32) {
     match kind {
-        RelKind::Table | RelKind::PartitionedTable => (icons::table, t.icon_table),
-        RelKind::ForeignTable => (icons::table, t.icon_column),
-        RelKind::View => (icons::view, t.icon_view),
-        RelKind::MaterializedView => (icons::materialized_view, t.icon_matview),
+        RelKind::Table | RelKind::PartitionedTable | RelKind::ForeignTable => icons::table,
+        RelKind::View => icons::view,
+        RelKind::MaterializedView => icons::materialized_view,
     }
 }
 
@@ -399,7 +397,7 @@ enum Click {
 /// Draws the tree for `catalog`, read in `dialect`, into `ui` (the filter, the refresh button,
 /// the count and the rows) and returns what the user asked for.
 pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &mut Tree, tags: &mut Tags) -> Vec<TreeAct> {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let mut acts = Vec::new();
     let many = dialect.schema_word().1.to_lowercase();
     ui.horizontal(|ui| {
@@ -415,14 +413,14 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         let enabled = tree.refresh == Refresh::Ready;
         let (rect, r) = ui.allocate_exact_size(vec2(26.0, 26.0), if enabled { Sense::click() } else { Sense::hover() });
         let fill = if enabled && r.hovered() { t.hover } else { Color32::TRANSPARENT };
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), fill);
+        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), fill);
         let icon_rect = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
         match &tree.refresh {
             Refresh::Running => {
                 egui::Spinner::new().size(14.0).color(t.text_muted).paint_at(ui, icon_rect);
             }
             Refresh::Ready => icons::refresh(ui.painter(), icon_rect, t.text_muted),
-            Refresh::Disabled(_) => icons::refresh(ui.painter(), icon_rect, t.border),
+            Refresh::Disabled(_) => icons::refresh(ui.painter(), icon_rect, t.text_faint),
         }
         let r = match &tree.refresh {
             Refresh::Ready => r.on_hover_text(format!("Refresh the {many}")),
@@ -552,7 +550,7 @@ fn draw_row(
     selected: Option<&Selected>,
     tags: &mut Tags,
 ) -> Click {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let Geometry { chevron: chevron_rect, icon: icon_rect, text_left } = Geometry::of(rect, row);
     let r = ui.interact(rect, egui::Id::new(("dbee-tree", id)), Sense::click());
     let is_selected = match (row, selected) {
@@ -570,7 +568,7 @@ fn draw_row(
         Color32::TRANSPARENT
     };
     let p = ui.painter().clone();
-    p.rect_filled(rect.shrink2(vec2(2.0, 0.0)), CornerRadius::same(RADIUS), fill);
+    p.rect_filled(rect.shrink2(vec2(2.0, 0.0)), CornerRadius::same(RADIUS_CONTROL), fill);
     let text_w = |right: f32| (right - text_left).max(1.0);
     let font = FontId::proportional(13.0);
     let label = |text: &str, color: Color32, right: f32| {
@@ -598,7 +596,7 @@ fn draw_row(
         Row::Schema { s, open, tables, system } => {
             let name = catalog.schemas.get(s).map_or("", |x| x.name.as_str());
             icons::chevron(&p, chevron_rect, t.text_muted, open);
-            icons::schema(&p, icon_rect, t.icon_schema);
+            icons::schema(&p, icon_rect, t.text_muted);
             let right = muted_right(&thousands(tables as u64));
             label(name, t.text, right);
             tags.tag_value(id, &r, json!({ "open": open, "tables": tables }));
@@ -609,8 +607,7 @@ fn draw_row(
         Row::Table { s, t: ti, open, .. } => {
             let Some(info) = catalog.schemas.get(s).and_then(|x| x.tables.get(ti)) else { return Click::None };
             icons::chevron(&p, chevron_rect, t.text_muted, open);
-            let (icon, color) = kind_icon(info.kind);
-            icon(&p, icon_rect, color);
+            kind_icon(info.kind)(&p, icon_rect, t.text_muted);
             label(&info.table.name, t.text, rect.right() - 8.0);
             let mut hover = format!("{} · {}", info.table.display(), kind_name(info.kind));
             if let Some(n) = row_estimate(info) {
@@ -642,9 +639,9 @@ fn draw_row(
                 None
             };
             match key {
-                Some("primary") => icons::key_primary(&p, icon_rect, t.key_primary),
-                Some(_) => icons::key_foreign(&p, icon_rect, t.key_foreign),
-                None => icons::column(&p, icon_rect, t.icon_column),
+                Some("primary") => icons::key_primary(&p, icon_rect, t.key),
+                Some(_) => icons::key_foreign(&p, icon_rect, t.text_muted),
+                None => icons::column(&p, icon_rect, t.text_muted),
             }
             let right = muted_right(col.label());
             label(&col.name, t.text, right);

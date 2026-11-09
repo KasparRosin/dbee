@@ -21,7 +21,7 @@
 //!   saying how to run.
 //!
 //! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` in the open connection's
-//! dialect, Postgres's when none is open ([`Tokens::job`], colours [`crate::theme::SqlSyntax`]; a
+//! dialect, Postgres's when none is open ([`Tokens::job`], colours from [`crate::theme::Tokens`]; a
 //! new dialect lexes the text again from scratch), with no soft wrap: a long line scrolls
 //! sideways, so each row of the layout is a line and the gutter's numbers are line numbers. The
 //! text lives in the window, a buffer per tab ([`EditorState`]), so a frame does not copy it: the
@@ -99,7 +99,7 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
-use crate::theme::{RADIUS, SqlSyntax, TOKENS, sql_syntax};
+use crate::theme::{self, size::RADIUS_CONTROL};
 use crate::tree::thousands;
 use crate::{DbeeApp, filter_bar, icons};
 
@@ -232,13 +232,13 @@ fn colour_window(view: Range<usize>) -> Range<usize> {
 }
 
 /// The colour and slant of a token of `kind`; `None` for whitespace, which joins the text before it.
-fn style(kind: TokenKind, syntax: &SqlSyntax, plain: Color32) -> Option<(Color32, bool)> {
+fn style(kind: TokenKind, syntax: &theme::Tokens, plain: Color32) -> Option<(Color32, bool)> {
     Some(match kind {
-        TokenKind::Keyword => (syntax.keyword, false),
-        TokenKind::String => (syntax.string, false),
-        TokenKind::Number | TokenKind::Param => (syntax.number, false),
-        TokenKind::Comment => (syntax.comment, true),
-        TokenKind::QuotedIdent => (syntax.quoted, false),
+        TokenKind::Keyword => (syntax.syn_keyword, false),
+        TokenKind::String => (syntax.syn_string, false),
+        TokenKind::Number | TokenKind::Param => (syntax.syn_number, false),
+        TokenKind::Comment => (syntax.text_muted, true),
+        TokenKind::QuotedIdent => (syntax.syn_literal, false),
         TokenKind::Whitespace => return None,
         TokenKind::Ident | TokenKind::Operator | TokenKind::Semicolon | TokenKind::Other | TokenKind::ExecutableMark => (plain, false),
     })
@@ -401,7 +401,7 @@ impl Tokens {
     /// section per run of the same colour (whitespace joins the run before it), the rest of the
     /// text plain; monospace and unwrapped. Sections that would not cover the text exactly (which
     /// the tokens never make) give one plain section rather than a job egui could not lay out.
-    fn job(&self, lines: Range<usize>, syntax: SqlSyntax, plain: Color32) -> LayoutJob {
+    fn job(&self, lines: Range<usize>, syntax: &theme::Tokens, plain: Color32) -> LayoutJob {
         let text = self.text.as_str();
         let font = FontId::monospace(FONT_SIZE);
         let section = |start: usize, end: usize, color: Color32, italics: bool| LayoutSection {
@@ -435,7 +435,7 @@ impl Tokens {
                 break;
             }
             let (start, end) = (t.range.start.max(from), t.range.end.min(to));
-            push(&mut job, &mut open, start, end, style(t.kind, &syntax, plain));
+            push(&mut job, &mut open, start, end, style(t.kind, syntax, plain));
         }
         if to < text.len() {
             push(&mut job, &mut open, to, text.len(), Some((plain, false)));
@@ -460,7 +460,7 @@ impl Tokens {
 
 /// `text` as a layout job for the editor, every token coloured (see [`Tokens::job`]).
 #[cfg(test)]
-fn highlight(text: &str, syntax: SqlSyntax, plain: Color32) -> LayoutJob {
+fn highlight(text: &str, syntax: &theme::Tokens, plain: Color32) -> LayoutJob {
     let mut tokens = Tokens::default();
     tokens.update(text);
     tokens.job(0..usize::MAX, syntax, plain)
@@ -499,7 +499,7 @@ impl Highlighter {
             return job.clone();
         }
         self.tokens.update(text);
-        let job = self.tokens.job(self.window.clone(), sql_syntax(dark), plain);
+        let job = self.tokens.job(self.window.clone(), if dark { &theme::DARK } else { &theme::LIGHT }, plain);
         self.coloured = job.sections.iter().any(|s| s.format.color != plain);
         self.job = Some((key, job.clone()));
         job
@@ -639,7 +639,7 @@ fn gutter_width(ui: &egui::Ui, lines: usize) -> f32 {
 /// Draws editor `id` over the rest of `ui`: the gutter with the line numbers, then the text in a
 /// scroll area both ways.
 pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let rect = ui.available_rect_before_wrap();
     if ui.memory(|m| m.has_focus(id)) {
         take_tabs(ui);
@@ -660,11 +660,11 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
     let focused = ui.memory(|m| m.has_focus(id));
     let gutter_w = gutter_width(ui, ed.lines);
     let p = ui.painter().clone();
-    p.rect(rect, CornerRadius::same(RADIUS), t.card, Stroke::new(1.0, if focused { t.accent } else { t.border }), StrokeKind::Inside);
+    p.rect(rect, CornerRadius::same(RADIUS_CONTROL), t.card, Stroke::new(1.0, if focused { t.ink } else { t.line_strong }), StrokeKind::Inside);
     let inner = rect.shrink(1.0);
     let gutter = Rect::from_min_max(inner.min, pos2((inner.left() + gutter_w).min(inner.right()), inner.bottom()));
-    p.rect_filled(gutter, CornerRadius { nw: RADIUS, sw: RADIUS, ne: 0, se: 0 }, t.grid_header);
-    p.line_segment([gutter.right_top(), gutter.right_bottom()], Stroke::new(1.0, t.border));
+    p.rect_filled(gutter, CornerRadius { nw: RADIUS_CONTROL, sw: RADIUS_CONTROL, ne: 0, se: 0 }, t.card);
+    p.line_segment([gutter.right_top(), gutter.right_bottom()], Stroke::new(1.0, t.line));
     let text_rect = Rect::from_min_max(pos2(gutter.right() + 1.0, inner.top()), inner.max);
     let mut text_ui = ui.new_child(UiBuilder::new().id_salt(id.with("dbee-editor-area")).max_rect(text_rect).layout(Layout::top_down(Align::Min)));
     let (out, view, offset) = {
@@ -767,12 +767,12 @@ pub(crate) type Queries = HashMap<TabId, QueryState>;
 
 /// A button for the toolbar; true when clicked.
 fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover, why_not): (&str, Option<&str>), main: bool) -> bool {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let enabled = why_not.is_none();
-    let text = if main && enabled { RichText::new(label).color(t.accent_text) } else { RichText::new(label) };
+    let text = if main && enabled { RichText::new(label).color(t.on_ink) } else { RichText::new(label) };
     let mut button = Button::new(text.size(12.5)).min_size(vec2(0.0, BUTTON_H));
     if main && enabled {
-        button = button.fill(t.accent);
+        button = button.fill(t.ink);
     }
     let r = ui.add_enabled(enabled, button);
     let r = match why_not {
@@ -797,7 +797,7 @@ struct Chip<'a> {
 /// it moves when the database changes (a long name is cut, and reads whole on hover). A click
 /// opens the list of `chip.choices` under its heading; returns the one chosen.
 fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<String> {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let (one, many) = chip.word;
     let enabled = chip.why_not.is_none();
     let mut chosen = None;
@@ -805,11 +805,11 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
         let (rect, r) = ui.allocate_exact_size(vec2(CHIP_W, BUTTON_H), Sense::click());
         let p = ui.painter();
         let fill = if enabled && r.hovered() { t.hover } else { t.card };
-        p.rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
         let icon = Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0));
-        icons::schema(p, icon, if enabled { t.icon_schema } else { t.border });
+        icons::schema(p, icon, if enabled { t.text_muted } else { t.text_faint });
         let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(14.0, 14.0));
-        icons::chevron(p, arrow, if enabled { t.text_muted } else { t.border }, true);
+        icons::chevron(p, arrow, if enabled { t.text_muted } else { t.text_faint }, true);
         let none = format!("No {one} chosen");
         let unknown = format!("{} not known", capitalized(one));
         let shown = chip.database.database.as_deref().filter(|_| chip.database.known);
@@ -879,14 +879,17 @@ fn heading(e: &QueryError, kept: usize) -> String {
 /// The error card of `e`, a run that kept `kept` results; `at` is the line and column of its
 /// position in the editor's text. True when a click on it asks to go to the error's position.
 fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: usize, at: Option<(usize, usize)>) -> bool {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let cancelled = e.code == "cancelled";
-    let (stroke, ink) = if cancelled { (t.border, t.text) } else { (t.danger, t.danger) };
+    let (stroke, ink) = if cancelled { (t.line, t.text) } else { (t.danger, t.danger) };
     let jump = at.is_some();
     let title = heading(e, kept);
     let note = (e.meaning == Some(Meaning::TransactionAborted)).then_some(ROLLBACK_NOTE);
-    let frame =
-        Frame::new().fill(t.card).stroke(Stroke::new(1.0, stroke)).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(12, 8));
+    let frame = Frame::new()
+        .fill(t.card)
+        .stroke(Stroke::new(1.0, stroke))
+        .corner_radius(CornerRadius::same(RADIUS_CONTROL))
+        .inner_margin(Margin::symmetric(12, 8));
     let label = |ui: &mut egui::Ui, text: RichText| ui.add(Label::new(text).wrap().selectable(!jump));
     let r = frame
         .show(ui, |ui| {
@@ -975,7 +978,7 @@ fn selector_fit(results: usize, shown: usize, room: f32, label_w: f32) -> Select
 /// The results selector, `room` points wide: one button per result, `n` from 1 (with more than
 /// fit, those around the shown one, and a `…` listing every result); the index of the one chosen.
 fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], shown: usize, room: f32) -> Option<usize> {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let mut picked = None;
     let muted = |text: &str| RichText::new(text).size(12.0).color(t.text_muted);
     let label = |ui: &mut egui::Ui, text: &str| ui.add(Label::new(muted(text)).selectable(false));
@@ -1029,7 +1032,7 @@ fn editor_height(h: f32, split: f32) -> f32 {
 
 /// Draws query tab `id` into `ui` and runs what it asks for.
 pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
     let mut set_text: Option<String> = None;
     {
@@ -1065,7 +1068,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
         }
         let split_rect = split_at(editor_h);
-        let grip = if split.hovered() || split.dragged() { t.text_muted } else { t.border };
+        let grip = if split.hovered() || split.dragged() { t.text_muted } else { t.line };
         let c = split_rect.center();
         ui.painter().line_segment([pos2(c.x - 18.0, c.y), pos2(c.x + 18.0, c.y)], Stroke::new(2.0, grip));
         tags.tag_value(SPLIT, &split, f64::from(view.query_split));
@@ -1165,7 +1168,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 tags.tag_value(ROWS, &r, text.as_str());
             }
         }
-        ui.painter().line_segment([bar_rect.left_bottom(), bar_rect.right_bottom()], Stroke::new(1.0, t.border));
+        ui.painter().line_segment([bar_rect.left_bottom(), bar_rect.right_bottom()], Stroke::new(1.0, t.line));
         // The card, then the results.
         let rest = Rect::from_min_max(pos2(full.left(), bar_rect.bottom() + 6.0), full.max);
         let mut rest_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-results", id.0)).max_rect(rest).layout(Layout::top_down(Align::Min)));
@@ -1485,7 +1488,7 @@ mod tests {
             ed.set_dialect(dialect);
             let job = ed.highlight.job(text, false, plain);
             assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(dialect, text).as_slice(), "{dialect:?}");
-            let comment = (crate::theme::SQL_LIGHT.comment, true);
+            let comment = (crate::theme::LIGHT.text_muted, true);
             assert_eq!(colour_at(&job, note) == comment, dialect == Dialect::MySql, "{dialect:?}: the job follows the dialect");
         }
     }
@@ -1516,7 +1519,7 @@ mod tests {
 
     #[test]
     fn only_the_lines_near_the_view_are_coloured() {
-        let syntax = crate::theme::SQL_LIGHT;
+        let syntax = &crate::theme::LIGHT;
         let plain = Color32::BLACK;
         let text = "select 1;\n".repeat(1000);
         let mut tokens = Tokens::default();
@@ -1524,8 +1527,8 @@ mod tests {
         let job = tokens.job(128..256, syntax, plain);
         let line = |n: usize| n * "select 1;\n".len();
         assert_eq!(colour_at(&job, line(0)), (plain, false), "before the window");
-        assert_eq!(colour_at(&job, line(128)), (syntax.keyword, false));
-        assert_eq!(colour_at(&job, line(255) + 7), (syntax.number, false));
+        assert_eq!(colour_at(&job, line(128)), (syntax.syn_keyword, false));
+        assert_eq!(colour_at(&job, line(255) + 7), (syntax.syn_number, false));
         assert_eq!(colour_at(&job, line(256)), (plain, false), "after the window");
         assert!(job.sections.len() < 2 * 128 * 3, "{} sections", job.sections.len());
         // The window moves in whole chunks: a few lines of scrolling keep it.
@@ -1560,21 +1563,21 @@ mod tests {
 
     #[test]
     fn highlighting_colours_tokens_and_covers_the_text() {
-        let syntax = crate::theme::SQL_LIGHT;
+        let syntax = &crate::theme::LIGHT;
         let plain = Color32::BLACK;
         let text = "SELECT a, \"Odd\" FROM t WHERE x = 'it''s' AND y > 4.5 -- why\n/* block */ $1";
         let job = highlight(text, syntax, plain);
         assert_eq!(job.text, text);
         let at = |needle: &str| colour_at(&job, text.find(needle).unwrap());
-        assert_eq!(at("SELECT"), (syntax.keyword, false));
-        assert_eq!(at("WHERE"), (syntax.keyword, false));
+        assert_eq!(at("SELECT"), (syntax.syn_keyword, false));
+        assert_eq!(at("WHERE"), (syntax.syn_keyword, false));
         assert_eq!(at("a,"), (plain, false));
-        assert_eq!(at("\"Odd\""), (syntax.quoted, false));
-        assert_eq!(at("'it"), (syntax.string, false));
-        assert_eq!(at("4.5"), (syntax.number, false));
-        assert_eq!(at("-- why"), (syntax.comment, true));
-        assert_eq!(at("/* block"), (syntax.comment, true));
-        assert_eq!(at("$1"), (syntax.number, false));
+        assert_eq!(at("\"Odd\""), (syntax.syn_literal, false));
+        assert_eq!(at("'it"), (syntax.syn_string, false));
+        assert_eq!(at("4.5"), (syntax.syn_number, false));
+        assert_eq!(at("-- why"), (syntax.text_muted, true));
+        assert_eq!(at("/* block"), (syntax.text_muted, true));
+        assert_eq!(at("$1"), (syntax.syn_number, false));
         // Contiguous sections over the whole text, none empty, no two alike side by side.
         let mut end = 0;
         for pair in job.sections.windows(2) {

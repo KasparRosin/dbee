@@ -25,7 +25,7 @@ use crate::automation::Tags;
 use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
 use crate::filter_bar;
 use crate::picker::Pick;
-use crate::theme::{RADIUS, TOKENS, connection_color};
+use crate::theme::{self, connection_color, size::RADIUS_CONTROL};
 
 /// The height of a label above a field.
 const LABEL_H: f32 = 16.0;
@@ -280,7 +280,7 @@ fn column<R>(ui: &mut egui::Ui, width: f32, label: &str, add: impl FnOnce(&mut e
     ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
         let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
-        ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), TOKENS.text_muted);
+        ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), theme::tokens(ui.ctx()).text_muted);
         add(ui)
     })
     .inner
@@ -300,10 +300,13 @@ fn column_noted<R>(
     ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
         let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
-        let shown = ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), TOKENS.text_muted);
+        let shown =
+            ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, label, FontId::proportional(12.0), theme::tokens(ui.ctx()).text_muted);
         let room = Rect::from_min_max(pos2((shown.right() + 8.0).min(rect.right()), rect.top()), rect.max);
         let note_ui = UiBuilder::new().max_rect(room).layout(Layout::left_to_right(Align::Center));
-        let r = ui.scope_builder(note_ui, |ui| ui.add(Label::new(RichText::new(note).size(12.0).color(TOKENS.text_muted)).truncate())).inner;
+        let r = ui
+            .scope_builder(note_ui, |ui| ui.add(Label::new(RichText::new(note).size(12.0).color(theme::tokens(ui.ctx()).text_muted)).truncate()))
+            .inner;
         tags.tag_value(id, &r, note);
         add(ui, tags)
     })
@@ -337,9 +340,9 @@ fn segments<T: Copy + PartialEq>(ui: &mut egui::Ui, tags: &mut Tags, id: &str, v
     let n = options.len().max(1) as f32;
     let gap = 4.0;
     let each = ((width - gap * (n - 1.0)) / n).max(20.0);
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let frame = Rect::from_min_size(ui.cursor().min, vec2(width, FIELD_H));
-    ui.painter().rect(frame, CornerRadius::same(RADIUS), t.card, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    ui.painter().rect(frame, CornerRadius::same(RADIUS_CONTROL), t.card, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
     let row = ui.allocate_ui_with_layout(vec2(width, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = gap;
         for (option, label, name) in options {
@@ -356,10 +359,10 @@ fn segments<T: Copy + PartialEq>(ui: &mut egui::Ui, tags: &mut Tags, id: &str, v
 
 /// A read-only path box (`id`) with the path it shows.
 fn path_box(ui: &mut egui::Ui, tags: &mut Tags, id: &str, width: f32, path: Option<&Path>, waiting: bool) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
     let p = ui.painter();
-    p.rect(rect, CornerRadius::same(RADIUS), t.panel, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+    p.rect(rect, CornerRadius::same(RADIUS_CONTROL), t.bg, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
     let shown = path.map(|p| tilde(&p.display().to_string()));
     let (text, color) = if waiting {
         ("Waiting for the file picker…".to_string(), t.text_muted)
@@ -395,7 +398,7 @@ const TITLE_MIN_W: f32 = 160.0;
 /// `text` in `font`, cut to `width` with "…" (then the whole text shows on hover), in a slot of
 /// that width, on its left or its `right`; tagged `id` with `value`.
 fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, font): (&str, FontId), value: &str, width: f32, right: bool) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let galley = line_galley(ui, text, font, t.text, width);
     let elided = galley.elided;
     let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
@@ -411,7 +414,7 @@ fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, font): (&str, F
 /// would leave the title less than [`TITLE_MIN_W`], the type and Change engine take a row of their
 /// own under it, Change engine under Fill from URL.
 pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let kind_font = FontId::proportional(15.0);
     let change = form && !conn.form.engine_fixed;
     // As wide as the widest type's name, so the layout is the same whichever type the form has.
@@ -503,7 +506,7 @@ fn picking(conn: &ConnScreen) -> Option<Pick> {
 
 /// Name and colour.
 fn name_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let colors: [(ConnectionColor, &str); 8] = [
         (ConnectionColor::None, "none"),
         (ConnectionColor::Red, "red"),
@@ -531,11 +534,11 @@ fn name_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
                             p.circle_filled(rect.center(), dot / 2.0 - 2.0, c);
                         }
                         None => {
-                            p.circle_stroke(rect.center(), dot / 2.0 - 3.0, Stroke::new(1.5, t.border));
+                            p.circle_stroke(rect.center(), dot / 2.0 - 3.0, Stroke::new(1.5, t.line_strong));
                         }
                     }
                     if chosen || r.hovered() {
-                        p.circle_stroke(rect.center(), dot / 2.0, Stroke::new(1.5, if chosen { t.text } else { t.border }));
+                        p.circle_stroke(rect.center(), dot / 2.0, Stroke::new(1.5, if chosen { t.text } else { t.line_strong }));
                     }
                     let r = r.on_hover_text(name);
                     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, chosen, name));
@@ -553,7 +556,7 @@ fn name_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
 
 /// Host and port, user and password, "Save passwords", and the database.
 fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let has_store = conn.has_store;
     let f = &mut conn.form;
     ui.horizontal_top(|ui| {
@@ -818,82 +821,85 @@ fn read_only_and_options(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f3
         }
     });
     if f.read_only {
-        let r = ui.add(Label::new(RichText::new(READ_ONLY_NOTE).size(12.0).color(TOKENS.text_muted)).wrap());
+        let r = ui.add(Label::new(RichText::new(READ_ONLY_NOTE).size(12.0).color(theme::tokens(ui.ctx()).text_muted)).wrap());
         tags.tag_value("conn-readonly-note", &r, READ_ONLY_NOTE);
     }
 }
 
 /// The SSH tunnel: on or off, then host, port, user, the login and what it will use.
 fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let picking = picking(conn);
     let ConnScreen { form: f, key, .. } = conn;
-    Frame::new().fill(t.panel).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::same(10)).show(ui, |ui| {
-        let w = w - 20.0;
-        ui.set_width(w);
-        ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
-            let r = ui.checkbox(&mut f.ssh_on, RichText::new("SSH tunnel").strong());
-            tags.tag_value("conn-ssh-on", &r, f.ssh_on);
-        });
-        if !f.ssh_on {
-            return;
-        }
-        ui.add_space(4.0);
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = GAP;
-            column(ui, w - PORT_W - GAP, "SSH host", |ui| text_field(ui, tags, "conn-ssh-host", &mut f.ssh_host, "bastion.example.com"));
-            column(ui, PORT_W, "SSH port", |ui| text_field(ui, tags, "conn-ssh-port", &mut f.ssh_port, "22"));
-        });
-        column(ui, w, "SSH user", |ui| text_field(ui, tags, "conn-ssh-user", &mut f.ssh_user, ""));
-        let auths = [(Auth::Key, "Key", "key"), (Auth::Agent, "Agent", "agent"), (Auth::Password, "Password", "password")];
-        column(ui, w, "Login", |ui| segments(ui, tags, "conn-ssh-auth", &mut f.ssh_auth, &auths, w));
-        // What the login will use: one fixed slot for every choice.
-        ui.add_space(2.0);
-        ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let button_w = 92.0;
-            let line_w = w - 2.0 * (button_w + 6.0);
-            let waiting = picking == Some(Pick::Key);
-            let wanted = f.ssh_auth();
-            let (text, color) = if waiting {
-                ("Waiting for the file picker…".to_string(), t.text_muted)
-            } else if key.for_auth.as_ref() == Some(&wanted) {
-                (key.text.clone(), t.text)
-            } else {
-                ("Looking for the key…".to_string(), t.text_muted)
-            };
-            let (rect, r) = ui.allocate_exact_size(vec2(line_w, FIELD_H), Sense::hover());
-            let galley = line_galley(ui, &text, FontId::proportional(13.0), color, line_w);
-            ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
-            let r = if text.chars().count() > 50 { r.on_hover_text(text.as_str()) } else { r };
-            tags.tag_value("conn-ssh-key", &r, text.as_str());
-            if f.ssh_auth == Auth::Key {
-                let change = ui.add_enabled(
-                    picking.is_none() || waiting,
-                    Button::new(if waiting { "Stop" } else { "Change…" }).min_size(vec2(button_w, FIELD_H)),
-                );
-                tags.tag("conn-ssh-change", &change);
-                if change.clicked() {
-                    acts.push(if waiting { Act::StopPicking } else { Act::Pick(Pick::Key) });
-                }
-                if f.ssh_key.is_some() {
-                    let auto = ui
-                        .add(Button::new("Automatic").min_size(vec2(button_w, FIELD_H)))
-                        .on_hover_text("Use the agent, then ~/.ssh/id_ed25519, id_ecdsa or id_rsa");
-                    tags.tag("conn-ssh-auto", &auto);
-                    if auto.clicked() {
-                        acts.push(Act::AutoKey);
+    Frame::new().fill(t.bg).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(RADIUS_CONTROL)).inner_margin(Margin::same(10)).show(
+        ui,
+        |ui| {
+            let w = w - 20.0;
+            ui.set_width(w);
+            ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
+                let r = ui.checkbox(&mut f.ssh_on, RichText::new("SSH tunnel").strong());
+                tags.tag_value("conn-ssh-on", &r, f.ssh_on);
+            });
+            if !f.ssh_on {
+                return;
+            }
+            ui.add_space(4.0);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                column(ui, w - PORT_W - GAP, "SSH host", |ui| text_field(ui, tags, "conn-ssh-host", &mut f.ssh_host, "bastion.example.com"));
+                column(ui, PORT_W, "SSH port", |ui| text_field(ui, tags, "conn-ssh-port", &mut f.ssh_port, "22"));
+            });
+            column(ui, w, "SSH user", |ui| text_field(ui, tags, "conn-ssh-user", &mut f.ssh_user, ""));
+            let auths = [(Auth::Key, "Key", "key"), (Auth::Agent, "Agent", "agent"), (Auth::Password, "Password", "password")];
+            column(ui, w, "Login", |ui| segments(ui, tags, "conn-ssh-auth", &mut f.ssh_auth, &auths, w));
+            // What the login will use: one fixed slot for every choice.
+            ui.add_space(2.0);
+            ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let button_w = 92.0;
+                let line_w = w - 2.0 * (button_w + 6.0);
+                let waiting = picking == Some(Pick::Key);
+                let wanted = f.ssh_auth();
+                let (text, color) = if waiting {
+                    ("Waiting for the file picker…".to_string(), t.text_muted)
+                } else if key.for_auth.as_ref() == Some(&wanted) {
+                    (key.text.clone(), t.text)
+                } else {
+                    ("Looking for the key…".to_string(), t.text_muted)
+                };
+                let (rect, r) = ui.allocate_exact_size(vec2(line_w, FIELD_H), Sense::hover());
+                let galley = line_galley(ui, &text, FontId::proportional(13.0), color, line_w);
+                ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
+                let r = if text.chars().count() > 50 { r.on_hover_text(text.as_str()) } else { r };
+                tags.tag_value("conn-ssh-key", &r, text.as_str());
+                if f.ssh_auth == Auth::Key {
+                    let change = ui.add_enabled(
+                        picking.is_none() || waiting,
+                        Button::new(if waiting { "Stop" } else { "Change…" }).min_size(vec2(button_w, FIELD_H)),
+                    );
+                    tags.tag("conn-ssh-change", &change);
+                    if change.clicked() {
+                        acts.push(if waiting { Act::StopPicking } else { Act::Pick(Pick::Key) });
+                    }
+                    if f.ssh_key.is_some() {
+                        let auto = ui
+                            .add(Button::new("Automatic").min_size(vec2(button_w, FIELD_H)))
+                            .on_hover_text("Use the agent, then ~/.ssh/id_ed25519, id_ecdsa or id_rsa");
+                        tags.tag("conn-ssh-auto", &auto);
+                        if auto.clicked() {
+                            acts.push(Act::AutoKey);
+                        }
                     }
                 }
-            }
-        });
-    });
+            });
+        },
+    );
 }
 
 /// Save · Test · Connect, `w` wide, then the reserved slot under them for an error, a result or
 /// a note.
 fn footer(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = TOKENS;
+    let t = theme::tokens(ui.ctx());
     let running = conn.running.map(|(_, kind)| kind);
     ui.allocate_ui_with_layout(vec2(w, 32.0), Layout::left_to_right(Align::Center), |ui| {
         let save = ui.add(Button::new("Save").min_size(vec2(88.0, 30.0)));
@@ -903,7 +909,7 @@ fn footer(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let label = if running == Some(Running::Connect) { "Connecting…" } else { "Connect" };
-            let connect = Button::new(RichText::new(label).color(t.accent_text)).fill(t.accent).min_size(vec2(112.0, 30.0));
+            let connect = Button::new(RichText::new(label).color(t.on_ink)).fill(t.ink).min_size(vec2(112.0, 30.0));
             let connect = ui.add_enabled(running.is_none(), connect);
             tags.tag_value("conn-connect", &connect, label);
             if connect.clicked() {
@@ -924,9 +930,9 @@ fn footer(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<
         let (color, tint, id) = match m.kind {
             Kind::Error => (t.danger, t.danger.gamma_multiply(0.08), "conn-error"),
             Kind::Result => (t.success, t.success.gamma_multiply(0.08), "conn-result"),
-            Kind::Note => (t.text_muted, t.panel, "conn-note"),
+            Kind::Note => (t.text_muted, t.bg, "conn-note"),
         };
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS), tint);
+        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), tint);
         let mut inner = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 6.0))).layout(Layout::top_down(Align::Min)));
         ScrollArea::vertical().id_salt("conn-message").max_height(MESSAGE_H - 12.0).auto_shrink([false, true]).show(&mut inner, |ui| {
             ui.add(Label::new(RichText::new(m.text.as_str()).color(color)).wrap().selectable(true));
