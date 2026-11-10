@@ -263,16 +263,22 @@ fn choice<R>(
         s.icon_spacing = ARROW_GAP;
         s.button_padding = vec2(CHOICE_PAD, ((ROW_H - text_h) / 2.0).max(0.0));
         s.interact_size.y = ROW_H;
-        ComboBox::from_id_salt(salt).selected_text(text).width(width).height(list_h).wrap_mode(TextWrapMode::Truncate).show_ui(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = ITEM_GAP;
-            list(ui)
-        })
+        ComboBox::from_id_salt(salt)
+            .selected_text(text)
+            .width(width)
+            .height(list_h)
+            .wrap_mode(TextWrapMode::Truncate)
+            .popup_style(theme::popup_style(ui.ctx()))
+            .show_ui(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = ITEM_GAP;
+                list(ui)
+            })
     })
     .inner
 }
 
-/// An item of a choice's list reading `text`, marked when `selected`. It is [`ITEM_H`] tall, and
-/// as wide as the list or its text, whether hovered, pressed or not, so the list never moves
+/// An item of a list on `raised` reading `text`, marked when `selected`. It is [`ITEM_H`] tall,
+/// and as wide as the list or its text, whether hovered, pressed or not, so the list never moves
 /// under the pointer.
 pub(crate) fn item(ui: &mut egui::Ui, selected: bool, text: &str) -> Response {
     item_sensing(ui, selected, text, Sense::click())
@@ -285,13 +291,7 @@ pub(crate) fn item_sensing(ui: &mut egui::Ui, selected: bool, text: &str, sense:
     let galley = ui.painter().layout_job(Text::Button.job(text, t.text));
     let width = ui.available_width().max(galley.size().x + 2.0 * ITEM_PAD);
     let (rect, r) = ui.allocate_exact_size(vec2(width, ITEM_H), sense);
-    let fill = if selected {
-        t.selection
-    } else if r.hovered() {
-        t.hover
-    } else {
-        egui::Color32::TRANSPARENT
-    };
+    let fill = if selected || r.hovered() { t.raised_hover } else { egui::Color32::TRANSPARENT };
     let stroke = if r.hovered() { egui::Stroke::new(1.0, t.ink) } else { egui::Stroke::NONE };
     // The stroke inside the rect: the item's size never changes.
     ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, stroke, egui::StrokeKind::Inside);

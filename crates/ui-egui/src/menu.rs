@@ -15,7 +15,7 @@
 
 use dbee_engine::{CommandInfo, Json};
 use egui::Button;
-use egui::containers::menu::{MenuBar, MenuButton};
+use egui::containers::menu::{MenuBar, MenuButton, MenuConfig};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -50,7 +50,7 @@ pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let mut chosen: Option<&'static str> = None;
     let checked = crate::ui_commands::theme_id(app.theme_choice);
     let tags = &mut app.tags;
-    MenuBar::new().ui(ui, |ui| {
+    MenuBar::new().config(MenuConfig::new().style(crate::theme::popup_style(ui.ctx()))).ui(ui, |ui| {
         for top in tops(&commands) {
             let (r, _) = MenuButton::new(top).ui(ui, |ui| {
                 ui.set_min_width(260.0);

@@ -59,6 +59,110 @@ fn every_screen_in_dark_paints_no_light_ground() {
     assert_dark(&ui, "a confirm dialog");
 }
 
+/// `top` (premultiplied, as egui keeps it) laid over an opaque `ground`.
+fn over(top: egui::Color32, ground: egui::Color32) -> egui::Color32 {
+    let a = f32::from(top.a()) / 255.0;
+    let mix = |t: u8, g: u8| (f32::from(t) + f32::from(g) * (1.0 - a)).round() as u8;
+    egui::Color32::from_rgb(mix(top.r(), ground.r()), mix(top.g(), ground.g()), mix(top.b(), ground.b()))
+}
+
+/// The rect of automation entry `id`, drawn in a frame run for it; that frame is the last one.
+fn rect_of(ui: &mut Ui, id: &str) -> egui::Rect {
+    let tag = ui.tag(id).unwrap_or_else(|| panic!("no widget `{id}`"));
+    let f = |i: usize| tag["rect"][i].as_f64().unwrap() as f32;
+    egui::Rect::from_min_size(egui::pos2(f(0), f(1)), egui::vec2(f(2), f(3)))
+}
+
+/// The fills of the rects the last frame drew within `within`, over its centre.
+fn fills_in(ui: &Ui, within: egui::Rect) -> Vec<egui::Color32> {
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if within.expand(1.0).contains_rect(r.rect) && r.rect.contains(within.center()) => Some(r.fill),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Automation entry `id` is drawn on `raised_hover`, which shows over `raised`.
+fn assert_marked(ui: &mut Ui, id: &str) {
+    let d = dbee_ui_egui::theme::DARK;
+    let rect = rect_of(ui, id);
+    let fills = fills_in(ui, rect);
+    assert!(fills.contains(&d.raised_hover), "{id}: fills {fills:?}, not raised_hover");
+    assert_ne!(over(d.raised_hover, d.raised), d.raised);
+}
+
+#[test]
+fn popups_mark_hovered_and_chosen_items_and_draw_lines_on_raised_in_dark() {
+    let db = dbee_testkit::require_testdb!();
+    let d = dbee_ui_egui::theme::DARK;
+
+    // A menu: the entry under the pointer, and a submenu's button while it is open.
+    let mut ui = Ui::connected(db);
+    dark(&mut ui);
+    ui.click("menu-View");
+    ui.frame();
+    let entry = rect_of(&mut ui, "menu-ui.toggleValuePanel");
+    ui.hover(entry.center());
+    assert_marked(&mut ui, "menu-ui.toggleValuePanel");
+    let theme = rect_of(&mut ui, "menu-View-Theme");
+    ui.hover(theme.center());
+    ui.frame();
+    let light = rect_of(&mut ui, "menu-ui.themeLight");
+    ui.hover(light.center());
+    assert_marked(&mut ui, "menu-ui.themeLight");
+    assert_marked(&mut ui, "menu-View-Theme");
+    ui.key("Escape");
+    ui.frame();
+
+    // A list: the chosen column.
+    ui.open("shop", "orders");
+    ui.until("the grid", |ui| ui.tag("grid-cell-0-1").is_some());
+    let chosen = ui.value("filter-0-column");
+    ui.click("filter-0-column");
+    ui.frame();
+    assert_marked(&mut ui, &format!("filter-0-column-{}", chosen.as_str().unwrap()));
+    ui.key("Escape");
+    ui.frame();
+
+    // The grid's menu: its two lines.
+    ui.right_click("grid-cell-0-1");
+    ui.frame();
+    let (top, copy, bottom) = (rect_of(&mut ui, "grid-menu-null"), rect_of(&mut ui, "grid-menu-copy"), rect_of(&mut ui, "grid-menu-delete"));
+    let lines: Vec<egui::Color32> = ui
+        .shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            // Across the menu, as wide as its entries (the grid's lines under it are a cell wide).
+            egui::Shape::LineSegment { points: [a, b], stroke }
+                if (a.y - b.y).abs() < 0.5
+                    && a.y > top.top()
+                    && a.y < bottom.bottom()
+                    && ((a.x - b.x).abs() - copy.width()).abs() < 2.0
+                    && (a.x.min(b.x) - copy.left()).abs() < 2.0 =>
+            {
+                Some(stroke.color)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, [d.raised_line, d.raised_line], "the menu's lines");
+    drop(ui);
+
+    // The connection form's database list: the row the keyboard moved to.
+    let mut ui = Ui::fresh(APP_SIZE);
+    dark(&mut ui);
+    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
+    ui.frame();
+    ui.click(&format!("conn-saved-{id}"));
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| ui.tag("conn-database-item-1").is_some());
+    ui.key("ArrowDown");
+    ui.frame();
+    assert_marked(&mut ui, "conn-database-item-1");
+}
+
 #[test]
 fn a_dialog_sits_on_card_over_the_scrim() {
     let db = dbee_testkit::require_testdb!();

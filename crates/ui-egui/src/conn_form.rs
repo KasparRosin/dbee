@@ -707,6 +707,7 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
                 .sense(Sense::CLICK)
                 .align(RectAlign::BOTTOM_START)
                 .width(field_w)
+                .style(theme::popup_style(ui.ctx()))
                 .show(|ui| {
                     ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
                     let shown = scroll.show_rows(ui, filter_bar::ITEM_H, names.len(), |ui, rows| {

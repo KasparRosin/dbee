@@ -492,7 +492,7 @@ impl Grid<'_> {
                         if primary_down && pointer.is_some_and(|p| resp.rect.contains(p)) {
                             drag_over = Some(here);
                         }
-                        resp.context_menu(|ui| self.menu(ui, here, tags, &mut acts));
+                        egui::Popup::context_menu(resp).style(theme::popup_style(&resp.ctx)).show(|ui| self.menu(ui, here, tags, &mut acts));
                     }
                 });
             });

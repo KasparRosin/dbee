@@ -882,7 +882,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     if r.double_clicked() {
         acts.push(Act::Connect(c.clone()));
     }
-    r.context_menu(|ui| {
+    egui::Popup::context_menu(&r).style(theme::popup_style(&r.ctx)).show(|ui| {
         let items =
             [("Connect", "conn-menu-connect"), ("Edit", "conn-menu-edit"), ("Duplicate", "conn-menu-duplicate"), ("Delete", "conn-menu-delete")];
         for (label, item) in items {

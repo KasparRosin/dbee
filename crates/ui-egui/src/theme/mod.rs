@@ -69,6 +69,22 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
 }
 
+/// The style of every popup on `raised` (menus, context menus, lists) in the mode `ctx` draws in:
+/// egui's menu look, with a hovered, pressed, open or chosen item on `raised_hover` and lines in
+/// `raised_line`, since `hover`, `selection` and `line` don't show on `raised` in dark.
+pub fn popup_style(ctx: &egui::Context) -> egui::style::StyleModifier {
+    let t = tokens(ctx);
+    egui::style::StyleModifier::new(move |style| {
+        egui::containers::menu::menu_style(style);
+        let v = &mut style.visuals;
+        for state in [&mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+            state.weak_bg_fill = t.raised_hover;
+        }
+        v.widgets.noninteractive.bg_stroke.color = t.raised_line;
+        v.selection.bg_fill = t.raised_hover;
+    })
+}
+
 /// Applies the theme to `ctx`: fonts, and both modes' styles from [`LIGHT`] and [`DARK`].
 pub fn apply(ctx: &egui::Context) {
     ctx.set_fonts(fonts::definitions());
