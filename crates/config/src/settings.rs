@@ -1,7 +1,7 @@
 //! The settings file beside the connections file: `{"version": 1, "theme": "dark"}`.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::store::{private_dir, replace_private_file};
 
@@ -50,19 +50,50 @@ pub fn load_theme(dir: Option<&Path>) -> ThemeChoice {
     map.get("theme").and_then(|v| v.as_str()).and_then(ThemeChoice::parse).unwrap_or_default()
 }
 
-/// Saves it, keeping the file's other fields. `None` writes nothing. A newer dbee's file is left alone, and is an error.
-pub fn save_theme(dir: Option<&Path>, theme: ThemeChoice) -> std::io::Result<()> {
+/// Why a choice wasn't saved; each names the settings file.
+#[derive(Debug)]
+pub enum SaveError {
+    /// A newer dbee wrote the file, which is left as it is.
+    Newer(PathBuf),
+    /// The file, or the folder it goes in, couldn't be written.
+    Io(PathBuf, std::io::Error),
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Newer(file) => write!(f, "a newer dbee wrote {}, so it isn't changed", file.display()),
+            Self::Io(file, e) => write!(f, "could not write {}: {e}", file.display()),
+        }
+    }
+}
+
+impl std::error::Error for SaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Newer(_) => None,
+            Self::Io(_, e) => Some(e),
+        }
+    }
+}
+
+/// Saves it, keeping the file's other fields. `None` writes nothing. A newer dbee's file, or one
+/// whose version isn't a whole number, is left alone, and is an error.
+pub fn save_theme(dir: Option<&Path>, theme: ThemeChoice) -> Result<(), SaveError> {
     let Some(dir) = dir else { return Ok(()) };
+    let file = dir.join(SETTINGS_FILE);
     let mut map = read_object(dir).unwrap_or_default();
-    if map.get("version").and_then(|v| v.as_u64()).is_some_and(|v| v > u64::from(SETTINGS_VERSION)) {
-        return Err(std::io::Error::other("A newer dbee wrote the settings file, so this choice won't be saved."));
+    if map.get("version").is_some_and(|v| v.as_u64().is_none_or(|n| n > u64::from(SETTINGS_VERSION))) {
+        return Err(SaveError::Newer(file));
     }
     map.insert("version".into(), SETTINGS_VERSION.into());
     map.insert("theme".into(), theme.as_str().into());
-    let mut bytes = serde_json::to_vec_pretty(&map).map_err(std::io::Error::other)?;
-    bytes.push(b'\n');
-    private_dir(dir)?;
-    replace_private_file(&dir.join(SETTINGS_FILE), &bytes)
+    let written = serde_json::to_vec_pretty(&map).map_err(std::io::Error::other).and_then(|mut bytes| {
+        bytes.push(b'\n');
+        private_dir(dir)?;
+        replace_private_file(&file, &bytes)
+    });
+    written.map_err(|e| SaveError::Io(file, e))
 }
 
 #[cfg(test)]
@@ -138,8 +169,21 @@ mod tests {
         write(&th.home, text);
         assert_eq!(load_theme(Some(&th.home)), ThemeChoice::Dark);
         let err = save_theme(Some(&th.home), ThemeChoice::Light).unwrap_err();
-        assert!(err.to_string().contains("A newer dbee wrote the settings file"));
+        assert!(matches!(&err, SaveError::Newer(file) if *file == th.home.join(SETTINGS_FILE)), "{err:?}");
         assert_eq!(read(&th.home), text);
+    }
+
+    #[test]
+    fn a_version_that_is_no_whole_number_counts_as_newer() {
+        let th = dbee_testkit::temp_home(None, None);
+        for text in [r#"{"version":"2","theme":"dark"}"#, r#"{"version":2.0}"#, r#"{"version":1.5}"#, r#"{"version":-1}"#, r#"{"version":null}"#] {
+            write(&th.home, text);
+            assert!(matches!(save_theme(Some(&th.home), ThemeChoice::Light), Err(SaveError::Newer(_))), "{text}");
+            assert_eq!(read(&th.home), text, "left as it is");
+        }
+        write(&th.home, r#"{"version":1}"#);
+        save_theme(Some(&th.home), ThemeChoice::Light).unwrap();
+        assert_eq!(load_theme(Some(&th.home)), ThemeChoice::Light);
     }
 
     #[cfg(unix)]

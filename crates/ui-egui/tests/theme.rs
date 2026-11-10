@@ -355,10 +355,54 @@ fn a_choice_that_cannot_be_saved_still_applies_and_says_so() {
     assert_eq!(ui.execute("ui.themeDark", json!({}))["mode"], "dark");
     ui.frame();
     assert_eq!(ui.harness.ctx.theme(), egui::Theme::Dark);
-    let notice = ui.value("notice");
-    let notice = notice.as_str().unwrap();
-    assert!(notice.starts_with("The theme is set for now, but it couldn't be saved: "), "{notice}");
+    let settings = file.join("settings.json");
+    let words = format!(
+        "The theme is set for now, but it couldn't be saved in {} (File exists): check that you can write to {}.",
+        settings.display(),
+        file.display()
+    );
+    assert_eq!(ui.value("notice"), json!(words));
     let _ = std::fs::remove_file(file);
+}
+
+/// The notice after choosing Dark with the settings kept in `dir`.
+fn notice_for(dir: &std::path::Path) -> serde_json::Value {
+    let mut ui = window_with(Some(dir.to_path_buf()), None, None);
+    ui.execute("ui.themeDark", json!({}));
+    ui.frame();
+    ui.value("notice")
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_written_is_named_with_what_to_do() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = dbee_testkit::temp_home(None, None);
+    let locked = home.home.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // As root the folder can be written anyway: nothing to check.
+    if std::fs::write(locked.join("probe"), "").is_ok() {
+        return;
+    }
+    let dir = locked.join("dbee");
+    let words = format!(
+        "The theme is set for now, but it couldn't be saved in {} (Permission denied): check that you can write to {}.",
+        dir.join("settings.json").display(),
+        dir.display()
+    );
+    assert_eq!(notice_for(&dir), json!(words));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn a_newer_dbees_file_is_named_and_left_as_it_is() {
+    let home = dbee_testkit::temp_home(None, None);
+    let text = r#"{"version":2,"theme":"light"}"#;
+    std::fs::write(home.home.join("settings.json"), text).unwrap();
+    let words = format!("The theme is set for now, but a newer dbee wrote {}, so it isn't changed.", home.home.join("settings.json").display());
+    assert_eq!(notice_for(&home.home), json!(words));
+    assert_eq!(std::fs::read_to_string(home.home.join("settings.json")).unwrap(), text);
 }
 
 #[test]

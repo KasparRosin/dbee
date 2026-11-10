@@ -95,6 +95,24 @@ pub(crate) fn sentence(text: &str) -> String {
     out
 }
 
+/// What the notice says when a theme choice couldn't be saved: the file, and what to do.
+fn not_saved(e: &dbee_config::SaveError) -> String {
+    match e {
+        dbee_config::SaveError::Newer(file) => format!("The theme is set for now, but a newer dbee wrote {}, so it isn't changed.", file.display()),
+        dbee_config::SaveError::Io(file, why) => {
+            // The system's words, without their number: "Permission denied (os error 13)".
+            let why = why.to_string();
+            let why = why.split(" (os error").next().unwrap_or_default().trim_end_matches('.');
+            let folder = file.parent().unwrap_or(file);
+            format!(
+                "The theme is set for now, but it couldn't be saved in {} ({why}): check that you can write to {}.",
+                file.display(),
+                folder.display()
+            )
+        }
+    }
+}
+
 /// The window over one session.
 pub struct DbeeApp {
     pub(crate) session: Session,
@@ -305,7 +323,7 @@ impl DbeeApp {
     pub(crate) fn choose_theme(&mut self, choice: dbee_config::ThemeChoice) {
         self.theme_choice = choice;
         if let Err(e) = dbee_config::save_theme(self.settings_dir.as_deref(), choice) {
-            self.notice_again(format!("The theme is set for now, but it couldn't be saved: {e}"));
+            self.notice_again(not_saved(&e));
         }
     }
 
