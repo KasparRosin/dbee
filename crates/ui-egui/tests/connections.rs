@@ -424,6 +424,13 @@ fn an_upcoming_engine_cannot_be_chosen() {
         assert_eq!(card["value"]["upcoming"], upcoming, "{card}");
         assert_eq!(card.get("enabled").is_none(), !upcoming, "{card}");
     }
+    // The Upcoming chip, 8 px into the card's top right corner: its words 1 + 6 px inside it.
+    let [x, y, w, h] = rect(&tag_in(&i, "conn-kind-mysql").unwrap()).map(|v| v as f32);
+    let card = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+    let (words, cut) = ui.text_in(card, "UPCOMING").expect("the Upcoming chip's words");
+    assert!(!cut);
+    assert!((words.right() - (card.right() - 15.0)).abs() < 0.5 && (words.center().y - (card.top() + 17.0)).abs() < 0.5, "{words:?} in {card:?}");
+    assert!(ui.text_in(card, "Upcoming").is_none(), "only drawn in capitals");
     ui.click("conn-kind-mysql");
     assert!(ui.tag("conn-host").is_none() && ui.tag("conn-kind-mysql").is_some(), "nothing was chosen");
     // Nor through a URL: the dialog names what this build opens.

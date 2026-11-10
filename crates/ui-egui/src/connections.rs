@@ -62,6 +62,7 @@ use serde_json::json;
 
 use crate::app::{Origin, sentence};
 use crate::automation::Tags;
+use crate::components::chip::Chip;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
@@ -984,8 +985,8 @@ fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<
     });
 }
 
-/// The card of the database type `kind`, `w` wide: its name, and "Upcoming" in the corner when
-/// it is not `available` (this build has no driver for it), greyed and not clickable.
+/// The card of the database type `kind`, `w` wide: its name, and an "Upcoming" chip in the corner
+/// when it is not `available` (this build has no driver for it), greyed and not clickable.
 fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &mut Tags, acts: &mut Vec<Act>) {
     let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(w, ENGINE_H), if available { Sense::click() } else { Sense::hover() });
@@ -1004,11 +1005,8 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &
     let name = line_galley(ui, kind.label(), Text::Subtitle, color, w - 28.0);
     p.galley(pos2(rect.left() + 14.0, rect.center().y - name.size().y / 2.0), name, color);
     if !available {
-        let chip = line_galley(ui, "Upcoming", Text::Label, t.text_muted, w);
-        let size = vec2(chip.size().x + 12.0, 18.0);
-        let pill = Rect::from_min_size(pos2(rect.right() - 8.0 - size.x, rect.top() + 8.0), size);
-        p.rect_filled(pill, CornerRadius::same(RADIUS_FLOAT), t.bg);
-        p.galley(pos2(pill.left() + 6.0, pill.center().y - chip.size().y / 2.0), chip, t.text_muted);
+        let corner = egui::UiBuilder::new().max_rect(rect.shrink(8.0)).layout(Layout::right_to_left(Align::Min));
+        ui.new_child(corner).add(Chip::next("Upcoming"));
     }
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, available, kind.label()));
     tags.tag_value_as(&format!("conn-kind-{}", kind.id()), &r, json!({ "label": kind.label(), "upcoming": !available }), available);

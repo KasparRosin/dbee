@@ -334,17 +334,7 @@ impl Ui {
 
     /// The shapes of the last frame in paint order, each with the rect it is clipped to.
     pub fn shapes(&self) -> Vec<(egui::Rect, egui::Shape)> {
-        fn walk(clip: egui::Rect, shape: &egui::Shape, out: &mut Vec<(egui::Rect, egui::Shape)>) {
-            match shape {
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(clip, s, out)),
-                s => out.push((clip, s.clone())),
-            }
-        }
-        let mut out = Vec::new();
-        for c in &self.harness.output().shapes {
-            walk(c.clip_rect, &c.shape, &mut out);
-        }
-        out
+        flat(&self.harness.output().shapes)
     }
 
     /// The text shapes of the last frame: each galley where it was drawn.
@@ -368,6 +358,41 @@ impl Ui {
     pub fn text_in(&self, within: egui::Rect, text: &str) -> Option<(egui::Rect, bool)> {
         self.texts().into_iter().find(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).map(|(r, g)| (r, g.elided))
     }
+}
+
+/// `shapes` in paint order, nested lists flattened, each with the rect it is clipped to.
+pub fn flat(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, egui::Shape)> {
+    fn walk(clip: egui::Rect, shape: &egui::Shape, out: &mut Vec<(egui::Rect, egui::Shape)>) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(clip, s, out)),
+            s => out.push((clip, s.clone())),
+        }
+    }
+    let mut out = Vec::new();
+    for c in shapes {
+        walk(c.clip_rect, &c.shape, &mut out);
+    }
+    out
+}
+
+/// The colours `shapes` draw their texts in.
+pub fn text_colours(shapes: &[(egui::Rect, egui::Shape)]) -> Vec<egui::Color32> {
+    let mut out = Vec::new();
+    for (_, shape) in shapes {
+        if let egui::Shape::Text(t) = shape {
+            match t.override_text_color {
+                Some(c) => out.push(c),
+                None => out.extend(
+                    t.galley
+                        .job
+                        .sections
+                        .iter()
+                        .map(|s| if s.format.color == egui::Color32::PLACEHOLDER { t.fallback_color } else { s.format.color }),
+                ),
+            }
+        }
+    }
+    out
 }
 
 /// A file dropped on the window, as eframe hands one over.

@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod automation;
+pub mod components;
 pub mod conn_form;
 pub mod connections;
 pub mod control;
