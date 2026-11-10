@@ -473,7 +473,7 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     let close_rect = Rect::from_min_size(pos2(x, rect.center().y - 9.0), vec2(18.0, 18.0));
     let close = ui.interact(close_rect, egui::Id::new(("dbee-tab-close", tab.id.0)), Sense::click());
     if close.hovered() {
-        p.rect_filled(close_rect, CornerRadius::same(RADIUS_CONTROL), t.line);
+        p.rect_filled(close_rect, CornerRadius::same(RADIUS_CONTROL), t.hover);
     }
     let cross = if tab.active || r.hovered() || close.hovered() { t.text_muted } else { t.line };
     icons::close(&p, close_rect.shrink(3.0), cross);

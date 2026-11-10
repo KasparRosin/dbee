@@ -164,6 +164,18 @@ fn popups_mark_hovered_and_chosen_items_and_draw_lines_on_raised_in_dark() {
 }
 
 #[test]
+fn a_tabs_close_button_takes_hover_under_the_pointer() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "orders");
+    let close = ids(&ui.inspect()).into_iter().find(|id| id.starts_with("tab-close-")).expect("the tab's close button");
+    let at = rect_of(&mut ui, &close);
+    ui.hover(at.center());
+    let rect = rect_of(&mut ui, &close);
+    assert!(fills_in(&ui, rect).contains(&dbee_ui_egui::theme::LIGHT.hover), "{:?}", fills_in(&ui, rect));
+}
+
+#[test]
 fn a_dialog_sits_on_card_over_the_scrim() {
     let db = dbee_testkit::require_testdb!();
     let d = dbee_ui_egui::theme::DARK;

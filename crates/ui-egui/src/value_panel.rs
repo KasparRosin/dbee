@@ -942,7 +942,7 @@ fn body(ui: &mut egui::Ui, view: &Arc<ValueView>, state: &mut PanelState, tags: 
                     x1 += glyph * 0.6;
                 }
                 let r = Rect::from_min_max(pos2(x0, row.top), pos2(x1, row.top + LINE_H));
-                ui.painter().rect_filled(r, CornerRadius::ZERO, t.selection);
+                ui.painter().rect_filled(r, CornerRadius::ZERO, t.text_selection);
             }
         }
         for row in rows {

@@ -348,8 +348,8 @@ fn buttons(ui: &mut egui::Ui, tags: &mut Tags, ok: &str, ok_enabled: bool, dange
     // Top-aligned: egui centres nothing in a dialog's first frame (its sizing pass), so a centred
     // row would sit a pixel off there.
     ui.allocate_ui_with_layout(vec2(WIDTH, 30.0), Layout::right_to_left(Align::Min), |ui| {
-        let fill = if danger { t.danger } else { t.ink };
-        let button = Button::new(RichText::new(ok).color(t.on_ink)).fill(fill).min_size(vec2(96.0, 30.0));
+        let (fill, text) = if danger { (t.danger, t.on_danger) } else { (t.ink, t.on_ink) };
+        let button = Button::new(RichText::new(ok).color(text)).fill(fill).min_size(vec2(96.0, 30.0));
         let ok_r = ui.add_enabled(ok_enabled, button);
         tags.tag_value_as("dialog-ok", &ok_r, ok, ok_enabled);
         let cancelled = if cancel {
