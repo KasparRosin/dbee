@@ -77,8 +77,9 @@ const SET_STATEMENT: &str = "SET STATEMENT can turn read-only off for the statem
 enum Mode {
     ReadOnly,
     Changed,
-    /// A cancel stopped the read.
-    Stopped,
+    /// A KILL stopped the read: the server's interrupt, or dbee's cancel of a read that returned
+    /// its row; the engine reads the first as its own cancel when it sent one.
+    Stopped(DbError),
     /// The server refused the read: the mode is unknown.
     Unread(DbError),
     Failed(DbError),
@@ -208,7 +209,7 @@ impl MySqlConnection {
             match self.mode(session).await {
                 Mode::ReadOnly => self.check_due.store(false, Ordering::Release),
                 Mode::Changed => return Err(self.restore(session, TURNED_OFF_BEFORE).await),
-                Mode::Stopped => return Err(DbError::Cancelled),
+                Mode::Stopped(e) => return Err(e),
                 Mode::Unread(e) | Mode::Failed(e) => return Err(e),
             }
         }
@@ -243,7 +244,7 @@ impl MySqlConnection {
                 Mode::ReadOnly
             }
             Ok(_) => Mode::Changed,
-            Err(DbError::Cancelled) => Mode::Stopped,
+            Err(e) if e.is_interrupted() => Mode::Stopped(e),
             Err(e @ DbError::Server(_)) => Mode::Unread(e),
             Err(e) => Mode::Failed(e),
         }

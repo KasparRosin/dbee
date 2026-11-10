@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
 use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
-use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState};
+use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState, TransactionState};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
@@ -88,8 +88,12 @@ pub struct Connected {
     /// after a run that names `session_track`.
     pub(crate) query_database: CurrentDatabase,
     /// The query run in progress: one at a time, since the query connection runs one statement at
-    /// a time and a cancel request hits whatever runs on it.
+    /// a time and a cancel request hits whatever runs on it. A `query.commit` or `query.rollback`
+    /// counts as one.
     pub(crate) query_run: Option<QueryRun>,
+    /// The query session's transaction, as the driver reported it after the last run, commit or
+    /// rollback on the query connection; read it through [`Connected::transaction`].
+    pub(crate) transaction: Option<Transaction>,
     /// The SSH tunnel both connections run through, when the config has one.
     pub(crate) tunnel: Option<Arc<Tunnel>>,
     /// What the connect used, kept in memory for reconnects (and the query connection).
@@ -119,6 +123,7 @@ impl std::fmt::Debug for Connected {
             .field("query_closed", &self.query.as_ref().map(|q| q.is_closed()))
             .field("query_database", &self.query_database)
             .field("query_run", &self.query_run)
+            .field("transaction", &self.transaction)
             .field("tunnel", &self.tunnel)
             .field("credentials", &self.credentials)
             .field("apply_gate", &self.apply_gate.as_ref().map(|(job, _, _)| job))
@@ -164,11 +169,12 @@ impl CurrentDatabase {
 
     /// Where a statement that failed with `error` leaves it, on a dialect where a statement can
     /// move it (`moves`): where it was, after an error the server answered with; not known any
-    /// more after any other end, a cancel among them (its kill can land just after the statement
-    /// took effect, and the server's error then hides the change).
+    /// more after any other end, an interrupt among them, dbee's or not (its kill can land just
+    /// after the statement took effect, and the server's error then hides the change).
     pub(crate) fn after_failure(self, error: &DbError, moves: bool) -> CurrentDatabase {
         match error {
             _ if !moves => self,
+            e if e.is_interrupted() => CurrentDatabase { known: false, ..self },
             DbError::Server(_) | DbError::ReadOnly { .. } => self,
             _ => CurrentDatabase { known: false, ..self },
         }
@@ -180,7 +186,56 @@ impl CurrentDatabase {
     }
 }
 
+/// The query session's open transaction: its state and the tab whose run opened it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Transaction {
+    /// `Open`, `Failed` or `Unknown`; never `Idle`, which is no transaction.
+    pub state: TransactionState,
+    /// The query tab whose run found the session idle and left it in a transaction; `None` once
+    /// that tab has closed, or when the state is unknown.
+    pub tab: Option<TabId>,
+}
+
+impl Transaction {
+    /// The transaction after a run of `tab` (`None` once it has closed), or a commit or rollback
+    /// (`None`), left the session in `state`, where it was `before`: none when idle; else the
+    /// owner it had, or the run's tab when it found the session idle.
+    pub(crate) fn after(before: Option<Transaction>, state: TransactionState, tab: Option<TabId>) -> Option<Transaction> {
+        match (state, before) {
+            (TransactionState::Idle, _) => None,
+            (TransactionState::Unknown, _) => Some(Transaction { state, tab: None }),
+            (_, Some(before)) => Some(Transaction { state, tab: before.tab }),
+            (_, None) => Some(Transaction { state, tab }),
+        }
+    }
+
+    /// `{state, tab}`: `state` is `open`, `failed` or `unknown`.
+    pub fn summary(&self) -> Json {
+        let state = match self.state {
+            TransactionState::Open => "open",
+            TransactionState::Failed => "failed",
+            TransactionState::Idle | TransactionState::Unknown => "unknown",
+        };
+        json!({ "state": state, "tab": self.tab })
+    }
+}
+
 impl Connected {
+    /// The query session's transaction; none while the query connection is not open, or has
+    /// closed, which ends its session.
+    pub fn transaction(&self) -> Option<Transaction> {
+        self.query.as_ref().filter(|q| !q.is_closed()).and(self.transaction)
+    }
+
+    /// Query tab `tab` has closed: a transaction it opened has no tab any more.
+    pub(crate) fn tab_closed(&mut self, tab: TabId) {
+        if let Some(t) = &mut self.transaction
+            && t.tab == Some(tab)
+        {
+            t.tab = None;
+        }
+    }
+
     /// The database a run of `q` starts in: the tab's own, which the run makes current first;
     /// else the query connection's while it is open, or the settings' before it opens.
     pub fn starts_in(&self, q: &QueryTab) -> CurrentDatabase {
@@ -192,11 +247,12 @@ impl Connected {
     }
 
     /// `{connection, id, name, color, kind, host, port, database, user, ssh, readOnly, server, tls,
-    /// lost, saved}`, as `inspect()` and `connection.open` show it: `connection` is its
+    /// lost, saved, transaction}`, as `inspect()` and `connection.open` show it: `connection` is its
     /// [`ConnectionId`], `id` the saved connection's, `kind` the database type's id, `server` the
     /// product and its version (`PostgreSQL 14.12`), `tls` the link's [`TlsState`] (`off`,
     /// `unchecked`, `certificateChecked`, `checked`; `null` for a file), `saved` whether the saved list holds it
-    /// (`ConnectionStore::is_saved`, which the caller asks). Never a secret.
+    /// (`ConnectionStore::is_saved`, which the caller asks), `transaction` the query session's
+    /// ([`Transaction::summary`], or null). Never a secret.
     pub fn summary(&self, saved: bool) -> Json {
         let c = &self.config;
         json!({
@@ -215,6 +271,7 @@ impl Connected {
             "tls": self.info.tls.map(TlsState::id),
             "lost": self.lost,
             "saved": saved,
+            "transaction": self.transaction().map(|t| t.summary()),
         })
     }
 }
@@ -321,7 +378,8 @@ pub struct QueryError {
     /// `1054`).
     pub server_code: Option<String>,
     /// What the server error means, when the driver knows: `transactionAborted` (a statement
-    /// failed earlier in the transaction, which refuses every statement until a ROLLBACK).
+    /// failed earlier in the transaction, which refuses every statement until a ROLLBACK) or
+    /// `interrupted` (the server stopped the statement, and dbee had sent no cancel for it).
     #[serde(serialize_with = "meaning_id")]
     pub meaning: Option<Meaning>,
     pub detail: Option<String>,
@@ -336,6 +394,7 @@ fn meaning_id<S: Serializer>(meaning: &Option<Meaning>, s: S) -> Result<S::Ok, S
     match meaning {
         None => s.serialize_none(),
         Some(Meaning::TransactionAborted) => s.serialize_str("transactionAborted"),
+        Some(Meaning::Interrupted) => s.serialize_str("interrupted"),
     }
 }
 
@@ -736,9 +795,13 @@ mod tests {
         // The server answered with an error: the statement did nothing.
         assert_eq!(shop().after_failure(&refused, true), shop());
         assert_eq!(shop().after_failure(&DbError::ReadOnly { message: "read-only".into() }, true), shop());
-        // A cancel: a kill that lands as a `USE` finishes is answered with an error after the
-        // change. A lost connection, or an answer that broke: the outcome is unknown too.
-        for error in [DbError::Cancelled, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
+        // A cancel, dbee's or the server's interrupt whoever asked for it: a kill that lands as a
+        // `USE` finishes is answered with an error after the change. A lost connection, or an
+        // answer that broke: the outcome is unknown too.
+        let DbError::Server(s) = &refused else { panic!("a server error") };
+        let interrupted =
+            DbError::Server(Box::new(dbee_driver::ServerError { code: "1317".into(), meaning: Some(Meaning::Interrupted), ..(**s).clone() }));
+        for error in [DbError::Cancelled, interrupted, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
             assert_eq!(shop().after_failure(&error, true), unknown, "{error:?}");
             assert_eq!(shop().after_failure(&error, false), shop(), "{error:?}: where no statement can move it");
         }

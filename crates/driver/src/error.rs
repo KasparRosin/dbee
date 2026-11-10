@@ -49,6 +49,11 @@ pub enum Meaning {
     /// A statement failed earlier in the transaction, which stays open and refuses every
     /// statement until it is rolled back.
     TransactionAborted,
+    /// The server stopped the statement before its end: a cancel, dbee's or another session's
+    /// (Postgres's `pg_cancel_backend`, MySQL's `KILL QUERY`), or a timeout with the same code
+    /// (Postgres's `statement_timeout`). Only the engine knows whether dbee sent a cancel for it,
+    /// and only then makes it [`DbError::Cancelled`].
+    Interrupted,
 }
 
 /// An error the server reported, with its own `code` (Postgres's SQLSTATE, say), which the text
@@ -100,7 +105,9 @@ pub enum DbError {
     Ssh(SshError),
     /// The connection broke after it was open (server restart, killed session, network gone).
     ConnectionLost,
-    /// The statement was cancelled.
+    /// dbee's own cancel stopped the statement, or dbee stopped it before it started. A server's
+    /// interrupt is a [`DbError::Server`] marked [`Meaning::Interrupted`] until the engine,
+    /// which sent the cancel, says it was dbee's.
     Cancelled,
     /// A write on a read-only connection.
     ReadOnly { message: String },
@@ -132,6 +139,16 @@ impl DbError {
             DbError::TooLarge { .. } => "tooLarge",
             DbError::NotAllowed(_) => "config",
             DbError::Other(_) => "other",
+        }
+    }
+
+    /// The statement was stopped before its end: by dbee's own cancel, or by the server's
+    /// interrupt, whoever asked for it.
+    pub fn is_interrupted(&self) -> bool {
+        match self {
+            DbError::Cancelled => true,
+            DbError::Server(s) => s.meaning == Some(Meaning::Interrupted),
+            _ => false,
         }
     }
 }
@@ -264,6 +281,19 @@ mod tests {
         let aborted = boxed(ServerError { meaning: Some(Meaning::TransactionAborted), ..server("25P02", Some("SQLSTATE")) });
         assert_eq!((aborted.code(), aborted.to_string().as_str()), ("server", "m (SQLSTATE 25P02)"));
         assert_eq!(DbError::from(dbee_ssh::SshError::NoKey), DbError::Ssh(dbee_ssh::SshError::NoKey));
+    }
+
+    /// The server's interrupt is a server error with its code and words; only the engine makes it
+    /// a cancel. Both are interrupted, and nothing else is.
+    #[test]
+    fn an_interrupt_is_the_servers_error() {
+        let interrupt = boxed(ServerError { meaning: Some(Meaning::Interrupted), ..server("57014", Some("SQLSTATE")) });
+        assert_eq!((interrupt.code(), interrupt.to_string().as_str()), ("server", "m (SQLSTATE 57014)"));
+        assert!(interrupt.is_interrupted() && DbError::Cancelled.is_interrupted());
+        let aborted = boxed(ServerError { meaning: Some(Meaning::TransactionAborted), ..server("25P02", Some("SQLSTATE")) });
+        for other in [boxed(server("57014", Some("SQLSTATE"))), aborted, DbError::ConnectionLost, DbError::Other("m".into())] {
+            assert!(!other.is_interrupted(), "{other:?}");
+        }
     }
 
     /// dbee's own refusal says that dbee stopped the login, and points to the mode that checks who

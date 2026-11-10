@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use dbee_config::{ALLOW_PUBLIC_KEY, ConnectionConfig, DbKind, SshAuth, SshConfig, SslMode};
 use dbee_core::TableRef;
-use dbee_driver::{ApplyGate, Cancel, Connection, DbError, Driver, Purpose, QUERY_LIMITS, Target, TlsState};
+use dbee_driver::{ApplyGate, Cancel, Connection, DbError, Driver, Meaning, Purpose, QUERY_LIMITS, Target, TlsState};
 use dbee_mysql::wire::{MAX_PAYLOAD, Packets};
 use dbee_mysql::{Canceller, Flavor, MySqlConnection, MySqlDriver, connect, version_num, version_warning};
 use dbee_sql::Dialect;
@@ -374,7 +374,8 @@ async fn until_sleeping(watcher: &MySqlConnection, id: u64) {
 }
 
 /// Starts `SELECT SLEEP(30)`, cancels it through the `Cancel` trait once `watcher` sees it sleep,
-/// and expects `cancelled`; then the connection still works.
+/// and expects it stopped: `cancelled` where the sleep still returned its row (MySQL), else the
+/// server's interrupt (MariaDB's 1317); then the connection still works.
 async fn cancel_sleep(conn: Arc<MySqlConnection>, watcher: &MySqlConnection) {
     let canceller: Arc<dyn Cancel> = Arc::new(conn.canceller());
     let id = conn.scalar_u64("SELECT CONNECTION_ID()").await.unwrap();
@@ -383,7 +384,8 @@ async fn cancel_sleep(conn: Arc<MySqlConnection>, watcher: &MySqlConnection) {
     until_sleeping(watcher, id).await;
     canceller.cancel().await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
-    assert_eq!(result.err(), Some(DbError::Cancelled));
+    let e = result.unwrap_err();
+    assert!(e.is_interrupted(), "{e:?}");
     assert!(!conn.is_closed());
     assert_eq!(scalar(&conn, "SELECT 'still here'").await.as_deref(), Some("still here"));
 }
@@ -640,7 +642,8 @@ async fn the_trait_canceller_stops_sleep() {
         until_sleeping(&open(&config(s, SslMode::Prefer), db).await, id).await;
         canceller.cancel().await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
-        assert_eq!(result.err(), Some(DbError::Cancelled), "{}", s.name);
+        let e = result.unwrap_err();
+        assert!(e.is_interrupted(), "{}: {e:?}", s.name);
         assert_eq!(conn.scalar_u64("SELECT 1").await, Ok(1), "{}", s.name);
     }
 }
@@ -1160,7 +1163,11 @@ async fn server_errors_carry_the_errno_and_flavor() {
     assert_eq!(e.to_string(), "Table 'shop.x' doesn't exist (MariaDB error 1146)");
     let DbError::Server(s) = &e else { panic!("{e:?}") };
     assert_eq!((s.code.as_str(), s.code_label, &s.detail, &s.hint, s.position, s.meaning), ("1146", Some("MariaDB error"), &None, &None, None, None));
-    assert_eq!(conn.run("q1317", QUERY_LIMITS).await.unwrap_err(), DbError::Cancelled);
+    // The server's interrupt is its error, marked: only the engine makes it a cancel.
+    let e = conn.run("q1317", QUERY_LIMITS).await.unwrap_err();
+    let DbError::Server(s) = &e else { panic!("{e:?}") };
+    assert_eq!((s.code.as_str(), s.meaning), ("1317", Some(Meaning::Interrupted)), "{e:?}");
+    assert_eq!(e.to_string(), "Query execution was interrupted (MariaDB error 1317)");
     assert_eq!(conn.run("q1792", QUERY_LIMITS).await.unwrap_err().code(), "readOnly");
     // The server hangs up: the connection is lost, and stays so.
     assert_eq!(conn.run("bye", QUERY_LIMITS).await.unwrap_err(), DbError::ConnectionLost);

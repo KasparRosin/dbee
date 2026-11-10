@@ -22,7 +22,7 @@ pub mod tls;
 
 pub use api::{
     BoxFuture, CATALOG_LIMITS, CONNECT_TIMEOUT, Cancel, Connection, DbFuture, Driver, Limits, PAGE_LIMITS, Purpose, QUERY_LIMITS, ROW_COST,
-    ServerInfo, Target, TlsState, cancel_not_delivered, cell_cost, column_cost, connect_first, result_cost, tune, within,
+    ServerInfo, Target, TlsState, TransactionState, cancel_not_delivered, cell_cost, column_cost, connect_first, result_cost, tune, within,
 };
 pub use apply::{ApplyError, ApplyGate, ApplySession};
 pub use catalog::{CatalogBudget, CatalogBuilder};

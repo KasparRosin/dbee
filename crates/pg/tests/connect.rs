@@ -266,8 +266,15 @@ async fn until_sleeping(watcher: &PgConnection, pid: &str) {
     }
 }
 
-/// Starts `SELECT pg_sleep(30)`, cancels it once `watcher` sees it sleep, and expects
-/// `cancelled`; then the connection still works.
+/// `e` is the server's interrupt (57014) with its words, which only the engine reads as dbee's
+/// own cancel.
+fn assert_interrupted(e: &DbError, words: &str) {
+    assert!(matches!(e, DbError::Server(s) if s.code == "57014" && s.meaning == Some(Meaning::Interrupted) && s.message.contains(words)), "{e:?}");
+    assert_eq!(e.code(), "server", "{e:?}");
+}
+
+/// Starts `SELECT pg_sleep(30)`, cancels it once `watcher` sees it sleep, and expects the
+/// server's interrupt; then the connection still works.
 async fn cancel_sleep(conn: Arc<PgConnection>, watcher: &PgConnection) {
     let canceller: Canceller = conn.canceller();
     let pid = scalar(&conn, "SELECT pg_backend_pid()").await.unwrap();
@@ -276,9 +283,7 @@ async fn cancel_sleep(conn: Arc<PgConnection>, watcher: &PgConnection) {
     until_sleeping(watcher, &pid).await;
     canceller.cancel().await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
-    let e = result.unwrap_err();
-    assert_eq!(e.code(), "cancelled", "{e:?}");
-    assert_eq!(e, DbError::Cancelled);
+    assert_interrupted(&result.unwrap_err(), "user request");
     assert!(!conn.is_closed());
     assert_eq!(scalar(&conn, "SELECT 'still here'").await.as_deref(), Some("still here"));
 }
@@ -507,8 +512,23 @@ async fn the_trait_canceller_stops_pg_sleep() {
         until_sleeping(&open(&config(s, SslMode::Prefer), db).await, &pid).await;
         canceller.cancel().await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
-        assert_eq!(result.err(), Some(DbError::Cancelled));
+        assert_interrupted(&result.unwrap_err(), "user request");
         assert_eq!(conn.scalar_u64("SELECT 1").await, Ok(1));
+    }
+}
+
+/// The driver reports a `statement_timeout` as the server's interrupt, with its code and words, as
+/// it does a cancel request: the engine tells them apart.
+#[tokio::test]
+async fn a_statement_timeout_is_the_servers_interrupt() {
+    let db = require_testdb!();
+    for s in postgres(db) {
+        let conn = PgDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
+        conn.run("SET statement_timeout = 100", QUERY_LIMITS).await.unwrap();
+        let e = conn.run("SELECT pg_sleep(2)", QUERY_LIMITS).await.unwrap_err();
+        assert_interrupted(&e, "statement timeout");
+        assert!(e.to_string().ends_with("(SQLSTATE 57014)"), "{e}");
+        assert_eq!(conn.scalar_u64("SELECT 7").await, Ok(7));
     }
 }
 
@@ -588,6 +608,89 @@ async fn pg_lists_through_postgres_when_the_default_database_is_missing() {
         while dbee_testkit::psql(s, &sessions).unwrap().trim() != "0" {
             assert!(Instant::now() < deadline, "{}: the listing connection is still open", s.name);
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// A Unix socket in a folder of its own that passes each connection on to the server's TCP port,
+/// answering an SSLRequest with `N` as a server's own socket does: the test servers have no socket
+/// on this machine.
+#[cfg(unix)]
+async fn socket_to(port: u16) -> std::path::PathBuf {
+    use tokio::io::AsyncWriteExt as _;
+    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xD2, 0x16, 0x2F];
+    let dir = std::env::temp_dir().join(unique("dbee-pgs"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let listener = tokio::net::UnixListener::bind(dir.join(format!(".s.PGSQL.{port}"))).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut unix, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                // Every first message, the startup too, is at least 8 bytes.
+                let mut first = [0u8; 8];
+                if unix.read_exact(&mut first).await.is_err() {
+                    return;
+                }
+                let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+                if first == SSL_REQUEST {
+                    unix.write_all(b"N").await.unwrap();
+                } else {
+                    tcp.write_all(&first).await.unwrap();
+                }
+                let _ = tokio::io::copy_bidirectional(&mut unix, &mut tcp).await;
+            });
+        }
+    });
+    dir
+}
+
+/// The session's transaction, as each ReadyForQuery says, on every way to the server: plain TCP,
+/// TLS, an SSH tunnel and a Unix socket, each of which still connects and runs as before.
+#[tokio::test]
+async fn the_transaction_state_is_read_on_every_way_there() {
+    use dbee_driver::TransactionState::*;
+    let db = require_testdb!();
+    let home = temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
+    for s in postgres(db) {
+        let mut ways = vec![
+            ("plain", config(s, SslMode::Disable), None, TlsState::Off, true),
+            ("tls", config(s, SslMode::Require), None, TlsState::Unchecked, true),
+            ("ssh", tunnelled(s, db, SslMode::Disable), Some(tunnel(db, &home).await), TlsState::Off, false),
+        ];
+        #[cfg(unix)]
+        {
+            let dir = socket_to(s.port).await;
+            ways.push((
+                "socket",
+                ConnectionConfig { host: dir.to_string_lossy().into_owned(), ..config(s, SslMode::Prefer) },
+                None,
+                TlsState::Off,
+                true,
+            ));
+        }
+        for (way, c, tunnel, tls, local) in ways {
+            let target = Target { config: &c, password: Some(&db.password), tunnel, purpose: Purpose::Query, create_file: false, allowed_dirs: None };
+            let conn = PgDriver.connect(target).await.unwrap_or_else(|e| panic!("{} {way}: {e}", s.name));
+            let at = format!("{} {way}", s.name);
+            assert_eq!((conn.info().tls, conn.info().local), (Some(tls), local), "{at}");
+            assert_eq!(conn.transaction().await, Idle, "{at}");
+            conn.run("BEGIN", QUERY_LIMITS).await.unwrap();
+            assert_eq!(conn.transaction().await, Open, "{at}");
+            // One statement with columns is also prepared, to type them: its answers come in after
+            // the run has returned.
+            assert_eq!(conn.run("SELECT 1 AS one", QUERY_LIMITS).await.unwrap().columns[0].base_type, "int4", "{at}");
+            assert_eq!(conn.transaction().await, Open, "{at}");
+            conn.run("SELECT 1/0", QUERY_LIMITS).await.unwrap_err();
+            assert_eq!(conn.transaction().await, Failed, "{at}");
+            conn.run("SELECT 1", QUERY_LIMITS).await.unwrap_err();
+            assert_eq!(conn.transaction().await, Failed, "{at}: 25P02");
+            conn.run("ROLLBACK", QUERY_LIMITS).await.unwrap();
+            assert_eq!(conn.transaction().await, Idle, "{at}");
+            // A script that begins: the server's report, not the text, says so.
+            conn.run("BEGIN; SELECT 1", QUERY_LIMITS).await.unwrap();
+            assert_eq!(conn.transaction().await, Open, "{at}");
+            conn.run("COMMIT", QUERY_LIMITS).await.unwrap();
+            assert_eq!(conn.transaction().await, Idle, "{at}");
+            assert_eq!(conn.scalar_u64("SELECT 7").await, Ok(7), "{at}");
         }
     }
 }

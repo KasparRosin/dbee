@@ -159,9 +159,14 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         }
     }
     if let Tab::Query(q) = s.state.tabs.remove(at)
-        && let (Some(job), Some(connection)) = (q.running, q.connection)
+        && let Some(connection) = q.connection
     {
-        super::query::stop_run(s, connection, job);
+        if let Some(job) = q.running {
+            super::query::stop_run(s, connection, job);
+        }
+        if let Some(c) = s.state.connection_mut(Which::Id(connection)) {
+            c.tab_closed(id);
+        }
     }
     if s.state.active == Some(id) {
         s.state.active = s.state.tabs.get(at).or_else(|| at.checked_sub(1).and_then(|i| s.state.tabs.get(i))).map(Tab::id);

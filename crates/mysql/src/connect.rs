@@ -11,7 +11,8 @@ use dbee_driver::{
     CONNECT_TIMEOUT, DbError, Limits, MAX_MESSAGE, MAX_VERSION, Purpose, QUERY_LIMITS, ServerInfo, Target, connect_first, kept_text, tls, within,
 };
 use dbee_ssh::Tunnel;
-use mysql_common::constants::{CapabilityFlags, Command, MariadbCapabilities};
+use mysql_common::constants::{CapabilityFlags, Command, MariadbCapabilities, StatusFlags};
+use mysql_common::packets::CommonOkPacket;
 use rustls::pki_types::ServerName;
 use rustls::{AlertDescription, ClientConfig};
 use tokio::sync::{Mutex, MutexGuard};
@@ -108,6 +109,10 @@ pub(crate) struct Session {
     /// The session variable that says whether transactions are read-only, as the server spells it
     /// ([`Flavor::read_only_variables`]); the session setup finds it.
     pub(crate) read_only_variable: &'static str,
+    /// A transaction is open, as the last command's last OK or EOF packet said
+    /// (`SERVER_STATUS_IN_TRANS`); `None` after a command that ended otherwise, an error among
+    /// them, whose packet says nothing of it.
+    pub(crate) in_transaction: Option<bool>,
 }
 
 impl Session {
@@ -175,6 +180,7 @@ impl Session {
             backslash_escapes: true,
             ansi_quotes: false,
             read_only_variable,
+            in_transaction: None,
         })
     }
 
@@ -195,7 +201,23 @@ impl Session {
         if let Some(off) = said.no_backslash_escapes {
             self.backslash_escapes = !off;
         }
+        self.in_transaction = if answer.is_ok() { said.in_transaction } else { None };
         answer
+    }
+
+    /// Whether a transaction is open, as the server says in its answer to `COM_PING`, an OK packet
+    /// with its status. Runs no statement.
+    pub(crate) async fn ping(&mut self) -> Result<bool, DbError> {
+        self.packets.reset();
+        self.packets.write(&[Command::COM_PING as u8]).await?;
+        let answer = self.packets.read().await?;
+        let in_transaction = match answer.first() {
+            Some(0x00) => result::parse_ok::<CommonOkPacket>(&answer, self.caps)?.status_flags().contains(StatusFlags::SERVER_STATUS_IN_TRANS),
+            Some(0xFF) => return Err(errors::from_err_packet(&answer, self.caps, self.flavor)),
+            _ => return Err(DbError::Other("the server answered a ping with something other than an OK packet".into())),
+        };
+        self.in_transaction = Some(in_transaction);
+        Ok(in_transaction)
     }
 
     /// Say goodbye (`COM_QUIT`); the server closes the connection.
@@ -579,6 +601,7 @@ mod tests {
             backslash_escapes: true,
             ansi_quotes: false,
             read_only_variable: "transaction_read_only",
+            in_transaction: None,
         }
     }
 

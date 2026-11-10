@@ -522,3 +522,24 @@ async fn sql_opens_no_other_file_when_the_run_allows_only_its_own() {
     drop(conn);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The session's transaction, as SQLite's autocommit flag says.
+#[tokio::test]
+async fn the_transaction_state_follows_autocommit() {
+    use dbee_driver::TransactionState::*;
+    let (_fresh, c) = Fresh::new().await;
+    let state = async |c: &SqliteConnection| dbee_driver::Connection::transaction(c).await;
+    assert_eq!(state(&c).await, Idle);
+    c.run("CREATE TABLE t (id INTEGER PRIMARY KEY)", QUERY_LIMITS).await.unwrap();
+    c.run("BEGIN", QUERY_LIMITS).await.unwrap();
+    assert_eq!(state(&c).await, Open);
+    c.run("INSERT INTO t VALUES (1)", QUERY_LIMITS).await.unwrap();
+    // A failed statement keeps it.
+    assert!(c.run("INSERT INTO t VALUES (1)", QUERY_LIMITS).await.is_err());
+    assert_eq!(state(&c).await, Open);
+    c.run("COMMIT", QUERY_LIMITS).await.unwrap();
+    assert_eq!(state(&c).await, Idle);
+    c.run("BEGIN", QUERY_LIMITS).await.unwrap();
+    c.run("ROLLBACK", QUERY_LIMITS).await.unwrap();
+    assert_eq!(state(&c).await, Idle);
+}

@@ -2,7 +2,7 @@
 //! with values as text by fixed rules ([`crate::values`]).
 
 use dbee_core::{Column, ResultSet};
-use dbee_driver::{DbError, Limits, QUERY_LIMITS, ROW_COST, cell_cost, column_cost};
+use dbee_driver::{DbError, Limits, QUERY_LIMITS, ROW_COST, TransactionState, cell_cost, column_cost};
 use dbee_sql::Dialect;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Statement};
@@ -50,6 +50,17 @@ impl SqliteConnection {
         let result = self.run_as(sql, Limits { max_rows: 1, ..QUERY_LIMITS }, Columns::Unnamed).await?;
         let cell = result.rows.first().and_then(|row| row.first()).and_then(|c| c.as_deref());
         cell.and_then(|text| text.trim().parse::<u64>().ok()).ok_or_else(|| DbError::Other("the query did not return a count".into()))
+    }
+
+    /// Whether the connection is in a transaction: SQLite's autocommit flag is off inside one.
+    /// `Unknown` on a closed connection.
+    pub async fn transaction(&self) -> TransactionState {
+        let Ok(_turn) = self.lock().await else { return TransactionState::Unknown };
+        match self.blocking(|s, _| Ok(s.conn.is_autocommit())).await {
+            Ok(true) => TransactionState::Idle,
+            Ok(false) => TransactionState::Open,
+            Err(_) => TransactionState::Unknown,
+        }
     }
 
     async fn run_as(&self, sql: &str, limits: Limits, columns: Columns) -> Result<ResultSet, DbError> {

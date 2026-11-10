@@ -1,6 +1,6 @@
 //! The MySQL and MariaDB error numbers dbee acts on, and an ERR packet as a [`DbError`].
 
-use dbee_driver::{DbError, MAX_MESSAGE, ServerError, kept_bytes};
+use dbee_driver::{DbError, MAX_MESSAGE, Meaning, ServerError, kept_bytes};
 use mysql_common::constants::CapabilityFlags;
 use mysql_common::io::ParseBuf;
 use mysql_common::packets::ErrPacket;
@@ -18,11 +18,13 @@ const ER_CLIENT_INTERACTION_TIMEOUT: u16 = 4031;
 /// The server has no session variable of that name.
 pub(crate) const ER_UNKNOWN_SYSTEM_VARIABLE: u16 = 1193;
 
-/// What an error number makes of the error, other than a [`DbError::Server`].
+/// What an error number makes of the error, other than a plain [`DbError::Server`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Becomes {
     Auth,
-    Cancelled,
+    /// The server's error, marked [`Meaning::Interrupted`]: a `KILL QUERY`, dbee's or another
+    /// session's.
+    Interrupted,
     ReadOnly,
     /// The server ends the session.
     ConnectionLost,
@@ -33,7 +35,7 @@ enum Becomes {
 const ERRNOS: &[(u16, Option<Flavor>, Becomes)] = &[
     (ER_ACCESS_DENIED_ERROR, None, Becomes::Auth),
     (ER_SERVER_SHUTDOWN, None, Becomes::ConnectionLost),
-    (ER_QUERY_INTERRUPTED, None, Becomes::Cancelled),
+    (ER_QUERY_INTERRUPTED, None, Becomes::Interrupted),
     (ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION, None, Becomes::ReadOnly),
     (ER_CONNECTION_KILLED, Some(Flavor::MariaDb), Becomes::ConnectionLost),
     (ER_CLIENT_INTERACTION_TIMEOUT, Some(Flavor::MySql), Becomes::ConnectionLost),
@@ -58,21 +60,22 @@ pub(crate) fn from_err_packet(payload: &[u8], caps: CapabilityFlags, flavor: Fla
 /// most errors, and the error number is what its users look up.
 fn from_errno(errno: u16, message: String, flavor: Flavor) -> DbError {
     let known = ERRNOS.iter().find(|(n, on, _)| *n == errno && on.is_none_or(|on| on == flavor));
-    match known.map(|(_, _, becomes)| *becomes) {
-        Some(Becomes::Auth) => DbError::Auth { message },
-        Some(Becomes::Cancelled) => DbError::Cancelled,
-        Some(Becomes::ReadOnly) => DbError::ReadOnly { message },
-        Some(Becomes::ConnectionLost) => DbError::ConnectionLost,
-        None => DbError::Server(Box::new(ServerError {
-            code: errno.to_string(),
-            code_label: Some(flavor.code_label()),
-            message,
-            detail: None,
-            hint: None,
-            position: None,
-            meaning: None,
-        })),
-    }
+    let meaning = match known.map(|(_, _, becomes)| *becomes) {
+        Some(Becomes::Auth) => return DbError::Auth { message },
+        Some(Becomes::ReadOnly) => return DbError::ReadOnly { message },
+        Some(Becomes::ConnectionLost) => return DbError::ConnectionLost,
+        Some(Becomes::Interrupted) => Some(Meaning::Interrupted),
+        None => None,
+    };
+    DbError::Server(Box::new(ServerError {
+        code: errno.to_string(),
+        code_label: Some(flavor.code_label()),
+        message,
+        detail: None,
+        hint: None,
+        position: None,
+        meaning,
+    }))
 }
 
 #[cfg(test)]
@@ -88,7 +91,11 @@ mod tests {
         let caps = CapabilityFlags::CLIENT_PROTOCOL_41;
         let map = |errno, flavor| from_err_packet(&err_packet(errno, "the message"), caps, flavor);
         assert_eq!(map(1045, Flavor::MySql), DbError::Auth { message: "the message".into() });
-        assert_eq!(map(1317, Flavor::MariaDb), DbError::Cancelled);
+        // The server's interrupt is its error, marked: only the engine makes it a cancel.
+        let interrupted = map(1317, Flavor::MariaDb);
+        assert!(matches!(&interrupted, DbError::Server(s) if s.code == "1317" && s.meaning == Some(Meaning::Interrupted)), "{interrupted:?}");
+        assert_eq!((interrupted.code(), interrupted.to_string().as_str()), ("server", "the message (MariaDB error 1317)"));
+        assert!(matches!(map(1146, Flavor::MySql), DbError::Server(s) if s.meaning.is_none()));
         assert_eq!(map(1792, Flavor::MySql), DbError::ReadOnly { message: "the message".into() });
         assert_eq!(map(1146, Flavor::MySql).to_string(), "the message (MySQL error 1146)");
         assert_eq!(map(1146, Flavor::MariaDb).to_string(), "the message (MariaDB error 1146)");
@@ -103,6 +110,8 @@ mod tests {
         let e = from_err_packet(&err_packet(1193, "Unknown system variable"), CapabilityFlags::CLIENT_PROTOCOL_41, Flavor::MySql);
         assert!(is_errno(&e, ER_UNKNOWN_SYSTEM_VARIABLE) && !is_errno(&e, 1194));
         assert!(!is_errno(&DbError::Cancelled, ER_QUERY_INTERRUPTED));
+        let interrupted = from_err_packet(&err_packet(1317, "interrupted"), CapabilityFlags::CLIENT_PROTOCOL_41, Flavor::MySql);
+        assert!(is_errno(&interrupted, ER_QUERY_INTERRUPTED));
     }
 
     #[test]

@@ -70,7 +70,6 @@ fn from_server(db: &PgServerError, phase: Phase) -> DbError {
     let message = kept_text(db.message(), MAX_MESSAGE);
     match code {
         "28P01" | "28000" => return DbError::Auth { message },
-        "57014" => return DbError::Cancelled,
         "25006" => return DbError::ReadOnly { message },
         _ => {}
     }
@@ -86,6 +85,8 @@ fn from_server(db: &PgServerError, phase: Phase) -> DbError {
     };
     let meaning = match code {
         "25P02" => Some(Meaning::TransactionAborted),
+        // A cancel request, dbee's or another session's, and `statement_timeout` alike.
+        "57014" => Some(Meaning::Interrupted),
         _ => None,
     };
     DbError::Server(Box::new(ServerError {

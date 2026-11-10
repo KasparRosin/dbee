@@ -67,7 +67,8 @@ impl std::fmt::Debug for Canceller {
 
 impl Canceller {
     /// Kill the statement running now, if one is. `Ok` means the KILL was delivered, or nothing
-    /// ran; the statement then fails with [`DbError::Cancelled`], unless it finished first.
+    /// ran; the statement then fails with the server's interrupt (1317), or with
+    /// [`DbError::Cancelled`] when it still returned rows, unless it finished first.
     pub async fn cancel(&self) -> Result<(), DbError> {
         // The timeout below needs a runtime; without one it would panic.
         tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("cancelling needs a tokio runtime".into()))?;
