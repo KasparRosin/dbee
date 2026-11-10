@@ -338,6 +338,19 @@ fn system_uses_what_the_desktop_said_at_startup() {
 }
 
 #[test]
+fn system_ignores_a_later_change_of_the_desktops_setting() {
+    let mut ui = window_with(None, None, None);
+    assert_eq!(state(&mut ui), json!({ "choice": "system", "mode": "light" }));
+    ui.harness.input_mut().system_theme = Some(egui::Theme::Dark);
+    for _ in 0..3 {
+        ui.frame();
+    }
+    assert_eq!(ui.harness.ctx.system_theme(), Some(egui::Theme::Dark), "egui heard the change");
+    assert_eq!(state(&mut ui), json!({ "choice": "system", "mode": "light" }));
+    assert_eq!(ui.harness.ctx.theme(), egui::Theme::Light);
+}
+
+#[test]
 fn the_choice_is_remembered_between_runs() {
     let dir = std::env::temp_dir().join(dbee_testkit::unique("theme-settings"));
     let mut first = window_with(Some(dir.clone()), None, None);
