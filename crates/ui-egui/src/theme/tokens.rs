@@ -118,7 +118,7 @@ pub const DARK: Tokens = Tokens {
     line: rgb(0x2A2A2A),
     line_strong: rgb(0xA6A6A6),
     fill: rgb(0x2A2A2A),
-    hover: rgba(0x2A2A2A80),
+    hover: rgba(0xF2F2F214),
     selection: rgb(0x2A2A2A),
     text_selection: rgb(0x2A2A2A),
     raised: rgb(0x2A2A2A),
@@ -227,6 +227,7 @@ mod tests {
             ("selection", t.selection),
             ("raised", t.raised),
             ("hover on card", over(t.hover, t.card)),
+            ("hover on raised", over(t.hover, t.raised)),
             ("raised_hover on raised", over(t.raised_hover, t.raised)),
             ("staged on card", over(t.staged, t.card)),
             ("new_row on card", over(t.new_row, t.card)),
@@ -284,6 +285,19 @@ mod tests {
                 for (gn, g) in [("bg", t.bg), ("card", t.card)] {
                     assert!(contrast(c, g) >= 4.5, "{mode}: {name} on {gn}: {:.2}", contrast(c, g));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn hover_shows_on_the_ground_and_on_raised() {
+        // An outlined button has no ground of its own: hovered in a dialog, it is `hover` on
+        // `raised`, where a destructive word must still read.
+        for (mode, t) in both() {
+            for (name, g) in [("card", t.card), ("raised", t.raised)] {
+                let hovered = over(t.hover, g);
+                assert_ne!(hovered, g, "{mode}: hover shows on {name}");
+                assert!(contrast(t.danger, hovered) >= 4.5, "{mode}: danger on hover on {name}: {:.2}", contrast(t.danger, hovered));
             }
         }
     }
