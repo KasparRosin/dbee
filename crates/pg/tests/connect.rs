@@ -611,3 +611,86 @@ async fn pg_lists_through_postgres_when_the_default_database_is_missing() {
         }
     }
 }
+
+/// A Unix socket in a folder of its own that passes each connection on to the server's TCP port,
+/// answering an SSLRequest with `N` as a server's own socket does: the test servers have no socket
+/// on this machine.
+#[cfg(unix)]
+async fn socket_to(port: u16) -> std::path::PathBuf {
+    use tokio::io::AsyncWriteExt as _;
+    const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xD2, 0x16, 0x2F];
+    let dir = std::env::temp_dir().join(unique("dbee-pgs"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let listener = tokio::net::UnixListener::bind(dir.join(format!(".s.PGSQL.{port}"))).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut unix, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                // Every first message, the startup too, is at least 8 bytes.
+                let mut first = [0u8; 8];
+                if unix.read_exact(&mut first).await.is_err() {
+                    return;
+                }
+                let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+                if first == SSL_REQUEST {
+                    unix.write_all(b"N").await.unwrap();
+                } else {
+                    tcp.write_all(&first).await.unwrap();
+                }
+                let _ = tokio::io::copy_bidirectional(&mut unix, &mut tcp).await;
+            });
+        }
+    });
+    dir
+}
+
+/// The session's transaction, as each ReadyForQuery says, on every way to the server: plain TCP,
+/// TLS, an SSH tunnel and a Unix socket, each of which still connects and runs as before.
+#[tokio::test]
+async fn the_transaction_state_is_read_on_every_way_there() {
+    use dbee_driver::TransactionState::*;
+    let db = require_testdb!();
+    let home = temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
+    for s in postgres(db) {
+        let mut ways = vec![
+            ("plain", config(s, SslMode::Disable), None, TlsState::Off, true),
+            ("tls", config(s, SslMode::Require), None, TlsState::Unchecked, true),
+            ("ssh", tunnelled(s, db, SslMode::Disable), Some(tunnel(db, &home).await), TlsState::Off, false),
+        ];
+        #[cfg(unix)]
+        {
+            let dir = socket_to(s.port).await;
+            ways.push((
+                "socket",
+                ConnectionConfig { host: dir.to_string_lossy().into_owned(), ..config(s, SslMode::Prefer) },
+                None,
+                TlsState::Off,
+                true,
+            ));
+        }
+        for (way, c, tunnel, tls, local) in ways {
+            let target = Target { config: &c, password: Some(&db.password), tunnel, purpose: Purpose::Query, create_file: false, allowed_dirs: None };
+            let conn = PgDriver.connect(target).await.unwrap_or_else(|e| panic!("{} {way}: {e}", s.name));
+            let at = format!("{} {way}", s.name);
+            assert_eq!((conn.info().tls, conn.info().local), (Some(tls), local), "{at}");
+            assert_eq!(conn.transaction().await, Idle, "{at}");
+            conn.run("BEGIN", QUERY_LIMITS).await.unwrap();
+            assert_eq!(conn.transaction().await, Open, "{at}");
+            // One statement with columns is also prepared, to type them: its answers come in after
+            // the run has returned.
+            assert_eq!(conn.run("SELECT 1 AS one", QUERY_LIMITS).await.unwrap().columns[0].base_type, "int4", "{at}");
+            assert_eq!(conn.transaction().await, Open, "{at}");
+            conn.run("SELECT 1/0", QUERY_LIMITS).await.unwrap_err();
+            assert_eq!(conn.transaction().await, Failed, "{at}");
+            conn.run("SELECT 1", QUERY_LIMITS).await.unwrap_err();
+            assert_eq!(conn.transaction().await, Failed, "{at}: 25P02");
+            conn.run("ROLLBACK", QUERY_LIMITS).await.unwrap();
+            assert_eq!(conn.transaction().await, Idle, "{at}");
+            // A script that begins: the server's report, not the text, says so.
+            conn.run("BEGIN; SELECT 1", QUERY_LIMITS).await.unwrap();
+            assert_eq!(conn.transaction().await, Open, "{at}");
+            conn.run("COMMIT", QUERY_LIMITS).await.unwrap();
+            assert_eq!(conn.transaction().await, Idle, "{at}");
+            assert_eq!(conn.scalar_u64("SELECT 7").await, Ok(7), "{at}");
+        }
+    }
+}

@@ -38,7 +38,7 @@ pub use dbee_driver::{Meaning, allowed_file};
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
 pub use state::{
-    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total, Which,
+    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total, Transaction, Which,
 };
 pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};
 
@@ -586,13 +586,15 @@ impl Session {
 
     /// No marker outlives its job: once `job`'s result was applied, or dropped because the job's
     /// future or its `Apply` panicked (and the state was put back with the markers it had), every
-    /// marker that still names it is cleared. A query run whose marker is still there was not
-    /// applied, so where it left the query connection is not known.
+    /// marker that still names it is cleared. A query run (or a commit or rollback) whose marker
+    /// is still there was not applied, so where it left the query connection, and its transaction,
+    /// are not known.
     fn job_ended(&mut self, job: JobId) {
         for c in &mut self.state.connections {
             if c.query_run.as_ref().is_some_and(|run| run.job == job) {
                 c.query_run = None;
                 c.query_database.known = false;
+                c.transaction = Some(Transaction { state: dbee_driver::TransactionState::Unknown, tab: None });
             }
         }
         for tab in &mut self.state.tabs {

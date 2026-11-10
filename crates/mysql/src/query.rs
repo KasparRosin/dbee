@@ -2,7 +2,7 @@
 //! sends them.
 
 use dbee_core::{Column, ResultSet};
-use dbee_driver::{DbError, Limits, QUERY_LIMITS};
+use dbee_driver::{DbError, Limits, QUERY_LIMITS, TransactionState};
 
 use crate::connect::{MySqlConnection, Session};
 
@@ -66,6 +66,29 @@ impl MySqlConnection {
         let result = self.run_untyped(sql, Limits { max_rows: 1, ..QUERY_LIMITS }).await?;
         let cell = result.rows.first().and_then(|row| row.first()).and_then(|c| c.as_deref());
         cell.and_then(|text| text.trim().parse::<u64>().ok()).ok_or_else(|| DbError::Other("the query did not return a count".into()))
+    }
+
+    /// Whether the session is in a transaction: as the last command's OK or EOF packet said, else
+    /// (an error's packet says nothing of it) as the server answers a ping. `Unknown` on a closed
+    /// connection, and when the ping fails, which closes it.
+    pub async fn transaction(&self) -> TransactionState {
+        let Ok(mut session) = self.lock().await else { return TransactionState::Unknown };
+        let in_transaction = match session.in_transaction {
+            Some(known) => known,
+            None => {
+                let closes = Closes(Some(self));
+                let pinged = session.ping().await;
+                closes.disarm();
+                match pinged {
+                    Ok(known) => known,
+                    Err(_) => {
+                        self.mark_closed();
+                        return TransactionState::Unknown;
+                    }
+                }
+            }
+        };
+        if in_transaction { TransactionState::Open } else { TransactionState::Idle }
     }
 
     /// Run one statement on `session`, which the caller locked, as the cancel's statement

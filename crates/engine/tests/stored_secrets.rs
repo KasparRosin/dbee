@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, DbKind, MemoryStore, SecretError, SecretKind, SecretStore, SslMode};
 use dbee_core::{Catalog, ResultSet};
-use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbError, DbFuture, Driver, Drivers, Limits, ServerInfo, Target};
+use dbee_driver::{
+    ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbError, DbFuture, Driver, Drivers, Limits, ServerInfo, Target, TransactionState,
+};
 use dbee_engine::{Session, SessionOptions};
 use dbee_sql::Dialect;
 use dbee_ssh::{AgentSource, SshEnv};
@@ -119,6 +121,9 @@ impl Connection for LoggedIn {
     }
     fn apply<'a>(&'a self, _: &'a [String], _: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>> {
         Box::pin(async { Err(ApplyError { index: 0, error: DbError::Other("not in this test".into()) }) })
+    }
+    fn transaction(&self) -> BoxFuture<'_, TransactionState> {
+        Box::pin(async { TransactionState::Idle })
     }
 }
 

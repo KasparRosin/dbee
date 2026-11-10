@@ -53,6 +53,8 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("query.cancel", &[]),
     ("query.showResult", &[("index", Hint::Count)]),
     ("query.setDatabase", &[("tab", Hint::Tab), ("database", Hint::Text)]),
+    ("query.commit", &[("tab", Hint::Tab)]),
+    ("query.rollback", &[("tab", Hint::Tab)]),
     ("tab.close", &[("tab", Hint::Tab), ("force", Hint::Bool)]),
     ("connection.list", &[]),
     ("connection.save", &[("config", CONFIG), ("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text)]),

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dbee_core::{Catalog, ResultSet};
-use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbError, DbFuture, Limits, ServerInfo};
+use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbError, DbFuture, Limits, ServerInfo, TransactionState};
 use dbee_sql::Dialect;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -106,6 +106,13 @@ impl Connection for InTurn {
         Box::pin(async move {
             let _turn = self.turn().await;
             self.conn.apply(statements, gate).await
+        })
+    }
+
+    fn transaction(&self) -> BoxFuture<'_, TransactionState> {
+        Box::pin(async move {
+            let _turn = self.turn().await;
+            self.conn.transaction().await
         })
     }
 }
@@ -229,6 +236,9 @@ pub(crate) mod tests {
         }
         fn apply<'a>(&'a self, _: &'a [String], _: &'a ApplyGate) -> BoxFuture<'a, Result<u64, ApplyError>> {
             Box::pin(async { Err(ApplyError { index: 0, error: DbError::Other("not in this test".into()) }) })
+        }
+        fn transaction(&self) -> BoxFuture<'_, TransactionState> {
+            Box::pin(async { TransactionState::Idle })
         }
     }
 }

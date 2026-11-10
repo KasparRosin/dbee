@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
 use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
-use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState};
+use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState, TransactionState};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
@@ -88,8 +88,12 @@ pub struct Connected {
     /// after a run that names `session_track`.
     pub(crate) query_database: CurrentDatabase,
     /// The query run in progress: one at a time, since the query connection runs one statement at
-    /// a time and a cancel request hits whatever runs on it.
+    /// a time and a cancel request hits whatever runs on it. A `query.commit` or `query.rollback`
+    /// counts as one.
     pub(crate) query_run: Option<QueryRun>,
+    /// The query session's transaction, as the driver reported it after the last run, commit or
+    /// rollback on the query connection; read it through [`Connected::transaction`].
+    pub(crate) transaction: Option<Transaction>,
     /// The SSH tunnel both connections run through, when the config has one.
     pub(crate) tunnel: Option<Arc<Tunnel>>,
     /// What the connect used, kept in memory for reconnects (and the query connection).
@@ -119,6 +123,7 @@ impl std::fmt::Debug for Connected {
             .field("query_closed", &self.query.as_ref().map(|q| q.is_closed()))
             .field("query_database", &self.query_database)
             .field("query_run", &self.query_run)
+            .field("transaction", &self.transaction)
             .field("tunnel", &self.tunnel)
             .field("credentials", &self.credentials)
             .field("apply_gate", &self.apply_gate.as_ref().map(|(job, _, _)| job))
@@ -181,7 +186,56 @@ impl CurrentDatabase {
     }
 }
 
+/// The query session's open transaction: its state and the tab whose run opened it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Transaction {
+    /// `Open`, `Failed` or `Unknown`; never `Idle`, which is no transaction.
+    pub state: TransactionState,
+    /// The query tab whose run found the session idle and left it in a transaction; `None` once
+    /// that tab has closed, or when the state is unknown.
+    pub tab: Option<TabId>,
+}
+
+impl Transaction {
+    /// The transaction after a run of `tab` (`None` once it has closed), or a commit or rollback
+    /// (`None`), left the session in `state`, where it was `before`: none when idle; else the
+    /// owner it had, or the run's tab when it found the session idle.
+    pub(crate) fn after(before: Option<Transaction>, state: TransactionState, tab: Option<TabId>) -> Option<Transaction> {
+        match (state, before) {
+            (TransactionState::Idle, _) => None,
+            (TransactionState::Unknown, _) => Some(Transaction { state, tab: None }),
+            (_, Some(before)) => Some(Transaction { state, tab: before.tab }),
+            (_, None) => Some(Transaction { state, tab }),
+        }
+    }
+
+    /// `{state, tab}`: `state` is `open`, `failed` or `unknown`.
+    pub fn summary(&self) -> Json {
+        let state = match self.state {
+            TransactionState::Open => "open",
+            TransactionState::Failed => "failed",
+            TransactionState::Idle | TransactionState::Unknown => "unknown",
+        };
+        json!({ "state": state, "tab": self.tab })
+    }
+}
+
 impl Connected {
+    /// The query session's transaction; none while the query connection is not open, or has
+    /// closed, which ends its session.
+    pub fn transaction(&self) -> Option<Transaction> {
+        self.query.as_ref().filter(|q| !q.is_closed()).and(self.transaction)
+    }
+
+    /// Query tab `tab` has closed: a transaction it opened has no tab any more.
+    pub(crate) fn tab_closed(&mut self, tab: TabId) {
+        if let Some(t) = &mut self.transaction
+            && t.tab == Some(tab)
+        {
+            t.tab = None;
+        }
+    }
+
     /// The database a run of `q` starts in: the tab's own, which the run makes current first;
     /// else the query connection's while it is open, or the settings' before it opens.
     pub fn starts_in(&self, q: &QueryTab) -> CurrentDatabase {
@@ -193,11 +247,12 @@ impl Connected {
     }
 
     /// `{connection, id, name, color, kind, host, port, database, user, ssh, readOnly, server, tls,
-    /// lost, saved}`, as `inspect()` and `connection.open` show it: `connection` is its
+    /// lost, saved, transaction}`, as `inspect()` and `connection.open` show it: `connection` is its
     /// [`ConnectionId`], `id` the saved connection's, `kind` the database type's id, `server` the
     /// product and its version (`PostgreSQL 14.12`), `tls` the link's [`TlsState`] (`off`,
     /// `unchecked`, `certificateChecked`, `checked`; `null` for a file), `saved` whether the saved list holds it
-    /// (`ConnectionStore::is_saved`, which the caller asks). Never a secret.
+    /// (`ConnectionStore::is_saved`, which the caller asks), `transaction` the query session's
+    /// ([`Transaction::summary`], or null). Never a secret.
     pub fn summary(&self, saved: bool) -> Json {
         let c = &self.config;
         json!({
@@ -216,6 +271,7 @@ impl Connected {
             "tls": self.info.tls.map(TlsState::id),
             "lost": self.lost,
             "saved": saved,
+            "transaction": self.transaction().map(|t| t.summary()),
         })
     }
 }

@@ -127,12 +127,15 @@ pub(crate) struct Said {
     pub(crate) mode: ModeReport,
     /// The last OK packet's `SERVER_STATUS_NO_BACKSLASH_ESCAPES`; `None` when none came.
     pub(crate) no_backslash_escapes: Option<bool>,
+    /// The last OK packet's `SERVER_STATUS_IN_TRANS`; `None` when none came.
+    pub(crate) in_transaction: Option<bool>,
 }
 
 impl Said {
     fn note(&mut self, mode: ModeReport, status: StatusFlags) {
         self.mode = self.mode.then(mode);
         self.no_backslash_escapes = Some(status.contains(StatusFlags::SERVER_STATUS_NO_BACKSLASH_ESCAPES));
+        self.in_transaction = Some(status.contains(StatusFlags::SERVER_STATUS_IN_TRANS));
     }
 }
 

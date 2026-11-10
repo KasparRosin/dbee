@@ -1,4 +1,5 @@
-//! Query tabs: `query.run`, `query.cancel`, `query.showResult` and `query.setDatabase`.
+//! Query tabs: `query.run`, `query.cancel`, `query.showResult`, `query.setDatabase`, `query.commit`
+//! and `query.rollback`.
 //!
 //! **Running** is a job on the query connection, which is not the browse connection: a `BEGIN`
 //! left open in a query tab never reaches table pages or an Apply. The job opens the connection
@@ -49,6 +50,18 @@
 //! the tab; the next run's `USE` keeps every tab in its own. A tab with none starts where the
 //! connection is ([`crate::Connected::starts_in`]).
 //!
+//! **The transaction.** All of a connection's query tabs share the query session, so its
+//! transaction belongs to the connection ([`Connected::transaction`]). After each run, commit and
+//! rollback the job asks the driver whether the session is in a transaction, as the server reported
+//! it ([`Connection::transaction`]): never from the SQL text, so a `BEGIN` in a script, MySQL's
+//! `SET autocommit = 0` and a statement that commits on its own all read as the server says. A run
+//! that finds the session idle and leaves it in a transaction makes its tab the owner; a run of
+//! another tab keeps the owner, and closing the owner leaves the transaction without one. A run
+//! whose result was not applied leaves it unknown; a lost or replaced query connection ends it.
+//! `query.commit` and `query.rollback` send `COMMIT` or `ROLLBACK` on the query session from any
+//! of its tabs, as a job that counts as the connection's run; with no transaction open they send
+//! nothing and say so. Table tabs run on the browse connection and never touch it.
+//!
 //! **Errors** keep the server's message, code, meaning, detail and hint ([`QueryError`]); the
 //! position the server gives (characters into the statement) becomes a byte offset into the tab
 //! text.
@@ -68,7 +81,7 @@ use std::sync::{Arc, Weak};
 
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
-use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target, TlsState};
+use dbee_driver::{Connection, DbError, Driver, Limits, Purpose, QUERY_LIMITS, Target, TlsState, TransactionState};
 use dbee_sql::{Dialect, lexer};
 use dbee_ssh::Tunnel;
 use serde_json::json;
@@ -76,7 +89,7 @@ use serde_json::json;
 use super::connection::{db_error, driver_for};
 use super::{CommandSpec, NO_QUERY_TAB, NOT_CONNECTED, active_query, bad, disabled, ignored, needs_db, p};
 use crate::jobs::{self, Stop};
-use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, Selection, StatementOutcome};
+use crate::state::{Connected, CurrentDatabase, QueryError, QueryRun, QueryTab, Selection, StatementOutcome, Transaction};
 use crate::turns::InTurn;
 use crate::{Apply, ConnectionId, EngineError, JobId, Json, Outcome, Session, Tab, TabId, Which};
 
@@ -84,6 +97,22 @@ const RUN: &str = "query.run";
 const CANCEL: &str = "query.cancel";
 const SHOW_RESULT: &str = "query.showResult";
 const SET_DATABASE: &str = "query.setDatabase";
+const COMMIT: &str = "query.commit";
+const ROLLBACK: &str = "query.rollback";
+
+/// What `query.commit` and `query.rollback` say when the query session has no transaction open.
+pub const NO_TRANSACTION: &str = "no transaction is open";
+
+/// What `query.commit` says of a Postgres transaction that had failed: the server ends it with a
+/// rollback.
+pub const FAILED_COMMIT: &str = "the transaction had failed, so the server rolled it back: nothing was committed";
+
+/// What `query.rollback` says when the query connection was lost: its transaction ended with it.
+pub const ENDED_WITH_SESSION: &str = "the query connection was lost, and the server rolled its transaction back";
+
+/// Why `query.commit` fails when the query connection was lost.
+pub const COMMIT_SESSION_LOST: &str =
+    "the query connection was lost, and the server rolled its transaction back: nothing was committed. Run again to open a new one";
 
 /// Why `query.run` does not start: the text holds no statement.
 pub const NOTHING_TO_RUN: &str = "there is no statement to run";
@@ -142,6 +171,28 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         undoable: false,
     },
     CommandSpec {
+        id: COMMIT,
+        label: "Commit",
+        menu: &[],
+        shortcut: None,
+        params: "{tab?}",
+        enabled: needs_db,
+        run: commit,
+        journal: false,
+        undoable: false,
+    },
+    CommandSpec {
+        id: ROLLBACK,
+        label: "Rollback",
+        menu: &[],
+        shortcut: None,
+        params: "{tab?}",
+        enabled: needs_db,
+        run: rollback,
+        journal: false,
+        undoable: false,
+    },
+    CommandSpec {
         id: SET_DATABASE,
         label: "Set Query Database",
         menu: &[],
@@ -187,9 +238,12 @@ fn busy(s: &Session, connection: ConnectionId) -> Option<String> {
         Tab::Query(q) if q.running == Some(run.job) => Some(q.title.as_str()),
         _ => None,
     });
-    Some(match title {
-        Some(title) => running_in(title),
-        None => "a cancelled query is still stopping".into(),
+    let label = s.jobs.running().find(|(job, _)| *job == run.job).map(|(_, label)| label);
+    Some(match (title, label) {
+        (Some(title), _) => running_in(title),
+        (None, Some(COMMIT)) => "a COMMIT is running".into(),
+        (None, Some(ROLLBACK)) => "a ROLLBACK is running".into(),
+        (None, _) => "a cancelled query is still stopping".into(),
     })
 }
 
@@ -235,6 +289,9 @@ struct Ran {
     current: CurrentDatabase,
     /// The tab's `USE` went through, or it needed none: its statements were reached.
     past_use: bool,
+    /// Whether the connection's session is in a transaction after the run, as the driver says;
+    /// `None` when no connection was reached.
+    transaction: Option<TransactionState>,
 }
 
 /// The byte offset in `text` of 1-based character `chars` of the statement at `range`, as the
@@ -264,7 +321,14 @@ struct RunSetup {
 /// rows do not fit its result is cut (and says so); once its columns do not fit it fails, and the
 /// run ends there ([`DbError::TooLarge`]). A statement without columns still runs.
 async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup: RunSetup, stop: Arc<Stop>, budget: usize) -> Ran {
-    let mut ran = Ran { conn: None, outcomes: Vec::with_capacity(ranges.len()), failure: None, current: setup.current.clone(), past_use: false };
+    let mut ran = Ran {
+        conn: None,
+        outcomes: Vec::with_capacity(ranges.len()),
+        failure: None,
+        current: setup.current.clone(),
+        past_use: false,
+        transaction: None,
+    };
     let stopped = |statement| Some(Failure { statement, error: DbError::Cancelled, position: None });
     if stop.is_set() {
         ran.failure = stopped(0);
@@ -358,6 +422,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
             }
         }
     }
+    ran.transaction = Some(conn.transaction().await);
     ran.conn = Some((conn, opened));
     ran
 }
@@ -482,17 +547,21 @@ fn same_connection(generation: &Weak<InTurn>, conn: &Arc<InTurn>) -> bool {
 fn apply_run(s: &mut Session, tab: TabId, id: ConnectionId, generation: &Weak<InTurn>, ran: Ran) -> Result<Json, EngineError> {
     let me = s.applying_job();
     let for_tab = matches!(s.state.tab(tab), Some(Tab::Query(q)) if me.is_some() && q.running == me);
+    let tab_open = s.state.tab(tab).is_some();
     // The connection is still the one the run started on: not closed, not replaced.
     let Some(c) = s.state.connection_mut(Which::Id(id)).filter(|c| same_connection(generation, &c.browse)) else { return Ok(ignored()) };
     // The run is over (clearing the marker of a job that ended is not applying its result).
     if me.is_some() && c.query_run.as_ref().map(|run| run.job) == me {
         c.query_run = None;
     }
-    let Ran { conn, outcomes, failure, current, past_use } = ran;
+    let Ran { conn, outcomes, failure, current, past_use, transaction } = ran;
     match &conn {
-        // Opened by the job: it becomes the session's query connection. Without the tab, a lost
-        // one is dropped: no open tab ever ran on it.
-        Some((used, true)) if c.query.is_none() && (for_tab || !used.is_closed()) => c.query = Some(Arc::clone(used)),
+        // Opened by the job: it becomes the session's query connection, with a new session. Without
+        // the tab, a lost one is dropped: no open tab ever ran on it.
+        Some((used, true)) if c.query.is_none() && (for_tab || !used.is_closed()) => {
+            c.query = Some(Arc::clone(used));
+            c.transaction = None;
+        }
         Some((used, false)) if !c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, used)) => return Ok(ignored()),
         _ => {}
     }
@@ -500,6 +569,9 @@ fn apply_run(s: &mut Session, tab: TabId, id: ConnectionId, generation: &Weak<In
         && c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, used))
     {
         c.query_database = current.clone();
+        if let Some(state) = transaction {
+            c.transaction = Transaction::after(c.transaction, state, tab_open.then_some(tab));
+        }
     }
     if !for_tab {
         return Ok(ignored());
@@ -635,17 +707,7 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// the dialect can write in its `USE`. A run that gets past it sets it to where it ends, so it is
 /// `Busy` while the tab runs.
 fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
-    let tab = match p::opt_tab_id(params, "tab")? {
-        Some(id) => match s.state.tab(id) {
-            Some(Tab::Query(q)) => q.id,
-            Some(Tab::Table(_)) => return Err(bad(format!("tab {} is not a query tab", id.0))),
-            None => return Err(bad(format!("no tab {} is open", id.0))),
-        },
-        None => match s.state.active_tab() {
-            Some(Tab::Query(q)) => q.id,
-            _ => return Err(disabled(NO_QUERY_TAB)),
-        },
-    };
+    let tab = query_tab(s, params)?;
     let dialect = s.state.dialect(Which::Tab(tab));
     let database = match params.get("database") {
         Some(Json::Null) => None,
@@ -661,6 +723,132 @@ fn set_database(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> 
     }
     q.database = database;
     Ok(Outcome::Done(json!({ "tab": tab, "database": q.database })))
+}
+
+/// The query tab `params` names in `tab`, else the active one.
+fn query_tab(s: &Session, params: &Json) -> Result<TabId, EngineError> {
+    match p::opt_tab_id(params, "tab")? {
+        Some(id) => match s.state.tab(id) {
+            Some(Tab::Query(q)) => Ok(q.id),
+            Some(Tab::Table(_)) => Err(bad(format!("tab {} is not a query tab", id.0))),
+            None => Err(bad(format!("no tab {} is open", id.0))),
+        },
+        None => match s.state.active_tab() {
+            Some(Tab::Query(q)) => Ok(q.id),
+            _ => Err(disabled(NO_QUERY_TAB)),
+        },
+    }
+}
+
+/// What `query.commit` and `query.rollback` send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum End {
+    Commit,
+    Rollback,
+}
+
+impl End {
+    fn id(self) -> &'static str {
+        match self {
+            End::Commit => COMMIT,
+            End::Rollback => ROLLBACK,
+        }
+    }
+
+    fn sql(self) -> &'static str {
+        match self {
+            End::Commit => "COMMIT",
+            End::Rollback => "ROLLBACK",
+        }
+    }
+}
+
+fn commit(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    end(s, params, End::Commit)
+}
+
+fn rollback(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    end(s, params, End::Rollback)
+}
+
+/// `{tab?}` → `{tab, sent, transaction, note?}`: ends the query session's transaction (see the
+/// module docs), asked from query tab `tab` (default: the active one), any of the connection's.
+/// `transaction` is the state after it. With none open it sends nothing: `sent: false` and
+/// `note` [`NO_TRANSACTION`], at once. A commit of a Postgres transaction that had failed is a
+/// rollback, which `note` says ([`FAILED_COMMIT`]). On a query connection found lost, a commit
+/// fails with `connectionLost` and a rollback has nothing left to do ([`ENDED_WITH_SESSION`]).
+fn end(s: &mut Session, params: &Json, end: End) -> Result<Outcome, EngineError> {
+    let tab = query_tab(s, params)?;
+    let id = s.state.connection(Which::Tab(tab)).map(|c| c.id).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    if let Some(why) = busy(s, id) {
+        return Err(EngineError::Busy(why));
+    }
+    s.browse(Which::Id(id))?;
+    let c = s.state.connection_mut(Which::Id(id)).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    let nothing = |note: &str| Ok(Outcome::Done(json!({ "tab": tab, "sent": false, "transaction": null, "note": note })));
+    let conn = match (&c.query, c.transaction) {
+        (Some(q), _) if q.is_closed() => {
+            log::info!("query: the query connection has closed, and its transaction with it; the next run opens a new one");
+            c.query = None;
+            c.transaction = None;
+            return match end {
+                End::Commit => Err(EngineError::Db { code: DbError::ConnectionLost.code(), message: COMMIT_SESSION_LOST.into(), data: json!({}) }),
+                End::Rollback => nothing(ENDED_WITH_SESSION),
+            };
+        }
+        (Some(q), Some(_)) => Arc::clone(q),
+        _ => return nothing(NO_TRANSACTION),
+    };
+    let before = c.transaction.map(|t| t.state);
+    let generation = Arc::downgrade(&c.browse);
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
+    let job = s.spawn_stoppable_job(end.id(), Arc::clone(&stop), async move {
+        let sent = jobs::stoppable(conn.canceller(), conn.run(end.sql(), Limits { max_rows: 0, max_bytes: 0 }), &job_stop).await.map(drop);
+        let state = conn.transaction().await;
+        let ended = Ended { tab, id, end, before, sent, state };
+        let apply: Apply = Box::new(move |s: &mut Session| apply_end(s, &generation, &conn, ended));
+        apply
+    });
+    if let Some(c) = s.state.connection_mut(Which::Id(id)) {
+        c.query_run = Some(QueryRun { job, stop });
+    }
+    Ok(Outcome::Started(job))
+}
+
+/// A commit or rollback that ran: what it was asked, the state before, whether it was sent, and
+/// the state the driver reported after it.
+struct Ended {
+    tab: TabId,
+    id: ConnectionId,
+    end: End,
+    before: Option<TransactionState>,
+    sent: Result<(), DbError>,
+    state: TransactionState,
+}
+
+/// Applies a commit or rollback that ran on `conn`, the query connection of open connection
+/// `e.id` when it started: the new state, then its error, if any. A connection closed or replaced
+/// meanwhile, or a query connection that is no longer the session's, is ignored.
+fn apply_end(s: &mut Session, generation: &Weak<InTurn>, conn: &Arc<dyn Connection>, e: Ended) -> Result<Json, EngineError> {
+    let me = s.applying_job();
+    let Some(c) = s.state.connection_mut(Which::Id(e.id)).filter(|c| same_connection(generation, &c.browse)) else { return Ok(ignored()) };
+    if me.is_some() && c.query_run.as_ref().map(|run| run.job) == me {
+        c.query_run = None;
+    }
+    if !c.query.as_ref().is_some_and(|q| Arc::ptr_eq(q, conn)) {
+        return Ok(ignored());
+    }
+    c.transaction = Transaction::after(c.transaction, e.state, None);
+    let transaction = c.transaction().map(|t| t.summary());
+    if let Err(error) = e.sent {
+        return Err(s.db_failed(e.id, conn, &error));
+    }
+    let mut result = json!({ "tab": e.tab, "sent": true, "transaction": transaction });
+    if e.end == End::Commit && e.before == Some(TransactionState::Failed) && e.state == TransactionState::Idle {
+        result["note"] = json!(FAILED_COMMIT);
+    }
+    Ok(result)
 }
 
 /// `{index}` → `{tab, shown, result}`: the grid shows result `index` of the last run.

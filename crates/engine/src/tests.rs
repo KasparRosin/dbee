@@ -623,8 +623,8 @@ fn panicking_job_becomes_internal() {
 }
 
 /// A query run whose result was never applied (its future or its `Apply` panicked) may have
-/// moved the query connection: once it has ended, the database it is in is unknown. Another
-/// job's end leaves it alone.
+/// moved the query connection: once it has ended, the database it is in is unknown, and so is
+/// its transaction. Another job's end leaves them alone.
 #[test]
 fn a_query_run_left_unapplied_leaves_the_database_not_known() {
     let home = dbee_testkit::temp_home(None, None);
@@ -642,6 +642,8 @@ fn a_query_run_left_unapplied_leaves_the_database_not_known() {
     s.job_ended(run);
     let c = s.state.connection(crate::Which::Active).unwrap();
     assert_eq!((c.query_run.as_ref().map(|r| r.job), &c.query_database), (None, &CurrentDatabase { known: false, ..shop() }));
+    let unknown = crate::Transaction { state: dbee_driver::TransactionState::Unknown, tab: None };
+    assert_eq!(c.transaction, Some(unknown));
 }
 
 #[test]

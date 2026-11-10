@@ -1280,6 +1280,7 @@ fn apply_open(
         query: None,
         query_database: CurrentDatabase::default(),
         query_run: None,
+        transaction: None,
         tunnel,
         credentials,
         apply_gate: None,
@@ -1405,6 +1406,7 @@ fn apply_reconnect(
     let old_browse = std::mem::replace(&mut c.browse, InTurn::new(conn));
     let query_reset = c.query.take().is_some();
     c.query_run = None;
+    c.transaction = None;
     c.tunnel = tunnel;
     c.credentials = credentials;
     c.lost = false;

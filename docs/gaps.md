@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-10 · **Change:** minor (entry 54: the engine reads only its own cancel as cancelled; the error band is left)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-10 · **Change:** minor (entries 14 and 53: the engine knows the query session's transaction and its tab, and commits or rolls it back; the footer mark, the prompt on close and the ROLLBACK button are left)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -120,10 +120,12 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 14. Query tabs share one session, and its transaction outlives a tab (D)
 
-- **Limit:** every query tab of a connection runs on one query connection, so they share one session: its transaction, its `SET`s and its temporary tables. A transaction a tab opened (`BEGIN`) stays open when the tab closes, and another tab's `COMMIT` or `ROLLBACK` ends it. On MySQL and MariaDB a statement that commits on its own (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `LOCK TABLES` and others) in any tab commits it, without a word. On Postgres a script that fails inside a transaction leaves the session in that failed transaction: every later run, in any tab, fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead; under a 25P02 error the card adds that a ROLLBACK ends it. MySQL, MariaDB and SQLite keep a transaction going after a failed statement, so there that part does not arise.
-- **Evidence:** the query connection (`Connected::query`, `crates/engine/src/state.rs`) is one per connection, and closing a tab ends no transaction (`crates/engine/src/cmd/tabs.rs`); `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
-- **Impact:** an uncommitted change made in a tab that was closed can be committed later by another tab, by its `COMMIT` or, on MySQL and MariaDB, by its DDL. A reconnect ends the session and its transaction (rolled back).
-- **Estimate:** 2–4 h (estimated): each driver reports after a run whether a transaction is open (Postgres's ReadyForQuery status, MySQL's `SERVER_STATUS_IN_TRANS`, SQLite's autocommit flag), the query tab shows it, and closing the tab or switching connections asks whether to commit or roll back. Planned for M3, with the redesign (the maintainer's call, 2026-11-08).
+- **Limit:** every query tab of a connection runs on one query connection, so they share one session: its transaction, its `SET`s and its temporary tables (one session per tab is not planned for M3). A transaction a tab opened (`BEGIN`) stays open when the tab closes, and another tab's `COMMIT` or `ROLLBACK` ends it. On MySQL and MariaDB a statement that commits on its own (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `LOCK TABLES` and others) in any tab commits it, without a word. On Postgres a script that fails inside a transaction leaves the session in that failed transaction: every later run, in any tab, fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead; under a 25P02 error the card adds that a ROLLBACK ends it. MySQL, MariaDB and SQLite keep a transaction going after a failed statement, so there that part does not arise.
+- **Done (engine):** the connection's `transaction` in `document.inspect` says whether its query session has one open (`open`, Postgres's `failed`, or `unknown`) and which tab's run opened it, as each driver reports after every run: Postgres's ReadyForQuery status (read off the stream, which tokio-postgres keeps to itself), MySQL's and MariaDB's `SERVER_STATUS_IN_TRANS` (a `COM_PING` after an error), SQLite's autocommit flag; never from the SQL. A reconnect or a lost query connection reads none. `query.commit` and `query.rollback` end it from any of the connection's query tabs.
+- **Left:** the footer's mark, and the prompt (COMMIT, ROLLBACK or CANCEL) when the owner tab closes or the connection closes or changes; both go with the Shell screen (M3 Phase 3). Until then closing a tab ends no transaction, and the transaction then has no tab.
+- **Evidence:** the query connection (`Connected::query`, `crates/engine/src/state.rs`) is one per connection; `Connected::transaction` and `Transaction` (`crates/engine/src/state.rs`), `Connection::transaction` (`crates/driver/src/api.rs`), `crates/pg/src/tap.rs`; the tests of `crates/engine/tests/transaction.rs`, `the_transaction_state_is_read_on_every_way_there` (`crates/pg/tests/connect.rs`), `the_transaction_state_follows_the_servers_status` (`crates/mysql/tests/query.rs`) and `the_transaction_state_follows_autocommit` (`crates/sqlite/tests/query.rs`); `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
+- **Impact:** until the Shell screen draws the mark and the prompt, the user cannot see that a transaction is open, and an uncommitted change made in a tab that was closed can be committed later by another tab, by its `COMMIT` or, on MySQL and MariaDB, by its DDL. A reconnect ends the session and its transaction (rolled back).
+- **Estimate:** part of the Shell screen (M3 Phase 3); not estimated.
 
 ### 15. A table without a row key pages by OFFSET alone (D)
 
@@ -394,10 +396,11 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 53. No ROLLBACK button after a failed transaction (F)
 
-- **Missing:** a rollback command, and the ROLLBACK button on the error card that runs it. After a failed statement in a Postgres transaction (25P02), the card only has a note saying a rollback ends it. The maintainer wants this, and the M3 error card draws it.
-- **Evidence:** `engine.commands` lists no rollback command; `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
-- **Impact:** the user has to type `ROLLBACK` before that session can run anything else.
-- **Estimate:** 1.5 h (estimated). Planned for M3.
+- **Done (engine):** `query.rollback` (and `query.commit`) end the query session's transaction, a Postgres one that failed (25P02) too, and return the new state; with none open they do nothing and say so.
+- **Left:** the ROLLBACK button on the error card that runs it. After a failed statement in a Postgres transaction (25P02), the card only has a note saying a rollback ends it. The maintainer wants this, and the M3 error card draws it; it goes with the Query tab screen (M3 Phase 3).
+- **Evidence:** `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`); `a_failed_postgres_transaction_reads_failed_and_rollback_ends_it` (`crates/engine/tests/transaction.rs`).
+- **Impact:** until the button is drawn, the user types `ROLLBACK` (or calls `query.rollback`) before that session can run anything else.
+- **Estimate:** part of the Query tab screen (M3 Phase 3); not estimated.
 
 ### 54. A cancel dbee didn't send: the engine is done, the error band is not (U)
 
@@ -481,6 +484,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-10 | minor | Entries 14 and 53: the connection's `transaction` says whether the query session has one open, as each driver reports it, and which tab's run opened it; `query.commit` and `query.rollback` end it. The footer mark and the prompt on close are left for the Shell screen, the ROLLBACK button for the Query tab screen. |
 | 2026-11-10 | minor | Entry 54: the engine reads only its own cancel as cancelled, and a statement the server stopped by itself is a server error marked `interrupted`; the M3 error band for it is left for the Query tab screen. |
 | 2026-11-10 | minor | The check of the M3 Phase 1 fixes: entries 63 (a long column type may be cut in the grid header) and 64 (the tokens check can misread a test helper with a comma in its type). |
 | 2026-11-10 | minor | The M3 Phase 1 review: entries 60 (the connection form's result strip uses a tint that is no token), 61 (three texts cut at the smallest window, older than M3) and 62 (View > Theme can't be reached before connecting). |
