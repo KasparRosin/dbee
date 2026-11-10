@@ -9,7 +9,7 @@ Every non-code asset in this repository (images, icons, fonts, example files, pr
 Drawn or defined in code and original to dbee (Kaspar Rosin and the dbee contributors, MIT OR Apache-2.0), so no asset file is involved:
 
 - the UI icon set: `crates/ui-egui/src/icons.rs`, shapes drawn with egui's painter;
-- the colour theme: `crates/ui-egui/src/theme/mod.rs`, dbee's own colour tokens and syntax colours;
+- the colour theme: `crates/ui-egui/src/theme/tokens.rs`, dbee's own colour tokens and syntax colours;
 - the test databases: `xtask/testdb/seed.sql` and the tests' own setup SQL, synthetic data only.
 
 ## Compiled in from dependencies
@@ -45,12 +45,12 @@ Their licence texts ship with the binaries from the first release on ([docs/rele
 | `assets/app-icon/hicolor/scalable/apps/dev.rosin.dbee.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
 | `assets/app-icon/LICENSE.txt` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
 | `assets/app-icon/README.md` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
-| `assets/fonts/Inter-Medium.ttf` | Rasmus Andersson | https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip, `extras/ttf/`, v4.1 | SIL OFL 1.1 |  |
-| `assets/fonts/Inter-Regular.ttf` | Rasmus Andersson | https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip, `extras/ttf/`, v4.1 | SIL OFL 1.1 |  |
-| `assets/fonts/JetBrainsMono-Medium.ttf` | JetBrains s.r.o. and the JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip, `fonts/ttf/`, v2.304 | SIL OFL 1.1 |  |
-| `assets/fonts/JetBrainsMono-Regular.ttf` | JetBrains s.r.o. and the JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip, `fonts/ttf/`, v2.304 | SIL OFL 1.1 |  |
-| `assets/fonts/OFL-Inter.txt` | Rasmus Andersson | `LICENSE.txt` of the Inter 4.1 release zip (URL above) | SIL OFL 1.1 | Licence text; ships with the binaries |
-| `assets/fonts/OFL-JetBrainsMono.txt` | JetBrains s.r.o. and the JetBrains Mono Project Authors | `OFL.txt` of the JetBrains Mono 2.304 release zip (URL above) | SIL OFL 1.1 | Licence text; ships with the binaries |
+| `assets/fonts/Inter-Medium.ttf` | The Inter Project Authors | https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip, `extras/ttf/`, v4.1 | SIL OFL 1.1 |  |
+| `assets/fonts/Inter-Regular.ttf` | The Inter Project Authors | https://github.com/rsms/inter/releases/download/v4.1/Inter-4.1.zip, `extras/ttf/`, v4.1 | SIL OFL 1.1 |  |
+| `assets/fonts/JetBrainsMono-Medium.ttf` | The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip, `fonts/ttf/`, v2.304 | SIL OFL 1.1 |  |
+| `assets/fonts/JetBrainsMono-Regular.ttf` | The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip, `fonts/ttf/`, v2.304 | SIL OFL 1.1 |  |
+| `assets/fonts/OFL-Inter.txt` | The Inter Project Authors | `LICENSE.txt` of the Inter 4.1 release zip (URL above) | SIL OFL 1.1 | Licence text; ships with the binaries |
+| `assets/fonts/OFL-JetBrainsMono.txt` | The JetBrains Mono Project Authors | `OFL.txt` of the JetBrains Mono 2.304 release zip (URL above) | SIL OFL 1.1 | Licence text; ships with the binaries |
 | `assets/readme/screenshot-filters.png` | Kaspar Rosin and the dbee contributors | Original: a screenshot of dbee taken by apps/dbee/tests/m1_day.rs (step 3), synthetic test data, reduced to 256 colours | MIT OR Apache-2.0 | Its text is drawn in egui's default fonts (above), from before Inter was bundled |
 | `packaging/macos/dmg/background.svg` | Kaspar Rosin and the dbee contributors | Original | MIT OR Apache-2.0 | |
 | `packaging/macos/dmg/background.tiff` | Kaspar Rosin and the dbee contributors | Generated from packaging/macos/dmg/background.svg by packaging/macos/dmg/generate.py | MIT OR Apache-2.0 | |

@@ -1,11 +1,14 @@
 //! The app shell: [`DbeeApp`] runs one window's frames over a [`Session`].
 //!
-//! Frame order ([`DbeeApp::ui`]):
+//! The first frame only applies the theme and the fonts, and draws nothing: egui loads fonts at
+//! the start of the next frame, and the screens name them. Before every frame
+//! ([`DbeeApp::feed_input`]) the mode chosen is set and the synthetic input fed in. Every later
+//! frame runs in this order ([`DbeeApp::ui`]):
 //! 1. `session.pump()`: the results of finished jobs are applied;
 //! 2. the control replies that waited (for a job, idleness, input or a picture) are answered;
 //! 3. the control requests that arrived are handled ([`crate::control`]); then the file the
-//!    command line named ([`DbeeApp::with_file`]), in the first frame, or else the first file
-//!    dropped on the window opens (`connection.openFile`; a file of no type dbee opens shows the
+//!    command line named ([`DbeeApp::with_file`]), in the first frame that draws, or else the
+//!    first file dropped on the window opens (`connection.openFile`; a file of no type dbee opens shows the
 //!    refusal as a notice; while a connection is open, it closes first, through its questions,
 //!    as a quick search switch does). A drop while a dialog shows or a connect runs is let go, not kept;
 //! 4. the open cell editor takes its keys and commits on a press outside it, or Enter over a
@@ -147,7 +150,7 @@ pub struct DbeeApp {
     /// Keyboard events held back for the next frame: those after a cell editor's key in the same
     /// frame ([`crate::editors::before_frame`]).
     pub(crate) carry: Vec<egui::Event>,
-    /// The file to open in the first frame ([`DbeeApp::with_file`]).
+    /// The file to open in the first frame that draws ([`DbeeApp::with_file`]).
     file: Option<PathBuf>,
 }
 
@@ -331,13 +334,13 @@ impl DbeeApp {
         &self.session
     }
 
-    /// Frames drawn so far.
     /// Marks the theme as set, for a test whose context has it already.
     #[cfg(test)]
     pub(crate) fn themed_for_test(&mut self) {
         self.themed = true;
     }
 
+    /// Frames drawn so far.
     pub fn frames(&self) -> u64 {
         self.frames
     }
