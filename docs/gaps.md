@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-10 · **Change:** minor (entries 60 to 62 from the M3 Phase 1 review; before: entry 60 fixed and dropped)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-10 · **Change:** minor (entries 63 and 64 from the check of the M3 Phase 1 fixes)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -462,10 +462,25 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: only before the first connect, and only when the desktop's setting isn't the one wanted.
 - **Estimate:** part of the Shell screen (M3 Phase 3); not estimated.
 
+### 63. A long column type may be cut in the grid header (U)
+
+- **Limit:** a column's first width counts the type at 0.85 of a cell character, from when types were drawn smaller. Since M3 a type is drawn in the cells' own font, so a type longer than its column's name and values can end elided in the header until the column is widened.
+- **Evidence:** `initial_widths` in `crates/ui-egui/src/grid.rs` (`chars(source.column_type(col)) * CHAR_W * 0.85`); types are drawn in `Text::Data`.
+- **Impact:** small: long types such as `timestamp with time zone` or a MySQL `enum(…)` show cut until the column is dragged wider. The full type is in the value panel.
+- **Estimate:** part of the Grid screen (M3 Phase 3); 0.5 h (estimated).
+
+### 64. The tokens check can misread a test helper with a comma in its type (S)
+
+- **Limit:** `cargo xtask tokens` skips the item after a `#[cfg(test)]`, and finds that item's end at its first comma or brace. A test helper whose signature has a comma inside angle brackets, such as `Result<u8, String>`, ends early, so its body is read as drawing code.
+- **Evidence:** `item_end` in `xtask/src/tokens.rs`; confirmed with a probe in the M3 Phase 1 fix check. Nothing in the tree trips it today.
+- **Impact:** small: it fails loudly, flagging a colour in test code, never quietly letting one through in drawing code.
+- **Estimate:** 0.5 h (estimated).
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-10 | minor | The check of the M3 Phase 1 fixes: entries 63 (a long column type may be cut in the grid header) and 64 (the tokens check can misread a test helper with a comma in its type). |
 | 2026-11-10 | minor | The M3 Phase 1 review: entries 60 (the connection form's result strip uses a tint that is no token), 61 (three texts cut at the smallest window, older than M3) and 62 (View > Theme can't be reached before connecting). |
 | 2026-11-09 | minor | Entry 60 fixed and dropped: the prompt after an unknown Apply reads "Apply again?" with an "Apply again" button, and "Close anyway" stays for the other prompts. |
 | 2026-11-09 | minor | Entries 53 to 60: what the M3 design draws that the code can't do yet (rollback, a cancel dbee didn't send, the structure view, cancelling a connect, last-used order, the saved cell's mark, the update button), and the "Close anyway" prompt that applies again. Entry 1 names what M3 draws for it. |
