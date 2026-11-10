@@ -1,7 +1,7 @@
 //! The harness the UI tests share (`mod common;`): a window over [`DbeeApp::ui`] in egui_kittest,
 //! run one frame at a time and driven only through control requests and automation ids, the way
-//! an agent drives the real window. Each frame first feeds the app's synthetic input
-//! ([`DbeeApp::feed_input`]), as eframe's raw-input hook does, and keeps what the frame put on the
+//! an agent drives the real window. Each frame first sets the mode chosen and feeds the app's
+//! synthetic input ([`DbeeApp::feed_input`]), as eframe's raw-input hook does, and keeps what the frame put on the
 //! clipboard (egui's `CopyText`, which kittest hands back and which never reaches the system
 //! clipboard).
 //!
@@ -158,7 +158,8 @@ impl Ui {
     pub fn frame(&mut self) {
         let start = Instant::now();
         let mut raw = self.harness.input().clone();
-        self.harness.state_mut().feed_input(&mut raw);
+        let ctx = self.harness.ctx.clone();
+        self.harness.state_mut().feed_input(&ctx, &mut raw);
         *self.harness.input_mut() = raw;
         self.harness.step();
         self.slowest = self.slowest.max(start.elapsed());

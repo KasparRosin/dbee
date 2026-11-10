@@ -344,11 +344,15 @@ impl DbeeApp {
         list
     }
 
-    /// Feeds the synthetic input of `ui.click`, `ui.key` and `ui.text` (one batch per frame) into
-    /// the raw input of the frame about to run, after the keyboard events held back from the last
-    /// frame (they came first). eframe calls it through `raw_input_hook`; a test harness calls it
-    /// before each frame.
-    pub fn feed_input(&mut self, raw: &mut egui::RawInput) {
+    /// Before the frame about to run: sets the mode chosen since the last frame, so this frame draws
+    /// wholly in it (egui makes a frame's widgets' style when the frame starts), then feeds the
+    /// synthetic input of `ui.click`, `ui.key` and `ui.text` (one batch per frame) into its raw
+    /// input, after the keyboard events held back from the last frame (they came first). eframe
+    /// calls it through `raw_input_hook`; a test harness calls it before each frame.
+    pub fn feed_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.themed && ctx.theme() != self.mode() {
+            ctx.set_theme(self.mode());
+        }
         if !self.carry.is_empty() {
             raw.events.splice(0..0, self.carry.drain(..));
         }
@@ -520,7 +524,7 @@ impl DbeeApp {
     }
 
     /// One frame (see the module docs). Usable from a test harness: call [`DbeeApp::feed_input`]
-    /// before it when the test drives input through the control channel.
+    /// before it, as eframe does.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if !self.themed {
@@ -532,9 +536,6 @@ impl DbeeApp {
             self.themed = true;
             ctx.request_repaint();
             return;
-        }
-        if ctx.theme() != self.mode() {
-            ctx.set_theme(self.mode());
         }
         // 1. Job results.
         let finished = self.session.pump();
@@ -585,7 +586,8 @@ impl DbeeApp {
         if self.session.busy() {
             ctx.request_repaint_after(BUSY_REPAINT);
         }
-        if control::needs_frames(self) || !self.carry.is_empty() {
+        // A mode chosen in this frame is set before the next one (`feed_input`).
+        if control::needs_frames(self) || !self.carry.is_empty() || ctx.theme() != self.mode() {
             ctx.request_repaint();
         }
         self.frames = self.frames.saturating_add(1);
@@ -652,8 +654,8 @@ impl eframe::App for DbeeApp {
         DbeeApp::ui(self, ui);
     }
 
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
-        self.feed_input(raw);
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.feed_input(ctx, raw);
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
@@ -695,7 +697,8 @@ mod tests {
         );
         let frame = |h: &mut Harness<'_, DbeeApp>| {
             let mut raw = h.input().clone();
-            h.state_mut().feed_input(&mut raw);
+            let ctx = h.ctx.clone();
+            h.state_mut().feed_input(&ctx, &mut raw);
             *h.input_mut() = raw;
             h.step();
         };

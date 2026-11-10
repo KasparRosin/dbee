@@ -473,9 +473,9 @@ struct Highlighter {
     tokens: Tokens,
     /// The lines to colour in the next job (see [`colour_window`]).
     window: Range<usize>,
-    /// What the job is for (dark visuals, the text colour, the coloured lines), and the job, whose
-    /// text is the text it is for.
-    job: Option<((bool, Color32, Range<usize>), LayoutJob)>,
+    /// What the job is for (the mode's tokens, the text colour, the coloured lines), and the job,
+    /// whose text is the text it is for.
+    job: Option<((theme::Tokens, Color32, Range<usize>), LayoutJob)>,
     /// Some token of the job is coloured.
     coloured: bool,
 }
@@ -490,9 +490,10 @@ impl Highlighter {
         }
     }
 
-    /// The job for `text` in the theme given: the last one again when nothing changed.
-    fn job(&mut self, text: &str, dark: bool, plain: Color32) -> LayoutJob {
-        let key = (dark, plain, self.window.clone());
+    /// The job for `text` in the mode whose tokens are `syntax`: the last one again when nothing
+    /// changed.
+    fn job(&mut self, text: &str, syntax: &theme::Tokens, plain: Color32) -> LayoutJob {
+        let key = (*syntax, plain, self.window.clone());
         if let Some((made_for, job)) = &self.job
             && *made_for == key
             && job.text == text
@@ -500,7 +501,7 @@ impl Highlighter {
             return job.clone();
         }
         self.tokens.update(text);
-        let job = self.tokens.job(self.window.clone(), if dark { &theme::DARK } else { &theme::LIGHT }, plain);
+        let job = self.tokens.job(self.window.clone(), syntax, plain);
         self.coloured = job.sections.iter().any(|s| s.format.color != plain);
         self.job = Some((key, job.clone()));
         job
@@ -671,7 +672,7 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
         let EditorState { text, highlight, view, .. } = &mut *ed;
         highlight.window = colour_window(view.clone());
         let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap_width: f32| {
-            let job = highlight.job(buf.as_str(), ui.visuals().dark_mode, ui.visuals().text_color());
+            let job = highlight.job(buf.as_str(), theme::tokens(ui.ctx()), ui.visuals().text_color());
             ui.fonts_mut(|f| f.layout_job(job))
         };
         // Not animated: a jump to an error far down lands at once (and the colours follow it at once).
@@ -1473,12 +1474,12 @@ mod tests {
         ed.highlight.window = colour_window(0..60);
         let plain = Color32::BLACK;
         let note = text.find("# note").unwrap();
-        let job = ed.highlight.job(text, false, plain);
+        let job = ed.highlight.job(text, &crate::theme::LIGHT, plain);
         assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(Dialect::Postgres, text).as_slice());
         assert_eq!(colour_at(&job, note), (plain, false), "`#` is an operator on Postgres");
         for dialect in [Dialect::MySql, Dialect::Sqlite, Dialect::Postgres] {
             ed.set_dialect(dialect);
-            let job = ed.highlight.job(text, false, plain);
+            let job = ed.highlight.job(text, &crate::theme::LIGHT, plain);
             assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(dialect, text).as_slice(), "{dialect:?}");
             let comment = (crate::theme::LIGHT.text_muted, true);
             assert_eq!(colour_at(&job, note) == comment, dialect == Dialect::MySql, "{dialect:?}: the job follows the dialect");

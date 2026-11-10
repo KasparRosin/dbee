@@ -11,7 +11,6 @@ use serde_json::json;
 fn dark(ui: &mut Ui) {
     ui.execute("ui.themeDark", json!({}));
     ui.frame();
-    ui.frame();
 }
 
 fn assert_dark(ui: &Ui, at: &str) {
@@ -238,6 +237,48 @@ fn the_menu_marks_the_chosen_entry() {
     assert_eq!(state(&mut ui)["choice"], "light");
 }
 
+/// The colours the last frame drew its texts in.
+fn text_colours(ui: &Ui) -> Vec<egui::Color32> {
+    let mut out = Vec::new();
+    for (_, shape) in ui.shapes() {
+        if let egui::Shape::Text(t) = shape {
+            match t.override_text_color {
+                Some(c) => out.push(c),
+                None => out.extend(
+                    t.galley
+                        .job
+                        .sections
+                        .iter()
+                        .map(|s| if s.format.color == egui::Color32::PLACEHOLDER { t.fallback_color } else { s.format.color }),
+                ),
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_frame_after_a_switch_is_wholly_in_the_new_mode() {
+    let (l, d) = (dbee_ui_egui::theme::LIGHT, dbee_ui_egui::theme::DARK);
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.frame();
+    assert!(text_colours(&ui).contains(&l.text), "light draws its text");
+    ui.execute("ui.themeDark", json!({}));
+    ui.frame();
+    assert_eq!(ui.harness.ctx.theme(), egui::Theme::Dark);
+    assert!(text_colours(&ui).contains(&d.text), "dark draws its text");
+    assert!(!text_colours(&ui).contains(&l.text), "no text in light's colour");
+    assert_dark(&ui, "the first frame after the switch to dark");
+    ui.execute("ui.themeLight", json!({}));
+    ui.frame();
+    assert!(!text_colours(&ui).contains(&d.text), "no text in dark's colour");
+    for (_, shape) in ui.shapes() {
+        if let egui::Shape::Rect(r) = shape {
+            assert!(r.fill != d.fill, "the first frame after the switch to light: {:?} is a dark ground", r.fill);
+        }
+    }
+}
+
 #[test]
 fn switching_recolours_what_is_already_open() {
     let db = dbee_testkit::require_testdb!();
@@ -255,7 +296,6 @@ fn switching_recolours_what_is_already_open() {
     };
     assert!(colours(&ui).contains(&l.syn_keyword) && colours(&ui).contains(&l.syn_string), "the editor is coloured in light");
     ui.execute("ui.themeDark", json!({}));
-    ui.frame();
     ui.frame();
     let after = colours(&ui);
     assert!(after.contains(&d.syn_keyword) && after.contains(&d.syn_string), "the editor is coloured in dark");

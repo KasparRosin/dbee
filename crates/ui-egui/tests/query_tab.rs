@@ -849,7 +849,7 @@ fn window_keystrokes(db: &TestDb, text: &str, keys: usize) -> (Duration, Duratio
     let frame = |app: &mut DbeeApp, events: Vec<Event>| {
         let mut raw =
             egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(1400.0, 900.0))), events, ..Default::default() };
-        app.feed_input(&mut raw);
+        app.feed_input(&ctx, &mut raw);
         let start = Instant::now();
         let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
         let (shapes, ppp) = (std::mem::take(&mut out.shapes), out.pixels_per_point);
@@ -963,7 +963,7 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
     let size = egui::vec2(1400.0, 900.0);
     let frame = |app: &mut DbeeApp, events: Vec<Event>| {
         let mut raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)), events, ..Default::default() };
-        app.feed_input(&mut raw);
+        app.feed_input(&ctx, &mut raw);
         let start = Instant::now();
         let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
         let (shapes, ppp) = (std::mem::take(&mut out.shapes), out.pixels_per_point);
