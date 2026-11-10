@@ -27,10 +27,11 @@
 
 use dbee_engine::{Json, Total};
 use dbee_sql::select::PAGE_SIZE;
-use egui::{Align, Button, CornerRadius, Layout, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
+use egui::{Align, Button, CornerRadius, Layout, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
 use crate::automation::Tags;
+use crate::components::button::{BoxButton, TextButton};
 use crate::components::icon::Icon;
 use crate::theme::{
     self, Text,
@@ -125,8 +126,6 @@ const SPACE: f32 = 10.0;
 const GAP: f32 = 12.0;
 /// A square button's side.
 const SQUARE: f32 = 26.0;
-/// Apply's least width.
-const APPLY_W: f32 = 64.0;
 /// The narrowest a cut page's note is shown in (it truncates, with its whole text on hover).
 const MIN_NOTE: f32 = 24.0;
 
@@ -202,8 +201,8 @@ impl Parts {
             count,
             edits: edits_text(p.edits),
             add_w: button_width(ui, "+ Row", Text::Label),
-            reset_w: button_width(ui, "Reset", Text::Button),
-            apply_w: button_width(ui, "Apply", Text::Button).max(APPLY_W),
+            reset_w: TextButton::new("Reset").width(ui),
+            apply_w: BoxButton::primary("Apply").width(ui),
         }
     }
 }
@@ -390,14 +389,13 @@ fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fi
         // The label's one widget id, so Reset and Apply keep theirs when it is left out.
         ui.skip_ahead_auto_ids(1);
     }
-    let r = ui.add(Button::new("Reset").min_size(vec2(parts.reset_w, SQUARE))).on_hover_text("Drop the staged changes");
+    let r = ui.add(TextButton::new("Reset")).on_hover_text("Drop the staged changes");
     tags.tag_value("edit-reset", &r, "Reset");
     if r.clicked() {
         runs.push(("edit.reset", json!({})));
     }
     let apply_enabled = p.apply_blocked.is_none();
-    let b = Button::new(RichText::new("Apply").color(t.on_ink)).fill(t.ink).min_size(vec2(parts.apply_w, SQUARE));
-    let r = ui.add_enabled(apply_enabled, b);
+    let r = ui.add_enabled(apply_enabled, BoxButton::primary("Apply"));
     let r = match p.apply_blocked {
         Some(why) => r.on_disabled_hover_text(format!("Cannot apply {} now: {why}", parts.edits)),
         None => r.on_hover_text(format!("Write {} in one transaction (Ctrl+S)", parts.edits)),
@@ -494,6 +492,9 @@ mod tests {
         "edit-apply",
     ];
 
+    /// Apply whole is 60 wide (12, APPLY, 12); narrower, the bar's edge cut it.
+    const APPLY_WHOLE: f32 = 59.5;
+
     #[test]
     fn no_width_draws_one_control_over_another() {
         // All the bar can show: the longest page label, a cut page's note, three changes; then the
@@ -525,7 +526,7 @@ mod tests {
                 let rect = |id: &str| rects.iter().find(|(i, _)| *i == id).and_then(|(_, r)| *r);
                 let icon = rect("page-count").is_some_and(|r| r.width() <= 27.0);
                 let text = rect("edits-count").is_some();
-                let cut = rect("edit-apply").is_none_or(|r| r.width() < 63.5);
+                let cut = rect("edit-apply").is_none_or(|r| r.width() < APPLY_WHOLE);
                 // Once the right group is cut the left one may be cut too, so the count's form
                 // shows only before.
                 assert!(cut || text || icon, "{at}: the changes' text went before the count's");
@@ -565,7 +566,7 @@ mod tests {
         let tags = &h.state().1;
         let rects: Vec<(&'static str, Option<Rect>)> = ["row-add", "edit-reset", "edit-apply"].into_iter().map(|id| (id, tags.rect(id))).collect();
         let text = tags.rect("edits-count").is_some();
-        let whole = tags.rect("edit-apply").is_some_and(|r| r.width() >= 63.5);
+        let whole = tags.rect("edit-apply").is_some_and(|r| r.width() >= APPLY_WHOLE);
         let ids = h.ctx.viewport(|vp| {
             let widgets = &vp.prev_pass.widgets;
             let find = |r: Rect| widgets.layers().flat_map(|(_, w)| w.iter()).find(|w| w.interact_rect == r && w.sense.senses_click()).map(|w| w.id);

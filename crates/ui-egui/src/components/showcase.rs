@@ -4,6 +4,8 @@
 
 use egui::{Align2, Color32, CornerRadius, Label, Rect, Sense, Ui, Vec2, pos2, vec2};
 
+use super::Look;
+use super::button::{BoxButton, TextButton};
 use super::chip::Chip;
 use super::icon::Icon;
 use super::keycap::Keycap;
@@ -12,6 +14,8 @@ use crate::theme::{Text, Tokens, tokens};
 
 /// The page's frames: 20 between sections.
 const BETWEEN: f32 = 20.0;
+/// Between the controls of a row of buttons.
+const ROW_GAP: f32 = 20.0;
 /// Between the keys of one shortcut.
 const KEY_GAP: f32 = 3.0;
 /// The Icons frame: 20 under its caption; cells of 120 by 40, nine to a row, 8 apart and 20
@@ -73,6 +77,7 @@ pub fn show(ui: &mut Ui) {
     egui::Frame::NONE.inner_margin(SPACE_24).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         section(ui, "icon/, today's drawings in their usual colour", ICONS_UNDER_CAPTION, icons);
+        buttons(ui);
         section(ui, "keycap: default, disabled", SPACE_8, |ui| {
             ui.spacing_mut().item_spacing.x = KEY_GAP;
             for key in ["Ctrl", "Shift", "Z"] {
@@ -89,6 +94,40 @@ pub fn show(ui: &mut Ui) {
             ui.add(Chip::next("Upcoming"));
             ui.add(Chip::available("Available"));
         });
+    });
+}
+
+/// The boxed and text buttons in each of their states, as the page's Buttons frame shows them.
+fn buttons(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    section(ui, "button/box primary: default, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(BoxButton::primary("Run").shortcut("Ctrl+Enter"));
+        ui.add(BoxButton::primary("Apply"));
+        ui.add(BoxButton::primary("Save"));
+        ui.add(BoxButton::primary("Apply").look(focused));
+        ui.add_enabled(false, BoxButton::primary("Run").shortcut("Ctrl+Enter"));
+    });
+    section(ui, "button/box outline: default, hover, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(BoxButton::outline("Cancel"));
+        ui.add(BoxButton::outline("Cancel").look(hovered));
+        ui.add(BoxButton::outline("Cancel").look(focused));
+        ui.add_enabled(false, BoxButton::outline("Clear"));
+    });
+    section(ui, "button/box danger: default, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(BoxButton::danger("Delete"));
+        ui.add(BoxButton::danger("Delete").look(focused));
+        ui.add_enabled(false, BoxButton::danger("Delete"));
+    });
+    section(ui, "button/text: default, hover, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(TextButton::new("Reset"));
+        ui.add(TextButton::new("Reset").look(hovered));
+        ui.add(TextButton::new("Reset").look(focused));
+        ui.add_enabled(false, TextButton::new("Reset"));
     });
 }
 

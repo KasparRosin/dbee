@@ -888,7 +888,8 @@ fn fit_of(bar: &[Drawn], at: &str) -> u8 {
     let get = |id: &str| bar.iter().find(|d| d.id == id);
     let icon = get("page-count").is_some_and(|d| d.rect.width() <= 27.0);
     let text = get("edits-count").is_some_and(|d| d.visible);
-    let cut = get("edit-apply").is_none_or(|d| !d.visible || d.rect.width() < 63.5);
+    // Apply whole is 60 wide: 12, APPLY, 12.
+    let cut = get("edit-apply").is_none_or(|d| !d.visible || d.rect.width() < 59.5);
     // Once the right group is cut the left one may be cut too, so the count's form shows only
     // before.
     assert!(cut || text || icon, "{at}: the changes' text went before the count's: {bar:?}");
@@ -1057,4 +1058,23 @@ fn keystroke_frame_with_a_value_at_the_cap() {
         // Two frames at 60 Hz.
         assert!(median < Duration::from_millis(33), "{what}: {median:?}");
     }
+}
+
+/// The paging bar's Reset and Apply, moved to `components::button`, say in `ui.inspect` what they
+/// said before: ids, values, enabled flags.
+#[test]
+fn moved_buttons_keep_their_ids_values_and_flags() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = connected_sized(db, 0.25, egui::vec2(1100.0, 720.0));
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.double_click("grid-cell-0-1");
+    ui.text("Ann");
+    ui.ctrl("Enter");
+    ui.frame();
+    let staged: [Moved<'_>; 2] = [("edit-reset", Some(json!("Reset")), true, "RESET"), ("edit-apply", Some(json!("Apply")), true, "APPLY")];
+    assert_moved(&mut ui, &staged, "a change staged");
+    ui.click("edit-reset");
+    assert_eq!(ui.edits()["count"], 0, "Reset dropped the change");
 }

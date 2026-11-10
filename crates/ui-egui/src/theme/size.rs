@@ -16,6 +16,15 @@ pub const RADIUS_CONTROL: u8 = 2;
 pub const RADIUS_FLOAT: u8 = 4;
 pub const SPINNER: f32 = 14.0;
 
+/// A boxed button (`button/box`): 12 between its box and its words, 8 between its words and its
+/// shortcut.
+pub const BUTTON_PAD_X: f32 = 12.0;
+pub const BUTTON_GAP: f32 = 8.0;
+/// A text button (`button/text`): 10 either side of its words.
+pub const TEXT_BUTTON_PAD_X: f32 = 10.0;
+/// The least width of a dialog's buttons (page component `dialog`).
+pub const DIALOG_BUTTON_MIN_W: f32 = 80.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key.
 pub const KEYCAP_PAD_X: f32 = 4.0;

@@ -24,13 +24,17 @@
 
 use dbee_config::{ConnectionConfig, DbKind};
 use dbee_engine::{EngineError, Json, Need, Outcome};
-use egui::{Align, Align2, Button, Checkbox, CornerRadius, Frame, Key, Layout, Margin, RichText, Stroke, TextEdit, vec2};
+use egui::{Align, Align2, Checkbox, CornerRadius, Frame, Key, Layout, Margin, Stroke, TextEdit, vec2};
 use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::button::BoxButton;
 use crate::connections;
-use crate::theme::{self, Text, size::RADIUS_FLOAT};
+use crate::theme::{
+    self, Text,
+    size::{BUTTON_H, DIALOG_BUTTON_MIN_W, RADIUS_FLOAT},
+};
 use crate::{DbeeApp, connections::tilde};
 
 /// The width of a dialog's content.
@@ -347,17 +351,15 @@ fn muted(ui: &mut egui::Ui, text: &str) {
 /// The OK and Cancel buttons, right-aligned: `(ok clicked, cancel clicked)`. Without `cancel`
 /// only OK shows.
 fn buttons(ui: &mut egui::Ui, tags: &mut Tags, ok: &str, ok_enabled: bool, danger: bool, cancel: bool) -> (bool, bool) {
-    let t = theme::tokens(ui.ctx());
     ui.add_space(12.0);
     // Top-aligned: egui centres nothing in a dialog's first frame (its sizing pass), so a centred
     // row would sit a pixel off there.
-    ui.allocate_ui_with_layout(vec2(WIDTH, 30.0), Layout::right_to_left(Align::Min), |ui| {
-        let (fill, text) = if danger { (t.danger, t.on_danger) } else { (t.ink, t.on_ink) };
-        let button = Button::new(RichText::new(ok).color(text)).fill(fill).min_size(vec2(96.0, 30.0));
-        let ok_r = ui.add_enabled(ok_enabled, button);
+    ui.allocate_ui_with_layout(vec2(WIDTH, BUTTON_H), Layout::right_to_left(Align::Min), |ui| {
+        let button = if danger { BoxButton::danger(ok) } else { BoxButton::primary(ok) };
+        let ok_r = ui.add_enabled(ok_enabled, button.min_width(DIALOG_BUTTON_MIN_W));
         tags.tag_value_as("dialog-ok", &ok_r, ok, ok_enabled);
         let cancelled = if cancel {
-            let r = ui.add(Button::new("Cancel").min_size(vec2(80.0, 30.0)));
+            let r = ui.add(BoxButton::outline("Cancel").min_width(DIALOG_BUTTON_MIN_W));
             tags.tag_value_as("dialog-cancel", &r, "Cancel", true);
             r.clicked()
         } else {

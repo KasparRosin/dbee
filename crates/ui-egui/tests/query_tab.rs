@@ -1074,3 +1074,34 @@ fn a_failed_transaction_says_a_rollback_ends_it() {
     run(&mut ui, "SELECT 1");
     assert!(ui.tag("query-error").is_none(), "after the ROLLBACK statements run again");
 }
+
+/// The toolbar's buttons, moved to `components::button`, say in `ui.inspect` what they said
+/// before: ids, values, enabled flags. Cancel, off, says why on hover.
+#[test]
+fn moved_buttons_keep_their_ids_values_and_flags() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text("select pg_sleep(30)");
+    ui.frame();
+    let idle: [Moved<'_>; 3] = [
+        ("query-run", Some(json!("Run")), true, "RUN"),
+        ("query-run-current", Some(json!("Run current")), true, "RUN CURRENT"),
+        ("query-cancel", Some(json!("Cancel")), false, "CANCEL"),
+    ];
+    assert_moved(&mut ui, &idle, "idle");
+    let cancel = ui.centre("query-cancel");
+    ui.rest(cancel);
+    let why = "Stop the running statement: not now, nothing is running";
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == why), "Cancel, off, says why on hover");
+    ui.click("query-run");
+    ui.until("the run to start", |ui| !ui.query()["running"].is_null());
+    ui.frame();
+    let running: [Moved<'_>; 3] = [
+        ("query-run", Some(json!("Run")), true, "RUN"),
+        ("query-run-current", Some(json!("Run current")), true, "RUN CURRENT"),
+        ("query-cancel", Some(json!("Cancel")), true, "CANCEL"),
+    ];
+    assert_moved(&mut ui, &running, "running");
+    ui.click("query-cancel");
+    ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
+}

@@ -22,6 +22,7 @@ use egui::{
 };
 
 use crate::automation::Tags;
+use crate::components::button::{BoxButton, TextButton};
 use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
 use crate::filter_bar;
 use crate::picker::Pick;
@@ -568,7 +569,8 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
         column(ui, half, "Password", |ui| {
             ui.allocate_ui_with_layout(vec2(half, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                let show_w = 52.0;
+                // As wide for both words, so the field keeps its width.
+                let show_w = BoxButton::outline("Show").width(ui).max(BoxButton::outline("Hide").width(ui));
                 let r = ui.add(
                     TextEdit::singleline(&mut f.password)
                         .id(field_id("conn-password"))
@@ -579,7 +581,7 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
                 );
                 tags.tag_secret("conn-password", &r, !f.password.is_empty());
                 let label = if f.show_password { "Hide" } else { "Show" };
-                let s = ui.add_sized(vec2(show_w, FIELD_H), Button::new(label));
+                let s = ui.add(BoxButton::outline(label).min_width(show_w));
                 tags.tag_value("conn-password-show", &s, f.show_password);
                 if s.clicked() {
                     f.show_password = !f.show_password;
@@ -754,16 +756,18 @@ fn tls_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mu
     column(ui, w, "CA file (optional)", |ui| {
         ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            let button_w = 84.0;
             let waiting = picking == Some(Pick::Ca);
-            path_box(ui, tags, "conn-ca", w - 2.0 * (button_w + 6.0), f.ca_file.as_deref(), waiting);
-            let choose =
-                ui.add_enabled(picking.is_none() || waiting, Button::new(if waiting { "Stop" } else { "Choose…" }).min_size(vec2(button_w, FIELD_H)));
+            // Choose… is as wide while it reads Stop, so nothing beside it moves.
+            let choose_w = BoxButton::outline("Choose…").width(ui).max(BoxButton::outline("Stop").width(ui));
+            let clear_w = BoxButton::outline("Clear").width(ui);
+            path_box(ui, tags, "conn-ca", w - choose_w - clear_w - 12.0, f.ca_file.as_deref(), waiting);
+            let label = if waiting { "Stop" } else { "Choose…" };
+            let choose = ui.add_enabled(picking.is_none() || waiting, BoxButton::outline(label).min_width(choose_w));
             tags.tag("conn-ca-choose", &choose);
             if choose.clicked() {
                 acts.push(if waiting { Act::StopPicking } else { Act::Pick(Pick::Ca) });
             }
-            let clear = ui.add_enabled(f.ca_file.is_some(), Button::new("Clear").min_size(vec2(button_w, FIELD_H)));
+            let clear = ui.add_enabled(f.ca_file.is_some(), BoxButton::outline("Clear"));
             tags.tag("conn-ca-clear", &clear);
             if clear.clicked() {
                 acts.push(Act::ClearCa);
@@ -899,21 +903,23 @@ fn footer(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<
     let t = theme::tokens(ui.ctx());
     let running = conn.running.map(|(_, kind)| kind);
     ui.allocate_ui_with_layout(vec2(w, 32.0), Layout::left_to_right(Align::Center), |ui| {
-        let save = ui.add(Button::new("Save").min_size(vec2(88.0, 30.0)));
+        let save = ui.add(TextButton::new("Save"));
         tags.tag_value("conn-save", &save, "Save");
         if save.clicked() {
             acts.push(Act::Save);
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            // Connect and Test are as wide while they say they run, so neither moves.
             let label = if running == Some(Running::Connect) { "Connecting…" } else { "Connect" };
-            let connect = Button::new(RichText::new(label).color(t.on_ink)).fill(t.ink).min_size(vec2(112.0, 30.0));
+            let connect = BoxButton::primary(label).min_width(BoxButton::primary("Connecting…").width(ui));
             let connect = ui.add_enabled(running.is_none(), connect);
             tags.tag_value("conn-connect", &connect, label);
             if connect.clicked() {
                 acts.push(Act::ConnectForm);
             }
             let label = if running == Some(Running::Test) { "Testing…" } else { "Test" };
-            let test = ui.add_enabled(running.is_none(), Button::new(label).min_size(vec2(96.0, 30.0)));
+            let test = BoxButton::outline(label).min_width(BoxButton::outline("Testing…").width(ui));
+            let test = ui.add_enabled(running.is_none(), test);
             tags.tag_value("conn-test", &test, label);
             if test.clicked() {
                 acts.push(Act::Test);

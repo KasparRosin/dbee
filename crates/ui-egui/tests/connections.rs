@@ -1279,3 +1279,31 @@ fn typing_in_the_field_closes_the_list_and_enter_connects_with_the_text() {
     let open = journal.as_array().unwrap().iter().find(|e| e["command"] == "connection.open").cloned().unwrap();
     assert_eq!(open["params"]["config"]["database"], "shop", "{open}");
 }
+
+/// The form's and the URL dialog's buttons, moved to `components::button`, say in `ui.inspect`
+/// what they said before: ids, values, enabled flags.
+#[test]
+fn moved_buttons_keep_their_ids_values_and_flags() {
+    let mut ui = ui();
+    ui.frame();
+    let form: [Moved<'_>; 6] = [
+        ("conn-password-show", Some(json!(false)), true, "SHOW"),
+        ("conn-ca-choose", None, true, "CHOOSE…"),
+        ("conn-ca-clear", None, false, "CLEAR"),
+        ("conn-save", Some(json!("Save")), true, "SAVE"),
+        ("conn-test", Some(json!("Test")), true, "TEST"),
+        ("conn-connect", Some(json!("Connect")), true, "CONNECT"),
+    ];
+    assert_moved(&mut ui, &form, "the form");
+    ui.click("conn-password-show");
+    assert_moved(&mut ui, &[("conn-password-show", Some(json!(true)), true, "HIDE")], "the password shown");
+    ui.click("conn-fill-url");
+    ui.frame();
+    let dialog: [Moved<'_>; 2] = [("dialog-ok", Some(json!("Fill")), false, "FILL"), ("dialog-cancel", Some(json!("Cancel")), true, "CANCEL")];
+    assert_moved(&mut ui, &dialog, "the URL dialog");
+    ui.text("postgres://ann@db.example/shop");
+    ui.frame();
+    assert_moved(&mut ui, &[("dialog-ok", Some(json!("Fill")), true, "FILL")], "a URL typed");
+    ui.click("dialog-cancel");
+    assert!(ui.tag("dialog-ok").is_none(), "Cancel closed the dialog");
+}

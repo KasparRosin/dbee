@@ -73,8 +73,16 @@ pub fn box_inside(painter: &Painter, rect: Rect) {
 /// A 1 px `on_ink` line 2 px inside `rect`, whatever is filled with `ink` (the main button, a
 /// selected segment). The page gives it corners of 1 whatever the corners of the ground.
 pub fn on_ink_line(painter: &Painter, rect: Rect) {
-    let t = tokens(painter.ctx());
-    let stroke = Stroke::new(FOCUS_LINE_W, t.on_ink);
+    line_inside(painter, rect, tokens(painter.ctx()).on_ink);
+}
+
+/// The same line in `on_danger`, on a button filled with `danger`.
+pub fn on_danger_line(painter: &Painter, rect: Rect) {
+    line_inside(painter, rect, tokens(painter.ctx()).on_danger);
+}
+
+fn line_inside(painter: &Painter, rect: Rect, colour: egui::Color32) {
+    let stroke = Stroke::new(FOCUS_LINE_W, colour);
     painter.rect_stroke(rect.shrink(FOCUS_INSET), CornerRadius::same(RADIUS_FOCUS_LINE), stroke, StrokeKind::Inside);
 }
 

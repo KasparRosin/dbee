@@ -125,7 +125,16 @@ fn the_showcase_draws_in_both_modes() {
                 _ => None,
             })
             .collect();
-        for caption in ["ICON/, TODAY'S DRAWINGS IN THEIR USUAL COLOUR", "KEYCAP: DEFAULT, DISABLED", "CHIP: NEXT, AVAILABLE"] {
+        let captions = [
+            "ICON/, TODAY'S DRAWINGS IN THEIR USUAL COLOUR",
+            "BUTTON/BOX PRIMARY: DEFAULT, FOCUS, DISABLED",
+            "BUTTON/BOX OUTLINE: DEFAULT, HOVER, FOCUS, DISABLED",
+            "BUTTON/BOX DANGER: DEFAULT, FOCUS, DISABLED",
+            "BUTTON/TEXT: DEFAULT, HOVER, FOCUS, DISABLED",
+            "KEYCAP: DEFAULT, DISABLED",
+            "CHIP: NEXT, AVAILABLE",
+        ];
+        for caption in captions {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");
         }
         let tokens = every(&t);

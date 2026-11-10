@@ -2,6 +2,7 @@
 //! [`crate::theme`]: each is an [`egui::Widget`] that works out its own look ([`Look`]) from its
 //! response, so a screen never sets a control's colour, size, padding or edge.
 
+pub mod button;
 pub mod chip;
 pub mod focus;
 pub mod icon;

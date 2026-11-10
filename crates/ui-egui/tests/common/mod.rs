@@ -459,6 +459,25 @@ pub fn ids(inspect: &Json) -> Vec<String> {
     inspect["automation"].as_array().unwrap().iter().filter_map(|a| a["id"].as_str().map(str::to_string)).collect()
 }
 
+/// A button that moved to `components::button`: its automation id, the value it is tagged with
+/// (`None` for none), whether it is enabled, and the words it draws.
+pub type Moved<'a> = (&'a str, Option<Json>, bool, &'a str);
+
+/// Each of `want` is in the last frame's `ui.inspect` with its value and its enabled flag as
+/// before the move, the page's 28 tall, its words drawn in capitals inside it.
+pub fn assert_moved(ui: &mut Ui, want: &[Moved<'_>], at: &str) {
+    let i = ui.inspect();
+    for (id, value, enabled, words) in want {
+        let e = tag_in(&i, id).unwrap_or_else(|| panic!("{at}: `{id}` is drawn: {:?}", ids(&i)));
+        assert_eq!(e.get("value"), value.as_ref(), "{at}: `{id}`'s value: {e}");
+        assert_eq!(e.get("enabled") != Some(&json!(false)), *enabled, "{at}: `{id}` enabled: {e}");
+        let r: Vec<f32> = (0..4).map(|k| e["rect"][k].as_f64().unwrap() as f32).collect();
+        let rect = egui::Rect::from_min_size(egui::pos2(r[0], r[1]), egui::vec2(r[2], r[3]));
+        assert_eq!(rect.height(), 28.0, "{at}: `{id}` is a button of the page, 28 tall: {rect:?}");
+        assert!(ui.text_in(rect, words).is_some(), "{at}: `{id}` draws `{words}` in {rect:?}");
+    }
+}
+
 /// An entry was drawn and is in view (entries list `visible: false` only when scrolled away).
 pub fn visible(entry: &Option<Json>) -> bool {
     entry.as_ref().is_some_and(|e| e.get("visible") != Some(&json!(false)))

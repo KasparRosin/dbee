@@ -91,12 +91,13 @@ use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, Tex
 use egui::text_edit::TextEditState;
 use egui::{
     Align, Button, Color32, CornerRadius, CursorIcon, Event, Frame, Id, Key, Label, Layout, Margin, Popup, Rect, Response, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, TextEdit, UiBuilder, pos2, vec2,
+    Sense, Stroke, StrokeKind, TextEdit, UiBuilder, Widget, pos2, vec2,
 };
 use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::button::{BoxButton, TextButton};
 use crate::components::icon::Icon;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
@@ -141,8 +142,7 @@ const MIN_RESULTS_H: f32 = 90.0;
 const TOP_PAD: f32 = 6.0;
 const SPLIT_H: f32 = 8.0;
 const TOOLBAR_H: f32 = 36.0;
-/// The toolbar's buttons' height, the database chip's too, and the chip's width.
-const BUTTON_H: f32 = 26.0;
+/// The database chip's width; it is as tall as the toolbar's buttons.
 const CHIP_W: f32 = 150.0;
 /// How tall the chip's list gets before it scrolls.
 const CHIP_LIST_H: f32 = 320.0;
@@ -766,15 +766,10 @@ pub(crate) struct QueryState {
 /// The query tabs' states, by tab.
 pub(crate) type Queries = HashMap<TabId, QueryState>;
 
-/// A button for the toolbar; true when clicked.
-fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover, why_not): (&str, Option<&str>), main: bool) -> bool {
-    let t = theme::tokens(ui.ctx());
+/// `button` in the toolbar, tagged `id` with `label`, its hover `hover` or why it is off; true
+/// when clicked.
+fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, button: impl Widget, (hover, why_not): (&str, Option<&str>)) -> bool {
     let enabled = why_not.is_none();
-    let text = if main && enabled { Text::ButtonCaps.rich(label).color(t.on_ink) } else { Text::ButtonCaps.rich(label) };
-    let mut button = Button::new(text).min_size(vec2(0.0, BUTTON_H));
-    if main && enabled {
-        button = button.fill(t.ink);
-    }
     let r = ui.add_enabled(enabled, button);
     let r = match why_not {
         Some(why) => r.on_disabled_hover_text(format!("{hover}: not now, {why}")),
@@ -803,7 +798,7 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
     let enabled = chip.why_not.is_none();
     let mut chosen = None;
     ui.add_enabled_ui(enabled, |ui| {
-        let (rect, r) = ui.allocate_exact_size(vec2(CHIP_W, BUTTON_H), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(vec2(CHIP_W, size::BUTTON_H), Sense::click());
         let p = ui.painter();
         let fill = if enabled && r.hovered() { t.hover } else { t.card };
         p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
@@ -1112,15 +1107,15 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             }
         }
         let why_not = run_blocked.as_deref();
-        if tool_button(&mut bar, tags, RUN, "Run", ("Run every statement (Ctrl+Enter)", why_not), true) {
+        if tool_button(&mut bar, tags, RUN, "Run", BoxButton::primary("Run"), ("Run every statement (Ctrl+Enter)", why_not)) {
             runs.push((QUERY_RUN, json!({})));
         }
         let current = ("Run the statement under the cursor (Ctrl+Shift+Enter)", why_not);
-        if tool_button(&mut bar, tags, RUN_CURRENT, "Run current", current, false) {
+        if tool_button(&mut bar, tags, RUN_CURRENT, "Run current", BoxButton::outline("Run current"), current) {
             runs.push((QUERY_RUN, json!({ "current": true, "cursor": out.cursor })));
         }
         let stop = ("Stop the running statement", (!running).then_some("nothing is running"));
-        if tool_button(&mut bar, tags, CANCEL, "Cancel", stop, false) {
+        if tool_button(&mut bar, tags, CANCEL, "Cancel", TextButton::new("Cancel"), stop) {
             runs.push(("query.cancel", json!({})));
         }
         let shown = q.shown_result();
