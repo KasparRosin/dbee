@@ -1,6 +1,5 @@
 //! The desktop's light or dark setting, read once at startup where winit reports none.
 
-use std::sync::mpsc;
 use std::time::Duration;
 
 const LIMIT: Duration = Duration::from_millis(500);
@@ -19,6 +18,7 @@ pub fn desktop_mode() -> Option<egui::Theme> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
 fn mode_of(color_scheme: u32) -> Option<egui::Theme> {
     match color_scheme {
         1 => Some(egui::Theme::Dark),
@@ -27,8 +27,9 @@ fn mode_of(color_scheme: u32) -> Option<egui::Theme> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
 fn within(limit: Duration, read: impl FnOnce() -> Option<egui::Theme> + Send + 'static) -> Option<egui::Theme> {
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("desktop-mode".into())
         .spawn(move || {
