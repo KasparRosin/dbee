@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-09 · **Change:** minor (entry 60 fixed and dropped)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-10 · **Change:** minor (entries 60 to 62 from the M3 Phase 1 review; before: entry 60 fixed and dropped)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -441,10 +441,32 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** a user learns of a new version only by looking on GitHub.
 - **Estimate:** 8 h (estimated), once drawn: the check is a new network request to GitHub, and each package format updates in its own way. Left out until it's drawn (the maintainer's call, 2026-11-09).
 
+### 60. The connection form's result strip uses a tint that is no token (U)
+
+- **Limit:** the strip under the form's buttons is filled with its meaning colour, `danger` or `success`, at 8 %, which is no token. Its text reads on it (light `success` at 4.56:1 is the lowest), but the message can be selected, and selected text sits on `selection`: `success` on `selection` in light is 4.13:1, a pair foundations keeps off screen. The strip is provisional until the design agent draws it.
+- **Evidence:** `gamma_multiply(0.08)` in the result strip (`crates/ui-egui/src/conn_form.rs`); the contrast figures are reviewer 1's, from the M3 Phase 1 review.
+- **Impact:** small: a user who selects the message of a passed test, in light, reads it at 4.13:1.
+- **Estimate:** part of the toast or error band component (M3 Phase 2), once the strip is drawn; not estimated.
+
+### 61. At the smallest window, three texts are cut (U)
+
+- **Limit:** at 640×420 the paging bar's page label (`PAGE 1`) runs about 29 points past its room, the query toolbar's `RUN CURRENT` is cut and overlaps the row count (`1 ROW`), and the form's title (`New connection`) is cut short at about 101 points. All three were cut before M3's fonts too (`Page 1`, `Run current` over `1 row`); see also entry 24.
+- **Evidence:** reviewer 1's size probe in the M3 Phase 1 review, run on the tree before and after Phase 1; `crates/ui-egui/src/paging.rs`, `crates/ui-egui/src/query_tab.rs` (the toolbar), `crates/ui-egui/src/conn_form.rs` (the title). At 1100×720 nothing is cut.
+- **Impact:** small: only in a window made as small as it goes.
+- **Estimate:** part of the bars' and the query tab's redesign (M3); not estimated.
+
+### 62. View > Theme can't be reached before connecting (U)
+
+- **Limit:** the menu bar is on the workspace only, so the connection screen has no View menu and no way to choose the theme. A user whose desktop says nothing, or who wants another mode than the desktop's, gets the choice only after the first connect; from then on it holds on the connection screen too, and it is kept between runs.
+- **Evidence:** `crates/ui-egui/src/menu.rs` is drawn by the workspace (`crates/ui-egui/src/workspace.rs`) only; `ui.themeDark` and the other two work on the connection screen over the control channel.
+- **Impact:** small: only before the first connect, and only when the desktop's setting isn't the one wanted.
+- **Estimate:** part of the Shell screen (M3 Phase 3); not estimated.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-10 | minor | The M3 Phase 1 review: entries 60 (the connection form's result strip uses a tint that is no token), 61 (three texts cut at the smallest window, older than M3) and 62 (View > Theme can't be reached before connecting). |
 | 2026-11-09 | minor | Entry 60 fixed and dropped: the prompt after an unknown Apply reads "Apply again?" with an "Apply again" button, and "Close anyway" stays for the other prompts. |
 | 2026-11-09 | minor | Entries 53 to 60: what the M3 design draws that the code can't do yet (rollback, a cancel dbee didn't send, the structure view, cancelling a connect, last-used order, the saved cell's mark, the update button), and the "Close anyway" prompt that applies again. Entry 1 names what M3 draws for it. |
 | 2026-11-08 | minor | The security review's lane C fix round: entries 50 (a client with no token can keep the 16 places), 51 (two small control channel test gaps) and 52 (the log's end-to-end test); entry 46 says OpenSSH's fall-back to a line with no port and `!` exclusions are not done; entry 47 names the right crate. |
