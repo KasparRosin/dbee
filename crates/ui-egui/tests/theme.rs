@@ -232,6 +232,44 @@ fn a_column_name_keeps_its_case_in_the_grid_header() {
     assert!(!drawn(&ui, "MIXEDCASE"));
 }
 
+/// Drops pg14's type `scratch."<name>"` when the test ends.
+struct DropType(String);
+
+impl Drop for DropType {
+    fn drop(&mut self) {
+        if let Some(db) = dbee_testkit::testdb() {
+            let _ = dbee_testkit::psql(pg14_server(db), &format!("DROP TYPE IF EXISTS scratch.\"{}\" CASCADE", self.0));
+        }
+    }
+}
+
+#[test]
+fn a_column_type_is_drawn_as_the_database_writes_it() {
+    let db = dbee_testkit::require_testdb!();
+    let ty = DropType(format!("{}_Mood", dbee_testkit::unique("case")));
+    let table = Scratch::new(db, "typed", |t| {
+        format!(
+            "CREATE TYPE scratch.\"{0}\" AS ENUM ('Happy', 'sad'); CREATE TABLE scratch.{t} (m scratch.\"{0}\"); INSERT INTO scratch.{t} VALUES ('Happy')",
+            ty.0
+        )
+    });
+    let label = format!("scratch.\"{}\"", ty.0);
+    let mut ui = Ui::connected(db);
+    ui.open("scratch", &table.0);
+    ui.until("the grid", |ui| ui.tag("grid-cell-0-0").is_some());
+    assert_eq!(ui.value("grid-header-0")["type"], json!(label), "the label the database gives");
+    assert!(drawn(&ui, &label), "the grid's header draws {label}");
+    ui.click("grid-cell-0-0");
+    ui.frame();
+    let panel = rect_of(&mut ui, "value-panel");
+    assert!(ui.text_in(panel, &label).is_some(), "the value panel draws {label}");
+    ui.click("tree-schema-scratch");
+    ui.click(&format!("tree-expand-scratch.{}", table.0));
+    let row = rect_of(&mut ui, &format!("tree-column-scratch.{}.m", table.0));
+    assert!(ui.text_in(row, &label).is_some(), "the tree draws {label}");
+    assert!(!drawn(&ui, &label.to_uppercase()), "nowhere in capitals");
+}
+
 #[test]
 fn the_gutters_numbers_sit_level_with_the_editors_lines() {
     let db = dbee_testkit::require_testdb!();

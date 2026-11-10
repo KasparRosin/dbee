@@ -774,7 +774,7 @@ fn header(ui: &mut egui::Ui, view: &ValueView) {
     ui.painter().galley(pos2(rect.left(), rect.center().y - name.size().y / 2.0), name, t.text);
     let left = rect.left() + name_w + 8.0;
     if rect.right() - left > 12.0 {
-        let ty = line_galley(ui, &view.type_label, Text::Label, t.text_muted, rect.right() - left);
+        let ty = line_galley_as_written(ui, &view.type_label, Text::Data, t.text_muted, rect.right() - left);
         ui.painter().galley(pos2(left, rect.center().y - ty.size().y / 2.0 + 1.0), ty, t.text_muted);
     }
     if !view.kind_label.is_empty() {

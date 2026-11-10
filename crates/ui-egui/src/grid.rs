@@ -567,7 +567,7 @@ impl Grid<'_> {
         p.galley(pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
         x += name_w + 6.0;
         if right - x > 12.0 {
-            let ty = line_galley(ui, self.source.column_type(col), Text::Label, t.text_muted, right - x);
+            let ty = line_galley_as_written(ui, self.source.column_type(col), Text::Data, t.text_muted, right - x);
             p.galley(pos2(x, rect.center().y - ty.size().y / 2.0 + 1.0), ty, t.text_muted);
         }
         if let Some(dir) = self.sort_of(col) {

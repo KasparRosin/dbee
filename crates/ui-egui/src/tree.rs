@@ -39,7 +39,7 @@ use egui::{Align, Color32, CornerRadius, Margin, Rect, ScrollArea, Sense, TextEd
 use serde_json::json;
 
 use crate::automation::Tags;
-use crate::connections::line_galley;
+use crate::connections::{line_galley, line_galley_as_written};
 use crate::icons;
 use crate::theme::{
     self, Text,
@@ -578,7 +578,7 @@ fn draw_row(
         p.galley(pos2(text_left, rect.center().y - g.size().y / 2.0), g, color);
     };
     let muted_right = |text: &str, style: Text| -> f32 {
-        let g = line_galley(ui, text, style, t.text_muted, (rect.width() * 0.45).max(1.0));
+        let g = line_galley_as_written(ui, text, style, t.text_muted, (rect.width() * 0.45).max(1.0));
         let x = rect.right() - 8.0 - g.size().x;
         let w = g.size().x;
         p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, t.text_muted);
@@ -645,7 +645,7 @@ fn draw_row(
                 Some(_) => icons::key_foreign(&p, icon_rect, t.text_muted),
                 None => icons::column(&p, icon_rect, t.text_muted),
             }
-            let right = muted_right(col.label(), Text::Label);
+            let right = muted_right(col.label(), Text::Data);
             label(&col.name, t.text, right);
             let r = match info.fk_for(&col.name) {
                 Some(fk) => r.on_hover_text(format!("{} → {}", col.name, fk.target.display())),
