@@ -36,6 +36,9 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     v.selection.bg_fill = t.selection;
     v.selection.stroke = Stroke::new(1.0, t.ink);
     v.text_cursor.stroke = Stroke::new(v.text_cursor.stroke.width, t.ink);
+    // egui thickens light text on a dark ground; the design's text weighs the same in both modes.
+    v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
+    v.text_options.font_hinting = false;
     v.window_shadow = Shadow::NONE;
     v.popup_shadow = float_shadow(t);
     v.window_corner_radius = CornerRadius::same(RADIUS_FLOAT);
@@ -135,6 +138,17 @@ mod tests {
         assert_eq!(mode_for(System, Some(Theme::Dark)), Theme::Dark);
         assert_eq!(mode_for(System, Some(Theme::Light)), Theme::Light);
         assert_eq!(mode_for(System, None), Theme::Light);
+    }
+
+    #[test]
+    fn text_draws_unthickened_and_unhinted_in_both_modes() {
+        let ctx = egui::Context::default();
+        apply(&ctx);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let o = ctx.style_of(theme).visuals.text_options;
+            assert_eq!(o.color_transfer_function, egui::epaint::FontColorTransferFunction::Off, "{theme:?}: no thickening");
+            assert!(!o.font_hinting, "{theme:?}: no hinting");
+        }
     }
 
     #[test]
