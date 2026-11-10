@@ -1,82 +1,53 @@
 //! Keyboard focus: whether a control shows it ([`shown`]), and the four looks foundations' Focus
 //! rule gives it. Every control draws focus through these.
 //!
-//! egui doesn't say where focus came from, so [`Source`] reads every frame's input before egui
-//! does, from the first frame a control is drawn: the keys that move focus (Tab, Shift+Tab, the
-//! arrows) make the next focus a keyboard one, a pointer press a pointer one. A control is judged
-//! when it gains focus and keeps that judgement while it holds focus; a pointer press clears it,
-//! so a click on a control the keyboard focused hides the look. Judging on gaining, not in the
-//! frame of the key, also covers egui handing focus over a frame late (Shift+Tab, Tab past the
-//! last control).
+//! The look shows whenever a control has focus, unless that focus came from a mouse or touch
+//! press on it: Tab, Shift+Tab and the arrows show it, and so does focus given by code (a dialog
+//! focusing its field as it opens). egui doesn't say where focus came from, so [`shown`] judges a
+//! control when it gains focus, from its own response: the pointer on it in that frame, or in the
+//! frame before (a control may ask for focus after working out its look), makes it a pointer
+//! focus. The judgement holds while the control keeps focus, so egui handing focus over a frame
+//! after the key (Shift+Tab, Tab past the last control) still shows; a press on the control makes
+//! its focus a pointer one again.
 
-use egui::{CornerRadius, Event, Id, Key, Painter, RawInput, Rect, Response, Stroke, StrokeKind, Ui};
+use egui::{CornerRadius, Id, Painter, Rect, Response, Stroke, StrokeKind, Ui};
 
 use crate::theme::size::{FOCUS_AROUND, FOCUS_INSET, FOCUS_LINE_W, FOCUS_W, RADIUS_CONTROL, RADIUS_FOCUS_AROUND, RADIUS_FOCUS_LINE};
 use crate::theme::tokens;
 
-/// How focus last moved, read from the input ([`egui::Plugin::input_hook`]).
-#[derive(Default)]
-struct Source {
-    /// The last key or press that moves focus was a key.
-    keyboard: bool,
-    /// The control judged when it gained focus, and whether that focus came from the keyboard.
+/// What [`shown`] keeps between frames, in the context's memory.
+#[derive(Clone, Copy, Default)]
+struct Seen {
+    /// The control judged when it gained focus, and whether its look shows.
     judged: Option<(Id, bool)>,
+    /// The last control the pointer was pressed on, and in which frame.
+    pointer: Option<(Id, u64)>,
 }
 
-impl Source {
-    fn read(&mut self, events: &[Event]) {
-        for e in events {
-            match e {
-                Event::Key { key: Key::Tab, pressed: true, modifiers, .. } if !modifiers.any() || modifiers.shift_only() => {
-                    self.keyboard = true;
-                }
-                Event::Key { key: Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight, pressed: true, modifiers, .. }
-                    if !modifiers.any() =>
-                {
-                    self.keyboard = true;
-                }
-                Event::PointerButton { pressed: true, .. } => {
-                    self.keyboard = false;
-                    self.judged = None;
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-impl egui::Plugin for Source {
-    fn debug_name(&self) -> &'static str {
-        "dbee keyboard focus"
-    }
-
-    fn setup(&mut self, ctx: &egui::Context) {
-        // Added by the first control drawn, after this frame's input went by.
-        ctx.input(|i| self.read(&i.raw.events));
-    }
-
-    fn input_hook(&mut self, _ctx: &egui::Context, input: &mut RawInput) {
-        self.read(&input.events);
-    }
-}
-
-/// Whether `r` shows focus now: it has focus, and that focus came from the keyboard.
+/// Whether `r` shows focus now: it has focus, and that focus didn't come from a mouse or touch
+/// press on it.
 pub fn shown(ui: &Ui, r: &Response) -> bool {
     let ctx = ui.ctx();
-    let source = ctx.plugin_or_default::<Source>();
-    if !r.has_focus() {
-        return false;
+    let key = Id::new("dbee-focus-seen");
+    let frame = ctx.cumulative_frame_nr();
+    let mut seen: Seen = ctx.data(|d| d.get_temp(key)).unwrap_or_default();
+    let pressed = r.is_pointer_button_down_on() || r.interact_pointer_pos().is_some();
+    if pressed {
+        seen.pointer = Some((r.id, frame));
     }
-    let gained = !ctx.memory(|m| m.had_focus_last_frame(r.id));
-    let mut s = source.lock();
-    match s.judged {
-        Some((id, keyboard)) if id == r.id && !gained => keyboard,
-        _ => {
-            let keyboard = s.keyboard;
-            s.judged = Some((r.id, keyboard));
-            keyboard
-        }
-    }
+    let show = r.has_focus() && {
+        let gained = !ctx.memory(|m| m.had_focus_last_frame(r.id));
+        let lately = seen.pointer.is_some_and(|(id, at)| id == r.id && at.saturating_add(1) >= frame);
+        let show = match seen.judged {
+            _ if pressed => false,
+            Some((id, show)) if id == r.id && !gained => show,
+            _ => !lately,
+        };
+        seen.judged = Some((r.id, show));
+        show
+    };
+    ctx.data_mut(|d| d.insert_temp(key, seen));
+    show
 }
 
 fn ink(painter: &Painter, rect: Rect, radius: u8) {
@@ -118,11 +89,13 @@ mod tests {
     use crate::theme::{DARK, LIGHT};
 
     /// Two focusable probes, as later controls are built: what each one's look and focus were in
-    /// the last frame.
+    /// the last frame. `give` hands one focus by code, after its look is worked out, as a dialog
+    /// focuses its field when it opens.
     #[derive(Default)]
     struct Probes {
         looks: [Look; 2],
         focus: [bool; 2],
+        give: Option<usize>,
     }
 
     fn probes() -> Harness<'static, Probes> {
@@ -132,12 +105,21 @@ mod tests {
                     for (i, name) in ["first", "second"].into_iter().enumerate() {
                         let (_, r) = ui.allocate_exact_size(vec2(60.0, 28.0), Sense::click());
                         r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, name));
-                        // egui gives focus on a click only to what asks for it, as a text field does.
-                        if r.clicked() {
+                        // egui gives focus on a click only to what asks for it, as a text field does:
+                        // the first asks before working out its look, the second after.
+                        if i == 0 && r.clicked() {
                             r.request_focus();
                         }
                         s.looks[i] = Look::of(ui, &r);
                         s.focus[i] = r.has_focus();
+                        if i == 1 && r.clicked() {
+                            r.request_focus();
+                        }
+                        if s.give == Some(i) {
+                            r.request_focus();
+                            s.give = None;
+                            ui.ctx().request_repaint();
+                        }
                     }
                 });
             },
@@ -175,6 +157,28 @@ mod tests {
         h.run();
         assert_eq!(h.state().focus, [true, false]);
         assert_eq!(focused(&h), [false, false], "the click on it hides the look");
+    }
+
+    #[test]
+    fn focus_given_by_code_shows() {
+        let mut h = probes();
+        h.get_by_label("second").click();
+        h.run();
+        assert_eq!((h.state().focus, focused(&h)), ([false, true], [false, false]), "the click's focus shows nothing");
+        // Right after that click, code gives the first focus, as a dialog opened from a menu does.
+        h.state_mut().give = Some(0);
+        h.run();
+        assert_eq!(h.state().focus, [true, false]);
+        assert_eq!(focused(&h), [true, false], "focus given by code shows");
+        // A click on it keeps the focus and hides the look; Tab away and back shows it again.
+        h.get_by_label("first").click();
+        h.run();
+        assert_eq!((h.state().focus, focused(&h)), ([true, false], [false, false]));
+        h.key_press(Key::Tab);
+        h.run();
+        h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+        h.run();
+        assert_eq!(focused(&h), [true, false], "back with Shift+Tab, the look shows again");
     }
 
     #[test]
