@@ -1,0 +1,49 @@
+# Installing dbee
+
+> **Last reviewed:** 2026-11-10 · **Last updated:** 2026-11-10 · **Change:** major (new: installing each download, and opening an unsigned build)
+
+Downloads are on the [Releases page](https://github.com/KasparRosin/dbee/releases). Each file is named `dbee-<version>-<platform>-<arch>.<ext>`; pick the one for your system below.
+
+dbee's builds aren't signed (see [releasing.md](releasing.md), "Signing"). macOS and Windows warn the first time you open one; the steps below get past that once. Linux and FreeBSD don't warn.
+
+## macOS (11 or later, Intel and Apple silicon)
+
+1. Open `dbee-<version>-macos-universal.dmg` and drag dbee to Applications.
+2. Open dbee. macOS says it can't check it for malicious software; close that.
+3. Open System Settings → Privacy & Security, find the line about dbee under Security, press **Open Anyway** and confirm.
+
+From then on dbee opens normally. On macOS 14 or older, Control-click dbee in Applications and choose Open also works. From a terminal, the same in one step: `xattr -dr com.apple.quarantine /Applications/dbee.app`.
+
+The command-line tool is `dbee-cli-<version>-macos-universal.zip`.
+
+## Windows (x64, x86 and arm64)
+
+- **Installer:** run `dbee-<version>-windows-<arch>.msi`.
+- **Portable:** unpack `dbee-<version>-windows-<arch>-portable.zip` anywhere and run `dbee.exe`.
+
+If SmartScreen says "Windows protected your PC", choose **More info**, then **Run anyway**.
+
+## Linux (x86_64 and aarch64; riscv64 as `.deb`, `.rpm` and `.tar.gz`)
+
+| File | Install |
+|---|---|
+| `.flatpak` | `flatpak install --user dbee-<version>-linux-<arch>.flatpak`; Flatpak fetches its runtime from Flathub if it's missing |
+| `.AppImage` | `chmod +x dbee-<version>-linux-<arch>.AppImage`, then run it |
+| `.deb` | `sudo apt install ./dbee-<version>-linux-<arch>.deb` |
+| `.rpm` | `sudo dnf install ./dbee-<version>-linux-<arch>.rpm` |
+| `.tar.gz` | unpack it and run `bin/dbee`; `share/` holds the desktop entry and icons |
+
+The Flatpak can't reach the keyring yet ([gaps.md](gaps.md), 11).
+
+## FreeBSD (x86_64)
+
+Unpack `dbee-<version>-freebsd-x86_64.tar.gz` and run `bin/dbee`.
+
+## Checking a download
+
+Every file is listed in the release's `SHA256SUMS.txt`. In the folder with both:
+
+- Linux: `sha256sum --ignore-missing -c SHA256SUMS.txt`
+- FreeBSD: `sha256 dbee-<version>-freebsd-x86_64.tar.gz`, then compare with the line in `SHA256SUMS.txt`
+- macOS: `shasum -a 256 --ignore-missing -c SHA256SUMS.txt`
+- Windows (PowerShell): `Get-FileHash dbee-<version>-windows-x64.msi`, then compare with the line in `SHA256SUMS.txt`
