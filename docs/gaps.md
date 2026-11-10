@@ -436,10 +436,10 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 59. No update check or update button (F)
 
-- **Missing:** a button that always shows dbee's version and, when a new version is out, an icon that starts the update with one click. If it needs root, the system asks for the password. A copy that can't update itself says to download the new version. The maintainer's request of 2026-11-08; not drawn yet.
+- **Missing:** an update check and a button at the right end of the menu bar. With no update out it shows nothing. When one is out it reads `UPDATE 0.4.0 → 0.5.0`, and a click starts the update; the system asks for the password if it needs root (pkexec). While it runs it reads `UPDATING 42%`, then `RESTART TO UPDATE`, or `UPDATE FAILED` with the reason on hover and RETRY. A copy installed by a package manager or Flatpak shows `DOWNLOAD 0.5.0`, which opens the download page. Decided by the maintainer on 2026-11-10; the design draws it after the M3 component groups.
 - **Evidence:** no update code in the tree; the version shows only on the connection screen (`crates/ui-egui/src/connections.rs`).
 - **Impact:** a user learns of a new version only by looking on GitHub.
-- **Estimate:** 8 h (estimated), once drawn: the check is a new network request to GitHub, and each package format updates in its own way. Left out until it's drawn (the maintainer's call, 2026-11-09).
+- **Estimate:** 8 h (estimated), once drawn: the check is a new network request to GitHub, the download and install need a security review, and each package format updates in its own way.
 
 ### 60. The connection form's result strip uses a tint that is no token (U)
 
@@ -476,10 +476,18 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: it fails loudly, flagging a colour in test code, never quietly letting one through in drawing code.
 - **Estimate:** 0.5 h (estimated).
 
+### 65. No Help menu or About (F)
+
+- **Missing:** a Help menu with About, which shows dbee's version once the update button (59) no longer does. Decided with 59 on 2026-11-10; not drawn yet.
+- **Evidence:** the menu bar has File, Edit, View and Query (`MENUS`, `crates/ui-egui/src/menu.rs`); the version shows only on the connection screen.
+- **Impact:** with 59 in place, the version can't be seen from the workspace.
+- **Estimate:** 1 h (estimated), once drawn.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-10 | minor | Entry 59 decided (the update button's states and where it sits) and entry 65 (no Help menu or About). |
 | 2026-11-10 | minor | The check of the M3 Phase 1 fixes: entries 63 (a long column type may be cut in the grid header) and 64 (the tokens check can misread a test helper with a comma in its type). |
 | 2026-11-10 | minor | The M3 Phase 1 review: entries 60 (the connection form's result strip uses a tint that is no token), 61 (three texts cut at the smallest window, older than M3) and 62 (View > Theme can't be reached before connecting). |
 | 2026-11-09 | minor | Entry 60 fixed and dropped: the prompt after an unknown Apply reads "Apply again?" with an "Apply again" button, and "Close anyway" stays for the other prompts. |
