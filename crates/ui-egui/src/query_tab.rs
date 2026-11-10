@@ -101,7 +101,7 @@ use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{
     self, Text,
-    size::{RADIUS_CONTROL, SPINNER},
+    size::{self, RADIUS_CONTROL},
 };
 use crate::tree::thousands;
 use crate::{DbeeApp, filter_bar, icons};
@@ -1126,7 +1126,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         // The summary's own width at the right, measured as it is drawn.
         let right_room = summary.as_ref().map_or(0.0, |(text, _)| bar.painter().layout_job(Text::Label.job(text, t.text)).size().x + 16.0);
         if running {
-            let spinner = bar.add(egui::Spinner::new().size(SPINNER).color(t.text_muted));
+            let spinner = bar.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
             let words = Text::Label.rich("Running…").color(t.text_muted);
             let words_w = bar.painter().layout_job(Text::Label.job("Running…", t.text_muted)).size().x;
             let after = bar.cursor().min.x + bar.spacing().item_spacing.x + words_w + 10.0;
