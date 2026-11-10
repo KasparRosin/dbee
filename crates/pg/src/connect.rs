@@ -1,48 +1,33 @@
 //! Opening a connection: TCP or an SSH tunnel channel, TLS, login, the session setup, and the
 //! cancel request.
 
+use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::task::{Context, Poll, ready};
 
 use dbee_config::ConnectionConfig;
+use dbee_driver::{
+    CONNECT_TIMEOUT, DbError, Limits, MAX_MESSAGE, MAX_VERSION, ServerInfo, Target, cancel_not_delivered, connect_first, kept_text, within,
+};
 use dbee_ssh::Tunnel;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_postgres::tls::MakeTlsConnect;
-use tokio_postgres::{CancelToken, Client, Connection, SimpleQueryMessage};
+use tokio_postgres::{CancelToken, Client, Connection};
 
-use crate::PgError;
 use crate::error::{self, Phase};
+use crate::query::{self, MAX_NAME};
 use crate::tls::{self, Tls};
-
-/// How long opening a connection (TCP or the tunnel channel, TLS, login and the session setup)
-/// and delivering a cancel request may take.
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+use crate::watch::{Rule, Watched};
 
 /// The oldest supported server, as `server_version_num`: Postgres 14.
 pub const MIN_VERSION_NUM: u32 = 140000;
 
-/// TCP keepalive on direct connections: the first probe after this long without traffic.
-const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
-/// Then a probe this often, and the connection is dead after [`KEEPALIVE_RETRIES`] unanswered.
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-const KEEPALIVE_RETRIES: u32 = 3;
-
-/// What the server said about itself when the connection opened.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerInfo {
-    /// `SHOW server_version`, e.g. `14.12` or `18.0 (Debian 18.0-1)`.
-    pub version: String,
-    /// `SHOW server_version_num`, e.g. `140012`.
-    pub version_num: u32,
-    /// New transactions are read-only (`default_transaction_read_only` is `on`): set by dbee for a
-    /// read-only connection, or by the server's own settings.
-    pub read_only: bool,
-    /// Things the user should know, e.g. [`version_warning`].
-    pub warnings: Vec<String>,
-}
+/// [`ServerInfo::product`] for every Postgres server.
+const PRODUCT: &str = "PostgreSQL";
 
 /// The warning for a server older than [`MIN_VERSION_NUM`], or `None`.
 pub fn version_warning(version_num: u32) -> Option<String> {
@@ -55,25 +40,6 @@ pub fn version_warning(version_num: u32) -> Option<String> {
     Some(format!("PostgreSQL {version} is older than {}, the oldest version dbee supports; some things may not work", MIN_VERSION_NUM / 10_000))
 }
 
-/// Where and how to connect. `password` is the database password (never stored in `config`);
-/// `tunnel` is the open SSH tunnel when `config.ssh` is set.
-#[derive(Clone)]
-pub struct Target<'a> {
-    pub config: &'a ConnectionConfig,
-    pub password: Option<&'a str>,
-    pub tunnel: Option<Arc<Tunnel>>,
-}
-
-impl std::fmt::Debug for Target<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Target")
-            .field("config", &self.config)
-            .field("password", &self.password.map(|_| "<redacted>"))
-            .field("tunnel", &self.tunnel)
-            .finish()
-    }
-}
-
 /// An open connection. Every operation on it holds [`PgConnection::lock`] for its whole run, so
 /// operations never interleave (an apply's `BEGIN` … `COMMIT` included). Dropping it closes the
 /// connection.
@@ -84,6 +50,14 @@ pub struct PgConnection {
     /// Set when the connection task ended, or an error showed the session is gone.
     closed: Arc<AtomicBool>,
     canceller: Canceller,
+    /// dbee made the session read-only, and reads the mode back after each statement
+    /// ([`crate::guard`]).
+    pub(crate) read_only: bool,
+    /// The mode could not be read after the last statement; it is read before the next one.
+    pub(crate) check_due: AtomicBool,
+    /// The schemas the session's search path finds, read when it opened: a type in one of them is
+    /// shown without its schema.
+    visible_schemas: Vec<String>,
 }
 
 impl std::fmt::Debug for PgConnection {
@@ -98,8 +72,13 @@ impl PgConnection {
         &self.info
     }
 
+    /// The schemas the session's search path found when it opened (`current_schemas(false)`).
+    pub fn visible_schemas(&self) -> &[String] {
+        &self.visible_schemas
+    }
+
     /// The connection has ended: closed by the server, the network or the tunnel. Every further
-    /// operation fails with [`PgError::ConnectionLost`].
+    /// operation fails with [`DbError::ConnectionLost`].
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire) || self.client.is_closed()
     }
@@ -116,12 +95,15 @@ impl PgConnection {
     }
 
     /// Serializes operations: hold the guard for the whole operation. Refuses with
-    /// [`PgError::ConnectionLost`] once the connection is closed, checked after the mutex is
+    /// [`DbError::ConnectionLost`] once the connection is closed, checked after the mutex is
     /// taken so an operation queued behind an abandoned apply cannot run inside its transaction.
-    pub(crate) async fn lock(&self) -> Result<MutexGuard<'_, ()>, PgError> {
+    /// A cancel request on its way is waited for first ([`Canceller::cancel`]), so it reaches the
+    /// statement it was sent for, or none.
+    pub(crate) async fn lock(&self) -> Result<MutexGuard<'_, ()>, DbError> {
         let guard = self.lock.lock().await;
+        drop(self.canceller.on_its_way.lock().await);
         if self.is_closed() {
-            return Err(PgError::ConnectionLost);
+            return Err(DbError::ConnectionLost);
         }
         Ok(guard)
     }
@@ -135,64 +117,156 @@ impl PgConnection {
     }
 
     /// Map an error of an operation on this connection; a lost session marks it closed.
-    pub(crate) fn error(&self, e: &tokio_postgres::Error) -> PgError {
+    pub(crate) fn error(&self, e: &tokio_postgres::Error) -> DbError {
         let mapped = error::map(e, Phase::Session);
-        if mapped == PgError::ConnectionLost {
+        if mapped == DbError::ConnectionLost {
             self.closed.store(true, Ordering::Release);
         }
         mapped
     }
 }
 
-/// The route a cancel request takes when the connection runs through a tunnel.
+/// The server the connection reached, for a cancel request: the way there, and `host`, the name
+/// TLS checks.
 #[derive(Clone)]
-struct TunnelRoute {
-    tunnel: Arc<Tunnel>,
+struct Route {
     host: String,
-    port: u16,
+    way: Way,
+}
+
+/// How a cancel request reaches the server the connection reached.
+#[derive(Clone)]
+enum Way {
+    /// A new channel through the tunnel, to the host and port the connection asked it for.
+    Tunnel { tunnel: Arc<Tunnel>, port: u16 },
+    /// The address that answered, of those the host name gave: the name may lead elsewhere later.
+    Tcp(SocketAddr),
+    /// The server's socket in the folder the host names.
+    #[cfg(unix)]
+    Socket(std::path::PathBuf),
+}
+
+impl Way {
+    /// The server's socket in a folder, which never leaves the machine.
+    fn is_socket(&self) -> bool {
+        match self {
+            #[cfg(unix)]
+            Way::Socket(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Sends a cancel request for the statement running on one connection. Cheap to clone; holds
-/// no lock.
+/// none of the connection's locks.
 #[derive(Clone)]
 pub struct Canceller {
     token: CancelToken,
     tls: Tls,
-    route: Option<TunnelRoute>,
+    /// The session runs over TLS: the request goes over TLS too, or not at all.
+    over_tls: bool,
+    route: Route,
+    /// Held while a request is on its way; no operation takes the connection's lock meanwhile
+    /// ([`PgConnection::lock`]). An Apply that holds the lock already runs its next statement.
+    on_its_way: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for Canceller {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The token holds the backend's secret key: not shown.
-        f.debug_struct("Canceller").field("tls", &self.tls).field("tunnel", &self.route.is_some()).finish()
+        let tunnel = matches!(self.route.way, Way::Tunnel { .. });
+        f.debug_struct("Canceller").field("tls", &self.tls).field("over_tls", &self.over_tls).field("tunnel", &tunnel).finish()
     }
 }
 
 impl Canceller {
     /// Ask the server to cancel the running statement, over a new connection: a new channel
-    /// through the tunnel, or a direct TCP connection to the address the connection uses. `Ok`
-    /// means the request was delivered; the statement then fails with [`PgError::Cancelled`],
-    /// unless it finished first.
-    pub async fn cancel(&self) -> Result<(), PgError> {
+    /// through the tunnel, or a direct connection to the address the connection reached. `Ok`
+    /// means the request was handled: the server closed that connection, as it does once it has
+    /// (the protocol sends no answer); the statement then fails with [`DbError::Cancelled`], unless
+    /// it finished first. Until then no operation takes the connection's lock
+    /// ([`PgConnection::lock`]); an Apply already holding it runs its next statement.
+    pub async fn cancel(&self) -> Result<(), DbError> {
         // The timeout below needs a runtime; without one it would panic.
-        tokio::runtime::Handle::try_current().map_err(|_| PgError::Other("cancelling needs a tokio runtime".into()))?;
+        tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("cancelling needs a tokio runtime".into()))?;
         let sending = async {
-            match &self.route {
-                Some(r) => {
-                    let stream = r.tunnel.connect(&r.host, r.port).await?;
-                    let tls = tls_connect(&self.tls, &r.host, &stream);
-                    self.token.cancel_query_raw(stream, tls).await
+            let _on_its_way = self.on_its_way.lock().await;
+            let host = &self.route.host;
+            match &self.route.way {
+                Way::Tunnel { tunnel, port } => self.request(tunnel.connect(host, *port).await?).await,
+                Way::Tcp(addr) => {
+                    let stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| DbError::Connect(format!("{addr}: {e}")))?;
+                    self.request(stream).await
                 }
-                None => self.token.cancel_query(self.tls.connector.clone()).await,
+                #[cfg(unix)]
+                Way::Socket(socket) => {
+                    let stream = tokio::net::UnixStream::connect(socket).await.map_err(|e| DbError::Connect(format!("{host}: {e}")))?;
+                    self.request(stream).await
+                }
             }
-            .map_err(|e| error::map(&e, Phase::Connect))
         };
         match tokio::time::timeout(CONNECT_TIMEOUT, sending).await {
             Ok(result) => {
                 log::info!("pg: cancel request {}", if result.is_ok() { "sent" } else { "failed" });
                 result
             }
-            Err(_) => Err(PgError::Connect(format!("the cancel request was not delivered within {} s", CONNECT_TIMEOUT.as_secs()))),
+            Err(_) => Err(cancel_not_delivered()),
+        }
+    }
+}
+
+impl Canceller {
+    /// Sends the cancel request over `stream`, with TLS as the connection has it, and waits until
+    /// the server has closed it. tokio-postgres would send it without TLS when the server says
+    /// `N` in `prefer` mode; for a session over TLS the watch refuses that ([`Rule::TlsOnly`]).
+    async fn request<S>(&self, stream: S) -> Result<(), DbError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let rule = if self.over_tls { Rule::TlsOnly } else { Rule::Any };
+        let stream = UntilClosed { inner: Watched::new(stream, rule), shut: false };
+        let tls = tls_connect(&self.tls, &self.route.host, &stream);
+        self.token.cancel_query_raw(stream, tls).await.map_err(|e| error::map(&e, Phase::Connect))
+    }
+}
+
+/// A stream whose shutdown also waits until the other end has closed the connection: a cancel
+/// request has been handled once the server closed its connection.
+struct UntilClosed<S> {
+    inner: S,
+    shut: bool,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for UntilClosed<S> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for UntilClosed<S> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if !self.shut {
+            ready!(Pin::new(&mut self.inner).poll_shutdown(cx))?;
+            self.shut = true;
+        }
+        let mut bytes = [0u8; 256];
+        loop {
+            let mut read = ReadBuf::new(&mut bytes);
+            match ready!(Pin::new(&mut self.inner).poll_read(cx, &mut read)) {
+                Ok(()) if read.filled().is_empty() => return Poll::Ready(Ok(())),
+                // Whatever the server sends before it closes (a TLS alert) is not read.
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Poll::Ready(Ok(())),
+                Err(e) => return Poll::Ready(Err(e)),
+            }
         }
     }
 }
@@ -210,18 +284,20 @@ fn address(host: &str, port: u16) -> String {
 /// default_transaction_read_only = on`, which a separate `SHOW` must confirm (a transaction-mode
 /// pooler that moved the session elsewhere shows there); the same `SHOW` confirms
 /// `standard_conforming_strings` and `client_encoding`. In `prefer` mode a failed TLS handshake
-/// is tried again without TLS, as libpq does.
-pub async fn connect(t: Target<'_>) -> Result<PgConnection, PgError> {
+/// is tried again without TLS, as libpq does. On a link without TLS a request for the password in
+/// clear text ends the login before the password is sent ([`crate::watch`]); over a Unix socket,
+/// which never leaves the machine, the password goes as the server asks.
+pub async fn connect(t: Target<'_>) -> Result<PgConnection, DbError> {
     let cfg = t.config;
     // The connection task needs a runtime; `tokio::spawn` would panic without one.
-    let runtime = tokio::runtime::Handle::try_current().map_err(|_| PgError::Other("connecting needs a tokio runtime".into()))?;
-    cfg.validate().map_err(|e| PgError::Connect(e.to_string()))?;
+    let runtime = tokio::runtime::Handle::try_current().map_err(|_| DbError::Other("connecting needs a tokio runtime".into()))?;
+    cfg.validate().map_err(|e| DbError::Connect(e.to_string()))?;
     if cfg.ssh.is_some() && t.tunnel.is_none() {
-        return Err(PgError::Connect("this connection goes through an SSH tunnel, and none is open".into()));
+        return Err(DbError::Connect("this connection goes through an SSH tunnel, and none is open".into()));
     }
     let tls = tls::make(cfg.ssl_mode, cfg.ca_file.as_deref())?;
     match attempt(&t, &tls, &runtime).await {
-        Err(PgError::Tls(_)) if tls.pg_mode() == tokio_postgres::config::SslMode::Prefer => {
+        Err(DbError::Tls(_)) if tls.pg_mode() == tokio_postgres::config::SslMode::Prefer => {
             log::info!("pg: the TLS handshake failed in prefer mode; connecting without TLS");
             attempt(&t, &tls.plain(), &runtime).await
         }
@@ -229,22 +305,21 @@ pub async fn connect(t: Target<'_>) -> Result<PgConnection, PgError> {
     }
 }
 
-async fn attempt(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnection, PgError> {
+async fn attempt(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnection, DbError> {
     let addr = address(&t.config.host, t.config.port);
     log::info!("pg: connecting to {addr}{}", if t.tunnel.is_some() { " through SSH" } else { "" });
-    match tokio::time::timeout(CONNECT_TIMEOUT, open(t, tls, runtime)).await {
-        Ok(Ok(conn)) => {
+    match open(t, tls, runtime).await {
+        Ok(conn) => {
             log::info!("pg: connected to {addr} (server {}, TLS mode {:?})", conn.info.version_num, tls.mode());
             Ok(conn)
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             log::info!("pg: connecting to {addr} failed ({})", e.code());
             Err(match e {
-                PgError::Connect(m) => PgError::Connect(format!("{addr}: {m}")),
+                DbError::Connect(m) => DbError::Connect(format!("{addr}: {m}")),
                 other => other,
             })
         }
-        Err(_) => Err(PgError::Connect(format!("{addr} did not answer within {} s", CONNECT_TIMEOUT.as_secs()))),
     }
 }
 
@@ -252,15 +327,7 @@ async fn attempt(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnec
 /// as in libpq (the OS user name; a database named like the user).
 fn pg_config(cfg: &ConnectionConfig, password: Option<&str>, tls: &Tls) -> tokio_postgres::Config {
     let mut pg = tokio_postgres::Config::new();
-    pg.host(&cfg.host)
-        .port(cfg.port)
-        .application_name("dbee")
-        .ssl_mode(tls.pg_mode())
-        .connect_timeout(CONNECT_TIMEOUT)
-        .keepalives(true)
-        .keepalives_idle(KEEPALIVE_IDLE)
-        .keepalives_interval(KEEPALIVE_INTERVAL)
-        .keepalives_retries(KEEPALIVE_RETRIES);
+    pg.host(&cfg.host).port(cfg.port).application_name("dbee").ssl_mode(tls.pg_mode()).connect_timeout(CONNECT_TIMEOUT);
     if !cfg.user.is_empty() {
         pg.user(&cfg.user);
     }
@@ -273,26 +340,81 @@ fn pg_config(cfg: &ConnectionConfig, password: Option<&str>, tls: &Tls) -> tokio
     pg
 }
 
-async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnection, PgError> {
+async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnection, DbError> {
     let cfg = t.config;
     let pg = pg_config(cfg, t.password, tls);
     let connect_error = |e: tokio_postgres::Error| error::map(&e, Phase::Connect);
-    let (client, closed) = match &t.tunnel {
+    let (client, closed, way, over_tls) = match &t.tunnel {
         Some(tunnel) => {
-            let stream = tunnel.connect(&cfg.host, cfg.port).await?;
-            let connect = tls_connect(tls, &cfg.host, &stream);
-            let (client, connection) = pg.connect_raw(stream, connect).await.map_err(connect_error)?;
-            (client, drive(runtime, connection))
+            let channel = within(CONNECT_TIMEOUT, "the SSH tunnel's channel", async { Ok(tunnel.connect(&cfg.host, cfg.port).await?) }).await?;
+            let (client, closed, over_tls) = within(CONNECT_TIMEOUT, "the server", login(channel, &pg, tls, &cfg.host, runtime)).await?;
+            (client, closed, Way::Tunnel { tunnel: Arc::clone(tunnel), port: cfg.port }, over_tls)
+        }
+        // The socket never leaves the machine, and Postgres has no TLS on it: the password may go
+        // in clear text there, as libpq sends it.
+        #[cfg(unix)]
+        None if cfg.host.starts_with('/') => {
+            let (client, connection) =
+                within(CONNECT_TIMEOUT, "the server", async { pg.connect(tls.connector.clone()).await.map_err(connect_error) }).await?;
+            let socket = std::path::Path::new(&cfg.host).join(format!(".s.PGSQL.{}", cfg.port));
+            (client, drive(runtime, connection), Way::Socket(socket), false)
         }
         None => {
-            let (client, connection) = pg.connect(tls.connector.clone()).await.map_err(connect_error)?;
-            (client, drive(runtime, connection))
+            let (client, closed, addr, over_tls) = connect_tcp(&pg, tls, &cfg.host, cfg.port, runtime).await?;
+            (client, closed, Way::Tcp(addr), over_tls)
         }
     };
-    let info = setup(&client, cfg.read_only).await?;
-    let route = t.tunnel.as_ref().map(|tunnel| TunnelRoute { tunnel: Arc::clone(tunnel), host: cfg.host.clone(), port: cfg.port });
-    let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), route };
-    Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller })
+    let (mut info, visible_schemas) = within(CONNECT_TIMEOUT, "the server", setup(&client, cfg.read_only)).await?;
+    info.tls = Some(dbee_driver::tls::state(over_tls, cfg.ssl_mode, cfg.ca_file.as_deref()));
+    let reached = if let Way::Tcp(addr) = way { Some(addr) } else { None };
+    info.local = way.is_socket() || reached.is_some_and(dbee_driver::tls::is_local);
+    info.warnings.extend(dbee_driver::tls::prefer_warning(cfg.ssl_mode, over_tls, reached));
+    let route = Route { host: cfg.host.clone(), way };
+    let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), over_tls, route, on_its_way: Arc::default() };
+    let check_due = AtomicBool::new(false);
+    Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller, read_only: cfg.read_only, check_due, visible_schemas })
+}
+
+/// Connects to the addresses `host` gives, in turn, as tokio-postgres does (TLS still checks
+/// `host`), each within [`CONNECT_TIMEOUT`] as libpq's `connect_timeout`, and logs in within it,
+/// and says which one answered and whether it runs over TLS. The stream is dbee's own, watched
+/// ([`Watched`]).
+async fn connect_tcp(
+    pg: &tokio_postgres::Config,
+    tls: &Tls,
+    host: &str,
+    port: u16,
+    runtime: &Handle,
+) -> Result<(Client, Arc<AtomicBool>, SocketAddr, bool), DbError> {
+    let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| DbError::Connect(e.to_string()))?;
+    let mut last = DbError::Connect("the host name gave no address".into());
+    for addr in addrs {
+        let tcp = match connect_first(&[addr], CONNECT_TIMEOUT).await {
+            Ok((tcp, _)) => tcp,
+            Err(e) => {
+                last = e;
+                continue;
+            }
+        };
+        match within(CONNECT_TIMEOUT, &addr.to_string(), login(tcp, pg, tls, host, runtime)).await {
+            Ok((client, closed, over_tls)) => return Ok((client, closed, addr, over_tls)),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Logs in over `stream`, a direct one or the tunnel's channel, watched ([`Watched`]): the
+/// client, the flag that tells when its connection ended, and whether the link runs over TLS.
+async fn login<S>(stream: S, pg: &tokio_postgres::Config, tls: &Tls, host: &str, runtime: &Handle) -> Result<(Client, Arc<AtomicBool>, bool), DbError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let stream = Watched::new(stream, Rule::Login);
+    let over_tls = stream.tls();
+    let connect = tls_connect(tls, host, &stream);
+    let (client, connection) = pg.connect_raw(stream, connect).await.map_err(|e| error::map(&e, Phase::Connect))?;
+    Ok((client, drive(runtime, connection), over_tls.load(Ordering::Acquire)))
 }
 
 /// The TLS connector for one stream to `host` (the stream only fixes the type).
@@ -336,12 +458,61 @@ where
     closed
 }
 
+/// The most the setup's read of its settings holds: one short value each, and a search path.
+const SETTINGS_LIMITS: Limits = Limits { max_rows: 6, max_bytes: 64 * 1024 };
+
+/// The most its read of the schemas the search path finds holds.
+const SCHEMAS_LIMITS: Limits = Limits { max_rows: 1024, max_bytes: 256 * 1024 };
+
 /// The settings the setup reads back, in order.
 const SHOW_SETTINGS: &str = "SHOW default_transaction_read_only; SHOW standard_conforming_strings; SHOW client_encoding; \
-                             SHOW server_version; SHOW server_version_num";
+                             SHOW server_version; SHOW server_version_num; SHOW search_path";
 
-/// The session setup; returns what the server says about itself.
-async fn setup(client: &Client, read_only: bool) -> Result<ServerInfo, PgError> {
+/// The schemas of a `search_path` value, in order, as the server reads them: a quoted name
+/// unquoted, an unquoted one in lowercase, whitespace outside quotes skipped.
+fn search_path_schemas(path: &str) -> Vec<String> {
+    let mut schemas = Vec::new();
+    let (mut name, mut quoted, mut chars) = (String::new(), false, path.chars().peekable());
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                name.push('"');
+            }
+            '"' => quoted = !quoted,
+            c if quoted => name.push(c),
+            ',' => schemas.push(std::mem::take(&mut name)),
+            c if c.is_whitespace() => {}
+            c => name.push(c.to_ascii_lowercase()),
+        }
+    }
+    schemas.push(name);
+    schemas.retain(|s| !s.is_empty());
+    schemas
+}
+
+/// The warning for a search path that names another schema before `pg_catalog` (the session's
+/// own temporary schema aside), or `None`. dbee names `pg_catalog`'s functions and operators
+/// itself, whatever the path, but its casts name built-in types such as `jsonb` and `uuid` as the
+/// server prints them, and such a path finds that schema's first.
+fn search_path_warning(path: &str) -> Option<String> {
+    let schemas = search_path_schemas(path);
+    let at = schemas.iter().position(|s| s == "pg_catalog")?;
+    schemas.get(..at)?.iter().any(|s| s != "pg_temp").then(|| {
+        format!(
+            "The search path ({path}) puts other schemas before pg_catalog, so a type someone made in one of them could take the place \
+             of a built-in one in the values dbee filters by and saves. Ask the database owner to put pg_catalog first in the search \
+             path, or to leave it out."
+        )
+    })
+}
+
+/// The schemas the session's search path finds, in order.
+const VISIBLE_SCHEMAS: &str = "SELECT pg_catalog.unnest(pg_catalog.current_schemas(false))";
+
+/// The session setup; returns what the server says about itself, and the schemas its search path
+/// finds.
+async fn setup(client: &Client, read_only: bool) -> Result<(ServerInfo, Vec<String>), DbError> {
     let fail = |e: tokio_postgres::Error| error::map(&e, Phase::Connect);
     let set = if read_only {
         "SET standard_conforming_strings = on; SET default_transaction_read_only = on"
@@ -349,28 +520,129 @@ async fn setup(client: &Client, read_only: bool) -> Result<ServerInfo, PgError> 
         "SET standard_conforming_strings = on"
     };
     client.batch_execute(set).await.map_err(fail)?;
-    let mut answers = Vec::new();
-    for message in client.simple_query(SHOW_SETTINGS).await.map_err(fail)? {
-        if let SimpleQueryMessage::Row(row) = message {
-            answers.push(row.try_get(0).ok().flatten().unwrap_or_default().to_owned());
-        }
-    }
-    let [ro, conforming, encoding, version, num] = answers.as_slice() else {
-        return Err(PgError::Other(format!("the server answered {} of 5 settings", answers.len())));
+    let map = |e: &tokio_postgres::Error| error::map(e, Phase::Connect);
+    let answers: Vec<String> = query::own_read(client, SHOW_SETTINGS, SETTINGS_LIMITS, map)
+        .await?
+        .into_iter()
+        .map(|cell| kept_text(cell.as_deref().unwrap_or_default(), MAX_MESSAGE))
+        .collect();
+    let [ro, conforming, encoding, version, num, path] = answers.as_slice() else {
+        return Err(DbError::Other(format!("the server answered {} of 6 settings", answers.len())));
     };
     // dbee quotes values into SQL text; that is safe only with both of these.
     if conforming != "on" || encoding != "UTF8" {
-        return Err(PgError::Other(format!(
+        return Err(DbError::Other(format!(
             "the session runs with standard_conforming_strings = {conforming} and client_encoding = {encoding}; dbee needs on and UTF8"
         )));
     }
-    let version_num = num.trim().parse::<u32>().map_err(|_| PgError::Other(format!("the server sent an unreadable server_version_num ({num:?})")))?;
+    let version_num = num.trim().parse::<u32>().map_err(|_| {
+        let num = kept_text(num, MAX_VERSION);
+        DbError::Other(format!("the server sent an unreadable server_version_num ({num:?})"))
+    })?;
     let server_read_only = ro == "on";
     if read_only && !server_read_only {
-        return Err(PgError::Other(format!(
+        return Err(DbError::Other(format!(
             "read-only mode did not stick (default_transaction_read_only is {ro:?}); a transaction-mode connection pooler is not supported"
         )));
     }
-    let warnings = version_warning(version_num).into_iter().collect();
-    Ok(ServerInfo { version: version.clone(), version_num, read_only: server_read_only, warnings })
+    let warnings = version_warning(version_num).into_iter().chain(search_path_warning(path)).collect();
+    let visible =
+        query::own_read(client, VISIBLE_SCHEMAS, SCHEMAS_LIMITS, map).await?.into_iter().flatten().map(|name| kept_text(&name, MAX_NAME)).collect();
+    let version = kept_text(version, MAX_VERSION);
+    Ok((ServerInfo { product: PRODUCT.into(), version, version_num, read_only: server_read_only, warnings, tls: None, local: false }, visible))
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    #[test]
+    fn a_search_path_is_read_as_the_server_names_its_schemas() {
+        assert_eq!(search_path_schemas("\"$user\", public"), ["$user", "public"]);
+        assert_eq!(search_path_schemas(" A ,\"b, \"\"C\" , PG_Catalog"), ["a", "b, \"C", "pg_catalog"]);
+        assert_eq!(search_path_schemas(""), Vec::<String>::new());
+        assert_eq!(search_path_schemas("\"\""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn only_another_schema_before_pg_catalog_is_warned_of() {
+        for warned in
+            ["public, pg_catalog", "\"$user\", pg_catalog", "pg_temp, app, pg_catalog", "\"a,pg_catalog\", pg_catalog", "public, PG_CATALOG"]
+        {
+            let w = search_path_warning(warned);
+            assert!(w.as_deref().is_some_and(|w| w.contains(warned) && w.contains("put pg_catalog first")), "{warned}: {w:?}");
+        }
+        for fine in
+            ["\"$user\", public", "pg_catalog, public", "pg_temp, pg_catalog, public", "", "public, \"pg_catalog \"", "public, \"PG_CATALOG\""]
+        {
+            assert_eq!(search_path_warning(fine), None, "{fine}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_waits_until_the_other_end_closes() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let at = listener.local_addr().unwrap();
+        let (got_all, all_got) = tokio::sync::oneshot::channel();
+        let (close, closing) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut seen = Vec::new();
+            socket.read_to_end(&mut seen).await.unwrap();
+            got_all.send(seen).unwrap();
+            let _ = closing.await;
+        });
+        let client = tokio::spawn(async move {
+            let mut stream = UntilClosed { inner: TcpStream::connect(at).await.unwrap(), shut: false };
+            stream.write_all(b"cancel").await.unwrap();
+            stream.shutdown().await
+        });
+        // The server has the request and the client's end of it, and has not closed: the
+        // client's shutdown is still waiting.
+        assert_eq!(all_got.await.unwrap(), b"cancel");
+        assert!(!client.is_finished());
+        close.send(()).unwrap();
+        server.await.unwrap();
+        assert!(client.await.unwrap().is_ok(), "done once the server closed");
+    }
+
+    #[test]
+    fn no_statement_starts_while_a_cancel_request_is_on_its_way() {
+        let db = dbee_testkit::require_testdb!();
+        let server = db.server("pg14").unwrap();
+        let config = ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port: server.port,
+            user: "postgres".into(),
+            database: "dbee".into(),
+            ..ConnectionConfig::default()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let target = Target {
+                config: &config,
+                password: Some(&db.password),
+                tunnel: None,
+                purpose: dbee_driver::Purpose::Browse,
+                create_file: false,
+                allowed_dirs: None,
+            };
+            let conn = Arc::new(connect(target).await.unwrap());
+            let on_its_way = conn.canceller.on_its_way.lock().await;
+            let starting = tokio::spawn({
+                let conn = Arc::clone(&conn);
+                async move { conn.lock().await.map(drop) }
+            });
+            // One thread: the task has run as far as it can, to the request on its way.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!starting.is_finished(), "started while a cancel request was on its way");
+            drop(on_its_way);
+            assert_eq!(starting.await.unwrap(), Ok(()));
+        });
+    }
 }

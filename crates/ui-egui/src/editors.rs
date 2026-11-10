@@ -20,8 +20,9 @@
 //!
 //! **Kinds** ([`Kind`], from the column's catalog entry): one line, where Enter commits; several
 //! lines for `text`, `json`, `jsonb` and `xml` (`ColumnInfo::multiline`), where Enter is a newline
-//! and Ctrl+Enter commits; and a true / false / NULL choice for booleans (category `B`), moved
-//! with the arrow keys or clicked.
+//! and Ctrl+Enter commits; and a true / false / NULL choice for booleans (class `Bool`), moved
+//! with the arrow keys or clicked. A boolean holding a value that is no choice (MySQL's
+//! `TINYINT(1)` holding 5) opens as one line instead.
 //!
 //! **Keys.** While an editor is open it has the keyboard: Enter or Ctrl+Enter commits, Tab
 //! commits and selects the next cell to the right, then the start of the next row (Shift+Tab goes
@@ -51,9 +52,9 @@
 
 use std::sync::{Arc, Weak};
 
-use dbee_core::{ColumnInfo, ResultSet};
+use dbee_core::{ColumnInfo, ResultSet, TypeClass};
 use dbee_engine::cmd::edit::can_edit;
-use dbee_engine::{EngineError, Json, Screen, Session, Tab, TabId};
+use dbee_engine::{EngineError, Json, Screen, Session, Tab, TabId, Which};
 use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
 use egui::widgets::text_edit::TextEditState;
 use egui::{
@@ -115,7 +116,7 @@ impl Kind {
     /// The kind for `column` (its catalog entry; one line when it is unknown).
     pub fn of(column: Option<&ColumnInfo>) -> Kind {
         match column {
-            Some(c) if c.category == 'B' => Kind::Bool,
+            Some(c) if c.class == TypeClass::Bool => Kind::Bool,
             Some(c) if c.multiline() => Kind::Lines,
             _ => Kind::Line,
         }
@@ -150,8 +151,9 @@ impl Choice {
         }
     }
 
-    /// The choice a boolean cell's value is. Postgres prints `t` and `f`; a staged value is as it
-    /// was typed, in any of the spellings Postgres reads. Other text is no choice.
+    /// The choice a boolean cell's value is. Postgres prints `t` and `f`, the other engines `1` and
+    /// `0`; a staged value is as it was typed, in any of the spellings Postgres reads. Other text is
+    /// no choice.
     pub fn of(value: Option<&str>) -> Option<Choice> {
         let Some(v) = value else { return Some(Choice::Null) };
         match v.trim().to_ascii_lowercase().as_str() {
@@ -288,10 +290,11 @@ impl std::fmt::Debug for CellEditor {
 
 impl CellEditor {
     /// An editor of `kind` on cell `(row, col)` of tab `tab`, holding `value` (`None`: NULL), on
-    /// `page`.
+    /// `page`; a boolean whose value is no choice as one line.
     pub fn new(tab: TabId, (row, col): (usize, usize), kind: Kind, value: Option<&str>, page: &Arc<ResultSet>, revision: u64) -> CellEditor {
         let text = value.unwrap_or_default().to_string();
         let opened_choice = Choice::of(value);
+        let kind = if kind == Kind::Bool && opened_choice.is_none() { Kind::Line } else { kind };
         CellEditor {
             tab,
             row,
@@ -380,7 +383,7 @@ pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>
     if let Some(v) = value.filter(|v| v.len() > MAX_INLINE_BYTES) {
         return Err(format!("This value is too large to edit inline ({}; at most {}).", size_text(v.len()), size_text(MAX_INLINE_BYTES)));
     }
-    let info = s.state().connected.as_ref().and_then(|c| c.catalog.table(&t.table)).and_then(|i| i.column(data.column_name(col)));
+    let info = s.state().connection(Which::Tab(t.id)).and_then(|c| c.catalog.table(&t.table)).and_then(|i| i.column(data.column_name(col)));
     if let Some(why) = info.and_then(|i| i.not_editable()) {
         return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why: why.into() }));
     }
@@ -490,7 +493,7 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
         }
         return;
     }
-    if app.view.dialog.is_some() || app.view.work.quick.open {
+    if app.view.dialog.is_some() || app.view.quick.open {
         commit(app, ctx);
         return;
     }
@@ -568,7 +571,7 @@ pub fn take_large_pastes(events: &mut Vec<Event>, length: usize, selected: usize
 /// selection and no widget has the keyboard.
 fn open_on_enter(app: &mut DbeeApp, ctx: &egui::Context) {
     let st = app.session.state();
-    if st.screen != Screen::Workspace || app.view.dialog.is_some() || app.view.work.quick.open || ctx.memory(|m| m.focused()).is_some() {
+    if st.screen != Screen::Workspace || app.view.dialog.is_some() || app.view.quick.open || ctx.memory(|m| m.focused()).is_some() {
         return;
     }
     let Some(Tab::Table(t)) = st.active_tab() else { return };
@@ -771,6 +774,7 @@ mod tests {
             rows_seen: 1,
             complete: true,
             rows_affected: None,
+            database_after: Default::default(),
         })
     }
 
@@ -807,9 +811,11 @@ mod tests {
         assert_eq!((e.choice, e.command()), (Choice::Null, None));
         e.choice = Choice::True;
         assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": true }))));
-        // Text that is no boolean: any choice is a change.
-        let e = editor(Kind::Bool, Some("maybe"));
-        assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": true }))));
+        // Text that is no boolean opens as one line: Enter alone changes nothing.
+        let mut e = editor(Kind::Bool, Some("5"));
+        assert_eq!((e.kind, e.text.as_str(), e.command()), (Kind::Line, "5", None));
+        e.text = "1".into();
+        assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": "1" }))));
         for (text, choice) in [("TRUE", Some(Choice::True)), ("off", Some(Choice::False)), (" yes ", Some(Choice::True)), ("2", None)] {
             assert_eq!(Choice::of(Some(text)), choice, "{text}");
         }
@@ -923,18 +929,24 @@ mod tests {
         let mut c = ColumnInfo {
             name: "c".into(),
             type_sql: "boolean".into(),
-            type_oid: 16,
             base_type: "bool".into(),
-            category: 'B',
+            class: TypeClass::Bool,
             not_null: false,
             has_default: false,
             generated: Default::default(),
+            hidden: false,
+            type_label: String::new(),
+            operators: dbee_core::Operators::Unnamed,
         };
         assert_eq!(Kind::of(Some(&c)), Kind::Bool);
-        (c.base_type, c.category) = ("jsonb".into(), 'U');
+        c.class = TypeClass::Json;
         assert_eq!(Kind::of(Some(&c)), Kind::Lines);
-        (c.base_type, c.category) = ("date".into(), 'D');
-        assert_eq!(Kind::of(Some(&c)), Kind::Line);
+        c.class = TypeClass::LongText;
+        assert_eq!(Kind::of(Some(&c)), Kind::Lines);
+        for class in [TypeClass::Text, TypeClass::Number, TypeClass::DateTime, TypeClass::Binary, TypeClass::Other] {
+            c.class = class;
+            assert_eq!(Kind::of(Some(&c)), Kind::Line, "{class:?}");
+        }
         assert_eq!(Kind::of(None), Kind::Line);
     }
 }

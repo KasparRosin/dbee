@@ -11,9 +11,10 @@
 //! Levels: `info` for dbee's own crates, `warn` for everything else (wgpu and naga are
 //! chatty). `RUST_LOG` replaces that with env_logger-style directives: `debug`,
 //! `warn,dbee_engine=trace`, `wgpu_core=info`. A directive ending in `*` matches every target
-//! that starts with it (`dbee*=debug`). The Postgres and SSH protocol crates ([`CAPPED`]) never
-//! log below `info`, whatever `RUST_LOG` says: at debug and trace they log SQL text, parameters
-//! and protocol data, and logs never hold secrets or cell values.
+//! that starts with it (`dbee*=debug`). Only dbee's own crates ([`own`]) log below `info`,
+//! whatever `RUST_LOG` says: at debug and trace other crates (the Postgres and SSH protocol
+//! crates among them, and any a new driver brings) may log SQL text, parameters and protocol
+//! data, and logs never hold secrets or cell values.
 //!
 //! Records logged before the settings directory is known are kept (up to [`MAX_PENDING`]) and
 //! written once the file is attached. Writing never panics: a file that can't be created or
@@ -24,6 +25,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::SystemTime;
 
@@ -39,8 +41,12 @@ pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_PENDING: usize = 512;
 /// The built-in filter when `RUST_LOG` is unset or empty.
 pub const DEFAULT_FILTER: &str = "warn,dbee*=info";
-/// Targets that never log more than `info` (directive syntax: `russh*` is every `russh` crate).
-pub const CAPPED: &[&str] = &["tokio_postgres", "russh*"];
+/// `target` is one of dbee's own crates (`dbee`, `dbee_engine`, …), the only ones that log below
+/// `info`.
+pub fn own(target: &str) -> bool {
+    let krate = target.split("::").next().unwrap_or_default();
+    krate == "dbee" || krate.starts_with("dbee_")
+}
 
 /// Per-target level filter parsed from env_logger-style directives.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +79,7 @@ impl Filter {
     }
 
     /// The level that applies to `target` (the most specific matching directive wins), at most
-    /// `info` for the [`CAPPED`] targets.
+    /// `info` for a target that is not one of dbee's own ([`own`]).
     pub fn level_for(&self, target: &str) -> LevelFilter {
         let level = self
             .directives
@@ -81,7 +87,7 @@ impl Filter {
             .filter(|(name, _)| matches(name, target))
             .max_by_key(|(name, _)| name.len())
             .map_or(self.default, |(_, level)| *level);
-        if CAPPED.iter().any(|name| matches(name, target)) { level.min(LevelFilter::Info) } else { level }
+        if own(target) { level } else { level.min(LevelFilter::Info) }
     }
 
     /// The most verbose level any target can reach (for `log::set_max_level`).
@@ -134,8 +140,11 @@ fn numbered(dir: &Path, n: usize) -> PathBuf {
 
 /// Shift the previous logs up one (`.log` → `.1.log` → … → `.<KEEP>.log`, the oldest dropped)
 /// and create a fresh, empty log file in `dir` (created if missing).
+///
+/// Where the OS has file modes the directory is 0700 and the logs 0600, so another user of the
+/// machine cannot read the host names they hold.
 pub fn rotate(dir: &Path) -> std::io::Result<(PathBuf, File)> {
-    std::fs::create_dir_all(dir)?;
+    create_private_dir(dir)?;
     for n in (1..=KEEP).rev() {
         match std::fs::rename(numbered(dir, n - 1), numbered(dir, n)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
@@ -143,8 +152,60 @@ pub fn rotate(dir: &Path) -> std::io::Result<(PathBuf, File)> {
         }
     }
     let path = numbered(dir, 0);
-    let file = File::create(&path)?;
+    let file = create_private_file(&path)?;
+    #[cfg(unix)]
+    for n in 1..=KEEP {
+        // Logs an older build wrote with the umask's mode.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(numbered(dir, n), std::fs::Permissions::from_mode(0o600));
+    }
     Ok((path, file))
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    File::create(path)
+}
+
+/// The longest message a crate that is not dbee's own may log, in characters.
+pub const FOREIGN_MESSAGE_CHARS: usize = 1024;
+/// How many records of crates that are not dbee's own a run logs. An SSH server controls some of
+/// what russh logs; past this the rest are dropped, so it cannot fill the file.
+pub const FOREIGN_RECORDS: usize = 2000;
+
+/// A message from a crate that is not dbee's own, on one line: control characters (a newline, an
+/// escape sequence) written out, and cut at [`FOREIGN_MESSAGE_CHARS`].
+pub fn sanitize_foreign(message: &str) -> String {
+    let mut out = String::with_capacity(message.len().min(FOREIGN_MESSAGE_CHARS + 16));
+    let mut chars = 0usize;
+    for c in message.chars() {
+        let piece: String = if c.is_control() { c.escape_default().collect() } else { c.to_string() };
+        chars = chars.saturating_add(piece.chars().count());
+        if chars > FOREIGN_MESSAGE_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push_str(&piece);
+    }
+    out
 }
 
 /// One formatted log line: `<timestamp> <LEVEL> [<thread>] <target>: <message>\n`.
@@ -232,11 +293,12 @@ pub struct AppLogger {
     filter: Filter,
     stderr: bool,
     sink: Mutex<Sink>,
+    foreign: AtomicUsize,
 }
 
 impl AppLogger {
     pub fn new(filter: Filter, stderr: bool) -> AppLogger {
-        AppLogger { filter, stderr, sink: Mutex::new(Sink::new(MAX_FILE_BYTES)) }
+        AppLogger { filter, stderr, sink: Mutex::new(Sink::new(MAX_FILE_BYTES)), foreign: AtomicUsize::new(0) }
     }
 
     /// Rotate the logs in `dir` and send records to the fresh file; returns its path. On an error
@@ -271,10 +333,21 @@ impl log::Log for AppLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
+        let mut message = record.args().to_string();
+        if !own(record.target()) {
+            let seen = self.foreign.fetch_add(1, Ordering::Relaxed);
+            if seen > FOREIGN_RECORDS {
+                return;
+            }
+            message = if seen == FOREIGN_RECORDS {
+                format!("{FOREIGN_RECORDS} records of other crates were logged; later ones are dropped")
+            } else {
+                sanitize_foreign(&message)
+            };
+        }
         // Formatted before the sink is locked, so a message that logs while it is formatted can't deadlock.
         let thread = std::thread::current();
-        let line =
-            format_line(&timestamp(SystemTime::now()), record.level(), thread.name().unwrap_or("?"), record.target(), &record.args().to_string());
+        let line = format_line(&timestamp(SystemTime::now()), record.level(), thread.name().unwrap_or("?"), record.target(), &message);
         if self.stderr {
             // No terminal (a Windows GUI build, a closed pipe) is not an error worth reporting.
             let _ = std::io::stderr().write_all(line.as_bytes());
@@ -345,8 +418,10 @@ mod tests {
         // A trailing `*` is a prefix.
         assert_eq!(Filter::parse("dbee*=debug").level_for("dbee_ui_egui::panel"), LevelFilter::Debug);
         assert_eq!(Filter::parse("dbee*=debug").level_for("eframe"), LevelFilter::Error);
-        // A bare target name sets that target to the most verbose level, as env_logger does.
-        assert_eq!(Filter::parse("naga").level_for("naga::front"), LevelFilter::Trace);
+        // A bare target name sets that target to the most verbose level, as env_logger does (for
+        // another crate than dbee's, its most verbose is info).
+        assert_eq!(Filter::parse("dbee_engine").level_for("dbee_engine::session"), LevelFilter::Trace);
+        assert_eq!(Filter::parse("naga").level_for("naga::front"), LevelFilter::Info);
         assert_eq!(Filter::parse("naga").level_for("eframe"), LevelFilter::Error);
         // Levels are case-insensitive and surrounding blanks are ignored.
         assert_eq!(Filter::parse(" WARN , dbee = Debug ").level_for("dbee"), LevelFilter::Debug);
@@ -354,29 +429,33 @@ mod tests {
     }
 
     #[test]
-    fn protocol_crates_never_log_below_info() {
-        // They log SQL text, parameters and protocol data at debug and trace.
-        let targets = ["tokio_postgres", "tokio_postgres::query", "tokio_postgres::prepare", "russh", "russh::client", "russh_keys::agent"];
-        for spec in
-            ["trace", "debug", "*=trace", "tokio_postgres=trace,russh*=trace", "tokio_postgres::query=trace,russh=debug,russh_keys=trace,info"]
-        {
+    fn only_dbees_own_crates_log_below_info() {
+        // Other crates may log SQL text, parameters and protocol data at debug and trace.
+        let others =
+            ["tokio_postgres", "tokio_postgres::query", "russh::client", "russh_keys::agent", "mysql_common", "a_new_protocol_crate::wire", "dbeefy"];
+        for spec in ["trace", "debug", "*=trace", "tokio_postgres=trace,russh*=trace", "a_new_protocol_crate=debug,info"] {
             let f = Filter::parse(spec);
-            for target in targets {
-                assert_eq!(f.level_for(target), LevelFilter::Info, "{spec}: {target}");
+            for target in others {
+                assert!(f.level_for(target) <= LevelFilter::Info, "{spec}: {target}");
             }
         }
-        // A directive for one of them caps that one; the rest keep their level.
-        let f = Filter::parse("tokio_postgres=trace");
-        assert_eq!((f.level_for("tokio_postgres::query"), f.level_for("russh")), (LevelFilter::Info, LevelFilter::Error));
-        // Quieter levels still apply, and other crates are not capped.
+        // A crate no list names, asked for debug: capped at info.
+        assert_eq!(Filter::parse("debug").level_for("a_new_protocol_crate::wire"), LevelFilter::Info);
+        assert_eq!(Filter::parse("a_new_protocol_crate=debug,info").level_for("a_new_protocol_crate"), LevelFilter::Info);
+        // dbee's own crates keep their level.
+        let f = Filter::parse("trace");
+        for target in ["dbee", "dbee::control_server", "dbee_engine", "dbee_ui_egui::panel", "dbee_mysql::wire"] {
+            assert_eq!(f.level_for(target), LevelFilter::Trace, "{target}");
+        }
+        // Quieter levels still apply to every crate.
         assert_eq!(Filter::parse(DEFAULT_FILTER).level_for("tokio_postgres"), LevelFilter::Warn);
         assert_eq!(Filter::parse("tokio_postgres=off").level_for("tokio_postgres::query"), LevelFilter::Off);
-        assert_eq!(Filter::parse("trace").level_for("tokio_postgres_rustls"), LevelFilter::Trace);
-        assert_eq!(Filter::parse("trace").level_for("dbee_engine"), LevelFilter::Trace);
+        assert_eq!(Filter::parse("error").level_for("a_new_protocol_crate"), LevelFilter::Error);
         let logger = AppLogger::new(Filter::parse("trace"), false);
         use log::Log;
-        assert!(!logger.enabled(&log::Metadata::builder().level(log::Level::Debug).target("tokio_postgres::query").build()));
+        assert!(!logger.enabled(&log::Metadata::builder().level(log::Level::Debug).target("a_new_protocol_crate").build()));
         assert!(logger.enabled(&log::Metadata::builder().level(log::Level::Info).target("russh::client").build()));
+        assert!(logger.enabled(&log::Metadata::builder().level(log::Level::Trace).target("dbee_engine").build()));
     }
 
     #[test]
@@ -454,6 +533,56 @@ mod tests {
         assert_eq!(read(&dir.join("dbee.1.log")), "run 3");
         assert_eq!(read(&dir.join("dbee.2.log")), "run 2");
         assert!(!dir.join("dbee.3.log").exists(), "only {KEEP} old logs are kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_directory_and_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+        let dir = temp_dir("private");
+        // A directory and a log an older build made with the umask's mode.
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::write(dir.join(LOG_FILE), "old").expect("write");
+        std::fs::set_permissions(dir.join(LOG_FILE), std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        for _ in 0..2 {
+            let (path, _file) = rotate(&dir).expect("rotate");
+            assert_eq!(mode(&dir), 0o700);
+            assert_eq!(mode(&path), 0o600);
+            assert_eq!(mode(&dir.join("dbee.1.log")), 0o600);
+        }
+        let fresh = temp_dir("private-new").join("logs");
+        rotate(&fresh).expect("rotate");
+        assert_eq!(mode(&fresh), 0o700);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(fresh.parent().expect("parent"));
+    }
+
+    #[test]
+    fn what_another_crate_logs_is_one_short_line_and_bounded() {
+        let hostile = format!("Unhandled global request: \"a\nb\r\x1b[31m\" {}", "x".repeat(5000));
+        let line = sanitize_foreign(&hostile);
+        assert!(!line.contains('\n') && !line.contains('\r') && !line.contains('\x1b'), "{line}");
+        assert!(line.contains("\\n") && line.chars().count() <= FOREIGN_MESSAGE_CHARS + 1);
+        assert_eq!(sanitize_foreign("plain é text"), "plain é text");
+
+        let dir = temp_dir("foreign");
+        let logger = AppLogger::new(Filter::parse("warn"), false);
+        logger.attach_dir(&dir).expect("attach");
+        record(&logger, log::Level::Warn, "russh::client", "forged\n2026-01-01T00:00:00.000Z ERROR [main] dbee: all good");
+        record(&logger, log::Level::Warn, "dbee_engine", "two\nlines");
+        for _ in 0..FOREIGN_RECORDS + 50 {
+            record(&logger, log::Level::Warn, "russh::client", "noise");
+        }
+        record(&logger, log::Level::Warn, "dbee_engine", "still logged");
+        let text = read(&dir.join(LOG_FILE));
+        assert!(text.contains("russh::client: forged\\n2026"), "{text}");
+        assert!(!text.contains("\n2026-01-01"), "{text}");
+        assert!(text.contains("dbee_engine: two\nlines"));
+        assert_eq!(text.matches("russh::client: noise").count(), FOREIGN_RECORDS - 1);
+        assert!(text.contains("later ones are dropped") && text.contains("still logged"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

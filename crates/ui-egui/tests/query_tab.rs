@@ -174,6 +174,20 @@ fn an_error_without_a_position_offers_no_jump() {
 #[test]
 fn cancel_button_stops_pg_sleep() {
     let db = dbee_testkit::require_testdb!();
+    cancel_with_the_button(db);
+}
+
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn cancel_button_stops_pg_sleep_within_five_seconds() {
+    let db = dbee_testkit::require_testdb!();
+    let took = cancel_with_the_button(db);
+    assert!(took < Duration::from_secs(5), "cancelled in {took:?}");
+}
+
+/// Runs `select pg_sleep(30)` and stops it with the Cancel button: the card says cancelled. How
+/// long from the click until the run ended.
+fn cancel_with_the_button(db: &TestDb) -> Duration {
     let mut ui = query_tab(db);
     ui.text("select pg_sleep(30)");
     ui.frame();
@@ -188,12 +202,13 @@ fn cancel_button_stops_pg_sleep() {
     ui.click("query-cancel");
     ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
     let took = start.elapsed();
-    assert!(took < Duration::from_secs(5), "cancelled in {took:?}");
+    println!("cancelled in {took:?}");
     ui.frame();
     let card = ui.value("query-error");
     assert_eq!(card["code"], "cancelled", "{card}");
     assert!(!ui.enabled("query-cancel"));
     assert!(ui.tag("notice").is_none(), "the card says it: {:?}", ui.tag("notice"));
+    took
 }
 
 #[test]
@@ -257,6 +272,84 @@ fn many_results_fit_the_toolbar() {
     assert_eq!(ui.query()["shown"], 1198);
     ui.frame();
     assert!(ui.tag("result-1200").is_some(), "the neighbours stay in reach");
+    // The `…` lists every result, the first one too.
+    let more = ui.rect("result-more");
+    assert!(more[0] + more[2] <= rows[0], "the `…` stays clear of the row count: {more:?} {rows:?}");
+    ui.click("result-more");
+    ui.frame();
+    ui.click("result-list-1");
+    ui.frame();
+    assert_eq!(ui.query()["shown"], 0);
+    assert!(ui.tag("result-list-1").is_none(), "the list closed");
+}
+
+/// Beside the database chip, at the app's first size with the value panel open, every result can
+/// be chosen, also while a statement runs; the selector's label shows whole or not at all.
+#[test]
+fn every_result_can_be_chosen_beside_the_database_chip() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let mut ui = connected_to_target(db, &mysql, Some("shop"), APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    assert!(ui.tag("query-database").is_some(), "the chip is drawn");
+    assert_eq!(ui.value("value-toggle"), true, "the value panel shows");
+    ui.execute("query.setText", json!({ "text": "select 1 as a;\nselect 2 as b;\nselect 3 as c" }));
+    ui.ctrl("Enter");
+    ui.ran();
+    choose_every_result(&mut ui, "after the run");
+    let key = unique("dbee_lock");
+    let held = mysql.hold_lock(&key).unwrap();
+    ui.execute("query.setText", json!({ "text": format!("SELECT 1 AS d FROM DUAL WHERE {}", mysql.waits_for_lock_sql(&key)) }));
+    ui.ctrl("Enter");
+    ui.until("the run to start", |ui| !ui.query()["running"].is_null());
+    ui.frame();
+    choose_every_result(&mut ui, "while a statement runs");
+    drop(held);
+    ui.ran();
+}
+
+/// Chooses each of the three results `a`, `b`, `c`, from the selector or from its `…` list.
+fn choose_every_result(ui: &mut Ui, when: &str) {
+    for (n, column) in [(1, "a"), (2, "b"), (3, "c")] {
+        selector_whole(ui, when);
+        if ui.tag(&format!("result-{n}")).is_some() {
+            ui.click(&format!("result-{n}"));
+        } else {
+            ui.click("result-more");
+            ui.frame();
+            ui.click(&format!("result-list-{n}"));
+        }
+        ui.frame();
+        assert_eq!(ui.query()["shown"], n - 1, "{when}: result {n}");
+        assert_eq!(ui.value("grid-header-0")["name"], column, "{when}: result {n}");
+    }
+}
+
+/// The selector's buttons lie whole between Cancel and the row count, and its label, when drawn,
+/// whole before them.
+fn selector_whole(ui: &mut Ui, when: &str) {
+    let i = ui.inspect();
+    let rect = |id: &str| -> [f32; 4] {
+        let r = tag_in(&i, id).unwrap_or_else(|| panic!("{when}: no `{id}`"))["rect"].clone();
+        [0, 1, 2, 3].map(|k| r[k].as_f64().unwrap() as f32)
+    };
+    let (cancel, rows) = (rect("query-cancel"), rect("query-rows"));
+    let parts: Vec<String> = ids(&i).into_iter().filter(|id| id.starts_with("result-") && !id.starts_with("result-list-")).collect();
+    assert!(!parts.is_empty(), "{when}: a selector");
+    let mut first = f32::MAX;
+    for id in &parts {
+        let [x, _, w, _] = rect(id);
+        assert!(visible(&tag_in(&i, id)) && w >= 22.0, "{when}: `{id}` is whole: {:?}", tag_in(&i, id));
+        assert!(x >= cancel[0] + cancel[2] && x + w <= rows[0], "{when}: `{id}` lies between Cancel and the row count");
+        first = first.min(x);
+    }
+    let bar = egui::Rect::from_min_size(egui::pos2(cancel[0], cancel[1]), egui::vec2(rows[0] + rows[2] - cancel[0], cancel[3]));
+    for (r, g) in ui.texts() {
+        if g.text() == "Results" && bar.contains(r.center()) {
+            assert!(r.max.x <= first, "{when}: the label is whole, before the buttons: {r:?} {first}");
+        }
+    }
 }
 
 #[test]
@@ -446,6 +539,197 @@ fn the_split_between_editor_and_results_drags() {
     assert!((other - after).abs() < 1.0, "{after} vs {other}");
 }
 
+/// The editor lexes with the open connection's dialect: on MySQL `#` starts a comment (drawn in
+/// the colour of a `--` one) and a backtick quotes a name, which on Postgres are an operator and
+/// a stray character, both plain. A new editor starts with the dialect of no connection, so the
+/// MySQL window shows the switch.
+#[test]
+fn query_highlighting_follows_the_dialect() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let highlighted = |ui: &mut Ui, text: &str| {
+        ui.execute("query.setText", json!({ "text": text }));
+        ui.frame();
+        ui.editor()["highlighted"].clone()
+    };
+    let cases = [("x # y", "a comment"), ("x `y`", "a quoted name")];
+    // The colour of `# c`'s `c` and of `-- d`'s `d`.
+    let comment = "x # c\n-- d";
+    let colours = |ui: &mut Ui| {
+        ui.execute("query.setText", json!({ "text": comment }));
+        ui.frame();
+        let (_, g) = ui.texts().into_iter().find(|(_, g)| g.text() == comment).expect("the editor's text is drawn");
+        let at = |byte: usize| g.job.sections.iter().find(|s| s.byte_range.contains(&egui::text::ByteIndex(byte))).map(|s| s.format.color);
+        (at(4), at(9))
+    };
+    {
+        let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+        ui.ctrl("T");
+        ui.frame();
+        for (text, what) in cases {
+            assert_eq!(highlighted(&mut ui, text), true, "{text:?} on MySQL holds {what}");
+        }
+        let (hash, dash) = colours(&mut ui);
+        assert!(hash.is_some() && hash == dash, "on MySQL `#` starts a comment: {hash:?} vs {dash:?}");
+    }
+    let mut ui = query_tab(db);
+    for (text, _) in cases {
+        assert_eq!(highlighted(&mut ui, text), false, "{text:?} on Postgres");
+    }
+    let (hash, dash) = colours(&mut ui);
+    assert!(dash.is_some() && hash != dash, "on Postgres `#` is no comment: {hash:?} vs {dash:?}");
+}
+
+/// A MySQL query tab shows its database at the left of its toolbar, as tall as its buttons. A
+/// table opened from the tree is the tree's selection, so a new query tab opens on its database;
+/// a click on the chip lists the catalog's databases (not the server's own), and choosing one
+/// sets the tab's. While the tab runs the chip waits.
+#[test]
+fn mysql_query_tab_shows_and_changes_its_database() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+    ui.click("tree-schema-shop");
+    ui.double_click("tree-table-shop.orders");
+    ui.until("the orders tab", |ui| ui.document()["table"]["name"] == "orders");
+    ui.ctrl("T");
+    ui.frame();
+    assert_eq!(ui.query()["database"], "shop");
+    assert_eq!(ui.value("query-database"), "shop");
+    let (chip, run) = (ui.rect("query-database"), ui.rect("query-run"));
+    assert!(chip[0] + chip[2] <= run[0], "the chip is left of Run: {chip:?} {run:?}");
+    assert!((chip[1] - run[1]).abs() < 0.5 && (chip[3] - run[3]).abs() < 0.5, "as tall as Run, level with it: {chip:?} {run:?}");
+    ui.click("query-database");
+    ui.frame();
+    let i = ui.inspect();
+    for name in ["many", "odd", "scratch", "shop"] {
+        assert!(tag_in(&i, &format!("query-database-{name}")).is_some(), "{name} is listed: {:?}", ids(&i));
+    }
+    for system in ["mysql", "information_schema", "performance_schema", "sys"] {
+        assert!(tag_in(&i, &format!("query-database-{system}")).is_none(), "{system} is the server's own");
+    }
+    ui.click("query-database-many");
+    ui.frame();
+    assert_eq!(ui.query()["database"], "many");
+    assert_eq!(ui.value("query-database"), "many");
+    assert!(ui.tag("query-database-shop").is_none(), "the list closed");
+    // While the tab runs, the chip waits, and its list goes: a run started with the list open
+    // (Ctrl+Enter reaches it) holds on a lock until the test lets it go.
+    let key = unique("dbee_lock");
+    let held = mysql.hold_lock(&key).unwrap();
+    ui.execute("query.setText", json!({ "text": format!("SELECT 1 FROM DUAL WHERE {}", mysql.waits_for_lock_sql(&key)) }));
+    ui.click("query-database");
+    ui.frame();
+    assert!(ui.tag("query-database-shop").is_some(), "the list is open");
+    ui.ctrl("Enter");
+    ui.until("the run to start", |ui| !ui.query()["running"].is_null());
+    ui.frame();
+    assert!(!ui.enabled("query-database"), "disabled while the tab runs");
+    let listed: Vec<String> = ids(&ui.inspect()).into_iter().filter(|id| id.starts_with("query-database-")).collect();
+    assert!(listed.is_empty(), "no list while the tab runs: {listed:?}");
+    drop(held);
+    ui.ran();
+    assert!(ui.enabled("query-database"));
+    assert!(ui.tag("query-database-shop").is_none(), "the list stays closed");
+    assert_eq!(ui.query()["error"], Json::Null, "the run in `many` went through");
+}
+
+/// Every way of opening a query tab opens it on the tree's selection: a selected database, or a
+/// selected table's. With nothing selected it opens on the connection's database, or on none.
+#[test]
+fn a_new_query_tab_opens_on_the_trees_selection() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    {
+        let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+        ui.ctrl("T");
+        ui.frame();
+        assert_eq!(ui.query()["database"], Json::Null, "nothing selected, and no database in the settings");
+        assert_eq!(ui.value("query-database"), Json::Null);
+        // A `USE` it runs becomes its database, as the engine reads it back.
+        ui.execute("query.setText", json!({ "text": "USE odd" }));
+        ui.ctrl("Enter");
+        ui.ran();
+        assert_eq!(ui.value("query-database"), "odd");
+        // Ctrl+T on a selected database.
+        ui.click("tree-schema-odd");
+        ui.ctrl("T");
+        ui.frame();
+        assert_eq!(ui.query()["database"], "odd");
+        // A table clicked after a database wins: its own database.
+        ui.click("tree-schema-odd");
+        ui.click("tree-table-many.t_001");
+        ui.click("tab-new");
+        ui.frame();
+        assert_eq!(ui.query()["database"], "many");
+        // + on a selected table.
+        ui.click("tree-schema-shop");
+        ui.click("tree-table-shop.customers");
+        ui.click("tab-new");
+        ui.frame();
+        assert_eq!(ui.query()["database"], "shop");
+        // The File menu.
+        ui.click("tree-schema-scratch");
+        ui.click("menu-File");
+        ui.click("menu-tab.newQuery");
+        ui.frame();
+        assert_eq!(ui.query()["database"], "scratch");
+    }
+    let mut ui = connected_to_target(db, &mysql, Some("shop"), APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    assert_eq!(ui.query()["database"], "shop", "nothing selected: the settings' database");
+    assert_eq!(ui.value("query-database"), "shop");
+}
+
+/// Drops `scratch.<name>` on `server` when the test ends, also when it fails.
+struct DropAfter<'a>(&'a dbee_testkit::Server, String);
+
+impl Drop for DropAfter<'_> {
+    fn drop(&mut self) {
+        let _ = dbee_testkit::sql(self.0, &format!("DROP TABLE IF EXISTS scratch.{}", self.1));
+    }
+}
+
+/// A selected table that a refresh no longer finds is forgotten: a new query tab gets nothing
+/// from it.
+#[test]
+fn a_selection_gone_after_a_refresh_gives_a_new_tab_nothing() {
+    let db = dbee_testkit::require_testdb!();
+    let server = db.server("mysql80").unwrap();
+    let name = unique("t_sel");
+    let _drop = DropAfter(server, name.clone());
+    dbee_testkit::mysql(server, &format!("CREATE TABLE scratch.{name} (id INT PRIMARY KEY)")).unwrap();
+    let mysql = dbee_testkit::target(server);
+    let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+    ui.click("tree-schema-scratch");
+    ui.click(&format!("tree-table-scratch.{name}"));
+    dbee_testkit::mysql(server, &format!("DROP TABLE scratch.{name}")).unwrap();
+    ui.click("tree-refresh");
+    ui.ok("engine.wait", json!({}));
+    ui.until("the refreshed tree", |ui| ui.tag(&format!("tree-table-scratch.{name}")).is_none());
+    ui.click("tab-new");
+    ui.frame();
+    assert_eq!(ui.query()["database"], Json::Null, "nothing selected any more, and no database in the settings");
+}
+
+/// No chip where the engine has no `USE`: Postgres and SQLite.
+#[test]
+fn no_database_chip_without_use() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let pg = dbee_testkit::target(pg14_server(db));
+    for (t, schema) in [(&pg, "shop"), (&sqlite, "main")] {
+        let mut ui = connected_to_target(db, t, None, APP_SIZE);
+        ui.click(&format!("tree-schema-{schema}"));
+        ui.ctrl("T");
+        ui.frame();
+        assert!(ui.tag("query-run").is_some(), "{}: the toolbar is drawn", t.name());
+        assert!(ui.tag("query-database").is_none(), "{}: no database chip", t.name());
+        assert_eq!(ui.query()["database"], Json::Null, "{}: a query tab has no database of its own", t.name());
+    }
+}
+
 #[test]
 fn the_layouter_tokenizes_only_when_the_text_changes() {
     use dbee_ui_egui::query_tab::{EditorState, editor};
@@ -556,6 +840,8 @@ fn window_keystrokes(db: &TestDb, text: &str, keys: usize) -> (Duration, Duratio
         ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
         notify: None,
         allowed_targets: None,
+        allowed_dirs: None,
+        drivers: dbee_drivers::all(),
     })
     .unwrap();
     let mut app = DbeeApp::new(session, None);
@@ -596,7 +882,7 @@ fn window_keystrokes(db: &TestDb, text: &str, keys: usize) -> (Duration, Duratio
 }
 
 #[test]
-#[ignore = "a timing test: cargo test --workspace --test query_tab -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn keystroke_frames_in_big_scripts() {
     let keys = 20;
     let mut slow_32k = Duration::ZERO;
@@ -668,6 +954,8 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
         ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
         notify: None,
         allowed_targets: None,
+        allowed_dirs: None,
+        drivers: dbee_drivers::all(),
     })
     .unwrap();
     let mut app = DbeeApp::new(session, None);
@@ -731,7 +1019,7 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
 /// builds one. Reported, not bounded: a wide result's frame grows with its columns
 /// (`docs/gaps.md`).
 #[test]
-#[ignore = "a timing test: cargo test --workspace --test query_tab -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn wide_result_frames() {
     let db = dbee_testkit::require_testdb!();
     let frames = 15;

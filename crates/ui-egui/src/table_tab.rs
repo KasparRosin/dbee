@@ -1,7 +1,8 @@
 //! The table tab's body ([`show`]), from top to bottom:
 //!
 //! - a small note when the rows cannot be edited, saying why (`table-note`: a view, no row key,
-//!   a read-only connection);
+//!   a read-only connection, or the table's own reason as the driver writes it), on one line: a
+//!   longer one is cut short, and reads whole on hover;
 //! - the filter bar ([`crate::filter_bar`]);
 //! - an inline card (`table-error`) when the last Apply failed, with the server's message (the
 //!   staged changes stay, and the grid marks the row it failed on), or else when the last page
@@ -23,7 +24,8 @@ use dbee_core::{ResultSet, TableInfo};
 use dbee_engine::cmd::LOST;
 use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
-use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab};
+use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab, Which};
+use dbee_sql::Dialect;
 use dbee_sql::select::PAGE_SIZE;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, RichText, Stroke, UiBuilder, pos2};
 use serde_json::json;
@@ -129,13 +131,14 @@ fn blocked(t: &TableTab, lost: bool) -> Option<&'static str> {
     }
 }
 
-/// What the paging bar shows for `t`; `edit_blocked` is why it takes no edits now.
-fn paging(t: &TableTab, info: Option<&TableInfo>, lost: bool, edit_blocked: Option<String>) -> Paging {
+/// What the paging bar shows for `t` on a connection in `dialect`; `edit_blocked` is why it takes
+/// no edits now.
+fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, edit_blocked: Option<String>) -> Paging {
     Paging {
         page: t.shown.page,
         at_end: t.view() == t.shown && !t.has_next,
         total: t.total,
-        estimate: info.and_then(|i| quick_estimate(i, &t.applied)),
+        estimate: info.and_then(|i| quick_estimate(dialect, i, &t.applied)),
         rows: t.data.as_ref().map_or(0, |d| d.rows.len()),
         complete: t.page_complete,
         loading: t.loading.is_some(),
@@ -153,10 +156,12 @@ fn paging(t: &TableTab, info: Option<&TableInfo>, lost: bool, edit_blocked: Opti
     }
 }
 
-/// The note above the grid for rows that cannot be edited.
-fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str) {
-    let text = format!("These rows cannot be edited: {why}.");
-    let r = ui.label(RichText::new(text.as_str()).size(12.0).color(TOKENS.text_muted));
+/// The note above the grid for rows that cannot be edited, `why` being the engine's reason, on
+/// one line (cut short, and whole on hover). The table's own reason (`own`, the driver's) is a
+/// sentence and shows as written; dbee's are phrases.
+fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str, own: Option<&str>) {
+    let text = if own == Some(why) { why.to_owned() } else { format!("These rows can't be edited: {why}.") };
+    let r = ui.add(egui::Label::new(RichText::new(text.as_str()).size(12.0).color(TOKENS.text_muted)).truncate());
     tags.tag_value("table-note", &r, text.as_str());
 }
 
@@ -222,7 +227,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     {
         let DbeeApp { session, view, tags, .. } = app;
         let Some(Tab::Table(tab)) = session.state().tab(id) else { return };
-        let connected = session.state().connected.as_ref();
+        let connected = session.state().connection(Which::Tab(id));
         let info = connected.and_then(|c| c.catalog.table(&tab.table));
         let lost = connected.is_none_or(|c| c.lost);
         let full = ui.available_rect_before_wrap();
@@ -239,12 +244,12 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         // lost, no page on its way and no Apply running.
         let edit_blocked = can_edit(session).err();
         if let Some(why) = read_only {
-            note(&mut top, tags, why);
+            note(&mut top, tags, &why, info.and_then(|i| i.no_edit_reason.as_deref()));
             top.add_space(2.0);
         }
-        // The filter bar: the table's columns from the schema, else the page's.
+        // The filter bar: the table's visible columns from the schema, else the page's.
         let columns: Vec<(&str, &str)> = match (info, tab.data.as_deref()) {
-            (Some(i), _) => i.columns.iter().map(|c| (c.name.as_str(), c.type_sql.as_str())).collect(),
+            (Some(i), _) => i.visible_columns().map(|c| (c.name.as_str(), c.label())).collect(),
             (None, Some(d)) => d.columns.iter().map(|c| (c.name.as_str(), c.type_label.as_str())).collect(),
             (None, None) => Vec::new(),
         };
@@ -256,6 +261,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             raw_mode: tab.raw_mode,
             disabled: lost.then_some(LOST),
             blocked: blocked(tab, lost),
+            dialect: session.state().dialect(Which::Tab(id)),
         };
         runs.extend(filter_bar::show(&mut top, &bar, tags));
         top.add_space(6.0);
@@ -317,7 +323,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         }
         let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(full.left(), split), full.max)));
         if tab.data.is_some() {
-            runs.extend(paging::show(&mut bottom, &paging(tab, info, lost, edit_blocked), tags));
+            runs.extend(paging::show(&mut bottom, &paging(tab, session.state().dialect(Which::Tab(id)), info, lost, edit_blocked), tags));
         }
     }
     for (command, params) in runs {
@@ -347,11 +353,15 @@ mod tests {
 
     fn page() -> ResultSet {
         ResultSet {
-            columns: vec![Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into() }, Column::untyped("note")],
+            columns: vec![
+                Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into(), class: dbee_core::TypeClass::Number },
+                Column::untyped("note"),
+            ],
             rows: vec![vec![Some("1".into()), Some("a".into())], vec![Some("2".into()), None], vec![Some("3".into()), Some("c".into())]],
             rows_seen: 3,
             complete: true,
             rows_affected: None,
+            database_after: Default::default(),
         }
     }
 
@@ -381,7 +391,7 @@ mod tests {
     #[test]
     fn a_cancelled_apply_has_a_note_of_its_own() {
         let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
-        let mut t = TableTab::new(TabId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
+        let mut t = TableTab::new(TabId(1), dbee_engine::ConnectionId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
         let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "m".into(), code };
         std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("server"));
         assert_eq!(card_text(&t), Some(("The changes were not applied", "m", FAILED_NOTE)));
@@ -420,6 +430,7 @@ mod tests {
                 target_columns: vec!["id".into()],
             }],
             estimated_rows: None,
+            no_edit_reason: None,
         };
         assert_eq!(keys(&data, Some(&info)), [Key::Primary, Key::Foreign]);
         assert_eq!(keys(&data, None), [Key::None, Key::None]);

@@ -140,10 +140,11 @@ fn ui_commands_run_through_engine_execute() {
     let r = ui.execute("ui.toggleValuePanel", json!({}));
     assert_eq!(r, json!({ "visible": false }));
     assert_eq!(ui.execute("ui.toggleValuePanel", json!({})), json!({ "visible": true }));
-    // Quick search needs a connection; copying needs a selection.
-    assert_eq!(ui.call("engine.execute", json!({ "command": "ui.quickSearch" }))["code"], "disabled");
+    // Copying needs a selection; the quick search finds saved connections on the connection
+    // screen too.
     let r = ui.call("engine.execute", json!({ "command": "clipboard.copy", "params": { "format": "tsv" } }));
     assert_eq!(r["code"], "disabled", "{r}");
+    assert_eq!(ui.execute("ui.quickSearch", json!({})), json!({ "open": true }));
 }
 
 #[test]

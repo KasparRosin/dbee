@@ -3,19 +3,27 @@
 //! Frame order ([`DbeeApp::ui`]):
 //! 1. `session.pump()`: the results of finished jobs are applied;
 //! 2. the control replies that waited (for a job, idleness, input or a picture) are answered;
-//! 3. the control requests that arrived are handled ([`crate::control`]);
+//! 3. the control requests that arrived are handled ([`crate::control`]); then the file the
+//!    command line named ([`DbeeApp::with_file`]), in the first frame, or else the first file
+//!    dropped on the window opens (`connection.openFile`; a file of no type dbee opens shows the
+//!    refusal as a notice; while a connection is open, it closes first, through its questions,
+//!    as a quick search switch does). A drop while a dialog shows or a connect runs is let go, not kept;
 //! 4. the open cell editor takes its keys and commits on a press outside it, or Enter over a
 //!    selection opens one ([`crate::editors`]); then the keyboard shortcuts run
 //!    ([`crate::shortcuts`]; the value panel's copy first), before any widget sees the keys (not
 //!    while a dialog or the quick search is open: the quick search handles its own keys);
-//! 5. the screen is drawn, tagging its widgets ([`crate::automation`]), then the dialog, if any
-//!    ([`crate::dialogs`]); then the cell editor's key acts, on the text it has now;
+//! 5. a connection chosen in the quick search connects once the one open has closed
+//!    ([`connections::switch_pending`]); the screen is drawn, tagging its widgets
+//!    ([`crate::automation`]), then the quick search over it while it is open
+//!    ([`crate::quick_search`]), then the dialog, if any ([`crate::dialogs`]); then the cell
+//!    editor's key acts, on the text it has now;
 //! 6. the session's UI requests (dialogs, notices) are taken, to show from the next frame.
 //!
 //! While a job runs the window repaints every 100 ms, so waits time out and progress shows even
 //! without input. The UI is thin: screens read `session.state()` and act through
 //! [`DbeeApp::run`]. A command the user started (a shortcut, a button, a dialog) goes through
-//! [`DbeeApp::start`], which hands its outcome back to where it came from ([`Origin`]), at once
+//! [`DbeeApp::start`], which gives a new query tab the tree's selected schema and hands its
+//! outcome back to where it came from ([`Origin`]), at once
 //! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; other
 //! errors show as a notice (a command that cannot run now gives its reason alone, as a sentence:
 //! [`notice_text`]), or under the connection form's buttons; the database error of a page load's
@@ -27,22 +35,32 @@
 //! bar, quick search) is [`crate::workspace`].
 
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use dbee_engine::{CommandInfo, EngineError, JobId, Json, Outcome, Screen, Session};
+use dbee_engine::cmd::connection::{OPEN, OPEN_FILE, RECONNECT};
+use dbee_engine::{CommandInfo, EngineError, JobId, Json, Outcome, Screen, Session, Which};
 use egui::{CornerRadius, Frame, Margin, RichText, vec2};
+use serde_json::json;
 
 use crate::automation::Tags;
 use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
 use crate::dialogs::{self, Dialog, Rerun};
+use crate::quick_search::{self, QuickSearch};
 use crate::theme::{RADIUS, TOKENS};
 use crate::workspace::Workspace;
 use crate::{editors, shortcuts, theme, ui_commands, workspace};
 
 /// The Apply command, whose job errors the table tab's card shows.
 const APPLY: &str = "edit.apply";
+
+/// The command that opens a query tab.
+const NEW_QUERY: &str = "tab.newQuery";
+
+/// The jobs that connect: while one runs, a dropped file is let go.
+const CONNECTING: [&str; 2] = [OPEN, RECONNECT];
 
 /// How often a busy session repaints.
 const BUSY_REPAINT: Duration = Duration::from_millis(100);
@@ -53,20 +71,20 @@ const NOTICE_SECS: f64 = 4.0;
 /// Most control requests handled in one frame; the rest wait for the next.
 const REQUESTS_PER_FRAME: usize = 64;
 
-/// What a notice says for `e`. A command that cannot run now (`Disabled`), is busy or got bad
-/// params gives its reason alone, as a sentence: `No staged changes.`, not "`edit.apply` cannot
-/// run now: no staged changes". Every other error reads as its own text. [`EngineError`]'s
-/// `Display`, which names the command, stays for the control channel and the logs.
+/// What a notice says for `e`, as a sentence. A command that cannot run now (`Disabled`), is busy
+/// or got bad params gives its reason alone: `No staged changes.`, not "`edit.apply` cannot run
+/// now: no staged changes". Every other error reads as its own text. [`EngineError`]'s `Display`,
+/// which names the command, stays for the control channel and the logs.
 pub(crate) fn notice_text(e: &EngineError) -> String {
     match e {
         EngineError::Disabled { why: text, .. } | EngineError::BadParams { msg: text, .. } | EngineError::Busy(text) => sentence(text),
-        other => other.to_string(),
+        other => sentence(&other.to_string()),
     }
 }
 
 /// `text` trimmed, its first letter upper-cased, ending in a full stop (unless it ends in one
 /// already, or in `?`, `!` or `…`).
-fn sentence(text: &str) -> String {
+pub(crate) fn sentence(text: &str) -> String {
     let text = text.trim();
     let mut chars = text.chars();
     let Some(first) = chars.next() else { return String::new() };
@@ -87,6 +105,8 @@ pub struct DbeeApp {
     pub(crate) deferred: Vec<Deferred>,
     /// The last screenshot token handed out.
     pub(crate) shots: u64,
+    /// The one folder `ui.screenshot` writes in ([`DbeeApp::with_screenshot_dir`]).
+    pub(crate) screenshot_dir: Option<PathBuf>,
     /// `app.quit` was answered when this many frames were drawn: close the window at a later
     /// frame, from this instant on.
     pub(crate) quit: Option<(u64, std::time::Instant)>,
@@ -102,6 +122,8 @@ pub struct DbeeApp {
     /// Keyboard events held back for the next frame: those after a cell editor's key in the same
     /// frame ([`crate::editors::before_frame`]).
     pub(crate) carry: Vec<egui::Event>,
+    /// The file to open in the first frame ([`DbeeApp::with_file`]).
+    file: Option<PathBuf>,
 }
 
 /// Where copied text goes ([`DbeeApp::with_clipboard`]).
@@ -155,8 +177,13 @@ pub(crate) struct View {
     pub value_panel: bool,
     /// The value panel's value, its rows and the selection in it.
     pub panel: crate::value_panel::PanelState,
-    /// The workspace's tree and quick search.
+    /// The workspace's tree, tabs and editors.
     pub work: Workspace,
+    /// The quick search ([`crate::quick_search`]).
+    pub quick: QuickSearch,
+    /// The widget to give the keyboard back to in the next frame, once the quick search has
+    /// closed, while the window still shows what the search opened over.
+    pub quick_refocus: Option<(egui::Id, (Screen, Option<String>))>,
     /// The dialog on screen ([`crate::dialogs`]).
     pub dialog: Option<Dialog>,
     /// Notices with the time they were first shown (`None` until then).
@@ -178,6 +205,8 @@ impl View {
             value_panel: true,
             panel: crate::value_panel::PanelState::default(),
             work: Workspace::default(),
+            quick: QuickSearch::default(),
+            quick_refocus: None,
             dialog: None,
             notices: VecDeque::new(),
             conn: ConnScreen::new(has_store),
@@ -198,7 +227,7 @@ impl std::fmt::Debug for DbeeApp {
 
 impl DbeeApp {
     /// The app over `session`; `control` brings the control channel's requests
-    /// ([`crate::control_server::start`]).
+    /// ([`crate::control_server::listen`]).
     pub fn new(session: Session, control: Option<Receiver<ControlRequest>>) -> DbeeApp {
         let has_store = !session.inspect()["secretStore"].is_null();
         DbeeApp {
@@ -209,6 +238,7 @@ impl DbeeApp {
             input: Input::default(),
             deferred: Vec::new(),
             shots: 0,
+            screenshot_dir: None,
             quit: None,
             frames: 0,
             ui_jobs: Vec::new(),
@@ -216,12 +246,27 @@ impl DbeeApp {
             memory: None,
             themed: false,
             carry: Vec::new(),
+            file: None,
         }
+    }
+
+    /// This app opening the database file at `path` once the window is up
+    /// (`connection.openFile`): the file the command line names.
+    pub fn with_file(mut self, path: PathBuf) -> DbeeApp {
+        self.file = Some(path);
+        self
     }
 
     /// This app with copied text going to `clipboard` (the system clipboard by default).
     pub fn with_clipboard(mut self, clipboard: Clipboard) -> DbeeApp {
         self.memory = (clipboard == Clipboard::Memory).then_some(None);
+        self
+    }
+
+    /// This app with `ui.screenshot` writing its files in `dir`; without one, it only sends the
+    /// picture back.
+    pub fn with_screenshot_dir(mut self, dir: Option<PathBuf>) -> DbeeApp {
+        self.screenshot_dir = dir;
         self
     }
 
@@ -321,6 +366,26 @@ impl DbeeApp {
         }
     }
 
+    /// Opens the database file at `path` as the user asked: dropped on the window, or named on the
+    /// command line. A refusal (a file of no type dbee opens, one that is not there) is a notice.
+    pub(crate) fn open_file(&mut self, path: &Path) {
+        self.start(OPEN_FILE, json!({ "path": path.to_string_lossy() }), Origin::Menu);
+    }
+
+    /// A database file dropped on the window: while a connection is open, through the questions
+    /// of `connection.close` first, as a switch in the quick search is ([`connections::switch_to`]),
+    /// unless the file would be refused anyway (that refusal is the notice, and nothing closes).
+    fn dropped_file(&mut self, path: &Path) {
+        if self.session.state().connection(Which::Active).is_none() {
+            self.open_file(path);
+            return;
+        }
+        match dbee_engine::cmd::connection::file_config(&self.session, path) {
+            Ok(_) => connections::switch_to(self, connections::SwitchTo::File(path.to_path_buf())),
+            Err(e) => self.notice(notice_text(&e)),
+        }
+    }
+
     /// Runs command `id` for a shortcut; `query.run` with `current` gets the editor's cursor,
     /// within the active query tab's text.
     pub(crate) fn run_shortcut(&mut self, id: &'static str, mut params: Json) {
@@ -339,6 +404,21 @@ impl DbeeApp {
         self.run_from_ui(id, params);
     }
 
+    /// `params` of a command the user started, with what the tree has selected where the command
+    /// takes it: a new query tab (from a shortcut, the menu or `+` alike) opens on the selected
+    /// schema, or the selected table's, while the catalog holds it, unless `params` name one. The
+    /// engine uses it where the dialect has `USE`.
+    fn with_selection(&self, command: &str, mut params: Json) -> Json {
+        if command == NEW_QUERY
+            && let Some(c) = self.session.state().connection(Which::Active)
+            && let Some(schema) = self.view.work.tree.selected_schema(&c.catalog)
+            && let Some(p) = params.as_object_mut()
+        {
+            p.entry("schema").or_insert_with(|| Json::from(schema));
+        }
+        params
+    }
+
     /// Runs command `id` because the user asked (a shortcut, a menu): a `needs…` error opens a
     /// dialog, other errors show as a notice, a job's too once it ends; a command that cannot run
     /// now says why in a notice (buttons that show the reason themselves are disabled instead).
@@ -349,6 +429,7 @@ impl DbeeApp {
     /// Runs `command` because the user asked, and hands its outcome to `origin`: now, or when
     /// its job ends (then the job is returned).
     pub(crate) fn start(&mut self, command: &'static str, params: Json, origin: Origin) -> Option<JobId> {
+        let params = self.with_selection(command, params);
         // The params are kept to run the command again after a dialog.
         match self.run(command, params.clone()) {
             Ok(Outcome::Started(job)) => {
@@ -421,9 +502,16 @@ impl DbeeApp {
             }
             self.control = Some(rx);
         }
+        let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
+        let busy = self.view.dialog.is_some() || CONNECTING.iter().any(|c| self.session.running(c));
+        if let Some(path) = self.file.take() {
+            self.open_file(&path);
+        } else if let Some(path) = dropped.filter(|_| !busy) {
+            self.dropped_file(&path);
+        }
         // 4. The cell editor, then shortcuts, unless a dialog or the quick search is open.
         editors::before_frame(self, &ctx);
-        if self.view.dialog.is_none() && !self.view.work.quick.open {
+        if self.view.dialog.is_none() && !self.view.quick.open {
             shortcuts::handle(self, &ctx);
         }
         // 5. Draw, then the cell editor's key.
@@ -452,14 +540,19 @@ impl DbeeApp {
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
+        connections::switch_pending(self);
         match self.session.state().screen {
             Screen::Connections => {
                 self.view.work.leave();
                 self.view.panel.clear();
                 connections::screen(self, ui);
             }
-            Screen::Workspace => workspace::screen(self, ui),
+            Screen::Workspace => {
+                self.view.conn.forget_list();
+                workspace::screen(self, ui);
+            }
         }
+        quick_search::show(self, ui.ctx());
         dialogs::show(self, ui.ctx());
         self.notices(ui);
     }
@@ -611,14 +704,14 @@ mod tests {
         app.outcome("table.page", json!({}), Origin::Page, Some(JobId(7)), Err(lost()));
         assert_eq!(shown(&app).len(), before, "the card shows it");
         app.outcome("table.page", json!({}), Origin::Page, None, Err(lost()));
-        assert_eq!(shown(&app).last().map(String::as_str), Some("connection lost"));
+        assert_eq!(shown(&app).last().map(String::as_str), Some("Connection lost."));
         // From a menu or a shortcut, job errors show as before.
         let failed = EngineError::Db { code: "server", message: "the count failed".into(), data: json!({}) };
         app.outcome("table.count", json!({}), Origin::Menu, Some(JobId(8)), Err(failed));
-        assert_eq!(shown(&app).last().map(String::as_str), Some("the count failed"));
+        assert_eq!(shown(&app).last().map(String::as_str), Some("The count failed."));
         // The same text twice (a button clicked again) shows once.
         let n = shown(&app).len();
-        app.notice("the count failed".into());
+        app.notice("The count failed.".into());
         assert_eq!(shown(&app).len(), n);
     }
 
@@ -645,7 +738,7 @@ mod tests {
         let shown = |app: &DbeeApp| app.view.notices.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>();
         let db = |code, message: &str, data| EngineError::Db { code, message: message.into(), data };
         // The engine records these on the tab (their data names the statement): the card shows them.
-        let server = db("server", "column \"nope\" does not exist", json!({ "sqlstate": "42703", "position": 7, "statement": 0 }));
+        let server = db("server", "column \"nope\" does not exist", json!({ "serverCode": "42703", "position": 7, "statement": 0 }));
         app.outcome("query.run", json!({}), Origin::Menu, Some(JobId(3)), Err(server));
         let cancelled = db("cancelled", "the statement was cancelled", json!({ "position": null, "statement": 1 }));
         app.outcome("query.run", json!({}), Origin::Menu, Some(JobId(4)), Err(cancelled));
@@ -663,7 +756,7 @@ mod tests {
         let nothing = EngineError::Disabled { id: "query.run".into(), why: "there is no statement to run".into() };
         app.outcome("query.run", json!({}), Origin::Menu, None, Err(nothing));
         let notices = shown(&app);
-        assert_eq!(notices, ["connection lost", "There is no statement to run."]);
+        assert_eq!(notices, ["Connection lost.", "There is no statement to run."]);
     }
 
     #[test]
@@ -677,10 +770,13 @@ mod tests {
         assert_eq!(notice_text(&EngineError::Busy("a query is running in Query 1".into())), "A query is running in Query 1.");
         let bad = EngineError::BadParams { id: "cell.edit".into(), msg: "`value` must be text or null".into() };
         assert_eq!(notice_text(&bad), "`value` must be text or null.");
-        // Every other error reads as its own text; Display keeps the command for the control channel.
+        // Every other error reads as its own text, as a sentence; Display keeps the command for the
+        // control channel.
         let db = EngineError::Db { code: "server", message: "duplicate key (SQLSTATE 23505)".into(), data: json!({}) };
-        assert_eq!(notice_text(&db), "duplicate key (SQLSTATE 23505)");
-        assert_eq!(notice_text(&EngineError::Timeout), EngineError::Timeout.to_string());
+        assert_eq!(notice_text(&db), "Duplicate key (SQLSTATE 23505).");
+        let lost = EngineError::Db { code: "connectionLost", message: "the connection was lost".into(), data: json!({}) };
+        assert_eq!(notice_text(&lost), "The connection was lost.");
+        assert_eq!(notice_text(&EngineError::Timeout), sentence(&EngineError::Timeout.to_string()));
         assert_eq!(disabled("no staged changes").to_string(), "`edit.apply` cannot run now: no staged changes");
     }
 

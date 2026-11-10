@@ -1,4 +1,4 @@
-//! The session state: screen, saved connections, the open connection and the tabs.
+//! The session state: screen, saved connections, the open connections and the tabs.
 //!
 //! [`State`] is cloned before every command (the panic guard's snapshot), so large data sits
 //! behind `Arc`.
@@ -7,16 +7,50 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
-use dbee_core::{Catalog, ResultSet, TableRef};
-use dbee_pg::{PgConnection, ServerInfo};
+use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
+use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState};
+use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
 use dbee_ssh::{SshSecrets, Tunnel};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::json;
 
 use crate::edits::Edits;
 use crate::jobs::Stop;
-use crate::{JobId, Json, TabId};
+use crate::turns::InTurn;
+use crate::{ConnectionId, JobId, Json, TabId};
+
+/// The dialect SQL is read with while no connection is open (the query editor's colours then).
+pub const NO_CONNECTION_DIALECT: Dialect = Dialect::Postgres;
+
+/// What the result texts and the status bar call the server: `PostgreSQL 14.12`.
+pub fn server_text(info: &ServerInfo) -> String {
+    format!("{} {}", info.product, info.version)
+}
+
+/// What the status bar says of the link to the server, and its longer text, for a connection
+/// through the SSH tunnel or not: `None` for a database without a link, a file.
+pub fn tls_text(info: &ServerInfo, tunnel: bool) -> Option<(&'static str, &'static str)> {
+    const NOT_ENCRYPTED: &str = "Not encrypted";
+    Some(match info.tls? {
+        TlsState::Off if tunnel => {
+            (NOT_ENCRYPTED, "The SSH tunnel encrypts the connection as far as the SSH server; from there to the database server it is not encrypted.")
+        }
+        TlsState::Off if info.local => (NOT_ENCRYPTED, "The connection is not encrypted, but it does not leave this machine."),
+        TlsState::Off => {
+            (NOT_ENCRYPTED, "The connection to the server is not encrypted: anyone on the network between them can read and change what is sent.")
+        }
+        TlsState::Unchecked => (
+            "Encrypted, server not checked",
+            "The connection is encrypted, but dbee did not check the server's certificate, so it cannot tell who answered. SSL mode verify-full checks it.",
+        ),
+        TlsState::CertificateChecked => (
+            "Encrypted, certificate checked",
+            "The connection is encrypted, and the certificate was checked against the CA file, but not the server's name. SSL mode verify-full checks the name too.",
+        ),
+        TlsState::Checked => ("Encrypted, server checked", "The connection is encrypted, and the server's certificate and its name were checked."),
+    })
+}
 
 /// Which screen the window shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -27,23 +61,32 @@ pub enum Screen {
     Workspace,
 }
 
-/// The open connection.
+/// An open connection, with what belongs to it alone.
 ///
 /// The connections are crate-private: commands reach them through the session, and a job that
 /// used one checks that it is still the session's before applying its result. `Debug` shows no
 /// secret.
 #[derive(Clone)]
 pub struct Connected {
+    pub id: ConnectionId,
     pub config: ConnectionConfig,
     pub info: ServerInfo,
+    /// The server's SQL rules, from the browse connection: every statement the engine builds or
+    /// splits for this connection is in this dialect.
+    pub dialect: Dialect,
     pub catalog: Arc<Catalog>,
     /// The connection broke; commands that need the database wait for a reconnect.
     pub lost: bool,
-    /// Table pages, counts, the catalog and applies.
-    pub(crate) browse: Arc<PgConnection>,
+    /// Table pages, counts, the catalog and applies, each in its turn.
+    pub(crate) browse: Arc<InTurn>,
     /// Query tabs' statements; opened on the first query run (and again after a reconnect, or
     /// once it was lost).
-    pub(crate) query: Option<Arc<PgConnection>>,
+    pub(crate) query: Option<Arc<dyn Connection>>,
+    /// The database the query connection is in, while it is open: the settings' when it opens,
+    /// each `USE` the engine sends, then where the driver says each statement left it. MySQL's
+    /// driver takes that from the server's session tracking, and stops trusting it on a connection
+    /// after a run that names `session_track`.
+    pub(crate) query_database: CurrentDatabase,
     /// The query run in progress: one at a time, since the query connection runs one statement at
     /// a time and a cancel request hits whatever runs on it.
     pub(crate) query_run: Option<QueryRun>,
@@ -51,41 +94,127 @@ pub struct Connected {
     pub(crate) tunnel: Option<Arc<Tunnel>>,
     /// What the connect used, kept in memory for reconnects (and the query connection).
     pub(crate) credentials: Credentials,
+    /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
+    /// decides to commit (one Apply runs at a time).
+    pub(crate) apply_gate: Option<(JobId, Arc<ApplyGate>, Arc<Stop>)>,
+}
+
+impl Connected {
+    /// `conn` is this connection's browse connection.
+    pub(crate) fn is_browse(&self, conn: &Arc<dyn Connection>) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(&self.browse), Arc::as_ptr(conn))
+    }
 }
 
 impl std::fmt::Debug for Connected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Connected")
+            .field("id", &self.id)
             .field("config", &self.config)
             .field("info", &self.info)
+            .field("dialect", &self.dialect)
             .field("tables", &self.catalog.table_count())
             .field("lost", &self.lost)
-            .field("browse", &self.browse)
-            .field("query", &self.query)
+            .field("browse_closed", &self.browse.is_closed())
+            .field("query_closed", &self.query.as_ref().map(|q| q.is_closed()))
+            .field("query_database", &self.query_database)
             .field("query_run", &self.query_run)
             .field("tunnel", &self.tunnel)
             .field("credentials", &self.credentials)
+            .field("apply_gate", &self.apply_gate.as_ref().map(|(job, _, _)| job))
             .finish()
     }
 }
 
-impl Connected {
-    /// `{id, name, color, host, port, database, user, ssh, readOnly, server, lost}`, as
-    /// `inspect()` and `connection.open` show it. Never a secret.
+/// What the engine knows of the database a connection is in, or none. It is never guessed: once
+/// a statement may have moved it unseen, `known` is false and `database` the last one known.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CurrentDatabase {
+    pub database: Option<String>,
+    pub known: bool,
+}
+
+impl CurrentDatabase {
+    /// Known to be `database`, or none.
+    pub fn known(database: Option<String>) -> CurrentDatabase {
+        CurrentDatabase { database, known: true }
+    }
+
+    /// The settings' database, as a connection opened with `config` starts in it.
+    pub fn of_settings(config: &ConnectionConfig) -> CurrentDatabase {
+        CurrentDatabase::known(Some(config.database.clone()).filter(|d| !d.is_empty()))
+    }
+
+    /// Known to be `name`.
+    pub fn is(&self, name: &str) -> bool {
+        self.known && self.database.as_deref() == Some(name)
+    }
+
+    /// Where a statement that succeeded leaves it, by the driver's `report`, on a dialect where a
+    /// statement can move it (`moves`): where the driver says; where it was, when the driver says
+    /// it stayed; not known any more, when the driver cannot tell.
+    pub(crate) fn after(self, report: &DatabaseAfter, moves: bool) -> CurrentDatabase {
+        match report {
+            _ if !moves => self,
+            DatabaseAfter::Changed(database) => CurrentDatabase::known(database.clone()),
+            DatabaseAfter::Unchanged => self,
+            DatabaseAfter::Untold => CurrentDatabase { known: false, ..self },
+        }
+    }
+
+    /// Where a statement that failed with `error` leaves it, on a dialect where a statement can
+    /// move it (`moves`): where it was, after an error the server answered with; not known any
+    /// more after any other end, a cancel among them (its kill can land just after the statement
+    /// took effect, and the server's error then hides the change).
+    pub(crate) fn after_failure(self, error: &DbError, moves: bool) -> CurrentDatabase {
+        match error {
+            _ if !moves => self,
+            DbError::Server(_) | DbError::ReadOnly { .. } => self,
+            _ => CurrentDatabase { known: false, ..self },
+        }
+    }
+
+    /// `{database, known}`: the name or null, and whether the engine knows it.
     pub fn summary(&self) -> Json {
+        json!({ "database": self.database, "known": self.known })
+    }
+}
+
+impl Connected {
+    /// The database a run of `q` starts in: the tab's own, which the run makes current first;
+    /// else the query connection's while it is open, or the settings' before it opens.
+    pub fn starts_in(&self, q: &QueryTab) -> CurrentDatabase {
+        match (&q.database, &self.query) {
+            (Some(name), _) => CurrentDatabase::known(Some(name.clone())),
+            (None, Some(_)) => self.query_database.clone(),
+            (None, None) => CurrentDatabase::of_settings(&self.config),
+        }
+    }
+
+    /// `{connection, id, name, color, kind, host, port, database, user, ssh, readOnly, server, tls,
+    /// lost, saved}`, as `inspect()` and `connection.open` show it: `connection` is its
+    /// [`ConnectionId`], `id` the saved connection's, `kind` the database type's id, `server` the
+    /// product and its version (`PostgreSQL 14.12`), `tls` the link's [`TlsState`] (`off`,
+    /// `unchecked`, `certificateChecked`, `checked`; `null` for a file), `saved` whether the saved list holds it
+    /// (`ConnectionStore::is_saved`, which the caller asks). Never a secret.
+    pub fn summary(&self, saved: bool) -> Json {
         let c = &self.config;
         json!({
+            "connection": self.id,
             "id": c.id,
             "name": c.display_name(),
             "color": c.color,
+            "kind": c.kind,
             "host": c.host,
             "port": c.port,
             "database": c.database,
             "user": c.user,
             "ssh": c.ssh.is_some(),
             "readOnly": self.info.read_only,
-            "server": self.info.version,
+            "server": server_text(&self.info),
+            "tls": self.info.tls.map(TlsState::id),
             "lost": self.lost,
+            "saved": saved,
         })
     }
 }
@@ -136,6 +265,9 @@ pub struct Selection {
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryTab {
     pub id: TabId,
+    /// The connection it runs on; `None` for a tab opened while no connection was open, until one
+    /// opens.
+    pub connection: Option<ConnectionId>,
     pub title: String,
     pub text: String,
     /// The job running this tab's statements.
@@ -148,12 +280,17 @@ pub struct QueryTab {
     pub shown: usize,
     /// Why the last run stopped early: an error, or a cancel.
     pub error: Option<QueryError>,
+    /// The database each run starts in, made current first with the dialect's `USE` when the query
+    /// connection is not known to be there already. After a run that got past it, it becomes the
+    /// database the driver says the run left the connection in, so a `USE` in the text sticks to
+    /// the tab. `None` runs in the query connection's current database ([`Connected::starts_in`]).
+    pub database: Option<String>,
 }
 
 impl QueryTab {
-    /// A tab with `text` that has not run.
+    /// A tab with `text` that has not run, on no connection, with no database of its own.
     pub fn new(id: TabId, title: String, text: String) -> QueryTab {
-        QueryTab { id, title, text, running: None, selection: None, results: Vec::new(), shown: 0, error: None }
+        QueryTab { id, connection: None, title, text, running: None, selection: None, results: Vec::new(), shown: 0, error: None, database: None }
     }
 
     /// The result the grid shows, when there is one.
@@ -177,17 +314,29 @@ pub struct StatementOutcome {
 pub struct QueryError {
     /// The error's `EngineError` code: `server`, `cancelled`, `readOnly`, `connectionLost`, ….
     pub code: &'static str,
-    /// The server's message with its SQLSTATE (`column "x" does not exist (SQLSTATE 42703)`), or
+    /// The server's message with its code (`column "x" does not exist (SQLSTATE 42703)`), or
     /// dbee's text for errors that are not the server's.
     pub message: String,
-    /// The server's SQLSTATE, for a server error (`25P02`: the transaction failed earlier).
-    pub sqlstate: Option<String>,
+    /// The server's own code, for a server error (Postgres's SQLSTATE `42703`, MySQL's errno
+    /// `1054`).
+    pub server_code: Option<String>,
+    /// What the server error means, when the driver knows: `transactionAborted` (a statement
+    /// failed earlier in the transaction, which refuses every statement until a ROLLBACK).
+    #[serde(serialize_with = "meaning_id")]
+    pub meaning: Option<Meaning>,
     pub detail: Option<String>,
     pub hint: Option<String>,
     /// Where the server says the error is, as a byte offset into the tab text.
     pub position: Option<usize>,
     /// The 0-based index of the statement that failed, among those the run ran.
     pub statement: usize,
+}
+
+fn meaning_id<S: Serializer>(meaning: &Option<Meaning>, s: S) -> Result<S::Ok, S::Error> {
+    match meaning {
+        None => s.serialize_none(),
+        Some(Meaning::TransactionAborted) => s.serialize_str("transactionAborted"),
+    }
 }
 
 /// A table tab's row count.
@@ -235,8 +384,8 @@ pub struct PageView {
 /// `shown` is what `data` was loaded with; number the rows from `shown.page`. A load that fails
 /// puts `applied`, `sort` and `page` back to `shown` and sets `error`; `data` stays.
 ///
-/// `loading`, `counting` and `applying` name the jobs in flight for the tab, always on the
-/// session's current browse connection: a job clears its own when its result arrives (stale or
+/// `loading`, `counting` and `applying` name the jobs in flight for the tab, always on its
+/// connection's current browse connection: a job clears its own when its result arrives (stale or
 /// not), the session clears any left once the job has ended (its future or its `Apply`
 /// panicked, [`TableTab::job_ended`]), and a reconnect clears them all
 /// ([`TableTab::drop_dead_jobs`]).
@@ -247,6 +396,8 @@ pub struct PageView {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableTab {
     pub id: TabId,
+    /// The connection whose table it shows.
+    pub connection: ConnectionId,
     pub table: TableRef,
     pub selection: Option<Selection>,
     /// The filter bar's rows, as edited (applied or not).
@@ -259,9 +410,13 @@ pub struct TableTab {
     pub sort: Option<Sort>,
     /// 0-based.
     pub page: u64,
-    /// The loaded page: at most 100 rows, columns typed from the catalog. `None` until the first
-    /// page arrives.
+    /// The loaded page: at most 100 rows, the table's visible columns typed from the catalog.
+    /// `None` until the first page arrives.
     pub data: Option<Arc<ResultSet>>,
+    /// The page's row key columns that are not visible (`TableInfo::page_columns`), row for row
+    /// with `data`: what the edits find their rows by, never shown. No columns when every key
+    /// column is visible.
+    pub hidden: Arc<ResultSet>,
     /// More rows follow this page (the page statement got 101).
     pub has_next: bool,
     /// `data` holds every row of its page: false when the page's cell text passed the byte cap
@@ -286,10 +441,11 @@ pub struct TableTab {
 }
 
 impl TableTab {
-    /// A tab for `table` about to load `view`; nothing loaded yet.
-    pub fn new(id: TabId, table: TableRef, filters: Vec<Filter>, view: PageView) -> TableTab {
+    /// A tab for `table` of connection `connection` about to load `view`; nothing loaded yet.
+    pub fn new(id: TabId, connection: ConnectionId, table: TableRef, filters: Vec<Filter>, view: PageView) -> TableTab {
         TableTab {
             id,
+            connection,
             table,
             selection: None,
             filters,
@@ -299,6 +455,7 @@ impl TableTab {
             sort: view.sort.clone(),
             page: view.page,
             data: None,
+            hidden: Arc::default(),
             has_next: false,
             page_complete: true,
             total: Total::Unknown,
@@ -389,6 +546,14 @@ impl Tab {
         }
     }
 
+    /// The connection the tab belongs to; `None` for a query tab opened while none was open.
+    pub fn connection(&self) -> Option<ConnectionId> {
+        match self {
+            Tab::Table(t) => Some(t.connection),
+            Tab::Query(q) => q.connection,
+        }
+    }
+
     /// `query` or `table`.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -412,30 +577,54 @@ impl Tab {
         }
     }
 
-    /// `{id, kind, title}`, as `tab.list` and `inspect` show it.
+    /// `{id, kind, title, connection}`, as `tab.list` and `inspect` show it.
     pub fn summary(&self) -> Json {
-        json!({ "id": self.id(), "kind": self.kind(), "title": self.title() })
+        json!({ "id": self.id(), "kind": self.kind(), "title": self.title(), "connection": self.connection() })
     }
+}
+
+/// Which open connection: read them all through [`State::connection`] with one of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Which {
+    /// The one tab `TabId` belongs to.
+    Tab(TabId),
+    /// The one with this id.
+    Id(ConnectionId),
+    /// The active tab's; with no tab active, the one opened last.
+    Active,
 }
 
 #[derive(Clone, Debug)]
 pub struct State {
     pub screen: Screen,
     pub store: ConnectionStore,
-    pub connected: Option<Connected>,
+    /// The open connections, in the order they opened: at most one for now (`connection.open`
+    /// refuses another).
+    pub connections: Vec<Connected>,
     /// In tab-strip order.
     pub tabs: Vec<Tab>,
     pub active: Option<TabId>,
     /// The id the next tab gets; ids are never reused.
     pub next_tab: u64,
-    /// Why the connections file could not be used (then the store is empty, and may be memory
-    /// only), for the UI to show.
+    /// The id the next connection gets; ids are never reused.
+    pub next_connection: u64,
+    /// Why the connections file could not be used, at the start or at a later change (then the
+    /// store may be empty, or memory only), for the UI to show.
     pub store_warning: Option<String>,
 }
 
 impl State {
     pub(crate) fn new(store: ConnectionStore, store_warning: Option<String>) -> State {
-        State { screen: Screen::Connections, store, connected: None, tabs: Vec::new(), active: None, next_tab: 1, store_warning }
+        State {
+            screen: Screen::Connections,
+            store,
+            connections: Vec::new(),
+            tabs: Vec::new(),
+            active: None,
+            next_tab: 1,
+            next_connection: 1,
+            store_warning,
+        }
     }
 
     pub fn tab(&self, id: TabId) -> Option<&Tab> {
@@ -450,10 +639,108 @@ impl State {
         self.active.and_then(|id| self.tab(id))
     }
 
+    /// The open connection `which` names; `None` when it names none that is open.
+    pub fn connection(&self, which: Which) -> Option<&Connected> {
+        let id = self.connection_id(which)?;
+        self.connections.iter().find(|c| c.id == id)
+    }
+
+    /// [`State::connection`], to change.
+    pub(crate) fn connection_mut(&mut self, which: Which) -> Option<&mut Connected> {
+        let id = self.connection_id(which)?;
+        self.connections.iter_mut().find(|c| c.id == id)
+    }
+
+    fn connection_id(&self, which: Which) -> Option<ConnectionId> {
+        match which {
+            Which::Tab(tab) => self.tab(tab)?.connection(),
+            Which::Id(id) => Some(id),
+            Which::Active => self.active_tab().and_then(Tab::connection).or_else(|| self.connections.last().map(|c| c.id)),
+        }
+    }
+
+    /// The SQL rules of the connection `which` names; [`NO_CONNECTION_DIALECT`] when it names none.
+    pub fn dialect(&self, which: Which) -> Dialect {
+        self.connection(which).map_or(NO_CONNECTION_DIALECT, |c| c.dialect)
+    }
+
     /// A fresh tab id.
     pub(crate) fn take_tab_id(&mut self) -> TabId {
         let id = TabId(self.next_tab);
         self.next_tab = self.next_tab.saturating_add(1);
         id
+    }
+
+    /// A fresh connection id.
+    pub(crate) fn take_connection_id(&mut self) -> ConnectionId {
+        let id = ConnectionId(self.next_connection);
+        self.next_connection = self.next_connection.saturating_add(1);
+        id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "Not encrypted" says what that means for the link: on the network anyone can read it, past
+    /// the SSH tunnel only from the SSH server on, and on this machine it goes nowhere.
+    #[test]
+    fn the_plain_links_text_says_where_it_runs() {
+        let info = |local| ServerInfo {
+            product: "PostgreSQL".into(),
+            version: "16".into(),
+            version_num: 160000,
+            read_only: false,
+            warnings: Vec::new(),
+            tls: Some(TlsState::Off),
+            local,
+        };
+        let hover = |local, tunnel| tls_text(&info(local), tunnel).map(|(label, hover)| (label.to_owned(), hover.to_owned())).unwrap();
+        assert_eq!(hover(false, false).0, "Not encrypted");
+        assert!(hover(false, false).1.contains("anyone on the network"), "{:?}", hover(false, false));
+        assert!(hover(true, false).1.contains("does not leave this machine"), "{:?}", hover(true, false));
+        assert!(hover(false, true).1.contains("as far as the SSH server"), "{:?}", hover(false, true));
+        assert_eq!(tls_text(&ServerInfo { tls: None, ..info(true) }, false), None);
+    }
+
+    #[test]
+    fn the_database_follows_what_the_driver_tells() {
+        let shop = || CurrentDatabase::known(Some("shop".into()));
+        assert_eq!(shop().after(&DatabaseAfter::Changed(Some("many".into())), true), CurrentDatabase::known(Some("many".into())));
+        assert_eq!(shop().after(&DatabaseAfter::Changed(None), true), CurrentDatabase::known(None));
+        assert_eq!(shop().after(&DatabaseAfter::Unchanged, true), shop());
+        // A driver that cannot tell: no longer known, the last one kept for what it is.
+        let unknown = shop().after(&DatabaseAfter::Untold, true);
+        assert_eq!(unknown, CurrentDatabase { database: Some("shop".into()), known: false });
+        assert!(!unknown.is("shop") && shop().is("shop"));
+        assert_eq!(unknown.summary(), json!({ "database": "shop", "known": false }));
+        // Where no statement can move it, nothing does.
+        assert_eq!(shop().after(&DatabaseAfter::Untold, false), shop());
+        assert_eq!(shop().after(&DatabaseAfter::Changed(Some("many".into())), false), shop());
+    }
+
+    #[test]
+    fn a_failed_statement_moves_it_only_as_far_as_not_known() {
+        let shop = || CurrentDatabase::known(Some("shop".into()));
+        let unknown = CurrentDatabase { database: Some("shop".into()), known: false };
+        let refused = DbError::Server(Box::new(dbee_driver::ServerError {
+            code: "1049".into(),
+            code_label: None,
+            message: "Unknown database 'gone'".into(),
+            detail: None,
+            hint: None,
+            position: None,
+            meaning: None,
+        }));
+        // The server answered with an error: the statement did nothing.
+        assert_eq!(shop().after_failure(&refused, true), shop());
+        assert_eq!(shop().after_failure(&DbError::ReadOnly { message: "read-only".into() }, true), shop());
+        // A cancel: a kill that lands as a `USE` finishes is answered with an error after the
+        // change. A lost connection, or an answer that broke: the outcome is unknown too.
+        for error in [DbError::Cancelled, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
+            assert_eq!(shop().after_failure(&error, true), unknown, "{error:?}");
+            assert_eq!(shop().after_failure(&error, false), shop(), "{error:?}: where no statement can move it");
+        }
     }
 }

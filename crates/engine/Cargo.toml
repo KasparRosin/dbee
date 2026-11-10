@@ -17,7 +17,7 @@ dbee-core = { workspace = true }
 dbee-sql = { workspace = true }
 dbee-config = { workspace = true }
 dbee-ssh = { workspace = true }
-dbee-pg = { workspace = true }
+dbee-driver = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
@@ -26,3 +26,5 @@ log = { workspace = true }
 
 [dev-dependencies]
 dbee-testkit = { workspace = true }
+# Tests open real connections; the engine itself knows drivers only through dbee-driver.
+dbee-drivers = { workspace = true }

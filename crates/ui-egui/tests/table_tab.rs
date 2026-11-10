@@ -10,7 +10,6 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -33,33 +32,6 @@ impl Ui {
     /// The ids drawn in the last frame that start with `prefix`.
     fn ids_with(&self, prefix: &str) -> Vec<String> {
         self.harness.state().tags().ids().into_iter().filter(|id| id.starts_with(prefix)).map(str::to_string).collect()
-    }
-
-    /// The pointer moves to `at` and stays there for a frame.
-    fn hover(&mut self, at: Pos2) {
-        self.frame_with(vec![Event::PointerMoved(at)]);
-    }
-
-    /// The text shapes of the last frame: each galley where it was drawn.
-    fn texts(&self) -> Vec<(egui::Rect, Arc<egui::Galley>)> {
-        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, Arc<egui::Galley>)>) {
-            match shape {
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
-                egui::Shape::Text(t) => out.push((t.galley.rect.translate(t.pos.to_vec2()), Arc::clone(&t.galley))),
-                _ => {}
-            }
-        }
-        let mut out = Vec::new();
-        for clipped in &self.harness.output().shapes {
-            walk(&clipped.shape, &mut out);
-        }
-        out
-    }
-
-    /// The text drawn inside `within` that reads `text`: where it was drawn and whether it was cut
-    /// short (an ellipsis).
-    fn text_in(&self, within: egui::Rect, text: &str) -> Option<(egui::Rect, bool)> {
-        self.texts().into_iter().find(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).map(|(r, g)| (r, g.elided))
     }
 }
 
@@ -329,20 +301,23 @@ fn context_menu_copy_puts_the_selection_on_the_clipboard() {
 #[test]
 fn a_page_draws_in_the_frame_its_rows_arrive() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = Ui::connected(db);
-    // The reply goes out in the frame that applies the rows; `ui.inspect` reports that frame.
-    ui.execute("table.open", json!({ "schema": "shop", "table": "big_rows" }));
-    let i = ui.inspect();
-    assert!(
-        visible(&tag_in(&i, "grid-cell-0-0")),
-        "the first row is drawn in the frame it arrived: {:?} {:?}",
-        tag_in(&i, "grid-cell-0-0"),
-        tag_in(&i, "page-number")
-    );
-    assert!(visible(&tag_in(&i, "grid-header-1")));
-    // Only the rows in view are laid out; the others are listed as out of view.
-    let far = tag_in(&i, "grid-cell-99-0").expect("rows out of view are listed");
-    assert_eq!(far["visible"], false, "{far}");
+    for t in dbee_testkit::targets() {
+        let mut ui = connected_to_target(db, &t, None, APP_SIZE);
+        // The reply goes out in the frame that applies the rows; `ui.inspect` reports that frame.
+        ui.execute("table.open", json!({ "schema": t.schema("shop"), "table": "big_rows" }));
+        let i = ui.inspect();
+        assert!(
+            visible(&tag_in(&i, "grid-cell-0-0")),
+            "{}: the first row is drawn in the frame it arrived: {:?} {:?}",
+            t.name(),
+            tag_in(&i, "grid-cell-0-0"),
+            tag_in(&i, "page-number")
+        );
+        assert!(visible(&tag_in(&i, "grid-header-1")), "{}", t.name());
+        // Only the rows in view are laid out; the others are listed as out of view.
+        let far = tag_in(&i, "grid-cell-99-0").expect("rows out of view are listed");
+        assert_eq!(far["visible"], false, "{}: {far}", t.name());
+    }
 }
 
 #[test]
@@ -459,8 +434,7 @@ fn count_rows_on_a_view_and_its_read_only_note() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = Ui::connected(db);
     ui.open("shop", "order_totals");
-    let note = ui.value("table-note");
-    assert!(note.as_str().is_some_and(|n| n.contains("views are read-only")), "{note}");
+    assert_eq!(ui.value("table-note"), "These rows can't be edited: views are read-only.");
     // No estimate for a view: never `~0`.
     assert_eq!(ui.value("page-count"), "Count rows");
     ui.click("page-count");
@@ -470,6 +444,70 @@ fn count_rows_on_a_view_and_its_read_only_note() {
     // An editable table has no note.
     ui.open("shop", "customers");
     assert!(ui.tag("table-note").is_none());
+}
+
+/// A table's own reason, a sentence of the driver's (an engine without transactions), shows as
+/// written where dbee's own reasons show: one line, cut short in a narrow tab and whole on hover,
+/// so the filter bar and the grid stay where a short note leaves them.
+#[test]
+fn myisam_reason_is_shown() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+    let loaded = |ui: &mut Ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0);
+    // dbee's own reasons keep their lead-in.
+    ui.open("shop", "order_totals");
+    ui.until("the view's rows", loaded);
+    ui.frame();
+    assert_eq!(ui.value("table-note"), "These rows can't be edited: views are read-only.");
+    let (short, bar) = (ui.rect("table-note").unwrap(), ui.rect("filter-0-column").unwrap());
+    ui.open("shop", "audit_log");
+    ui.until("the audit_log rows", loaded);
+    ui.frame();
+    let reason = ui.table()["noEditReason"].as_str().unwrap_or_default().to_owned();
+    assert!(reason.starts_with("The MyISAM table engine can't undo a write") && reason.ends_with('.'), "{reason}");
+    assert_eq!(ui.value("table-note"), reason.as_str());
+    let note = ui.rect("table-note").unwrap();
+    assert!((note.height() - short.height()).abs() < 0.5, "one line: {note:?} vs {short:?}");
+    assert_eq!(ui.rect("filter-0-column").unwrap().min, bar.min, "the filter bar stays where it was");
+    let (_, cut) = ui.text_in(note, &reason).unwrap_or_else(|| panic!("the reason is drawn in {note:?}"));
+    assert!(cut, "cut short in the app's first window, with the value panel open");
+    // Hovered, it reads whole.
+    ui.rest(note.center());
+    let whole = ui.texts().into_iter().any(|(r, g)| g.text() == reason && !g.elided && !note.contains(r.center()));
+    assert!(whole, "the hover shows the whole reason");
+}
+
+/// The filter bar's operator hover adds what the operator does on this engine that its label
+/// does not say; on Postgres there is nothing to add.
+#[test]
+fn operator_note_on_mysql() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let pg = dbee_testkit::target(pg14_server(db));
+    for (t, note) in [(&mysql, true), (&pg, false)] {
+        let mut ui = connected_to_target(db, t, None, APP_SIZE);
+        ui.open("shop", "orders");
+        ui.until("the page", |ui| ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+        ui.click("filter-0-op");
+        ui.frame();
+        // An operator without a note has no hover: resting on it draws no more text.
+        let is_null = ui.rect("filter-0-op-isNull").expect("the operators are listed");
+        ui.hover(is_null.center());
+        let before = ui.texts().len();
+        ui.rest(is_null.center());
+        assert_eq!(ui.texts().len(), before, "{}: no hover on `is null`", t.name());
+        let like = ui.rect("filter-0-op-like").expect("the operators are listed");
+        ui.rest(like.center());
+        let shown = ui.texts().into_iter().any(|(_, g)| g.text().contains("collation"));
+        assert_eq!(shown, note, "{}: the like operator's hover", t.name());
+        // The chosen operator's hover says it too.
+        ui.click("filter-0-op-like");
+        let choice = ui.rect("filter-0-op").unwrap();
+        ui.rest(choice.center());
+        let shown = ui.texts().into_iter().any(|(_, g)| g.text().contains("collation"));
+        assert_eq!(shown, note, "{}: the chosen operator's hover", t.name());
+    }
 }
 
 #[test]
@@ -500,7 +538,7 @@ fn a_bad_filter_value_shows_the_error_over_the_old_rows() {
 fn odd_identifiers_filter_sort_and_follow() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = Ui::connected(db);
-    ui.open("odd", "Odd \"Name\" 🐝");
+    ui.open("odd", "Odd \"Name\" 🐙");
     assert_eq!(ui.value("grid-header-1")["name"], "Total $");
     assert_eq!(ui.value("grid-header-3")["key"], "foreign");
     ui.click("filter-0-column");
@@ -520,15 +558,14 @@ fn odd_identifiers_filter_sort_and_follow() {
     assert_eq!(ui.table()["filters"], json!([{ "column": "id", "op": "eq", "value": "1" }]));
 }
 
-#[test]
-fn twenty_megabyte_cells_keep_frames_under_250_ms() {
-    let db = dbee_testkit::require_testdb!();
+/// The grid over the row of two 20 MB cells, one of them selected (the value panel builds its view
+/// once); the slowest of the 10 frames after.
+fn twenty_megabyte_cells(db: &TestDb) -> Duration {
     let mut ui = Ui::connected(db);
     ui.open("shop", "big_cell");
     ui.until("the big row", |ui| ui.table()["rows"] == 1);
     let text = ui.value("grid-cell-0-1")["text"].as_str().unwrap().to_string();
     assert!(text.chars().count() <= 201 && text.ends_with('…'), "the grid shows the cut text: {} chars", text.chars().count());
-    // Selecting it (the value panel builds its view once) and drawing it stay cheap.
     ui.click("grid-cell-0-2");
     let mut slowest = Duration::ZERO;
     for _ in 0..10 {
@@ -536,6 +573,21 @@ fn twenty_megabyte_cells_keep_frames_under_250_ms() {
         ui.frame();
         slowest = slowest.max(start.elapsed());
     }
+    println!("the slowest of 10 frames with two 20 MB cells: {slowest:?}");
+    slowest
+}
+
+#[test]
+fn twenty_megabyte_cells_show_cut() {
+    let db = dbee_testkit::require_testdb!();
+    twenty_megabyte_cells(db);
+}
+
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn twenty_megabyte_cells_keep_frames_under_250_ms() {
+    let db = dbee_testkit::require_testdb!();
+    let slowest = twenty_megabyte_cells(db);
     assert!(slowest < Duration::from_millis(250), "a frame with two 20 MB cells took {slowest:?}");
 }
 
@@ -573,9 +625,9 @@ fn machine() -> String {
 }
 
 #[test]
-#[ignore = "a timing test: cargo test -p dbee-ui-egui --test table_tab -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn grid_frame_within_budget() {
-    use dbee_core::{Column, ResultSet};
+    use dbee_core::{Column, ResultSet, TypeClass};
     use dbee_engine::Selection;
     use dbee_ui_egui::automation::Tags;
     use dbee_ui_egui::grid::{Grid, GridState, RowEdits};
@@ -588,10 +640,12 @@ fn grid_frame_within_budget() {
     }
     // 10,000 rows of 20 columns (a query result at its cap), one value 20 MB long.
     let huge = "y".repeat(20_000_000);
-    let columns = (0..20).map(|c| Column { name: format!("column_{c}"), base_type: "text".into(), type_label: "text".into() }).collect();
+    let columns = (0..20)
+        .map(|c| Column { name: format!("column_{c}"), base_type: "text".into(), type_label: "text".into(), class: TypeClass::LongText })
+        .collect();
     let rows = (0..10_000).map(|r| (0..20).map(|c| Some(if r == 3 && c == 2 { huge.clone() } else { format!("value {r}.{c}") })).collect()).collect();
     let state = State {
-        rows: ResultSet { columns, rows, rows_seen: 10_000, complete: true, rows_affected: None },
+        rows: ResultSet { columns, rows, rows_seen: 10_000, complete: true, ..ResultSet::default() },
         grid: GridState::default(),
         tags: Tags::default(),
         selection: None,
@@ -854,4 +908,26 @@ fn a_filter_without_a_value_is_muted_left_out_and_not_counted() {
     ui.frame();
     assert!(ui.tag("filter-0-unapplied").is_none());
     assert_eq!(ui.value(&format!("tab-{tab}")), "orders [1]");
+}
+
+#[test]
+fn a_table_keyed_by_its_rowid_shows_no_rowid() {
+    let db = dbee_testkit::require_testdb!();
+    let seed = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = seed.file().map(std::path::Path::to_path_buf);
+    let config = dbee_config::ConnectionConfig { name: "sqlite".into(), kind: dbee_config::DbKind::Sqlite, file, ..Default::default() };
+    let mut ui = Ui::connected_with(db, Setup { config: Some(config), ..Setup::default() });
+    ui.open("main", "notes_nokey");
+    ui.until("the rows", |ui| ui.table()["rows"] == 3);
+    assert_eq!(ui.ids_with("grid-header-"), ["grid-header-0", "grid-header-1"]);
+    assert_eq!((ui.value("grid-header-0")["name"].clone(), ui.value("grid-header-1")["name"].clone()), (json!("title"), json!("body")));
+    assert_eq!(ui.value("grid-header-0")["key"], Json::Null, "no key column shows");
+    assert_eq!(ui.value("grid-cell-1-0")["text"], "second");
+    // The tree lists the visible columns only.
+    ui.click("tree-expand-main.notes_nokey");
+    let i = ui.inspect();
+    assert!(tag_in(&i, "tree-column-main.notes_nokey.title").is_some(), "{:?}", ids(&i));
+    assert!(tag_in(&i, "tree-column-main.notes_nokey.rowid").is_none(), "{:?}", ids(&i));
+    // The table takes edits, by the rowid it does not show.
+    assert_eq!(ui.document()["table"]["editable"], true);
 }

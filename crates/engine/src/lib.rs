@@ -17,6 +17,7 @@ pub mod edits;
 pub mod fuzzy;
 mod jobs;
 pub mod state;
+mod turns;
 pub mod view;
 
 use std::any::Any;
@@ -25,16 +26,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionStore, SecretStore};
+use dbee_config::{ConnectionStore, DbKind, SecretStore};
+use dbee_driver::Drivers;
 use dbee_ssh::SshEnv;
 use serde::Serialize;
 use serde_json::{Map, json};
 
 pub use cmd::selection::COPY_MAX_BYTES;
 pub use cmd::{CommandInfo, CommandSpec};
+pub use dbee_driver::{Meaning, allowed_file};
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
-pub use state::{Connected, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total};
+pub use state::{
+    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total, Which,
+};
 pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};
 
 /// Params, results and error data.
@@ -47,6 +52,11 @@ pub struct JobId(pub u64);
 /// A tab, unique within a session (ids are never reused).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct TabId(pub u64);
+
+/// An open connection, unique within a session: each open gets a fresh one (ids are never
+/// reused), and a reconnect keeps it. It is not the saved connection's id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct ConnectionId(pub u64);
 
 /// What a command did.
 #[derive(Clone, Debug, PartialEq)]
@@ -85,7 +95,7 @@ pub enum EngineError {
     BadParams { id: String, msg: String },
     /// The command needs an answer first.
     Needs { need: Need, message: String },
-    /// The database or the tunnel failed; `code` is a `dbee_pg::PgError::code`.
+    /// The database or the tunnel failed; `code` is a `dbee_driver::DbError::code`.
     Db { code: &'static str, message: String, data: Json },
     /// Something is already running that this command would collide with.
     Busy(String),
@@ -180,10 +190,18 @@ pub struct SessionOptions {
     pub ssh: SshEnv,
     /// Called from a worker thread after each job result, so the UI can wake up and pump.
     pub notify: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// The only `(host, port)` targets `connection.test`, `connection.open` and
-    /// `connection.reconnect` may reach (an isolated run's test servers); `None` is no limit.
+    /// The only `(host, port)` targets `connection.test`, `connection.listDatabases`,
+    /// `connection.open` and `connection.reconnect` may reach (an isolated run's test servers);
+    /// `None` is no limit.
     /// See [`allowed`].
     pub allowed_targets: Option<Vec<(String, u16)>>,
+    /// The only folders a file database may lie in (an isolated run's home and `target/`); `None`
+    /// is no limit. They go to the driver (`dbee_driver::Target::allowed_dirs`), which checks the
+    /// file inside its open and keeps the connection's SQL from other files. See [`allowed`].
+    pub allowed_dirs: Option<Vec<PathBuf>>,
+    /// The drivers connections open with (the app's are `dbee_drivers::all()`). A database type
+    /// none of them opens is refused with `disabled`.
+    pub drivers: Drivers,
 }
 
 impl std::fmt::Debug for SessionOptions {
@@ -194,6 +212,8 @@ impl std::fmt::Debug for SessionOptions {
             .field("ssh", &self.ssh)
             .field("notify", &self.notify.is_some())
             .field("allowed_targets", &self.allowed_targets)
+            .field("allowed_dirs", &self.allowed_dirs)
+            .field("drivers", &self.drivers)
             .finish()
     }
 }
@@ -233,9 +253,8 @@ pub struct Session {
     pub(crate) secrets: Option<Arc<dyn SecretStore>>,
     pub(crate) ssh: SshEnv,
     pub(crate) allowed_targets: Option<Vec<(String, u16)>>,
-    /// The running `edit.apply` job and its gate: `table.cancel` on its tab cancels it until it
-    /// decides to commit (one Apply runs at a time).
-    pub(crate) apply_gate: Option<(JobId, Arc<dbee_pg::ApplyGate>)>,
+    pub(crate) allowed_dirs: Option<Vec<PathBuf>>,
+    pub(crate) drivers: Drivers,
     journal: Vec<(String, Json)>,
     value_cache: view::Cache,
 }
@@ -263,7 +282,8 @@ impl Session {
             secrets: o.secrets,
             ssh: o.ssh,
             allowed_targets: o.allowed_targets,
-            apply_gate: None,
+            allowed_dirs: o.allowed_dirs,
+            drivers: o.drivers,
             journal: Vec::new(),
             value_cache: view::Cache::default(),
         })
@@ -430,6 +450,12 @@ impl Session {
             .collect()
     }
 
+    /// The only folders this run may touch files in, an isolated run's; `None` is no limit
+    /// ([`SessionOptions::allowed_dirs`]).
+    pub fn allowed_dirs(&self) -> Option<&[PathBuf]> {
+        self.allowed_dirs.as_deref()
+    }
+
     /// Successful journaled commands, oldest first, with their params minus secrets. Replaying
     /// them in order on a new session repeats the work (secrets must then come from the store).
     pub fn journal(&self) -> &[(String, Json)] {
@@ -443,6 +469,12 @@ impl Session {
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    /// The database types this session can open: those a driver opens, in [`DbKind::ALL`]
+    /// order.
+    pub fn kinds(&self) -> Vec<DbKind> {
+        self.drivers.kinds()
     }
 
     /// The value panel's content: the focus cell of the active tab's selection, with staged
@@ -459,20 +491,28 @@ impl Session {
         self.value_cache.get(self.state.active_tab()?)
     }
 
+    /// How many operations wait for their turn on the browse connection (for tests of the queue).
+    #[doc(hidden)]
+    pub fn browse_waiting(&self) -> usize {
+        self.state.connection(Which::Active).map_or(0, |c| c.browse.waiting())
+    }
+
     /// How many value views this session has built (for tests of the caching).
     #[doc(hidden)]
     pub fn value_view_computations(&self) -> usize {
         self.value_cache.built()
     }
 
-    /// A JSON summary for agents and tests (`document.inspect`): the screen, the connection, the
-    /// tabs and the active one in detail, and the running jobs. Never contains a secret.
+    /// A JSON summary for agents and tests (`document.inspect`): the screen, the database types
+    /// the session can open (`kinds`, their ids), the active tab's connection and every open one,
+    /// the tabs and the active one in detail, and the running jobs. Never contains a secret.
     pub fn inspect(&self) -> Json {
         let st = &self.state;
-        let connection = st.connected.as_ref().map(Connected::summary);
+        let summary = |c: &Connected| c.summary(st.store.is_saved(&c.config.id));
+        let connection = st.connection(Which::Active).map(summary);
         let active = st.active_tab();
         let query = match active {
-            Some(Tab::Query(q)) => cmd::query::summary(q),
+            Some(Tab::Query(q)) => cmd::query::summary(q, st.connection(Which::Tab(q.id))),
             _ => Json::Null,
         };
         let table = match active {
@@ -481,7 +521,9 @@ impl Session {
         };
         json!({
             "screen": st.screen,
+            "kinds": self.kinds(),
             "connection": connection,
+            "connections": st.connections.iter().map(summary).collect::<Vec<_>>(),
             "storeWarning": st.store_warning,
             "secretStore": self.secrets.as_ref().map(|s| s.name()),
             "tabs": st.tabs.iter().map(Tab::summary).collect::<Vec<_>>(),
@@ -501,6 +543,16 @@ impl Session {
     /// by a call that then panics is orphaned: its `Apply` is dropped.
     pub(crate) fn spawn_job(&mut self, label: &'static str, fut: impl Future<Output = Apply> + Send + 'static) -> JobId {
         self.jobs.spawn(label, fut)
+    }
+
+    /// [`Session::spawn_job`] for a job that `stop` stops (`Jobs::stop`).
+    pub(crate) fn spawn_stoppable_job(
+        &mut self,
+        label: &'static str,
+        stop: Arc<jobs::Stop>,
+        fut: impl Future<Output = Apply> + Send + 'static,
+    ) -> JobId {
+        self.jobs.spawn_stoppable(label, stop, fut)
     }
 
     /// The job whose result is being applied, inside an [`Apply`]; `None` elsewhere.
@@ -534,12 +586,14 @@ impl Session {
 
     /// No marker outlives its job: once `job`'s result was applied, or dropped because the job's
     /// future or its `Apply` panicked (and the state was put back with the markers it had), every
-    /// marker that still names it is cleared.
+    /// marker that still names it is cleared. A query run whose marker is still there was not
+    /// applied, so where it left the query connection is not known.
     fn job_ended(&mut self, job: JobId) {
-        if let Some(c) = self.state.connected.as_mut()
-            && c.query_run.as_ref().is_some_and(|run| run.job == job)
-        {
-            c.query_run = None;
+        for c in &mut self.state.connections {
+            if c.query_run.as_ref().is_some_and(|run| run.job == job) {
+                c.query_run = None;
+                c.query_database.known = false;
+            }
         }
         for tab in &mut self.state.tabs {
             match tab {

@@ -10,7 +10,9 @@
 //! (`Session::is_current_browse`, or `Arc::ptr_eq` on the query connection). When not, because
 //! the tab closed or the connection was closed or replaced while the job ran, it changes nothing
 //! and returns `Ok(`[`ignored()`]`)`: never an error, and never a `Needs` prompt, since nobody is
-//! waiting for that answer any more. The check comes before the job's own error is mapped.
+//! waiting for that answer any more. The check comes before the job's own error is mapped. The
+//! one exception is a query run whose tab closed: what it did to the query connection is kept
+//! (see [`query`]).
 
 pub mod connection;
 pub mod edit;
@@ -22,7 +24,7 @@ pub mod tabs;
 
 use serde::Serialize;
 
-use crate::{EngineError, Json, Outcome, Session};
+use crate::{ConnectionId, EngineError, Json, Outcome, Session, Which};
 
 /// One command.
 pub struct CommandSpec {
@@ -99,8 +101,9 @@ pub fn is_secret_param(key: &str) -> bool {
     key == "password" || key == "passphrase" || key.ends_with("Password") || key.ends_with("Passphrase")
 }
 
-/// `params` as the journal keeps it: every secret param is left out, at any depth. Replaying
-/// the entry runs the command without it (the secret store or the user supplies it again).
+/// `params` as the journal keeps it: every secret param is left out, at any depth, and so is
+/// `trustHostKey`. Replaying the entry runs the command without them: the secret store or the
+/// user supplies the secret again, and a host key is asked about again.
 pub fn journal_params(params: &Json) -> Json {
     let mut kept = params.clone();
     // Iterative, so deep params cannot overflow the stack.
@@ -108,7 +111,7 @@ pub fn journal_params(params: &Json) -> Json {
     while let Some(v) = stack.pop() {
         match v {
             Json::Object(map) => {
-                map.retain(|k, _| !is_secret_param(k));
+                map.retain(|k, _| !is_secret_param(k) && k != "trustHostKey");
                 stack.extend(map.values_mut());
             }
             Json::Array(items) => stack.extend(items.iter_mut()),
@@ -149,23 +152,46 @@ pub const NOT_CONNECTED: &str = "not connected";
 /// Why a command that needs the database cannot run after the connection broke.
 pub const LOST: &str = "connection lost — reconnect";
 
+/// How many connections may be open at once.
+pub(crate) const MAX_OPEN: usize = 1;
+
+/// Why another connection cannot open while [`MAX_OPEN`] are.
+pub(crate) const ALREADY_CONNECTED: &str = "already connected; disconnect first";
+
 /// A connection is open, lost or not.
 pub fn connected(s: &Session) -> Result<(), String> {
-    if s.state.connected.is_some() { Ok(()) } else { Err(NOT_CONNECTED.into()) }
+    if s.state.connection(Which::Active).is_some() { Ok(()) } else { Err(NOT_CONNECTED.into()) }
 }
 
-/// No connection is open (one connection per window).
+/// Another connection may open: fewer than [`MAX_OPEN`] are.
 pub fn not_connected(s: &Session) -> Result<(), String> {
-    if s.state.connected.is_some() { Err("already connected; disconnect first".into()) } else { Ok(()) }
+    if s.state.connections.len() >= MAX_OPEN { Err(ALREADY_CONNECTED.into()) } else { Ok(()) }
 }
 
 /// A connection is open and not lost: for every command that needs the database.
 pub fn needs_db(s: &Session) -> Result<(), String> {
-    match &s.state.connected {
+    match s.state.connection(Which::Active) {
         None => Err(NOT_CONNECTED.into()),
         Some(c) if c.lost => Err(LOST.into()),
         Some(_) => Ok(()),
     }
+}
+
+/// The open connection a command's `connection` param names, else the active tab's
+/// ([`Which::Active`]); `None` when none is named and none is open. An id that is not open is
+/// `BadParams`.
+pub(crate) fn connection_param(s: &Session, params: &Json) -> Result<Option<ConnectionId>, EngineError> {
+    let which = match p::opt_connection_id(params, "connection")? {
+        Some(id) if s.state.connection(Which::Id(id)).is_none() => return Err(bad(format!("no connection {} is open", id.0))),
+        Some(id) => Which::Id(id),
+        None => Which::Active,
+    };
+    Ok(s.state.connection(which).map(|c| c.id))
+}
+
+/// [`connection_param`] for a command that needs a connection: `Disabled` when none is open.
+pub(crate) fn needed_connection(s: &Session, params: &Json) -> Result<ConnectionId, EngineError> {
+    connection_param(s, params)?.ok_or_else(|| disabled(NOT_CONNECTED))
 }
 
 /// Why a query tab command cannot run when the active tab is not a query tab.
@@ -182,7 +208,7 @@ pub fn active_query(s: &Session) -> Result<(), String> {
 /// Reading params. Each helper returns `BadParams` naming the key; `execute` fills in the
 /// command id. A missing key and `null` are the same.
 pub mod p {
-    use crate::{EngineError, Json, TabId};
+    use crate::{ConnectionId, EngineError, Json, TabId};
 
     fn bad_key(key: &str, what: &str) -> EngineError {
         EngineError::BadParams { id: String::new(), msg: format!("`{key}` {what}") }
@@ -232,6 +258,12 @@ pub mod p {
 
     pub fn opt_tab_id(p: &Json, key: &str) -> Result<Option<TabId>, EngineError> {
         get(p, key).map(|v| whole(v, key).map(TabId)).transpose()
+    }
+
+    /// An open connection's id. Whether it is open is the caller's check
+    /// ([`connection_param`](super::connection_param)).
+    pub fn opt_connection_id(p: &Json, key: &str) -> Result<Option<ConnectionId>, EngineError> {
+        get(p, key).map(|v| whole(v, key).map(ConnectionId)).transpose()
     }
 }
 

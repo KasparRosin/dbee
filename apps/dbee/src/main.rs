@@ -4,16 +4,28 @@
 //! - `--version` (`-V`) prints the version.
 //! - `--control <port>` (or `DBEE_CONTROL_PORT`) serves the control channel on
 //!   `127.0.0.1:<port>` (`docs/control-protocol.md`). It listens before the window opens, so a
-//!   port in use stops the start: an agent must never drive another dbee by mistake.
+//!   port in use stops the start: an agent must never drive another dbee by mistake. Its token
+//!   file is `DBEE_CONTROL_TOKEN_FILE` (set by `cargo xtask run-isolated`), else in the settings
+//!   folder ([`control_token_file`]).
+//! - The first argument that is no flag names a database file to open once the window is up
+//!   (`connection.openFile`): how a file manager's Open with hands dbee a file. A file of no type
+//!   dbee opens, or one that is not there, says so in the window.
 //! - `DBEE_SECRET_STORE=memory` keeps passwords in memory only; otherwise the OS keyring, and
 //!   without one none (a warning is logged and passwords are asked each time).
 //! - `DBEE_CLIPBOARD=memory` keeps every copy and cut in the app (a text field's too), never on
 //!   the system clipboard; the control channel's `document.inspect` shows the start of the last
 //!   as `clipboard` ([`Clipboard::Memory`]; set by `cargo xtask run-isolated`).
+//! - `DBEE_SCREENSHOT_DIR` is the one folder `ui.screenshot` writes files in (set by `cargo xtask
+//!   run-isolated`); without it, `screenshots` in the settings folder ([`screenshot_dir`]).
 //! - `DBEE_NO_PREFS` keeps no connections file and no log file.
 //! - `DBEE_ALLOW_TARGETS` (`host:port,…`, set by `cargo xtask run-isolated`) limits connections
 //!   to those targets ([`SessionOptions::allowed_targets`]).
+//! - `DBEE_ALLOW_DIRS` (folders joined as the system joins paths, set by `cargo xtask
+//!   run-isolated`) limits database files to those folders, and keeps SQL from opening other files
+//!   ([`SessionOptions::allowed_dirs`]). With `DBEE_ALLOW_TARGETS` set and this not, no folder is
+//!   allowed.
 //! - SSH uses `~/.ssh` and the OS agent ([`SshEnv::from_os`]).
+//! - The session opens connections with every driver dbee ships (`dbee_drivers::all()`).
 //!
 //! The logger (`logging.rs`) and the Windows graphics start-up (`graphics.rs`) are set up first.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
@@ -89,6 +101,33 @@ fn control_port(args: &[OsString], env: Option<OsString>) -> Result<Option<u16>,
     }
 }
 
+/// The database file the command line names: the first argument that is no flag, nor the value
+/// of `--control`. Whether it is there, and of a type dbee opens, is `connection.openFile`'s to say.
+fn open_file(args: &[OsString]) -> Option<PathBuf> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--control" {
+            it.next();
+        } else if !a.to_string_lossy().starts_with('-') {
+            return Some(PathBuf::from(a));
+        }
+    }
+    None
+}
+
+/// The control channel's token file: `env` (`DBEE_CONTROL_TOKEN_FILE`; empty is unset), else
+/// `control-<port>.token` in the settings folder `settings`.
+fn control_token_file(port: u16, env: Option<OsString>, settings: Option<PathBuf>) -> Option<PathBuf> {
+    env.filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| settings.map(|d| d.join(format!("control-{port}.token"))))
+}
+
+/// The folder `ui.screenshot` writes files in, whole: `env` (`DBEE_SCREENSHOT_DIR`; empty is unset),
+/// else `screenshots` in the settings folder `settings`.
+fn screenshot_dir(env: Option<OsString>, settings: Option<PathBuf>) -> Option<PathBuf> {
+    let dir = env.filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| settings.map(|d| d.join("screenshots")))?;
+    std::path::absolute(dir).ok()
+}
+
 /// `DBEE_SECRET_STORE=memory`.
 fn memory_secrets(env: Option<OsString>) -> bool {
     env.is_some_and(|v| v == "memory")
@@ -126,10 +165,25 @@ fn allowed_targets(env: Option<OsString>) -> Option<Vec<(String, u16)>> {
     Some(text.split(',').filter_map(entry).collect())
 }
 
+/// `DBEE_ALLOW_DIRS` (folders joined as the system joins paths, set by `cargo xtask
+/// run-isolated`): the only folders this run's database files may lie in. Unset is no limit,
+/// unless the run limits its targets (`isolated`): then no folder. Set, it fails closed: an empty
+/// value allows no folder.
+fn allowed_dirs(env: Option<OsString>, isolated: bool) -> Option<Vec<PathBuf>> {
+    match env {
+        Some(dirs) => Some(std::env::split_paths(&dirs).filter(|p| !p.as_os_str().is_empty()).collect()),
+        None => isolated.then(Vec::new),
+    }
+}
+
 fn session_options(notify: Arc<dyn Fn() + Send + Sync>) -> SessionOptions {
     let allowed_targets = allowed_targets(std::env::var_os("DBEE_ALLOW_TARGETS"));
     if let Some(list) = &allowed_targets {
         log::info!("this run may connect only to {} allowed target(s) (DBEE_ALLOW_TARGETS)", list.len());
+    }
+    let allowed_dirs = allowed_dirs(std::env::var_os("DBEE_ALLOW_DIRS"), allowed_targets.is_some());
+    if let Some(list) = &allowed_dirs {
+        log::info!("this run may open files only in {} allowed folder(s) (DBEE_ALLOW_DIRS)", list.len());
     }
     SessionOptions {
         config_dir: config_dir().filter(|_| prefs_enabled()),
@@ -137,6 +191,8 @@ fn session_options(notify: Arc<dyn Fn() + Send + Sync>) -> SessionOptions {
         ssh: SshEnv::from_os(),
         notify: Some(notify),
         allowed_targets,
+        allowed_dirs,
+        drivers: dbee_drivers::all(),
     }
 }
 
@@ -183,22 +239,28 @@ fn main() -> ExitCode {
     // Listening before the window exists: requests wait in the queue until the first frame, and
     // wake the window once it has a context.
     let window: Arc<OnceLock<egui::Context>> = Arc::new(OnceLock::new());
-    let control = match port {
-        None => None,
+    let (control, _token_file) = match port {
+        None => (None, None),
         Some(port) => {
+            let Some(token_file) = control_token_file(port, std::env::var_os("DBEE_CONTROL_TOKEN_FILE"), config_dir()) else {
+                let line = "control channel: there is no settings folder for its token file: set HOME, or name a file with DBEE_CONTROL_TOKEN_FILE";
+                log::error!("{line}");
+                let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("dbee: {line}\n"));
+                return ExitCode::FAILURE;
+            };
             let w = Arc::clone(&window);
             let wake = Arc::new(move || {
                 if let Some(ctx) = w.get() {
                     ctx.request_repaint();
                 }
             });
-            match dbee_ui_egui::control_server::listen(port, wake) {
-                Ok((_, rx)) => Some(rx),
+            match dbee_ui_egui::control_server::listen(port, &token_file, wake) {
+                Ok(listening) => (Some(listening.requests), Some(listening.token_file)),
                 Err(e) => {
-                    log::error!("control channel: cannot listen on 127.0.0.1:{port}: {e}");
+                    log::error!("control channel: cannot start on 127.0.0.1:{port}: {e}");
                     let _ = std::io::Write::write_fmt(
                         &mut std::io::stderr(),
-                        format_args!("dbee: control channel: cannot listen on 127.0.0.1:{port}: {e}\n"),
+                        format_args!("dbee: control channel: cannot start on 127.0.0.1:{port}: {e}\n"),
                     );
                     return ExitCode::FAILURE;
                 }
@@ -206,6 +268,7 @@ fn main() -> ExitCode {
         }
     };
     let control = std::cell::Cell::new(control);
+    let file = std::cell::Cell::new(open_file(&args));
     let clipboard = clipboard(std::env::var_os("DBEE_CLIPBOARD"));
     if clipboard == Clipboard::Memory {
         log::info!("copies and cuts stay in the app for this run (DBEE_CLIPBOARD=memory)");
@@ -241,7 +304,12 @@ fn main() -> ExitCode {
                 let _ = window.set(cc.egui_ctx.clone());
                 let ctx = cc.egui_ctx.clone();
                 let session = Session::new(session_options(Arc::new(move || ctx.request_repaint())))?;
-                Ok(Box::new(DbeeApp::new(session, control.take()).with_clipboard(clipboard)))
+                let shots = screenshot_dir(std::env::var_os("DBEE_SCREENSHOT_DIR"), config_dir());
+                let app = DbeeApp::new(session, control.take()).with_clipboard(clipboard).with_screenshot_dir(shots);
+                Ok(Box::new(match file.take() {
+                    Some(path) => app.with_file(path),
+                    None => app,
+                }))
             }),
         )
     };
@@ -290,12 +358,48 @@ mod start_tests {
         assert_eq!(control_port(&args(&["--control", "7979"]), Some("7000".into())), Ok(Some(7979)));
         // An empty variable is unset.
         assert_eq!(control_port(&args(&[]), Some("".into())), Ok(None));
-        // Other arguments (a file the desktop asks dbee to open) are left alone.
+        // Other arguments (a file the desktop asks dbee to open, `open_file`) are left alone.
         assert_eq!(control_port(&args(&["/tmp/a.sqlite"]), None), Ok(None));
         for bad in [&["--control"][..], &["--control", "x"], &["--control", "70000"], &["--control", "0"], &["--control="], &["--control", "-1"]] {
             assert!(control_port(&args(bad), None).is_err(), "{bad:?}");
         }
         assert!(control_port(&args(&[]), Some("seven".into())).is_err());
+    }
+
+    #[test]
+    fn a_file_argument_opens_it() {
+        assert_eq!(open_file(&args(&["/tmp/a.sqlite"])), Some(PathBuf::from("/tmp/a.sqlite")));
+        assert_eq!(open_file(&args(&["--control", "7979"])), None);
+        assert_eq!(open_file(&args(&[])), None);
+        // Flags and the control port's value are no file; the first file is the one.
+        assert_eq!(open_file(&args(&["--control", "7979", "a.db", "b.db"])), Some(PathBuf::from("a.db")));
+        assert_eq!(open_file(&args(&["--control=7979", "-x", "--other", "a.db"])), Some(PathBuf::from("a.db")));
+        // Whether it is there, and a type dbee opens, is `connection.openFile`'s to say.
+        assert_eq!(open_file(&args(&["notes.txt"])), Some(PathBuf::from("notes.txt")));
+    }
+
+    #[test]
+    fn the_token_file_comes_from_the_environment_or_the_settings_folder() {
+        let settings = || Some(PathBuf::from("/home/u/.config/dbee"));
+        assert_eq!(control_token_file(7983, None, settings()), Some(PathBuf::from("/home/u/.config/dbee/control-7983.token")));
+        assert_eq!(control_token_file(7983, Some("/repo/token".into()), settings()), Some(PathBuf::from("/repo/token")));
+        assert_eq!(
+            control_token_file(7983, Some("".into()), settings()),
+            Some(PathBuf::from("/home/u/.config/dbee/control-7983.token")),
+            "empty is unset"
+        );
+        assert_eq!(control_token_file(7983, None, None), None);
+    }
+
+    #[test]
+    fn the_screenshot_folder_comes_from_the_environment_or_the_settings_folder() {
+        let settings = || Some(PathBuf::from("/home/u/.config/dbee"));
+        assert_eq!(screenshot_dir(None, settings()), Some(PathBuf::from("/home/u/.config/dbee/screenshots")));
+        assert_eq!(screenshot_dir(Some("/repo/target/look".into()), settings()), Some(PathBuf::from("/repo/target/look")));
+        assert_eq!(screenshot_dir(Some("".into()), settings()), Some(PathBuf::from("/home/u/.config/dbee/screenshots")), "empty is unset");
+        assert_eq!(screenshot_dir(None, None), None);
+        // A relative one is whole, so what it lies in can be checked.
+        assert_eq!(screenshot_dir(Some("look".into()), None), Some(std::env::current_dir().unwrap().join("look")));
     }
 
     #[test]
@@ -308,6 +412,19 @@ mod start_tests {
         // Set but empty or malformed: nothing is allowed, never everything.
         assert_eq!(allowed_targets(Some("".into())), Some(vec![]));
         assert_eq!(allowed_targets(Some("x,h:0,h:99999,:5,h:p,127.0.0.1:1".into())), Some(vec![t("127.0.0.1", 1)]));
+    }
+
+    #[test]
+    fn allowed_dirs_come_from_the_environment_and_fail_closed() {
+        assert_eq!(allowed_dirs(None, false), None, "a normal run has no limit");
+        let joined = std::env::join_paths(["/repo/target", "/repo/target/isolated/7979/home"]).unwrap();
+        let both = Some(vec![PathBuf::from("/repo/target"), PathBuf::from("/repo/target/isolated/7979/home")]);
+        assert_eq!(allowed_dirs(Some(joined.clone()), false), both);
+        assert_eq!(allowed_dirs(Some(joined), true), both);
+        // Set but empty, or a run that limits its targets without naming folders: no folder is
+        // allowed, never every one.
+        assert_eq!(allowed_dirs(Some("".into()), false), Some(vec![]));
+        assert_eq!(allowed_dirs(None, true), Some(vec![]));
     }
 
     #[test]
@@ -338,17 +455,33 @@ mod start_tests {
 
 #[cfg(test)]
 mod packaging_tests {
-    /// No platform offers dbee for files while no engine opens one. The `.sqlite` and `.sqlite3`
-    /// associations come back with the SQLite engine (docs/roadmap.md).
+    /// Linux and Windows offer dbee for SQLite files but never make it their default: the desktop
+    /// entry lists the MIME types (the user's settings pick the default) and takes one file, and
+    /// the installer adds dbee to the extensions' Open with list (`OpenWithProgids`), not their
+    /// default. macOS declares no document types while winit passes no Finder open event on
+    /// (docs/gaps.md).
     #[test]
-    fn no_platform_offers_dbee_for_files_yet() {
+    fn dbee_is_offered_for_database_files_but_takes_no_type_over() {
         let plist = include_str!("../../../packaging/macos/Info.plist.in");
         let wxs = include_str!("../../../packaging/windows/dbee.wxs");
         let desktop = include_str!("../../../packaging/linux/dev.rosin.dbee.desktop");
         let metainfo = include_str!("../../../packaging/linux/dev.rosin.dbee.metainfo.xml.in");
-        assert!(!plist.contains("CFBundleDocumentTypes"), "Info.plist.in declares document types");
-        assert!(!wxs.contains("OpenWithProgids") && !wxs.contains("FileAssociations"), "dbee.wxs declares file associations");
-        assert!(!desktop.lines().any(|l| l.starts_with("MimeType=")), "the desktop entry declares MIME types");
-        assert!(!metainfo.contains("<mediatype>"), "the AppStream metadata declares media types");
+        let lines: Vec<&str> = desktop.lines().collect();
+        assert!(lines.contains(&"MimeType=application/vnd.sqlite3;application/x-sqlite3;"), "{desktop}");
+        assert!(lines.contains(&"Exec=dbee %f"), "one file, as dbee opens the first: {desktop}");
+        for t in ["application/vnd.sqlite3", "application/x-sqlite3"] {
+            assert!(metainfo.contains(&format!("<mediatype>{t}</mediatype>")), "{t}");
+        }
+        assert!(wxs.contains(r#"Value="&quot;[INSTALLFOLDER]dbee.exe&quot; &quot;%1&quot;""#), "the open verb");
+        for ext in [".sqlite", ".sqlite3"] {
+            let key = format!(r"Software\Classes\{ext}\OpenWithProgids");
+            assert!(wxs.contains(&format!(r#"Key="{key}""#)), "{ext} lists dbee under Open with");
+        }
+        // No default: nothing writes an extension's own key, and no WiX element that does.
+        for line in wxs.lines().filter(|l| l.contains(r"Software\Classes\.")) {
+            assert!(line.contains("OpenWithProgids"), "{line}");
+        }
+        assert!(!wxs.contains("<ProgId") && !wxs.contains("<Extension"), "WiX's ProgId and Extension make dbee the default");
+        assert!(!plist.contains("CFBundleDocumentTypes"), "Finder's open event does not reach dbee yet");
     }
 }

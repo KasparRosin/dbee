@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 dbee-ui-egui = { workspace = true }
 dbee-engine = { workspace = true }
+dbee-drivers = { workspace = true }
 dbee-config = { workspace = true }
 dbee-ssh = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
@@ -24,7 +25,8 @@ log = { workspace = true }
 image = { workspace = true }
 
 [dev-dependencies]
-# tests/m1_day.rs: the test servers, the skip rule and psql; JSON lines on the control channel.
+# tests/m1_day.rs and m2_day.rs: the test servers, the skip rule, their clients and the SQLite
+# seed; JSON lines on the control channel.
 dbee-testkit = { workspace = true }
 serde_json = { workspace = true }
 

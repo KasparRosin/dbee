@@ -17,7 +17,11 @@ dbee-core = { path = "crates/core" }
 dbee-sql = { path = "crates/sql" }
 dbee-config = { path = "crates/config" }
 dbee-ssh = { path = "crates/ssh" }
+dbee-driver = { path = "crates/driver" }
 dbee-pg = { path = "crates/pg" }
+dbee-mysql = { path = "crates/mysql" }
+dbee-sqlite = { path = "crates/sqlite" }
+dbee-drivers = { path = "crates/drivers" }
 dbee-engine = { path = "crates/engine" }
 dbee-ui-egui = { path = "crates/ui-egui" }
 dbee-mcp = { path = "crates/mcp" }
@@ -32,17 +36,33 @@ serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 log = "0.4"
 proptest = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# The control channel's token; already in the tree through russh, at this version.
+getrandom = "0.4"
 
 # network
+# Hashed names in known_hosts; already in the tree through russh, at these versions.
+hmac = "0.13"
+sha1 = "0.11"
+data-encoding = "2"
 russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 # Pinned exactly: dbee-pg classifies its errors by their Display texts (its error kinds are private),
 # so a new version must be checked against crates/pg/src/error.rs before it is taken.
 tokio-postgres = "=0.7.18"
 tokio-postgres-rustls = { version = "0.14", features = ["ring"] }
+# MySQL's TLS upgrade on dbee's own stream; already in the tree through tokio-postgres-rustls.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# MySQL packets, login scrambles and RSA, no networking of its own; no default features (zlib, derive).
+mysql_common = { version = "0.38", default-features = false }
+# TCP keepalive intervals on MySQL's direct connections, which tokio's TcpStream cannot set.
+socket2 = { version = "0.6", features = ["all"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7"
 futures-util = "0.3"
+
+# storage
+# SQLite compiled in (public domain, docs/standards/licensing.md); the crates are MIT.
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # ui
 egui = "0.36"

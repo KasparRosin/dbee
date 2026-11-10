@@ -3,30 +3,37 @@
 //! - the SQL editor ([`editor`]), with line numbers in a gutter at its left;
 //! - the split: dragged, it moves the line between the editor and the results. Where it is lasts
 //!   for the window's run, in memory, and is the same for every query tab (`View::query_split`);
-//! - the toolbar: Run (`query.run`), Run current (`query.run` with `current` and the cursor) and
-//!   Cancel (`query.cancel`, enabled while the tab's run goes), a spinner while it runs, and with
-//!   several results the selector `1 · 2 · 3` (`query.showResult`; with more than fit, those
-//!   around the shown one, [`selector_range`]); at its right, what the shown result holds:
-//!   `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
+//! - the toolbar: on an engine with `USE` (`Dialect::has_use_database`), first the database chip:
+//!   the database the tab's next run starts in, as the engine knows it (`Connected::starts_in`:
+//!   the tab's own, else where the query connection is), in the engine's word for one
+//!   ([`database_chip`]); a click lists the catalog's databases, the server's own left out, and
+//!   choosing one sends `query.setDatabase`. It waits while the tab runs, and while Run cannot.
+//!   Then Run (`query.run`), Run current (`query.run` with `current` and the cursor) and Cancel
+//!   (`query.cancel`, enabled while the tab's run goes), a spinner while it runs (with its words
+//!   when the selector keeps room), and with several results the selector `1 · 2 · 3`
+//!   (`query.showResult`; with more than fit, those around the shown one and a `…` that lists
+//!   every result, its label only where it fits whole, [`selector_fit`]); at its right, what the
+//!   shown result holds: `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
 //! - the last run's error card, when it stopped early ([`card`]);
 //! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
 //!   selecting and copying work, and the value panel follows the selected cell), or for a
 //!   statement without rows how many it affected ([`affected_text`]). With no result yet, a line
 //!   saying how to run.
 //!
-//! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` ([`Tokens::job`], colours
-//! [`crate::theme::SqlSyntax`]), with no soft wrap: a long line scrolls sideways, so each row of
-//! the layout is a line and the gutter's numbers are line numbers. The text lives in the window, a
-//! buffer per tab ([`EditorState`]), so a frame does not copy it: the frame compares it with the
-//! tab's (an agent's `query.setText` replaces it) and sends each change with `query.setText`
-//! (journaled, consecutive ones coalesce). The layouter keeps the job it made for the last text,
-//! theme and coloured lines ([`Highlighter`]), and tokenizes only a text it has not seen, lexing
-//! again only around the change ([`Tokens`]). Only the lines near the view are coloured
-//! ([`colour_window`]: whole chunks of [`CHUNK`] lines, [`MARGIN`] beyond the view each side), so
-//! the job of a big script stays small for egui to hash and split; egui then lays out again only
-//! the paragraphs (lines) that changed. The editor does not animate its scrolling, so a jump far
-//! down is coloured at once. The text has no size cap; the keystroke cost of big scripts is
-//! measured by `keystroke_frames_in_big_scripts` (docs/testing.md §6): a script of short lines
+//! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` in the open connection's
+//! dialect, Postgres's when none is open ([`Tokens::job`], colours [`crate::theme::SqlSyntax`]; a
+//! new dialect lexes the text again from scratch), with no soft wrap: a long line scrolls
+//! sideways, so each row of the layout is a line and the gutter's numbers are line numbers. The
+//! text lives in the window, a buffer per tab ([`EditorState`]), so a frame does not copy it: the
+//! frame compares it with the tab's (an agent's `query.setText` replaces it) and sends each change
+//! with `query.setText` (journaled, consecutive ones coalesce). The layouter keeps the job it made
+//! for the last text, theme and coloured lines ([`Highlighter`]), and tokenizes only a text it has
+//! not seen, lexing again only around the change ([`Tokens`]). Only the lines near the view are
+//! coloured ([`colour_window`]: whole chunks of [`CHUNK`] lines, [`MARGIN`] beyond the view each
+//! side), so the job of a big script stays small for egui to hash and split; egui then lays out
+//! again only the paragraphs (lines) that changed. The editor does not animate its scrolling, so a
+//! jump far down is coloured at once. The text has no size cap; the keystroke cost of big scripts
+//! is measured by `keystroke_frames_in_big_scripts` (docs/testing.md §6): a script of short lines
 //! costs about what egui's plain text editor does, and one very long line costs as much to lay
 //! out as it does there, on every keystroke.
 //!
@@ -39,7 +46,7 @@
 //! one it is the start. A tab's editor takes the keyboard when the tab becomes the active one (a
 //! new tab too), unless a dialog or the quick search is open.
 //!
-//! **Errors.** The card shows the server's message (with its SQLSTATE), detail and hint, and
+//! **Errors.** The card shows the server's message (with its code), detail and hint, and
 //! where the server points, as a line and column of the text (as it is now: the position is a
 //! byte offset into the text the run started with, kept within the text). A click on it puts the
 //! cursor there, with the keyboard; an error without a position offers no click. A cancelled run shows
@@ -58,11 +65,15 @@
 //! Automation ids: `query-editor` (value `{cursor, focused, lines, length, highlighted}`: the
 //! cursor as a byte offset, whether the editor has the keyboard, the lines, the text's length in
 //! bytes, and whether some token is coloured), `query-split` (value: the editor's share of the
-//! height), `query-run`, `query-run-current`, `query-cancel`, `result-<n>` (1-based, with several
-//! results; value `{shown, rows, rowsAffected}`), `query-rows` (value: what the shown result
-//! holds, e.g. `First 10,000 of 25,000 rows`), `query-affected` (value: `2 rows affected`),
-//! `query-error` (value `{code, heading, message, detail, hint, note, position, statement, line,
-//! column, jump}`, `note` the card's line that a ROLLBACK ends a failed transaction (SQLSTATE
+//! height), `query-database` (value: the database shown, or null for none; while its list is open
+//! the choices `query-database-<name>`), `query-run`, `query-run-current`, `query-cancel`,
+//! `result-<n>` (1-based, with several results; value `{shown, rows, rowsAffected}`), `result-more`
+//! (the `…` when not all fit; value: the number of results) and, while its list is open,
+//! `result-list-<n>` (value as `result-<n>`; only those in view),
+//! `query-rows` (value: what the shown result holds, e.g. `First 10,000 of 25,000 rows`),
+//! `query-affected` (value: `2 rows affected`), `query-error` (value `{code, heading, message,
+//! detail, hint, note, position, statement, line, column, jump}`, `note` the card's line that a
+//! ROLLBACK ends a failed transaction (an error whose meaning is `TransactionAborted`, Postgres's
 //! 25P02) or null, `jump` saying whether a click moves the cursor) and `query-hint`.
 
 use std::collections::HashMap;
@@ -71,32 +82,40 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use dbee_core::ResultSet;
-use dbee_engine::cmd::query::can_run;
-use dbee_engine::{Json, QueryError, StatementOutcome, Tab, TabId};
+use dbee_engine::cmd::query::{can_run, can_set_database};
+use dbee_engine::state::NO_CONNECTION_DIALECT;
+use dbee_engine::{CurrentDatabase, Json, Meaning, QueryError, StatementOutcome, Tab, TabId, Which};
+use dbee_sql::Dialect;
 use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
 use egui::text_edit::TextEditState;
 use egui::{
-    Align, Button, Color32, CornerRadius, CursorIcon, Event, FontId, Frame, Id, Key, Label, Layout, Margin, Rect, Response, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, TextEdit, UiBuilder, pos2, vec2,
+    Align, Button, Color32, CornerRadius, CursorIcon, Event, FontId, Frame, Id, Key, Label, Layout, Margin, Popup, Rect, Response, RichText,
+    ScrollArea, Sense, Stroke, StrokeKind, TextEdit, UiBuilder, pos2, vec2,
 };
 use serde_json::json;
 
-use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{RADIUS, SqlSyntax, TOKENS, sql_syntax};
 use crate::tree::thousands;
+use crate::{DbeeApp, filter_bar, icons};
 
 /// The automation ids.
 pub const EDITOR: &str = "query-editor";
 pub const SPLIT: &str = "query-split";
+/// The database chip; its list's choices are `query-database-<name>`.
+pub const DATABASE: &str = "query-database";
 pub const RUN: &str = "query-run";
 pub const RUN_CURRENT: &str = "query-run-current";
 pub const CANCEL: &str = "query-cancel";
 /// The selector's buttons: `result-1`, `result-2`, … (`query.showResult` takes the 0-based index).
 pub const RESULT: &str = "result-";
+/// The selector's `…` when not all results fit, and its list's items `result-list-1`, ….
+pub const RESULT_MORE: &str = "result-more";
+pub const RESULT_LIST: &str = "result-list-";
 pub const ROWS: &str = "query-rows";
 pub const AFFECTED: &str = "query-affected";
 pub const ERROR: &str = "query-error";
@@ -119,6 +138,11 @@ const MIN_RESULTS_H: f32 = 90.0;
 const TOP_PAD: f32 = 6.0;
 const SPLIT_H: f32 = 8.0;
 const TOOLBAR_H: f32 = 36.0;
+/// The toolbar's buttons' height, the database chip's too, and the chip's width.
+const BUTTON_H: f32 = 26.0;
+const CHIP_W: f32 = 150.0;
+/// How tall the chip's list gets before it scrolls.
+const CHIP_LIST_H: f32 = 320.0;
 /// The gutter's inset at each side of its numbers.
 const GUTTER_PAD: f32 = 8.0;
 /// The text's inset in the editor.
@@ -176,30 +200,23 @@ fn rows_text(result: &ResultSet) -> String {
 fn cap_hover() -> String {
     let limits = dbee_engine::cmd::query::RUN_LIMITS;
     format!(
-        "A run keeps at most {} rows of each result, and {} MiB of cell text for all its results together.",
+        "A run keeps at most {} rows of each result, and {} MiB of memory for all its results together.",
         thousands(limits.max_rows as u64),
         limits.max_bytes / (1024 * 1024)
     )
 }
 
 /// The line for a statement without rows: `1 row affected`, `2 rows affected`, or a line of its
-/// own when the server gave no count.
+/// own when the database gave no count.
 fn affected_text(rows: Option<u64>) -> String {
     match rows {
         Some(n) => format!("{} affected", rows_word(n)),
-        None => "The statement ran; the server gave no row count.".into(),
+        None => "The statement ran; the database gave no row count.".into(),
     }
 }
 
 // ---- highlighting ------------------------------------------------------------------------------
 
-/// How far past a token's end `lexer::tokenize` may read to decide it, for every token but a lone
-/// `$` (see [`reach`]), with one byte to spare. The rules read at most: a number three bytes (`1e+`
-/// followed by no digit ends the number before the `e`); an operator two (it stops before `--` and
-/// `/*`); a `U` two (`U&'` or `U&"` starts a Unicode string); whitespace, comments, identifiers,
-/// `$1`, `.`, quoted strings and names one (a doubled quote goes on). A dollar-quoted string ends
-/// at its closing tag, and anything unterminated runs to the end of the text.
-const LOOKAHEAD: usize = 4;
 /// How far past a change the lexer first looks for the old tokens to fit again.
 const RESYNC_BYTES: usize = 1024;
 /// The editor colours the lines in view and [`MARGIN`] more each side, in whole chunks of
@@ -223,7 +240,7 @@ fn style(kind: TokenKind, syntax: &SqlSyntax, plain: Color32) -> Option<(Color32
         TokenKind::Comment => (syntax.comment, true),
         TokenKind::QuotedIdent => (syntax.quoted, false),
         TokenKind::Whitespace => return None,
-        TokenKind::Ident | TokenKind::Operator | TokenKind::Semicolon | TokenKind::Other => (plain, false),
+        TokenKind::Ident | TokenKind::Operator | TokenKind::Semicolon | TokenKind::Other | TokenKind::ExecutableMark => (plain, false),
     })
 }
 
@@ -262,25 +279,9 @@ fn ceil_boundary(text: &str, at: usize) -> usize {
     at
 }
 
-/// `list[k]` is a lone `$`: one that starts no dollar quote and stands as a 1-byte `Other` token.
-fn lone_dollar(list: &[Token], k: usize, text: &str) -> bool {
-    list.get(k).is_some_and(|t| t.kind == TokenKind::Other && text.get(t.range.clone()) == Some("$"))
-}
-
-/// The byte up to which the text decides `list[k]` (exclusive). [`LOOKAHEAD`] past its end, but a
-/// lone `$` reads the whole word after it (a dollar quote's tag: letters, digits, characters past
-/// ASCII), and the byte after that, to find no closing `$`. That word is the token after it (an
-/// identifier, or the `E` or `U` that starts a string), so the `$` reaches as far as that token
-/// does.
-fn reach(list: &[Token], k: usize, text: &str) -> usize {
-    let end = list.get(k).map_or(0, |t| t.range.end);
-    let end = if lone_dollar(list, k, text) { list.get(k.saturating_add(1)).map_or(end, |next| next.range.end.max(end)) } else { end };
-    end.saturating_add(LOOKAHEAD)
-}
-
 /// `tokenize(slice)`, its ranges moved to start at `offset`.
-fn lex(slice: &str, offset: usize) -> Vec<Token> {
-    lexer::tokenize(slice)
+fn lex(dialect: Dialect, slice: &str, offset: usize) -> Vec<Token> {
+    lexer::tokenize(dialect, slice)
         .into_iter()
         .map(|t| Token { kind: t.kind, range: t.range.start.saturating_add(offset)..t.range.end.saturating_add(offset) })
         .collect()
@@ -289,16 +290,17 @@ fn lex(slice: &str, offset: usize) -> Vec<Token> {
 /// The lexer's tokens of a text, and where its lines start, kept across edits.
 ///
 /// `lexer::tokenize` starts every token afresh and reads only forward, so tokens from a token
-/// boundary on depend only on the text from there; each token is decided by the text up to its
-/// [`reach`]: [`LOOKAHEAD`] past its end, or for a lone `$` the end of the word after it. An edit
-/// keeps the tokens whose reach ends at or before its first changed byte, and lexes again from
-/// there (a bounded slice first) until a new token starts where an old one did in the unchanged
-/// rest of the text, the token before it decided within the slice: from there on the old tokens
-/// hold, moved by the change in length. The result is what lexing the whole text gives
-/// (`incremental_tokens_match_a_full_lex`, and key by key for dollar quotes in
-/// `typing_and_deleting_dollar_quotes_key_by_key_match_a_full_lex`).
-#[derive(Default)]
+/// boundary on depend only on the text from there and on whether a MySQL executable comment is
+/// open there; each token is decided by the text up to its [`lexer::reach`]. An edit keeps the
+/// tokens whose reach ends at or before its first changed byte (and before the end of the text),
+/// fewer when they leave an executable comment open, and lexes again from there (a bounded slice
+/// first) until a new token starts where an old one did in the unchanged rest of the text, the
+/// token before it decided within the slice and the same comment open or not before both: from
+/// there on the old tokens hold, moved by the change in length.
+/// The result is what lexing the whole text gives (`incremental_tokens_match_a_full_lex`, and key
+/// by key for dollar quotes in `typing_and_deleting_dollar_quotes_key_by_key_match_a_full_lex`).
 struct Tokens {
+    dialect: Dialect,
     text: String,
     list: Vec<Token>,
     line_starts: Vec<usize>,
@@ -307,7 +309,17 @@ struct Tokens {
     lexed: usize,
 }
 
+impl Default for Tokens {
+    fn default() -> Self {
+        Self::new(NO_CONNECTION_DIALECT)
+    }
+}
+
 impl Tokens {
+    fn new(dialect: Dialect) -> Self {
+        Self { dialect, text: String::new(), list: Vec::new(), line_starts: Vec::new(), updates: 0, lexed: 0 }
+    }
+
     /// The tokens of `text` in order, covering it.
     #[cfg(test)]
     fn list(&self) -> &[Token] {
@@ -328,10 +340,19 @@ impl Tokens {
         let prefix = floor_boundary(new, common_prefix(old.as_bytes(), new.as_bytes()));
         let most = old.len().min(new.len()).saturating_sub(prefix);
         let changed_end = ceil_boundary(new, new.len().saturating_sub(common_suffix(old.as_bytes(), new.as_bytes(), most)));
-        // Reach never decreases along the list (a lone `$` reaches as far as the token after it,
-        // which is never another lone `$`), so the tokens kept are a prefix of it.
-        let mut keep = if self.updates == 0 { 0 } else { self.list.partition_point(|t| t.range.end.saturating_add(LOOKAHEAD) <= prefix) };
-        while keep > 0 && reach(&self.list, keep - 1, &old) > prefix {
+        // Reach never decreases along the list, so the tokens kept are a prefix of it. One that
+        // reaches the end of the old text depends on where that text ends.
+        let kept = |k: usize| {
+            let reach = lexer::reach(self.dialect, &self.list, k, &old);
+            reach <= prefix && reach < old.len()
+        };
+        let mut keep = if self.updates == 0 { 0 } else { self.list.partition_point(|t| t.range.end <= prefix) };
+        while keep > 0 && !kept(keep - 1) {
+            keep -= 1;
+        }
+        // Lexing starts with no executable comment open: before the start of one left open.
+        let old_open = lexer::executable_open_states(&self.list, &old);
+        while keep > 0 && old_open.get(keep).copied().unwrap_or(false) {
             keep -= 1;
         }
         let restart = keep.checked_sub(1).and_then(|k| self.list.get(k)).map_or(0, |t| t.range.end);
@@ -339,24 +360,22 @@ impl Tokens {
         let tail = loop {
             let slice = new.get(restart..cut).unwrap_or_default();
             self.lexed = self.lexed.saturating_add(slice.len());
-            let fresh = lex(slice, restart);
+            let fresh = lex(self.dialect, slice, restart);
             if cut >= new.len() {
                 break fresh;
             }
+            let fresh_open = lexer::executable_open_states(&fresh, new);
             // A token starting after the change where an old one started too, the token before it
-            // decided within the slice (its reach not past the cut).
+            // decided within the slice (its reach not past the cut) or kept.
             let fits = fresh.iter().enumerate().find_map(|(k, t)| {
                 let at = t.range.start;
-                let decided = match k.checked_sub(1) {
-                    Some(before) => reach(&fresh, before, new) <= cut,
-                    None => at.saturating_add(LOOKAHEAD) <= cut,
-                };
+                let decided = k.checked_sub(1).is_none_or(|before| lexer::reach(self.dialect, &fresh, before, new) <= cut);
                 if at < changed_end || !decided {
                     return None;
                 }
                 let then = at.saturating_add(old.len()).checked_sub(new.len())?;
                 let j = self.list.binary_search_by_key(&then, |t| t.range.start).ok()?;
-                (j >= keep).then_some((k, j))
+                (j >= keep && old_open.get(j) == fresh_open.get(k)).then_some((k, j))
             });
             if let Some((k, j)) = fits {
                 let mut tail = fresh;
@@ -461,6 +480,15 @@ struct Highlighter {
 }
 
 impl Highlighter {
+    /// Colours with `dialect` from now on. Another dialect starts over: the text is lexed again
+    /// from scratch, and no token or job of the old one is kept.
+    fn set_dialect(&mut self, dialect: Dialect) {
+        if self.tokens.dialect != dialect {
+            self.tokens = Tokens::new(dialect);
+            self.job = None;
+        }
+    }
+
     /// The job for `text` in the theme given: the last one again when nothing changed.
     fn job(&mut self, text: &str, dark: bool, plain: Color32) -> LayoutJob {
         let key = (dark, plain, self.window.clone());
@@ -530,9 +558,14 @@ impl EditorState {
         self.focus = true;
     }
 
-    /// How many texts the layouter tokenized.
+    /// How many texts the layouter tokenized since its dialect last changed.
     pub fn tokenized(&self) -> usize {
         self.highlight.tokens.work().0
+    }
+
+    /// The editor colours the text with `dialect` ([`Highlighter::set_dialect`]).
+    fn set_dialect(&mut self, dialect: Dialect) {
+        self.highlight.set_dialect(dialect);
     }
 
     /// Some token of the text is coloured.
@@ -737,7 +770,7 @@ fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover
     let t = TOKENS;
     let enabled = why_not.is_none();
     let text = if main && enabled { RichText::new(label).color(t.accent_text) } else { RichText::new(label) };
-    let mut button = Button::new(text.size(12.5)).min_size(vec2(0.0, 26.0));
+    let mut button = Button::new(text.size(12.5)).min_size(vec2(0.0, BUTTON_H));
     if main && enabled {
         button = button.fill(t.accent);
     }
@@ -750,10 +783,86 @@ fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, (hover
     r.clicked()
 }
 
-/// SQLSTATE 25P02: a statement failed earlier in the transaction, which stays open, failed.
-const IN_FAILED_TRANSACTION: &str = "25P02";
+/// What the database chip shows: the database the tab's next run starts in, as the engine knows
+/// it, the ones to choose from, the engine's word for one and for many, and why it cannot be used
+/// now.
+struct Chip<'a> {
+    database: CurrentDatabase,
+    choices: Vec<&'a str>,
+    word: (&'static str, &'static str),
+    why_not: Option<String>,
+}
 
-/// The card's line under such an error.
+/// The database chip, as tall as the toolbar's buttons and of a fixed width, so nothing beside
+/// it moves when the database changes (a long name is cut, and reads whole on hover). A click
+/// opens the list of `chip.choices` under its heading; returns the one chosen.
+fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<String> {
+    let t = TOKENS;
+    let (one, many) = chip.word;
+    let enabled = chip.why_not.is_none();
+    let mut chosen = None;
+    ui.add_enabled_ui(enabled, |ui| {
+        let (rect, r) = ui.allocate_exact_size(vec2(CHIP_W, BUTTON_H), Sense::click());
+        let p = ui.painter();
+        let fill = if enabled && r.hovered() { t.hover } else { t.card };
+        p.rect(rect, CornerRadius::same(RADIUS), fill, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        let icon = Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0));
+        icons::schema(p, icon, if enabled { t.icon_schema } else { t.border });
+        let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(14.0, 14.0));
+        icons::chevron(p, arrow, if enabled { t.text_muted } else { t.border }, true);
+        let none = format!("No {one} chosen");
+        let unknown = format!("{} not known", capitalized(one));
+        let shown = chip.database.database.as_deref().filter(|_| chip.database.known);
+        let (text, ink) = match shown {
+            Some(name) if enabled => (name, t.text),
+            Some(name) => (name, t.text_muted),
+            None if chip.database.known => (none.as_str(), t.text_muted),
+            None => (unknown.as_str(), t.text_muted),
+        };
+        let left = icon.right() + 6.0;
+        let g = line_galley(ui, text, FontId::proportional(12.5), ink, (arrow.left() - 4.0 - left).max(1.0));
+        ui.painter().galley(pos2(left, rect.center().y - g.size().y / 2.0), g, ink);
+        let hover = match shown {
+            Some(name) => format!("The next run starts in the {one} {name}. Click to choose another."),
+            None if chip.database.known => format!("No {one} is chosen for this tab. Click to choose one."),
+            None => format!(
+                "Which {one} the next run starts in is not known: the server does not say where a statement leaves the connection. Click to choose one."
+            ),
+        };
+        let r = match &chip.why_not {
+            Some(why) => r.on_disabled_hover_text(format!("Choose the {one}: not now, {why}")),
+            None => r.on_hover_text(hover),
+        };
+        tags.tag_value_as(DATABASE, &r, shown, enabled);
+        if !enabled {
+            // egui closes a popup that is not drawn: no list while the chip waits.
+            return;
+        }
+        Popup::menu(&r).width(CHIP_W).show(|ui| {
+            ui.add(Label::new(RichText::new(many).size(11.5).color(t.text_muted)).selectable(false));
+            ScrollArea::vertical().max_height(CHIP_LIST_H).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
+                for name in &chip.choices {
+                    let r = filter_bar::item(ui, shown == Some(*name), name);
+                    // A menu's first frame is a sizing pass, which reads every widget as disabled.
+                    tags.tag_value_as(&format!("{DATABASE}-{name}"), &r, *name, true);
+                    if r.clicked() {
+                        chosen = Some((*name).to_owned());
+                    }
+                }
+            });
+        });
+    });
+    chosen
+}
+
+/// `word` with its first letter upper-cased.
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// The card's line under an error that means the transaction failed earlier.
 pub const ROLLBACK_NOTE: &str = "The transaction this connection is in failed earlier: run ROLLBACK to end it. Until then every statement fails.";
 
 /// The error card's heading for `e` of a run that kept `kept` results.
@@ -775,7 +884,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: us
     let (stroke, ink) = if cancelled { (t.border, t.text) } else { (t.danger, t.danger) };
     let jump = at.is_some();
     let title = heading(e, kept);
-    let note = (e.sqlstate.as_deref() == Some(IN_FAILED_TRANSACTION)).then_some(ROLLBACK_NOTE);
+    let note = (e.meaning == Some(Meaning::TransactionAborted)).then_some(ROLLBACK_NOTE);
     let frame =
         Frame::new().fill(t.card).stroke(Stroke::new(1.0, stroke)).corner_radius(CornerRadius::same(RADIUS)).inner_margin(Margin::symmetric(12, 8));
     let label = |ui: &mut egui::Ui, text: RichText| ui.add(Label::new(text).wrap().selectable(!jump));
@@ -833,48 +942,80 @@ fn result_width(results: usize) -> f32 {
     (7.5 * digits + 20.0).max(22.0) + 12.0
 }
 
-/// The room the selector keeps for its label and the `…` at both ends.
-const SELECTOR_LABELS_W: f32 = 90.0;
+/// The selector's `…` button with its spacing, and its list's width.
+const MORE_W: f32 = 26.0;
+const RESULT_LIST_W: f32 = 220.0;
 
-/// The results the selector shows in `room` points: all of them when they fit, else as many as
-/// fit around the shown one. Returns the first and the end of that range.
-fn selector_range(results: usize, shown: usize, room: f32) -> (usize, usize) {
+/// What the selector draws: its label, the results from `from` to `to`, and the `…` that lists
+/// them all when some are left out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelectorFit {
+    label: bool,
+    from: usize,
+    to: usize,
+    more: bool,
+}
+
+/// The selector in `room` points, its label `label_w` wide: all results and the label when they
+/// fit; else as many as fit around the shown one beside the `…`, and the label only if it and one
+/// result fit too, so it is never cut.
+fn selector_fit(results: usize, shown: usize, room: f32, label_w: f32) -> SelectorFit {
     let per = result_width(results);
-    let fit = if room.is_finite() { (room / per).floor().max(1.0) as usize } else { 1 };
-    if results <= fit {
-        return (0, results);
+    let room = if room.is_finite() { room } else { 0.0 };
+    if results as f32 * per + label_w <= room {
+        return SelectorFit { label: true, from: 0, to: results, more: false };
     }
-    let from = shown.saturating_sub(fit / 2).min(results.saturating_sub(fit));
-    (from, from.saturating_add(fit).min(results))
+    let label = room >= label_w + MORE_W + per;
+    let left = room - MORE_W - if label { label_w } else { 0.0 };
+    let fit = if left > 0.0 { ((left / per).floor() as usize).min(results) } else { 0 };
+    let from = shown.min(results.saturating_sub(1)).saturating_sub(fit / 2).min(results.saturating_sub(fit));
+    SelectorFit { label, from, to: from.saturating_add(fit).min(results), more: true }
 }
 
 /// The results selector, `room` points wide: one button per result, `n` from 1 (with more than
-/// fit, those around the shown one, and `…` where some are left out); the index of the one clicked.
+/// fit, those around the shown one, and a `…` listing every result); the index of the one chosen.
 fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], shown: usize, room: f32) -> Option<usize> {
     let t = TOKENS;
     let mut picked = None;
-    let label = |ui: &mut egui::Ui, text: &str| ui.add(Label::new(RichText::new(text).size(12.0).color(t.text_muted)).selectable(false));
-    label(ui, "Results");
-    let (from, to) = selector_range(results.len(), shown, room - SELECTOR_LABELS_W);
-    if from > 0 {
-        label(ui, "…");
+    let muted = |text: &str| RichText::new(text).size(12.0).color(t.text_muted);
+    let label = |ui: &mut egui::Ui, text: &str| ui.add(Label::new(muted(text)).selectable(false));
+    let label_w = ui.painter().layout_no_wrap("Results".to_owned(), FontId::proportional(12.0), t.text_muted).size().x + ui.spacing().item_spacing.x;
+    let fit = selector_fit(results.len(), shown, room, label_w);
+    if fit.label {
+        label(ui, "Results");
     }
-    for (i, o) in results.iter().enumerate().take(to).skip(from) {
-        if i > from {
+    let what = |o: &StatementOutcome| if o.result.columns.is_empty() { affected_text(o.result.rows_affected) } else { rows_text(&o.result) };
+    let value = |i: usize, o: &StatementOutcome| json!({ "shown": i == shown, "rows": o.result.rows.len(), "rowsAffected": o.result.rows_affected });
+    for (i, o) in results.iter().enumerate().take(fit.to).skip(fit.from) {
+        if i > fit.from {
             label(ui, "·");
         }
         let n = i.saturating_add(1);
         let r = ui.add(Button::selectable(i == shown, RichText::new(n.to_string()).size(12.5)).min_size(vec2(22.0, 22.0)));
-        let what = if o.result.columns.is_empty() { affected_text(o.result.rows_affected) } else { rows_text(&o.result) };
-        let r = r.on_hover_text(format!("Statement {n}: {what}"));
-        let value = json!({ "shown": i == shown, "rows": o.result.rows.len(), "rowsAffected": o.result.rows_affected });
-        tags.tag_value(&format!("{RESULT}{n}"), &r, value);
+        let r = r.on_hover_text(format!("Statement {n}: {}", what(o)));
+        tags.tag_value(&format!("{RESULT}{n}"), &r, value(i, o));
         if r.clicked() && i != shown {
             picked = Some(i);
         }
     }
-    if to < results.len() {
-        label(ui, "…");
+    if fit.more {
+        let r = ui.add(Button::new(RichText::new("…").size(12.5)).min_size(vec2(22.0, 22.0)));
+        let r = r.on_hover_text(format!("Choose one of the {} results", results.len()));
+        tags.tag_value(RESULT_MORE, &r, results.len());
+        Popup::menu(&r).width(RESULT_LIST_W).show(|ui| {
+            ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
+            ScrollArea::vertical().max_height(CHIP_LIST_H).show_rows(ui, filter_bar::ITEM_H, results.len(), |ui, rows| {
+                for (i, o) in results.iter().enumerate().take(rows.end).skip(rows.start) {
+                    let n = i.saturating_add(1);
+                    let r = filter_bar::item(ui, i == shown, &format!("Statement {n}: {}", what(o)));
+                    // A menu's first frame is a sizing pass, which reads every widget as disabled.
+                    tags.tag_value_as(&format!("{RESULT_LIST}{n}"), &r, value(i, o), true);
+                    if r.clicked() && i != shown {
+                        picked = Some(i);
+                    }
+                }
+            });
+        });
     }
     picked
 }
@@ -896,7 +1037,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let Some(Tab::Query(q)) = session.state().tab(id) else { return };
         // The engine's own rule for the Run buttons; what the run refuses it says when clicked.
         let run_blocked = can_run(session).err();
-        let modal = view.dialog.is_some() || view.work.quick.open;
+        let modal = view.dialog.is_some() || view.quick.open;
         let focus_now = view.work.focused_query != Some(id) && !modal;
         if focus_now {
             view.work.focused_query = Some(id);
@@ -909,6 +1050,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         if focus_now {
             state.editor.focus();
         }
+        state.editor.set_dialect(session.state().dialect(Which::Tab(id)));
         let full = ui.available_rect_before_wrap();
         let h = full.height();
         // The split first, so a drag moves the editor in this frame.
@@ -949,6 +1091,21 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let mut bar =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-bar", id.0)).max_rect(bar_rect).layout(Layout::left_to_right(Align::Center)));
         bar.spacing_mut().item_spacing.x = 6.0;
+        let running = q.running.is_some();
+        if let Some(c) = session.state().connection(Which::Tab(id)).filter(|c| c.dialect.has_use_database()) {
+            let chip = Chip {
+                database: c.starts_in(q),
+                choices: c.catalog.schemas.iter().filter(|s| !s.system).map(|s| s.name.as_str()).collect(),
+                word: c.dialect.schema_word(),
+                why_not: can_set_database(session)
+                    .err()
+                    .or_else(|| running.then(|| "the tab's query is running".to_owned()))
+                    .or_else(|| run_blocked.clone()),
+            };
+            if let Some(name) = database_chip(&mut bar, tags, &chip) {
+                runs.push(("query.setDatabase", json!({ "tab": id, "database": name })));
+            }
+        }
         let why_not = run_blocked.as_deref();
         if tool_button(&mut bar, tags, RUN, "Run", ("Run every statement (Ctrl+Enter)", why_not), true) {
             runs.push((QUERY_RUN, json!({})));
@@ -957,14 +1114,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         if tool_button(&mut bar, tags, RUN_CURRENT, "Run current", current, false) {
             runs.push((QUERY_RUN, json!({ "current": true, "cursor": out.cursor })));
         }
-        let running = q.running.is_some();
         let stop = ("Stop the running statement", (!running).then_some("nothing is running"));
         if tool_button(&mut bar, tags, CANCEL, "Cancel", stop, false) {
             runs.push(("query.cancel", json!({})));
-        }
-        if running {
-            bar.add(egui::Spinner::new().size(13.0).color(t.text_muted));
-            bar.label(RichText::new("Running…").size(12.5).color(t.text_muted));
         }
         let shown = q.shown_result();
         let summary = shown.filter(|o| !o.result.columns.is_empty()).map(|o| (rows_text(&o.result), !o.result.complete));
@@ -973,6 +1125,17 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             let font = FontId::proportional(12.5);
             bar.painter().layout_no_wrap(text.clone(), font, t.text).size().x + 16.0
         });
+        if running {
+            let spinner = bar.add(egui::Spinner::new().size(13.0).color(t.text_muted));
+            let words = RichText::new("Running…").size(12.5).color(t.text_muted);
+            let words_w = bar.painter().layout_no_wrap("Running…".to_owned(), FontId::proportional(12.5), t.text_muted).size().x;
+            let after = bar.cursor().min.x + bar.spacing().item_spacing.x + words_w + 10.0;
+            if q.results.len() < 2 || bar_rect.right() - right_room - after >= MORE_W + result_width(q.results.len()) {
+                bar.label(words);
+            } else {
+                spinner.on_hover_text("Running…");
+            }
+        }
         // The selector between the buttons and the summary, kept within its room.
         let left = bar.cursor().min.x + 10.0;
         let right = (bar_rect.right() - right_room).max(left);
@@ -1100,6 +1263,7 @@ mod tests {
             rows_seen: seen,
             complete,
             rows_affected: Some(seen),
+            database_after: Default::default(),
         };
         assert_eq!(rows_text(&rs(3, 3, true)), "3 rows");
         assert_eq!(rows_text(&rs(1, 1, true)), "1 row");
@@ -1112,13 +1276,12 @@ mod tests {
         assert_eq!(affected_text(Some(1)), "1 row affected");
         assert_eq!(affected_text(Some(0)), "0 rows affected");
         assert_eq!(affected_text(Some(12_000)), "12,000 rows affected");
-        assert!(!affected_text(None).is_empty());
-        assert!(!affected_text(None).contains("affected"), "no count, no number: {}", affected_text(None));
+        assert_eq!(affected_text(None), "The statement ran; the database gave no row count.");
     }
 
     #[test]
     fn byte_offsets_and_char_indices_convert_both_ways() {
-        let text = "select 'é🐝', nope";
+        let text = "select 'é🐙', nope";
         let nope = text.find("nope").unwrap();
         assert_eq!(char_index(text, nope), 13);
         assert_eq!(byte_offset(text, 13), nope);
@@ -1170,7 +1333,7 @@ mod tests {
     /// `tokens` after updating to `text` equals a full lex of `text`.
     fn same_as_full(tokens: &mut Tokens, text: &str, what: &str) {
         tokens.update(text);
-        assert_eq!(tokens.list(), lexer::tokenize(text).as_slice(), "{what}: {text:?}");
+        assert_eq!(tokens.list(), lexer::tokenize(tokens.dialect, text).as_slice(), "{what}: {text:?}");
     }
 
     #[test]
@@ -1182,31 +1345,36 @@ mod tests {
             "select $tagé$ é $tagé$, $1",
             "do $$ begin perform 1; end $$; select $x1$a$x1$",
         ] {
-            let mut tokens = Tokens::default();
-            let ends: Vec<usize> = text.char_indices().map(|(at, _)| at).skip(1).chain([text.len()]).collect();
-            for &end in &ends {
-                same_as_full(&mut tokens, &text[..end], "typed");
-            }
-            for &end in ends.iter().rev() {
-                same_as_full(&mut tokens, &text[..end], "deleted from the end");
+            for dialect in Dialect::ALL {
+                let mut tokens = Tokens::new(dialect);
+                let ends: Vec<usize> = text.char_indices().map(|(at, _)| at).skip(1).chain([text.len()]).collect();
+                for &end in &ends {
+                    same_as_full(&mut tokens, &text[..end], "typed");
+                }
+                for &end in ends.iter().rev() {
+                    same_as_full(&mut tokens, &text[..end], "deleted from the end");
+                }
             }
         }
         // A tag typed in the middle, its closing `$` last; then that `$` taken away again.
-        let mut tokens = Tokens::default();
-        for text in ["as $ select 1", "as $b select 1", "as $bo select 1", "as $bod select 1", "as $body select 1", "as $body$ select 1"] {
-            same_as_full(&mut tokens, text, "typed in the middle");
-        }
-        let mut tokens = Tokens::default();
-        for text in ["as $body", "as $body$ select 1; $body$", "as $body select 1; $body$", "$tagé", "$tagé$$"] {
-            same_as_full(&mut tokens, text, "pasted and cut");
+        for dialect in Dialect::ALL {
+            let mut tokens = Tokens::new(dialect);
+            for text in ["as $ select 1", "as $b select 1", "as $bo select 1", "as $bod select 1", "as $body select 1", "as $body$ select 1"] {
+                same_as_full(&mut tokens, text, "typed in the middle");
+            }
+            let mut tokens = Tokens::new(dialect);
+            for text in ["as $body", "as $body$ select 1; $body$", "as $body select 1; $body$", "$tagé", "$tagé$$"] {
+                same_as_full(&mut tokens, text, "pasted and cut");
+            }
         }
     }
 
     #[test]
     fn incremental_tokens_match_a_full_lex() {
-        // Pieces that end tokens late: exponents, `--` and `/*` after an operator, `U&` and `E'`,
-        // a lone `$` before a tag word of any length (its tag read to the end), dollar quotes,
-        // quotes that open strings running on, and characters of several bytes (in tags too).
+        // Pieces that end tokens late: exponents, `--`, `/*` and `*/` after an operator, `U&` and
+        // `E'`, MySQL's executable comments and their versions, a lone `$` before a tag word of any
+        // length (its tag read to the end), dollar quotes, quotes that open strings running on, and
+        // characters of several bytes (in tags too).
         let pieces = [
             "select ",
             "1e",
@@ -1250,31 +1418,75 @@ mod tests {
             "\r\n",
             " ",
             "é",
-            "🐝",
+            "🐙",
             "from t",
             "<>",
             "::",
+            "#",
+            "`",
+            "[",
+            "]",
+            "x'",
+            "B'",
+            "0x",
+            "0xA",
+            "-- ",
+            "--\t",
+            "+--",
+            "\\'",
+            "DELIMITER ",
+            "create trigger ",
+            "begin ",
+            "end ",
+            "!",
+            "M!",
+            "/*!",
+            "/*M!1",
+            "50003",
         ];
-        for seed in [0x9E37_79B9_7F4A_7C15, 12_345, 777, 42, 0xDEAD_BEEF] {
-            let mut rng = Rng(seed);
-            for round in 0..300 {
-                let mut text: String = (0..rng.next(40)).map(|_| pieces[rng.next(pieces.len())]).collect();
-                let mut tokens = Tokens::default();
-                tokens.update(&text);
-                for step in 0..60 {
-                    // Two character boundaries, a few characters apart at most.
-                    let bounds: Vec<usize> = text.char_indices().map(|(at, _)| at).chain([text.len()]).collect();
-                    let i = rng.next(bounds.len());
-                    let j = (i + rng.next(8)).min(bounds.len() - 1);
-                    let (a, b) = (bounds[i], bounds[j]);
-                    match rng.next(3) {
-                        0 => text.insert_str(a, pieces[rng.next(pieces.len())]),
-                        1 => text.replace_range(a..b, ""),
-                        _ => text.replace_range(a..b, pieces[rng.next(pieces.len())]),
+        for dialect in Dialect::ALL {
+            for seed in [0x9E37_79B9_7F4A_7C15, 12_345, 777, 42, 0xDEAD_BEEF] {
+                let mut rng = Rng(seed);
+                for round in 0..300 {
+                    let mut text: String = (0..rng.next(40)).map(|_| pieces[rng.next(pieces.len())]).collect();
+                    let mut tokens = Tokens::new(dialect);
+                    tokens.update(&text);
+                    for step in 0..60 {
+                        // Two character boundaries, a few characters apart at most.
+                        let bounds: Vec<usize> = text.char_indices().map(|(at, _)| at).chain([text.len()]).collect();
+                        let i = rng.next(bounds.len());
+                        let j = (i + rng.next(8)).min(bounds.len() - 1);
+                        let (a, b) = (bounds[i], bounds[j]);
+                        match rng.next(3) {
+                            0 => text.insert_str(a, pieces[rng.next(pieces.len())]),
+                            1 => text.replace_range(a..b, ""),
+                            _ => text.replace_range(a..b, pieces[rng.next(pieces.len())]),
+                        }
+                        same_as_full(&mut tokens, &text, &format!("{dialect:?}, seed {seed}, round {round}, step {step}"));
                     }
-                    same_as_full(&mut tokens, &text, &format!("seed {seed}, round {round}, step {step}"));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_dialect_change_lexes_the_text_again_from_scratch() {
+        // Each engine reads these differently: backticks, `#`, `$$` and a backslash in a string.
+        let text = "select `a`, \"b\" # note\n, $$x$$ -- c\nselect 'it\\'s'";
+        assert_ne!(lexer::tokenize(Dialect::Postgres, text), lexer::tokenize(Dialect::MySql, text), "the text tells them apart");
+        let mut ed = EditorState::new(text.into());
+        ed.highlight.window = colour_window(0..60);
+        let plain = Color32::BLACK;
+        let note = text.find("# note").unwrap();
+        let job = ed.highlight.job(text, false, plain);
+        assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(Dialect::Postgres, text).as_slice());
+        assert_eq!(colour_at(&job, note), (plain, false), "`#` is an operator on Postgres");
+        for dialect in [Dialect::MySql, Dialect::Sqlite, Dialect::Postgres] {
+            ed.set_dialect(dialect);
+            let job = ed.highlight.job(text, false, plain);
+            assert_eq!(ed.highlight.tokens.list(), lexer::tokenize(dialect, text).as_slice(), "{dialect:?}");
+            let comment = (crate::theme::SQL_LIGHT.comment, true);
+            assert_eq!(colour_at(&job, note) == comment, dialect == Dialect::MySql, "{dialect:?}: the job follows the dialect");
         }
     }
 
@@ -1292,14 +1504,14 @@ mod tests {
             tokens.update(&text);
             let lexed = tokens.work().1 - before;
             assert!(lexed <= 2 * RESYNC_BYTES, "an edit at {at} lexed {lexed} bytes");
-            assert_eq!(tokens.list(), lexer::tokenize(&text).as_slice());
+            assert_eq!(tokens.list(), lexer::tokenize(Dialect::Postgres, &text).as_slice());
         }
         // An edit that opens a string changes the rest of the text: all of it is lexed again.
         text.insert(10, '\'');
         let (_, before) = tokens.work();
         tokens.update(&text);
         assert!(tokens.work().1 - before > text.len() / 2);
-        assert_eq!(tokens.list(), lexer::tokenize(&text).as_slice());
+        assert_eq!(tokens.list(), lexer::tokenize(Dialect::Postgres, &text).as_slice());
     }
 
     #[test]
@@ -1325,17 +1537,25 @@ mod tests {
 
     #[test]
     fn the_selector_shows_the_results_around_the_shown_one_when_not_all_fit() {
-        let room = |n: usize| n as f32 * result_width(100);
-        assert_eq!(selector_range(3, 2, 3.0 * result_width(3)), (0, 3), "all fit");
-        assert_eq!(selector_range(100, 0, room(10)), (0, 10));
-        assert_eq!(selector_range(100, 50, room(10)), (45, 55));
-        assert_eq!(selector_range(100, 99, room(10)), (90, 100));
-        assert_eq!(selector_range(100, 7, -5.0), (7, 8), "no room: the shown one still");
-        assert_eq!(selector_range(100, 7, f32::NAN), (7, 8));
-        assert_eq!(selector_range(0, 0, room(10)), (0, 0));
+        let fit = |results: usize, shown: usize, room: f32| {
+            let f = selector_fit(results, shown, room, 50.0);
+            (f.label, f.from, f.to, f.more)
+        };
+        let room = |n: usize| 50.0 + MORE_W + n as f32 * result_width(100);
+        assert_eq!(fit(3, 2, 50.0 + 3.0 * result_width(3)), (true, 0, 3, false), "all fit, and the label");
+        assert_eq!(fit(100, 0, room(10)), (true, 0, 10, true));
+        assert_eq!(fit(100, 50, room(10)), (true, 45, 55, true));
+        assert_eq!(fit(100, 99, room(10)), (true, 90, 100, true));
+        // Short of room the label goes first, never cut; the `…` stays and lists them all.
+        assert_eq!(fit(3, 2, MORE_W + result_width(3)), (false, 2, 3, true));
+        assert_eq!(fit(3, 2, MORE_W + 2.0 * result_width(3)), (false, 1, 3, true));
+        assert_eq!(fit(3, 0, MORE_W + 1.0), (false, 0, 0, true), "room for the `…` alone");
+        assert_eq!(fit(100, 7, -5.0), (false, 7, 7, true));
+        assert_eq!(fit(100, 7, f32::NAN), (false, 7, 7, true));
+        assert_eq!(fit(0, 0, room(10)), (true, 0, 0, false));
         // Longer numbers take more room.
         assert!(result_width(3000) > result_width(30) && result_width(30) > result_width(3));
-        assert_eq!(selector_range(3000, 2999, 10.0 * result_width(3000)), (2990, 3000));
+        assert_eq!(fit(3000, 2999, 50.0 + MORE_W + 10.0 * result_width(3000)), (true, 2990, 3000, true));
     }
 
     #[test]

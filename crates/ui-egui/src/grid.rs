@@ -47,8 +47,8 @@
 //! why a disabled entry cannot run now). Cells of rows out of view are listed with
 //! `visible: false` ([`CellBlock`]); a click on one scrolls its row into view first.
 
-use dbee_core::ResultSet;
 use dbee_core::display::grid_text;
+use dbee_core::{ResultSet, TypeClass};
 use dbee_engine::Selection;
 use dbee_sql::filter::SortDir;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
@@ -147,11 +147,6 @@ pub trait GridSource {
     }
 }
 
-/// Postgres base types (`pg_type.typname`) whose values are numbers.
-pub fn is_numeric(base_type: &str) -> bool {
-    matches!(base_type, "int2" | "int4" | "int8" | "float4" | "float8" | "numeric" | "money" | "oid")
-}
-
 /// A result as it came: no marks.
 impl GridSource for ResultSet {
     fn columns(&self) -> usize {
@@ -170,7 +165,7 @@ impl GridSource for ResultSet {
         self.rows.get(row)?.get(col)?.as_deref()
     }
     fn right_aligned(&self, col: usize) -> bool {
-        self.columns.get(col).is_some_and(|c| is_numeric(&c.base_type))
+        self.columns.get(col).is_some_and(|c| c.class == TypeClass::Number)
     }
 }
 
@@ -716,13 +711,14 @@ mod tests {
     fn result(rows: Vec<Vec<Option<&str>>>) -> ResultSet {
         ResultSet {
             columns: vec![
-                Col { name: "id".into(), base_type: "int4".into(), type_label: "integer".into() },
-                Col { name: "note".into(), base_type: "text".into(), type_label: "text".into() },
+                Col { name: "id".into(), base_type: "int4".into(), type_label: "integer".into(), class: TypeClass::Number },
+                Col { name: "note".into(), base_type: "text".into(), type_label: "text".into(), class: TypeClass::LongText },
             ],
             rows: rows.into_iter().map(|r| r.into_iter().map(|c| c.map(str::to_owned)).collect()).collect(),
             rows_seen: 0,
             complete: true,
             rows_affected: None,
+            database_after: Default::default(),
         }
     }
 

@@ -7,7 +7,8 @@
 //!    key (mode 0600) and `.ssh/known_hosts` holds their sshd's host key line.
 //! 3. Runs the binary from the repository root with `--control <port>` (default
 //!    [`DEFAULT_PORT`]) and the arguments after `--`, and waits for it to exit (an agent starts
-//!    it in the background and ends it with `app.quit`).
+//!    it in the background and ends it with `app.quit`). A client reads the run's token file,
+//!    [`token_file`]: `target/isolated/<port>/control-token` ([`TOKEN_VAR`] on the child).
 //!
 //! Only the child's environment changes ([`command`]): `HOME` and `USERPROFILE` are the
 //! throwaway home, the XDG directories and `APPDATA`/`LOCALAPPDATA` lie inside it,
@@ -15,12 +16,17 @@
 //! `DBEE_CLIPBOARD=memory` are set. So the run never reads or writes the real home, `~/.ssh` or
 //! the keyring, keeps every copy and cut in the app (text fields' too; `document.inspect` shows
 //! the last as `clipboard`), and on Linux and macOS never reaches the SSH agent. On Windows the
-//! OpenSSH agent pipe is still reachable: dbee finds it without `SSH_AUTH_SOCK`.
+//! OpenSSH agent pipe is still reachable: dbee finds it without `SSH_AUTH_SOCK`. [`SHOTS_VAR`] is
+//! the one folder `ui.screenshot` writes in, [`shots_dir`]: `target/look`.
 //!
 //! [`ALLOW_VAR`] lists the only targets the run may connect to ([`allowed_targets`]): each test
 //! server's port and the sshd's, on `127.0.0.1` and on `localhost`, and `127.0.0.1:1` for error
 //! demos. Without a readable `env.json` it is `127.0.0.1:1` alone, and a warning says so. dbee
 //! refuses every other target of a test, an open or a reconnect before any network I/O.
+//! [`DIRS_VAR`] lists the only folders the run touches files in ([`allowed_dirs`]): the throwaway
+//! home and `target/`. It binds a database file, an SSH key file, a CA file and a screenshot. While
+//! it is set, dbee also keeps a connection's SQL from opening any other file (SQLite's `ATTACH` and
+//! `VACUUM INTO`).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -63,11 +69,37 @@ pub fn parse_args(args: &[&str]) -> Result<Options, String> {
 /// `main.rs`).
 pub const ALLOW_VAR: &str = "DBEE_ALLOW_TARGETS";
 
+/// The child's variable with the control channel's token file (read by dbee's `main.rs`).
+pub const TOKEN_VAR: &str = "DBEE_CONTROL_TOKEN_FILE";
+
+/// The token file of the run on `port`: `<repo>/target/isolated/<port>/control-token`.
+pub fn token_file(root: &Path, port: u16) -> PathBuf {
+    root.join("target").join("isolated").join(port.to_string()).join("control-token")
+}
+
+/// The child's variable with the folders it may touch files in, joined as the system joins paths
+/// (read by dbee's `main.rs`).
+pub const DIRS_VAR: &str = "DBEE_ALLOW_DIRS";
+
+/// The child's variable with the one folder `ui.screenshot` writes in (read by dbee's `main.rs`).
+pub const SHOTS_VAR: &str = "DBEE_SCREENSHOT_DIR";
+
+/// Where an isolated run's screenshots go: `<repo>/target/look`.
+pub fn shots_dir(root: &Path) -> PathBuf {
+    root.join("target").join("look")
+}
+
+/// The folders an isolated run may touch files in: its throwaway `home` and `target/`.
+pub fn allowed_dirs(root: &Path, home: &Path) -> Vec<PathBuf> {
+    vec![home.to_path_buf(), root.join("target")]
+}
+
 /// Port 1, where nothing listens: a connection error to show, always allowed.
 const ERROR_DEMO: (&str, u16) = ("127.0.0.1", 1);
 
-/// The targets an isolated run may connect to: every server's port and the sshd's, each on
-/// `127.0.0.1` and `localhost`, then [`ERROR_DEMO`]. Without the env file, [`ERROR_DEMO`] alone.
+/// The targets an isolated run may connect to: every database server's port and
+/// the sshd's, each on `127.0.0.1` and `localhost`, then [`ERROR_DEMO`]. Without the env file,
+/// [`ERROR_DEMO`] alone.
 pub fn allowed_targets(env: Option<&testdb::Env>) -> Vec<(String, u16)> {
     let mut list = Vec::new();
     if let Some(env) = env {
@@ -172,6 +204,10 @@ pub fn command(root: &Path, port: u16, exe: &Path, rest: &[String], allowed: &[(
         .env("DBEE_SECRET_STORE", "memory")
         .env("DBEE_CLIPBOARD", "memory")
         .env(ALLOW_VAR, allow_list(allowed))
+        // A folder whose path holds the separator cannot be listed: then no folder is allowed.
+        .env(DIRS_VAR, std::env::join_paths(allowed_dirs(root, &home)).unwrap_or_default())
+        .env(SHOTS_VAR, shots_dir(root))
+        .env(TOKEN_VAR, token_file(root, port))
         .env_remove("SSH_AUTH_SOCK")
         .env_remove("DBEE_CONTROL_PORT");
     c
@@ -193,11 +229,14 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), String> {
         );
     }
     eprintln!(
-        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{}, connections only to {}",
+        "dbee on the throwaway home {} ({}), control channel on 127.0.0.1:{} with the token file {}, connections only to {}, files only in {}, screenshots in {}",
         home.display(),
         if testdb.is_some() { "with the test servers' SSH key and host" } else { "no test servers" },
         o.port,
-        allow_list(&allowed)
+        token_file(root, o.port).display(),
+        allow_list(&allowed),
+        allowed_dirs(root, &home).iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", "),
+        shots_dir(root).display()
     );
     let status = command(root, o.port, &exe, &o.rest, &allowed).status().map_err(|e| format!("{}: {e}", exe.display()))?;
     if status.success() { Ok(()) } else { Err(format!("dbee exited with {status}")) }
@@ -216,17 +255,25 @@ mod tests {
         c.get_envs().find(|(k, _)| *k == OsStr::new(key)).map(|(_, v)| v)
     }
 
-    fn test_env(ports: &[u16], sshd: u16) -> testdb::Env {
+    fn test_env(ports: &[u16], my_ports: &[u16], sshd: u16) -> testdb::Env {
+        let server = |name: String, kind: testdb::Kind, version: &str, port: u16| testdb::Server {
+            name,
+            kind,
+            version: version.into(),
+            port,
+            service_port: kind.info().port,
+            full_seed: true,
+        };
+        let pg = ports.iter().map(|&port| server(format!("pg{port}"), testdb::Kind::Postgres, "14.19", port));
+        let my = my_ports.iter().map(|&port| server(format!("mysql{port}"), testdb::Kind::MySql, "8.0.46", port));
         testdb::Env {
             password: "pw".into(),
-            servers: ports.iter().map(|&port| testdb::Server { name: format!("pg{port}"), major: 14, port }).collect(),
+            servers: pg.chain(my).collect(),
             sshd: testdb::Sshd {
                 port: sshd,
                 user: "dbee".into(),
                 password_user: "dbeepw".into(),
                 known_hosts_line: "[127.0.0.1]:2222 ssh-ed25519 AAAA".into(),
-                pg_host: "pg14".into(),
-                pg_port: 5432,
             },
             keys: testdb::Keys { plain: "k".into(), encrypted: "e".into(), passphrase: "p".into(), rsa: "r".into() },
             ca_file: "ca".into(),
@@ -235,16 +282,19 @@ mod tests {
 
     #[test]
     fn allowed_targets_are_the_test_servers_on_both_host_spellings() {
-        let list = allowed_targets(Some(&test_env(&[32780, 32776], 32779)));
-        for port in [32780, 32776, 32779] {
+        let list = allowed_targets(Some(&test_env(&[32780, 32776], &[32781], 32779)));
+        for port in [32780, 32776, 32781, 32779] {
             for host in ["127.0.0.1", "localhost"] {
                 assert!(list.contains(&(host.to_string(), port)), "{host}:{port} missing from {list:?}");
             }
         }
         assert!(list.contains(&("127.0.0.1".to_string(), 1)), "port 1 stays for error demos");
-        assert_eq!(list.len(), 7, "{list:?}");
-        assert!(!list.iter().any(|(_, p)| *p == 5432), "the database port behind the tunnel is not a local target");
-        assert_eq!(allow_list(&list), "127.0.0.1:32780,localhost:32780,127.0.0.1:32776,localhost:32776,127.0.0.1:32779,localhost:32779,127.0.0.1:1");
+        assert_eq!(list.len(), 9, "{list:?}");
+        assert!(!list.iter().any(|(_, p)| *p == 5432 || *p == 3306), "the database ports behind the tunnel are not local targets");
+        assert_eq!(
+            allow_list(&list),
+            "127.0.0.1:32780,localhost:32780,127.0.0.1:32776,localhost:32776,127.0.0.1:32781,localhost:32781,127.0.0.1:32779,localhost:32779,127.0.0.1:1"
+        );
     }
 
     #[test]
@@ -276,6 +326,19 @@ mod tests {
         assert_eq!(env_of(&c, "SSH_AUTH_SOCK"), Some(None), "the agent socket is removed");
         assert_eq!(env_of(&c, "DBEE_SECRET_STORE"), Some(Some(OsStr::new("memory"))));
         assert_eq!(env_of(&c, "DBEE_CONTROL_PORT"), Some(None));
+        let dirs = std::env::join_paths([home.clone(), root.join("target")]).unwrap();
+        assert_eq!(env_of(&c, DIRS_VAR), Some(Some(dirs.as_os_str())), "files only in the throwaway home and target/");
+        assert_eq!(DIRS_VAR, "DBEE_ALLOW_DIRS");
+        assert_eq!(
+            env_of(&c, SHOTS_VAR),
+            Some(Some(root.join("target").join("look").as_os_str())),
+            "screenshots in target/look, inside those folders"
+        );
+        assert_eq!(SHOTS_VAR, "DBEE_SCREENSHOT_DIR");
+        let token = root.join("target").join("isolated").join("7979").join("control-token");
+        assert_eq!(token_file(root, 7979), token);
+        assert_eq!(env_of(&c, TOKEN_VAR), Some(Some(token.as_os_str())), "the token file lies beside the throwaway home");
+        assert_eq!(TOKEN_VAR, "DBEE_CONTROL_TOKEN_FILE");
         let args: Vec<&OsStr> = c.get_args().collect();
         assert_eq!(args, vec![OsStr::new("--control"), OsStr::new("7979"), OsStr::new("--x")]);
         assert_eq!(c.get_current_dir(), Some(root));
@@ -334,19 +397,33 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    /// `ui.inspect`'s `frame`, or `None` while the app does not answer yet.
-    fn inspect_frame(port: u16) -> Option<u64> {
+    /// A connection to the run on `port` that has sent the token and checked the proof, or `None`
+    /// while there is none yet.
+    fn connect(root: &Path, port: u16) -> Option<(BufReader<TcpStream>, TcpStream)> {
+        let text = std::fs::read_to_string(token_file(root, port)).ok()?;
+        let (token, proof) = text.split_once('\n')?;
         let s = TcpStream::connect(("127.0.0.1", port)).ok()?;
         s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
         let mut w = s.try_clone().ok()?;
+        w.write_all(format!("{token}\n").as_bytes()).ok()?;
+        let mut r = BufReader::new(s);
+        let mut line = String::new();
+        r.read_line(&mut line).ok()?;
+        let reply: serde_json::Value = serde_json::from_str(&line).ok()?;
+        (reply["result"]["proof"].as_str() == Some(proof.trim_end())).then_some((r, w))
+    }
+
+    /// `ui.inspect`'s `frame`, or `None` while the app does not answer yet.
+    fn inspect_frame(root: &Path, port: u16) -> Option<u64> {
+        let (mut r, mut w) = connect(root, port)?;
         w.write_all(b"{\"id\":1,\"method\":\"ui.inspect\"}\n").ok()?;
         let mut line = String::new();
-        BufReader::new(s).read_line(&mut line).ok()?;
+        r.read_line(&mut line).ok()?;
         serde_json::from_str::<serde_json::Value>(&line).ok()?["result"]["frame"].as_u64()
     }
 
     #[test]
-    #[ignore = "opens a window; run by hand: cargo test -p xtask -- --ignored"]
+    #[ignore = "timing; opens a window, run by hand: cargo test -p xtask -- --ignored --nocapture"]
     fn connection_screen_within_one_second() {
         let root = crate::root();
         let exe = build(&root, true).unwrap();
@@ -356,7 +433,7 @@ mod tests {
         let started = Instant::now();
         let mut child = cmd.spawn().unwrap();
         let took = loop {
-            if inspect_frame(port).is_some_and(|f| f >= 1) {
+            if inspect_frame(&root, port).is_some_and(|f| f >= 1) {
                 break started.elapsed();
             }
             if started.elapsed() > Duration::from_secs(30) {
@@ -366,8 +443,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         println!("connection screen drawn {took:?} after spawn (release build)");
-        if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
-            let _ = s.write_all(b"{\"method\":\"app.quit\"}\n");
+        if let Some((_, mut w)) = connect(&root, port) {
+            let _ = w.write_all(b"{\"method\":\"app.quit\"}\n");
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cell::Column;
+use crate::cell::{Column, TypeClass};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,68 +28,88 @@ pub enum RelKind {
     ForeignTable,
 }
 
-/// Whether Postgres computes a column's value, so that it takes no written value (an `UPDATE` or
-/// `INSERT` of one fails with SQLSTATE 428C9).
+/// Whether the engine computes a column's value, so that it takes no written value (on Postgres an
+/// `UPDATE` or `INSERT` of one fails with SQLSTATE 428C9).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Generated {
     /// An ordinary column; an identity `BY DEFAULT` or a default can be written over.
     #[default]
     No,
-    /// A generated column, `GENERATED ALWAYS AS (…)` (stored, or virtual on Postgres 18).
+    /// A generated column, `GENERATED ALWAYS AS (…)`, stored or virtual.
     Expression,
-    /// An identity column `GENERATED ALWAYS`.
+    /// A Postgres identity column `GENERATED ALWAYS`.
     Identity,
+}
+
+/// Whose operators dbee's own SQL names when it compares a column's values.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Operators {
+    /// None by a schema: the engine's operators have none (MySQL, SQLite).
+    #[default]
+    Unnamed,
+    /// The engine's built-in ones: on Postgres `pg_catalog`'s, for a base type (after domains) or
+    /// an array in `pg_catalog`, an enum, a range or a composite.
+    Builtin,
+    /// The base type's own: an extension's type (`citext`), or a domain over one. dbee compares
+    /// the values as `base`, the base type's SQL name, with the operators of its operator class
+    /// (`ops`), each named in its own schema, so none is looked up where someone else made one.
+    OfType { base: String, ops: TypeOperators },
+}
+
+/// A type's own comparisons, from its default btree operator class (`=` and `<>` from its hash
+/// class where it has no btree one; `<>` is the `=`'s negator): each operator as SQL names it, with
+/// its schema (`ext.=`), or `None` where the class has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeOperators {
+    pub eq: Option<String>,
+    pub ne: Option<String>,
+    pub lt: Option<String>,
+    pub le: Option<String>,
+    pub gt: Option<String>,
+    pub ge: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
     pub name: String,
-    /// `format_type` output: the type as the server names it, used in key casts (values use
-    /// [`write_type_sql`](Self::write_type_sql)).
+    /// The column's type as the server names it, used in key casts.
     pub type_sql: String,
-    pub type_oid: u32,
-    /// `pg_type.typname` of the base type.
+    /// The engine's own base type name (Postgres `pg_type.typname`), read only by that engine's
+    /// dialect and driver.
     pub base_type: String,
-    /// `pg_type.typcategory`.
-    pub category: char,
+    /// What the values are, for the grid, editors and copies.
+    pub class: TypeClass,
     pub not_null: bool,
     pub has_default: bool,
-    /// Postgres computes the value (`attgenerated`, `attidentity = 'a'`).
+    /// The engine computes the value (Postgres's `attgenerated` and `attidentity = 'a'`, a generated
+    /// column on MySQL, MariaDB and SQLite).
     #[serde(default)]
     pub generated: Generated,
+    /// A column the engine keeps out of sight (a SQLite hidden column): the grid, sort, filters and
+    /// copies leave it out, and a page reads it only when it is part of the row key.
+    #[serde(default)]
+    pub hidden: bool,
+    /// The type as the user reads it: on Postgres `type_sql` without a schema that is on the
+    /// session's search path, as Postgres itself shows it; empty means `type_sql`.
+    #[serde(default)]
+    pub type_label: String,
+    /// Whose operators compare the column's values, which dbee's own SQL names.
+    #[serde(default)]
+    pub operators: Operators,
 }
 
 impl ColumnInfo {
-    /// Clearing a string-category cell stages `''`; any other type stages NULL.
+    /// Clearing a text cell stages `''`; any other class stages NULL.
     pub fn clears_to_null(&self) -> bool {
-        self.category != 'S'
+        !matches!(self.class, TypeClass::Text | TypeClass::LongText)
     }
 
-    /// The type a value to write is cast to. Postgres defines an explicit cast to
-    /// `varchar(n)`, `char(n)` and `bit varying(n)` as cutting the value to the length, and to
-    /// `bit(n)` as cutting or padding it, without an error; only the assignment to the column (or
-    /// to a domain over such a type) refuses a value that does not fit. So these, their arrays
-    /// and domains over them are cast to the type without its length: `text`, `bit varying`,
-    /// `text[]` or `bit varying[]`. Every other type is cast to [`type_sql`](Self::type_sql)
-    /// itself. A key value the server sent fits its column, so key comparisons keep `type_sql`.
-    /// Filters use these types too, except for `char(n)`, `bit(n)` and the arrays of
-    /// `varchar(n)`, `char(n)` and `bit(n)`, which they compare as `bpchar`, `"bit"`,
-    /// `character varying[]`, `bpchar[]` and `"bit"[]` to keep the column's operators and indexes
-    /// (`dbee_sql::filter`).
-    pub fn write_type_sql(&self) -> &str {
-        match self.base_type.as_str() {
-            "varchar" | "bpchar" => "text",
-            "bit" | "varbit" => "bit varying",
-            "_varchar" | "_bpchar" => "text[]",
-            "_bit" | "_varbit" => "bit varying[]",
-            _ => &self.type_sql,
-        }
-    }
-
-    /// Why the column's cells cannot be edited, or `None` when they can: Postgres computes the
-    /// value of a generated column and of an identity column `GENERATED ALWAYS`.
+    /// Why the column's cells cannot be edited, or `None` when they can: the engine computes the
+    /// value of a generated column, and Postgres that of an identity column `GENERATED ALWAYS`.
     pub fn not_editable(&self) -> Option<&'static str> {
         match self.generated {
             Generated::No => None,
@@ -98,13 +118,19 @@ impl ColumnInfo {
         }
     }
 
-    /// Editors for these types take Enter as a newline.
+    /// Editors for these classes take Enter as a newline.
     pub fn multiline(&self) -> bool {
-        matches!(self.base_type.as_str(), "text" | "json" | "jsonb" | "xml")
+        matches!(self.class, TypeClass::LongText | TypeClass::Json)
     }
 
     pub fn column(&self) -> Column {
-        Column { name: self.name.clone(), base_type: self.base_type.clone(), type_label: self.type_sql.clone() }
+        Column { name: self.name.clone(), base_type: self.base_type.clone(), type_label: self.label().to_owned(), class: self.class }
+    }
+
+    /// The type as the user reads it: [`ColumnInfo::type_label`], or `type_sql` when that is
+    /// empty. Every display of a column's type reads this.
+    pub fn label(&self) -> &str {
+        if self.type_label.is_empty() { &self.type_sql } else { &self.type_label }
     }
 }
 
@@ -127,13 +153,18 @@ pub struct TableInfo {
     pub unique_keys: Vec<Vec<String>>,
     pub foreign_keys: Vec<ForeignKey>,
     pub estimated_rows: Option<u64>,
+    /// Why the grid cannot edit this table, whatever its keys (for example an engine that cannot
+    /// undo a write). `None` when it can.
+    #[serde(default)]
+    pub no_edit_reason: Option<String>,
 }
 
 impl TableInfo {
     /// The primary key, else the first unique key whose columns are all NOT NULL.
-    /// `None` for views and other relations that cannot be edited, or when there is no key.
+    /// `None` for views and other relations that cannot be edited, for a table with a
+    /// [`no_edit_reason`](Self::no_edit_reason), or when there is no key.
     pub fn row_key(&self) -> Option<Vec<&ColumnInfo>> {
-        if !matches!(self.kind, RelKind::Table | RelKind::PartitionedTable) {
+        if self.no_edit_reason.is_some() || !matches!(self.kind, RelKind::Table | RelKind::PartitionedTable) {
             return None;
         }
         let lookup = |names: &[String]| -> Option<Vec<&ColumnInfo>> {
@@ -150,6 +181,29 @@ impl TableInfo {
 
     pub fn column(&self, name: &str) -> Option<&ColumnInfo> {
         self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// The columns the grid shows, and that sort, filters, copies and the value view know: every
+    /// column but the hidden ones. The one place that decides what is visible.
+    pub fn visible_columns(&self) -> impl Iterator<Item = &ColumnInfo> {
+        self.columns.iter().filter(|c| !c.hidden)
+    }
+
+    /// The visible column named `name`.
+    pub fn visible_column(&self, name: &str) -> Option<&ColumnInfo> {
+        self.visible_columns().find(|c| c.name == name)
+    }
+
+    /// The columns a page reads: the visible ones in order, then the row key's columns that are
+    /// not visible (a SQLite rowid), which the page keeps for its edits.
+    pub fn page_columns(&self) -> Vec<&ColumnInfo> {
+        let mut page: Vec<&ColumnInfo> = self.visible_columns().collect();
+        for key in self.row_key().unwrap_or_default() {
+            if !page.iter().any(|c| c.name == key.name) {
+                page.push(key);
+            }
+        }
+        page
     }
 
     /// The foreign key that includes `column`.
@@ -170,6 +224,9 @@ pub struct SchemaInfo {
 #[serde(rename_all = "camelCase")]
 pub struct Catalog {
     pub schemas: Vec<SchemaInfo>,
+    /// The schema to show first, as the driver names it (Postgres `public`), when it exists.
+    #[serde(default)]
+    pub default_schema: Option<String>,
 }
 
 impl Catalog {
@@ -213,12 +270,14 @@ mod tests {
         ColumnInfo {
             name: name.into(),
             type_sql: "text".into(),
-            type_oid: 25,
             base_type: "text".into(),
-            category: 'S',
+            class: TypeClass::Text,
             not_null,
             has_default: false,
             generated: Generated::No,
+            hidden: false,
+            type_label: String::new(),
+            operators: Operators::Unnamed,
         }
     }
     fn table(schema: &str, name: &str) -> TableInfo {
@@ -230,6 +289,7 @@ mod tests {
             unique_keys: vec![],
             foreign_keys: vec![],
             estimated_rows: None,
+            no_edit_reason: None,
         }
     }
     fn names(v: Vec<&ColumnInfo>) -> Vec<&str> {
@@ -261,25 +321,58 @@ mod tests {
     }
 
     #[test]
-    fn clearing_rules() {
-        let mut c = col("x", false);
-        c.category = 'S';
-        assert!(!c.clears_to_null());
-        for cat in ['N', 'D', 'B', 'U', 'E'] {
-            c.category = cat;
-            assert!(c.clears_to_null(), "{cat}");
+    fn hidden_columns_are_left_out_and_a_page_reads_the_key_too() {
+        let mut t = table("main", "notes");
+        t.columns.insert(0, ColumnInfo { hidden: true, ..col("rowid", true) });
+        t.columns.push(ColumnInfo { hidden: true, ..col("rank", false) });
+        assert_eq!(t.visible_columns().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "email", "nick"]);
+        assert!(t.visible_column("rowid").is_none() && t.visible_column("rank").is_none());
+        assert_eq!(t.visible_column("email").map(|c| c.name.as_str()), Some("email"));
+        assert!(t.column("rowid").is_some(), "the catalog keeps every column");
+        // A page reads what shows, then the key's hidden columns; never another hidden one.
+        assert_eq!(names(t.page_columns()), ["id", "email", "nick"]);
+        t.primary_key = vec!["rowid".into()];
+        assert_eq!(names(t.page_columns()), ["id", "email", "nick", "rowid"]);
+        t.primary_key = vec!["email".into(), "rowid".into()];
+        assert_eq!(names(t.page_columns()), ["id", "email", "nick", "rowid"]);
+        t.primary_key = vec!["id".into()];
+        assert_eq!(names(t.page_columns()), ["id", "email", "nick"]);
+    }
+
+    #[test]
+    fn classes_drive_clearing_and_lines() {
+        let info = |class| ColumnInfo { class, ..col("x", false) };
+        assert!(!info(TypeClass::Text).clears_to_null());
+        assert!(!info(TypeClass::LongText).clears_to_null());
+        for class in [TypeClass::Number, TypeClass::Bool, TypeClass::Json, TypeClass::DateTime, TypeClass::Binary, TypeClass::Other] {
+            assert!(info(class).clears_to_null(), "{class:?}");
         }
-        for (ty, multi) in
-            [("text", true), ("json", true), ("jsonb", true), ("xml", true), ("varchar", false), ("int4", false), ("bytea", false), ("_text", false)]
-        {
-            c.base_type = ty.into();
-            assert_eq!(c.multiline(), multi, "{ty}");
+        assert!(info(TypeClass::Json).multiline());
+        assert!(info(TypeClass::LongText).multiline());
+        for class in [TypeClass::Text, TypeClass::Number, TypeClass::Bool, TypeClass::DateTime, TypeClass::Binary, TypeClass::Other] {
+            assert!(!info(class).multiline(), "{class:?}");
         }
-        c.name = "n".into();
+        let mut c = col("n", false);
         c.type_sql = "character varying(200)".into();
         c.base_type = "varchar".into();
         let col = c.column();
-        assert_eq!((col.name.as_str(), col.base_type.as_str(), col.type_label.as_str()), ("n", "varchar", "character varying(200)"));
+        assert_eq!(
+            (col.name.as_str(), col.base_type.as_str(), col.type_label.as_str(), col.class),
+            ("n", "varchar", "character varying(200)", TypeClass::Text)
+        );
+    }
+
+    #[test]
+    fn no_edit_reason_blocks_row_key() {
+        let mut t = table("shop", "users");
+        t.primary_key = vec!["id".into()];
+        assert!(t.row_key().is_some());
+        t.no_edit_reason = Some("The MyISAM table engine can't undo a write".into());
+        assert!(t.row_key().is_none());
+        // Catalogs saved before the field existed have none.
+        let mut j = serde_json::to_value(table("shop", "users")).unwrap();
+        j.as_object_mut().unwrap().remove("noEditReason");
+        assert_eq!(serde_json::from_value::<TableInfo>(j).unwrap().no_edit_reason, None);
     }
 
     fn catalog() -> Catalog {
@@ -288,6 +381,7 @@ mod tests {
                 SchemaInfo { name: "pg_catalog".into(), system: true, tables: vec![table("pg_catalog", "pg_class")] },
                 SchemaInfo { name: "shop".into(), system: false, tables: vec![table("shop", "orders"), table("shop", "items")] },
             ],
+            default_schema: None,
         }
     }
 
@@ -323,36 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn write_type_drops_the_lengths_an_explicit_cast_cuts_to() {
-        let typed = |base: &str, type_sql: &str| ColumnInfo { type_sql: type_sql.into(), base_type: base.into(), ..col("x", false) };
-        for (base, type_sql, write) in [
-            ("varchar", "character varying(10)", "text"),
-            ("varchar", "character varying", "text"),
-            ("bpchar", "character(2)", "text"),
-            ("bit", "bit(2)", "bit varying"),
-            ("varbit", "bit varying(2)", "bit varying"),
-            ("_varchar", "character varying(3)[]", "text[]"),
-            ("_bpchar", "character(2)[]", "text[]"),
-            ("_bit", "bit(2)[]", "bit varying[]"),
-            ("_varbit", "bit varying(2)[]", "bit varying[]"),
-            // A domain over varchar(5): the base type decides, the assignment to the column checks the domain.
-            ("varchar", "scratch.d5", "text"),
-            // Everything else is written as its own type.
-            ("text", "text", "text"),
-            ("int4", "integer", "integer"),
-            ("numeric", "numeric(12,2)", "numeric(12,2)"),
-            ("timestamp", "timestamp(3) without time zone", "timestamp(3) without time zone"),
-            ("char", "\"char\"", "\"char\""),
-            ("_text", "text[]", "text[]"),
-            ("order_status", "shop.order_status", "shop.order_status"),
-        ] {
-            let c = typed(base, type_sql);
-            assert_eq!(c.write_type_sql(), write, "{base} {type_sql}");
-            assert_eq!(c.type_sql, type_sql, "the type itself is unchanged");
-        }
-    }
-
-    #[test]
     fn fk_lookup_and_serde() {
         let mut t = table("shop", "orders");
         t.foreign_keys = vec![ForeignKey {
@@ -368,10 +432,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "timing; run with --ignored --nocapture"]
     fn filter_1000_tables_within_a_frame() {
         let tables: Vec<TableInfo> = (0..1000).map(|i| table("public", &format!("Table_{i}_Name"))).collect();
-        let c = Catalog { schemas: vec![SchemaInfo { name: "public".into(), system: false, tables }] };
+        let c = Catalog { schemas: vec![SchemaInfo { name: "public".into(), system: false, tables }], default_schema: None };
         let mut times: Vec<f64> = (0..100)
             .map(|_| {
                 let start = Instant::now();

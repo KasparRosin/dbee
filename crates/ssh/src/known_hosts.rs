@@ -1,11 +1,19 @@
-//! Host key check against `known_hosts`: known, unknown (asks once and can be learned) or
-//! changed (refused, never overridable).
+//! Host key check against `known_hosts`: known, unknown (asks once and can be learned),
+//! changed, of another type than the one recorded, or revoked (all refused, never overridable).
+//!
+//! The file is read as OpenSSH reads it: fields split on spaces and tabs, `@revoked` and
+//! `@cert-authority` markers, comma lists with `!` and the wildcards `*` and `?`, hashed names
+//! (`|1|salt|hash`), names compared without regard to case. Not read: `/etc/ssh/ssh_known_hosts`
+//! (docs/gaps.md).
 
 use std::path::Path;
 
+use data_encoding::BASE64_MIME;
+use hmac::{Hmac, KeyInit, Mac};
 use russh::Preferred;
-use russh::keys::known_hosts::{known_host_keys_path, learn_known_hosts_path};
-use russh::keys::{Algorithm, Error as KeyError, HashAlg, PublicKey, check_known_hosts_path};
+use russh::keys::known_hosts::learn_known_hosts_path;
+use russh::keys::{Algorithm, HashAlg, PublicKey, parse_public_key_base64};
+use sha1::Sha1;
 
 /// How `known_hosts` names an SSH server: `host` on port 22, else `[host]:port`.
 pub fn host_port(host: &str, port: u16) -> String {
@@ -36,6 +44,11 @@ pub(crate) enum Verdict {
     Unknown { key_type: String, fingerprint: String },
     /// Another key of the same type is recorded at this 1-based line of the file.
     Changed { line: usize },
+    /// Keys of other types only are recorded for this host: what a man in the middle that
+    /// cannot show the recorded key looks like. Never overridable.
+    OtherType { key_type: String, recorded: Vec<String>, lines: Vec<usize> },
+    /// This key is marked `@revoked` for this host at this 1-based line.
+    Revoked { line: usize },
     /// `known_hosts` exists but could not be read, or a line for this host is malformed.
     Failed(String),
     /// The server offered something this client does not check (a host certificate).
@@ -48,62 +61,172 @@ impl Verdict {
     }
 }
 
-/// Check `key` for `host:port` against `file`; with `trust` equal to the key's fingerprint an
-/// unknown key is learned. A changed key is refused whatever `trust` says.
-pub(crate) fn check(host: &str, port: u16, key: &PublicKey, file: Option<&Path>, trust: Option<&str>) -> Verdict {
-    // russh reads a file it cannot open as an empty one, which would let a changed key pass as an
-    // unknown one: a file that exists but cannot be read is a failure.
-    if let Some(f) = file
-        && let Err(e) = std::fs::File::open(f)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Verdict::Failed(format!("{} cannot be read ({e})", f.display()));
-    }
-    let recorded = match file {
-        Some(f) => check_known_hosts_path(host, port, key, f),
-        None => Ok(false),
-    };
-    match recorded {
-        Ok(true) => Verdict::Known,
-        Ok(false) => {
-            let fingerprint = fingerprint(key);
-            if trust != Some(fingerprint.as_str()) {
-                return Verdict::Unknown { key_type: key_type(key), fingerprint };
-            }
-            let Some(f) = file else { return Verdict::Trusted { unsaved: None } };
-            match learn_known_hosts_path(host, port, key, f) {
-                Ok(()) => Verdict::Learned,
-                Err(e) => {
-                    log::warn!("ssh: could not save the host key of {} to known_hosts", host_port(host, port));
-                    let entry = host_port(host, port);
-                    Verdict::Trusted {
-                        unsaved: Some(format!(
-                            "The host key of {entry} is trusted for this connection only: saving it to {} failed ({e}).",
-                            f.display()
-                        )),
-                    }
-                }
-            }
-        }
-        Err(KeyError::KeyChanged { line }) => Verdict::Changed { line: file.map_or(line, |f| file_line(f, line)) },
-        Err(e) => Verdict::Failed(e.to_string()),
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    None,
+    Revoked,
+    CertAuthority,
 }
 
-/// russh numbers only the lines that do not start with `#`; turn its number into the line number
-/// in the file, so the message points at the line to remove.
-fn file_line(file: &Path, counted: usize) -> usize {
-    let Ok(bytes) = std::fs::read(file) else { return counted };
-    let mut seen = 0usize;
-    for (i, line) in bytes.split(|b| *b == b'\n').enumerate() {
-        if line.first() != Some(&b'#') {
-            seen = seen.saturating_add(1);
-            if seen == counted {
-                return i.saturating_add(1);
+struct Entry {
+    line: usize,
+    marker: Marker,
+    key: PublicKey,
+}
+
+/// The entries of `file` for `host:port`. `Err` when the file cannot be read, or a line for this
+/// host holds no key.
+fn entries_for(host: &str, port: u16, file: &Path) -> Result<Vec<Entry>, String> {
+    let bytes = match std::fs::read(file) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("{} cannot be read ({e})", file.display())),
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let name = host_port(host, port).to_lowercase();
+    let mut found = Vec::new();
+    for (i, raw) in text.split('\n').enumerate() {
+        let line = i.saturating_add(1);
+        let mut fields = raw.split([' ', '\t', '\r']).filter(|f| !f.is_empty());
+        let Some(mut first) = fields.next() else { continue };
+        if first.starts_with('#') {
+            continue;
+        }
+        let marker = match first {
+            "@revoked" => Marker::Revoked,
+            "@cert-authority" => Marker::CertAuthority,
+            m if m.starts_with('@') => continue,
+            _ => Marker::None,
+        };
+        if marker != Marker::None {
+            let Some(names) = fields.next() else { continue };
+            first = names;
+        }
+        if !names_match(first, &name) {
+            continue;
+        }
+        let (Some(_type), Some(encoded)) = (fields.next(), fields.next()) else {
+            return Err(format!("line {line} of {} has no key", file.display()));
+        };
+        if BASE64_MIME.decode(encoded.as_bytes()).is_err() {
+            return Err(format!("line {line} of {} holds a key that is not base64", file.display()));
+        }
+        // A key type dbee does not know (a security-key type, say) is no key to compare.
+        if let Ok(key) = parse_public_key_base64(encoded) {
+            found.push(Entry { line, marker, key });
+        }
+    }
+    Ok(found)
+}
+
+/// Whether the names field of a `known_hosts` line covers `name` (lower case): a hashed name, or
+/// a comma list of patterns where `!` excludes.
+fn names_match(field: &str, name: &str) -> bool {
+    if field.starts_with("|1|") {
+        return hashed_match(field, name);
+    }
+    let mut matched = false;
+    for pattern in field.split(',') {
+        let (negated, pattern) = match pattern.strip_prefix('!') {
+            Some(p) => (true, p),
+            None => (false, pattern),
+        };
+        if wildcard(&pattern.to_lowercase(), name) {
+            if negated {
+                return false;
+            }
+            matched = true;
+        }
+    }
+    matched
+}
+
+fn hashed_match(field: &str, name: &str) -> bool {
+    let mut parts = field.split('|').skip(2);
+    let (Some(Ok(salt)), Some(Ok(hash))) =
+        (parts.next().map(|p| BASE64_MIME.decode(p.as_bytes())), parts.next().map(|p| BASE64_MIME.decode(p.as_bytes())))
+    else {
+        return false;
+    };
+    Hmac::<Sha1>::new_from_slice(&salt).is_ok_and(|mac| mac.chain_update(name).verify_slice(&hash).is_ok())
+}
+
+/// `pattern` with `*` (any run) and `?` (one character) against `text`; no backtracking beyond
+/// the last `*`, so no input makes it slow.
+fn wildcard(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        match p.get(pi) {
+            Some('*') => {
+                star = Some((pi, ti));
+                pi = pi.saturating_add(1);
+            }
+            Some(c) if *c == '?' || Some(c) == t.get(ti) => {
+                pi = pi.saturating_add(1);
+                ti = ti.saturating_add(1);
+            }
+            _ => match star {
+                Some((sp, st)) => {
+                    pi = sp.saturating_add(1);
+                    ti = st.saturating_add(1);
+                    star = Some((sp, ti));
+                }
+                None => return false,
+            },
+        }
+    }
+    p.iter().skip(pi).all(|c| *c == '*')
+}
+
+/// Check `key` for `host:port` against `file`; with `trust` equal to the key's fingerprint an
+/// unknown key is learned. A changed, other-type or revoked key is refused whatever `trust` says.
+pub(crate) fn check(host: &str, port: u16, key: &PublicKey, file: Option<&Path>, trust: Option<&str>) -> Verdict {
+    // A name that `known_hosts` cannot hold would write a line that vouches for other hosts.
+    if !dbee_config::is_host_name(host) {
+        return Verdict::Failed(format!("{host:?} is not a host name or an IP address"));
+    }
+    let recorded = match file.map(|f| entries_for(host, port, f)) {
+        Some(Ok(entries)) => entries,
+        Some(Err(m)) => return Verdict::Failed(m),
+        None => Vec::new(),
+    };
+    if let Some(revoked) = recorded.iter().find(|e| e.marker == Marker::Revoked && e.key == *key) {
+        return Verdict::Revoked { line: revoked.line };
+    }
+    let keys: Vec<&Entry> = recorded.iter().filter(|e| e.marker == Marker::None).collect();
+    if keys.iter().any(|e| e.key == *key) {
+        return Verdict::Known;
+    }
+    if let Some(same_type) = keys.iter().find(|e| e.key.algorithm() == key.algorithm()) {
+        return Verdict::Changed { line: same_type.line };
+    }
+    if !keys.is_empty() {
+        let mut types: Vec<String> = Vec::new();
+        for e in &keys {
+            let t = key_type(&e.key);
+            if !types.contains(&t) {
+                types.push(t);
+            }
+        }
+        return Verdict::OtherType { key_type: key_type(key), recorded: types, lines: keys.iter().map(|e| e.line).collect() };
+    }
+    let fingerprint = fingerprint(key);
+    if trust != Some(fingerprint.as_str()) {
+        return Verdict::Unknown { key_type: key_type(key), fingerprint };
+    }
+    let Some(f) = file else { return Verdict::Trusted { unsaved: None } };
+    match learn_known_hosts_path(host, port, key, f) {
+        Ok(()) => Verdict::Learned,
+        Err(e) => {
+            log::warn!("ssh: could not save the host key of {} to known_hosts", host_port(host, port));
+            let entry = host_port(host, port);
+            Verdict::Trusted {
+                unsaved: Some(format!("The host key of {entry} is trusted for this connection only: saving it to {} failed ({e}).", f.display())),
             }
         }
     }
-    counted
 }
 
 /// russh's host key algorithms, with the types `file` records for this host first (as OpenSSH
@@ -111,13 +234,13 @@ fn file_line(file: &Path, counted: usize) -> usize {
 /// about another. Without a file, or when it cannot be read, the default order.
 pub(crate) fn preferred_key_algorithms(host: &str, port: u16, file: Option<&Path>) -> Vec<Algorithm> {
     let default: Vec<Algorithm> = Preferred::DEFAULT.key.to_vec();
-    let recorded = match file.map(|f| known_host_keys_path(host, port, f)) {
-        Some(Ok(keys)) => keys,
+    let recorded = match file.map(|f| entries_for(host, port, f)) {
+        Some(Ok(entries)) => entries,
         _ => return default,
     };
     let mut order: Vec<Algorithm> = Vec::with_capacity(default.len());
-    for (_, key) in &recorded {
-        let alg = key.algorithm();
+    for entry in recorded.iter().filter(|e| e.marker == Marker::None) {
+        let alg = entry.key.algorithm();
         for a in &default {
             let same = *a == alg || (matches!(a, Algorithm::Rsa { .. }) && matches!(alg, Algorithm::Rsa { .. }));
             if same && !order.contains(a) {
@@ -137,7 +260,6 @@ pub(crate) fn preferred_key_algorithms(host: &str, port: u16, file: Option<&Path
 mod tests {
     use super::*;
     use dbee_testkit::temp_home;
-    use russh::keys::parse_public_key_base64;
 
     const K1: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIAJ8AonQpGdILvxzaGZgY9v2ImqeHwRkUXrAJ3pR4KLE";
     const K1_FP: &str = "SHA256:LL6CACwW9o4ABCBREsVMKKD+US+WvvnaxKCsi9qONWo";
@@ -189,13 +311,76 @@ mod tests {
         assert_eq!(check("h", 2222, &k1, Some(&file), Some(K1_FP)), Verdict::Changed { line: 4 });
         assert_eq!(std::fs::read_to_string(&file).unwrap(), changed);
 
-        // A recorded key of another type only: unknown, not changed.
-        std::fs::write(&file, format!("[h]:2222 ecdsa-sha2-nistp256 {ECDSA}\n")).unwrap();
-        assert_eq!(check("h", 2222, &k1, Some(&file), None), unknown);
+        // A recorded key of another type only: refused, whatever `trust` says, and nothing is learned.
+        let other = format!("[h]:2222 ecdsa-sha2-nistp256 {ECDSA}\n");
+        std::fs::write(&file, &other).unwrap();
+        let refused = Verdict::OtherType { key_type: "ssh-ed25519".into(), recorded: vec!["ecdsa-sha2-nistp256".into()], lines: vec![1] };
+        assert_eq!(check("h", 2222, &k1, Some(&file), None), refused);
+        assert_eq!(check("h", 2222, &k1, Some(&file), Some(K1_FP)), refused);
+        assert!(!refused.accepts());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), other);
 
         // A broken line for this host is a known_hosts problem.
         std::fs::write(&file, "[h]:2222 ssh-ed25519 !!!\n").unwrap();
         assert!(matches!(check("h", 2222, &k1, Some(&file), None), Verdict::Failed(_)));
+    }
+
+    #[test]
+    fn the_file_is_read_as_openssh_reads_it() {
+        let home = temp_home(None, None);
+        let file = home.ssh_dir().join("known_hosts");
+        let k1 = parse_public_key_base64(K1).unwrap();
+        let k2 = parse_public_key_base64(K2).unwrap();
+        let verdict = |text: String, key: &PublicKey| {
+            std::fs::write(&file, text).unwrap();
+            check("h", 2222, key, Some(&file), None)
+        };
+        // Tabs separate the fields; the line number is the file's.
+        assert_eq!(verdict(format!("# c\n\n[h]:2222\tssh-ed25519\t{K2}\n"), &k1), Verdict::Changed { line: 3 });
+        assert_eq!(verdict(format!("[h]:2222\tssh-ed25519\t{K1}\n"), &k1), Verdict::Known);
+        assert_eq!(verdict(format!("  [h]:2222 \t ssh-ed25519 {K1} a comment\r\n"), &k1), Verdict::Known);
+        // A revoked key is refused, with or without a trusted fingerprint; others are not revoked.
+        let revoked = format!("@revoked [h]:2222 ssh-ed25519 {K1}\n");
+        assert_eq!(verdict(revoked.clone(), &k1), Verdict::Revoked { line: 1 });
+        std::fs::write(&file, &revoked).unwrap();
+        assert_eq!(check("h", 2222, &k1, Some(&file), Some(K1_FP)), Verdict::Revoked { line: 1 });
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), revoked);
+        assert!(matches!(verdict(format!("@revoked\t[h]:2222\tssh-ed25519\t{K1}\n"), &k1), Verdict::Revoked { .. }));
+        assert!(matches!(verdict(revoked, &k2), Verdict::Unknown { .. }));
+        // A certificate authority is no host key: the line neither vouches for a key nor changes it.
+        assert!(matches!(verdict(format!("@cert-authority [h]:2222 ssh-ed25519 {K2}\n"), &k1), Verdict::Unknown { .. }));
+        // Names compare without regard to case, with wildcards and exclusions.
+        assert_eq!(verdict(format!("[H]:2222 ssh-ed25519 {K1}\n"), &k1), Verdict::Known);
+        assert_eq!(verdict(format!("[*]:2222 ssh-ed25519 {K1}\n"), &k1), Verdict::Known);
+        assert_eq!(verdict(format!("[?]:2222,other ssh-ed25519 {K1}\n"), &k1), Verdict::Known);
+        assert!(matches!(verdict(format!("*,![h]:2222 ssh-ed25519 {K1}\n"), &k1), Verdict::Unknown { .. }));
+        // Hashed names (the salt and hash of `[h]:2222`).
+        let mac = {
+            let salt = b"0123456789abcdefghij";
+            let mut m = Hmac::<Sha1>::new_from_slice(salt).unwrap();
+            m.update(b"[h]:2222");
+            format!("|1|{}|{}", data_encoding::BASE64.encode(salt), data_encoding::BASE64.encode(&m.finalize().into_bytes()))
+        };
+        assert_eq!(verdict(format!("{mac} ssh-ed25519 {K1}\n"), &k1), Verdict::Known);
+        assert_eq!(verdict(format!("{mac} ssh-ed25519 {K2}\n"), &k1), Verdict::Changed { line: 1 });
+        // Two keys of one type recorded (a rotation): the one shown is known.
+        assert_eq!(verdict(format!("[h]:2222 ssh-ed25519 {K2}\n[h]:2222 ssh-ed25519 {K1}\n"), &k1), Verdict::Known);
+        // A line for another host is none of this host's business, however broken.
+        assert!(matches!(verdict("other ssh-ed25519\n@odd x y z\n@revoked\n".into(), &k1), Verdict::Unknown { .. }));
+        // The wildcard matcher stays quick on a hostile pattern.
+        assert!(!wildcard(&"*a".repeat(2000), &"b".repeat(4000)));
+    }
+
+    #[test]
+    fn a_host_known_hosts_cannot_hold_is_refused_before_anything_is_written() {
+        let home = temp_home(None, None);
+        let file = home.ssh_dir().join("known_hosts");
+        let k1 = parse_public_key_base64(K1).unwrap();
+        for host in ["a,b", "a b", "a\nb", "#a", "[a]", ""] {
+            let v = check(host, 2222, &k1, Some(&file), Some(K1_FP));
+            assert!(matches!(v, Verdict::Failed(_)), "{host:?}: {v:?}");
+        }
+        assert!(!file.exists());
     }
 
     #[cfg(unix)]

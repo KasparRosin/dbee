@@ -36,8 +36,9 @@ pub struct ValueView {
     pub type_label: String,
     #[serde(serialize_with = "kind_id")]
     pub kind: JsonKind,
-    /// `jsonb`, `json`, `text containing JSON`, `JSON string containing JSON`, or `""`.
-    pub kind_label: &'static str,
+    /// A JSON column's type as the engine names it (`jsonb`; `json` when it names none), `text
+    /// containing JSON`, `JSON string containing JSON`, or `""`.
+    pub kind_label: String,
     /// Pretty when the value is JSON and under the cap (for a `JsonStringContainingJson`, the
     /// decoded inner document pretty-printed), else the raw text cut to the cap on a character
     /// boundary. Empty for NULL.
@@ -53,7 +54,6 @@ pub struct ValueView {
 
 fn kind_id<S: Serializer>(kind: &JsonKind, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(match kind {
-        JsonKind::Jsonb => "jsonb",
         JsonKind::Json => "json",
         JsonKind::TextContainingJson => "textContainingJson",
         JsonKind::JsonStringContainingJson => "jsonStringContainingJson",
@@ -78,7 +78,7 @@ impl ValueView {
             column: column.name.clone(),
             type_label: column.type_label.clone(),
             kind: JsonKind::NotJson,
-            kind_label: "",
+            kind_label: String::new(),
             text: String::new(),
             pretty: false,
             truncated: false,
@@ -89,15 +89,11 @@ impl ValueView {
         if raw.len() > VALUE_VIEW_MAX_BYTES {
             // Too long to pretty-print (`json::pretty` gives up above the cap), so the start of
             // the raw text; the kind is the column's, without walking 20 MB again.
-            view.kind = match column.base_type.as_str() {
-                "jsonb" => JsonKind::Jsonb,
-                "json" => JsonKind::Json,
-                _ => JsonKind::NotJson,
-            };
+            view.kind = json::column_kind(column);
             view.text = cut(raw, VALUE_VIEW_MAX_BYTES).to_owned();
             view.truncated = true;
         } else {
-            view.kind = json::classify(&column.base_type, raw);
+            view.kind = json::classify(column, raw);
             let pretty = match view.kind {
                 JsonKind::NotJson => None,
                 JsonKind::JsonStringContainingJson => json::decoded_inner(raw).and_then(|inner| json::pretty(&inner)),
@@ -106,7 +102,10 @@ impl ValueView {
             view.pretty = pretty.is_some();
             view.text = pretty.unwrap_or_else(|| raw.to_owned());
         }
-        view.kind_label = view.kind.label();
+        view.kind_label = match view.kind {
+            JsonKind::Json if !column.type_label.is_empty() => column.type_label.clone(),
+            kind => kind.label().to_owned(),
+        };
         view
     }
 }
@@ -244,16 +243,23 @@ pub(crate) fn selection_json(tab: Option<&Tab>) -> Json {
 mod tests {
     use super::*;
     use crate::state::{QueryTab, StatementOutcome};
+    use dbee_core::TypeClass;
 
     fn col(name: &str, base: &str) -> Column {
-        Column { name: name.into(), base_type: base.into(), type_label: base.into() }
+        let class = match base {
+            "int4" => TypeClass::Number,
+            "json" | "jsonb" => TypeClass::Json,
+            "text" => TypeClass::LongText,
+            _ => TypeClass::Other,
+        };
+        Column { name: name.into(), base_type: base.into(), type_label: base.into(), class }
     }
 
     #[test]
     fn cut_stays_on_a_character_boundary() {
         assert_eq!(cut("aé", 2), "a");
         assert_eq!(cut("aé", 3), "aé");
-        assert_eq!(cut("🐝🐝", 5), "🐝");
+        assert_eq!(cut("🐙🐙", 5), "🐙");
         assert_eq!(cut("abc", 0), "");
         assert_eq!(cut("abc", usize::MAX), "abc");
     }
@@ -261,9 +267,15 @@ mod tests {
     #[test]
     fn views_of_odd_values() {
         let v = ValueView::new(&col("j", "jsonb"), Some("{bad"));
-        assert_eq!((v.kind_label, v.pretty, v.text.as_str()), ("jsonb", false, "{bad"));
+        assert_eq!((v.kind, v.kind_label.as_str(), v.pretty, v.text.as_str()), (JsonKind::Json, "jsonb", false, "{bad"));
         let v = ValueView::new(&col("n", "int4"), Some("42"));
-        assert_eq!((v.kind_label, v.pretty, v.truncated, v.byte_len), ("", false, false, 2));
+        assert_eq!((v.kind_label.as_str(), v.pretty, v.truncated, v.byte_len), ("", false, false, 2));
+        // A JSON column's label is its type as the engine names it, `json` when it names none.
+        assert_eq!(ValueView::new(&col("j", "json"), Some("[1]")).kind_label, "json");
+        let unnamed = Column { type_label: String::new(), ..col("j", "jsonb") };
+        assert_eq!(ValueView::new(&unnamed, Some("[1]")).kind_label, "json");
+        let nested = ValueView::new(&col("j", "jsonb"), Some(r#""{\"a\":1}""#));
+        assert_eq!((nested.kind, nested.kind_label.as_str()), (JsonKind::JsonStringContainingJson, "JSON string containing JSON"));
         let long = "é".repeat(VALUE_VIEW_MAX_BYTES / 2 + 1);
         let v = ValueView::new(&col("t", "text"), Some(&long));
         assert!(v.truncated && v.text.len() <= VALUE_VIEW_MAX_BYTES && v.byte_len == long.len());
@@ -281,7 +293,7 @@ mod tests {
         assert_eq!(s, expected);
         let v = ValueView::new(&col("j", "jsonb"), Some(r#"{"a":1}"#));
         let expected = serde_json::json!({
-            "column": "j", "typeLabel": "jsonb", "kind": "jsonb", "kindLabel": "jsonb", "text": v.text,
+            "column": "j", "typeLabel": "jsonb", "kind": "json", "kindLabel": "jsonb", "text": v.text,
             "pretty": true, "truncated": false, "isNull": false, "bytes": 7, "textCut": false,
         });
         assert_eq!(summary(&v), expected);
@@ -306,6 +318,7 @@ mod tests {
             rows_seen: 2,
             complete: true,
             rows_affected: None,
+            database_after: Default::default(),
         };
         let mut q = QueryTab::new(TabId(1), "q".into(), String::new());
         q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs) });

@@ -1,4 +1,4 @@
-use dbee_config::store::{FILE, MAX_RECENT};
+use dbee_config::store::{FILE, LOCK_FILE, MAX_RECENT};
 use dbee_config::*;
 
 #[test]
@@ -15,7 +15,7 @@ fn url_ipv6_and_bad_scheme() {
     assert_eq!(parse_url("postgres://[::1]/x").unwrap().host.as_deref(), Some("::1"));
     let u = parse_url("postgres://[::1]:5433/x").unwrap();
     assert_eq!((u.host.as_deref(), u.port), (Some("::1"), Some(5433)));
-    assert!(parse_url("mysql://x").is_err());
+    assert!(parse_url("oracle://x").is_err());
     assert!(parse_url("postgres://h:notaport/x").is_err());
     assert!(parse_url("postgres://h/x?sslmode=bogus").is_err());
     assert!(parse_url("postgres://u%zz@h/x").is_err());
@@ -67,9 +67,54 @@ fn serde_shapes() {
 }
 
 #[test]
+fn a_host_is_a_name_or_an_address_nothing_known_hosts_could_misread() {
+    let bad = ["a,b", "a b", "a\nb", "#a", "[a]", "a\tb", "a/b", "a:22", "[::1]", "fe80::1%", "fe80::1%a b", "1.2.3.4%eth0", "a\u{0}b"];
+    for h in bad {
+        for kind in [DbKind::Postgres, DbKind::MySql] {
+            let db = ConnectionConfig { kind, host: h.into(), ..ConnectionConfig::default() };
+            let e = db.validate().unwrap_err().to_string();
+            assert!(e.contains("The host can hold only"), "{kind:?} database host {h:?}: {e}");
+        }
+        let ssh = SshConfig { host: h.into(), user: "u".into(), ..SshConfig::default() };
+        let c = ConnectionConfig { ssh: Some(ssh), ..ConnectionConfig::default() };
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("The SSH host can hold only") && !e.contains('`'), "SSH host {h:?}: {e}");
+    }
+    for h in ["db.example.com", "localhost", "127.0.0.1", "::1", "2001:db8::7", "my_host-1", "bücher.example"] {
+        let ssh = SshConfig { host: h.into(), user: "u".into(), ..SshConfig::default() };
+        let c = ConnectionConfig { host: h.into(), ssh: Some(ssh), ..ConnectionConfig::default() };
+        assert!(c.validate().is_ok(), "{h:?}");
+    }
+}
+
+#[test]
+fn a_zone_id_and_a_socket_folder_are_database_hosts_only() {
+    let db = |kind, host: &str, ssh: Option<SshConfig>| ConnectionConfig { kind, host: host.into(), ssh, ..ConnectionConfig::default() };
+    let jump = |host: &str| Some(SshConfig { host: host.into(), user: "u".into(), ..SshConfig::default() });
+    // A zone id goes to the name lookup, never into known_hosts.
+    for kind in [DbKind::Postgres, DbKind::MySql, DbKind::MariaDb] {
+        assert!(db(kind, "fe80::1%eth0", None).validate().is_ok(), "{kind:?}");
+        assert!(db(kind, "fe80::1%eth0", jump("jump")).validate().is_ok(), "{kind:?}");
+    }
+    assert!(db(DbKind::Postgres, "jump", jump("fe80::1%eth0")).validate().is_err(), "not as an SSH host");
+    // A socket folder, where the type says it takes one and there is no tunnel.
+    assert!(db(DbKind::Postgres, "/var/run/postgresql", None).validate().is_ok());
+    assert!(db(DbKind::Postgres, "/tmp/with space/pg", None).validate().is_ok());
+    assert!(db(DbKind::Postgres, "/var/run/postgresql", jump("jump")).validate().is_err());
+    assert!(db(DbKind::Postgres, "/tmp/a\nb", None).validate().is_err());
+    assert!(db(DbKind::Postgres, "a/b", None).validate().is_err());
+    for kind in [DbKind::MySql, DbKind::MariaDb] {
+        assert!(db(kind, "/var/run/mysqld", None).validate().is_err(), "{kind:?}");
+    }
+    assert!(db(DbKind::Postgres, "jump", jump("/var/run")).validate().is_err(), "not as an SSH host");
+}
+
+#[test]
 fn display_name_and_validate() {
     let mut c = ConnectionConfig { user: "ann".into(), database: "shop".into(), ..ConnectionConfig::default() };
     assert_eq!(c.display_name(), "ann@localhost/shop");
+    let no_database = ConnectionConfig { database: String::new(), ..c.clone() };
+    assert_eq!(no_database.display_name(), "ann@localhost", "no slash without a database");
     c.name = "Prod".into();
     assert_eq!(c.display_name(), "Prod");
     assert!(c.validate().is_ok());
@@ -102,22 +147,24 @@ fn store_round_trip_and_recent_cap() {
     let dir = th.home.clone();
     let (mut s, warn) = ConnectionStore::load(Some(&dir));
     assert!(warn.is_none() && s.saved.is_empty());
-    s.upsert(cfg("a"));
-    s.upsert(cfg("b"));
-    let mut a2 = cfg("a");
-    a2.host = "other".into();
-    s.upsert(a2);
+    s.change(|s| {
+        s.upsert(cfg("a"));
+        s.upsert(cfg("b"));
+        let mut a2 = cfg("a");
+        a2.host = "other".into();
+        s.upsert(a2);
+        for i in 0..25 {
+            s.touch_recent(&cfg(&format!("r{i}")), i as u64);
+        }
+        assert_eq!(s.recent.len(), MAX_RECENT);
+        assert_eq!(s.recent[0].config.id, "r24");
+        s.touch_recent(&cfg("r10"), 99);
+    })
+    .unwrap();
     assert_eq!(s.saved.len(), 2);
     assert_eq!(s.get("a").unwrap().host, "other");
-    for i in 0..25 {
-        s.touch_recent(&cfg(&format!("r{i}")), i as u64);
-    }
-    assert_eq!(s.recent.len(), MAX_RECENT);
-    assert_eq!(s.recent[0].config.id, "r24");
-    s.touch_recent(&cfg("r10"), 99);
     assert_eq!((s.recent[0].config.id.as_str(), s.recent[0].used_at, s.recent.len()), ("r10", 99, MAX_RECENT));
     assert_eq!(s.get("r24").unwrap().id, "r24");
-    s.save().unwrap();
     let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
     assert!(text.contains("\"version\""));
     let (l, warn) = ConnectionStore::load(Some(&dir));
@@ -131,9 +178,10 @@ fn store_round_trip_and_recent_cap() {
 
 #[test]
 fn memory_only_store_saves_nothing() {
-    let (s, w) = ConnectionStore::load(None);
+    let (mut s, w) = ConnectionStore::load(None);
     assert!(w.is_none());
-    assert!(s.save().is_ok());
+    assert_eq!(s.change(|s| s.upsert(cfg("a"))), Ok(((), None)));
+    assert_eq!(ids(&s.saved), ["a"]);
 }
 
 #[test]
@@ -159,6 +207,79 @@ fn memory_store_set_get_delete() {
     s.delete("c1", SecretKind::DbPassword).unwrap();
 }
 
+fn saved_for() -> SavedFor {
+    SavedFor::of(&ConnectionConfig {
+        kind: DbKind::MySql,
+        host: "db.example".into(),
+        port: 3307,
+        user: "ann".into(),
+        database: "shop".into(),
+        ssl_mode: SslMode::Require,
+        ca_file: Some("/ca/ours.pem".into()),
+        ssh: Some(SshConfig {
+            host: "jump".into(),
+            port: 2222,
+            user: "bob".into(),
+            auth: SshAuth::Key { path: Some("/k/id".into()) },
+            ..SshConfig::default()
+        }),
+        options: [(ALLOW_PUBLIC_KEY.id.to_owned(), "true".to_owned())].into(),
+        ..ConnectionConfig::default()
+    })
+}
+
+#[test]
+fn a_stored_secret_reads_back_with_what_it_was_saved_for() {
+    for secret in ["pw", "quo\"te\\ and\nnewline", "пароль", r#"{"v":1,"secret":"x","for":{}}"#] {
+        let text = StoredSecret::text(secret, &saved_for()).unwrap();
+        assert_eq!(StoredSecret::parse(&text), StoredSecret::For { secret: secret.to_owned(), saved_for: Box::new(saved_for()) }, "{text}");
+    }
+    let weakening = saved_for().weakening;
+    assert_eq!(weakening, [ALLOW_PUBLIC_KEY.id], "only the options that are on and protect it less");
+}
+
+#[test]
+fn saved_for_leaves_out_what_does_not_decide_where_a_secret_goes() {
+    let config = ConnectionConfig { name: "shop".into(), id: "a".into(), database: "shop".into(), read_only: true, ..ConnectionConfig::default() };
+    assert_eq!(SavedFor::of(&config), SavedFor::of(&ConnectionConfig::default()));
+    // An option this type does not have, and an option that is off, are not kept.
+    let mut stray = ConnectionConfig::default();
+    stray.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
+    assert!(SavedFor::of(&stray).weakening.is_empty());
+    let mut off = ConnectionConfig { kind: DbKind::MySql, ..ConnectionConfig::default() };
+    off.options.insert(ALLOW_PUBLIC_KEY.id.into(), "false".into());
+    assert!(SavedFor::of(&off).weakening.is_empty());
+    // A newer build's unknown fields in the tunnel are no setting of this one.
+    let mut ssh = SshConfig::default();
+    ssh.extra.insert("later".into(), "x".into());
+    let with = ConnectionConfig { ssh: Some(ssh), ..ConnectionConfig::default() };
+    let without = ConnectionConfig { ssh: Some(SshConfig::default()), ..ConnectionConfig::default() };
+    assert_eq!(SavedFor::of(&with), SavedFor::of(&without));
+}
+
+#[test]
+fn only_the_stores_own_form_is_read_as_one() {
+    for bare in ["pw", "", "12345", "[1]", "{", "{\"v\":1}", "{\"v\":1,\"secret\":\"s\"}", "{\"secret\":\"s\",\"for\":{}}"] {
+        assert_eq!(StoredSecret::parse(bare), StoredSecret::Bare(bare.to_owned()), "{bare}");
+    }
+    let text = StoredSecret::text("s", &saved_for()).unwrap();
+    let later = text.replace("\"v\":1", "\"v\":2");
+    assert_ne!(text, later);
+    let unknown_type = text.replace("\"kind\":\"mysql\"", "\"kind\":\"a later type\"");
+    assert_ne!(text, unknown_type);
+    for unreadable in [later.as_str(), unknown_type.as_str(), r#"{"v":1,"secret":1,"for":{}}"#, r#"{"v":"1","secret":"s","for":{}}"#] {
+        assert_eq!(StoredSecret::parse(unreadable), StoredSecret::Unreadable, "{unreadable}");
+    }
+}
+
+#[test]
+fn a_stored_secrets_debug_hides_it() {
+    let text = StoredSecret::text("hunter2", &saved_for()).unwrap();
+    for stored in [StoredSecret::parse(&text), StoredSecret::Bare("hunter2".into())] {
+        assert!(!format!("{stored:?}").contains("hunter2"));
+    }
+}
+
 #[test]
 fn secret_error_never_shows_secret() {
     let e = SecretError("backend said no".into());
@@ -182,8 +303,7 @@ fn unreadable_file_is_never_overwritten() {
     let (mut s, warn) = ConnectionStore::load(Some(&dir));
     assert!(warn.unwrap().contains("untouched"));
     assert!(s.dir.is_none());
-    s.upsert(cfg("a"));
-    s.save().unwrap();
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
     assert!(dir.join(FILE).join("keep").is_dir());
 }
 
@@ -192,13 +312,15 @@ fn failed_bad_rename_leaves_file_untouched() {
     let th = dbee_testkit::temp_home(None, None);
     let dir = th.home.clone();
     std::fs::write(dir.join(FILE), "{oops").unwrap();
-    // a non-empty directory at the .bad path makes the rename fail
+    // every .bad name taken means no free place to move it
     std::fs::create_dir_all(dir.join("connections.json.bad").join("x")).unwrap();
+    for n in 1..100 {
+        std::fs::create_dir_all(dir.join(format!("connections.json.bad.{n}")).join("x")).unwrap();
+    }
     let (mut s, warn) = ConnectionStore::load(Some(&dir));
     assert!(warn.unwrap().contains("untouched"));
     assert!(s.dir.is_none());
-    s.upsert(cfg("a"));
-    s.save().unwrap();
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
     assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), "{oops");
 }
 
@@ -207,9 +329,434 @@ fn save_leaves_no_temp_files() {
     let th = dbee_testkit::temp_home(None, None);
     let dir = th.home.clone();
     let (mut s, _) = ConnectionStore::load(Some(&dir));
-    s.upsert(cfg("a"));
-    s.save().unwrap();
-    s.save().unwrap();
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    s.change(|s| s.upsert(cfg("b"))).unwrap();
     let tmp = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
     assert_eq!(tmp, 0);
+}
+
+#[test]
+fn old_saved_connections_are_postgres() {
+    let c: ConnectionConfig = serde_json::from_str(r#"{"id":"a","name":"x","host":"h","port":5432}"#).unwrap();
+    assert_eq!(c.kind, DbKind::Postgres);
+}
+
+#[test]
+fn kinds_round_trip_by_id() {
+    for k in DbKind::ALL {
+        assert_eq!(DbKind::from_id(k.id()), Some(k));
+    }
+    assert_eq!(DbKind::from_id("oracle"), None);
+}
+
+#[test]
+fn mysql_url() {
+    let p = parse_url("mysql://u:p@db.example:3307/shop?ssl-mode=VERIFY_IDENTITY").unwrap();
+    assert_eq!((p.kind, p.port, p.database.as_deref(), p.ssl_mode), (DbKind::MySql, Some(3307), Some("shop"), Some(SslMode::VerifyFull)));
+}
+
+#[test]
+fn url_schemes_name_their_kind() {
+    for (url, kind) in [
+        ("postgres://h", DbKind::Postgres),
+        ("postgresql://h", DbKind::Postgres),
+        ("mysql://h", DbKind::MySql),
+        ("mariadb://h", DbKind::MariaDb),
+        ("MariaDB://h", DbKind::MariaDb),
+    ] {
+        assert_eq!(parse_url(url).unwrap().kind, kind, "{url}");
+    }
+    assert!(parse_url("sqlite://h").is_err());
+}
+
+#[test]
+fn url_takes_both_sslmode_spellings() {
+    assert_eq!(parse_url("mariadb://h/d?sslmode=verify-ca").unwrap().ssl_mode, Some(SslMode::VerifyCa));
+    assert_eq!(parse_url("mysql://h/d?ssl-mode=REQUIRED").unwrap().ssl_mode, Some(SslMode::Require));
+    assert_eq!(parse_url("mysql://h/d?ssl-mode=DISABLED").unwrap().ssl_mode, Some(SslMode::Disable));
+    assert_eq!(parse_url("mysql://h/d?ssl-mode=PREFERRED").unwrap().ssl_mode, Some(SslMode::Prefer));
+    assert_eq!(parse_url("mysql://h/d?ssl-mode=VERIFY_CA").unwrap().ssl_mode, Some(SslMode::VerifyCa));
+}
+
+#[test]
+fn sqlite_needs_a_file() {
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: None, ..Default::default() };
+    assert_eq!(c.validate(), Err(ConfigError::Invalid("no file chosen".into())));
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), host: String::new(), port: 0, ..Default::default() };
+    assert!(c.validate().is_ok());
+}
+
+#[test]
+fn a_database_file_has_no_ssh_tunnel() {
+    let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password, ..SshConfig::default() };
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ssh: Some(ssh.clone()), ..Default::default() };
+    assert_eq!(c.validate(), Err(ConfigError::Invalid("a database file has no SSH tunnel".into())));
+    assert!(ConnectionConfig { kind: DbKind::Postgres, ssh: Some(ssh), ..Default::default() }.validate().is_ok());
+}
+
+#[test]
+fn sqlite_display_name_is_the_file() {
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ..Default::default() };
+    assert_eq!(c.display_name(), "shop.sqlite");
+    let c = ConnectionConfig { name: "Mine".into(), ..c };
+    assert_eq!(c.display_name(), "Mine");
+}
+
+#[test]
+fn server_kinds_need_host_and_port() {
+    for kind in [DbKind::MySql, DbKind::MariaDb] {
+        let c = ConnectionConfig { kind, host: String::new(), ..Default::default() };
+        assert!(c.validate().is_err());
+        let c = ConnectionConfig { kind, port: 0, ..Default::default() };
+        assert!(c.validate().is_err());
+    }
+}
+
+#[test]
+fn default_port_follows_the_default_kind() {
+    assert_eq!(ConnectionConfig::default().port, DbKind::default().default_port().unwrap());
+}
+
+#[test]
+fn every_kind_has_one_row() {
+    for k in DbKind::ALL {
+        assert_eq!(DbKind::from_id(k.info().id), Some(k));
+        assert!(!k.label().is_empty());
+    }
+    let ids: std::collections::HashSet<&str> = DbKind::ALL.iter().map(|k| k.id()).collect();
+    assert_eq!(ids.len(), DbKind::ALL.len());
+}
+
+#[test]
+fn file_kinds_have_extensions_and_no_port() {
+    for k in DbKind::ALL {
+        match k.info().settings {
+            Settings::File { extensions } => {
+                assert!(k.uses_file());
+                assert!(!extensions.is_empty());
+                assert_eq!(k.default_port(), None);
+            }
+            Settings::Server { .. } => {
+                assert!(!k.uses_file());
+                assert!(k.default_port().is_some());
+            }
+        }
+    }
+}
+
+#[test]
+fn ssl_aliases_stay_with_their_kind() {
+    assert!(parse_url("postgres://h/db?sslmode=VERIFY_IDENTITY").is_err());
+    assert_eq!(parse_url("mysql://h/db?sslmode=VERIFY_IDENTITY").unwrap().ssl_mode, Some(SslMode::VerifyFull));
+}
+
+#[test]
+fn saved_kind_json_is_the_id() {
+    for k in DbKind::ALL {
+        assert_eq!(serde_json::to_string(&k).unwrap(), format!("\"{}\"", k.id()));
+        assert_eq!(serde_json::from_str::<DbKind>(&serde_json::to_string(&k).unwrap()).unwrap(), k);
+    }
+    assert_eq!(serde_json::to_string(&DbKind::MariaDb).unwrap(), "\"mariadb\"");
+    assert!(serde_json::from_str::<DbKind>("\"oracle\"").is_err());
+    let j = serde_json::to_value(ConnectionConfig::default()).unwrap();
+    assert_eq!(j["kind"], "postgres");
+}
+
+#[test]
+fn corrupt_file_never_overwrites_an_earlier_bad_file() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    std::fs::write(dir.join("connections.json.bad"), "first").unwrap();
+    std::fs::write(dir.join(FILE), "{oops").unwrap();
+    let (_, warn) = ConnectionStore::load(Some(&dir));
+    assert!(warn.is_some());
+    assert_eq!(std::fs::read_to_string(dir.join("connections.json.bad")).unwrap(), "first");
+    assert_eq!(std::fs::read_to_string(dir.join("connections.json.bad.1")).unwrap(), "{oops");
+}
+
+#[test]
+fn an_unreadable_entry_is_kept_and_the_others_load() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let oracle = serde_json::json!({"id": "o", "name": "Newer", "kind": "oracle", "host": "h", "port": 1521, "future": [1, 2]});
+    let recent = serde_json::json!({"config": {"id": "r", "kind": "oracle"}, "usedAt": 5});
+    let good = serde_json::to_value(cfg("g")).unwrap();
+    let file = serde_json::json!({"version": 1, "saved": [oracle, good], "recent": [recent]});
+    std::fs::write(dir.join(FILE), serde_json::to_vec(&file).unwrap()).unwrap();
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    assert_eq!(s.saved.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["g"]);
+    let warn = warn.unwrap();
+    // One saved entry and one recent one, counted together.
+    assert_eq!(warn, "2 saved or recent connection entries could not be read and are kept unchanged in the file");
+    assert!(!dir.join("connections.json.bad").exists());
+    s.change(|s| s.upsert(cfg("h"))).unwrap();
+    let back: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(FILE)).unwrap()).unwrap();
+    assert!(back["saved"].as_array().unwrap().contains(&oracle));
+    assert!(back["recent"].as_array().unwrap().contains(&recent));
+    assert_eq!(back["saved"].as_array().unwrap().len(), 3);
+    let (again, _) = ConnectionStore::load(Some(&dir));
+    assert_eq!(again.saved.len(), 2);
+}
+
+#[test]
+fn a_sqlite_connection_round_trips_through_the_store() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut s, _) = ConnectionStore::load(Some(&dir));
+    let c = ConnectionConfig { kind: DbKind::Sqlite, file: Some("/x/shop.sqlite".into()), ..cfg("s") };
+    s.change(|s| s.upsert(c.clone())).unwrap();
+    let (l, warn) = ConnectionStore::load(Some(&dir));
+    assert_eq!((l.saved, warn), (vec![c], None));
+}
+
+#[test]
+fn options_round_trip_and_stay_out_of_the_file_when_empty() {
+    let v = serde_json::to_value(ConnectionConfig::default()).unwrap();
+    assert!(v.get("options").is_none(), "{v}");
+    let mut c = ConnectionConfig { kind: DbKind::MySql, ..cfg("m") };
+    c.options.insert(ALLOW_PUBLIC_KEY.id.into(), "true".into());
+    c.options.insert("aLaterOption".into(), "42".into());
+    let v = serde_json::to_value(&c).unwrap();
+    assert_eq!((&v["options"]["allowPublicKey"], &v["options"]["aLaterOption"]), (&serde_json::json!("true"), &serde_json::json!("42")));
+    assert_eq!(serde_json::from_value::<ConnectionConfig>(v).unwrap(), c);
+    assert!(c.option_on("allowPublicKey"));
+    assert!(!c.option_on("aLaterOption") && !c.option_on("missing"));
+    c.options.insert(ALLOW_PUBLIC_KEY.id.into(), "yes".into());
+    assert!(!c.option_on(ALLOW_PUBLIC_KEY.id), "only \"true\" is on");
+
+    // A key this build does not know survives a load and a save.
+    let th = dbee_testkit::temp_home(None, None);
+    let (mut s, _) = ConnectionStore::load(Some(&th.home));
+    s.change(|s| s.upsert(c.clone())).unwrap();
+    let (mut l, warn) = ConnectionStore::load(Some(&th.home));
+    assert!(warn.is_none());
+    l.change(|_| ()).unwrap();
+    let (l, _) = ConnectionStore::load(Some(&th.home));
+    assert_eq!(l.get("m").unwrap().options.get("aLaterOption").map(String::as_str), Some("42"));
+    assert_eq!(l.get("m"), Some(&c));
+}
+
+#[test]
+fn each_kind_lists_its_options() {
+    assert_eq!(ALLOW_PUBLIC_KEY, KindOption { id: "allowPublicKey", label: "Allow the server's public key without encryption", weakens: true });
+    assert_eq!(DbKind::MySql.info().options, [ALLOW_PUBLIC_KEY]);
+    assert_eq!(DbKind::MariaDb.info().options, [ALLOW_PUBLIC_KEY]);
+    assert!(DbKind::Postgres.info().options.is_empty() && DbKind::Sqlite.info().options.is_empty());
+}
+
+/// The saved ids, sorted.
+fn ids(saved: &[ConnectionConfig]) -> Vec<&str> {
+    let mut ids: Vec<&str> = saved.iter().map(|c| c.id.as_str()).collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The saved and recent ids the file in `dir` holds now, each sorted.
+fn in_file(dir: &std::path::Path) -> (Vec<String>, Vec<String>) {
+    let (s, warn) = ConnectionStore::load(Some(dir));
+    assert_eq!(warn, None);
+    let recent: Vec<ConnectionConfig> = s.recent.iter().map(|r| r.config.clone()).collect();
+    let own = |v: Vec<&str>| v.into_iter().map(String::from).collect();
+    (own(ids(&s.saved)), own(ids(&recent)))
+}
+
+#[test]
+fn two_dbees_keep_each_others_saves() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut a, _) = ConnectionStore::load(Some(&dir));
+    let (mut b, _) = ConnectionStore::load(Some(&dir));
+    a.change(|s| s.upsert(cfg("a"))).unwrap();
+    b.change(|s| s.upsert(cfg("b"))).unwrap();
+    assert_eq!(in_file(&dir).0, ["a", "b"]);
+    // The one that wrote last holds both now.
+    assert_eq!(ids(&b.saved), ["a", "b"]);
+}
+
+#[test]
+fn a_delete_in_one_dbee_keeps_the_others_save() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut first, _) = ConnectionStore::load(Some(&dir));
+    first.change(|s| s.upsert(cfg("x"))).unwrap();
+    let (mut a, _) = ConnectionStore::load(Some(&dir));
+    let (mut b, _) = ConnectionStore::load(Some(&dir));
+    assert!(a.change(|s| s.remove("x")).unwrap().0);
+    b.change(|s| s.upsert(cfg("y"))).unwrap();
+    assert_eq!(in_file(&dir).0, ["y"]);
+}
+
+#[test]
+fn a_recent_touch_in_one_dbee_keeps_the_others_save() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut a, _) = ConnectionStore::load(Some(&dir));
+    let (mut b, _) = ConnectionStore::load(Some(&dir));
+    a.change(|s| s.upsert(cfg("a"))).unwrap();
+    b.change(|s| s.touch_recent(&cfg("r"), 7)).unwrap();
+    assert_eq!(in_file(&dir), (vec!["a".to_string()], vec!["r".to_string()]));
+}
+
+#[test]
+fn a_change_waits_for_another_dbees_and_then_says_so() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let (mut s, _) = ConnectionStore::load(Some(&dir));
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    let before = std::fs::read(dir.join(FILE)).unwrap();
+    // Another dbee holds the lock and does not let go.
+    let other = std::fs::File::options().create(true).truncate(false).write(true).open(dir.join(LOCK_FILE)).unwrap();
+    other.lock().unwrap();
+    let e = s.change(|s| s.upsert(cfg("b"))).unwrap_err();
+    assert_eq!(e.to_string(), "Another dbee window was changing the connections file for over 5 seconds, so nothing was changed.");
+    assert_eq!((ids(&s.saved), std::fs::read(dir.join(FILE)).unwrap()), (vec!["a"], before), "neither the copy nor the file changed");
+    other.unlock().unwrap();
+    s.change(|s| s.upsert(cfg("b"))).unwrap();
+    assert_eq!(in_file(&dir).0, ["a", "b"]);
+}
+
+#[test]
+fn a_newer_file_loads_and_is_never_rewritten() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let entry = serde_json::json!({"id": "n", "name": "Newer", "host": "h", "port": 5432, "group": "work"});
+    let file = serde_json::json!({"version": 2, "folders": ["work"], "saved": [entry], "recent": []});
+    let bytes = serde_json::to_vec_pretty(&file).unwrap();
+    std::fs::write(dir.join(FILE), &bytes).unwrap();
+    let newer = "A newer dbee wrote the connections file, so changes here won't be saved.";
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    assert_eq!((ids(&s.saved), warn.as_deref()), (vec!["n"], Some(newer)));
+    assert_eq!(s.get("n").unwrap().name, "Newer");
+    // A change stays in memory, and the file is as the newer dbee wrote it.
+    assert_eq!(s.change(|s| s.upsert(cfg("mine"))), Ok(((), None)));
+    assert_eq!(ids(&s.saved), ["mine", "n"]);
+    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), bytes);
+    // So it is for a store that read the file before the newer dbee wrote it.
+    std::fs::write(dir.join(FILE), b"{\"version\": 1}").unwrap();
+    let (mut before, _) = ConnectionStore::load(Some(&dir));
+    std::fs::write(dir.join(FILE), &bytes).unwrap();
+    let (_, warn) = before.change(|s| s.upsert(cfg("mine"))).unwrap();
+    assert_eq!(warn.as_deref(), Some(newer));
+    assert_eq!((ids(&before.saved), before.dir.as_ref()), (vec!["mine", "n"], None));
+    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), bytes);
+}
+
+#[test]
+fn fields_this_build_does_not_know_survive_a_save() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let ssh = serde_json::json!({"host": "b", "port": 22, "user": "u", "auth": {"method": "agent"}, "jumpHosts": ["j"]});
+    let entry = serde_json::json!({"id": "a", "name": "A", "host": "h", "port": 5432, "group": "work", "ssh": ssh});
+    let recent = serde_json::json!({"config": {"id": "a", "host": "h", "timezone": "UTC"}, "usedAt": 5, "pinned": true});
+    let file = serde_json::json!({"version": 1, "folders": ["work"], "saved": [entry], "recent": [recent]});
+    std::fs::write(dir.join(FILE), serde_json::to_vec(&file).unwrap()).unwrap();
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    assert_eq!(warn, None);
+    // Another connection saved, and this one again as a form or a script sends it: without them.
+    let mut again = serde_json::from_value::<ConnectionConfig>(serde_json::to_value(s.get("a").unwrap()).unwrap()).unwrap();
+    again.name = "A renamed".into();
+    s.change(|s| {
+        s.upsert(cfg("b"));
+        s.upsert(again);
+    })
+    .unwrap();
+    let back: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(FILE)).unwrap()).unwrap();
+    assert_eq!(back["folders"], serde_json::json!(["work"]));
+    let a = back["saved"].as_array().unwrap().iter().find(|e| e["id"] == "a").unwrap();
+    assert_eq!(
+        (&a["name"], &a["group"], &a["ssh"]["jumpHosts"]),
+        (&serde_json::json!("A renamed"), &serde_json::json!("work"), &serde_json::json!(["j"]))
+    );
+    assert_eq!((&back["recent"][0]["pinned"], &back["recent"][0]["config"]["timezone"]), (&serde_json::json!(true), &serde_json::json!("UTC")));
+    // A use of it keeps them too.
+    s.change(|s| s.touch_recent(&s.get("a").unwrap().clone(), 9)).unwrap();
+    let back: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join(FILE)).unwrap()).unwrap();
+    assert_eq!((&back["recent"][0]["pinned"], &back["recent"][0]["config"]["group"]), (&serde_json::json!(true), &serde_json::json!("work")));
+    // They never show outside the file.
+    let shown = serde_json::to_string(&(&s.saved, &s.recent)).unwrap();
+    assert!(!shown.contains("work") && !shown.contains("pinned") && !shown.contains("jumpHosts") && !shown.contains("UTC"), "{shown}");
+}
+
+#[test]
+fn a_newer_file_whose_shape_changed_is_never_moved_aside() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    let newer = "A newer dbee wrote the connections file, so changes here won't be saved.";
+    // `saved` became an object keyed by id; then `version` stopped being a number.
+    let by_id = serde_json::json!({"version": 2, "saved": {"a": {"host": "h"}}, "recent": []});
+    let text_version = serde_json::json!({"version": "2.0", "saved": [], "recent": []});
+    for file in [by_id, text_version] {
+        let bytes = serde_json::to_vec_pretty(&file).unwrap();
+        std::fs::write(dir.join(FILE), &bytes).unwrap();
+        let (mut s, warn) = ConnectionStore::load(Some(&dir));
+        assert_eq!((warn.as_deref(), s.dir.as_ref()), (Some(newer), None), "{file}");
+        s.change(|s| s.upsert(cfg("mine"))).unwrap();
+        // A store that read the file while it was this build's finds it newer at its next change.
+        std::fs::write(dir.join(FILE), b"{\"version\": 1}").unwrap();
+        let (mut before, _) = ConnectionStore::load(Some(&dir));
+        std::fs::write(dir.join(FILE), &bytes).unwrap();
+        let (_, warn) = before.change(|s| s.upsert(cfg("mine"))).unwrap();
+        assert_eq!((warn.as_deref(), before.dir.as_ref()), (Some(newer), None), "{file}");
+        assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), bytes, "{file}");
+        assert!(!dir.join("connections.json.bad").exists(), "{file}");
+    }
+    // This build's version with a body it cannot read, and JSON that is no object, are damaged.
+    for damaged in [r#"{"version": 1, "saved": {"a": {}}}"#, "[]"] {
+        std::fs::write(dir.join(FILE), damaged).unwrap();
+        let (_, warn) = ConnectionStore::load(Some(&dir));
+        assert!(warn.is_some_and(|w| w.contains("is damaged")), "{damaged}");
+        assert_eq!(std::fs::read_to_string(dir.join("connections.json.bad")).unwrap(), damaged);
+        std::fs::remove_file(dir.join("connections.json.bad")).unwrap();
+    }
+}
+
+#[test]
+fn a_connections_file_past_the_cap_is_left_alone() {
+    let th = dbee_testkit::temp_home(None, None);
+    let dir = th.home.clone();
+    // Valid JSON, one byte past 4 MiB.
+    let head = br#"{"version": 1, "saved": [], "recent": []}"#;
+    let mut bytes = vec![b' '; 4 * 1024 * 1024 + 1 - head.len()];
+    bytes.extend_from_slice(head);
+    std::fs::write(dir.join(FILE), &bytes).unwrap();
+    let (mut s, warn) = ConnectionStore::load(Some(&dir));
+    let warn = warn.unwrap_or_default();
+    assert!(warn.ends_with("is larger than 4 MiB; the file was left untouched and changes will not be saved"), "{warn}");
+    assert!(s.dir.is_none());
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), bytes);
+    // One byte less loads.
+    std::fs::write(dir.join(FILE), &bytes[1..]).unwrap();
+    assert_eq!(ConnectionStore::load(Some(&dir)).1, None);
+}
+
+/// The connections file lists every saved server, so it, its lock and a damaged file moved aside
+/// are `0600` and their folder `0700`, whatever the umask; a folder and files from before are
+/// tightened at the next write.
+#[cfg(unix)]
+#[test]
+fn the_connections_file_and_its_folder_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &std::path::Path| format!("{:o}", std::fs::metadata(p).unwrap().permissions().mode() & 0o777);
+    let open_to_all = |p: &std::path::Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let th = dbee_testkit::temp_home(None, None);
+    let made = th.home.join("made");
+    let (mut s, _) = ConnectionStore::load(Some(&made));
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    assert_eq!((mode(&made), mode(&made.join(FILE)), mode(&made.join(LOCK_FILE))), ("700".into(), "600".into(), "600".into()), "made by dbee");
+    let older = th.home.join("older");
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(older.join(FILE), r#"{"version":1,"saved":[],"recent":[]}"#).unwrap();
+    std::fs::write(older.join(LOCK_FILE), "").unwrap();
+    open_to_all(&older, 0o755);
+    open_to_all(&older.join(FILE), 0o644);
+    open_to_all(&older.join(LOCK_FILE), 0o644);
+    let (mut s, _) = ConnectionStore::load(Some(&older));
+    s.change(|s| s.upsert(cfg("a"))).unwrap();
+    assert_eq!((mode(&older), mode(&older.join(FILE)), mode(&older.join(LOCK_FILE))), ("700".into(), "600".into(), "600".into()), "made before");
+    std::fs::write(older.join(FILE), "{oops").unwrap();
+    open_to_all(&older.join(FILE), 0o644);
+    let (_, warning) = ConnectionStore::load(Some(&older));
+    assert!(warning.is_some_and(|w| w.contains(".bad")));
+    assert_eq!(mode(&older.join(format!("{FILE}.bad"))), "600", "moved aside");
 }

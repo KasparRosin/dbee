@@ -30,15 +30,16 @@
 //! **Statements** ([`Edits::statements`]): one `UPDATE` per changed loaded row setting only its
 //! staged columns, one `INSERT` per new row with only its staged columns (the others get their
 //! defaults), one `DELETE` per marked row, in that order. A loaded row is found by the table's
-//! row key with the values the row was loaded with, so editing the key works. Page columns are
-//! matched to the catalog by name: a catalog refreshed since the page loaded still fits, or the
-//! statements are refused.
+//! row key with the values the row was loaded with, so editing the key works; a key column the
+//! grid does not show was loaded beside the page. Page columns are matched to the catalog by
+//! name: a catalog refreshed since the page loaded still fits, or the statements are refused.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dbee_core::{ColumnInfo, ResultSet, TableInfo};
+use dbee_core::{Cell, ColumnInfo, ResultSet, TableInfo};
+use dbee_sql::Dialect;
 use dbee_sql::SqlError;
 use dbee_sql::edit::{NewValue, delete_sql, insert_sql, update_sql};
 
@@ -182,27 +183,37 @@ impl Edits {
         value.map(text)
     }
 
-    /// The statements that write the edits, each with its grid row: updates, then inserts, then
-    /// deletes. `NoKey` when the table has no row key or a loaded row lacks its key value,
-    /// `UnknownColumn` when a staged column or a key column is not in both the page and `info`.
-    pub fn statements(&self, info: &TableInfo, data: &ResultSet) -> Result<Vec<(usize, String)>, SqlError> {
+    /// The statements that write the edits in `dialect`, each with its grid row: updates, then
+    /// inserts, then deletes. `hidden` holds the page's key columns the grid does not show, row for
+    /// row with `data`. `NoKey` when the table has no row key or a loaded row lacks its key value,
+    /// `UnknownColumn` when a staged column is not a visible column of both the page and `info`, or
+    /// a key column is not where `info` says it is: a visible one in the page, a hidden one beside
+    /// it (so a catalog refreshed since the page loaded never takes one for the other).
+    pub fn statements(&self, dialect: Dialect, info: &TableInfo, data: &ResultSet, hidden: &ResultSet) -> Result<Vec<(usize, String)>, SqlError> {
         if self.is_empty() {
             return Ok(Vec::new());
         }
         let key = info.row_key().ok_or(SqlError::NoKey)?;
         let column = |col: usize| -> Result<&ColumnInfo, SqlError> {
             let name = &data.columns.get(col).ok_or_else(|| SqlError::UnknownColumn(format!("#{col}")))?.name;
-            info.column(name).ok_or_else(|| SqlError::UnknownColumn(name.clone()))
+            info.visible_column(name).ok_or_else(|| SqlError::UnknownColumn(name.clone()))
+        };
+        // A loaded row's value of the key column `name`: in the page when it is visible, else
+        // beside it.
+        let loaded = |row: usize, name: &str| -> Option<&Cell> {
+            let page = if info.visible_column(name).is_some() { data } else { hidden };
+            let at = page.columns.iter().position(|c| c.name == name)?;
+            Some(page.rows.get(row).and_then(|values| values.get(at)).unwrap_or(&None))
         };
         let key_of = |row: usize| -> Result<Vec<(&ColumnInfo, &str)>, SqlError> {
-            let values = data.rows.get(row).ok_or(SqlError::NoKey)?;
+            if row >= data.rows.len() {
+                return Err(SqlError::NoKey);
+            }
             key.iter()
-                .map(|k| {
-                    let at = data.columns.iter().position(|c| c.name == k.name).ok_or_else(|| SqlError::UnknownColumn(k.name.clone()))?;
-                    match values.get(at) {
-                        Some(Some(v)) => Ok((*k, v.as_str())),
-                        _ => Err(SqlError::NoKey),
-                    }
+                .map(|k| match loaded(row, &k.name) {
+                    None => Err(SqlError::UnknownColumn(k.name.clone())),
+                    Some(Some(v)) => Ok((*k, v.as_str())),
+                    Some(None) => Err(SqlError::NoKey),
                 })
                 .collect()
         };
@@ -214,14 +225,14 @@ impl Edits {
             }
         }
         for (row, changes) in changed {
-            out.push((row, update_sql(info, &key_of(row)?, &changes)?));
+            out.push((row, update_sql(dialect, info, &key_of(row)?, &changes)?));
         }
         for (i, values) in self.new_rows.iter().enumerate() {
             let values = values.iter().map(|(&col, v)| Ok((column(col)?, v))).collect::<Result<Vec<_>, SqlError>>()?;
-            out.push((data.rows.len().saturating_add(i), insert_sql(info, &values)?));
+            out.push((data.rows.len().saturating_add(i), insert_sql(dialect, info, &values)?));
         }
         for &row in &self.deleted {
-            out.push((row, delete_sql(info, &key_of(row)?)?));
+            out.push((row, delete_sql(dialect, info, &key_of(row)?)?));
         }
         Ok(out)
     }
@@ -272,18 +283,15 @@ impl Edits {
     }
 
     /// Stages `value` for grid cell `(row, col)`; `true` when that changed the edits. `Err` names
-    /// what is wrong with the cell or the value (outside the grid, a row marked for deletion, a
-    /// column Postgres computes, a NUL character). `column` is the cell's column in the catalog,
-    /// when it is there.
+    /// what is wrong with the cell (outside the grid, a row marked for deletion, a column the
+    /// engine computes). `column` is the cell's column in the catalog, when it is there. Whether
+    /// the dialect can write the value is the command's to check.
     pub(crate) fn stage(&mut self, data: &ResultSet, row: usize, col: usize, value: NewValue, column: Option<&ColumnInfo>) -> Result<bool, String> {
         if col >= data.columns.len() {
             return Err(format!("the page has no column {col}"));
         }
         if let Some(why) = column.and_then(ColumnInfo::not_editable) {
             return Err(why.to_owned());
-        }
-        if matches!(&value, NewValue::Text(t) if t.contains('\0')) {
-            return Err(SqlError::Nul.to_string());
         }
         match row.checked_sub(data.rows.len()) {
             None => {
@@ -439,7 +447,7 @@ impl Edits {
 mod tests {
     use std::collections::BTreeMap;
 
-    use dbee_core::{Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef};
+    use dbee_core::{Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef, TypeClass};
     use dbee_sql::SqlError;
     use dbee_sql::edit::NewValue;
 
@@ -449,12 +457,18 @@ mod tests {
         ColumnInfo {
             name: name.into(),
             type_sql: type_sql.into(),
-            type_oid: 0,
             base_type: base.into(),
-            category,
+            class: match category {
+                'N' => TypeClass::Number,
+                'S' => TypeClass::Text,
+                _ => TypeClass::Other,
+            },
             not_null: name == "id",
             has_default: false,
             generated: Default::default(),
+            hidden: false,
+            type_label: String::new(),
+            operators: dbee_core::Operators::Unnamed,
         }
     }
 
@@ -467,6 +481,7 @@ mod tests {
             unique_keys: vec![],
             foreign_keys: vec![],
             estimated_rows: None,
+            no_edit_reason: None,
         }
     }
 
@@ -479,11 +494,17 @@ mod tests {
             rows_seen: 2,
             complete: true,
             rows_affected: None,
+            database_after: Default::default(),
         }
     }
 
     fn text(v: &str) -> NewValue {
         NewValue::Text(v.into())
+    }
+
+    /// No hidden columns beside the page: every key column shows.
+    fn shown_all() -> ResultSet {
+        ResultSet::default()
     }
 
     #[test]
@@ -503,7 +524,6 @@ mod tests {
         // Out of the grid, or on a column the page does not have.
         assert!(e.stage(&d, 2, 0, text("x"), None).is_err());
         assert!(e.stage(&d, 0, 3, text("x"), None).is_err());
-        assert!(e.stage(&d, 0, 1, text("nul\0"), None).is_err());
         assert_eq!(e.count(), 1);
     }
 
@@ -538,7 +558,7 @@ mod tests {
         e.stage(&d, 0, 0, text("10"), None).unwrap();
         e.stage(&d, 0, 1, text("it's"), None).unwrap();
         assert_eq!(e.count(), 5);
-        let s = e.statements(&i, &d).unwrap();
+        let s = e.statements(Dialect::Postgres, &i, &d, &shown_all()).unwrap();
         assert_eq!(
             s,
             [
@@ -555,7 +575,11 @@ mod tests {
         let mut one = Edits::default();
         one.stage(&d, 1, 2, text("3"), None).unwrap();
         assert_eq!(one.only_column(2, 1), Some(2));
-        assert_eq!(Edits::default().statements(&i, &d), Ok(vec![]));
+        assert_eq!(Edits::default().statements(Dialect::Postgres, &i, &d, &shown_all()), Ok(vec![]));
+        // The same edits in another engine's SQL.
+        let mysql = e.statements(Dialect::MySql, &i, &d, &shown_all()).unwrap();
+        assert!(mysql.iter().all(|(_, sql)| sql.contains("`s`.`t`")), "{mysql:?}");
+        assert_eq!(mysql.get(2).map(|(_, sql)| sql.as_str()), Some("INSERT INTO `s`.`t` () VALUES ()"));
     }
 
     #[test]
@@ -565,15 +589,68 @@ mod tests {
         e.stage(&d, 0, 1, text("b"), None).unwrap();
         let mut keyless = info();
         keyless.primary_key.clear();
-        assert_eq!(e.statements(&keyless, &d), Err(SqlError::NoKey));
+        assert_eq!(e.statements(Dialect::Postgres, &keyless, &d, &shown_all()), Err(SqlError::NoKey));
         // A key value the page does not have, or a NULL one, cannot address the row.
         let mut null_key = d.clone();
         null_key.rows[0][0] = None;
-        assert_eq!(e.statements(&info(), &null_key), Err(SqlError::NoKey));
+        assert_eq!(e.statements(Dialect::Postgres, &info(), &null_key, &shown_all()), Err(SqlError::NoKey));
         // A column the catalog no longer has.
         let mut renamed = info();
         renamed.columns[1].name = "label".into();
-        assert_eq!(e.statements(&renamed, &d), Err(SqlError::UnknownColumn("name".into())));
+        assert_eq!(e.statements(Dialect::Postgres, &renamed, &d, &shown_all()), Err(SqlError::UnknownColumn("name".into())));
+    }
+
+    #[test]
+    fn statements_find_a_hidden_key_beside_the_page() {
+        // Keyed by a rowid the grid does not show: the page holds id, name and total, and the
+        // rowids of its rows sit beside it.
+        let mut i = info();
+        i.columns.insert(0, ColumnInfo { hidden: true, ..col("rowid", "INTEGER", "INTEGER", 'N') });
+        i.primary_key = vec!["rowid".into()];
+        let d = data();
+        let rowid = i.columns[0].column();
+        let hidden = ResultSet { columns: vec![rowid], rows: vec![vec![Some("7".into())], vec![Some("8".into())]], ..ResultSet::default() };
+        let mut e = Edits::default();
+        e.stage(&d, 1, 1, text("x"), None).unwrap();
+        e.delete_rows(&d, &[0]).unwrap();
+        assert_eq!(
+            e.statements(Dialect::Sqlite, &i, &d, &hidden),
+            Ok(vec![
+                (1, r#"UPDATE "s"."t" SET "name" = 'x' WHERE "rowid" = 8"#.to_owned()),
+                (0, r#"DELETE FROM "s"."t" WHERE "rowid" = 7"#.to_owned()),
+            ])
+        );
+        // Without its rowids the page's rows cannot be found.
+        assert_eq!(e.statements(Dialect::Sqlite, &i, &d, &ResultSet::default()), Err(SqlError::UnknownColumn("rowid".into())));
+        let mut gone = hidden.clone();
+        gone.rows[1][0] = None;
+        assert_eq!(e.statements(Dialect::Sqlite, &i, &d, &gone), Err(SqlError::NoKey));
+    }
+
+    #[test]
+    fn a_key_that_went_out_of_sight_is_refused() {
+        let cell = |v: &str| Some(v.to_owned());
+        let hide = |c: ColumnInfo| ColumnInfo { hidden: true, ..c };
+        // Loaded while the table had a real column `rowid`, so its key was the hidden `_rowid_`.
+        let (real, note) = (col("rowid", "TEXT", "TEXT", 'S'), col("note", "TEXT", "TEXT", 'S'));
+        let d = ResultSet { columns: vec![real.column(), note.column()], rows: vec![vec![cell("1"), cell("a")]], ..ResultSet::default() };
+        let hidden = ResultSet {
+            columns: vec![hide(col("_rowid_", "INTEGER", "INTEGER", 'N')).column()],
+            rows: vec![vec![cell("7")]],
+            ..ResultSet::default()
+        };
+        // Then the column went, and the refreshed catalog keys the table by the hidden `rowid`: the
+        // old column's values must not stand in for it.
+        let refreshed =
+            TableInfo { columns: vec![hide(col("rowid", "INTEGER", "INTEGER", 'N')), note.clone()], primary_key: vec!["rowid".into()], ..info() };
+        let mut e = Edits::default();
+        e.stage(&d, 0, 1, text("b"), None).unwrap();
+        assert_eq!(e.statements(Dialect::Sqlite, &refreshed, &d, &hidden), Err(SqlError::UnknownColumn("rowid".into())));
+        // A cell staged on the old column names no visible column any more.
+        let by_note = TableInfo { primary_key: vec!["note".into()], ..refreshed };
+        let mut e = Edits::default();
+        e.stage(&d, 0, 0, text("2"), None).unwrap();
+        assert_eq!(e.statements(Dialect::Sqlite, &by_note, &d, &hidden), Err(SqlError::UnknownColumn("rowid".into())));
     }
 
     #[test]

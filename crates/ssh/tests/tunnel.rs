@@ -15,7 +15,7 @@ use russh::keys::{HashAlg, PublicKeyBase64, load_secret_key, parse_public_key_ba
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn cfg(db: &TestDb, auth: SshAuth) -> SshConfig {
-    SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth }
+    SshConfig { host: "127.0.0.1".into(), port: db.sshd.port, user: db.sshd.user.clone(), auth, ..SshConfig::default() }
 }
 
 fn env(home: &TempHome) -> SshEnv {
@@ -36,13 +36,19 @@ fn server_key_base64(db: &TestDb) -> String {
     db.sshd.known_hosts_line.split_whitespace().nth(2).unwrap_or_default().to_owned()
 }
 
+/// pg14 as the sshd reaches it: `pg14:5432`.
+fn pg14(db: &TestDb) -> (&str, u16) {
+    let s = db.server("pg14").unwrap();
+    (&s.name, s.service_port)
+}
+
 fn server_fingerprint(db: &TestDb) -> String {
     parse_public_key_base64(&server_key_base64(db)).unwrap().fingerprint(HashAlg::Sha256).to_string()
 }
 
 /// Opens a channel to Postgres through the tunnel and checks that it answers an SSLRequest.
 async fn reaches_postgres(t: &Tunnel, db: &TestDb) {
-    let mut s = t.connect(&db.sshd.pg_host, db.sshd.pg_port).await.unwrap();
+    let mut s = t.connect(pg14(db).0, pg14(db).1).await.unwrap();
     s.write_all(&[0, 0, 0, 8, 4, 210, 22, 47]).await.unwrap(); // SSLRequest
     let mut b = [0u8; 1];
     s.read_exact(&mut b).await.unwrap();
@@ -72,7 +78,7 @@ async fn default_key_login_reaches_postgres() {
     assert!(!t.is_closed());
     t.close().await;
     assert!(t.is_closed());
-    assert!(matches!(t.connect(&db.sshd.pg_host, db.sshd.pg_port).await, Err(SshError::Channel(_))));
+    assert!(matches!(t.connect(pg14(db).0, pg14(db).1).await, Err(SshError::Channel(_))));
 }
 
 #[tokio::test]
@@ -120,6 +126,53 @@ async fn changed_host_key_refuses() {
     let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), Some(&server_fingerprint(db))).await.unwrap_err();
     assert_eq!(e, SshError::HostKeyChanged { host: host_entry(db), line: 2 });
     assert_eq!(std::fs::read_to_string(home.ssh_dir().join("known_hosts")).unwrap(), line);
+}
+
+const ECDSA_KEY: &str =
+    "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEgM887NED7wEb/MfE1ApBUZTo5U5rrM+GKiL5PUNYDLkBOGN04gQ3YHkVjeKWfn3h/SpPODL2xHfQ5A+U7EeiE=";
+
+#[tokio::test]
+async fn a_key_of_another_type_than_the_recorded_one_refuses() {
+    let db = require_testdb!();
+    // known_hosts has an ECDSA key for the server; the server shows Ed25519 only.
+    let line = format!("{} ecdsa-sha2-nistp256 {ECDSA_KEY}\n", host_entry(db));
+    let home = temp_home(Some(&db.keys.plain), Some(&line));
+    let c = cfg(db, SshAuth::Key { path: None });
+    let want = SshError::HostKeyOtherType {
+        host: host_entry(db),
+        key_type: "ssh-ed25519".into(),
+        recorded: vec!["ecdsa-sha2-nistp256".into()],
+        lines: vec![1],
+    };
+    let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), None).await.unwrap_err();
+    assert_eq!(e, want);
+    assert!(
+        e.to_string().contains("interception") && e.to_string().contains("known_hosts line 1") && !e.to_string().contains("not known yet"),
+        "{e}"
+    );
+    // Trusting the new key's fingerprint is not an answer, and nothing is learned.
+    let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), Some(&server_fingerprint(db))).await.unwrap_err();
+    assert_eq!(e, want);
+    assert_eq!(std::fs::read_to_string(home.ssh_dir().join("known_hosts")).unwrap(), line);
+}
+
+#[tokio::test]
+async fn a_tab_separated_or_revoked_line_is_read_as_openssh_reads_it() {
+    let db = require_testdb!();
+    let other = load_secret_key(&db.keys.plain, None).unwrap().public_key().public_key_base64();
+    let c = cfg(db, SshAuth::Key { path: None });
+    let tabbed = format!("{}\tssh-ed25519\t{other}\n", host_entry(db));
+    let home = temp_home(Some(&db.keys.plain), Some(&tabbed));
+    let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), None).await.unwrap_err();
+    assert_eq!(e, SshError::HostKeyChanged { host: host_entry(db), line: 1 }, "a tab-separated line is a recorded key");
+
+    let revoked = format!("@revoked {} ssh-ed25519 {}\n", host_entry(db), server_key_base64(db));
+    let home = temp_home(Some(&db.keys.plain), Some(&revoked));
+    for trust in [None, Some(server_fingerprint(db))] {
+        let e = Tunnel::open(&c, &env(&home), &SshSecrets::default(), trust.as_deref()).await.unwrap_err();
+        assert_eq!(e, SshError::HostKeyRevoked { host: host_entry(db), line: 1 });
+    }
+    assert_eq!(std::fs::read_to_string(home.ssh_dir().join("known_hosts")).unwrap(), revoked);
 }
 
 #[tokio::test]
@@ -280,7 +333,7 @@ async fn nothing_listening_is_a_connect_error() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let home = temp_home(None, None);
-    let c = SshConfig { host: "127.0.0.1".into(), port, user: "x".into(), auth: SshAuth::Password };
+    let c = SshConfig { host: "127.0.0.1".into(), port, user: "x".into(), auth: SshAuth::Password, ..SshConfig::default() };
     let e = Tunnel::open(&c, &env(&home), &secrets(Some("pw"), None), None).await.unwrap_err();
     assert!(matches!(e, SshError::Connect(_)), "{e:?}");
     assert!(e.to_string().contains(&port.to_string()), "{e}");
@@ -291,7 +344,7 @@ async fn plan_shows_what_will_be_used() {
     let home = temp_home(None, None);
     let ssh = home.ssh_dir();
     let e = env(&home);
-    let base = SshConfig { host: "h".into(), port: 22, user: "u".into(), auth: SshAuth::Password };
+    let base = SshConfig { host: "h".into(), port: 22, user: "u".into(), auth: SshAuth::Password, ..SshConfig::default() };
     let with = |auth| SshConfig { auth, ..base.clone() };
     assert_eq!(plan(&with(SshAuth::Password), &e).await, KeyPlan::Password);
     assert_eq!(plan(&with(SshAuth::Key { path: None }), &e).await, KeyPlan::Nothing);
@@ -321,7 +374,28 @@ fn tunnel_and_open_are_send() {
     send(&p);
     // What `connect` returns can carry a database connection on a spawned task.
     fn stream<T: Send + Unpin + tokio::io::AsyncRead + tokio::io::AsyncWrite>() {}
-    stream::<russh::ChannelStream<russh::client::Msg>>();
+    stream::<dbee_ssh::TunnelStream>();
+}
+
+/// A stream is dropped wherever its last owner goes: in the app, on the UI thread, which runs no
+/// runtime, and after the runtime it was opened on shut down. Neither panics, and the tunnel goes on.
+#[test]
+fn a_stream_can_be_dropped_off_the_runtime() {
+    let db = require_testdb!();
+    let home = temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let (tunnel, on_a_plain_thread, after_shutdown) = runtime.block_on(async {
+        let t = Tunnel::open(&cfg(db, SshAuth::Key { path: None }), &env(&home), &SshSecrets::default(), None).await.unwrap();
+        let a = t.connect(pg14(db).0, pg14(db).1).await.unwrap();
+        let b = t.connect(pg14(db).0, pg14(db).1).await.unwrap();
+        (t, a, b)
+    });
+    std::thread::spawn(move || drop(on_a_plain_thread)).join().expect("a stream dropped on a thread without a runtime");
+    assert!(!tunnel.is_closed());
+    runtime.block_on(reaches_postgres(&tunnel, db));
+    drop(runtime);
+    std::thread::spawn(move || drop(after_shutdown)).join().expect("a stream dropped after its runtime shut down");
+    drop(tunnel);
 }
 
 #[test]
@@ -346,6 +420,13 @@ fn errors_read_plainly() {
         SshError::AuthFailed { tried: vec!["agent".into(), "key /k/id".into()] },
         SshError::KnownHosts("bad line".into()),
         SshError::Channel("prohibited".into()),
+        SshError::HostKeyOtherType {
+            host: "h".into(),
+            key_type: "ssh-ed25519".into(),
+            recorded: vec!["ecdsa-sha2-nistp256".into()],
+            lines: vec![1, 4],
+        },
+        SshError::HostKeyRevoked { host: "h".into(), line: 3 },
     ];
     for e in &all {
         let text = e.to_string();
@@ -355,6 +436,8 @@ fn errors_read_plainly() {
     assert!(all[2].to_string().contains("line 7"));
     assert!(all[3].to_string().contains("/k/id"));
     assert!(all[7].to_string().contains("agent, key /k/id"));
+    assert!(all[10].to_string().contains("known_hosts lines 1, 4") && all[10].to_string().contains("remove the old lines"));
+    assert!(all[11].to_string().contains("line 3") && all[11].to_string().contains("Ask the server's administrator for its current key"));
     let _: &dyn std::error::Error = &all[0];
 }
 

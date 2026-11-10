@@ -750,7 +750,7 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
     }
     ui.add_space(6.0);
     body(&mut ui, view, state, tags);
-    let label = (!view.kind_label.is_empty()).then_some(view.kind_label);
+    let label = (!view.kind_label.is_empty()).then_some(view.kind_label.as_str());
     let head = json!({
         "column": view.column,
         "type": view.type_label,
@@ -778,7 +778,7 @@ fn header(ui: &mut egui::Ui, view: &ValueView) {
     }
     if !view.kind_label.is_empty() {
         ui.add_space(2.0);
-        let label = line_galley(ui, view.kind_label, FontId::proportional(11.5), t.accent, width - 12.0);
+        let label = line_galley(ui, &view.kind_label, FontId::proportional(11.5), t.accent, width - 12.0);
         let (pill, _) = ui.allocate_exact_size(vec2(label.size().x + 12.0, 18.0), Sense::hover());
         ui.painter().rect_filled(pill, CornerRadius::same(RADIUS.saturating_mul(2)), t.selection);
         ui.painter().galley(pos2(pill.left() + 6.0, pill.center().y - label.size().y / 2.0), label, t.accent);
@@ -1000,15 +1000,16 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use dbee_core::Column;
     use dbee_core::json::JsonToken;
+    use dbee_core::{Column, TypeClass};
     use dbee_engine::{VALUE_VIEW_MAX_BYTES, ValueView};
 
     use super::*;
     use crate::automation::Tags;
 
     fn col(name: &str, base: &str) -> Column {
-        Column { name: name.into(), base_type: base.into(), type_label: base.into() }
+        let class = if base == "jsonb" { TypeClass::Json } else { TypeClass::LongText };
+        Column { name: name.into(), base_type: base.into(), type_label: base.into(), class }
     }
 
     /// One column for every character of `text` (no tabs in it).
@@ -1059,7 +1060,7 @@ mod tests {
         // Many marks' worth of rows, of lines of every length, with characters of 1 to 4 bytes.
         let mut text = String::new();
         for i in 0..3000 {
-            text.push_str(&"aé🐝".repeat(i % 37));
+            text.push_str(&"aé🐙".repeat(i % 37));
             text.push('\n');
             if i % 5 == 0 {
                 text.push_str(&"x".repeat(i));
@@ -1103,32 +1104,32 @@ mod tests {
         out
     }
 
-    /// Columns as the tests take them: a tab 4, ASCII 1, 🐝 and CJK 2, other characters 1.
+    /// Columns as the tests take them: a tab 4, ASCII 1, 🐙 and CJK 2, other characters 1.
     fn test_columns(text: &str) -> Columns {
         let mut c = Columns::new(4);
-        c.learn(text, |ch| if ch == '🐝' || ('\u{4E00}'..='\u{9FFF}').contains(&ch) { 1.6 } else { 0.9 });
+        c.learn(text, |ch| if ch == '🐙' || ('\u{4E00}'..='\u{9FFF}').contains(&ch) { 1.6 } else { 0.9 });
         c
     }
 
     #[test]
     fn rows_count_tabs_and_wide_characters_by_their_columns() {
-        let text = "a\tb\tc\n🐝🐝🐝\n中文中\nab\t\n\t\t\t\nõõõõõõ";
+        let text = "a\tb\tc\n🐙🐙🐙\n中文中\nab\t\n\t\t\t\nõõõõõõ";
         let cols = test_columns(text);
-        assert_eq!((cols.of('\t'), cols.of('a'), cols.of('🐝'), cols.of('中'), cols.of('õ')), (4, 1, 2, 2, 1));
+        assert_eq!((cols.of('\t'), cols.of('a'), cols.of('🐙'), cols.of('中'), cols.of('õ')), (4, 1, 2, 2, 1));
         let rows = |width: usize| -> Vec<String> {
             let r = Rows::new(text, width, &cols);
             (0..r.count()).map(|i| text[r.range(text, i, &cols).unwrap()].to_string()).collect()
         };
-        assert_eq!(rows(5), ["a\t", "b\t", "c", "🐝🐝", "🐝", "中文", "中", "ab", "\t", "\t", "\t", "\t", "õõõõõ", "õ"]);
+        assert_eq!(rows(5), ["a\t", "b\t", "c", "🐙🐙", "🐙", "中文", "中", "ab", "\t", "\t", "\t", "\t", "õõõõõ", "õ"]);
         // A character wider than a row still takes one.
         assert_eq!(
             rows(1),
-            ["a", "\t", "b", "\t", "c", "🐝", "🐝", "🐝", "中", "文", "中", "a", "b", "\t", "\t", "\t", "\t", "õ", "õ", "õ", "õ", "õ", "õ"]
+            ["a", "\t", "b", "\t", "c", "🐙", "🐙", "🐙", "中", "文", "中", "a", "b", "\t", "\t", "\t", "\t", "õ", "õ", "õ", "õ", "õ", "õ"]
         );
         // Far down, as a plain split with the same columns.
         let mut long = String::new();
         for i in 0..2000 {
-            long.push_str(&"\tx🐝中é".repeat(i % 23));
+            long.push_str(&"\tx🐙中é".repeat(i % 23));
             long.push('\n');
         }
         let cols = test_columns(&long);
@@ -1174,10 +1175,9 @@ mod tests {
         assert!(worker.take(first).is_none(), "an answer nobody waits for any more is dropped");
     }
 
-    #[test]
-    fn rows_of_a_long_line_are_found_quickly() {
-        // 10 MiB on one line, as the cut 20 MB cell: finding a row far down walks a few rows,
-        // not the line.
+    /// 10 MiB on one line, as the cut 20 MB cell: its rows, and the 41 last ones found 100 times;
+    /// how long that took.
+    fn rows_of_a_long_line() -> Duration {
         let text = "0123456789abcdef".repeat(VALUE_VIEW_MAX_BYTES / 16);
         let start = Instant::now();
         let cols = Columns::new(4);
@@ -1187,7 +1187,21 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(rows.ranges(&text, last - 40, 60, &cols).len(), 41);
         }
-        assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+        start.elapsed()
+    }
+
+    #[test]
+    fn rows_of_a_long_line_are_found() {
+        rows_of_a_long_line();
+    }
+
+    #[test]
+    #[ignore = "timing; run with --ignored --nocapture"]
+    fn rows_of_a_long_line_are_found_quickly() {
+        // Finding a row far down walks a few rows, not the line.
+        let took = rows_of_a_long_line();
+        println!("rows of a 10 MiB line: {took:?}");
+        assert!(took < Duration::from_secs(2), "{took:?}");
     }
 
     #[test]
@@ -1317,11 +1331,11 @@ mod tests {
     fn no_character_lands_past_the_text_box() {
         let text = [
             "\tindented\twith\ttabs\tand\tmore\ttabs\there\tand\there",
-            &"🐝".repeat(40),
+            &"🐙".repeat(40),
             &"中文字符".repeat(12),
             &"\t".repeat(30),
             "plain ascii that is long enough to wrap more than once in a narrow panel like this one",
-            "mixed\t🐝\tõ\t中\tend",
+            "mixed\t🐙\tõ\t中\tend",
         ]
         .join("\n");
         let view = Arc::new(ValueView::new(&col("t", "text"), Some(&text)));

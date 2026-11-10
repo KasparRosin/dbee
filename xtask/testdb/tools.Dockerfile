@@ -9,7 +9,8 @@ RUN apk add --no-cache openssh-server openssl \
  && echo 'dbee:*' | chpasswd -e
 
 # `dbee` logs in with the keys in /secrets/authorized_keys; `dbeepw` only with the password the
-# `sshd` service sets at start. Forwarding reaches the two Postgres servers and nothing else.
+# `sshd` service sets at start. Forwarding reaches nothing unless the `sshd` service's `-o
+# PermitOpen=…` names it: the database servers of xtask's SERVICES.
 COPY <<'EOF_CONFIG' /etc/ssh/sshd_config
 Port 22
 HostKey /etc/ssh/ssh_host_ed25519_key
@@ -22,7 +23,7 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 AllowTcpForwarding yes
-PermitOpen pg14:5432 pgnew:5432
+PermitOpen none
 AllowAgentForwarding no
 AllowStreamLocalForwarding no
 GatewayPorts no

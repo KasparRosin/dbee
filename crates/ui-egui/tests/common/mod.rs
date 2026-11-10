@@ -5,6 +5,9 @@
 //! clipboard (egui's `CopyText`, which kittest hands back and which never reaches the system
 //! clipboard).
 //!
+//! Every window's session gets every driver dbee ships (`dbee_drivers::all()`), unless its
+//! [`Setup`] gives fewer.
+//!
 //! Safety: every window keeps its connections file in a throwaway home, its secrets in a
 //! `MemoryStore` (or none), and reads SSH keys and `known_hosts` from `<temp home>/.ssh` with no
 //! agent, so the real home, `~/.ssh`, SSH agent and keyring are never touched. Windows connect
@@ -17,13 +20,15 @@
 //! time while a test of the binary takes the exclusive lock.
 #![allow(dead_code, reason = "each test binary uses some of these helpers")]
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, mpsc};
 use std::time::{Duration, Instant};
 
-use dbee_config::{ConnectionConfig, MemoryStore, SecretStore, SslMode};
+use dbee_config::{ConnectionConfig, DbKind, MemoryStore, SecretStore, SslMode};
+use dbee_driver::Drivers;
 use dbee_engine::{Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
-use dbee_testkit::{PgServer, TempHome, TestDb, temp_home, unique};
+use dbee_testkit::{Server, TempHome, TestDb, TestTarget, temp_home, unique};
 use dbee_ui_egui::{ControlRequest, DbeeApp};
 use egui::{Event, Pos2};
 use egui_kittest::Harness;
@@ -45,7 +50,7 @@ enum Hold {
 pub type MakeApp = Box<dyn FnOnce(Session, mpsc::Receiver<ControlRequest>) -> DbeeApp>;
 
 /// How a window is made. [`Setup::default`]: 1400 × 900, kittest's frame step, a new throwaway
-/// home, a memory secret store, a shared lock, the pg14 test server, `DbeeApp::new`.
+/// home, a memory secret store, a shared lock, the pg14 test server, every driver, `DbeeApp::new`.
 pub struct Setup {
     pub size: egui::Vec2,
     /// Seconds between frames on egui's clock; `None` is kittest's default.
@@ -58,12 +63,14 @@ pub struct Setup {
     pub exclusive: bool,
     /// What [`Ui::connected_with`] connects with; `None` is [`pg14`].
     pub config: Option<ConnectionConfig>,
+    /// The session's drivers; `None` is every driver dbee ships.
+    pub drivers: Option<Drivers>,
     pub app: Option<MakeApp>,
 }
 
 impl Default for Setup {
     fn default() -> Setup {
-        Setup { size: egui::vec2(1400.0, 900.0), step: None, home: None, secrets: true, exclusive: false, config: None, app: None }
+        Setup { size: egui::vec2(1400.0, 900.0), step: None, home: None, secrets: true, exclusive: false, config: None, drivers: None, app: None }
     }
 }
 
@@ -99,6 +106,8 @@ impl Ui {
             ssh: SshEnv { ssh_dir: Some(home.ssh_dir()), agent: AgentSource::None },
             notify: None,
             allowed_targets: None,
+            allowed_dirs: None,
+            drivers: setup.drivers.unwrap_or_else(dbee_drivers::all),
         })
         .unwrap();
         let (tx, rx) = mpsc::channel();
@@ -307,7 +316,97 @@ impl Ui {
     pub fn copied(&self) -> Option<String> {
         self.copied.last().cloned()
     }
+
+    /// The pointer moves to `at` and stays there for a frame.
+    pub fn hover(&mut self, at: Pos2) {
+        self.frame_with(vec![Event::PointerMoved(at)]);
+    }
+
+    /// The pointer moves to `at` and rests there for a second (four frames), longer than a
+    /// tooltip waits: each move starts that wait again.
+    pub fn rest(&mut self, at: Pos2) {
+        self.hover(at);
+        for _ in 0..4 {
+            self.frame();
+        }
+    }
+
+    /// The text shapes of the last frame: each galley where it was drawn.
+    pub fn texts(&self) -> Vec<(egui::Rect, Arc<egui::Galley>)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, Arc<egui::Galley>)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push((t.galley.rect.translate(t.pos.to_vec2()), Arc::clone(&t.galley))),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &self.harness.output().shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// The text drawn inside `within` that reads `text`: where it was drawn and whether it was cut
+    /// short (an ellipsis).
+    pub fn text_in(&self, within: egui::Rect, text: &str) -> Option<(egui::Rect, bool)> {
+        self.texts().into_iter().find(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).map(|(r, g)| (r, g.elided))
+    }
 }
+
+/// A file dropped on the window, as eframe hands one over.
+#[derive(Debug)]
+pub struct Dropped(pub PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Err("the test reads no file".into())
+    }
+}
+
+/// One frame with `paths` dropped on the window.
+pub fn drop_files(ui: &mut Ui, paths: &[&Path]) {
+    for p in paths {
+        ui.harness.input_mut().dropped_files.push(Arc::new(Dropped(p.to_path_buf())));
+    }
+    ui.frame();
+}
+
+/// The settings for `t`: its server on `127.0.0.1` as the kind's user, on the kind's test
+/// database (none on MySQL's servers), TLS `prefer`; or its file. Named after the target.
+pub fn config_of(t: &TestTarget) -> ConnectionConfig {
+    let info = t.kind().info();
+    let kind = DbKind::from_id(t.kind().id()).expect("the test kinds are dbee's");
+    let base = ConnectionConfig { name: t.name(), kind, ..ConnectionConfig::default() };
+    match t.server() {
+        Some(s) => ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port: s.port,
+            user: info.user.into(),
+            database: info.database.into(),
+            ssl_mode: SslMode::Prefer,
+            ..base
+        },
+        None => ConnectionConfig { file: t.file().map(std::path::Path::to_path_buf), ..base },
+    }
+}
+
+/// A window of `size` connected to `t` (with `database` instead of the kind's, when given), on
+/// the workspace. A SQLite target's file goes with the target, which must outlive the window.
+pub fn connected_to_target(db: &TestDb, t: &TestTarget, database: Option<&str>, size: egui::Vec2) -> Ui {
+    let mut config = config_of(t);
+    if let Some(d) = database {
+        config.database = d.into();
+    }
+    Ui::connected_with(db, Setup { size, config: Some(config), ..Setup::default() })
+}
+
+/// The app's first window size (`apps/dbee`), for tests where layout matters.
+pub const APP_SIZE: egui::Vec2 = egui::vec2(1100.0, 720.0);
 
 /// The automation entry `id` in a `ui.inspect` result.
 pub fn tag_in(inspect: &Json, id: &str) -> Option<Json> {
@@ -325,12 +424,12 @@ pub fn visible(entry: &Option<Json>) -> bool {
 }
 
 /// The Postgres 14 test server.
-pub fn pg14_server(db: &TestDb) -> &PgServer {
-    db.servers.iter().find(|s| s.major == 14).unwrap()
+pub fn pg14_server(db: &TestDb) -> &Server {
+    db.server("pg14").unwrap()
 }
 
 /// `postgres@127.0.0.1:<port>/dbee` on `server`, named after it, TLS `prefer`.
-pub fn server_config(server: &PgServer) -> ConnectionConfig {
+pub fn server_config(server: &Server) -> ConnectionConfig {
     ConnectionConfig {
         name: server.name.clone(),
         host: "127.0.0.1".into(),

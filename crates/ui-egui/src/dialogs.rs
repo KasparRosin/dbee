@@ -10,9 +10,10 @@
 //!   (`savePassword`), which the engine honours for saved connections only;
 //! - `needsConfirm` → [`Dialog::Confirm`]: Close anyway (`force`).
 //!
-//! The connection screen also opens [`Dialog::FillFromUrl`] (runs `connection.parseUrl`) and
-//! [`Dialog::DeleteConnection`]. Programmatic calls (the control channel's `engine.execute`)
-//! never come here: they get the `needs…` error back.
+//! The connection screen also opens [`Dialog::FillFromUrl`] (runs `connection.parseUrl`, and takes
+//! only a URL of the database types it was opened for) and [`Dialog::DeleteConnection`].
+//! Programmatic calls (the control channel's `engine.execute`) never come here: they get the
+//! `needs…` error back.
 //!
 //! Every dialog is a fixed-width card at a fixed place (centred, near the top), so its widgets are
 //! where `ui.inspect` says from its first frame on. Automation ids: `dialog-ok`, `dialog-cancel`,
@@ -21,7 +22,7 @@
 //! says whether they are filled in, never what they hold, and neither `Debug` nor the logs show
 //! them.
 
-use dbee_config::ConnectionConfig;
+use dbee_config::{ConnectionConfig, DbKind};
 use dbee_engine::{EngineError, Json, Need, Outcome};
 use egui::{Align, Align2, Button, Checkbox, CornerRadius, Frame, Key, Layout, Margin, RichText, Stroke, TextEdit, vec2};
 use serde_json::json;
@@ -88,8 +89,8 @@ pub(crate) enum Keep {
 
 /// The dialog on screen.
 pub(crate) enum Dialog {
-    /// "Fill from URL…": a URL to parse into the connection form.
-    FillFromUrl { url: String, error: Option<String>, focused: bool },
+    /// "Fill from URL…": a URL of one of `kinds` to parse into the connection form.
+    FillFromUrl { url: String, error: Option<String>, focused: bool, kinds: Vec<DbKind> },
     /// An SSH server not in `known_hosts`.
     HostKey { host: String, key_type: String, fingerprint: String, rerun: Rerun },
     /// A password or passphrase; `line` says whose.
@@ -124,9 +125,9 @@ impl Dialog {
         }
     }
 
-    /// The empty "Fill from URL" dialog.
-    pub(crate) fn fill_from_url() -> Dialog {
-        Dialog::FillFromUrl { url: String::new(), error: None, focused: false }
+    /// The empty "Fill from URL" dialog, for a URL of one of `kinds`.
+    pub(crate) fn fill_from_url(kinds: Vec<DbKind>) -> Dialog {
+        Dialog::FillFromUrl { url: String::new(), error: None, focused: false, kinds }
     }
 }
 
@@ -240,8 +241,17 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
         }
         Act::ParseUrl(url) => match app.run(connections::PARSE_URL, json!({ "url": url })) {
             Ok(Outcome::Done(parts)) => {
-                app.view.dialog = None;
-                connections::fill_from_url(app, &parts);
+                let kind = parts.get("kind").and_then(Json::as_str).and_then(DbKind::from_id);
+                match app.view.dialog.as_mut() {
+                    Some(Dialog::FillFromUrl { error, kinds, .. }) if !kind.is_some_and(|k| kinds.contains(&k)) => {
+                        *error = Some(format!("Paste a {} URL.", schemes(kinds)));
+                    }
+                    _ => {
+                        app.view.dialog = None;
+                        let password = dbee_config::parse_url(&url).ok().and_then(|u| u.password);
+                        connections::fill_from_url(app, &parts, password);
+                    }
+                }
             }
             Ok(Outcome::Started(_)) => app.view.dialog = None,
             Err(e) => {
@@ -255,6 +265,24 @@ pub(crate) fn show(app: &mut DbeeApp, ctx: &egui::Context) {
             connections::delete(app, &id);
         }
     }
+}
+
+/// The URL schemes of `kinds`: `postgres://, postgresql:// or mysql://`.
+fn schemes(kinds: &[DbKind]) -> String {
+    let all: Vec<String> = kinds.iter().flat_map(|k| k.info().url_schemes).map(|s| format!("{s}://")).collect();
+    match all.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
+/// An example URL of the first of `kinds`, with its default port.
+fn url_hint(kinds: &[DbKind]) -> String {
+    let Some(kind) = kinds.first() else { return String::new() };
+    let scheme = kind.info().url_schemes.last().copied().unwrap_or_default();
+    let port = kind.default_port().map(|p| format!(":{p}")).unwrap_or_default();
+    format!("{scheme}://user:password@host{port}/database")
 }
 
 /// `params` with `key` set to `value`.
@@ -342,14 +370,14 @@ fn focus(r: &egui::Response, focused: &mut bool) {
 fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
     let t = TOKENS;
     match dialog {
-        Dialog::FillFromUrl { url, error, focused } => {
+        Dialog::FillFromUrl { url, error, focused, kinds } => {
             title(ui, "Fill from URL");
-            text(ui, tags, "dialog-text", "Paste a postgres:// or postgresql:// URL. The parts it has replace those in the form.");
+            text(ui, tags, "dialog-text", &format!("Paste a {} URL. The parts it has replace those in the form.", schemes(kinds)));
             ui.add_space(8.0);
             let r = ui.add(
                 TextEdit::singleline(url)
                     .id(egui::Id::new("dialog-url"))
-                    .hint_text("postgresql://user:password@host:5432/database")
+                    .hint_text(url_hint(kinds))
                     .desired_width(WIDTH)
                     .margin(Margin::symmetric(6, 5)),
             );

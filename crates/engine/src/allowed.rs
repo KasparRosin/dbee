@@ -1,15 +1,31 @@
-//! The connection guard of isolated runs: with a list of allowed targets
-//! ([`crate::SessionOptions::allowed_targets`], set by `cargo xtask run-isolated`),
-//! `connection.test`, `connection.open` and `connection.reconnect` refuse every other target
-//! before any network I/O. Without a list there is no limit (a normal run).
+//! The connection guard of isolated runs (`cargo xtask run-isolated`): `connection.test`,
+//! `connection.listDatabases`, `connection.open` and `connection.reconnect` refuse a target the
+//! run may not reach before any network I/O. A server is checked by its target
+//! ([`crate::SessionOptions::allowed_targets`]), and so is any SSH server a config names. The
+//! files a connection reads are checked against the session's allowed folders
+//! ([`crate::SessionOptions::allowed_dirs`]) inside its job, as they touch the filesystem: an SSH
+//! key and a CA file by [`check_files`], a file database's file by its driver inside the open
+//! (`dbee_driver::Target::allowed_dirs`). Without a list there is no limit (a normal run).
 //!
-//! The target is the database's `host:port`, or with an SSH tunnel the SSH server's (the
-//! database host behind it is resolved by the sshd). Hosts are compared lowercased and literally:
-//! no name lookup, so `localhost` and `127.0.0.1` are separate entries.
+//! The target is the database's `host:port`, or with an SSH tunnel the SSH server's (the database
+//! host behind it is resolved by the sshd). Hosts are compared lowercased and literally: no name
+//! lookup, so `localhost` and `127.0.0.1` are separate entries.
 
-use dbee_config::ConnectionConfig;
+use std::path::PathBuf;
+
+use dbee_config::{ConnectionConfig, SshAuth};
+use dbee_driver::DbError;
 
 use crate::EngineError;
+
+/// `Ok` when this run may reach `config`'s target: a server's, or the SSH server any config
+/// names. A file without one has no target.
+pub(crate) fn check(targets: Option<&[(String, u16)]>, config: &ConnectionConfig) -> Result<(), EngineError> {
+    if config.kind.uses_file() && config.ssh.is_none() {
+        return Ok(());
+    }
+    check_target(targets, config)
+}
 
 /// `Ok` when `config` may be reached: there is no list, or its target is on it.
 pub(crate) fn check_target(allowed: Option<&[(String, u16)]>, config: &ConnectionConfig) -> Result<(), EngineError> {
@@ -26,8 +42,23 @@ pub(crate) fn check_target(allowed: Option<&[(String, u16)]>, config: &Connectio
     Err(EngineError::Config(format!("this isolated run may only connect to the test servers; {what} {host}:{port} is not one of them")))
 }
 
+/// `Ok` when the SSH key file and the CA file `config` names lie in the `allowed` folders, once
+/// resolved, or there is no list. Run before anything is read or sent.
+pub(crate) fn check_files(allowed: Option<&[PathBuf]>, config: &ConnectionConfig) -> Result<(), DbError> {
+    let Some(allowed) = allowed else { return Ok(()) };
+    let key = match config.ssh.as_ref().map(|ssh| &ssh.auth) {
+        Some(SshAuth::Key { path: Some(path) }) => Some(path.as_path()),
+        _ => None,
+    };
+    for file in [key, config.ca_file.as_deref()].into_iter().flatten() {
+        dbee_driver::allowed_file(allowed, file)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use dbee_config::{ConnectionConfig, MemoryStore, SshAuth, SshConfig};
@@ -41,7 +72,7 @@ mod tests {
     }
 
     fn tunnel(ssh_host: &str, ssh_port: u16, db_host: &str, db_port: u16) -> ConnectionConfig {
-        let ssh = SshConfig { host: ssh_host.into(), port: ssh_port, user: "dbee".into(), auth: SshAuth::Agent };
+        let ssh = SshConfig { host: ssh_host.into(), port: ssh_port, user: "dbee".into(), auth: SshAuth::Agent, ..SshConfig::default() };
         ConnectionConfig { ssh: Some(ssh), ..at(db_host, db_port) }
     }
 
@@ -85,12 +116,105 @@ mod tests {
     }
 
     #[test]
+    fn a_file_has_no_target_but_its_ssh_server() {
+        let file = ConnectionConfig { kind: dbee_config::DbKind::Sqlite, file: Some("/x/a.sqlite".into()), ..at("db.example", 5432) };
+        assert_eq!(check(Some(&[]), &file), Ok(()), "a file's host and port are no target");
+        let through = ConnectionConfig { ssh: tunnel("jump.example", 22, "db", 1).ssh, ..file };
+        let e = check(Some(&list()), &through).unwrap_err();
+        assert!(e.to_string().contains("the SSH server jump.example:22 is not one of them"), "{e}");
+        assert_eq!(check(Some(&list()), &at("127.0.0.1", 1)), Ok(()));
+        assert!(check(Some(&[]), &at("127.0.0.1", 1)).is_err());
+    }
+
+    /// A folder of its own under `target/`, removed when dropped.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new(name: &str) -> Folder {
+            let path = dbee_testkit::repo_root().join("target").join("testkit").join("allowed").join(dbee_testkit::unique(name));
+            std::fs::create_dir_all(&path).unwrap();
+            Folder(path)
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `at` the error port with `ca` as its CA file.
+    fn with_ca(ca: &Path) -> ConnectionConfig {
+        ConnectionConfig { ca_file: Some(ca.to_path_buf()), ..at("127.0.0.1", 1) }
+    }
+
+    /// `at` the error port through an SSH server there, logging in with the key file `key`.
+    fn with_key(key: &Path) -> ConnectionConfig {
+        let ssh = SshConfig {
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "u".into(),
+            auth: SshAuth::Key { path: Some(key.to_path_buf()) },
+            ..SshConfig::default()
+        };
+        ConnectionConfig { ssh: Some(ssh), ..at("db", 5432) }
+    }
+
+    #[test]
+    fn an_isolated_run_reads_no_ssh_key_or_ca_file_outside_its_folders() {
+        let (inside, outside) = (Folder::new("in"), Folder::new("out"));
+        let file_out = outside.0.join("secret");
+        let file_in = inside.0.join("file");
+        std::fs::write(&file_out, "x").unwrap();
+        std::fs::write(&file_in, "x").unwrap();
+        let mut s = Session::new(SessionOptions {
+            allowed_targets: Some(vec![("127.0.0.1".into(), 1)]),
+            allowed_dirs: Some(vec![inside.0.clone()]),
+            drivers: dbee_drivers::all(),
+            ..SessionOptions::default()
+        })
+        .unwrap();
+        let wait = Duration::from_secs(30);
+        let mut refused = vec![file_out.clone(), inside.0.join("..").join(outside.0.file_name().unwrap()).join("secret")];
+        #[cfg(unix)]
+        {
+            let link = inside.0.join("link");
+            std::os::unix::fs::symlink(&file_out, &link).unwrap();
+            refused.push(link);
+        }
+        for file in &refused {
+            for config in [with_ca(file), with_key(file)] {
+                for command in ["connection.test", "connection.open", "connection.listDatabases"] {
+                    let e = s.run_blocking(command, json!({ "config": config, "password": "pw" }), wait).unwrap_err();
+                    assert_eq!(e.code(), "config", "{command} with {}: {e}", file.display());
+                    assert_eq!(e.to_string(), format!("this isolated run may only open files in its own folders; {} is not in them", file.display()));
+                }
+            }
+        }
+        // Inside the folders the check passes, and the connection fails on the port.
+        for config in [with_ca(&file_in), with_key(&file_in)] {
+            let e = s.run_blocking("connection.test", json!({ "config": config, "password": "pw" }), wait).unwrap_err();
+            assert_ne!(e.code(), "config", "{e}");
+        }
+    }
+
+    #[test]
+    fn a_normal_run_has_no_limit_on_its_key_and_ca_files() {
+        let mut s = Session::new(SessionOptions { drivers: dbee_drivers::all(), ..SessionOptions::default() }).unwrap();
+        for config in [with_ca(Path::new("/nowhere/ca.pem")), with_key(Path::new("/nowhere/key"))] {
+            let e = s.run_blocking("connection.test", json!({ "config": config, "password": "pw" }), Duration::from_secs(30)).unwrap_err();
+            assert_ne!(e.code(), "config", "{e}");
+        }
+    }
+
+    #[test]
     fn reconnect_is_checked_too() {
         let db = dbee_testkit::require_testdb!();
-        let server = db.servers.iter().find(|s| s.major == 14).unwrap();
+        let server = db.server("pg14").unwrap();
         let mut s = Session::new(SessionOptions {
             secrets: Some(std::sync::Arc::new(MemoryStore::default())),
             allowed_targets: Some(vec![("127.0.0.1".into(), server.port)]),
+            drivers: dbee_drivers::all(),
             ..SessionOptions::default()
         })
         .unwrap();
@@ -101,6 +225,23 @@ mod tests {
         let e = s.execute("connection.reconnect", json!({})).unwrap_err();
         assert_eq!(e.code(), "config", "{e}");
         assert!(!s.busy(), "refused before any job started");
+        assert_eq!(s.run_blocking("connection.close", json!({}), Duration::from_secs(5)).map(|_| ()), Ok(()));
+    }
+
+    #[test]
+    fn a_reconnect_checks_the_file_again() {
+        let seed = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().unwrap();
+        let file = seed.file().unwrap();
+        let folder = file.parent().unwrap().to_path_buf();
+        let mut s =
+            Session::new(SessionOptions { allowed_dirs: Some(vec![folder]), drivers: dbee_drivers::all(), ..SessionOptions::default() }).unwrap();
+        let config = ConnectionConfig { kind: dbee_config::DbKind::Sqlite, file: Some(file.to_path_buf()), ..ConnectionConfig::default() };
+        s.run_blocking("connection.open", json!({ "config": config }), Duration::from_secs(30)).unwrap();
+        // The file's driver checks it again inside the reconnect's open.
+        s.allowed_dirs = Some(Vec::new());
+        let e = s.run_blocking("connection.reconnect", json!({}), Duration::from_secs(30)).unwrap_err();
+        assert_eq!(e.code(), "config", "{e}");
+        assert!(e.to_string().starts_with("this isolated run may only open files in its own folders; "), "{e}");
         assert_eq!(s.run_blocking("connection.close", json!({}), Duration::from_secs(5)).map(|_| ()), Ok(()));
     }
 }

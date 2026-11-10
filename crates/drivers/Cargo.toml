@@ -1,0 +1,22 @@
+[package]
+name = "dbee-drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "dbee's database drivers (L4): the one list of every driver dbee ships, for the apps and tests"
+
+[lints]
+workspace = true
+
+[dependencies]
+dbee-driver = { workspace = true }
+dbee-pg = { workspace = true }
+dbee-mysql = { workspace = true }
+dbee-sqlite = { workspace = true }
+
+[dev-dependencies]
+dbee-config = { workspace = true }

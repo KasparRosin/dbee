@@ -14,13 +14,15 @@
 
 mod common;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use dbee_config::{ConnectionColor, ConnectionConfig};
-use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef};
+use dbee_config::{ConnectionColor, ConnectionConfig, SslMode};
+use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef, TypeClass};
 use dbee_testkit::TestDb;
+use dbee_ui_egui::DbeeApp;
 use dbee_ui_egui::automation::Tags;
 use dbee_ui_egui::tree::{self, Tree};
 use egui_kittest::Harness;
@@ -42,6 +44,53 @@ impl Ui {
     fn active(&mut self) -> u64 {
         self.document()["active"].as_u64().expect("a tab is active")
     }
+
+    /// Ctrl+P, `query` typed, and Enter on the best match.
+    fn quick_choose(&mut self, query: &str) {
+        self.ctrl("P");
+        self.text(query);
+        self.frame();
+        self.key("Enter");
+    }
+
+    /// The open connection's id, if one is open.
+    fn connection_id(&mut self) -> Option<String> {
+        self.document()["connection"]["id"].as_str().map(str::to_string)
+    }
+}
+
+/// A window at the app's first size connected to pg14, with the newest Postgres saved (with the
+/// test servers' password) as "pgnew"; and pgnew's id.
+fn with_pgnew(db: &TestDb) -> (Ui, String) {
+    with_pgnew_held(db, false)
+}
+
+/// [`with_pgnew`], the window holding the lock exclusively when `exclusive` (it kills backends).
+fn with_pgnew_held(db: &TestDb, exclusive: bool) -> (Ui, String) {
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, exclusive, ..Setup::default() });
+    let pgnew = server_config(db.server("pgnew").unwrap());
+    let id = ui.execute("connection.save", json!({ "config": pgnew, "password": db.password }))["id"].as_str().unwrap().to_string();
+    ui.frame();
+    (ui, id)
+}
+
+/// A connection switched to with Ctrl+P shows its tree from the top, not scrolled as the last one was.
+#[test]
+fn the_tree_starts_at_its_top_after_a_switch() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, _) = with_pgnew(db);
+    // The SQLite seed's tree is tall enough (315 rows open) to keep an old offset.
+    let file = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let config = json!({ "name": "seed file", "kind": "sqlite", "file": file.file().unwrap() });
+    ui.execute("connection.save", json!({ "config": config }));
+    ui.click("tree-schema-many");
+    ui.click("tree-table-many.t_300");
+    ui.frame();
+    assert!(!visible(&ui.tag("tree-schema-public")), "scrolled down to `many`'s last table");
+    ui.quick_choose("seed file");
+    ui.until("the file's workspace", |ui| ui.document()["connection"]["kind"] == "sqlite" && ui.document()["screen"] == "workspace");
+    ui.frame();
+    assert!(visible(&ui.tag("tree-schema-main")), "the first schema row shows: {:?}", ui.tag("tree-schema-main"));
 }
 
 #[test]
@@ -132,6 +181,213 @@ fn enter_opens_the_hit_for_the_text_typed_in_the_same_frame() {
     ui.frame();
     ui.until("the customers tab", |ui| ui.document()["table"]["name"] == "customers");
     assert_eq!(ui.document()["table"]["schema"], "shop");
+}
+
+#[test]
+fn ctrl_p_switches_connection() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, pgnew) = with_pgnew(db);
+    let pg14 = ui.connection_id().unwrap();
+    ui.ctrl("P");
+    ui.text("pg");
+    ui.frame();
+    // Tables and connections in one list of twenty rows, every row as high and as wide as the
+    // others. At this size not all twenty fit: the list scrolls, the rows in view are whole and
+    // inside the window, and the others are listed out of view.
+    let i = ui.inspect();
+    let rows: Vec<Json> = (0..20).filter_map(|n| tag_in(&i, &format!("qs-item-{n}"))).collect();
+    assert_eq!(rows.len(), 20, "{rows:?}");
+    let rect = |row: &Json| -> Vec<f64> { row["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect() };
+    let x = rect(&rows[0])[0];
+    // A row in view is whole, but for the list's top edge rounded to a pixel.
+    let whole = |r: &[f64]| r[3] > 27.0 && r[3] <= 28.0;
+    for row in &rows {
+        let r = rect(row);
+        assert!(r[0] == x && r[2] == 560.0 && whole(&r), "{rows:?}");
+        assert!(!visible(&Some(row.clone())) || r[1] + r[3] <= f64::from(APP_SIZE.y), "{row}");
+    }
+    assert!(!visible(&Some(rows[19].clone())), "the twentieth row waits below the list: {rows:?}");
+    let pgnew_row = (0..rows.len()).find(|n| tag_in(&i, &format!("qs-item-{n}-kind")).is_some()).expect("a connection hit");
+    assert_eq!(rows[pgnew_row]["value"], "pgnew");
+    assert_eq!(tag_in(&i, &format!("qs-item-{pgnew_row}-kind")).unwrap()["value"], "PostgreSQL");
+    assert!(rows.iter().any(|r| r["value"].as_str().is_some_and(|v| v.starts_with("pg_catalog."))), "table hits too: {rows:?}");
+    assert!(!rows.iter().any(|r| r["value"] == "pg14"), "the open connection is left out");
+    // Down to the last row: the list scrolls it into view, whole. Down once more stays there.
+    let in_view = |ui: &mut Ui, n: usize| {
+        let row = ui.tag(&format!("qs-item-{n}"));
+        assert!(visible(&row), "row {n}: {row:?}");
+        let r = rect(row.as_ref().unwrap());
+        assert!(whole(&r) && r[1] + r[3] <= f64::from(APP_SIZE.y), "row {n}: {r:?}");
+    };
+    for _ in 0..19 {
+        ui.key("ArrowDown");
+    }
+    in_view(&mut ui, 19);
+    assert!(!visible(&ui.tag("qs-item-0")), "the first row scrolled away");
+    ui.key("ArrowDown");
+    in_view(&mut ui, 19);
+    assert!(!visible(&ui.tag("qs-item-0")), "Down at the last row stays there");
+    // Up to the first row: it scrolls back into view, whole. Up once more stays there.
+    for _ in 0..19 {
+        ui.key("ArrowUp");
+    }
+    in_view(&mut ui, 0);
+    assert!(!visible(&ui.tag("qs-item-19")), "the last row scrolled away");
+    ui.key("ArrowUp");
+    in_view(&mut ui, 0);
+    assert!(!visible(&ui.tag("qs-item-19")), "Up at the first row stays there");
+    ui.key("Escape");
+    ui.quick_choose("pgnew");
+    ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
+    assert!(ui.tag("qs-input").is_none(), "the search closed");
+    // And back, which now lists pg14.
+    ui.quick_choose("pg14");
+    ui.until("connected to pg14", |ui| ui.connection_id().as_deref() == Some(pg14.as_str()) && ui.document()["screen"] == "workspace");
+}
+
+#[test]
+fn switching_with_unsaved_query_text_asks_first() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, pgnew) = with_pgnew(db);
+    let pg14 = ui.connection_id().unwrap();
+    ui.ctrl("T");
+    ui.execute("query.setText", json!({ "text": "select 1" }));
+    ui.quick_choose("pgnew");
+    assert_eq!(ui.inspect()["dialog"], "confirm", "the query text would be lost");
+    assert_eq!(ui.value("dialog-text"), "Disconnect from pg14? The text of 1 query tab will be lost.");
+    ui.click("dialog-cancel");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"]["id"].clone()), (json!("workspace"), json!(pg14)), "Cancel keeps pg14 open: {d}");
+    assert_eq!((d["tabs"].as_array().map(Vec::len), d["query"]["text"].clone()), (Some(1), json!("select 1")), "{d}");
+    // Close anyway closes pg14 and connects to pgnew.
+    ui.quick_choose("pgnew");
+    assert_eq!(ui.inspect()["dialog"], "confirm");
+    ui.click("dialog-ok");
+    ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
+    assert_eq!(ui.document()["tabs"], json!([]));
+}
+
+#[test]
+fn switching_with_staged_edits_asks_first_and_cancel_keeps_them() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, _) = with_pgnew(db);
+    let pg14 = ui.connection_id().unwrap();
+    ui.open("shop", "customers");
+    ui.execute("cell.edit", json!({ "row": 0, "column": "name", "value": "Switched" }));
+    ui.quick_choose("pgnew");
+    assert_eq!(ui.inspect()["dialog"], "confirm", "the staged edits would be lost");
+    assert_eq!(ui.value("dialog-text"), "Disconnect from pg14? The staged changes of 1 table tab will be lost.");
+    ui.click("dialog-cancel");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    assert_eq!(ui.connection_id(), Some(pg14), "Cancel keeps pg14 open");
+    assert_eq!(ui.table()["edits"]["count"], 1, "and the staged edit");
+    // The switch was dropped: a later disconnect connects nowhere.
+    ui.execute("connection.close", json!({ "force": true }));
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"].clone(), d["jobs"].clone()), (json!("connections"), Json::Null, json!([])), "{d}");
+}
+
+#[test]
+fn ctrl_p_without_a_stored_password_asks_as_a_double_click_does() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let config = ConnectionConfig { name: "pg14 no password".into(), ..pg14(db) };
+    let bare = ui.execute("connection.save", json!({ "config": config }))["id"].as_str().unwrap().to_string();
+    // The screen, the dialog and the form the connect asks over.
+    let asked = |ui: &mut Ui| {
+        ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+        let d = ui.document();
+        (d["screen"].clone(), d["connection"].clone(), ui.value("dialog-text"), ui.value("dialog-save"), ui.value("conn-name"), ui.value("conn-host"))
+    };
+    // From the workspace: pg14 closes, and the form connects.
+    ui.quick_choose("no password");
+    let by_search = asked(&mut ui);
+    assert_eq!((by_search.0.clone(), by_search.4.clone()), (json!("connections"), json!("pg14 no password")), "{by_search:?}");
+    ui.click("dialog-cancel");
+    ui.double_click(&format!("conn-saved-{bare}"));
+    assert_eq!(asked(&mut ui), by_search, "a double-click on the card asks the same");
+    ui.click("dialog-cancel");
+    // On the connection screen.
+    ui.quick_choose("no password");
+    assert_eq!(asked(&mut ui), by_search);
+    ui.text(&db.password);
+    ui.click("dialog-ok");
+    ui.until("connected", |ui| ui.connection_id().as_deref() == Some(bare.as_str()) && ui.document()["screen"] == "workspace");
+}
+
+#[test]
+fn ctrl_p_on_the_connection_screen_lists_and_opens_connections() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::window(Setup { size: APP_SIZE, ..Setup::default() });
+    ui.execute("connection.save", json!({ "config": ConnectionConfig { name: "Shop live".into(), color: ConnectionColor::Red, ..pg14(db) } }));
+    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
+    ui.frame();
+    ui.ctrl("P");
+    assert!(visible(&ui.tag("qs-input")), "Ctrl+P opens the quick search on the connection screen");
+    ui.frame();
+    // Every saved connection, connections only, in the saved list's order.
+    let saved: Vec<Json> = ui.execute("connection.list", json!({}))["saved"].as_array().unwrap().iter().map(|c| c["name"].clone()).collect();
+    assert_eq!(saved, [json!("Shop live"), json!("pg14")]);
+    assert_eq!(vec![ui.value("qs-item-0"), ui.value("qs-item-1")], saved);
+    assert!(ui.tag("qs-item-2").is_none());
+    ui.text("zzz");
+    ui.frame();
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == "No connection matches."));
+    ui.key("Escape");
+    ui.quick_choose("pg14");
+    ui.until("connected to pg14", |ui| ui.connection_id().as_deref() == Some(id.as_str()) && ui.document()["screen"] == "workspace");
+}
+
+#[test]
+fn a_failed_switch_ends_on_the_form_with_its_error() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    ui.ctrl("T");
+    // Nothing listens on port 1: the server refuses.
+    ui.execute("connection.save", json!({ "config": ConnectionConfig { name: "nowhere".into(), port: 1, ..pg14(db) } }));
+    ui.frame();
+    ui.quick_choose("nowhere");
+    ui.until("the connect's error", |ui| ui.tag("conn-error").is_some());
+    let d = ui.document();
+    assert_eq!(
+        (d["screen"].clone(), d["connection"].clone(), d["tabs"].clone(), d["jobs"].clone()),
+        (json!("connections"), Json::Null, json!([]), json!([])),
+        "{d}"
+    );
+    assert_eq!(ui.value("conn-name"), "nowhere", "the form shows the chosen connection");
+    assert!(ui.value("conn-error").as_str().is_some_and(|e| !e.is_empty()), "the error in the form's message slot");
+    assert_eq!(ui.inspect()["dialog"], Json::Null);
+}
+
+#[test]
+fn ctrl_p_leaves_a_lost_connection() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, pgnew) = with_pgnew_held(db, true);
+    ui.ctrl("T");
+    dbee_testkit::kill_dbee_connections(pg14_server(db)).unwrap();
+    // The next database action finds the connection gone.
+    ui.click("tree-refresh");
+    ui.until("the lost mark", |ui| ui.document()["connection"]["lost"] == true);
+    // While lost, only connections are found.
+    ui.ctrl("P");
+    ui.text("pg");
+    ui.frame();
+    let i = ui.inspect();
+    let rows: Vec<usize> = (0..20).filter(|n| tag_in(&i, &format!("qs-item-{n}")).is_some()).collect();
+    assert!(!rows.is_empty() && rows.iter().all(|n| tag_in(&i, &format!("qs-item-{n}-kind")).is_some()), "{:?}", ids(&i));
+    ui.key("Escape");
+    ui.quick_choose("pgnew");
+    ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
+    let d = ui.document();
+    assert_eq!((d["connection"]["lost"].clone(), d["tabs"].clone()), (json!(false), json!([])), "{d}");
 }
 
 #[test]
@@ -238,6 +494,37 @@ fn tree_double_click_opens_and_expands_columns() {
     ui.until("the odd tab", |ui| ui.document()["table"]["name"] == "Other Ödd");
 }
 
+/// A type in a schema on the session's search path shows without that schema, as Postgres shows
+/// it, in the tree's column rows and in the filter's column list, as in the grid's header.
+#[test]
+fn the_tree_and_the_filter_show_a_type_as_postgres_does() {
+    let db = dbee_testkit::require_testdb!();
+    let mood = dbee_testkit::unique("mood");
+    let _type = DropType(db, format!("public.{mood}"));
+    let table = Scratch::new(db, "t_label", |t| {
+        format!(
+            "CREATE TYPE public.{mood} AS ENUM ('ok'); CREATE TABLE scratch.{t} (id int PRIMARY KEY, m public.{mood}); INSERT INTO scratch.{t} VALUES (1, 'ok');"
+        )
+    });
+    let mut ui = Ui::connected(db);
+    ui.click("tree-schema-scratch");
+    ui.click(&format!("tree-expand-scratch.{}", table.0));
+    let column = tag_in(&ui.inspect(), &format!("tree-column-scratch.{}.m", table.0)).expect("the column shows under its table");
+    assert_eq!(column["value"]["type"], json!(mood), "{column}");
+    ui.open("scratch", &table.0);
+    ui.click("filter-0-column");
+    assert_eq!(ui.value("filter-0-column-m"), json!(mood));
+}
+
+/// Drops the type it names on pg14 when the test ends, after the table that uses it.
+struct DropType<'a>(&'a TestDb, String);
+
+impl Drop for DropType<'_> {
+    fn drop(&mut self) {
+        let _ = dbee_testkit::psql(pg14_server(self.0), &format!("DROP TYPE IF EXISTS {} CASCADE", self.1));
+    }
+}
+
 #[test]
 fn tree_rows_out_of_view_scroll_in_when_clicked() {
     let db = dbee_testkit::require_testdb!();
@@ -249,6 +536,65 @@ fn tree_rows_out_of_view_scroll_in_when_clicked() {
     assert_eq!(far["visible"], false, "{far}");
     ui.click_with("tree-table-many.t_290", json!({ "count": 2 }));
     ui.until("the t_290 tab", |ui| ui.document()["table"]["name"] == "t_290");
+}
+
+/// The tree's schema rows in the order drawn: `(schema, open)`.
+fn schema_rows(i: &Json) -> Vec<(String, bool)> {
+    let rows = i["automation"].as_array().unwrap().iter();
+    rows.filter_map(|a| Some((a["id"].as_str()?.strip_prefix("tree-schema-")?.to_string(), a["value"]["open"] == true))).collect()
+}
+
+/// The catalog's default schema (Postgres `public`, MySQL the database the settings name, SQLite
+/// `main`) is listed first and starts open; without one the first in the catalog's order does.
+#[test]
+fn the_first_schema_is_the_default_one_on_every_engine() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let pg = dbee_testkit::target(pg14_server(db));
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    for (t, database, first) in [(&pg, None, "public"), (&mysql, Some("shop"), "shop"), (&mysql, None, "many"), (&sqlite, None, "main")] {
+        let mut ui = connected_to_target(db, t, database, APP_SIZE);
+        let rows = schema_rows(&ui.inspect());
+        assert_eq!(rows.first(), Some(&(first.to_string(), true)), "{}: {rows:?}", t.name());
+        assert!(rows.iter().skip(1).all(|(_, open)| !open), "{}: only the first starts open: {rows:?}", t.name());
+    }
+}
+
+/// The tree names the level under a connection with the engine's word: databases on MySQL,
+/// schemas on Postgres.
+#[test]
+fn the_tree_says_databases_on_mysql_and_schemas_on_postgres() {
+    let db = dbee_testkit::require_testdb!();
+    for (server, label) in [("pg14", "System schemas"), ("mysql80", "System databases")] {
+        let t = dbee_testkit::target(db.server(server).unwrap());
+        let mut ui = connected_to_target(db, &t, None, APP_SIZE);
+        // The open schema closed (MySQL's `many` holds 300 tables), so the group is in view.
+        if let Some((open, _)) = schema_rows(&ui.inspect()).into_iter().find(|(_, open)| *open) {
+            ui.click(&format!("tree-schema-{open}"));
+        }
+        let group = ui.harness.state().tags().rect("tree-system").expect("the system group is drawn");
+        let texts: Vec<String> = ui.texts().iter().filter(|(r, _)| group.contains(r.center())).map(|(_, g)| g.text().to_string()).collect();
+        assert!(ui.text_in(group, label).is_some(), "{server}: {texts:?}");
+        // The refresh button's hover says the word too.
+        let refresh = ui.harness.state().tags().rect("tree-refresh").expect("the refresh button is drawn");
+        ui.rest(refresh.center());
+        let hover = if server == "pg14" { "Refresh the schemas" } else { "Refresh the databases" };
+        assert!(ui.texts().iter().any(|(_, g)| g.text() == hover), "{server}: no `{hover}`");
+    }
+}
+
+/// The status bar names the server as it reports itself, MariaDB as MariaDB.
+#[test]
+fn status_bar_names_the_product() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let maria = dbee_testkit::target(db.server("mariadbnew").unwrap());
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    for (t, product) in [(&maria, "MariaDB 1"), (&mysql, "MySQL 8.0"), (&sqlite, "SQLite 3")] {
+        let mut ui = connected_to_target(db, t, None, APP_SIZE);
+        let server = ui.value("status-server");
+        assert!(server.as_str().is_some_and(|s| s.starts_with(product)), "{}: {server}", t.name());
+    }
 }
 
 #[test]
@@ -537,7 +883,119 @@ fn status_bar_shows_colour_and_read_only() {
     assert!(text.contains("Shop live") && text.contains("read-only"), "{status}");
     let server = ui.value("status-server");
     assert!(server.as_str().is_some_and(|s| s.starts_with("PostgreSQL 14")), "{server}");
+    // prefer, and the test server offers TLS: encrypted, its certificate not checked.
+    assert_eq!(ui.value("status-tls"), "Encrypted, server not checked");
     assert!(ui.tag("status-reconnect").is_none(), "no Reconnect while the connection is fine");
+    assert!(ui.tag("status-save").is_none(), "no Save connection for a saved one");
+}
+
+/// The status bar tells a checked certificate from a checked server: `verify-ca` and `require`
+/// with a CA file do not check the name, and say so; `verify-full` does.
+#[test]
+fn the_status_bar_tells_what_was_checked() {
+    let db = dbee_testkit::require_testdb!();
+    let ca_file = Some(db.ca_file.clone());
+    for (ssl_mode, says) in [
+        (SslMode::VerifyCa, "Encrypted, certificate checked"),
+        (SslMode::Require, "Encrypted, certificate checked"),
+        (SslMode::VerifyFull, "Encrypted, server checked"),
+    ] {
+        let mut ui = connected_to(db, ConnectionConfig { ssl_mode, ca_file: ca_file.clone(), ..pg14(db) }, false);
+        assert_eq!(ui.value("status-tls"), says, "{ssl_mode:?}");
+    }
+}
+
+#[test]
+fn a_dropped_database_file_opens_unsaved_and_save_connection_saves_it() {
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap();
+    let mut ui = Ui::fresh(APP_SIZE);
+    // Of several files, the first opens.
+    drop_files(&mut ui, &[file, Path::new("/nonexistent/dbee-test/second.txt")]);
+    ui.until("the file to open", |ui| ui.document()["screen"] == "workspace");
+    let name = file.file_name().unwrap().to_str().unwrap();
+    assert_eq!(ui.value("status-connection"), name);
+    assert!(ui.tag("status-tls").is_none(), "a file has no link to protect");
+    assert_eq!(ui.document()["connection"]["saved"], false);
+    assert!(visible(&ui.tag("status-save")), "{:?}", ids(&ui.inspect()));
+    assert!(ui.tag("notice").is_none(), "the second file is left alone");
+    let bar = |ui: &mut Ui| ["status-connection", "status-server", "value-toggle"].map(|id| ui.tag(id).map(|t| t["rect"].clone()));
+    let before = bar(&mut ui);
+    ui.click("status-save");
+    ui.until("the save", |ui| ui.tag("status-save").is_none());
+    assert_eq!(ui.document()["connection"]["saved"], true);
+    assert_eq!(bar(&mut ui), before, "the button fits the status bar: nothing moves when it goes");
+    let list = ui.execute("connection.list", json!({}));
+    assert_eq!((&list["saved"][0]["file"], &list["saved"][0]["id"]), (&json!(file), &ui.document()["connection"]["id"]), "{list}");
+}
+
+#[test]
+fn a_file_dropped_while_connected_opens_through_the_disconnect_question() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let pg14 = ui.connection_id().unwrap();
+    ui.ctrl("T");
+    ui.execute("query.setText", json!({ "text": "select 1" }));
+    // A file dbee would refuse anyway says so, and the connection stays.
+    let notes = ui.home.home.join("notes.txt");
+    drop_files(&mut ui, &[&notes]);
+    ui.frame();
+    assert!(ui.value("notice").as_str().is_some_and(|n| n.starts_with("Can't open notes.txt")), "{:?}", ui.value("notice"));
+    assert_eq!((ui.inspect()["dialog"].clone(), ui.connection_id()), (Json::Null, Some(pg14.clone())));
+    // A database file asks first, as a switch does: Cancel keeps the connection and the text.
+    drop_files(&mut ui, &[file]);
+    ui.frame();
+    assert_eq!(ui.inspect()["dialog"], "confirm", "the query text would be lost");
+    assert_eq!(ui.value("dialog-text"), "Disconnect from pg14? The text of 1 query tab will be lost.");
+    ui.click("dialog-cancel");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"]["id"].clone()), (json!("workspace"), json!(pg14)), "Cancel keeps pg14 open: {d}");
+    assert_eq!((d["tabs"].as_array().map(Vec::len), d["query"]["text"].clone()), (Some(1), json!("select 1")), "{d}");
+    // Disconnect anyway: pg14 closes and the file opens.
+    drop_files(&mut ui, &[file]);
+    ui.frame();
+    assert_eq!(ui.inspect()["dialog"], "confirm");
+    ui.click("dialog-ok");
+    ui.until("the file to open", |ui| ui.document()["connection"]["kind"] == "sqlite" && ui.document()["screen"] == "workspace");
+    assert_eq!(ui.value("status-connection"), file.file_name().unwrap().to_str().unwrap());
+    assert_eq!(ui.document()["tabs"], json!([]));
+}
+
+#[test]
+fn a_dropped_file_of_no_type_dbee_opens_says_which_do() {
+    let mut ui = Ui::fresh(APP_SIZE);
+    let notes = ui.home.home.join("notes.txt");
+    drop_files(&mut ui, &[&notes]);
+    ui.frame();
+    let notice = ui.value("notice");
+    let text = notice.as_str().unwrap_or_default();
+    assert!(text.starts_with("Can't open notes.txt: dbee opens ") && text.contains(".sqlite"), "{notice}");
+    assert!(text.ends_with("To open a file with another name, use New connection and choose SQLite."), "{notice}");
+    assert_eq!(ui.document()["screen"], "connections");
+}
+
+#[test]
+fn the_file_the_command_line_names_opens_once_the_window_is_up() {
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap().to_path_buf();
+    let with_file = |path: PathBuf| -> MakeApp { Box::new(move |session, rx| DbeeApp::new(session, Some(rx)).with_file(path)) };
+    let mut ui = Ui::window(Setup { size: APP_SIZE, app: Some(with_file(file.clone())), ..Setup::default() });
+    ui.until("the file to open", |ui| ui.document()["screen"] == "workspace");
+    assert_eq!(ui.document()["connection"]["saved"], false);
+    assert!(visible(&ui.tag("status-save")));
+    // One that is not there: the plain error, and the window goes on.
+    let gone = ui.home.home.join("gone.sqlite");
+    drop(ui);
+    let mut ui = Ui::window(Setup { size: APP_SIZE, app: Some(with_file(gone.clone())), ..Setup::default() });
+    ui.until("the error", |ui| ui.tag("notice").is_some());
+    let notice = ui.value("notice");
+    assert!(notice.as_str().is_some_and(|n| n.ends_with(&format!(": no file at {}.", gone.display()))), "{notice}");
+    assert_eq!(ui.document()["screen"], "connections");
 }
 
 #[test]
@@ -567,7 +1025,7 @@ fn status_bar_lists_only_live_jobs() {
 fn lost_connection_offers_reconnect() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = connected_to(db, pg14(db), true);
-    let server = db.servers.iter().find(|s| s.major == 14).unwrap();
+    let server = db.server("pg14").unwrap();
     let sql = "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = 'dbee'";
     dbee_testkit::psql(server, sql).unwrap();
     // The next database action finds the connection gone.
@@ -604,12 +1062,14 @@ fn synthetic(n: usize) -> Arc<Catalog> {
     let column = |i: usize| ColumnInfo {
         name: format!("column_{i}"),
         type_sql: "integer".into(),
-        type_oid: 23,
         base_type: "int4".into(),
-        category: 'N',
+        class: TypeClass::Number,
         not_null: i == 0,
         has_default: false,
         generated: Default::default(),
+        hidden: false,
+        type_label: String::new(),
+        operators: dbee_core::Operators::Unnamed,
     };
     let table = |schema: &str, name: String| TableInfo {
         table: TableRef { schema: schema.into(), name },
@@ -619,6 +1079,7 @@ fn synthetic(n: usize) -> Arc<Catalog> {
         unique_keys: vec![],
         foreign_keys: vec![],
         estimated_rows: Some(1000),
+        no_edit_reason: None,
     };
     let mut schemas: Vec<SchemaInfo> = (0..10)
         .map(|s| {
@@ -630,11 +1091,11 @@ fn synthetic(n: usize) -> Arc<Catalog> {
     for sys in ["information_schema", "pg_catalog"] {
         schemas.push(SchemaInfo { name: sys.into(), system: true, tables: (0..60).map(|t| table(sys, format!("pg_thing_{t}"))).collect() });
     }
-    Arc::new(Catalog { schemas })
+    Arc::new(Catalog { schemas, default_schema: None })
 }
 
 #[test]
-#[ignore = "a timing test: cargo test -p dbee-ui-egui --test workspace -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn tree_filter_1000_tables_within_a_frame() {
     struct State {
         catalog: Arc<Catalog>,
@@ -645,7 +1106,7 @@ fn tree_filter_1000_tables_within_a_frame() {
     let mut h = Harness::builder().with_size(egui::vec2(320.0, 900.0)).build_ui_state(
         |ui, s: &mut State| {
             s.tags.begin_frame();
-            let _ = tree::show(ui, &s.catalog, &mut s.tree, &mut s.tags);
+            let _ = tree::show(ui, &s.catalog, dbee_sql::Dialect::Postgres, &mut s.tree, &mut s.tags);
         },
         state,
     );

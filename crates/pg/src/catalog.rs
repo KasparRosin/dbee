@@ -1,39 +1,56 @@
-//! Catalog loading: schemas, relations, columns and keys, from three fixed catalog queries
-//! joined in Rust.
+//! Catalog loading: schemas, relations, columns and keys, from three fixed catalog queries whose
+//! rows go to `dbee_driver`'s [`CatalogBuilder`].
 //!
 //! The queries read only `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type` and
 //! `pg_constraint` columns that exist in Postgres 14 and every later version, and take no user
 //! input. Results are simple-query text (`t`/`f` booleans, decimal numbers). Key columns come
-//! from `unnest(conkey) WITH ORDINALITY`, so no array text is parsed.
+//! from `pg_catalog.unnest(conkey) WITH ORDINALITY`, so no array text is parsed.
 //!
-//! Limits: a catalog must never be truncated, so the queries run with limits no real catalog
-//! reaches (`CATALOG_LIMITS`: 5 million rows and 512 MiB of text; a result that still hits them is an error, never a partial catalog) instead of the 10,000-row
-//! query cap, because a database with a few hundred tables already has more columns than that.
+//! Each query runs with `search_path` set to `pg_catalog, pg_temp` for its own statement
+//! ([`run`]): a function or operator someone made in another schema can be a closer match than
+//! `pg_catalog`'s (`public.unnest(smallint[])` beats `unnest(anyarray)`, `name !~~ name` beats
+//! `name !~~ text` for a literal), and would run as the user who opens the database. So type
+//! names outside `pg_catalog` come back from `format_type` qualified (`public.citext`). The `LIKE`
+//! patterns escape with `!`: a backslash in a string would have the driver check
+//! `standard_conforming_strings` first, and refuse the query while a function has it off.
+//!
+//! Limits: a catalog must never be truncated, so the queries run with `CATALOG_LIMITS`, which no
+//! real catalog reaches, instead of the 10,000-row query cap: a database with a few hundred
+//! tables already has more columns than that. Its bytes are shared by every query of one read
+//! ([`CatalogBudget`]): the read holds all their results.
 
-use std::collections::HashMap;
+use dbee_config::ConnectionConfig;
+use dbee_core::cell::Cell;
+use dbee_core::cell::{ResultSet, TypeClass};
+use dbee_core::schema::{Catalog, ColumnInfo, Generated, Operators, RelKind, TableRef, TypeOperators};
+use dbee_driver::catalog::{ColumnRow, ForeignKeyRow, KeyKind, KeyRow, TableRow, bad, number, owned, text};
+use dbee_driver::{CatalogBudget, CatalogBuilder, DbError, Target};
 
-use dbee_core::cell::{Cell, ResultSet};
-use dbee_core::schema::{Catalog, ColumnInfo, ForeignKey, Generated, RelKind, SchemaInfo, TableInfo, TableRef};
+use crate::connect::{self, PgConnection};
+use crate::query;
 
-use crate::connect::PgConnection;
-use crate::error::PgError;
-use crate::query::{self, Limits};
+/// Postgres's own schemas, listed after the user's.
+const SYSTEM_SCHEMAS: &[&str] = &["pg_catalog", "information_schema"];
 
-/// Limits for catalog queries: far above any real catalog, so nothing is ever cut.
-pub const CATALOG_LIMITS: Limits = Limits { max_rows: 5_000_000, max_bytes: 512 * 1024 * 1024 };
+/// The schema shown first.
+const DEFAULT_SCHEMA: &str = "public";
 
 /// Schemas and relations. A schema without relations yields one row with NULL relation columns.
 /// Partitions (`relispartition`) are hidden; the partitioned parent (`p`) is shown.
 const RELATIONS_SQL: &str = "\
-SELECT n.nspname, c.oid::text, c.relname, c.relkind::text, c.reltuples::numeric::text
+SELECT n.nspname, c.relname, c.relkind::text, c.reltuples::numeric::text
 FROM pg_catalog.pg_namespace n
 LEFT JOIN pg_catalog.pg_class c
   ON c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-WHERE n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+WHERE n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_temp!_%' ESCAPE '!'
 ORDER BY n.nspname, c.relname";
 
 /// Columns of those relations. `d` resolves each domain (also a domain over a domain) to its
-/// non-domain base type.
+/// non-domain base type, whose operators are `pg_catalog`'s when it is built in, an array, an enum,
+/// a range or a composite, and otherwise the type's own, compared as that base type: `ops` holds,
+/// for each type outside `pg_catalog`, the operators of its default btree and hash operator
+/// classes (strategy 3 of btree and 1 of hash is `=`, with its negator), each named in its own
+/// schema ([`Operators`]). The type's own schema, plain and quoted, gives its label.
 const COLUMNS_SQL: &str = "\
 WITH RECURSIVE d(root, cur) AS (
     SELECT oid, typbasetype FROM pg_catalog.pg_type WHERE typtype = 'd'
@@ -41,54 +58,96 @@ WITH RECURSIVE d(root, cur) AS (
     SELECT d.root, t.typbasetype FROM d JOIN pg_catalog.pg_type t ON t.oid = d.cur AND t.typtype = 'd'
 ), base(root, base) AS (
     SELECT d.root, d.cur FROM d JOIN pg_catalog.pg_type t ON t.oid = d.cur AND t.typtype <> 'd'
+), ops(typ, method, strategy, name, negator) AS (
+    SELECT oc.opcintype, am.amname, ao.amopstrategy,
+           pg_catalog.quote_ident(n.nspname) || '.' || o.oprname, pg_catalog.quote_ident(nn.nspname) || '.' || ng.oprname
+    FROM pg_catalog.pg_opclass oc
+    JOIN pg_catalog.pg_type ot ON ot.oid = oc.opcintype AND ot.typnamespace <> 'pg_catalog'::pg_catalog.regnamespace
+    JOIN pg_catalog.pg_am am ON am.oid = oc.opcmethod AND am.amname IN ('btree', 'hash')
+    JOIN pg_catalog.pg_amop ao ON ao.amopfamily = oc.opcfamily AND ao.amopmethod = am.oid
+      AND ao.amoplefttype = oc.opcintype AND ao.amoprighttype = oc.opcintype
+    JOIN pg_catalog.pg_operator o ON o.oid = ao.amopopr
+    JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
+    LEFT JOIN pg_catalog.pg_operator ng ON ng.oid = o.oprnegate
+    LEFT JOIN pg_catalog.pg_namespace nn ON nn.oid = ng.oprnamespace
+    WHERE oc.opcdefault
 )
-SELECT c.oid::text, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.atttypid::text,
+SELECT n.nspname, c.relname, a.attnum::text, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod),
        bt.typname, bt.typcategory::text, a.attnotnull::text,
-       (a.atthasdef OR a.attidentity IN ('a', 'd'))::text, (a.attgenerated <> '')::text, (a.attidentity = 'a')::text
+       (a.atthasdef OR a.attidentity IN ('a', 'd'))::text, (a.attgenerated <> '')::text, (a.attidentity = 'a')::text,
+       (bt.typnamespace = 'pg_catalog'::pg_catalog.regnamespace OR bt.typtype IN ('e', 'r', 'm', 'c') OR bt.typcategory = 'A')::text,
+       tn.nspname, pg_catalog.quote_ident(tn.nspname), pg_catalog.format_type(bt.oid, NULL),
+       co.eq, co.ne, co.lt, co.le, co.gt, co.ge
 FROM pg_catalog.pg_class c
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
 JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
 LEFT JOIN base ON base.root = t.oid
 JOIN pg_catalog.pg_type bt ON bt.oid = COALESCE(base.base, t.oid)
+LEFT JOIN LATERAL (
+    SELECT COALESCE(pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 3),
+                    pg_catalog.max(name) FILTER (WHERE method = 'hash' AND strategy = 1)) AS eq,
+           COALESCE(pg_catalog.max(negator) FILTER (WHERE method = 'btree' AND strategy = 3),
+                    pg_catalog.max(negator) FILTER (WHERE method = 'hash' AND strategy = 1)) AS ne,
+           pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 1) AS lt,
+           pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 2) AS le,
+           pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 5) AS gt,
+           pg_catalog.max(name) FILTER (WHERE method = 'btree' AND strategy = 4) AS ge
+    FROM ops WHERE ops.typ = bt.oid
+) co ON true
 WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-  AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+  AND n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_temp!_%' ESCAPE '!'
 ORDER BY c.oid, a.attnum";
 
 /// Primary, unique and foreign keys, one row per key column in key order. Constraints copied
 /// down to partitions (`conparentid <> 0`) are skipped, so a foreign key to a partitioned table
 /// names the parent.
 const CONSTRAINTS_SQL: &str = "\
-SELECT con.oid::text, con.conrelid::text, con.contype::text, con.conname, att.attname,
+SELECT n.nspname, c.relname, con.contype::text, con.conname, k.ord::text, att.attname,
        fn.nspname, fc.relname, fatt.attname
 FROM pg_catalog.pg_constraint con
 JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+CROSS JOIN LATERAL pg_catalog.unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
 JOIN pg_catalog.pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
-LEFT JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON con.contype = 'f' AND fk.ord = k.ord
+LEFT JOIN LATERAL pg_catalog.unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON con.contype = 'f' AND fk.ord = k.ord
 LEFT JOIN pg_catalog.pg_class fc ON con.contype = 'f' AND fc.oid = con.confrelid
 LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
 LEFT JOIN pg_catalog.pg_attribute fatt ON fatt.attrelid = con.confrelid AND fatt.attnum = fk.attnum
 WHERE con.contype IN ('p', 'u', 'f') AND con.conparentid = 0
   AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT c.relispartition
-  AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+  AND n.nspname NOT LIKE 'pg!_toast%' ESCAPE '!' AND n.nspname NOT LIKE 'pg!_temp!_%' ESCAPE '!'
 ORDER BY con.conrelid, con.conname, con.oid, k.ord";
 
-fn bad(what: &str) -> PgError {
-    PgError::Other(format!("unexpected catalog data ({what})"))
+/// The class of a column from its base type's `typname` and `typcategory` (a domain has its base
+/// type's): numbers `N`, booleans `B`, `text`, `xml` and `citext` long text, other strings `S`
+/// text, `json` and `jsonb`, dates and times `D`, `bytea`; arrays and everything else `Other`.
+pub(crate) fn class_for(typname: &str, category: char) -> TypeClass {
+    match (typname, category) {
+        ("json" | "jsonb", _) => TypeClass::Json,
+        ("bytea", _) => TypeClass::Binary,
+        ("text" | "xml" | "citext", _) => TypeClass::LongText,
+        (_, 'N') => TypeClass::Number,
+        (_, 'B') => TypeClass::Bool,
+        (_, 'S') => TypeClass::Text,
+        (_, 'D') => TypeClass::DateTime,
+        _ => TypeClass::Other,
+    }
 }
 
-/// A text cell that must not be NULL.
-fn text<'a>(row: &'a [Cell], i: usize, what: &str) -> Result<&'a str, PgError> {
-    row.get(i).and_then(|c| c.as_deref()).ok_or_else(|| bad(what))
+/// `type_sql` as the user reads it: without `quoted_schema.` when `schema` is on the session's
+/// search path (`visible`), as Postgres shows a type the path finds.
+fn label(type_sql: &str, schema: &str, quoted_schema: &str, visible: &[String]) -> String {
+    let unqualified = type_sql.strip_prefix(quoted_schema).and_then(|rest| rest.strip_prefix('.'));
+    match unqualified {
+        Some(rest) if visible.iter().any(|v| v == schema) => rest.to_owned(),
+        _ => type_sql.to_owned(),
+    }
 }
 
-fn owned(row: &[Cell], i: usize, what: &str) -> Result<String, PgError> {
-    text(row, i, what).map(str::to_owned)
-}
-
-fn boolean(row: &[Cell], i: usize, what: &str) -> Result<bool, PgError> {
+/// A `bool` as Postgres prints it: `t`/`true` or `f`/`false`.
+fn boolean(row: &[Cell], i: usize, what: &str) -> Result<bool, DbError> {
     match text(row, i, what)? {
         "t" | "true" => Ok(true),
         "f" | "false" => Ok(false),
@@ -96,11 +155,7 @@ fn boolean(row: &[Cell], i: usize, what: &str) -> Result<bool, PgError> {
     }
 }
 
-fn number<T: std::str::FromStr>(row: &[Cell], i: usize, what: &str) -> Result<T, PgError> {
-    text(row, i, what)?.parse().map_err(|_| bad(what))
-}
-
-fn rel_kind(s: &str) -> Result<RelKind, PgError> {
+fn rel_kind(s: &str) -> Result<RelKind, DbError> {
     match s {
         "r" => Ok(RelKind::Table),
         "p" => Ok(RelKind::PartitionedTable),
@@ -117,113 +172,132 @@ fn estimate(s: &str) -> Option<u64> {
     (v.is_finite() && v >= 0.0).then(|| v.round() as u64)
 }
 
-/// A catalog result that was cut by the limits is an error: a partial catalog would be wrong.
-fn require_complete(r: ResultSet) -> Result<ResultSet, PgError> {
-    if r.complete { Ok(r) } else { Err(PgError::Other(format!("catalog too large: stopped after {} rows", r.rows_seen))) }
+/// Put before each catalog query: only `pg_catalog` (and the session's own temporary schema,
+/// after it) is searched, until the implicit transaction of the query's message ends.
+const CATALOG_PATH: &str = "SET LOCAL search_path TO pg_catalog, pg_temp; ";
+
+/// Runs the catalog query `sql` with [`CATALOG_PATH`], within what `budget` has left; a cut
+/// result is an error.
+async fn run(conn: &PgConnection, budget: &mut CatalogBudget, sql: &str) -> Result<ResultSet, DbError> {
+    budget.take(query::run_untyped(conn, &format!("{CATALOG_PATH}{sql}"), budget.limits()).await?)
 }
 
-async fn run(conn: &PgConnection, sql: &str) -> Result<ResultSet, PgError> {
-    require_complete(query::run_untyped(conn, sql, CATALOG_LIMITS).await?)
+/// The databases a connection can open: templates and those that take no connections left out.
+const DATABASES_SQL: &str = "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname";
+
+/// The database the list is read through when the server has none named like the user.
+const FALLBACK_DATABASE: &str = "postgres";
+
+/// The connect failed because its database does not exist (SQLSTATE `3D000`).
+fn no_such_database(e: &DbError) -> bool {
+    matches!(e, DbError::Server(s) if s.code == "3D000")
+}
+
+/// A connection to read the server's databases through: to its default database (the one named
+/// like the user), whatever `target` names, or when there is none such, to `postgres`.
+pub async fn list_connection(target: Target<'_>) -> Result<PgConnection, DbError> {
+    let through = |database: &str| ConnectionConfig { database: database.into(), ..target.config.clone() };
+    let default = through("");
+    match connect::connect(Target { config: &default, ..target.clone() }).await {
+        Err(e) if no_such_database(&e) => {
+            let fallback = through(FALLBACK_DATABASE);
+            connect::connect(Target { config: &fallback, ..target }).await
+        }
+        reached => reached,
+    }
+}
+
+/// The server's databases, by name.
+pub async fn list_databases(conn: &PgConnection) -> Result<Vec<String>, DbError> {
+    run(conn, &mut CatalogBudget::default(), DATABASES_SQL).await?.rows.iter().map(|row| owned(row, 0, "database name")).collect()
 }
 
 /// Load every schema, relation, column and key. User schemas come first by name, then
-/// `information_schema` and `pg_catalog`; tables by name; columns by `attnum`.
-pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, PgError> {
-    let relations = run(conn, RELATIONS_SQL).await?;
-    let columns = run(conn, COLUMNS_SQL).await?;
-    let constraints = run(conn, CONSTRAINTS_SQL).await?;
+/// `information_schema` and `pg_catalog`; tables by name; columns by `attnum`. `public` is the
+/// default schema, when it exists.
+pub async fn load_catalog(conn: &PgConnection) -> Result<Catalog, DbError> {
+    let rows = catalog_rows(conn).await?;
+    let dropped = rows.dropped();
+    if dropped > 0 {
+        log::info!("pg: catalog: {dropped} rows named a relation the catalog did not list");
+    }
+    Ok(rows.build(Some(DEFAULT_SCHEMA)))
+}
 
-    let mut schemas: Vec<SchemaInfo> = Vec::new();
-    // relation oid -> (schema index, table index)
-    let mut index: HashMap<u32, (usize, usize)> = HashMap::new();
+/// The catalog queries' rows, not yet built into a [`Catalog`].
+pub async fn catalog_rows(conn: &PgConnection) -> Result<CatalogBuilder, DbError> {
+    let budget = &mut CatalogBudget::default();
+    let relations = run(conn, budget, RELATIONS_SQL).await?;
+    let columns = run(conn, budget, COLUMNS_SQL).await?;
+    let constraints = run(conn, budget, CONSTRAINTS_SQL).await?;
+    let mut catalog = CatalogBuilder::new(SYSTEM_SCHEMAS);
+
     for row in &relations.rows {
         let schema = owned(row, 0, "schema name")?;
-        if schemas.last().map(|s| s.name.as_str()) != Some(schema.as_str()) {
-            let system = schema == "pg_catalog" || schema == "information_schema";
-            schemas.push(SchemaInfo { name: schema.clone(), system, tables: Vec::new() });
-        }
+        catalog.schema(schema.clone());
         if row.get(1).is_some_and(Option::is_none) {
             continue; // a schema without relations
         }
-        let oid: u32 = number(row, 1, "relation oid")?;
-        let table = TableInfo {
-            table: TableRef { schema, name: owned(row, 2, "relation name")? },
-            kind: rel_kind(text(row, 3, "relkind")?)?,
-            columns: Vec::new(),
-            primary_key: Vec::new(),
-            unique_keys: Vec::new(),
-            foreign_keys: Vec::new(),
-            estimated_rows: estimate(text(row, 4, "reltuples")?),
-        };
-        let si = schemas.len() - 1;
-        let tables = &mut schemas[si].tables;
-        index.insert(oid, (si, tables.len()));
-        tables.push(table);
+        catalog.table(TableRow {
+            table: TableRef { schema, name: owned(row, 1, "relation name")? },
+            kind: rel_kind(text(row, 2, "relkind")?)?,
+            estimated_rows: estimate(text(row, 3, "reltuples")?),
+            no_edit_reason: None,
+        });
     }
 
     for row in &columns.rows {
-        let oid: u32 = number(row, 0, "column relation")?;
-        let Some(&(si, ti)) = index.get(&oid) else { continue };
-        let category = text(row, 5, "typcategory")?.chars().next().ok_or_else(|| bad("typcategory"))?;
-        schemas[si].tables[ti].columns.push(ColumnInfo {
-            name: owned(row, 1, "column name")?,
-            type_sql: owned(row, 2, "format_type")?,
-            type_oid: number(row, 3, "type oid")?,
-            base_type: owned(row, 4, "typname")?,
-            category,
-            not_null: boolean(row, 6, "attnotnull")?,
-            has_default: boolean(row, 7, "has default")?,
-            generated: match (boolean(row, 8, "attgenerated")?, boolean(row, 9, "attidentity")?) {
+        let category = text(row, 6, "typcategory")?.chars().next().ok_or_else(|| bad("typcategory"))?;
+        let base_type = owned(row, 5, "typname")?;
+        let type_sql = owned(row, 4, "format_type")?;
+        let type_label = label(&type_sql, text(row, 12, "type schema")?, text(row, 13, "quoted type schema")?, conn.visible_schemas());
+        let column = ColumnInfo {
+            name: owned(row, 3, "column name")?,
+            type_label,
+            type_sql,
+            class: class_for(&base_type, category),
+            base_type,
+            not_null: boolean(row, 7, "attnotnull")?,
+            has_default: boolean(row, 8, "has default")?,
+            generated: match (boolean(row, 9, "attgenerated")?, boolean(row, 10, "attidentity")?) {
                 (true, _) => Generated::Expression,
                 (false, true) => Generated::Identity,
                 (false, false) => Generated::No,
             },
-        });
+            hidden: false,
+            operators: if boolean(row, 11, "builtin operators")? {
+                Operators::Builtin
+            } else {
+                let op = |i: usize| row.get(i).cloned().ok_or_else(|| bad("type operator"));
+                let ops = TypeOperators { eq: op(15)?, ne: op(16)?, lt: op(17)?, le: op(18)?, gt: op(19)?, ge: op(20)? };
+                Operators::OfType { base: owned(row, 14, "base type")?, ops }
+            },
+        };
+        let table = TableRef { schema: owned(row, 0, "column schema")?, name: owned(row, 1, "column relation")? };
+        catalog.column(ColumnRow { table, position: number(row, 2, "attnum")?, column });
     }
 
-    // Rows arrive grouped by constraint, in key-column order.
-    let mut current: Option<(String, u32, char, String, Vec<String>, Vec<String>, Option<TableRef>)> = None;
-    let mut keys = Vec::new();
     for row in &constraints.rows {
-        let con = owned(row, 0, "constraint oid")?;
-        if current.as_ref().is_none_or(|c| c.0 != con) {
-            if let Some(done) = current.take() {
-                keys.push(done);
+        let table = TableRef { schema: owned(row, 0, "constraint schema")?, name: owned(row, 1, "constraint relation")? };
+        let constraint = owned(row, 3, "constraint name")?;
+        let position = number(row, 4, "key position")?;
+        let column = owned(row, 5, "key column")?;
+        match text(row, 2, "contype")? {
+            "p" => catalog.key(KeyRow { table, constraint, kind: KeyKind::Primary, position, column }),
+            "u" => catalog.key(KeyRow { table, constraint, kind: KeyKind::Unique, position, column }),
+            "f" => {
+                let target = match (row.get(6).and_then(|c| c.as_deref()), row.get(7).and_then(|c| c.as_deref())) {
+                    (Some(s), Some(n)) => TableRef { schema: s.to_owned(), name: n.to_owned() },
+                    _ => return Err(bad("foreign key target")),
+                };
+                let target_column = owned(row, 8, "referenced column")?;
+                catalog.foreign_key(ForeignKeyRow { table, constraint, position, column, target, target_column });
             }
-            let kind = text(row, 2, "contype")?.chars().next().ok_or_else(|| bad("contype"))?;
-            let target = match (kind, row.get(5).and_then(|c| c.as_deref()), row.get(6).and_then(|c| c.as_deref())) {
-                ('f', Some(s), Some(n)) => Some(TableRef { schema: s.to_owned(), name: n.to_owned() }),
-                ('f', _, _) => return Err(bad("foreign key target")),
-                _ => None,
-            };
-            current = Some((con, number(row, 1, "constraint relation")?, kind, owned(row, 3, "constraint name")?, Vec::new(), Vec::new(), target));
-        }
-        if let Some(c) = current.as_mut() {
-            c.4.push(owned(row, 4, "key column")?);
-            if c.2 == 'f' {
-                c.5.push(owned(row, 7, "referenced column")?);
-            }
-        }
-    }
-    keys.extend(current);
-    for (_, rel, kind, name, cols, target_cols, target) in keys {
-        let Some(&(si, ti)) = index.get(&rel) else { continue };
-        let t = &mut schemas[si].tables[ti];
-        match (kind, target) {
-            ('p', _) => t.primary_key = cols,
-            ('u', _) => t.unique_keys.push(cols),
-            ('f', Some(target)) => t.foreign_keys.push(ForeignKey { name, columns: cols, target, target_columns: target_cols }),
-            _ => {}
+            _ => return Err(bad("contype")),
         }
     }
 
-    // User schemas first, then system ones; by name within each group. Tables are already by
-    // name from the query's ORDER BY (database collation), so sort them the same way here.
-    schemas.sort_by(|a, b| a.system.cmp(&b.system).then_with(|| a.name.cmp(&b.name)));
-    for s in &mut schemas {
-        s.tables.sort_by(|a, b| a.table.name.cmp(&b.table.name));
-    }
-    Ok(Catalog { schemas })
+    Ok(catalog)
 }
 
 #[cfg(test)]
@@ -231,10 +305,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncated_result_is_an_error() {
-        let cut = ResultSet { complete: false, rows_seen: 7, ..ResultSet::default() };
-        let err = require_complete(cut).expect_err("must fail");
-        assert!(err.to_string().contains("catalog too large"), "{err}");
-        assert!(require_complete(ResultSet { complete: true, ..ResultSet::default() }).is_ok());
+    fn only_a_missing_database_falls_back() {
+        let server = |code: &str| {
+            let e = dbee_driver::ServerError {
+                code: code.into(),
+                code_label: Some("SQLSTATE"),
+                message: "m".into(),
+                detail: None,
+                hint: None,
+                position: None,
+                meaning: None,
+            };
+            DbError::Server(Box::new(e))
+        };
+        assert!(no_such_database(&server("3D000")));
+        for e in [server("28P01"), server("42501"), DbError::Auth { message: "m".into() }, DbError::Connect("3D000".into())] {
+            assert!(!no_such_database(&e), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn booleans_as_postgres_prints_them() {
+        let row: Vec<Cell> = vec![Some("t".into()), Some("true".into()), Some("f".into()), Some("false".into()), Some("1".into()), None];
+        let read: Vec<_> = (0..4).map(|i| boolean(&row, i, "b")).collect();
+        assert_eq!(read, [Ok(true), Ok(true), Ok(false), Ok(false)]);
+        for i in [4, 5, 6] {
+            let e = boolean(&row, i, "b").err();
+            assert!(e.is_some_and(|e| e.to_string() == "unexpected catalog data (b)"), "{i}");
+        }
     }
 }

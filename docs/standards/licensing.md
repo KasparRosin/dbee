@@ -1,6 +1,6 @@
 # Licensing
 
-> **Last reviewed:** 2026-10-27 · **Last updated:** 2026-10-27 · **Change:** minor (no NOTICE file; egui's fonts are compiled into the binaries)
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (SQLite's public-domain dedication allowed)
 
 ## dbee
 
@@ -8,7 +8,7 @@ dbee is licensed **MIT OR Apache-2.0**. The texts are `LICENSE-MIT` and `LICENSE
 
 ## Dependencies
 
-Allowed: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0, CC0-1.0, BSL-1.0, and MPL-2.0 used unmodified.
+Allowed: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0, CC0-1.0, BSL-1.0, and MPL-2.0 used unmodified. SQLite's public-domain dedication is also allowed, for the SQLite library compiled in by `libsqlite3-sys`.
 
 Never GPL, LGPL or AGPL, linked or vendored. A licence outside the list needs a human decision.
 

@@ -8,11 +8,13 @@
 //! a table with a row key). Reset, undo and redo do not: they change only the staged edits, so a
 //! tab whose table was dropped, or that reconnected to a read-only server, can always drop them.
 //! Rows are grid rows (see [`crate::edits`]); `column` is a name or a 0-based index into the
-//! page's columns. A value is text or `null`; a number or a boolean is taken as its text.
+//! page's columns. A value is text or `null`; a number or a boolean is taken as its text, except
+//! that a boolean in a Bool column takes the connection's own spelling (its dialect's
+//! `bool_literals`: Postgres `t` and `f`).
 //!
 //! **Apply** builds every statement on the caller's thread (`Edits::statements`; edits it cannot
-//! build are `BadParams` and change nothing), then runs one job on the browse connection:
-//! `dbee_pg::apply` writes them all or none in one transaction, and on success the page loads
+//! build are `BadParams` and change nothing), then runs one job on the browse connection: its
+//! `apply` writes them all or none in one transaction, and on success the page loads
 //! again in the same job. Then the edits and their history go (writes are not undone), the page
 //! shows what was written, and an exact total that the writes may have changed is forgotten. When
 //! the Apply fails nothing was written: every edit stays, and `failed` names the grid row of the
@@ -23,7 +25,7 @@
 //! them twice, so it asks first (`Needs::Confirm { what: "applyAfterUnknownOutcome" }`) unless
 //! `force` (see `Edits::outcome_unknown`). An Apply is never dropped: its job runs to its end. One
 //! runs at a time (`busy`). `table.cancel` on its tab cancels it while its statements before
-//! `COMMIT` run (`dbee_pg::ApplyGate`): it then fails with code `cancelled`, writes nothing and
+//! `COMMIT` run (`dbee_driver::ApplyGate`): it then fails with code `cancelled`, writes nothing and
 //! keeps every edit, as a failed Apply does. Once it has decided to commit, `table.cancel` is
 //! `Busy` ([`COMMITTING`]) and the Apply runs to its end.
 //!
@@ -38,8 +40,9 @@
 
 use std::sync::Arc;
 
-use dbee_core::ResultSet;
-use dbee_pg::{ApplyError, PgConnection, PgError};
+use dbee_core::{ResultSet, TypeClass};
+use dbee_driver::{ApplyError, Connection, DbError};
+use dbee_sql::Dialect;
 use dbee_sql::edit::NewValue;
 use dbee_sql::filter::Condition;
 use serde_json::json;
@@ -47,11 +50,16 @@ use serde_json::json;
 use super::table::{Loaded, NO_TABLE_TAB, Reload, active_table, catalog, lookup, not_editable, table_tab_mut};
 use super::{CommandSpec, bad, disabled, ignored, p};
 use crate::edits::{Edits, Failed, UNKNOWN_OUTCOME};
+use crate::jobs::Stop;
 use crate::state::{TableTab, Total};
-use crate::{Apply, EngineError, Json, Need, Outcome, Session, Tab, TabId};
+use crate::turns;
+use crate::{Apply, ConnectionId, EngineError, Json, Need, Outcome, Session, Tab, TabId, Which};
 
 const EDIT: &str = "cell.edit";
 const SET_NULL: &str = "cell.setNull";
+
+/// Why a value with a NUL character is refused where the dialect cannot write one.
+const NUL: &str = "the value holds a NUL character (U+0000), which this database can't take";
 const CLEAR: &str = "cell.clear";
 const ADD_ROW: &str = "row.add";
 const DELETE_ROWS: &str = "row.delete";
@@ -187,7 +195,7 @@ fn editable_tab(s: &Session) -> Result<&TableTab, String> {
     active_table(s)?;
     let Some(Tab::Table(t)) = s.state.active_tab() else { return Err(NO_TABLE_TAB.into()) };
     if let Some(why) = not_editable(s, t) {
-        return Err(why.into());
+        return Err(why.into_owned());
     }
     if t.loading.is_some() {
         return Err(LOADING.into());
@@ -265,12 +273,19 @@ fn column(params: &Json, data: &ResultSet) -> Result<usize, EngineError> {
     }
 }
 
-/// `value`: text, or `null` for NULL; a number or a boolean is taken as its text.
-fn value(params: &Json) -> Result<NewValue, EngineError> {
+/// `value` for a cell of class `class`: text, or `null` for NULL; a number or a boolean is taken
+/// as its text, but a boolean for a Bool column as `dialect`'s spelling of it. Text with a NUL
+/// character only where `dialect` can write one.
+fn value(params: &Json, class: TypeClass, dialect: Dialect) -> Result<NewValue, EngineError> {
     match params.get("value") {
         None => Err(bad("`value` is required (text, or null for NULL)")),
         Some(Json::Null) => Ok(NewValue::Null),
+        Some(Json::String(t)) if t.contains('\0') && !dialect.statement_may_hold_nul() => Err(bad(NUL)),
         Some(Json::String(t)) => Ok(NewValue::Text(t.clone())),
+        Some(Json::Bool(b)) if class == TypeClass::Bool => {
+            let (yes, no) = dialect.bool_literals();
+            Ok(NewValue::Text(if *b { yes } else { no }.to_owned()))
+        }
         Some(v @ (Json::Number(_) | Json::Bool(_))) => Ok(NewValue::Text(v.to_string())),
         Some(_) => Err(bad("`value` must be text or null")),
     }
@@ -311,7 +326,7 @@ enum Staging {
     /// The `value` param.
     Value,
     Null,
-    /// `''` for a string-category column, NULL for every other.
+    /// `''` for a text column, NULL for every other.
     Clear,
 }
 
@@ -321,16 +336,16 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
     let row = p::usize(params, "row")?;
     let (tab, data) = target(s)?;
     let col = column(params, &data)?;
-    let catalog = catalog(s)?;
+    let catalog = catalog(s, Which::Tab(tab))?;
     let table = match s.state.tab(tab) {
         Some(Tab::Table(t)) => t.table.clone(),
         _ => return Err(disabled(NO_TABLE_TAB)),
     };
-    let name = data.columns.get(col).map(|c| c.name.as_str()).unwrap_or_default();
-    // The cell's column in the catalog: what clearing stages, and whether Postgres computes it.
+    let (name, class) = data.columns.get(col).map_or(("", TypeClass::Other), |c| (c.name.as_str(), c.class));
+    // The cell's column in the catalog: what clearing stages, and whether the engine computes it.
     let info = lookup(&catalog, &table).ok().and_then(|t| t.column(name));
     let value = match what {
-        Staging::Value => value(params)?,
+        Staging::Value => value(params, class, s.state.dialect(Which::Tab(tab)))?,
         Staging::Null => NewValue::Null,
         Staging::Clear => {
             let info = info.ok_or_else(|| bad("the column is no longer in the schema (refresh it)"))?;
@@ -413,14 +428,16 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if s.jobs.is_running_label(APPLY) {
         return Err(EngineError::Busy(APPLYING.into()));
     }
-    let (tab, table, edits, data) = match s.state.active_tab() {
+    let (tab, table, edits, data, hidden) = match s.state.active_tab() {
         Some(Tab::Table(t)) if t.applying.is_some() => return Err(EngineError::Busy(APPLYING.into())),
-        Some(Tab::Table(t)) => (t.id, t.table.clone(), Arc::clone(&t.edits), t.data.clone().ok_or_else(|| disabled(NOT_LOADED))?),
+        Some(Tab::Table(t)) => {
+            (t.id, t.table.clone(), Arc::clone(&t.edits), t.data.clone().ok_or_else(|| disabled(NOT_LOADED))?, Arc::clone(&t.hidden))
+        }
         _ => return Err(disabled(NO_TABLE_TAB)),
     };
-    let catalog = catalog(s)?;
+    let catalog = catalog(s, Which::Tab(tab))?;
     let info = lookup(&catalog, &table)?;
-    let statements = edits.statements(info, &data).map_err(|e| bad(e.to_string()))?;
+    let statements = edits.statements(s.state.dialect(Which::Tab(tab)), info, &data, &hidden).map_err(|e| bad(e.to_string()))?;
     if statements.is_empty() {
         return Err(disabled(NOTHING_STAGED));
     }
@@ -433,35 +450,40 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         reshaped: !edits.new_rows.is_empty() || !edits.deleted.is_empty(),
     };
     let sql: Vec<String> = statements.into_iter().map(|(_, sql)| sql).collect();
-    let conn = s.browse()?;
+    let (id, job_conn) = s.browse_in_turn(Which::Tab(tab))?;
+    let conn: Arc<dyn Connection> = job_conn.clone();
     let reload = Reload::prepare(s, tab, info)?;
     if let Some(t) = table_tab_mut(s, tab)
         && (t.edits.failed.is_some() || t.edits.outcome_unknown())
     {
         Arc::make_mut(&mut t.edits).apply_started();
     }
-    let job_conn = Arc::clone(&conn);
-    let gate = Arc::new(dbee_pg::ApplyGate::default());
+    let gate = Arc::new(dbee_driver::ApplyGate::default());
     let job_gate = Arc::clone(&gate);
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
     let job = s.spawn_job(APPLY, async move {
-        let written = dbee_pg::apply_gated(&job_conn, &sql, &job_gate).await;
+        let written = turns::apply_in_turn(&job_conn, &sql, &job_gate, &job_stop).await;
         let page = match written {
-            Ok(_) => Some(reload.run(&job_conn).await),
+            Ok(_) => Some(reload.run(job_conn.as_ref()).await),
             Err(_) => None,
         };
-        let apply: Apply = Box::new(move |s: &mut Session| applied(s, &conn, tab, applying, reload, written, page));
+        let apply: Apply = Box::new(move |s: &mut Session| applied(s, id, &conn, tab, applying, reload, written, page));
         apply
     });
     if let Some(t) = table_tab_mut(s, tab) {
         t.applying = Some(job);
     }
-    s.apply_gate = Some((job, gate));
+    if let Some(c) = s.state.connection_mut(Which::Id(id)) {
+        c.apply_gate = Some((job, gate, stop));
+    }
     Ok(Outcome::Started(job))
 }
 
 fn applied(
     s: &mut Session,
-    conn: &Arc<PgConnection>,
+    id: ConnectionId,
+    conn: &Arc<dyn Connection>,
     tab: TabId,
     applying: Applying,
     reload: Reload,
@@ -469,10 +491,12 @@ fn applied(
     page: Option<Loaded>,
 ) -> Result<Json, EngineError> {
     let me = s.applying_job();
-    if s.apply_gate.as_ref().is_some_and(|(job, _)| Some(*job) == me) {
-        s.apply_gate = None;
+    if let Some(c) = s.state.connection_mut(Which::Id(id))
+        && c.apply_gate.as_ref().is_some_and(|(job, _, _)| Some(*job) == me)
+    {
+        c.apply_gate = None;
     }
-    if !s.is_current_browse(conn) {
+    if !s.is_current_browse(id, conn) {
         return Ok(ignored());
     }
     let Some(t) = table_tab_mut(s, tab) else { return Ok(ignored()) };
@@ -488,7 +512,7 @@ fn applied(
                 t.total = Total::Unknown;
             }
             let shown = match page {
-                Some(page) => reload.finish(s, conn, tab, page),
+                Some(page) => reload.finish(s, id, conn, tab, page),
                 None => Err(bad("the page was not loaded again")),
             };
             Ok(match shown {
@@ -504,7 +528,7 @@ fn applied(
             })
         }
         Err(ApplyError { index, error }) => {
-            let lost = error == PgError::ConnectionLost;
+            let lost = error == DbError::ConnectionLost;
             let (row, column) = applying.statements.get(index).or(applying.statements.first()).copied().unwrap_or((0, None));
             let edits = Arc::make_mut(&mut t.edits);
             let message = if lost {
@@ -516,7 +540,7 @@ fn applied(
                 message
             };
             let column = if lost { None } else { column };
-            Err(match s.db_failed(conn, &error) {
+            Err(match s.db_failed(id, conn, &error) {
                 EngineError::Db { code, mut data, .. } => {
                     if let Json::Object(map) = &mut data {
                         map.insert("row".into(), json!(row));

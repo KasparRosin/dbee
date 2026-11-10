@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 publish = false
-description = "dbee Postgres connection (L3): TLS, SSH tunnel, read-only mode, cancel, simple-query runner"
+description = "dbee Postgres driver (L4): TLS, SSH tunnel, read-only mode, cancel, simple-query runner, catalog, apply"
 
 [lints]
 workspace = true
@@ -17,11 +17,11 @@ dbee-core = { workspace = true }
 dbee-sql = { workspace = true }
 dbee-config = { workspace = true }
 dbee-ssh = { workspace = true }
+dbee-driver = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 tokio-postgres-rustls = { workspace = true }
 rustls = { workspace = true }
-rustls-platform-verifier = { workspace = true }
 futures-util = { workspace = true }
 log = { workspace = true }
 

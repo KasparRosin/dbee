@@ -1,16 +1,22 @@
 //! All-or-nothing apply tests against the Docker test servers (`cargo xtask testdb up`); every
-//! test runs against every server in `db.servers`. Each creates a `scratch` table of its own,
+//! test runs against every Postgres server in `db.servers`. Each creates a `scratch` table of its own,
 //! checks results from a second connection, and drops the table.
 
 use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, SslMode};
-use dbee_pg::apply::{ApplyGate, apply, apply_gated};
-use dbee_pg::query::{QUERY_LIMITS, run_untyped};
-use dbee_pg::{PgConnection, PgError, Target, connect};
-use dbee_testkit::{PgServer, TestDb, require_testdb, unique};
+use dbee_driver::{ApplyGate, DbError, Purpose, QUERY_LIMITS, Target};
+use dbee_pg::apply::{apply, apply_gated};
+use dbee_pg::query::run_untyped;
+use dbee_pg::{PgConnection, connect};
+use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
 
-async fn open(s: &PgServer, password: &str, read_only: bool) -> PgConnection {
+/// The Postgres test servers.
+fn postgres(db: &TestDb) -> impl Iterator<Item = &Server> {
+    db.servers_of(&[Kind::Postgres])
+}
+
+async fn open(s: &Server, password: &str, read_only: bool) -> PgConnection {
     let config = ConnectionConfig {
         name: format!("test {}", s.name),
         host: "127.0.0.1".into(),
@@ -21,7 +27,16 @@ async fn open(s: &PgServer, password: &str, read_only: bool) -> PgConnection {
         read_only,
         ..ConnectionConfig::default()
     };
-    match connect(Target { config: &config, password: Some(password), tunnel: None }).await {
+    match connect(Target {
+        config: &config,
+        password: Some(password),
+        tunnel: None,
+        purpose: Purpose::Browse,
+        create_file: false,
+        allowed_dirs: None,
+    })
+    .await
+    {
         Ok(c) => c,
         Err(e) => panic!("connect to {} failed: {e}", s.name),
     }
@@ -51,13 +66,13 @@ where
     F: Fn(u32, PgConnection, PgConnection, String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    for s in &db.servers {
+    for s in postgres(db) {
         let writer = open(s, &db.password, false).await;
         let reader = open(s, &db.password, false).await;
         let table = format!("scratch.\"{}\"", unique("apply"));
         sql(&writer, &format!("CREATE TABLE {table} (id int PRIMARY KEY, name text, amount numeric)")).await;
         sql(&writer, &format!("INSERT INTO {table} VALUES (1, 'one', 1.5), (2, 'two', 2.5)")).await;
-        body(s.major, writer, reader, table.clone()).await;
+        body(s.major(), writer, reader, table.clone()).await;
         let cleaner = open(s, &db.password, false).await;
         sql(&cleaner, &format!("DROP TABLE IF EXISTS {table}")).await;
     }
@@ -88,7 +103,7 @@ async fn one_failure_writes_nothing() {
         let err = apply(&w, &stmts).await.expect_err("must fail");
         assert_eq!(err.index, 1, "pg{major}");
         assert_eq!(err.error.code(), "server", "pg{major}");
-        assert!(matches!(&err.error, PgError::Server { code, .. } if code == "22P02"), "pg{major}: {:?}", err.error);
+        assert!(matches!(&err.error, DbError::Server(s) if s.code == "22P02"), "pg{major}: {:?}", err.error);
         assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
         // The connection is usable again and not inside a transaction.
         sql(&w, &format!("UPDATE {t} SET name = 'after' WHERE id = 1")).await;
@@ -104,7 +119,7 @@ async fn missing_row_rolls_back() {
         let stmts = vec![format!("UPDATE {t} SET name = 'ghost' WHERE id = 99"), format!("UPDATE {t} SET name = 'uno' WHERE id = 1")];
         let err = apply(&w, &stmts).await.expect_err("must fail");
         assert_eq!(err.index, 0, "pg{major}");
-        assert_eq!(err.error, PgError::RowNotFound { statement: 0 }, "pg{major}");
+        assert_eq!(err.error, DbError::RowNotFound { statement: 0 }, "pg{major}");
         assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
 
         // A statement that matches two rows is also refused, and rolls back the earlier one.
@@ -120,7 +135,7 @@ async fn missing_row_rolls_back() {
 async fn read_only_connection_refuses() {
     let db = require_testdb!();
     with_table(db, |major, _w, _r, t| async move {
-        let s = db.servers.iter().find(|s| s.major == major).expect("server");
+        let s = postgres(db).find(|s| s.major() == major).expect("server");
         let ro = open(s, &db.password, true).await;
         let stmts = vec![format!("UPDATE {t} SET name = 'uno' WHERE id = 1")];
         let err = apply(&ro, &stmts).await.expect_err("must fail");
@@ -147,9 +162,14 @@ async fn empty_apply_sends_nothing() {
 async fn dropped_apply_marks_the_connection_closed() {
     let db = require_testdb!();
     with_table(db, |major, w, r, t| async move {
-        let stmts = vec![format!("UPDATE {t} SET name = 'abandoned' WHERE id = 1 AND pg_sleep(5) IS NOT NULL")];
-        let out = tokio::time::timeout(Duration::from_millis(300), apply(&w, &stmts)).await;
-        assert!(out.is_err(), "apply should still be running");
+        let pid = number(&w, "SELECT pg_backend_pid()").await;
+        let stmts = vec![format!("UPDATE {t} SET name = 'abandoned' WHERE id = 1 AND pg_sleep(30) IS NOT NULL")];
+        // The apply is dropped once its statement sleeps on the server.
+        let sleeping = format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid} AND wait_event = 'PgSleep'");
+        tokio::select! {
+            out = apply(&w, &stmts) => panic!("pg{major}: the apply ended: {out:?}"),
+            () = until_number(&r, &sleeping, 1) => {}
+        }
         assert!(w.is_closed(), "pg{major}");
         // Nothing may run on it: it is still inside the abandoned transaction.
         let e = run_untyped(&w, "SELECT now() <> statement_timestamp()", QUERY_LIMITS).await.expect_err("refused");
@@ -157,10 +177,11 @@ async fn dropped_apply_marks_the_connection_closed() {
         let later = vec![format!("UPDATE {t} SET name = 'later' WHERE id = 2")];
         let e = apply(&w, &later).await.expect_err("refused");
         assert_eq!(e.error.code(), "connectionLost", "pg{major}");
-        // Stop the sleeping statement, drop the connection, and the original rows remain.
+        // Stop the sleeping statement and drop the connection: once the server has ended its
+        // session, which rolls the transaction back, the original rows remain.
         let _ = w.canceller().cancel().await;
         drop(w);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        until_number(&r, &format!("SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}"), 0).await;
         assert_eq!(rows(&r, &t).await, ["1:one:1.5", "2:two:2.5"], "pg{major}");
     })
     .await;
@@ -179,6 +200,15 @@ async fn multi_statement_text_is_refused_before_sending() {
         assert!(!w.is_closed());
     })
     .await;
+}
+
+/// Waits until `sql`, run through `c`, gives `want` (up to 20 s).
+async fn until_number(c: &PgConnection, sql: &str, want: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while number(c, sql).await != want {
+        assert!(tokio::time::Instant::now() < deadline, "{sql} never gave {want}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// The number in the first cell of `sql`'s first row, run through `c`.

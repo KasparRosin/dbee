@@ -35,7 +35,7 @@ commands:
   version [set X.Y.Z[-pre]]
                   print or set the workspace version ([workspace.package] in Cargo.toml)
   testdb up|down|status
-                  the Docker test servers (Postgres 14 and newest, sshd); `up` writes target/testdb/env.json
+                  the Docker test servers (Postgres, MySQL, MariaDB, sshd); `up` writes target/testdb/env.json
   stats [--exact] count tests and lines per crate (--exact: ask the test harness via `-- --list`)
   ico <out.ico> <in.png>...
                   pack square PNGs (<= 256 px) into a Windows .ico (see packaging/icons.sh)
@@ -108,7 +108,7 @@ pub fn metadata() -> Result<serde_json::Value, String> {
 fn cmd_layers() -> Result<(), String> {
     let crates = layers::from_metadata(&metadata()?)?;
     println!("Dependency layering (AGENTS.md \"Layering\")\n");
-    println!("{:<28} {:<10} workspace deps", "crate", "layer");
+    println!("{:<28} {:<12} workspace deps", "crate", "layer");
     for c in &crates {
         let ws: Vec<String> = c
             .deps
@@ -123,7 +123,7 @@ fn cmd_layers() -> Result<(), String> {
                 format!("{}{k}", layers::short_name(&d.name))
             })
             .collect();
-        println!("{:<28} {:<10} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
+        println!("{:<28} {:<12} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
     }
     let violations = layers::check(&crates);
     println!();

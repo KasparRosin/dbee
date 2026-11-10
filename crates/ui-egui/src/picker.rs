@@ -1,6 +1,8 @@
 //! The file pickers of the connection form ("Change…" for the SSH key, "Choose…" for the CA
-//! file): rfd runs on a thread of its own and sends the chosen path back over a channel, so the
-//! UI thread never waits for it.
+//! file, "Choose…" and "New file…" for a database file): rfd runs on a thread of its own and sends
+//! the chosen path back over a channel, so the UI thread never waits for it. A database file's
+//! pickers list the type's extensions first, then all files; New file… is a save dialog, and the
+//! file it names is made by the next test or connect.
 //!
 //! One picker at a time: while its thread runs, the form starts no other. "Stop" only stops
 //! waiting in the form; the picker's answer still lands when it comes, unless the form shows
@@ -11,6 +13,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
+
+use dbee_config::Settings;
 
 use crate::conn_form::Auth;
 use crate::connections::{ConnScreen, Kind, Message};
@@ -27,6 +31,24 @@ pub(crate) const NO_PICKER: &str = "No file chosen. If no file picker appeared, 
 pub(crate) enum Pick {
     Key,
     Ca,
+    /// A database file to open.
+    File,
+    /// A database file to make.
+    NewFile,
+}
+
+/// The filter that lists every file.
+const ALL_FILES: &[&str] = &["*"];
+
+/// What a picker shows.
+struct Ask {
+    title: &'static str,
+    /// The folder it starts in.
+    dir: Option<PathBuf>,
+    /// Named extension lists, the first shown first.
+    filters: Vec<(String, &'static [&'static str])>,
+    /// A save dialog (a file to make), else an open one.
+    save: bool,
 }
 
 /// A file picker running on its own thread.
@@ -54,18 +76,21 @@ enum Answer {
 }
 
 impl Picker {
-    /// Opens the picker on its own thread, starting in `dir`.
-    fn spawn(target: Pick, generation: u64, title: &'static str, dir: Option<PathBuf>, ctx: &egui::Context) -> Result<Picker, String> {
+    /// Opens the picker `ask` describes on its own thread.
+    fn spawn(target: Pick, generation: u64, ask: Ask, ctx: &egui::Context) -> Result<Picker, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let repaint = ctx.clone();
         std::thread::Builder::new()
             .name("dbee-file-picker".into())
             .spawn(move || {
-                let mut dialog = rfd::FileDialog::new().set_title(title);
-                if let Some(dir) = dir.filter(|d| d.is_dir()) {
+                let mut dialog = rfd::FileDialog::new().set_title(ask.title);
+                if let Some(dir) = ask.dir.filter(|d| d.is_dir()) {
                     dialog = dialog.set_directory(dir);
                 }
-                let _ = tx.send(dialog.pick_file());
+                for (name, extensions) in &ask.filters {
+                    dialog = dialog.add_filter(name, extensions);
+                }
+                let _ = tx.send(if ask.save { dialog.save_file() } else { dialog.pick_file() });
                 repaint.request_repaint();
             })
             .map_err(|e| e.to_string())?;
@@ -116,6 +141,10 @@ pub(crate) fn poll(conn: &mut ConnScreen, ctx: &egui::Context) {
                 conn.form.ssh_auth = Auth::Key;
             }
             Pick::Ca => conn.form.ca_file = Some(path),
+            Pick::File | Pick::NewFile => {
+                conn.form.file = Some(path);
+                conn.form.create_file = target == Pick::NewFile;
+            }
         },
         // rfd says "nothing" for a cancel too, so this claims no failure.
         Answer::Nothing { quick } if quick && !stopped && cfg!(not(any(target_os = "macos", target_os = "windows"))) => {
@@ -134,16 +163,28 @@ pub(crate) fn start(conn: &mut ConnScreen, target: Pick, ctx: &egui::Context) {
         return;
     }
     let ssh_dir = dbee_config::home_dir().map(|h| h.join(".ssh"));
-    let (title, dir) = match target {
+    let folder_of = |path: Option<&Path>| path.and_then(Path::parent).map(Path::to_path_buf).or_else(dbee_config::home_dir);
+    let open = |title, dir| Ask { title, dir, filters: Vec::new(), save: false };
+    let ask = match target {
         // ~/.ssh, or the folder of the key the login uses when there is no ~/.ssh.
-        Pick::Key => {
-            ("Choose an SSH key", ssh_dir.filter(|d| d.is_dir()).or_else(|| conn.key.path.as_deref().and_then(Path::parent).map(Path::to_path_buf)))
-        }
-        Pick::Ca => {
-            ("Choose a CA certificate", conn.form.ca_file.as_deref().and_then(Path::parent).map(Path::to_path_buf).or_else(dbee_config::home_dir))
+        Pick::Key => open(
+            "Choose an SSH key",
+            ssh_dir.filter(|d| d.is_dir()).or_else(|| conn.key.path.as_deref().and_then(Path::parent).map(Path::to_path_buf)),
+        ),
+        Pick::Ca => open("Choose a CA certificate", folder_of(conn.form.ca_file.as_deref())),
+        Pick::File | Pick::NewFile => {
+            let kind = conn.form.kind;
+            let mut filters = Vec::new();
+            if let Settings::File { extensions } = kind.info().settings {
+                filters.push((format!("{} files", kind.label()), extensions));
+            }
+            filters.push(("All files".to_string(), ALL_FILES));
+            let save = target == Pick::NewFile;
+            let title = if save { "New database file" } else { "Choose a database file" };
+            Ask { title, dir: folder_of(conn.form.file.as_deref()), filters, save }
         }
     };
-    match Picker::spawn(target, conn.generation, title, dir, ctx) {
+    match Picker::spawn(target, conn.generation, ask, ctx) {
         Ok(p) => conn.picker = Some(p),
         Err(e) => conn.message = Some(Message { kind: Kind::Error, text: format!("The file picker could not be started: {e}") }),
     }

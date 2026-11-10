@@ -7,15 +7,16 @@
 //! the edits name rows of the page shown; typing in the filter bar (`table.setFilters` with
 //! `apply: false`) does not. A page never lands on staged edits: one that would is ignored.
 //!
-//! **Loading a page** is a job on the browse connection. The command builds the statement first
-//! (SQL that cannot be built, like an unknown column or a `;` in the raw condition, is
-//! `BadParams` and changes nothing), then sets the tab's `applied`, `sort` and `page` to what it
-//! asked for, bumps the tab's `seq` and starts the job. The page statement asks for 101 rows:
-//! 100 are kept, and the 101st sets `has_next`. When the page's cell text passes the byte cap
-//! (`PAGE_LIMITS`, 256 MiB) fewer rows are kept and `page_complete` says so (`pageComplete` in
-//! `table.read` and `inspect()`). Columns are typed from the catalog. A load that
-//! fails sets `error` (the server's text) and puts `applied`, `sort` and `page` back to what the
-//! rows still shown were loaded with; the job's result is the error. `table.page {to: "last"}`
+//! **Loading a page** is a job on the browse connection. The command builds the statement first,
+//! in the connection's dialect (SQL that cannot be built, like an unknown column or a `;` in the
+//! raw condition, is `BadParams` and changes nothing), then sets the tab's `applied`, `sort` and
+//! `page` to what it asked for, bumps the tab's `seq` and starts the job. The page statement asks
+//! for 101 rows: 100 are kept, and the 101st sets `has_next`. When the page's cell text passes the
+//! byte cap (`PAGE_LIMITS`, 256 MiB) fewer rows are kept and `page_complete` says so
+//! (`pageComplete` in `table.read` and `inspect()`). Columns are typed from the catalog; the
+//! page shows the visible ones and keeps the row key's hidden ones beside them (`hidden`). A load
+//! that fails sets `error` (the server's text) and puts `applied`, `sort` and `page` back to what
+//! the rows still shown were loaded with; the job's result is the error. `table.page {to: "last"}`
 //! counts first, in the same job. `table.read` and `inspect()` give the rows with the page they
 //! are (`page`, from `shown`) and the page asked for (`requestedPage`).
 //!
@@ -42,21 +43,23 @@
 //! Logs carry the command ids and job labels only (the job runtime times them), never SQL,
 //! filter values or cells.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use dbee_core::{Catalog, Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef};
-use dbee_pg::query::{run_untyped, scalar_u64};
-use dbee_pg::{PAGE_LIMITS, PgConnection, PgError};
+use dbee_driver::{Connection, DbError, PAGE_LIMITS};
+use dbee_sql::Dialect;
 use dbee_sql::SqlError;
 use dbee_sql::filter::{Condition, Filter, Op, Sort, SortDir, where_sql};
 use dbee_sql::select::{PAGE_SIZE, count_sql, page_sql};
 use serde_json::json;
 
-use super::connection::cancel_statements;
 use super::edit;
-use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needs_db, p};
+use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needed_connection, needs_db, p};
+use crate::jobs::Stop;
 use crate::state::{PageView, TableTab, Total};
-use crate::{Apply, EngineError, JobId, Json, Outcome, Session, Tab, TabId};
+use crate::turns::{self, InTurn};
+use crate::{Apply, ConnectionId, EngineError, JobId, Json, Outcome, Session, Tab, TabId, Which};
 
 const OPEN: &str = "table.open";
 const SET_FILTERS: &str = "table.setFilters";
@@ -77,7 +80,8 @@ pub const NO_TABLE_TAB: &str = "no table tab is active";
 /// Rows a page keeps.
 const PAGE_ROWS: usize = PAGE_SIZE as usize;
 
-/// The last page whose offset Postgres takes (`OFFSET` is a `bigint`).
+/// The last page dbee can reach: its `OFFSET` fits a signed 64-bit integer, which every engine
+/// takes.
 const MAX_PAGE: u64 = i64::MAX as u64 / PAGE_SIZE;
 
 /// The rows `table.read` returns when `limit` is not given.
@@ -89,7 +93,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Open Table",
         menu: &[],
         shortcut: None,
-        params: "{schema, table, filters?: [{column, op, value}]}",
+        params: "{schema, table, filters?: [{column, op, value}], connection?}",
         enabled: needs_db,
         run: open,
         journal: true,
@@ -212,8 +216,9 @@ fn sql_bad(e: SqlError) -> EngineError {
     bad(e.to_string())
 }
 
-pub(crate) fn catalog(s: &Session) -> Result<Arc<Catalog>, EngineError> {
-    s.state.connected.as_ref().map(|c| Arc::clone(&c.catalog)).ok_or_else(|| disabled(NOT_CONNECTED))
+/// The catalog of the connection `which` names.
+pub(crate) fn catalog(s: &Session, which: Which) -> Result<Arc<Catalog>, EngineError> {
+    s.state.connection(which).map(|c| Arc::clone(&c.catalog)).ok_or_else(|| disabled(NOT_CONNECTED))
 }
 
 pub(crate) fn lookup<'a>(catalog: &'a Catalog, table: &TableRef) -> Result<&'a TableInfo, EngineError> {
@@ -277,12 +282,13 @@ fn opt_bool(params: &Json, key: &str) -> Result<Option<bool>, EngineError> {
     }
 }
 
-/// The planner's estimate for `cond` on `info`, when there is one to show at once: only when the
-/// condition restricts nothing (none, or only filter rows without a value), and only for
-/// relations that keep one (not views or foreign tables). The UI shows it by the same rule.
-pub fn quick_estimate(info: &TableInfo, cond: &Condition) -> Option<u64> {
+/// The planner's estimate for `cond` on `info` in `dialect`, when there is one to show at once:
+/// only when the condition restricts nothing (none, or only filter rows without a value), and
+/// only for relations that keep one (not views or foreign tables). The UI shows it by the same
+/// rule.
+pub fn quick_estimate(dialect: Dialect, info: &TableInfo, cond: &Condition) -> Option<u64> {
     let kept = matches!(info.kind, RelKind::Table | RelKind::PartitionedTable | RelKind::MaterializedView);
-    let unfiltered = matches!(where_sql(cond, info), Ok(None));
+    let unfiltered = matches!(where_sql(dialect, cond, info), Ok(None));
     if kept && unfiltered { info.estimated_rows } else { None }
 }
 
@@ -291,23 +297,32 @@ fn last_page(rows: u64) -> u64 {
     rows.saturating_sub(1) / PAGE_SIZE
 }
 
-/// Why the tab's rows cannot be edited, or `None` when they can (`notEditableReason`).
-pub fn not_editable(s: &Session, t: &TableTab) -> Option<&'static str> {
-    let Some(c) = s.state.connected.as_ref() else { return Some(NOT_CONNECTED) };
+/// Why the tab's rows cannot be edited, or `None` when they can (`notEditableReason`): the
+/// connection, the relation's kind, the table's own reason (`noEditReason`), or its key.
+pub fn not_editable<'a>(s: &'a Session, t: &TableTab) -> Option<Cow<'a, str>> {
+    let Some(c) = s.state.connection(Which::Tab(t.id)) else { return Some(NOT_CONNECTED.into()) };
     if c.info.read_only || c.config.read_only {
-        return Some("read-only connection");
+        return Some("read-only connection".into());
     }
-    let Some(info) = c.catalog.table(&t.table) else { return Some("the table is no longer in the schema") };
+    let Some(info) = c.catalog.table(&t.table) else { return Some("the table is no longer in the schema".into()) };
     match info.kind {
         RelKind::Table | RelKind::PartitionedTable => {}
-        RelKind::View => return Some("views are read-only"),
-        RelKind::MaterializedView => return Some("materialized views are read-only"),
-        RelKind::ForeignTable => return Some("foreign tables are read-only"),
+        RelKind::View => return Some("views are read-only".into()),
+        RelKind::MaterializedView => return Some("materialized views are read-only".into()),
+        RelKind::ForeignTable => return Some("foreign tables are read-only".into()),
+    }
+    if let Some(why) = &info.no_edit_reason {
+        return Some(why.as_str().into());
     }
     if info.row_key().is_none() {
-        return Some("no primary key or unique not-null key");
+        return Some("no primary key or unique not-null key".into());
     }
     None
+}
+
+/// The table's own reason it cannot be edited, whatever the connection (`noEditReason`).
+fn no_edit_reason<'a>(s: &'a Session, t: &TableTab) -> Option<&'a str> {
+    s.state.connection(Which::Tab(t.id))?.catalog.table(&t.table)?.no_edit_reason.as_deref()
 }
 
 /// The tab as `inspect()` shows it.
@@ -334,6 +349,7 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "error": t.error,
         "editable": reason.is_none(),
         "notEditableReason": reason,
+        "noEditReason": no_edit_reason(s, t),
         "edits": super::edit::summary(&t.edits, t.data.as_ref().map_or(0, |d| d.rows.len())),
         "failed": t.edits.failed.as_ref().map(|f| json!({ "row": f.row, "column": f.column, "message": f.message, "code": f.code })),
         "outcomeUnknown": t.edits.outcome_unknown(),
@@ -345,33 +361,38 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
 
 /// A page load, checked and ready to start.
 struct Plan {
-    conn: Arc<PgConnection>,
+    /// The open connection `conn` belongs to.
+    id: ConnectionId,
+    conn: Arc<InTurn>,
+    dialect: Dialect,
     info: TableInfo,
     view: PageView,
     /// Count first and load the last page (`view.page` is then not used).
     last: bool,
 }
 
-/// Checks that the statements for `view` can be built: `BadParams` when not.
-fn check(info: &TableInfo, view: &PageView, last: bool) -> Result<(), EngineError> {
-    page_sql(info, &view.applied, view.sort.as_ref(), view.page).map_err(sql_bad)?;
+/// Checks that the statements for `view` can be built in `dialect`: `BadParams` when not.
+fn check(dialect: Dialect, info: &TableInfo, view: &PageView, last: bool) -> Result<(), EngineError> {
+    page_sql(dialect, info, &view.applied, view.sort.as_ref(), view.page).map_err(sql_bad)?;
     if last {
-        count_sql(info, &view.applied).map_err(sql_bad)?;
+        count_sql(dialect, info, &view.applied).map_err(sql_bad)?;
     }
     Ok(())
 }
 
-/// [`check`], then takes the browse connection. Changes nothing but a lost mark.
-fn prepare(s: &mut Session, info: &TableInfo, view: PageView, last: bool) -> Result<Plan, EngineError> {
-    check(info, &view, last)?;
-    let conn = s.browse()?;
-    Ok(Plan { conn, info: info.clone(), view, last })
+/// [`check`], then takes the browse connection of the connection `which` names. Changes nothing
+/// but a lost mark.
+fn prepare(s: &mut Session, which: Which, info: &TableInfo, view: PageView, last: bool) -> Result<Plan, EngineError> {
+    let dialect = s.state.dialect(which);
+    check(dialect, info, &view, last)?;
+    let (id, conn) = s.browse_in_turn(which)?;
+    Ok(Plan { id, conn, dialect, info: info.clone(), view, last })
 }
 
 /// Starts `plan` for tab `tab`: the tab asks for its view (a new condition forgets the total,
 /// `last` shows it as counting), its `seq` moves on, and the job runs.
 fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result<Outcome, EngineError> {
-    let Plan { conn, info, view, last } = plan;
+    let Plan { id, conn, dialect, info, view, last } = plan;
     let Some(t) = table_tab_mut(s, tab) else { return Err(bad(format!("no tab {} is open", tab.0))) };
     if t.applied != view.applied {
         t.total = Total::Unknown;
@@ -379,17 +400,20 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     t.applied = view.applied.clone();
     t.sort = view.sort.clone();
     if last {
-        t.total = Total::Counting { estimate: quick_estimate(&info, &view.applied) };
+        t.total = Total::Counting { estimate: quick_estimate(dialect, &info, &view.applied) };
     } else {
         t.page = view.page;
     }
     t.seq = t.seq.wrapping_add(1);
     let seq = t.seq;
-    let columns: Vec<Column> = info.columns.iter().map(ColumnInfo::column).collect();
+    let columns = PageColumns::of(&info);
     let job_conn = Arc::clone(&conn);
-    let job = s.spawn_job(label, async move {
-        let loaded = load(&job_conn, &info, &view, last).await;
-        let apply: Apply = Box::new(move |s: &mut Session| apply_load(s, &conn, tab, seq, view, last, columns, loaded));
+    let conn: Arc<dyn Connection> = conn;
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
+    let job = s.spawn_stoppable_job(label, stop, async move {
+        let loaded = load(job_conn.as_ref(), dialect, &info, &view, last, &job_stop).await;
+        let apply: Apply = Box::new(move |s: &mut Session| apply_load(s, id, &conn, tab, seq, view, last, columns, loaded));
         apply
     });
     if let Some(t) = table_tab_mut(s, tab) {
@@ -404,17 +428,20 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
 /// What a page job brings back: the count `last` made, and the page number with its rows.
 pub(crate) struct Loaded {
     counted: Option<u64>,
-    page: Result<(u64, ResultSet), PgError>,
+    page: Result<(u64, ResultSet), DbError>,
 }
 
-async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool) -> Loaded {
+/// Loads the page, counting first for `last`, each statement in its turn on the browse connection;
+/// `stop` stops the statement that runs, and the next does not start
+/// ([`turns::stoppable_in_turn`]).
+async fn load(conn: &InTurn, dialect: Dialect, info: &TableInfo, view: &PageView, last: bool, stop: &Stop) -> Loaded {
     let mut page = view.page;
     let mut counted = None;
     if last {
-        let rows = match count_sql(info, &view.applied) {
-            Ok(sql) => scalar_u64(conn, &sql).await,
+        let rows = match count_sql(dialect, info, &view.applied) {
+            Ok(sql) => turns::stoppable_in_turn(conn, |c| c.scalar_u64(&sql), stop).await,
             // Built once already, before the job started.
-            Err(e) => Err(PgError::Other(e.to_string())),
+            Err(e) => Err(DbError::Other(e.to_string())),
         };
         match rows {
             Ok(n) => {
@@ -424,11 +451,24 @@ async fn load(conn: &PgConnection, info: &TableInfo, view: &PageView, last: bool
             Err(e) => return Loaded { counted, page: Err(e) },
         }
     }
-    let rows = match page_sql(info, &view.applied, view.sort.as_ref(), page) {
-        Ok(sql) => run_untyped(conn, &sql, PAGE_LIMITS).await,
-        Err(e) => Err(PgError::Other(e.to_string())),
+    let rows = match page_sql(dialect, info, &view.applied, view.sort.as_ref(), page) {
+        Ok(sql) => turns::stoppable_in_turn(conn, |c| c.run_untyped(&sql, PAGE_LIMITS), stop).await,
+        Err(e) => Err(DbError::Other(e.to_string())),
     };
     Loaded { counted, page: rows.map(|rs| (page, rs)) }
+}
+
+/// The columns a page statement reads ([`TableInfo::page_columns`]), typed from the catalog, and
+/// how many of them, from the first, are visible.
+pub(crate) struct PageColumns {
+    columns: Vec<Column>,
+    visible: usize,
+}
+
+impl PageColumns {
+    fn of(info: &TableInfo) -> PageColumns {
+        PageColumns { columns: info.page_columns().into_iter().map(ColumnInfo::column).collect(), visible: info.visible_columns().count() }
+    }
 }
 
 /// The page as the tab keeps it: at most 100 rows, the catalog's columns. Then whether more rows
@@ -446,17 +486,29 @@ fn page_data(mut rs: ResultSet, columns: Vec<Column>) -> (ResultSet, bool, bool)
     (rs, has_next, complete)
 }
 
+/// `rs` cut after its first `visible` columns: the rows the grid shows, and the hidden key
+/// columns beside them (every row cut the same way; a short row stays short).
+fn split_hidden(mut rs: ResultSet, visible: usize) -> (ResultSet, ResultSet) {
+    if visible >= rs.columns.len() {
+        return (rs, ResultSet::default());
+    }
+    let columns = rs.columns.split_off(visible);
+    let rows = rs.rows.iter_mut().map(|row| row.split_off(visible.min(row.len()))).collect();
+    (rs, ResultSet { columns, rows, ..ResultSet::default() })
+}
+
 fn apply_load(
     s: &mut Session,
-    conn: &Arc<PgConnection>,
+    id: ConnectionId,
+    conn: &Arc<dyn Connection>,
     tab: TabId,
     seq: u64,
     mut view: PageView,
     last: bool,
-    columns: Vec<Column>,
+    columns: PageColumns,
     loaded: Loaded,
 ) -> Result<Json, EngineError> {
-    if !s.is_current_browse(conn) {
+    if !s.is_current_browse(id, conn) {
         return Ok(ignored());
     }
     let me = s.applying_job();
@@ -491,11 +543,15 @@ fn apply_load(
             // Nothing is staged; what could be undone or redone named the rows of the old page.
             t.edits = Arc::default();
             view.page = page;
-            let (data, has_next, complete) = page_data(rs, columns);
+            let typed = columns.columns.len();
+            let (data, has_next, complete) = page_data(rs, columns.columns);
+            // A result of other columns than the statement named is shown as it came.
+            let (data, hidden) = if data.columns.len() == typed { split_hidden(data, columns.visible) } else { (data, ResultSet::default()) };
             let (rows, width) = (data.rows.len(), data.columns.len());
             let fits = |(r, c): (usize, usize)| r < rows && c < width;
             t.selection = t.selection.filter(|sel| fits(sel.anchor) && fits(sel.focus));
             t.data = Some(Arc::new(data));
+            t.hidden = Arc::new(hidden);
             t.has_next = has_next;
             t.page_complete = complete;
             t.error = None;
@@ -508,7 +564,7 @@ fn apply_load(
         Err(e) => {
             t.error = Some(e.to_string());
             t.back_to_shown();
-            Err(s.db_failed(conn, &e))
+            Err(s.db_failed(id, conn, &e))
         }
     }
 }
@@ -517,38 +573,48 @@ fn apply_load(
 /// after it writes. [`Reload::prepare`] runs on the caller's thread and moves the tab's `seq` on;
 /// [`Reload::run`] loads in the job; [`Reload::finish`] applies the page like any other load.
 pub(crate) struct Reload {
+    dialect: Dialect,
     info: TableInfo,
     view: PageView,
-    columns: Vec<Column>,
+    columns: PageColumns,
     seq: u64,
 }
 
 impl Reload {
     pub(crate) fn prepare(s: &mut Session, tab: TabId, info: &TableInfo) -> Result<Reload, EngineError> {
         let view = table_tab_mut(s, tab).map(|t| t.shown.clone()).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
-        check(info, &view, false)?;
+        let dialect = s.state.dialect(Which::Tab(tab));
+        check(dialect, info, &view, false)?;
         let t = table_tab_mut(s, tab).ok_or_else(|| bad(format!("no tab {} is open", tab.0)))?;
         t.seq = t.seq.wrapping_add(1);
-        Ok(Reload { info: info.clone(), view, columns: info.columns.iter().map(ColumnInfo::column).collect(), seq: t.seq })
+        Ok(Reload { dialect, info: info.clone(), view, columns: PageColumns::of(info), seq: t.seq })
     }
 
-    pub(crate) async fn run(&self, conn: &PgConnection) -> Loaded {
-        load(conn, &self.info, &self.view, false).await
+    pub(crate) async fn run(&self, conn: &InTurn) -> Loaded {
+        load(conn, self.dialect, &self.info, &self.view, false, &Stop::default()).await
     }
 
-    pub(crate) fn finish(self, s: &mut Session, conn: &Arc<PgConnection>, tab: TabId, loaded: Loaded) -> Result<Json, EngineError> {
-        apply_load(s, conn, tab, self.seq, self.view, false, self.columns, loaded)
+    pub(crate) fn finish(
+        self,
+        s: &mut Session,
+        id: ConnectionId,
+        conn: &Arc<dyn Connection>,
+        tab: TabId,
+        loaded: Loaded,
+    ) -> Result<Json, EngineError> {
+        apply_load(s, id, conn, tab, self.seq, self.view, false, self.columns, loaded)
     }
 }
 
-/// Opens `table` in a new active tab with `filters` applied, and loads its first page.
-fn open_tab(s: &mut Session, label: &'static str, table: TableRef, filters: Vec<Filter>) -> Result<Outcome, EngineError> {
-    let catalog = catalog(s)?;
+/// Opens `table` of the connection `which` names in a new active tab with `filters` applied, and
+/// loads its first page.
+fn open_tab(s: &mut Session, label: &'static str, which: Which, table: TableRef, filters: Vec<Filter>) -> Result<Outcome, EngineError> {
+    let catalog = catalog(s, which)?;
     let info = lookup(&catalog, &table)?;
     let view = PageView { applied: condition(&filters, "", false), sort: None, page: 0 };
-    let plan = prepare(s, info, view.clone(), false)?;
+    let plan = prepare(s, which, info, view.clone(), false)?;
     let id = s.state.take_tab_id();
-    s.state.tabs.push(Tab::Table(TableTab::new(id, table, filters, view)));
+    s.state.tabs.push(Tab::Table(TableTab::new(id, plan.id, table, filters, view)));
     s.state.active = Some(id);
     start(s, label, id, plan)
 }
@@ -559,22 +625,24 @@ fn reload(s: &mut Session, label: &'static str, view: PageView, last: bool) -> R
         let t = active(s)?;
         (t.id, t.table.clone())
     };
-    let catalog = catalog(s)?;
-    let plan = prepare(s, lookup(&catalog, &table)?, view, last)?;
+    let catalog = catalog(s, Which::Tab(tab))?;
+    let plan = prepare(s, Which::Tab(tab), lookup(&catalog, &table)?, view, last)?;
     start(s, label, tab, plan)
 }
 
 // ---- the commands ----------------------------------------------------------------------------
 
-/// `{schema, table, filters?}` → a job returning `{tab, page, rows, hasNext, total}`: a new
-/// active tab on page 0, with the filters applied.
+/// `{schema, table, filters?, connection?}` → a job returning `{tab, page, rows, hasNext, total}`:
+/// a new active tab on page 0 of the table of the connection named, else the active tab's, with
+/// the filters applied.
 fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let table = TableRef { schema: p::str(params, "schema")?.to_owned(), name: p::str(params, "table")?.to_owned() };
     let filters = match params.get("filters").filter(|v| !v.is_null()) {
         Some(v) => parse_filters(v)?,
         None => Vec::new(),
     };
-    open_tab(s, OPEN, table, filters)
+    let connection = needed_connection(s, params)?;
+    open_tab(s, OPEN, Which::Id(connection), table, filters)
 }
 
 /// `{filters?, raw?, rawMode?, apply? = true}`: sets what is given in the filter bar. With
@@ -595,11 +663,12 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let raw_mode = raw_mode.unwrap_or(t.raw_mode);
     // SQL dbee will not build leaves the bar as it was; past that check the bar keeps what was
     // typed, even when the connection then turns out to be lost.
+    let dialect = s.state.dialect(Which::Tab(tab));
     let checked = if apply {
-        let catalog = catalog(s)?;
+        let catalog = catalog(s, Which::Tab(tab))?;
         let info = lookup(&catalog, &table)?;
         let view = PageView { applied: condition(&filters, &raw, raw_mode), sort, page: 0 };
-        check(info, &view, false)?;
+        check(dialect, info, &view, false)?;
         Some((info.clone(), view))
     } else {
         None
@@ -610,8 +679,8 @@ fn set_filters(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     t.raw_mode = raw_mode;
     match checked {
         Some((info, view)) => {
-            let conn = s.browse()?;
-            start(s, SET_FILTERS, tab, Plan { conn, info, view, last: false })
+            let (id, conn) = s.browse_in_turn(Which::Tab(tab))?;
+            start(s, SET_FILTERS, tab, Plan { id, conn, dialect, info, view, last: false })
         }
         None => Ok(Outcome::Done(json!({ "tab": tab, "filters": t.filters, "raw": t.raw, "rawMode": t.raw_mode }))),
     }
@@ -639,7 +708,7 @@ fn parse_to(params: &Json) -> Result<To, EngineError> {
         },
         Some(n @ Json::Number(_)) => match n.as_u64().and_then(|n| n.checked_sub(1)) {
             Some(page) if page <= MAX_PAGE => Ok(To::Page(page)),
-            Some(_) => Err(bad("`to` is past the last page Postgres can reach")),
+            Some(_) => Err(bad("`to` is past the last page dbee can reach")),
             None => Err(bad(what)),
         },
         _ => Err(bad(what)),
@@ -680,9 +749,9 @@ fn sort(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let column = p::str(params, "column")?;
     let dir = p::opt_str(params, "dir")?;
     let t = active(s)?;
-    let catalog = catalog(s)?;
+    let catalog = catalog(s, Which::Tab(t.id))?;
     let info = lookup(&catalog, &t.table)?;
-    if info.column(column).is_none() {
+    if info.visible_column(column).is_none() {
         return Err(bad("the table has no such `column`"));
     }
     let current = t.sort.as_ref().filter(|sort| sort.column == column).map(|sort| sort.dir);
@@ -706,15 +775,18 @@ fn sort(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let (tab, condition) = (t.id, t.applied.clone());
-    let catalog = catalog(s)?;
+    let catalog = catalog(s, Which::Tab(tab))?;
     let info = lookup(&catalog, &t.table)?;
-    let sql = count_sql(info, &condition).map_err(sql_bad)?;
-    let estimate = quick_estimate(info, &condition);
-    let conn = s.browse()?;
-    let job_conn = Arc::clone(&conn);
-    let job = s.spawn_job(COUNT, async move {
-        let rows = scalar_u64(&job_conn, &sql).await;
-        let apply: Apply = Box::new(move |s: &mut Session| apply_count(s, &conn, tab, &condition, rows));
+    let dialect = s.state.dialect(Which::Tab(tab));
+    let sql = count_sql(dialect, info, &condition).map_err(sql_bad)?;
+    let estimate = quick_estimate(dialect, info, &condition);
+    let (id, job_conn) = s.browse_in_turn(Which::Tab(tab))?;
+    let conn: Arc<dyn Connection> = job_conn.clone();
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
+    let job = s.spawn_stoppable_job(COUNT, stop, async move {
+        let rows = turns::stoppable_in_turn(&job_conn, |c| c.scalar_u64(&sql), &job_stop).await;
+        let apply: Apply = Box::new(move |s: &mut Session| apply_count(s, id, &conn, tab, &condition, rows));
         apply
     });
     if let Some(t) = table_tab_mut(s, tab) {
@@ -726,12 +798,13 @@ fn count(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 
 fn apply_count(
     s: &mut Session,
-    conn: &Arc<PgConnection>,
+    id: ConnectionId,
+    conn: &Arc<dyn Connection>,
     tab: TabId,
     condition: &Condition,
-    rows: Result<u64, PgError>,
+    rows: Result<u64, DbError>,
 ) -> Result<Json, EngineError> {
-    if !s.is_current_browse(conn) {
+    if !s.is_current_browse(id, conn) {
         return Ok(ignored());
     }
     let me = s.applying_job();
@@ -753,50 +826,56 @@ fn apply_count(
                 // No newer count runs: back to the estimate.
                 t.total = t.total.settled();
             }
-            Err(s.db_failed(conn, &e))
+            Err(s.db_failed(id, conn, &e))
         }
     }
 }
 
-/// `{}` → `{sent}`: while the tab loads a page or counts, sends a cancel request for the
-/// statement running on the browse connection (the job then ends with `cancelled`, and the rows
-/// from before stay). `sent: false` when the tab runs nothing. The tab's markers name only
-/// running jobs on the current browse connection (see the module docs); a marker whose job is
-/// not running does not count, all the same.
+/// `{}` → `{sent, stopping?}`: while the tab loads a page or counts, stops those jobs: one whose
+/// statement runs sends a cancel request for it, again while it has not ended, and one still
+/// waiting for its turn on the browse connection leaves the queue and sends none, as a request
+/// would stop the statement ahead of it ([`turns::stoppable_in_turn`]). The job then ends with
+/// `cancelled`, and the rows from before stay.
+/// `sent: false` when the tab runs nothing; called again while they stop, it sends nothing more
+/// (`{sent: false, stopping: true}`). The tab's markers name only running jobs on the current
+/// browse connection (see the module docs); a marker whose job is not running does not count, all
+/// the same.
 ///
 /// While the tab's own Apply runs, `{sent: true, apply: true}`: the Apply is cancelled (it writes
-/// nothing, and keeps its edits) and a cancel request stops the statement it waits on, as long as
-/// its statements before `COMMIT` run. Once the Apply has decided to commit, nothing is sent and
-/// the result is `Busy` ([`edit::COMMITTING`]): a cancel never meets the `COMMIT`, so the outcome
-/// stays known.
-///
-/// A cancel request cancels whatever statement runs on the connection at that moment, and every
-/// tab shares the browse connection. So while another tab's `edit.apply` job runs (or one of a tab
-/// closed meanwhile) nothing is sent and the result is `Busy`: the tab's load may still be
-/// waiting behind the Apply, and the request would roll the Apply back instead.
+/// nothing, and keeps its edits). Still waiting for its turn, it leaves the queue; with its turn,
+/// its job sends a cancel request for the statement it waits on, as long as its statements before
+/// `COMMIT` run ([`turns::apply_in_turn`]). Once the Apply has decided to commit, nothing is sent
+/// and the result is `Busy` ([`edit::COMMITTING`]): a cancel never meets the `COMMIT`, so the
+/// outcome stays known. Another tab's Apply is no reason to refuse: a load waiting behind it
+/// leaves the queue too.
 fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
+    let which = Which::Tab(t.id);
     let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));
     if let Some(job) = t.applying.filter(|&job| s.jobs.is_running(job)) {
-        let gate = s.apply_gate.as_ref().filter(|(of, _)| *of == job).map(|(_, gate)| Arc::clone(gate));
-        let Some(gate) = gate else { return Err(EngineError::Busy(edit::APPLYING.into())) };
-        let conn = s.browse()?;
+        let gate = s.state.connection(which).and_then(|c| c.apply_gate.as_ref()).filter(|(of, _, _)| *of == job);
+        let Some((gate, stop)) = gate.map(|(_, gate, stop)| (Arc::clone(gate), Arc::clone(stop))) else {
+            return Err(EngineError::Busy(edit::APPLYING.into()));
+        };
+        s.browse(which)?;
         if !gate.cancel() {
             return Err(EngineError::Busy(edit::COMMITTING.into()));
         }
-        cancel_statements(s, std::iter::once(conn));
+        stop.stop();
         return Ok(Outcome::Done(json!({ "sent": true, "apply": true })));
     }
     let running = alive(t.loading) || alive(t.counting);
     if !running {
         return Ok(Outcome::Done(json!({ "sent": false })));
     }
-    if s.jobs.is_running_label(edit::APPLY) {
-        return Err(EngineError::Busy(edit::APPLYING.into()));
-    }
-    let conn = s.browse()?;
-    cancel_statements(s, std::iter::once(conn));
-    Ok(Outcome::Done(json!({ "sent": true })))
+    let jobs = [t.loading, t.counting.filter(|&c| Some(c) != t.loading)];
+    s.browse(which)?;
+    let stopped: Vec<bool> = jobs.into_iter().flatten().filter_map(|job| s.jobs.stop(job)).collect();
+    Ok(Outcome::Done(match (stopped.contains(&true), stopped.is_empty()) {
+        (true, _) => json!({ "sent": true }),
+        (false, true) => json!({ "sent": false }),
+        (false, false) => json!({ "sent": false, "stopping": true }),
+    }))
 }
 
 /// `{}` → a job returning `{tab, page, rows, hasNext, total}`: loads the page again. The total
@@ -810,8 +889,8 @@ fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// pageComplete, total, editable, notEditableReason, outcomeUnknown, loading, error}`: the loaded
 /// rows from `offset`, at most `limit`, each a list of text or `null`, and the 0-based page they
 /// are (`requestedPage` is the one asked for, which differs while a load runs). `pageComplete` is
-/// false when the byte cap kept fewer rows than the page has. Before the first page arrives, the
-/// catalog's columns and no rows.
+/// false when the byte cap kept fewer rows than the page has. The columns are the visible ones;
+/// before the first page arrives, the catalog's, and no rows.
 fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let offset = p::opt_usize(params, "offset")?.unwrap_or(0);
     let limit = p::opt_usize(params, "limit")?.unwrap_or(READ_LIMIT);
@@ -819,8 +898,8 @@ fn read(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let (columns, rows) = match &t.data {
         Some(d) => (json!(d.columns), json!(d.rows.iter().skip(offset).take(limit).collect::<Vec<_>>())),
         None => {
-            let catalog = catalog(s)?;
-            let columns: Vec<Column> = catalog.table(&t.table).map(|i| i.columns.iter().map(ColumnInfo::column).collect()).unwrap_or_default();
+            let catalog = catalog(s, Which::Tab(t.id))?;
+            let columns: Vec<Column> = catalog.table(&t.table).map(|i| i.visible_columns().map(ColumnInfo::column).collect()).unwrap_or_default();
             (json!(columns), json!([]))
         }
     };
@@ -860,7 +939,8 @@ fn follow(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
             .ok_or_else(|| bad("`column` is not a column of the page"))?,
         _ => return Err(bad("`column` is required (a name or a 0-based index)")),
     };
-    let catalog = catalog(s)?;
+    let which = Which::Tab(t.id);
+    let catalog = catalog(s, which)?;
     let info = lookup(&catalog, &t.table)?;
     let fk = info.fk_for(name).ok_or_else(|| bad("`column` is not part of a foreign key"))?;
     let values = data.rows.get(row).ok_or_else(|| bad("`row` is not a loaded row"))?;
@@ -874,12 +954,13 @@ fn follow(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         }
     }
     let target = fk.target.clone();
-    open_tab(s, FOLLOW, target, filters)
+    open_tab(s, FOLLOW, which, target, filters)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dbee_core::TypeClass;
 
     #[test]
     fn totals_serialize_and_settle() {
@@ -950,8 +1031,9 @@ mod tests {
             rows_seen: 101,
             complete: true,
             rows_affected: Some(101),
+            database_after: Default::default(),
         };
-        let typed = vec![Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into() }];
+        let typed = vec![Column { name: "id".into(), base_type: "int4".into(), type_label: "integer".into(), class: TypeClass::Number }];
         let (page, more, complete) = page_data(rs.clone(), typed.clone());
         assert!(more && complete);
         assert_eq!((page.rows.len(), page.rows_seen, &page.columns), (100, 100, &typed));
@@ -966,5 +1048,25 @@ mod tests {
         assert_eq!(page.rows.len(), 40);
         let probe_lost = ResultSet { rows: rs.rows[..100].to_vec(), complete: false, ..rs };
         assert!(page_data(probe_lost, vec![]).2, "only the 101st row was not kept");
+    }
+
+    #[test]
+    fn a_page_keeps_its_hidden_key_beside_the_rows_it_shows() {
+        let cell = |v: &str| Some(v.to_owned());
+        let rs = ResultSet {
+            columns: vec![Column::untyped("body"), Column::untyped("rowid")],
+            rows: vec![vec![cell("a"), cell("1")], vec![cell("b")], vec![]],
+            rows_seen: 3,
+            complete: true,
+            rows_affected: None,
+            database_after: Default::default(),
+        };
+        let (shown, hidden) = split_hidden(rs.clone(), 1);
+        assert_eq!((shown.columns, shown.rows), (vec![Column::untyped("body")], vec![vec![cell("a")], vec![cell("b")], vec![]]));
+        assert_eq!((shown.rows_seen, shown.complete), (3, true));
+        assert_eq!((hidden.columns, hidden.rows), (vec![Column::untyped("rowid")], vec![vec![cell("1")], vec![], vec![]]), "short rows stay short");
+        // Every column shows: nothing beside it.
+        let (shown, hidden) = split_hidden(rs.clone(), 2);
+        assert_eq!((shown, hidden), (rs, ResultSet::default()));
     }
 }

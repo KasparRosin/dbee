@@ -9,6 +9,9 @@
 
 pub mod keys;
 pub mod known_hosts;
+mod stream;
+
+pub use stream::TunnelStream;
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -16,11 +19,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dbee_config::{SshAuth, SshConfig};
-use russh::client::{self, AuthResult, Handle, Msg};
+use russh::client::{self, AuthResult, Handle};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
-use russh::{AgentAuthError, ChannelOpenFailure, ChannelStream, Disconnect, Preferred};
+use russh::{AgentAuthError, ChannelOpenFailure, Disconnect, Preferred};
 
 use crate::keys::LoadError;
 use crate::known_hosts::Verdict;
@@ -139,6 +142,11 @@ pub enum SshError {
     /// `known_hosts` holds another key of this type for the server, at `line` (1-based). Never
     /// overridable.
     HostKeyChanged { host: String, line: usize },
+    /// `known_hosts` holds keys of other types for the server and none of the type it showed
+    /// (`key_type`). Never overridable.
+    HostKeyOtherType { host: String, key_type: String, recorded: Vec<String>, lines: Vec<usize> },
+    /// `known_hosts` marks the key the server showed `@revoked`, at `line` (1-based).
+    HostKeyRevoked { host: String, line: usize },
     /// The key file is encrypted; open again with `SshSecrets::passphrase`.
     NeedPassphrase { key: PathBuf },
     /// The passphrase does not open the key file.
@@ -166,6 +174,24 @@ impl std::fmt::Display for SshError {
                 f,
                 "the host key of the SSH server {host} has changed since it was saved (known_hosts line {line}); \
                  this can mean someone is intercepting the connection, so dbee will not connect"
+            ),
+            SshError::HostKeyOtherType { host, key_type, recorded, lines } => {
+                let numbers: Vec<String> = lines.iter().map(usize::to_string).collect();
+                write!(
+                    f,
+                    "the SSH server {host} showed a {key_type} host key, but known_hosts records only {} for it (known_hosts line{} {}); \
+                     this is what an interception looks like, so dbee will not connect. \
+                     Ask the server's administrator whether its key changed; if it did, remove the old line{} from known_hosts",
+                    recorded.join(", "),
+                    if lines.len() == 1 { "" } else { "s" },
+                    numbers.join(", "),
+                    if lines.len() == 1 { "" } else { "s" }
+                )
+            }
+            SshError::HostKeyRevoked { host, line } => write!(
+                f,
+                "known_hosts line {line} marks the host key of the SSH server {host} as revoked, so dbee will not connect. \
+                 Ask the server's administrator for its current key"
             ),
             SshError::NeedPassphrase { key } => write!(f, "the SSH key {} is protected by a passphrase", key.display()),
             SshError::WrongPassphrase { key } => write!(f, "the passphrase does not open the SSH key {}", key.display()),
@@ -263,6 +289,8 @@ impl Tunnel {
                 return Err(match verdict {
                     Some(Verdict::Unknown { key_type, fingerprint }) => SshError::HostKeyUnknown { host: entry, key_type, fingerprint },
                     Some(Verdict::Changed { line }) => SshError::HostKeyChanged { host: entry, line },
+                    Some(Verdict::OtherType { key_type, recorded, lines }) => SshError::HostKeyOtherType { host: entry, key_type, recorded, lines },
+                    Some(Verdict::Revoked { line }) => SshError::HostKeyRevoked { host: entry, line },
                     Some(Verdict::Failed(m)) => SshError::KnownHosts(m),
                     Some(Verdict::Unsupported(m)) => SshError::Connect(format!("{addr}: {m}")),
                     _ => SshError::Connect(format!("{addr}: {e}")),
@@ -282,9 +310,12 @@ impl Tunnel {
         }
     }
 
-    /// A new direct-tcpip channel to `host:port`, as the SSH server resolves it.
-    pub async fn connect(&self, host: &str, port: u16) -> Result<ChannelStream<Msg>, SshError> {
+    /// A new direct-tcpip channel to `host:port`, as the SSH server resolves it. Called on a Tokio
+    /// runtime; the stream can be dropped anywhere ([`TunnelStream`]).
+    pub async fn connect(&self, host: &str, port: u16) -> Result<TunnelStream, SshError> {
         let target = address(host, port);
+        let runtime =
+            tokio::runtime::Handle::try_current().map_err(|_| SshError::Channel(format!("opening a channel to {target} needs a tokio runtime")))?;
         if self.is_closed() {
             return Err(SshError::Channel(format!("the SSH connection is closed, so {target} cannot be reached")));
         }
@@ -292,7 +323,7 @@ impl Tunnel {
         match tokio::time::timeout(CONNECT_TIMEOUT, opening).await {
             Err(_) => Err(SshError::Channel(format!("the SSH server did not open a channel to {target} within {} s", CONNECT_TIMEOUT.as_secs()))),
             Ok(Err(e)) => Err(SshError::Channel(channel_error(&target, e))),
-            Ok(Ok(channel)) => Ok(channel.into_stream()),
+            Ok(Ok(channel)) => Ok(TunnelStream::new(channel.into_stream(), runtime)),
         }
     }
 

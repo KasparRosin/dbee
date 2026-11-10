@@ -3,8 +3,9 @@
 //! `DBEE_FUZZ_SEED` picks the sequence (default: from the clock, printed so a failure can be
 //! replayed); `DBEE_FUZZ_STEPS` is its length (default 300). After every step the session must
 //! hold its invariants: no command or job result is `Internal` (a caught panic), `inspect()`
-//! serializes, the active tab is an open tab (`None` exactly when no tab is open), and no
-//! journal entry keeps a secret param at any depth.
+//! serializes, the active tab is an open tab (`None` exactly when no tab is open), every tab is
+//! on an open connection (on none only while none is open), and no journal entry keeps a secret
+//! param at any depth.
 //!
 //! Every engine task adds its commands' param shapes to [`PARAM_HINTS`]; the test
 //! `every_command_has_param_hints` fails when one is missing.
@@ -21,7 +22,7 @@ use std::time::Duration;
 
 use dbee_config::MemoryStore;
 use dbee_engine::cmd::is_secret_param;
-use dbee_engine::{EngineError, Json, Outcome, Session, SessionOptions, Tab};
+use dbee_engine::{EngineError, Json, Outcome, Session, SessionOptions, Tab, Which};
 use dbee_ssh::SshEnv;
 use serde_json::json;
 
@@ -44,13 +45,14 @@ enum Hint {
 /// Param shapes per command id: (key, hint) pairs. The fuzz builds well-formed params from them
 /// most of the time, so commands get past their params checks and change the state.
 const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
-    ("tab.newQuery", &[("text", Hint::Text)]),
+    ("tab.newQuery", &[("text", Hint::Text), ("schema", Hint::Text), ("connection", CONNECTION)]),
     ("tab.activate", &[("tab", Hint::Tab)]),
     ("tab.list", &[]),
     ("query.setText", &[("text", Hint::Text)]),
     ("query.run", &[("current", Hint::Bool), ("cursor", Hint::Count)]),
     ("query.cancel", &[]),
     ("query.showResult", &[("index", Hint::Count)]),
+    ("query.setDatabase", &[("tab", Hint::Tab), ("database", Hint::Text)]),
     ("tab.close", &[("tab", Hint::Tab), ("force", Hint::Bool)]),
     ("connection.list", &[]),
     ("connection.save", &[("config", CONFIG), ("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text)]),
@@ -59,13 +61,16 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("connection.parseUrl", &[("url", Hint::Custom(url))]),
     ("connection.sshKey", &[("config", CONFIG)]),
     ("connection.test", CONNECT),
+    ("connection.listDatabases", LIST_DATABASES),
     ("connection.open", OPEN),
-    ("connection.reconnect", SECRETS),
-    ("schema.refresh", &[]),
-    ("schema.inspect", &[("schema", Hint::Text), ("table", Hint::Text)]),
-    ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count)]),
-    ("connection.close", &[("force", Hint::Bool)]),
-    ("table.open", &[("schema", SCHEMA), ("table", TABLE), ("filters", FILTERS)]),
+    ("connection.openFile", &[("path", FILE_PATH), ("password", Hint::Text)]),
+    ("connection.saveOpen", &[("connection", CONNECTION)]),
+    ("connection.reconnect", RECONNECT),
+    ("schema.refresh", &[("connection", CONNECTION)]),
+    ("schema.inspect", &[("connection", CONNECTION), ("schema", Hint::Text), ("table", Hint::Text)]),
+    ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count), ("connection", CONNECTION)]),
+    ("connection.close", &[("connection", CONNECTION), ("force", Hint::Bool)]),
+    ("table.open", &[("schema", SCHEMA), ("table", TABLE), ("filters", FILTERS), ("connection", CONNECTION)]),
     ("table.setFilters", &[("filters", FILTERS), ("raw", Hint::Text), ("rawMode", Hint::Bool), ("apply", Hint::Bool)]),
     ("table.page", &[("to", Hint::Custom(page_to))]),
     ("table.sort", &[("column", COLUMN), ("dir", Hint::OneOf(&["asc", "desc", "none", "up", ""]))]),
@@ -90,8 +95,8 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
 ];
 
 /// Table commands: names from the seed data, odd ones and ones that do not exist.
-const SCHEMA: Hint = Hint::OneOf(&["shop", "odd", "scratch", "", "🐝"]);
-const TABLE: Hint = Hint::OneOf(&["orders", "customers", "big_rows", "order_totals", "Odd \"Name\" 🐝", "nope"]);
+const SCHEMA: Hint = Hint::OneOf(&["shop", "odd", "scratch", "", "🐙"]);
+const TABLE: Hint = Hint::OneOf(&["orders", "customers", "big_rows", "order_totals", "Odd \"Name\" 🐙", "nope"]);
 const COLUMN: Hint = Hint::Custom(column);
 const FILTERS: Hint = Hint::Custom(filters);
 
@@ -143,7 +148,7 @@ fn value(r: &mut Rng, _: &Session) -> Json {
     if r.chance(15) {
         return Json::Null;
     }
-    json!(r.pick(&["", "1", "42", "-7.5", "x", "2025-01-01", "not a date", "true", "{}", "[1, 2]", "it's \"q\" 🐝", "Alice"]))
+    json!(r.pick(&["", "1", "42", "-7.5", "x", "2025-01-01", "not a date", "true", "{}", "[1, 2]", "it's \"q\" 🐙", "Alice"]))
 }
 
 fn page_to(r: &mut Rng, _: &Session) -> Json {
@@ -157,8 +162,13 @@ const CONFIG: Hint = Hint::Custom(config);
 const SAVED_ID: Hint = Hint::Custom(saved_id);
 /// For commands that take `id` or `config`: mostly absent, so `config` alone gets through too.
 const MAYBE_ID: Hint = Hint::Custom(maybe_id);
-const SECRETS: &[(&str, Hint)] =
-    &[("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text), ("trustHostKey", FINGERPRINT)];
+const RECONNECT: &[(&str, Hint)] = &[
+    ("connection", CONNECTION),
+    ("password", Hint::Text),
+    ("sshPassword", Hint::Text),
+    ("sshPassphrase", Hint::Text),
+    ("trustHostKey", FINGERPRINT),
+];
 const CONNECT: &[(&str, Hint)] = &[
     ("id", MAYBE_ID),
     ("config", CONFIG),
@@ -167,6 +177,8 @@ const CONNECT: &[(&str, Hint)] = &[
     ("sshPassphrase", Hint::Text),
     ("trustHostKey", FINGERPRINT),
 ];
+const LIST_DATABASES: &[(&str, Hint)] =
+    &[("config", CONFIG), ("password", Hint::Text), ("sshPassword", Hint::Text), ("sshPassphrase", Hint::Text), ("trustHostKey", FINGERPRINT)];
 const OPEN: &[(&str, Hint)] = &[
     ("id", MAYBE_ID),
     ("config", CONFIG),
@@ -176,6 +188,15 @@ const OPEN: &[(&str, Hint)] = &[
     ("trustHostKey", FINGERPRINT),
     ("savePassword", Hint::Bool),
 ];
+/// Database file paths that are never there (or a name without a type dbee opens), so the fuzz
+/// opens no file.
+const FILE_PATH: Hint = Hint::OneOf(&[
+    "/nonexistent/dbee-fuzz/a.sqlite",
+    "/nonexistent/dbee-fuzz/B.DB",
+    "/nonexistent/dbee-fuzz/notes.txt",
+    "/nonexistent/dbee-fuzz/noext",
+    "",
+]);
 const FINGERPRINT: Hint = Hint::OneOf(&["SHA256:AAAA", "SHA256:", "", "md5:00:11"]);
 
 fn config(r: &mut Rng, s: &Session) -> Json {
@@ -183,8 +204,8 @@ fn config(r: &mut Rng, s: &Session) -> Json {
         "host": "127.0.0.1",
         "port": if r.chance(5) { 0 } else { 1 },
         "name": text(r),
-        "user": r.pick(&["", "postgres", "it's", "🐝"]),
-        "database": r.pick(&["", "dbee", "a\"b", "🐝"]),
+        "user": r.pick(&["", "postgres", "it's", "🐙"]),
+        "database": r.pick(&["", "dbee", "a\"b", "🐙"]),
         "sslMode": if r.chance(5) { "bogus" } else { *r.pick(&["disable", "prefer", "require", "verify-ca", "verify-full"]) },
         "color": if r.chance(5) { "plaid" } else { *r.pick(&["none", "red", "blue"]) },
         "readOnly": r.chance(50),
@@ -216,7 +237,15 @@ fn config(r: &mut Rng, s: &Session) -> Json {
 /// A saved connection's id most of the time, else one that is not saved.
 fn saved_id(r: &mut Rng, s: &Session) -> Json {
     let saved = &s.state().store.saved;
-    if !saved.is_empty() && r.chance(80) { json!(r.pick(saved).id) } else { json!(r.pick(&["", "nope", "🐝", "../x"])) }
+    if !saved.is_empty() && r.chance(80) { json!(r.pick(saved).id) } else { json!(r.pick(&["", "nope", "🐙", "../x"])) }
+}
+
+/// An open connection's id most of the time, else one that is not open.
+const CONNECTION: Hint = Hint::Custom(connection_id);
+
+fn connection_id(r: &mut Rng, s: &Session) -> Json {
+    let open = &s.state().connections;
+    if !open.is_empty() && r.chance(85) { json!(r.pick(open).id.0) } else { json!(*r.pick(&[0u64, s.state().next_connection, u64::MAX])) }
 }
 
 fn maybe_id(r: &mut Rng, s: &Session) -> Json {
@@ -273,12 +302,12 @@ const TEXTS: &[&str] = &[
     "select 'a;b'; select \"x\" from t; -- done",
     "it's \"quoted\"; \\ backslash",
     "nul \u{0} inside",
-    "🐝 emoji, ünïcödé and a combining e\u{301}",
+    "🐙 emoji, ünïcödé and a combining e\u{301}",
     "select * from shop.orders where id = '1''; drop table shop.orders; --'",
 ];
 
 fn nested(depth: usize) -> Json {
-    let mut v = json!({"leaf": "🐝"});
+    let mut v = json!({"leaf": "🐙"});
     for i in 0..depth {
         v = if i % 2 == 0 { json!({ "n": v }) } else { json!([v]) };
     }
@@ -286,7 +315,7 @@ fn nested(depth: usize) -> Json {
 }
 
 fn text(r: &mut Rng) -> Json {
-    if r.chance(5) { Json::String("x'\";🐝\u{0}".repeat(1_000)) } else { json!(r.pick(TEXTS)) }
+    if r.chance(5) { Json::String("x'\";🐙\u{0}".repeat(1_000)) } else { json!(r.pick(TEXTS)) }
 }
 
 /// Any value at all, with the inputs that break code: edges of numbers, quotes, NUL, emoji,
@@ -302,7 +331,7 @@ fn hostile(r: &mut Rng) -> Json {
         6 => json!("it's"),
         7 => json!("say \"hi\"; drop table x; --"),
         8 => json!("nul\u{0}byte"),
-        9 => json!("🐝🐝🐝"),
+        9 => json!("🐙🐙🐙"),
         10 => Json::String("x".repeat(10_000)),
         11 => Json::Null,
         12 => json!([1, "two", null, [3], {"four": 4, "inner": {"sshPassword": "pw"}}]),
@@ -329,7 +358,7 @@ fn well_formed(r: &mut Rng, hint: Hint, s: &Session) -> Json {
     }
 }
 
-const EXTRA_KEYS: &[&str] = &["password", "sshPassphrase", "tab", "text", "force", "", "🐝", "ms"];
+const EXTRA_KEYS: &[&str] = &["password", "sshPassphrase", "tab", "text", "force", "", "🐙", "ms"];
 
 fn params(r: &mut Rng, id: &str, s: &Session) -> Json {
     if r.chance(4) {
@@ -364,6 +393,8 @@ fn session() -> Session {
         ssh: SshEnv::default(),
         notify: None,
         allowed_targets: None,
+        allowed_dirs: None,
+        drivers: dbee_drivers::all(),
     };
     Session::new(options).unwrap()
 }
@@ -387,9 +418,15 @@ fn check(s: &Session, at: &str) {
     ids.sort_unstable();
     ids.dedup();
     assert_eq!(ids.len(), st.tabs.len(), "{at}: duplicate tab ids");
+    for t in &st.tabs {
+        match t.connection() {
+            Some(c) => assert!(st.connection(Which::Id(c)).is_some(), "{at}: tab {} is on connection {}, which is not open", t.id().0, c.0),
+            None => assert!(st.connections.is_empty(), "{at}: tab {} is on no connection while one is open", t.id().0),
+        }
+    }
 }
 
-/// No journal entry from `from` on holds a secret param, at any depth (R2).
+/// No journal entry from `from` on holds a secret param, at any depth.
 fn no_secrets_in_journal(s: &Session, from: usize, at: &str) {
     for (id, params) in s.journal().iter().skip(from) {
         let mut stack = vec![params];

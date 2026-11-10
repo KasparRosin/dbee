@@ -2,8 +2,11 @@
 //! [`SecretStore`](crate::SecretStore).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::kind;
 
 /// Errors of this crate. The text never contains a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +17,8 @@ pub enum ConfigError {
     Url(String),
     /// The connections file could not be read or written.
     Io(String),
+    /// Another dbee held the connections file's lock for over 5 seconds.
+    Locked,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -22,6 +27,11 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Invalid(m) => write!(f, "invalid connection settings: {m}"),
             ConfigError::Url(m) => write!(f, "invalid connection URL: {m}"),
             ConfigError::Io(m) => write!(f, "connections file: {m}"),
+            ConfigError::Locked => write!(
+                f,
+                "Another dbee window was changing the connections file for over {} seconds, so nothing was changed.",
+                crate::store::LOCK_WAIT.as_secs()
+            ),
         }
     }
 }
@@ -42,6 +52,102 @@ pub enum SslMode {
     VerifyCa,
     #[serde(rename = "verify-full")]
     VerifyFull,
+}
+
+/// What a database type's settings consist of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settings {
+    /// Host and port, with optional TLS and SSH. With `socket`, the host may also name the folder
+    /// of a Unix socket (it starts with `/`), where there is no SSH tunnel.
+    Server { tls: bool, ssh: bool, socket: bool },
+    /// A single file, opened by these extensions.
+    File { extensions: &'static [&'static str] },
+}
+
+/// The fixed facts of one database type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindInfo {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub default_port: Option<u16>,
+    pub settings: Settings,
+    pub url_schemes: &'static [&'static str],
+    /// This type's own TLS-mode names in URLs, besides libpq's.
+    pub ssl_aliases: &'static [(&'static str, SslMode)],
+    /// The type's own on/off settings, kept in [`ConnectionConfig::options`].
+    pub options: &'static [KindOption],
+}
+
+/// An on/off setting of one database type, saved under `id` in [`ConnectionConfig::options`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KindOption {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// On, it protects the password less: a stored password is not used for settings that turn it
+    /// on where the saved ones had it off.
+    pub weakens: bool,
+}
+
+/// The database types dbee can open. Saved as the type's id.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "&'static str")]
+pub enum DbKind {
+    #[default]
+    Postgres,
+    MySql,
+    MariaDb,
+    Sqlite,
+}
+
+impl DbKind {
+    pub const ALL: [DbKind; 4] = [DbKind::Postgres, DbKind::MySql, DbKind::MariaDb, DbKind::Sqlite];
+
+    pub const fn info(self) -> &'static KindInfo {
+        match self {
+            DbKind::Postgres => &kind::postgres::INFO,
+            DbKind::MySql => &kind::mysql::INFO,
+            DbKind::MariaDb => &kind::mysql::MARIADB,
+            DbKind::Sqlite => &kind::sqlite::INFO,
+        }
+    }
+
+    pub const fn id(self) -> &'static str {
+        self.info().id
+    }
+
+    pub fn from_id(id: &str) -> Option<DbKind> {
+        DbKind::ALL.into_iter().find(|k| k.id() == id)
+    }
+
+    pub const fn label(self) -> &'static str {
+        self.info().label
+    }
+
+    pub const fn default_port(self) -> Option<u16> {
+        self.info().default_port
+    }
+
+    pub const fn uses_file(self) -> bool {
+        matches!(self.info().settings, Settings::File { .. })
+    }
+
+    /// Its connections may go through an SSH tunnel.
+    pub const fn takes_ssh(self) -> bool {
+        matches!(self.info().settings, Settings::Server { ssh: true, .. })
+    }
+}
+
+impl From<DbKind> for &'static str {
+    fn from(k: DbKind) -> Self {
+        k.id()
+    }
+}
+
+impl TryFrom<String> for DbKind {
+    type Error = String;
+    fn try_from(id: String) -> Result<Self, String> {
+        DbKind::from_id(&id).ok_or_else(|| format!("unknown database type {id:?}"))
+    }
 }
 
 /// The colour tag shown for a connection.
@@ -75,7 +181,7 @@ impl Default for SshAuth {
     }
 }
 
-/// An SSH jump host.
+/// The SSH server a connection tunnels through.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SshConfig {
@@ -83,13 +189,20 @@ pub struct SshConfig {
     pub port: u16,
     pub user: String,
     pub auth: SshAuth,
+    /// Fields this build does not know, read from the connections file and written back to it;
+    /// never serialized anywhere else.
+    #[serde(flatten, skip_serializing)]
+    pub extra: Unknown,
 }
 
 impl Default for SshConfig {
     fn default() -> Self {
-        SshConfig { host: String::new(), port: 22, user: String::new(), auth: SshAuth::default() }
+        SshConfig { host: String::new(), port: 22, user: String::new(), auth: SshAuth::default(), extra: Unknown::new() }
     }
 }
+
+/// Fields of a saved connection that this build does not know (a newer build's), by name.
+pub type Unknown = serde_json::Map<String, serde_json::Value>;
 
 /// One saved connection. Never holds a password.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +210,8 @@ impl Default for SshConfig {
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
+    pub kind: DbKind,
+    pub file: Option<PathBuf>,
     pub color: ConnectionColor,
     pub host: String,
     pub port: u16,
@@ -107,6 +222,14 @@ pub struct ConnectionConfig {
     pub ssh: Option<SshConfig>,
     pub read_only: bool,
     pub save_secrets: bool,
+    /// The type's own settings ([`KindInfo::options`]), by id; keys this build does not know
+    /// are kept.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, String>,
+    /// Fields this build does not know, read from the connections file and written back to it;
+    /// never serialized anywhere else. A command's config has none: one would be refused.
+    #[serde(flatten, skip_serializing)]
+    pub extra: Unknown,
 }
 
 impl Default for ConnectionConfig {
@@ -114,9 +237,11 @@ impl Default for ConnectionConfig {
         ConnectionConfig {
             id: String::new(),
             name: String::new(),
+            kind: DbKind::default(),
+            file: None,
             color: ConnectionColor::None,
             host: "localhost".into(),
-            port: 5432,
+            port: DbKind::default().default_port().unwrap_or(0),
             user: String::new(),
             database: String::new(),
             ssl_mode: SslMode::Prefer,
@@ -124,21 +249,79 @@ impl Default for ConnectionConfig {
             ssh: None,
             read_only: false,
             save_secrets: true,
+            options: BTreeMap::new(),
+            extra: Unknown::new(),
         }
     }
 }
 
 impl ConnectionConfig {
-    /// The name, or `user@host/database` when the name is empty.
-    pub fn display_name(&self) -> String {
-        if self.name.is_empty() { format!("{}@{}/{}", self.user, self.host, self.database) } else { self.name.clone() }
+    /// The names of the fields this build does not know, its tunnel's as `ssh.<name>`.
+    pub fn unknown_fields(&self) -> Vec<String> {
+        let ssh = self.ssh.iter().flat_map(|ssh| ssh.extra.keys().map(|k| format!("ssh.{k}")));
+        self.extra.keys().cloned().chain(ssh).collect()
     }
 
-    /// Host non-empty, port non-zero, and for SSH a host, a port and a user.
+    /// Takes the fields this build does not know from `old`, the same connection as the file held
+    /// it, where this one lacks them (a config from a form or a script has none).
+    pub(crate) fn keep_unknown(&mut self, old: &ConnectionConfig) {
+        keep(&mut self.extra, &old.extra);
+        if let (Some(ssh), Some(old)) = (self.ssh.as_mut(), old.ssh.as_ref()) {
+            keep(&mut ssh.extra, &old.extra);
+        }
+    }
+
+    /// The option `id` ([`KindInfo::options`]) is on: its value is `"true"`.
+    pub fn option_on(&self, id: &str) -> bool {
+        self.options.get(id).is_some_and(|v| v == "true")
+    }
+
+    /// The name; when empty, a file type's file name, else `user@host/database` (`user@host`
+    /// without a database).
+    pub fn display_name(&self) -> String {
+        if !self.name.is_empty() {
+            return self.name.clone();
+        }
+        let file_name = self.file.as_ref().and_then(|f| f.file_name()).map(|n| n.to_string_lossy().into_owned());
+        match (self.kind.uses_file(), file_name) {
+            (true, Some(n)) => n,
+            _ => format!("{}@{}{}", self.user, self.host, self.database_suffix()),
+        }
+    }
+
+    /// `/database`, or nothing when no database is set.
+    pub fn database_suffix(&self) -> String {
+        if self.database.is_empty() { String::new() } else { format!("/{}", self.database) }
+    }
+
+    /// A file type needs a file and takes no SSH tunnel. A server type needs a host and a port, and
+    /// for SSH (where its type takes it) a host, a port and a user.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_for(self.kind.info().settings)
+    }
+
+    /// [`ConnectionConfig::validate`] for a type whose settings are `settings`.
+    fn validate_for(&self, settings: Settings) -> Result<(), ConfigError> {
         let bad = |m: &str| Err(ConfigError::Invalid(m.to_string()));
+        let ssh_allowed = match settings {
+            Settings::File { .. } if self.ssh.is_some() => return bad("a database file has no SSH tunnel"),
+            Settings::File { .. } => {
+                return match &self.file {
+                    Some(f) if !f.as_os_str().is_empty() => Ok(()),
+                    _ => bad("no file chosen"),
+                };
+            }
+            Settings::Server { ssh, .. } => ssh,
+        };
+        let socket = matches!(settings, Settings::Server { socket: true, .. });
+        if self.ssh.is_some() && !ssh_allowed {
+            return bad("this database type takes no SSH tunnel");
+        }
         if self.host.trim().is_empty() {
             return bad("host is empty");
+        }
+        if !is_database_host(&self.host, socket && self.ssh.is_none()) {
+            return bad(if socket { DATABASE_HOST_CHARS_SOCKET } else { DATABASE_HOST_CHARS });
         }
         if self.port == 0 {
             return bad("port must not be 0");
@@ -146,6 +329,9 @@ impl ConnectionConfig {
         if let Some(ssh) = &self.ssh {
             if ssh.host.trim().is_empty() {
                 return bad("SSH host is empty");
+            }
+            if !is_host_name(&ssh.host) {
+                return bad(SSH_HOST_CHARS);
             }
             if ssh.port == 0 {
                 return bad("SSH port must not be 0");
@@ -158,9 +344,44 @@ impl ConnectionConfig {
     }
 }
 
+const DATABASE_HOST_CHARS: &str = "The host can hold only letters, digits, hyphens, dots and underscores, or be an IP address.";
+const DATABASE_HOST_CHARS_SOCKET: &str = "The host can hold only letters, digits, hyphens, dots and underscores, or be an IP address, or the full path of a socket folder (without an SSH tunnel).";
+const SSH_HOST_CHARS: &str =
+    "The SSH host can hold only letters, digits, hyphens, dots and underscores, or be an IP address (an IPv6 address without brackets or a zone).";
+
+/// The database host: what [`is_host_name`] takes, an IPv6 address with a zone (`fe80::1%eth0`,
+/// which the drivers' name lookup takes), and with `socket` a folder (`/var/run/postgresql`).
+/// None of these goes into `known_hosts`, which only the SSH host does.
+pub fn is_database_host(host: &str, socket: bool) -> bool {
+    if is_host_name(host) {
+        return true;
+    }
+    if let Some((address, zone)) = host.split_once('%') {
+        return address.parse::<std::net::Ipv6Addr>().is_ok()
+            && !zone.is_empty()
+            && zone.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '.' | '_'));
+    }
+    socket && host.starts_with('/') && !host.chars().any(char::is_control)
+}
+
+/// `host` is a host name (letters, digits, `-`, `.`, `_`) or an IP address, IPv6 without
+/// brackets. Nothing else is safe to write into `known_hosts`, where a comma, a space or a
+/// newline changes which names a line vouches for.
+pub fn is_host_name(host: &str) -> bool {
+    !host.is_empty() && (host.parse::<std::net::IpAddr>().is_ok() || host.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '.' | '_')))
+}
+
+/// Adds the fields of `old` that `extra` lacks.
+pub(crate) fn keep(extra: &mut Unknown, old: &Unknown) {
+    for (k, v) in old {
+        extra.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+}
+
 /// What a connection URL fills in. Absent parts stay `None`. `Debug` hides the password.
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct UrlParts {
+    pub kind: DbKind,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
@@ -172,6 +393,7 @@ pub struct UrlParts {
 impl std::fmt::Debug for UrlParts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UrlParts")
+            .field("kind", &self.kind)
             .field("host", &self.host)
             .field("port", &self.port)
             .field("user", &self.user)
@@ -206,15 +428,35 @@ fn some_nonempty(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-/// Parses `postgres://` and `postgresql://` URLs: userinfo and path are percent-decoded, `[v6]`
-/// hosts work, and `?sslmode=` is read. Other query parameters are ignored.
+/// libpq's TLS-mode names, which every type takes.
+fn libpq_ssl_mode(v: &str) -> Option<SslMode> {
+    Some(match v {
+        "disable" => SslMode::Disable,
+        "allow" | "prefer" => SslMode::Prefer,
+        "require" => SslMode::Require,
+        "verify-ca" => SslMode::VerifyCa,
+        "verify-full" => SslMode::VerifyFull,
+        _ => return None,
+    })
+}
+
+/// Parses a server type's URL (the schemes in the type table): userinfo and path are percent-decoded,
+/// `[v6]` hosts work, and `?sslmode=` or `?ssl-mode=` is read. Other query parameters are ignored.
 pub fn parse_url(url: &str) -> Result<UrlParts, ConfigError> {
     let err = |m: &str| ConfigError::Url(m.to_string());
     let url = url.trim();
-    let rest = ["postgresql://", "postgres://"]
-        .iter()
-        .find_map(|p| url.get(..p.len()).filter(|h| h.eq_ignore_ascii_case(p)).map(|_| &url[p.len()..]))
-        .ok_or_else(|| err("expected a postgres:// or postgresql:// URL"))?;
+    let (kind, rest) = DbKind::ALL
+        .into_iter()
+        .flat_map(|k| k.info().url_schemes.iter().map(move |s| (k, *s)))
+        .find_map(|(k, scheme)| {
+            let head = url.get(..scheme.len())?;
+            let tail = url.get(scheme.len()..)?.strip_prefix("://")?;
+            head.eq_ignore_ascii_case(scheme).then_some((k, tail))
+        })
+        .ok_or_else(|| {
+            let schemes: Vec<String> = DbKind::ALL.iter().flat_map(|k| k.info().url_schemes).map(|s| format!("{s}://")).collect();
+            ConfigError::Url(format!("expected a {} URL", schemes.join(", ")))
+        })?;
     let rest = rest.split('#').next().unwrap_or("");
     let (before_query, query) = match rest.split_once('?') {
         Some((a, q)) => (a, Some(q)),
@@ -224,7 +466,7 @@ pub fn parse_url(url: &str) -> Result<UrlParts, ConfigError> {
         Some((a, p)) => (a, Some(p)),
         None => (before_query, None),
     };
-    let mut parts = UrlParts::default();
+    let mut parts = UrlParts { kind, ..UrlParts::default() };
     let hostport = match authority.rsplit_once('@') {
         Some((userinfo, hp)) => {
             let (u, p) = match userinfo.split_once(':') {
@@ -262,15 +504,12 @@ pub fn parse_url(url: &str) -> Result<UrlParts, ConfigError> {
         parts.database = some_nonempty(percent_decode(p)?);
     }
     for pair in query.unwrap_or("").split('&') {
-        if let Some(("sslmode", v)) = pair.split_once('=') {
-            parts.ssl_mode = Some(match percent_decode(v)?.as_str() {
-                "disable" => SslMode::Disable,
-                "allow" | "prefer" => SslMode::Prefer,
-                "require" => SslMode::Require,
-                "verify-ca" => SslMode::VerifyCa,
-                "verify-full" => SslMode::VerifyFull,
-                _ => return Err(err("unknown sslmode")),
-            });
+        if let Some((key, v)) = pair.split_once('=')
+            && (key == "sslmode" || key == "ssl-mode")
+        {
+            let v = percent_decode(v)?;
+            let alias = kind.info().ssl_aliases.iter().find(|(name, _)| name.eq_ignore_ascii_case(&v)).map(|(_, m)| *m);
+            parts.ssl_mode = Some(libpq_ssl_mode(&v).or(alias).ok_or_else(|| err("unknown sslmode"))?);
         }
     }
     Ok(parts)
@@ -287,4 +526,36 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn new_id() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     format!("{nanos:x}-{:x}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_holds_every_kind_once() {
+        // Each kind and the next, by an exhaustive match: a new variant joins the chain here.
+        let after = |k: DbKind| match k {
+            DbKind::Postgres => Some(DbKind::MySql),
+            DbKind::MySql => Some(DbKind::MariaDb),
+            DbKind::MariaDb => Some(DbKind::Sqlite),
+            DbKind::Sqlite => None,
+        };
+        let every: Vec<DbKind> = std::iter::successors(Some(DbKind::Postgres), |k| after(*k)).collect();
+        assert_eq!(DbKind::ALL.to_vec(), every);
+        let mut ids: Vec<&str> = DbKind::ALL.iter().map(|k| k.info().id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), DbKind::ALL.len(), "each id once");
+    }
+
+    #[test]
+    fn a_server_type_without_ssh_refuses_a_tunnel() {
+        let ssh = SshConfig { host: "jump.example".into(), port: 22, user: "u".into(), auth: SshAuth::Password, ..SshConfig::default() };
+        let c = ConnectionConfig { ssh: Some(ssh), ..ConnectionConfig::default() };
+        assert_eq!(c.validate_for(Settings::Server { tls: true, ssh: true, socket: false }), Ok(()));
+        let refused = c.validate_for(Settings::Server { tls: true, ssh: false, socket: false });
+        assert_eq!(refused, Err(ConfigError::Invalid("this database type takes no SSH tunnel".into())));
+        assert_eq!(ConnectionConfig { ssh: None, ..c }.validate_for(Settings::Server { tls: true, ssh: false, socket: false }), Ok(()));
+    }
 }

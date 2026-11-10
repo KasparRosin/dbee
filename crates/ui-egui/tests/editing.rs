@@ -34,7 +34,7 @@ fn connected_sized(db: &TestDb, step: f32, size: egui::Vec2) -> Ui {
 }
 
 /// [`connected`] to `server`.
-fn connected_to(db: &TestDb, server: &dbee_testkit::PgServer) -> Ui {
+fn connected_to(db: &TestDb, server: &dbee_testkit::Server) -> Ui {
     Ui::connected_with(db, Setup { step: Some(0.25), config: Some(server_config(server)), ..Setup::default() })
 }
 
@@ -103,11 +103,11 @@ impl Ui {
 }
 
 /// Drops `scratch.<name>` on `server` when the test ends, also when it fails.
-struct ScratchOn<'a>(&'a dbee_testkit::PgServer, String);
+struct ScratchOn<'a>(&'a dbee_testkit::Server, String);
 
 impl Drop for ScratchOn<'_> {
     fn drop(&mut self) {
-        let _ = dbee_testkit::psql(self.0, &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.1));
+        let _ = dbee_testkit::sql(self.0, &format!("DROP TABLE IF EXISTS scratch.{} CASCADE", self.1));
     }
 }
 
@@ -285,7 +285,7 @@ fn ctrl_s_applies_all_or_nothing() {
 #[test]
 fn a_value_too_long_for_its_column_fails_the_apply_and_says_why() {
     let db = dbee_testkit::require_testdb!();
-    for server in &db.servers {
+    for server in db.servers_of(&[dbee_testkit::Kind::Postgres]) {
         let name = unique("t_len_ui");
         let _drop = ScratchOn(server, name.clone());
         dbee_testkit::psql(
@@ -687,13 +687,65 @@ fn booleans_choose_true_false_or_null() {
     ui.key("ArrowUp");
     assert_eq!(ui.editor(), Some(json!({ "choice": "false" })));
     ui.key("Enter");
-    assert_eq!(ui.staged(2, 4), Some(json!("false")));
+    assert_eq!(ui.staged(2, 4), Some(json!("f")), "staged as Postgres prints a bool");
     ui.double_click("grid-cell-1-4");
     ui.click("cell-editor-true");
-    assert_eq!(ui.staged(1, 4), Some(json!("true")));
+    assert_eq!(ui.staged(1, 4), Some(json!("t")));
     ui.ctrl("S");
     ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
     assert_eq!(q(db, &format!("SELECT string_agg(coalesce(flag::text, 'null'), ',' ORDER BY id) FROM scratch.{}", t.0)), "null,true,false");
+}
+
+/// A MySQL `BOOLEAN` is a `TINYINT(1)`, printed `1` and `0`: the boolean choice opens on it, and
+/// false chosen there writes `0`.
+#[test]
+fn a_mysql_boolean_set_to_false_in_the_editor_writes_0() {
+    let db = dbee_testkit::require_testdb!();
+    let server = db.server("mysql80").unwrap();
+    let name = unique("t_bool_ui");
+    let _drop = ScratchOn(server, name.clone());
+    dbee_testkit::mysql(
+        server,
+        &format!("CREATE TABLE scratch.{name} (id INT PRIMARY KEY, flag BOOLEAN); INSERT INTO scratch.{name} VALUES (1, TRUE);"),
+    )
+    .unwrap();
+    let t = dbee_testkit::target(server);
+    let mut ui = Ui::connected_with(db, Setup { step: Some(0.25), config: Some(config_of(&t)), ..Setup::default() });
+    ui.open("scratch", &name);
+    ui.until("the page", |ui| ui.table()["rows"] == 1);
+    ui.double_click("grid-cell-0-1");
+    assert_eq!(ui.editor(), Some(json!({ "choice": "true" })), "the choice opens on the 1 MySQL prints");
+    ui.click("cell-editor-false");
+    assert_eq!(ui.staged(0, 1), Some(json!("0")), "staged as MySQL prints a false BOOLEAN");
+    ui.ctrl("S");
+    ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
+    assert_eq!(dbee_testkit::mysql(server, &format!("SELECT flag FROM scratch.{name}")).unwrap().trim(), "0");
+}
+
+/// A MySQL `BOOLEAN` holding 5 is no choice: the cell opens as one line on the 5, and Enter
+/// alone writes nothing over it.
+#[test]
+fn a_mysql_boolean_holding_another_number_opens_as_one_line() {
+    let db = dbee_testkit::require_testdb!();
+    let server = db.server("mysql80").unwrap();
+    let name = unique("t_bool_ui");
+    let _drop = ScratchOn(server, name.clone());
+    dbee_testkit::mysql(
+        server,
+        &format!("CREATE TABLE scratch.{name} (id INT PRIMARY KEY, flag BOOLEAN); INSERT INTO scratch.{name} VALUES (1, 5);"),
+    )
+    .unwrap();
+    let t = dbee_testkit::target(server);
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, step: Some(0.25), config: Some(config_of(&t)), ..Setup::default() });
+    ui.open("scratch", &name);
+    ui.until("the page", |ui| ui.table()["rows"] == 1);
+    ui.double_click("grid-cell-0-1");
+    assert_eq!(ui.editor(), Some(json!({ "text": "5", "multiline": false })), "one line, on the 5");
+    assert!(ui.tag("cell-editor-true").is_none(), "no choice");
+    ui.key("Enter");
+    assert!(ui.editor().is_none());
+    assert_eq!((ui.staged(0, 1), ui.edits()["count"].clone()), (None, json!(0)), "Enter alone stages nothing");
+    assert_eq!(dbee_testkit::mysql(server, &format!("SELECT flag FROM scratch.{name}")).unwrap().trim(), "5");
 }
 
 #[test]
@@ -929,7 +981,7 @@ fn machine() -> String {
 }
 
 #[test]
-#[ignore = "a timing test: cargo test -p dbee-ui-egui --test editing -- --ignored --nocapture"]
+#[ignore = "timing; run with --ignored --nocapture"]
 fn keystroke_frame_with_a_value_at_the_cap() {
     let db = dbee_testkit::require_testdb!();
     let cap = dbee_ui_egui::editors::MAX_INLINE_BYTES;

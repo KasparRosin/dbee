@@ -633,6 +633,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "btoi"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b5ab9db53bcda568284df0fd39f6eac24ad6f7ba7ff1168b9e76eba6576b976"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1066,6 +1075,7 @@ name = "dbee"
 version = "0.0.0"
 dependencies = [
  "dbee-config",
+ "dbee-drivers",
  "dbee-engine",
  "dbee-ssh",
  "dbee-testkit",
@@ -1106,12 +1116,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbee-driver"
+version = "0.0.0"
+dependencies = [
+ "dbee-config",
+ "dbee-core",
+ "dbee-sql",
+ "dbee-ssh",
+ "dbee-testkit",
+ "futures-util",
+ "rustls",
+ "rustls-platform-verifier",
+ "socket2",
+ "tokio",
+]
+
+[[package]]
+name = "dbee-drivers"
+version = "0.0.0"
+dependencies = [
+ "dbee-config",
+ "dbee-driver",
+ "dbee-mysql",
+ "dbee-pg",
+ "dbee-sqlite",
+]
+
+[[package]]
 name = "dbee-engine"
 version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-core",
- "dbee-pg",
+ "dbee-driver",
+ "dbee-drivers",
  "dbee-sql",
  "dbee-ssh",
  "dbee-testkit",
@@ -1127,18 +1165,36 @@ name = "dbee-mcp"
 version = "0.0.0"
 
 [[package]]
+name = "dbee-mysql"
+version = "0.0.0"
+dependencies = [
+ "dbee-config",
+ "dbee-core",
+ "dbee-driver",
+ "dbee-sql",
+ "dbee-ssh",
+ "dbee-testkit",
+ "log",
+ "mysql_common",
+ "proptest",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "dbee-pg"
 version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-core",
+ "dbee-driver",
  "dbee-sql",
  "dbee-ssh",
  "dbee-testkit",
  "futures-util",
  "log",
  "rustls",
- "rustls-platform-verifier",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
@@ -1155,13 +1211,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "dbee-ssh"
+name = "dbee-sqlite"
 version = "0.0.0"
 dependencies = [
  "dbee-config",
+ "dbee-core",
+ "dbee-driver",
+ "dbee-sql",
  "dbee-testkit",
  "log",
+ "proptest",
+ "rusqlite",
+ "tokio",
+]
+
+[[package]]
+name = "dbee-ssh"
+version = "0.0.0"
+dependencies = [
+ "data-encoding",
+ "dbee-config",
+ "dbee-testkit",
+ "hmac",
+ "log",
  "russh",
+ "sha1",
  "tokio",
 ]
 
@@ -1169,6 +1243,7 @@ dependencies = [
 name = "dbee-testkit"
 version = "0.0.0"
 dependencies = [
+ "rusqlite",
  "serde_json",
 ]
 
@@ -1178,6 +1253,8 @@ version = "0.0.0"
 dependencies = [
  "dbee-config",
  "dbee-core",
+ "dbee-driver",
+ "dbee-drivers",
  "dbee-engine",
  "dbee-sql",
  "dbee-ssh",
@@ -1186,6 +1263,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "egui_kittest",
+ "getrandom 0.4.3",
  "image",
  "log",
  "rfd",
@@ -1679,6 +1757,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7"
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2155,6 +2245,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashlink"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2457,6 +2556,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsqlite3-sys"
+version = "0.38.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2600,6 +2710,33 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "mysql_common"
+version = "0.38.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d11189bb0e285f58b71744ee23aa8b943bd5120ef0877555813d2107374d3970"
+dependencies = [
+ "base64",
+ "bitflags 2.13.2",
+ "btoi",
+ "byteorder",
+ "bytes",
+ "crc32fast",
+ "flate2",
+ "getrandom 0.4.3",
+ "hex",
+ "num-bigint 0.5.1",
+ "num-traits",
+ "regex",
+ "saturating",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -3529,7 +3666,7 @@ dependencies = [
  "base64",
  "byteorder",
  "bytes",
- "fallible-iterator",
+ "fallible-iterator 0.2.0",
  "hmac",
  "md-5",
  "memchr",
@@ -3545,7 +3682,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
 dependencies = [
  "bytes",
- "fallible-iterator",
+ "fallible-iterator 0.2.0",
  "postgres-protocol",
 ]
 
@@ -3868,6 +4005,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsqlite-vfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c51c9ae4df8a7fba42103df5c621fa3c37eccf3a3c650879e90fc48b11cc192c"
+dependencies = [
+ "hashbrown 0.16.1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.40.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+dependencies = [
+ "bitflags 2.13.2",
+ "fallible-iterator 0.3.0",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
+ "sqlite-wasm-rs",
+]
+
+[[package]]
 name = "russh"
 version = "0.64.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4015,6 +4177,7 @@ version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4118,6 +4281,12 @@ checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
 ]
+
+[[package]]
+name = "saturating"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ece8e78b2f38ec51c51f5d475df0a7187ba5111b2a28bdc761ee05b075d40a71"
 
 [[package]]
 name = "schannel"
@@ -4541,6 +4710,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 
 [[package]]
+name = "sqlite-wasm-rs"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc3efc0da82635d7e1ced0053bbbfa8c7ab9645d0bf36ceb4f7127bb85315d75"
+dependencies = [
+ "cc",
+ "js-sys",
+ "rsqlite-vfs",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "ssh-cipher"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4782,7 +4963,7 @@ dependencies = [
  "async-trait",
  "byteorder",
  "bytes",
- "fallible-iterator",
+ "fallible-iterator 0.2.0",
  "futures-channel",
  "futures-util",
  "log",
@@ -5023,6 +5204,12 @@ dependencies = [
  "serde_core",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vello_common"

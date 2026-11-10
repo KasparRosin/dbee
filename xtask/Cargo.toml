@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 publish = false
-description = "dbee workspace tooling: cargo xtask ci | assets | layers | licenses | provenance | version | stats | ico | icns | contributors | run-isolated"
+description = "dbee workspace tooling: cargo xtask ci | assets | layers | licenses | provenance | version | stats | ico | icns | contributors | run-isolated | testdb"
 
 [lints]
 workspace = true
