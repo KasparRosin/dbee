@@ -266,8 +266,15 @@ async fn until_sleeping(watcher: &PgConnection, pid: &str) {
     }
 }
 
-/// Starts `SELECT pg_sleep(30)`, cancels it once `watcher` sees it sleep, and expects
-/// `cancelled`; then the connection still works.
+/// `e` is the server's interrupt (57014) with its words, which only the engine reads as dbee's
+/// own cancel.
+fn assert_interrupted(e: &DbError, words: &str) {
+    assert!(matches!(e, DbError::Server(s) if s.code == "57014" && s.meaning == Some(Meaning::Interrupted) && s.message.contains(words)), "{e:?}");
+    assert_eq!(e.code(), "server", "{e:?}");
+}
+
+/// Starts `SELECT pg_sleep(30)`, cancels it once `watcher` sees it sleep, and expects the
+/// server's interrupt; then the connection still works.
 async fn cancel_sleep(conn: Arc<PgConnection>, watcher: &PgConnection) {
     let canceller: Canceller = conn.canceller();
     let pid = scalar(&conn, "SELECT pg_backend_pid()").await.unwrap();
@@ -276,9 +283,7 @@ async fn cancel_sleep(conn: Arc<PgConnection>, watcher: &PgConnection) {
     until_sleeping(watcher, &pid).await;
     canceller.cancel().await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
-    let e = result.unwrap_err();
-    assert_eq!(e.code(), "cancelled", "{e:?}");
-    assert_eq!(e, DbError::Cancelled);
+    assert_interrupted(&result.unwrap_err(), "user request");
     assert!(!conn.is_closed());
     assert_eq!(scalar(&conn, "SELECT 'still here'").await.as_deref(), Some("still here"));
 }
@@ -507,8 +512,23 @@ async fn the_trait_canceller_stops_pg_sleep() {
         until_sleeping(&open(&config(s, SslMode::Prefer), db).await, &pid).await;
         canceller.cancel().await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
-        assert_eq!(result.err(), Some(DbError::Cancelled));
+        assert_interrupted(&result.unwrap_err(), "user request");
         assert_eq!(conn.scalar_u64("SELECT 1").await, Ok(1));
+    }
+}
+
+/// The driver reports a `statement_timeout` as the server's interrupt, with its code and words, as
+/// it does a cancel request: the engine tells them apart.
+#[tokio::test]
+async fn a_statement_timeout_is_the_servers_interrupt() {
+    let db = require_testdb!();
+    for s in postgres(db) {
+        let conn = PgDriver.connect(target(&config(s, SslMode::Prefer), Some(&db.password))).await.unwrap();
+        conn.run("SET statement_timeout = 100", QUERY_LIMITS).await.unwrap();
+        let e = conn.run("SELECT pg_sleep(2)", QUERY_LIMITS).await.unwrap_err();
+        assert_interrupted(&e, "statement timeout");
+        assert!(e.to_string().ends_with("(SQLSTATE 57014)"), "{e}");
+        assert_eq!(conn.scalar_u64("SELECT 7").await, Ok(7));
     }
 }
 

@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-10 · **Change:** minor (entries 63 and 64 from the check of the M3 Phase 1 fixes)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-10 · **Change:** minor (entry 54: the engine reads only its own cancel as cancelled; the error band is left)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -399,12 +399,13 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** the user has to type `ROLLBACK` before that session can run anything else.
 - **Estimate:** 1.5 h (estimated). Planned for M3.
 
-### 54. A cancel dbee didn't send reads as cancelled (D)
+### 54. A cancel dbee didn't send: the engine is done, the error band is not (U)
 
-- **Limit:** Postgres's 57014 and MySQL's and MariaDB's 1317 all become `DbError::Cancelled`, so a `statement_timeout` or a `KILL QUERY` from another session reads the same as the user pressing Cancel. The maintainer wants only dbee's own cancel to read as cancelled, and any other as an error. The M3 design shows no band for a cancel, so this has to land with it.
-- **Evidence:** `"57014"` in `crates/pg/src/error.rs`, `ER_QUERY_INTERRUPTED` in `crates/mysql/src/errors.rs`, and `DbError::Cancelled` carries no message (`crates/driver/src/error.rs`).
-- **Impact:** a statement the server stopped looks like the user's own choice, and the server's reason isn't shown.
-- **Estimate:** 2 h (estimated). Planned for M3.
+- **Done (engine):** only dbee's own cancel reads as cancelled. The drivers report Postgres's 57014 and MySQL's and MariaDB's 1317 as the server's error with its code and words, marked `interrupted`; the engine makes it `cancelled` only for a statement it sent a cancel for (a run, a page load, a count), or an Apply whose gate it cancelled. A `statement_timeout`, or a `pg_cancel_backend` or `KILL QUERY` from another session, fails as a `server` error, which today's error card shows; a query tab's error says `meaning: "interrupted"`. SQLite's interrupt comes only from dbee and stays cancelled.
+- **Left:** the M3 error band for such an error, which shows no band for a cancel; it goes with the Query tab screen (M3 Phase 3). When a Postgres timeout lands while dbee's own cancel request is on its way, both have the same code and the run reads as cancelled: the user asked for the stop.
+- **Evidence:** `Meaning::Interrupted` (`crates/driver/src/error.rs`), `stoppable` (`crates/engine/src/jobs.rs`); the tests `a_statement_timeout_reads_as_an_error`, `a_cancel_from_another_session_reads_as_an_error` and `a_cancel_after_the_end_changes_nothing` (`crates/engine/tests/query.rs`) and `a_table_read_stopped_by_the_server_reads_as_an_error` (`crates/engine/tests/table.rs`).
+- **Impact:** small until the band is drawn: the error card already shows the server's reason.
+- **Estimate:** part of the Query tab screen (M3 Phase 3); not estimated.
 
 ### 55. No structure view (F)
 
@@ -480,6 +481,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-10 | minor | Entry 54: the engine reads only its own cancel as cancelled, and a statement the server stopped by itself is a server error marked `interrupted`; the M3 error band for it is left for the Query tab screen. |
 | 2026-11-10 | minor | The check of the M3 Phase 1 fixes: entries 63 (a long column type may be cut in the grid header) and 64 (the tokens check can misread a test helper with a comma in its type). |
 | 2026-11-10 | minor | The M3 Phase 1 review: entries 60 (the connection form's result strip uses a tint that is no token), 61 (three texts cut at the smallest window, older than M3) and 62 (View > Theme can't be reached before connecting). |
 | 2026-11-09 | minor | Entry 60 fixed and dropped: the prompt after an unknown Apply reads "Apply again?" with an "Apply again" button, and "Close anyway" stays for the other prompts. |

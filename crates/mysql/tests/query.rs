@@ -440,7 +440,10 @@ async fn a_cancelled_sleep_is_cancelled() {
         until_sleeping(&open(s, db).await, id).await;
         canceller.cancel().await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(20), job).await.expect("not cancelled").unwrap();
-        assert_eq!(result.unwrap_err(), DbError::Cancelled, "{}", s.name);
+        // MySQL's sleep still returns its row, which dbee's KILL makes `cancelled`; MariaDB's ends
+        // in the server's interrupt, which the engine reads as its cancel.
+        let e = result.unwrap_err();
+        assert!(e.is_interrupted(), "{}: {e:?}", s.name);
         assert!(!c.is_closed(), "{}", s.name);
         assert_eq!(c.scalar_u64("SELECT 3").await.unwrap(), 3, "{}", s.name);
     }

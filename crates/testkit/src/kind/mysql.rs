@@ -84,6 +84,9 @@ const MYSQL: KindInfo = KindInfo {
     },
     connection_id_sql: "SELECT CONNECTION_ID()",
     running_with_sql: |m| format!("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{m}%' AND ID <> CONNECTION_ID()"),
+    running_ids_sql: |m| format!("SELECT ID FROM information_schema.PROCESSLIST WHERE INFO LIKE '%{m}%' AND ID <> CONNECTION_ID()"),
+    cancel_sql: |id| format!("KILL QUERY {id}"),
+    cancel_error: ("1317", "Query execution was interrupted"),
     take_lock_sql: |key| format!("SELECT GET_LOCK('{key}', 0)"),
     // Taken and given back at once, in a derived table, which runs once.
     waits_for_lock_sql: |key| format!("EXISTS (SELECT 1 FROM (SELECT GET_LOCK('{key}', 60) + RELEASE_LOCK('{key}') AS z) AS d)"),

@@ -239,8 +239,9 @@ pub fn cancel_not_delivered() -> DbError {
 
 /// Stops the statement running on one connection, from outside it. Holds no lock.
 pub trait Cancel: Send + Sync + 'static {
-    /// `Ok` means the cancel was delivered; the statement then fails with
-    /// [`DbError::Cancelled`], unless it finished first.
+    /// `Ok` means the cancel was delivered; the statement then fails with the server's interrupt
+    /// (a [`DbError::Server`] marked [`Meaning::Interrupted`](crate::Meaning::Interrupted)) or
+    /// with [`DbError::Cancelled`], unless it finished first.
     fn cancel(&self) -> DbFuture<'_, ()>;
 }
 

@@ -164,11 +164,12 @@ impl CurrentDatabase {
 
     /// Where a statement that failed with `error` leaves it, on a dialect where a statement can
     /// move it (`moves`): where it was, after an error the server answered with; not known any
-    /// more after any other end, a cancel among them (its kill can land just after the statement
-    /// took effect, and the server's error then hides the change).
+    /// more after any other end, an interrupt among them, dbee's or not (its kill can land just
+    /// after the statement took effect, and the server's error then hides the change).
     pub(crate) fn after_failure(self, error: &DbError, moves: bool) -> CurrentDatabase {
         match error {
             _ if !moves => self,
+            e if e.is_interrupted() => CurrentDatabase { known: false, ..self },
             DbError::Server(_) | DbError::ReadOnly { .. } => self,
             _ => CurrentDatabase { known: false, ..self },
         }
@@ -321,7 +322,8 @@ pub struct QueryError {
     /// `1054`).
     pub server_code: Option<String>,
     /// What the server error means, when the driver knows: `transactionAborted` (a statement
-    /// failed earlier in the transaction, which refuses every statement until a ROLLBACK).
+    /// failed earlier in the transaction, which refuses every statement until a ROLLBACK) or
+    /// `interrupted` (the server stopped the statement, and dbee had sent no cancel for it).
     #[serde(serialize_with = "meaning_id")]
     pub meaning: Option<Meaning>,
     pub detail: Option<String>,
@@ -336,6 +338,7 @@ fn meaning_id<S: Serializer>(meaning: &Option<Meaning>, s: S) -> Result<S::Ok, S
     match meaning {
         None => s.serialize_none(),
         Some(Meaning::TransactionAborted) => s.serialize_str("transactionAborted"),
+        Some(Meaning::Interrupted) => s.serialize_str("interrupted"),
     }
 }
 
@@ -736,9 +739,13 @@ mod tests {
         // The server answered with an error: the statement did nothing.
         assert_eq!(shop().after_failure(&refused, true), shop());
         assert_eq!(shop().after_failure(&DbError::ReadOnly { message: "read-only".into() }, true), shop());
-        // A cancel: a kill that lands as a `USE` finishes is answered with an error after the
-        // change. A lost connection, or an answer that broke: the outcome is unknown too.
-        for error in [DbError::Cancelled, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
+        // A cancel, dbee's or the server's interrupt whoever asked for it: a kill that lands as a
+        // `USE` finishes is answered with an error after the change. A lost connection, or an
+        // answer that broke: the outcome is unknown too.
+        let DbError::Server(s) = &refused else { panic!("a server error") };
+        let interrupted =
+            DbError::Server(Box::new(dbee_driver::ServerError { code: "1317".into(), meaning: Some(Meaning::Interrupted), ..(**s).clone() }));
+        for error in [DbError::Cancelled, interrupted, DbError::ConnectionLost, DbError::Other("a broken answer".into())] {
             assert_eq!(shop().after_failure(&error, true), unknown, "{error:?}");
             assert_eq!(shop().after_failure(&error, false), shop(), "{error:?}: where no statement can move it");
         }

@@ -840,6 +840,45 @@ fn cancel_stops_a_slow_page() {
     });
 }
 
+/// A page load that dbee's Cancel stops while its statement sleeps reads as cancelled: the
+/// server's interrupt is dbee's own cancel here, and the tab's error has no server code.
+#[test]
+fn a_table_read_cancelled_by_dbee_reads_as_cancelled() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let m = unique("dbee_marker");
+        let slow = format!("'{m}' <> '' AND {}", t.slow_condition_sql(30));
+        let Outcome::Started(job) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
+        until_running(t, &m);
+        assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
+        let e = s.wait(job, Duration::from_secs(60)).unwrap_err();
+        assert_eq!((e.code(), &e.data()["serverCode"]), ("cancelled", &Json::Null), "{}: {e} {}", t.name(), e.data());
+        assert_eq!(summary(s)["error"], "the statement was cancelled", "{}", t.name());
+        // The rows from before stay.
+        assert_eq!((rows(&read(s)), &summary(s)["applied"]), (100, &json!("none")), "{}", t.name());
+    });
+}
+
+/// Postgres: a page load the server's `statement_timeout` stopped fails with the server's code
+/// and words, not as cancelled, and the rows from before stay.
+#[test]
+fn a_table_read_stopped_by_the_server_reads_as_an_error() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    open_table(&mut s, "shop", "orders");
+    // The browse connection's own timeout, which a page load's condition sets for the statements
+    // after it.
+    run(&mut s, "table.setFilters", json!({ "raw": "set_config('statement_timeout', '100', false) <> ''", "rawMode": true }));
+    let e = run_err(&mut s, "table.setFilters", json!({ "raw": "(SELECT true FROM pg_sleep(2))", "rawMode": true }));
+    assert_eq!((e.code(), &e.data()["serverCode"]), ("server", &json!("57014")), "{e} {}", e.data());
+    assert!(e.to_string().contains("statement timeout") && e.to_string().ends_with("(SQLSTATE 57014)"), "{e}");
+    assert_eq!(summary(&s)["error"], json!(e.to_string()));
+    assert_eq!(rows(&read(&mut s)), 100);
+    run(&mut s, "table.setFilters", json!({ "raw": "set_config('statement_timeout', '0', false) <> ''", "rawMode": true }));
+    assert_eq!(summary(&s)["error"], Json::Null);
+}
+
 #[test]
 fn table_commands_need_a_table_tab() {
     let _db = require_testdb!();

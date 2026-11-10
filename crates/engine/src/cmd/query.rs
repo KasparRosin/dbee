@@ -31,7 +31,10 @@
 //! connection's `Cancel`, again while the statement has not ended (a request that reaches the
 //! server before the statement is lost), and waits for the statement to end and for each request
 //! to arrive (so none can reach a later run, [`crate::jobs::stoppable`]); it starts no further
-//! statement. A stopped run ends with code `cancelled`. The job is never dropped or aborted.
+//! statement. A stopped run ends with code `cancelled`. The job is never dropped or aborted. Only
+//! dbee's own cancel reads so: a statement the server stopped while dbee had sent no cancel for it
+//! (a timeout, another session's cancel) fails with the server's code and words, its `meaning`
+//! `interrupted`, and one that ended before the cancel reached it keeps its result.
 //!
 //! **The database a run starts in.** On a dialect with `USE`, a tab with a database of its own
 //! makes it current first, unless the query connection is known to be there already (a `USE`
@@ -40,7 +43,7 @@
 //! when the connection opens, each `USE` it sends, and where the driver says each statement that
 //! succeeded left it (`ResultSet::database_after`; MySQL's server reports it in its OK packets).
 //! It sends no statement of its own to find out. A statement the server answered with an error
-//! moves nothing; one that ended any other way (cancelled, or lost) may have, so the database is
+//! moves nothing; one that ended any other way (cancelled or interrupted, or lost) may have, so the database is
 //! no longer known, as when the driver cannot tell: it is never guessed. After a run
 //! that got past its `USE`, the tab's database becomes that one, so a `USE` in the text sticks to
 //! the tab; the next run's `USE` keeps every tab in its own. A tab with none starts where the
@@ -360,7 +363,8 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
 }
 
 /// Runs one statement. When the run is stopped meanwhile, the cancel request goes out until the
-/// statement has ended ([`jobs::stoppable`]); it then usually ends with `Cancelled`.
+/// statement has ended ([`jobs::stoppable`]); it then usually ends with `Cancelled`, unless it
+/// ended first.
 async fn run_one(conn: &dyn Connection, sql: &str, limits: Limits, stop: &Stop) -> Result<ResultSet, DbError> {
     jobs::stoppable(conn.canceller(), conn.run(sql, limits), stop).await
 }

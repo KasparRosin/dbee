@@ -835,7 +835,8 @@ fn apply_count(
 /// statement runs sends a cancel request for it, again while it has not ended, and one still
 /// waiting for its turn on the browse connection leaves the queue and sends none, as a request
 /// would stop the statement ahead of it ([`turns::stoppable_in_turn`]). The job then ends with
-/// `cancelled`, and the rows from before stay.
+/// `cancelled`, and the rows from before stay. A statement the server stopped without dbee's
+/// cancel (a timeout, another session's cancel) fails with the server's error instead.
 /// `sent: false` when the tab runs nothing; called again while they stop, it sends nothing more
 /// (`{sent: false, stopping: true}`). The tab's markers name only running jobs on the current
 /// browse connection (see the module docs); a marker whose job is not running does not count, all

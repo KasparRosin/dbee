@@ -39,9 +39,11 @@ impl MySqlConnection {
     /// `limits` are still read (so the connection stays in step) and counted in `rows_seen`, but
     /// not kept, and `complete` becomes false. The byte cap counts what the columns and the rows
     /// kept hold ([`dbee_driver::cell_cost`]); columns that do not fit end the run in
-    /// [`DbError::TooLarge`], once its answer is read to the end. A statement that a cancel's `KILL QUERY` targeted and that still returned
-    /// rows (`SELECT SLEEP(…)` returns 1 when killed) is [`DbError::Cancelled`]. What dbee
-    /// refuses is not sent, and a read-only connection's mode is read back ([`crate::guard`]).
+    /// [`DbError::TooLarge`], once its answer is read to the end. A statement that dbee's
+    /// `KILL QUERY` targeted and that still returned rows (MySQL's `SELECT SLEEP(…)` returns 1
+    /// when killed) is [`DbError::Cancelled`]; one that a KILL ended in an error is the server's
+    /// interrupt (1317), whoever sent it. What dbee refuses is not sent, and a read-only
+    /// connection's mode is read back ([`crate::guard`]).
     pub async fn run(&self, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
         let mut session = self.lock().await?;
         self.before(&mut session, sql).await?;

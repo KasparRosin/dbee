@@ -129,11 +129,12 @@ impl<S: ApplySession> Drop for Open<S> {
 /// index, and each must be exactly one SQL statement in `dialect` (checked before `lock` is
 /// awaited, so before anything is sent). `gate` can cancel the apply until it decides to commit
 /// ([`ApplyGate`]): a cancelled apply rolls back and fails with [`DbError::Cancelled`] at the
-/// statement it stopped at (the last one when every statement had run). A failing `COMMIT` (a
-/// deferred constraint, say) is reported at the last statement's index; a `ConnectionLost`
-/// during `COMMIT` leaves the outcome unknown. Any failure rolls back; a `ROLLBACK` that itself
-/// fails is [`DbError::ConnectionLost`], and the connection is marked lost. The session is held
-/// from the transaction's start to the end. An empty list sends nothing.
+/// statement it stopped at (the last one when every statement had run), also when the server's
+/// interrupt stopped that statement; without the gate's cancel, the interrupt is the server's
+/// error. A failing `COMMIT` (a deferred constraint, say) is reported at the last statement's
+/// index; a `ConnectionLost` during `COMMIT` leaves the outcome unknown. Any failure rolls back; a
+/// `ROLLBACK` that itself fails is [`DbError::ConnectionLost`], and the connection is marked lost.
+/// The session is held from the transaction's start to the end. An empty list sends nothing.
 pub async fn apply<S: ApplySession>(
     dialect: Dialect,
     statements: &[String],
@@ -166,6 +167,8 @@ pub async fn apply<S: ApplySession>(
         },
         Err((index, e)) => (index, e),
     };
+    // The gate is dbee's own cancel: a server's interrupt after it is that cancel.
+    let error = if gate.cancelled() && error.is_interrupted() { DbError::Cancelled } else { error };
     if roll_back(&mut open.session).await {
         open.armed = false;
         Err(ApplyError { index, error })
@@ -177,12 +180,12 @@ pub async fn apply<S: ApplySession>(
 }
 
 /// `ROLLBACK`; false when it failed. A cancel can arrive after the statement it was meant for
-/// ended, during the `ROLLBACK`: one more `ROLLBACK` then ends the transaction.
+/// ended, during the `ROLLBACK`: when it is interrupted, one more `ROLLBACK` ends the transaction.
 async fn roll_back<S: ApplySession>(session: &mut S) -> bool {
     for _ in 0..2 {
         match session.rollback().await {
             Ok(()) => return true,
-            Err(DbError::Cancelled) => {}
+            Err(e) if e.is_interrupted() => {}
             Err(_) => return false,
         }
     }
@@ -237,13 +240,15 @@ mod tests {
     use futures_util::FutureExt;
 
     /// A session that answers each statement with the next scripted answer (`Ok(Some(1))` once
-    /// they run out), records what it was sent, and never answers the statement `hang_on`.
+    /// they run out), records what it was sent, never answers the statement `hang_on`, and
+    /// cancels the gate of `cancel_on` as that statement runs.
     #[derive(Default)]
     struct Fake {
         sent: Arc<Mutex<Vec<String>>>,
         answers: VecDeque<Result<Option<u64>, DbError>>,
         lost: Arc<AtomicBool>,
         hang_on: Option<&'static str>,
+        cancel_on: Option<(&'static str, Arc<ApplyGate>)>,
     }
 
     impl ApplySession for Fake {
@@ -251,6 +256,11 @@ mod tests {
 
         fn execute(&mut self, sql: &str) -> impl Future<Output = Result<Option<u64>, DbError>> + Send {
             self.sent.lock().unwrap().push(sql.to_owned());
+            if let Some((on, gate)) = &self.cancel_on
+                && *on == sql
+            {
+                assert!(gate.cancel());
+            }
             let hang = self.hang_on == Some(sql);
             let answer = self.answers.pop_front().unwrap_or(Ok(Some(1)));
             async move {
@@ -336,18 +346,49 @@ mod tests {
         assert_eq!(sent(&r), ["START", "UPDATE", "UPDATE", "COMMIT", "ROLLBACK"]);
     }
 
+    /// The server's interrupt, as a Postgres or MySQL statement a cancel stopped ends.
+    fn interrupt() -> DbError {
+        DbError::Server(Box::new(crate::ServerError {
+            code: "57014".into(),
+            code_label: Some("SQLSTATE"),
+            message: "canceling statement due to user request".into(),
+            detail: None,
+            hint: None,
+            position: None,
+            meaning: Some(crate::Meaning::Interrupted),
+        }))
+    }
+
     #[test]
     fn a_cancel_that_meets_the_rollback_rolls_back_again() {
-        let answers = vec![Ok(None), Err(DbError::Cancelled), Err(DbError::Cancelled), Ok(None)];
-        let r = run(&statements(2), &ApplyGate::default(), answers, None);
-        assert_eq!(r.result, Some(Err(ApplyError { index: 0, error: DbError::Cancelled })));
-        assert_eq!(sent(&r), ["START", "UPDATE", "ROLLBACK", "ROLLBACK"]);
-        assert!(!r.lost);
+        for cancel in [DbError::Cancelled, interrupt()] {
+            let answers = vec![Ok(None), Err(DbError::Cancelled), Err(cancel), Ok(None)];
+            let r = run(&statements(2), &ApplyGate::default(), answers, None);
+            assert_eq!(r.result, Some(Err(ApplyError { index: 0, error: DbError::Cancelled })));
+            assert_eq!(sent(&r), ["START", "UPDATE", "ROLLBACK", "ROLLBACK"]);
+            assert!(!r.lost);
+        }
+    }
+
+    /// A change the server interrupted is the Apply's cancel when the gate was cancelled, which
+    /// is dbee's own; else the server's error, and nothing is written either way.
+    #[test]
+    fn an_interrupted_change_is_cancelled_only_through_the_gate() {
+        let answers = || vec![Ok(None), Ok(Some(1)), Err(interrupt())];
+        let r = run(&statements(2), &ApplyGate::default(), answers(), None);
+        assert_eq!(r.result, Some(Err(ApplyError { index: 1, error: interrupt() })));
+        assert_eq!(sent(&r), ["START", "UPDATE", "UPDATE", "ROLLBACK"]);
+        let gate = Arc::new(ApplyGate::default());
+        let fake = Fake { answers: answers().into(), cancel_on: Some(("UPDATE t SET a = 2 WHERE id = 2", Arc::clone(&gate))), ..Fake::default() };
+        let sent = Arc::clone(&fake.sent);
+        let result = apply(Dialect::Postgres, &statements(2), &gate, async { Ok(fake) }).now_or_never();
+        assert_eq!(result, Some(Err(ApplyError { index: 1, error: DbError::Cancelled })));
+        assert_eq!(sent.lock().unwrap().last().map(String::as_str), Some("ROLLBACK"));
     }
 
     #[test]
     fn a_rollback_that_fails_loses_the_connection() {
-        for second in [vec![Err(DbError::ConnectionLost)], vec![Err(DbError::Cancelled), Err(DbError::Cancelled)]] {
+        for second in [vec![Err(DbError::ConnectionLost)], vec![Err(DbError::Cancelled), Err(interrupt())]] {
             let answers = [vec![Ok(None), Err(DbError::Other("no".into()))], second].concat();
             let r = run(&statements(1), &ApplyGate::default(), answers, None);
             assert_eq!(r.result, Some(Err(ApplyError { index: 0, error: DbError::ConnectionLost })));

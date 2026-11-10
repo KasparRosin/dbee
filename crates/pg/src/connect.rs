@@ -183,8 +183,9 @@ impl Canceller {
     /// Ask the server to cancel the running statement, over a new connection: a new channel
     /// through the tunnel, or a direct connection to the address the connection reached. `Ok`
     /// means the request was handled: the server closed that connection, as it does once it has
-    /// (the protocol sends no answer); the statement then fails with [`DbError::Cancelled`], unless
-    /// it finished first. Until then no operation takes the connection's lock
+    /// (the protocol sends no answer); the statement then fails with the server's interrupt
+    /// (`57014`, marked [`Meaning::Interrupted`](dbee_driver::Meaning::Interrupted)), unless it
+    /// finished first. Until then no operation takes the connection's lock
     /// ([`PgConnection::lock`]); an Apply already holding it runs its next statement.
     pub async fn cancel(&self) -> Result<(), DbError> {
         // The timeout below needs a runtime; without one it would panic.
