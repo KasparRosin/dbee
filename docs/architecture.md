@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C, job 3: the host key check reads `known_hosts` itself, the journal, the log; before: a stored secret is kept with the settings it was saved for; before: the control channel's token and screenshot folder; before that: the security review's lane A, fix round 1: the query connection's TLS and a result whose columns do not fit)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-09 · **Change:** minor (the theme's `settings.json` in `crates/config` and View > Theme in `crates/ui-egui`; before: the security review's lane C, job 3: the host key check reads `known_hosts` itself, the journal, the log; before: a stored secret is kept with the settings it was saved for; before: the control channel's token and screenshot folder; before that: the security review's lane A, fix round 1: the query connection's TLS and a result whose columns do not fit)
 
 How dbee is built, and how it will be built. Rules for contributors are in [`AGENTS.md`](../AGENTS.md). Anything not yet built is marked **(planned)**.
 
@@ -83,6 +83,7 @@ M1's and M2's crates are all in place. The driver interface exists, and the engi
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | `crates/config` keeps the theme choice in `settings.json` beside the connections file (`settings.rs`); `crates/ui-egui` has View > Theme (System, Light, Dark). |
 | 2026-11-08 | minor | The security review's lane C, job 3: `crates/ssh` reads `known_hosts` itself and refuses a key of another type or a revoked one; the journal leaves out `trustHostKey`; the log is 0600 and what other crates log is bounded. |
 | 2026-11-08 | minor | A stored secret is kept with the settings it was saved for (`SavedFor`, `StoredSecret` in `crates/config/src/secrets.rs`), and they alone decide where it may go (`reuse` in `crates/engine/src/cmd/connection.rs`). |
 | 2026-11-08 | minor | The control channel's token file and proof (`crates/ui-egui/src/control_server.rs`), `ui.screenshot`'s one folder, and an isolated run's key and CA files (`crates/engine/src/allowed.rs`). |
