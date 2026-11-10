@@ -934,7 +934,7 @@ fn the_paging_bar_draws_nothing_over_anything_at_the_default_size() {
     }
     for id in ["page-first", "page-prev", "page-next", "page-last", "table-refresh"] {
         let d = bar.iter().find(|d| d.id == id).unwrap();
-        assert_eq!(d.rect.size(), egui::vec2(26.0, 26.0), "`{id}` shows whole");
+        assert_eq!(d.rect.size(), egui::vec2(28.0, 28.0), "`{id}` shows whole");
     }
     // They take their clicks: + Row adds a row, Reset drops both changes, Apply writes one.
     ui.click("row-add");
@@ -1077,4 +1077,120 @@ fn moved_buttons_keep_their_ids_values_and_flags() {
     assert_moved(&mut ui, &staged, "a change staged");
     ui.click("edit-reset");
     assert_eq!(ui.edits()["count"], 0, "Reset dropped the change");
+}
+
+/// What is drawn inside `at`: the colours of its rects' edges, and of its lines and discs (an
+/// icon).
+fn marks_in(ui: &Ui, at: egui::Rect) -> (Vec<egui::Color32>, Vec<egui::Color32>) {
+    let (mut edges, mut lines) = (Vec::new(), Vec::new());
+    for (_, s) in ui.shapes() {
+        if !at.expand(0.5).contains_rect(s.visual_bounding_rect()) {
+            continue;
+        }
+        match s {
+            egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color.a() > 0 => edges.push(r.stroke.color),
+            egui::Shape::Path(p) => match p.stroke.color {
+                egui::epaint::ColorMode::Solid(c) => lines.push(c),
+                egui::epaint::ColorMode::UV(_) => lines.push(egui::Color32::RED),
+            },
+            egui::Shape::Circle(c) => lines.push(c.fill),
+            _ => {}
+        }
+    }
+    lines.retain(|c| *c != egui::Color32::TRANSPARENT);
+    lines.dedup();
+    (edges, lines)
+}
+
+/// Where the last frame drew `id`.
+fn rect_of(ui: &mut Ui, id: &str) -> egui::Rect {
+    let e = ui.tag(id).unwrap_or_else(|| panic!("`{id}` is drawn"));
+    let r: Vec<f32> = (0..4).map(|k| e["rect"][k].as_f64().unwrap() as f32).collect();
+    egui::Rect::from_min_size(egui::pos2(r[0], r[1]), egui::vec2(r[2], r[3]))
+}
+
+/// The paging bar's arrows, refresh and + Row, moved to `components::button`, say in
+/// `ui.inspect` what they said before: ids, values, enabled flags; the arrows and refresh are the
+/// page's plain icon buttons, + Row a bar button.
+#[test]
+fn moved_icon_buttons_keep_their_ids_values_and_flags() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = connected_sized(db, 0.25, egui::vec2(1100.0, 720.0));
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.frame();
+    let check = |ui: &mut Ui, want: &[(&str, &str, bool)], at: &str| {
+        for (id, value, enabled) in want {
+            let e = ui.tag(id).unwrap_or_else(|| panic!("{at}: `{id}` is drawn"));
+            assert_eq!(e["value"], json!(value), "{at}: `{id}`'s value: {e}");
+            assert_eq!(e.get("enabled") != Some(&json!(false)), *enabled, "{at}: `{id}` enabled: {e}");
+            let size = rect_of(ui, id).size();
+            let page = if *id == "row-add" { size.y == 36.0 } else { size == egui::vec2(28.0, 28.0) };
+            assert!(page, "{at}: `{id}` is the page's size: {size:?}");
+        }
+    };
+    // One page of three rows: the arrows are off, refresh and + Row on.
+    let idle = [
+        ("page-first", "First page", false),
+        ("page-prev", "Previous page", false),
+        ("page-next", "Next page", false),
+        ("page-last", "Last page (counts the rows)", false),
+        ("table-refresh", "Refresh", true),
+        ("row-add", "+ Row", true),
+    ];
+    check(&mut ui, &idle, "one page");
+    // A change staged: refresh waits.
+    ui.double_click("grid-cell-0-1");
+    ui.text("Ann");
+    ui.ctrl("Enter");
+    ui.frame();
+    let staged = [("table-refresh", "Refresh", false), ("row-add", "+ Row", true), ("page-first", "First page", false)];
+    check(&mut ui, &staged, "a change staged");
+    ui.click("row-add");
+    assert_eq!(ui.edits()["count"], 2, "+ Row added a row");
+    ui.click("edit-reset");
+    ui.frame();
+    check(&mut ui, &idle, "reset");
+    ui.click("table-refresh");
+    ui.until("the refreshed page", |ui| ui.table()["loading"].is_null());
+    assert_eq!(ui.table()["rows"], 3);
+}
+
+/// An arrow or refresh that is off can't be clicked, draws its icon faint with no edge, and
+/// hovering it says why, as before the move.
+#[test]
+fn paging_arrows_that_are_off_still_say_why() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = connected_sized(db, 0.25, egui::vec2(1100.0, 720.0));
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.frame();
+    let faint = dbee_ui_egui::theme::tokens(&ui.harness.ctx).text_faint;
+    let off = |ui: &mut Ui, id: &str, why: &str| {
+        let at = rect_of(ui, id);
+        let (edges, lines) = marks_in(ui, at);
+        assert_eq!((edges, lines), (vec![], vec![faint]), "`{id}`: off, its icon faint and no edge");
+        ui.rest(at.center());
+        assert!(ui.texts().iter().any(|(_, g)| g.text() == why), "`{id}`: hovered, it says `{why}`");
+        // A press on it does nothing.
+        let page = ui.table()["page"].clone();
+        ui.frame_with(vec![
+            egui::Event::PointerButton { pos: at.center(), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: at.center(), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ]);
+        ui.frame();
+        assert_eq!(ui.table()["page"], page, "`{id}`: a click asked for no page");
+        assert!(ui.table()["loading"].is_null(), "`{id}`: nothing loads");
+    };
+    off(&mut ui, "page-first", "First page: not now, this is the first page");
+    off(&mut ui, "page-prev", "Previous page: not now, this is the first page");
+    off(&mut ui, "page-next", "Next page: not now, this is the last page");
+    off(&mut ui, "page-last", "Last page (counts the rows): not now, this is the last page");
+    ui.double_click("grid-cell-0-1");
+    ui.text("Ann");
+    ui.ctrl("Enter");
+    ui.frame();
+    off(&mut ui, "table-refresh", "Refresh: not now, apply or reset your changes first");
 }

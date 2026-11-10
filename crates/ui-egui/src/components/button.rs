@@ -1,13 +1,19 @@
-//! Boxed and text buttons: page components `button/box` (styles primary, outline and danger) and
-//! `button/text`. Their words are drawn in `button-caps` and reported to accessibility as written.
+//! The buttons of the page: `button/box` (styles primary, outline and danger), `button/text`,
+//! `button/icon` (boxed and plain) and `button/bar` (an icon with words, or an icon alone). Their
+//! words are drawn in capitals and reported to accessibility as written; an icon alone is named
+//! by its icon.
 
 use std::sync::Arc;
 
 use egui::epaint::TextShape;
-use egui::{Color32, CornerRadius, Galley, Response, Sense, Stroke, StrokeKind, Ui, Widget, WidgetInfo, WidgetType, pos2, vec2};
+use egui::{Color32, CornerRadius, Galley, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2};
 
+use super::icon::Icon;
 use super::{Look, focus, painter};
-use crate::theme::size::{BUTTON_GAP, BUTTON_H, BUTTON_PAD_X, RADIUS_CONTROL, TEXT_BUTTON_PAD_X};
+use crate::theme::size::{
+    BAR_BUTTON_DIVIDER, BAR_BUTTON_GAP, BAR_BUTTON_H, BAR_BUTTON_PAD_X, BUTTON_GAP, BUTTON_H, BUTTON_PAD_X, ICON_BUTTON, RADIUS_CONTROL,
+    TEXT_BUTTON_PAD_X,
+};
 use crate::theme::{Text, tokens};
 
 /// A shortcut on a filled button is its words' colour at this opacity, as the page draws it.
@@ -186,6 +192,163 @@ impl Widget for TextButton<'_> {
         p.galley(at, words, colour);
         if look.focused {
             focus::box_around(&p, rect);
+        }
+        r
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IconStyle {
+    Boxed,
+    Plain,
+}
+
+/// An icon button, 28 square (`button/icon`); off when added with `ui.add_enabled(false, …)`.
+pub struct IconButton {
+    icon: Icon,
+    style: IconStyle,
+    look: Option<Look>,
+}
+
+impl IconButton {
+    /// A `line_strong` edge and no ground of its own: the filter bar's add, remove and raw SQL.
+    pub fn boxed(icon: Icon) -> IconButton {
+        IconButton { icon, style: IconStyle::Boxed, look: None }
+    }
+
+    /// No edge: the paging arrows.
+    pub fn plain(icon: Icon) -> IconButton {
+        IconButton { icon, style: IconStyle::Plain, look: None }
+    }
+
+    /// Draws it with `look` whatever its response says (the showcase only).
+    pub fn look(mut self, look: Look) -> IconButton {
+        self.look = Some(look);
+        self
+    }
+}
+
+impl Widget for IconButton {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let (rect, r) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON), Sense::click());
+        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.icon.name()));
+        let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
+        if !ui.is_rect_visible(rect) {
+            return r;
+        }
+        let t = tokens(ui.ctx());
+        let p = painter(ui);
+        let radius = CornerRadius::same(RADIUS_CONTROL);
+        if look.hovered && !look.disabled {
+            p.rect_filled(rect, radius, t.hover);
+        }
+        self.icon.paint(&p, rect.center(), if look.disabled { t.text_faint } else { t.text });
+        match (self.style, look.focused) {
+            (IconStyle::Boxed, true) => focus::own_edge(&p, rect, RADIUS_CONTROL),
+            (IconStyle::Boxed, false) => {
+                p.rect_stroke(rect, radius, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
+            }
+            (IconStyle::Plain, true) => focus::box_around(&p, rect),
+            (IconStyle::Plain, false) => {}
+        }
+        r
+    }
+}
+
+/// A cell of a bar (`button/bar`), 36 tall: an icon with words, or an icon alone in a 36 square.
+/// Off when added with `ui.add_enabled(false, …)`.
+pub struct BarButton<'a> {
+    icon: Icon,
+    label: Option<&'a str>,
+    on: bool,
+    divider: bool,
+    look: Option<Look>,
+}
+
+impl<'a> BarButton<'a> {
+    /// `icon` and `label`, as REFRESH and + ROW in the table bar.
+    pub fn label(icon: Icon, label: &'a str) -> BarButton<'a> {
+        BarButton { icon, label: Some(label), on: false, divider: true, look: None }
+    }
+
+    /// `icon` alone, as the value panel's toggle.
+    pub fn icon(icon: Icon) -> BarButton<'a> {
+        BarButton { icon, label: None, on: false, divider: true, look: None }
+    }
+
+    /// On: what it shows is showing (`fill` over the cell, whether hovered or not).
+    pub fn on(mut self, on: bool) -> BarButton<'a> {
+        self.on = on;
+        self
+    }
+
+    /// A 1 px `line` at its left end, between it and what is before it in the bar (the default).
+    pub fn divider(mut self, divider: bool) -> BarButton<'a> {
+        self.divider = divider;
+        self
+    }
+
+    /// Draws it with `look` whatever its response says (the showcase only).
+    pub fn look(mut self, look: Look) -> BarButton<'a> {
+        self.look = Some(look);
+        self
+    }
+
+    /// How wide it draws in `ui`.
+    pub fn width(&self, ui: &Ui) -> f32 {
+        self.parts(ui).1
+    }
+
+    /// The words, if any, and the width.
+    fn parts(&self, ui: &Ui) -> (Option<Arc<Galley>>, f32) {
+        let Some(label) = self.label else {
+            return (None, BAR_BUTTON_H);
+        };
+        let words = ui.painter().layout_job(Text::Label.job(label, Color32::PLACEHOLDER));
+        // egui puts the letter spacing after the last letter too; the page's measure has none there.
+        let words_w = words.size().x - Text::Label.spacing();
+        let width = (2.0 * BAR_BUTTON_PAD_X + self.icon.size().x + BAR_BUTTON_GAP + words_w).ceil();
+        (Some(words), width)
+    }
+}
+
+impl Widget for BarButton<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let (words, width) = self.parts(ui);
+        let (rect, r) = ui.allocate_exact_size(vec2(width, BAR_BUTTON_H), Sense::click());
+        let name = self.label.unwrap_or(self.icon.name());
+        r.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), self.on, name));
+        let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
+        if !ui.is_rect_visible(rect) {
+            return r;
+        }
+        let t = tokens(ui.ctx());
+        let p = painter(ui);
+        let ground = if self.on {
+            Some(t.fill)
+        } else if look.hovered && !look.disabled {
+            Some(t.hover)
+        } else {
+            None
+        };
+        if let Some(ground) = ground {
+            p.rect_filled(rect, CornerRadius::ZERO, ground);
+        }
+        let colour = if look.disabled { t.text_faint } else { t.text };
+        match words {
+            Some(words) => {
+                let x = rect.left() + BAR_BUTTON_PAD_X;
+                let icon_w = self.icon.size().x;
+                self.icon.paint(&p, pos2(x + icon_w / 2.0, rect.center().y), colour);
+                p.galley(pos2(x + icon_w + BAR_BUTTON_GAP, rect.center().y - words.size().y / 2.0), words, colour);
+            }
+            None => self.icon.paint(&p, rect.center(), colour),
+        }
+        if self.divider {
+            p.rect_filled(Rect::from_min_size(rect.min, vec2(BAR_BUTTON_DIVIDER, rect.height())), CornerRadius::ZERO, t.line);
+        }
+        if look.focused {
+            focus::box_inside(&p, rect);
         }
         r
     }
@@ -452,5 +615,195 @@ mod tests {
         h.key_press(Key::Space);
         h.run();
         assert_eq!(*h.state(), [1, 1], "Space pressed the next");
+    }
+
+    /// The colours of the icon drawn within `at` (its lines and discs), and the box it fills.
+    fn icon_in(shapes: &[egui::epaint::ClippedShape], at: Rect) -> (Vec<Color32>, Rect) {
+        let solid = |c: &egui::epaint::ColorMode| match c {
+            egui::epaint::ColorMode::Solid(c) => *c,
+            egui::epaint::ColorMode::UV(_) => Color32::RED,
+        };
+        let mut colours = Vec::new();
+        let mut bounds = Rect::NOTHING;
+        for s in crate::components::flat(shapes) {
+            let drawn = match &s {
+                egui::Shape::Path(p) => vec![p.fill, solid(&p.stroke.color)],
+                egui::Shape::Circle(c) => vec![c.fill, c.stroke.color],
+                egui::Shape::LineSegment { stroke, .. } => vec![stroke.color],
+                _ => continue,
+            };
+            let r = s.visual_bounding_rect();
+            if !at.contains_rect(r) {
+                continue;
+            }
+            bounds = bounds.union(r);
+            for c in drawn.into_iter().filter(|c| *c != Color32::TRANSPARENT) {
+                if !colours.contains(&c) {
+                    colours.push(c);
+                }
+            }
+        }
+        (colours, bounds)
+    }
+
+    #[test]
+    fn each_icon_button_state_matches_the_page() {
+        // Node 161038: 28 square, corners 2, the icon centred in `text`. Boxed: a 1 px line_strong
+        // edge and no ground; plain: no edge, so its focus is a box around it.
+        let hovered = Look { hovered: true, ..Look::default() };
+        let focused = Look { focused: true, ..Look::default() };
+        for (theme, t) in both() {
+            for style in [IconStyle::Boxed, IconStyle::Plain] {
+                for state in ["default", "hover", "focus", "disabled"] {
+                    let at_ = format!("{theme:?} {style:?} {state}");
+                    let mut at = Rect::NOTHING;
+                    let shapes = painted(theme, |ui| {
+                        ui.add_space(ROOM);
+                        ui.horizontal(|ui| {
+                            ui.add_space(ROOM);
+                            let b = IconButton { icon: Icon::Plus, style, look: None };
+                            at = match state {
+                                "disabled" => ui.add_enabled(false, b).rect,
+                                "hover" => ui.add(b.look(hovered)).rect,
+                                "focus" => ui.add(b.look(focused)).rect,
+                                _ => ui.add(b).rect,
+                            };
+                        });
+                    });
+                    assert_eq!(at.size(), egui::vec2(28.0, 28.0), "{at_}: 28 square");
+                    let radius = CornerRadius::same(2);
+                    let want_fills: Vec<(Rect, Color32)> = if state == "hover" { vec![(at, t.hover)] } else { vec![] };
+                    let want_edges = match (style, state) {
+                        (IconStyle::Boxed, "focus") => vec![Edge { outer: at, width: 2.0, colour: t.ink, radius }],
+                        (IconStyle::Boxed, _) => vec![Edge { outer: at, width: 1.0, colour: t.line_strong, radius }],
+                        (IconStyle::Plain, "focus") => {
+                            vec![Edge { outer: at.expand(4.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(4) }]
+                        }
+                        (IconStyle::Plain, _) => vec![],
+                    };
+                    assert_eq!(fills_in(&shapes, at), want_fills, "{at_}: the ground");
+                    assert_eq!(edges_in(&shapes, at, 4.0), want_edges, "{at_}: the edge");
+                    let (colours, bounds) = icon_in(&shapes, at);
+                    let colour = if state == "disabled" { t.text_faint } else { t.text };
+                    assert_eq!(colours, [colour], "{at_}: the icon's colour");
+                    assert!((bounds.center() - at.center()).length() <= 1.0, "{at_}: the icon {bounds:?} centred in {at:?}");
+                }
+            }
+            for (style, add) in [
+                (IconStyle::Boxed, (|ui: &mut Ui| ui.add(IconButton::boxed(Icon::Minus))) as fn(&mut Ui) -> Response),
+                (IconStyle::Plain, |ui: &mut Ui| ui.add(IconButton::plain(Icon::Next))),
+            ] {
+                let (shapes, at) = tabbed(theme, add);
+                let want = match style {
+                    IconStyle::Boxed => Edge { outer: at, width: 2.0, colour: t.ink, radius: CornerRadius::same(2) },
+                    IconStyle::Plain => Edge { outer: at.expand(4.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(4) },
+                };
+                assert_eq!(edges_in(&shapes, at, 4.0), [want], "{theme:?} {style:?}: Tab shows its focus");
+            }
+        }
+    }
+
+    #[test]
+    fn each_bar_button_state_matches_the_page() {
+        // Node 161067: 36 tall; the label kind 12, its icon, 8, its words in `label` caps, 12; the
+        // icon kind 36 square, its icon centred. Hover `hover`, on `fill` over the whole cell (and
+        // hovering it changes nothing), the divider a 1 px `line` at its left end over the ground,
+        // focus a 2 px ink box 2 px inside.
+        let hovered = Look { hovered: true, ..Look::default() };
+        let focused = Look { focused: true, ..Look::default() };
+        let icon = Icon::Refresh.size();
+        for (theme, t) in both() {
+            for words in [Some("Refresh"), None] {
+                for divider in [false, true] {
+                    for state in ["default", "hover", "on", "on hovered", "disabled", "focus"] {
+                        let at_ = format!("{theme:?} {words:?} divider {divider} {state}");
+                        let mut at = Rect::NOTHING;
+                        let mut width = 0.0;
+                        let shapes = painted(theme, |ui| {
+                            ui.add_space(ROOM);
+                            let b = match words {
+                                Some(w) => BarButton::label(Icon::Refresh, w),
+                                None => BarButton::icon(Icon::Refresh),
+                            };
+                            let b = b.divider(divider).on(state.starts_with("on"));
+                            width = b.width(ui);
+                            at = match state {
+                                "disabled" => ui.add_enabled(false, b).rect,
+                                "hover" | "on hovered" => ui.add(b.look(hovered)).rect,
+                                "focus" => ui.add(b.look(focused)).rect,
+                                _ => ui.add(b).rect,
+                            };
+                        });
+                        assert_eq!(at.height(), 36.0, "{at_}: 36 tall");
+                        assert_eq!(at.width(), width, "{at_}: as wide as it measures");
+                        let ground = match state {
+                            "hover" => Some(t.hover),
+                            "on" | "on hovered" => Some(t.fill),
+                            _ => None,
+                        };
+                        let mut want_fills: Vec<(Rect, Color32)> = ground.map(|g| (at, g)).into_iter().collect();
+                        if divider {
+                            want_fills.push((Rect::from_min_size(at.min, egui::vec2(1.0, 36.0)), t.line));
+                        }
+                        assert_eq!(fills_in(&shapes, at), want_fills, "{at_}: the ground and the divider");
+                        let box_inside = Edge { outer: at.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
+                        let want_edges = if state == "focus" { vec![box_inside] } else { vec![] };
+                        assert_eq!(edges_in(&shapes, at, 0.0), want_edges, "{at_}: the edge");
+                        let colour = if state == "disabled" { t.text_faint } else { t.text };
+                        let (colours, bounds) = icon_in(&shapes, at);
+                        assert_eq!(colours, [colour], "{at_}: the icon's colour");
+                        let drawn = texts(&shapes);
+                        match words {
+                            Some(_) => {
+                                let (_, w, c) = drawn.iter().find(|(s, _, _)| s == "REFRESH").unwrap_or_else(|| panic!("{at_}: {drawn:?}"));
+                                assert_eq!(*c, colour, "{at_}: the words' colour");
+                                assert!(close(w.left(), at.left() + 12.0 + icon.x + 8.0), "{at_}: {w:?} after the icon in {at:?}");
+                                assert!(close(w.center().y, at.center().y), "{at_}: the words centred");
+                                // The page's measure: egui puts the letter spacing after the last
+                                // letter too, which takes no room.
+                                let page = (12.0 + icon.x + 8.0 + w.width() - Text::Label.spacing() + 12.0).ceil();
+                                assert_eq!(at.width(), page, "{at_}: 12, icon, 8, words, 12");
+                                let centre = egui::pos2(at.left() + 12.0 + icon.x / 2.0, at.center().y);
+                                assert!((bounds.center() - centre).length() <= 1.0, "{at_}: the icon {bounds:?} 12 in");
+                            }
+                            None => {
+                                assert_eq!(at.width(), 36.0, "{at_}: 36 square");
+                                assert!(!drawn.iter().any(|(_, r, _)| at.intersects(*r)), "{at_}: no words: {drawn:?}");
+                                assert!((bounds.center() - at.center()).length() <= 1.0, "{at_}: the icon {bounds:?} centred");
+                            }
+                        }
+                    }
+                }
+            }
+            let (shapes, at) = tabbed(theme, |ui| ui.add(BarButton::label(Icon::Plus, "Row")));
+            let want = Edge { outer: at.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
+            assert_eq!(edges_in(&shapes, at, 0.0), [want], "{theme:?}: Tab shows the box inside");
+        }
+    }
+
+    #[test]
+    fn a_bar_button_that_is_on_says_so() {
+        use egui::accesskit::{Role, Toggled};
+        use egui_kittest::kittest::NodeT;
+        let mut h = harness(Theme::Light, false, |ui, on: &mut bool| {
+            ui.horizontal(|ui| {
+                if ui.add(BarButton::icon(Icon::Panel).on(*on)).clicked() {
+                    *on = !*on;
+                }
+                ui.add(BarButton::label(Icon::Wrap, "Wrap").on(true));
+                ui.add(IconButton::plain(Icon::First));
+            });
+        });
+        h.run();
+        let toggled = |h: &Harness<'_, bool>, label: &str| h.get_by_label(label).accesskit_node().toggled();
+        assert_eq!(toggled(&h, "panel"), Some(Toggled::False), "off, it says so");
+        assert_eq!(toggled(&h, "Wrap"), Some(Toggled::True), "on, it says so");
+        assert!(h.query_by_role_and_label(Role::Button, "Wrap").is_some(), "a button, its words as written");
+        assert!(h.query_by_label("WRAP").is_none(), "the capitals are only drawn");
+        assert!(h.query_by_role_and_label(Role::Button, "first").is_some(), "an icon button is named by its icon");
+        h.get_by_label("panel").click();
+        h.run();
+        assert!(*h.state());
+        assert_eq!(toggled(&h, "panel"), Some(Toggled::True), "clicked on, it says so");
     }
 }

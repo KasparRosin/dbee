@@ -31,11 +31,11 @@ use egui::{Align, Button, CornerRadius, Layout, Rect, Sense, Stroke, StrokeKind,
 use serde_json::json;
 
 use crate::automation::Tags;
-use crate::components::button::{BoxButton, TextButton};
+use crate::components::button::{BarButton, BoxButton, IconButton, TextButton};
 use crate::components::icon::Icon;
 use crate::theme::{
     self, Text,
-    size::{self, RADIUS_CONTROL, SPINNER},
+    size::{self, ICON_BUTTON, RADIUS_CONTROL, SPINNER},
 };
 use crate::tree::thousands;
 
@@ -106,12 +106,12 @@ pub fn edits_text(n: usize) -> String {
     if n == 1 { "1 change".into() } else { format!("{n} changes") }
 }
 
-/// A square button with a paging arrow; `true` when clicked.
+/// A paging arrow; `true` when clicked.
 fn step_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, step: Icon, why_not: Option<&str>, hover: &str) -> bool {
     let enabled = why_not.is_none();
-    let r = square_button(ui, enabled, |p, rect, colour| step.paint(p, rect.center(), colour));
+    let r = ui.add_enabled(enabled, IconButton::plain(step));
     let r = match why_not {
-        Some(why) => r.on_hover_text(format!("{hover}: not now, {why}")),
+        Some(why) => r.on_disabled_hover_text(format!("{hover}: not now, {why}")),
         None => r.on_hover_text(hover),
     };
     tags.tag_value_as(id, &r, hover, enabled);
@@ -124,7 +124,7 @@ const SPACING: f32 = 4.0;
 const SPACE: f32 = 10.0;
 /// Between the bar's left group and its right one.
 const GAP: f32 = 12.0;
-/// A square button's side.
+/// The row count's side when it shows as a square button, and its height as text.
 const SQUARE: f32 = 26.0;
 /// The narrowest a cut page's note is shown in (it truncates, with its whole text on hover).
 const MIN_NOTE: f32 = 24.0;
@@ -200,7 +200,7 @@ impl Parts {
             count_w: button_width(ui, &count, Text::Label),
             count,
             edits: edits_text(p.edits),
-            add_w: button_width(ui, "+ Row", Text::Label),
+            add_w: add_row().width(ui),
             reset_w: TextButton::new("Reset").width(ui),
             apply_w: BoxButton::primary("Apply").width(ui),
         }
@@ -209,18 +209,18 @@ impl Parts {
 
 /// What each group takes, in each form; the same parts, spaces and spinners [`show`] draws.
 fn widths(ui: &egui::Ui, p: &Paging, parts: &Parts) -> Widths {
-    let mut paging = vec![SQUARE, SQUARE, text_width(ui, &parts.page, Text::Label)];
+    let mut paging = vec![ICON_BUTTON, ICON_BUTTON, text_width(ui, &parts.page, Text::Label)];
     if p.loading {
         paging.push(SPINNER);
     }
-    paging.extend([SQUARE, SQUARE]);
+    paging.extend([ICON_BUTTON, ICON_BUTTON]);
     let counting = matches!(p.total, Total::Counting { .. });
     let left = |count: f32| {
         let mut tail = vec![count];
         if counting {
             tail.push(SPINNER);
         }
-        tail.push(SQUARE);
+        tail.push(ICON_BUTTON);
         row(&paging) + SPACING + SPACE + row(&tail)
     };
     let (right_text, right_bare) = if p.edits > 0 {
@@ -248,14 +248,20 @@ fn count_icon(p: &egui::Painter, rect: Rect, color: egui::Color32) {
     p.line_segment([at(0.16, 0.62), at(0.82, 0.62)], s);
 }
 
-/// A square button framed like the paging arrows, drawn with `icon`.
-fn square_button(ui: &mut egui::Ui, enabled: bool, icon: impl FnOnce(&egui::Painter, Rect, egui::Color32)) -> egui::Response {
+/// The row count as a framed square with a number sign: the page has no such icon, so it is
+/// drawn here until the row count's own screen.
+fn count_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(SQUARE, SQUARE), if enabled { Sense::click() } else { Sense::hover() });
     let fill = if enabled && r.hovered() { t.hover } else { t.card };
     ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
-    icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), if enabled { t.text } else { t.text_faint });
+    count_icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), if enabled { t.text } else { t.text_faint });
     r
+}
+
+/// "+ Row": the page's bar button with a plus and its words.
+fn add_row() -> BarButton<'static> {
+    BarButton::label(Icon::Plus, "Row")
 }
 
 /// Draws the bar into `ui` and returns the commands it asks for.
@@ -333,7 +339,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     let count = parts.count.as_str();
     let enabled = p.count_blocked.is_none() && !counting;
     let r = if fit.count_icon {
-        let r = square_button(ui, enabled, count_icon);
+        let r = count_button(ui, enabled);
         match (p.count_blocked, counting) {
             (Some(why), _) => r.on_hover_text(format!("{count}. Can't count now: {why}.")),
             (None, true) => r.on_hover_text(format!("{count}: counting the rows")),
@@ -354,9 +360,9 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
         ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
     }
     let refresh_enabled = p.blocked.is_none();
-    let r = square_button(ui, refresh_enabled, |p, rect, colour| Icon::Refresh.paint(p, rect.center(), colour));
+    let r = ui.add_enabled(refresh_enabled, IconButton::plain(Icon::Refresh));
     let r = match p.blocked {
-        Some(why) => r.on_hover_text(format!("Refresh: not now, {why}")),
+        Some(why) => r.on_disabled_hover_text(format!("Refresh: not now, {why}")),
         None => r.on_hover_text("Load the page again"),
     };
     tags.tag_value_as("table-refresh", &r, "Refresh", refresh_enabled);
@@ -369,7 +375,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
 fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit: Fit, runs: &mut Vec<Run>) {
     let t = theme::tokens(ui.ctx());
     let enabled = p.add_blocked.is_none();
-    let r = ui.add_enabled(enabled, Button::new(Text::Label.rich("+ Row")).min_size(vec2(parts.add_w, SQUARE)));
+    let r = ui.add_enabled(enabled, add_row());
     let r = match &p.add_blocked {
         Some(why) => r.on_disabled_hover_text(format!("Cannot add a row now: {why}")),
         None => r.on_hover_text("Add a row, written with the other changes on Apply"),

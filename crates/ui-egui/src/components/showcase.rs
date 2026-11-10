@@ -5,7 +5,7 @@
 use egui::{Align2, Color32, CornerRadius, Label, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use super::Look;
-use super::button::{BoxButton, TextButton};
+use super::button::{BarButton, BoxButton, IconButton, TextButton};
 use super::chip::Chip;
 use super::icon::Icon;
 use super::keycap::Keycap;
@@ -122,12 +122,48 @@ fn buttons(ui: &mut Ui) {
         ui.add(BoxButton::danger("Delete").look(focused));
         ui.add_enabled(false, BoxButton::danger("Delete"));
     });
+    // Bar buttons stand side by side, as in a bar.
+    section(ui, "button/bar: default, with divider, hover, on, disabled, focus", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add(BarButton::label(Icon::Refresh, "Refresh").divider(false));
+        ui.add(BarButton::label(Icon::Plus, "Row"));
+        ui.add(BarButton::label(Icon::Import, "Import").look(hovered));
+        ui.add(BarButton::label(Icon::Wrap, "Wrap").on(true));
+        ui.add_enabled(false, BarButton::label(Icon::Copy, "Copy"));
+        ui.add(BarButton::label(Icon::Refresh, "Refresh").look(focused));
+    });
+    section(ui, "button/bar icon: default, hover, on, disabled, focus", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add(BarButton::icon(Icon::Panel).divider(false));
+        ui.add(BarButton::icon(Icon::Panel).divider(false).look(hovered));
+        ui.add(BarButton::icon(Icon::Panel).divider(false).on(true));
+        ui.add_enabled(false, BarButton::icon(Icon::Panel).divider(false));
+        ui.add(BarButton::icon(Icon::Refresh).look(focused));
+    });
     section(ui, "button/text: default, hover, focus, disabled", SPACE_8, |ui| {
         ui.spacing_mut().item_spacing.x = ROW_GAP;
         ui.add(TextButton::new("Reset"));
         ui.add(TextButton::new("Reset").look(hovered));
         ui.add(TextButton::new("Reset").look(focused));
         ui.add_enabled(false, TextButton::new("Reset"));
+    });
+    section(ui, "button/icon boxed: plus, minus, code, hover, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(IconButton::boxed(Icon::Plus));
+        ui.add(IconButton::boxed(Icon::Minus));
+        ui.add(IconButton::boxed(Icon::Code));
+        ui.add(IconButton::boxed(Icon::Plus).look(hovered));
+        ui.add(IconButton::boxed(Icon::Plus).look(focused));
+        ui.add_enabled(false, IconButton::boxed(Icon::Minus));
+    });
+    section(ui, "button/icon plain: first, previous, next, last, hover, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        for icon in [Icon::First, Icon::Previous, Icon::Next, Icon::Last] {
+            ui.add(IconButton::plain(icon));
+        }
+        ui.add(IconButton::plain(Icon::Next).look(hovered));
+        ui.add(IconButton::plain(Icon::Next).look(focused));
+        ui.add_enabled(false, IconButton::plain(Icon::First));
     });
 }
 
