@@ -314,8 +314,12 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
     let below = (screen.height() - offset.y).max(1.0);
     // No fade-in: a screenshot right after a dialog opens shows it as it is.
     let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, offset).default_size(vec2(outer, below)).fade_in(false);
-    let frame =
-        Frame::new().fill(t.card).stroke(Stroke::new(1.0, t.line)).corner_radius(CornerRadius::same(RADIUS_FLOAT)).inner_margin(Margin::same(MARGIN));
+    let frame = Frame::new()
+        .fill(t.raised)
+        .stroke(Stroke::new(1.0, t.line))
+        .shadow(theme::float_shadow(t))
+        .corner_radius(CornerRadius::same(RADIUS_FLOAT))
+        .inner_margin(Margin::same(MARGIN));
     let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(t.scrim).show(ctx, |ui| {
         ui.set_width(WIDTH);
         ui.with_layout(Layout::top_down(Align::Min), |ui| body(ui, dialog, tags)).inner

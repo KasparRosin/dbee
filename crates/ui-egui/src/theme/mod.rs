@@ -14,6 +14,11 @@ pub use tokens::{DARK, LIGHT, Tokens, connection_color, on_connection_color, tok
 use egui::{Color32, CornerRadius, Shadow, Stroke};
 use size::{RADIUS_CONTROL, RADIUS_FLOAT};
 
+/// The design's one shadow, under every popup and dialog.
+pub fn float_shadow(t: &Tokens) -> Shadow {
+    Shadow { offset: [0, 6], blur: 18, spread: 0, color: t.shadow }
+}
+
 fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     let v = &mut style.visuals;
     v.dark_mode = dark;
@@ -32,7 +37,7 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     v.selection.stroke = Stroke::new(1.0, t.ink);
     v.text_cursor.stroke = Stroke::new(v.text_cursor.stroke.width, t.ink);
     v.window_shadow = Shadow::NONE;
-    v.popup_shadow = Shadow { offset: [0, 6], blur: 18, spread: 0, color: t.shadow };
+    v.popup_shadow = float_shadow(t);
     v.window_corner_radius = CornerRadius::same(RADIUS_FLOAT);
     v.menu_corner_radius = CornerRadius::same(RADIUS_FLOAT);
     let w = &mut v.widgets;

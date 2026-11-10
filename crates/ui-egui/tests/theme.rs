@@ -176,14 +176,17 @@ fn a_tabs_close_button_takes_hover_under_the_pointer() {
 }
 
 #[test]
-fn a_dialog_sits_on_card_over_the_scrim() {
+fn a_dialog_sits_on_raised_over_the_scrim() {
     let db = dbee_testkit::require_testdb!();
     let d = dbee_ui_egui::theme::DARK;
+    let l = dbee_ui_egui::theme::LIGHT;
     let mut ui = Ui::connected(db);
     dark(&mut ui);
     let has = |ui: &Ui, fill: egui::Color32, stroke: Option<egui::Color32>| {
         ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == fill && stroke.is_none_or(|c| r.stroke.color == c)))
     };
+    let shadowed =
+        |ui: &Ui, color: egui::Color32| ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == color && r.blur_width == 18.0));
     ui.ctrl("P");
     ui.frame();
     assert!(ui.tag("qs-input").is_some());
@@ -195,7 +198,13 @@ fn a_dialog_sits_on_card_over_the_scrim() {
     ui.ok("ui.key", json!({ "key": "Q", "cmd": true, "shift": true }));
     assert_eq!(ui.inspect()["dialog"], "confirm");
     assert!(has(&ui, d.scrim, None), "the dialog's scrim");
-    assert!(has(&ui, d.card, Some(d.line)), "the dialog on card with a line");
+    assert!(has(&ui, d.raised, Some(d.line)), "the dialog on raised with a line");
+    assert!(shadowed(&ui, d.shadow), "the dialog's shadow");
+    ui.execute("ui.themeLight", json!({}));
+    ui.frame();
+    assert!(has(&ui, l.scrim, None), "the light dialog's scrim");
+    assert!(has(&ui, l.raised, Some(l.line)), "the light dialog on raised with a line");
+    assert!(shadowed(&ui, l.shadow), "the light dialog's shadow");
 }
 
 fn drawn(ui: &Ui, text: &str) -> bool {
