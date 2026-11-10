@@ -1,6 +1,6 @@
 # Releasing dbee
 
-> **Last reviewed:** 2026-10-29 · **Last updated:** 2026-10-29 · **Change:** minor (GitHub setup: what is done, what is left; the first test release)
+> **Last reviewed:** 2026-11-10 · **Last updated:** 2026-11-10 · **Change:** minor (releases are full releases from 0.2.0; the notes link to installing.md)
 
 Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `dbee v<version>`. Nobody sees a draft until the owner publishes it. The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 
@@ -19,7 +19,7 @@ Every push to the `release` branch runs `.github/workflows/release.yml`. The wor
 2. **Push `main` to `release`:** `git push origin main:release`. The workflow starts by itself.
 3. **Wait for the draft.** Notarization and the FreeBSD VM are the slow parts. The Releases page then has a draft `dbee v<version>`, tagged `v<version>` on the pushed commit, with every artifact and `SHA256SUMS.txt`.
 4. **Check it.** Download an installer or two and read the job summaries. A `::warning::` there means a signing secret was missing and that artifact is unsigned.
-5. **Publish** the draft in the GitHub UI. Publishing creates the tag. A version containing `-` (such as `0.0.1-rc.1`) is marked as a pre-release.
+5. **Write the notes and publish** the draft in the GitHub UI. Publishing creates the tag. From 0.2.0 on, releases are full releases, not pre-releases (the maintainer's call, 2026-11-10); a version containing `-` (such as `0.0.1-rc.1`) would still be marked as one. The notes link to [installing.md](installing.md) for opening an unsigned build, instead of repeating the steps; links into the repository point at the release's commit, since its tag only exists once it's published.
 
 Pushing to `release` again before you publish rebuilds the same draft and replaces its assets. After publishing, the workflow refuses to touch that version again, so bump first.
 
