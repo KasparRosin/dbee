@@ -97,6 +97,7 @@ use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::icon::Icon;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{
@@ -104,7 +105,7 @@ use crate::theme::{
     size::{self, RADIUS_CONTROL},
 };
 use crate::tree::thousands;
-use crate::{DbeeApp, filter_bar, icons};
+use crate::{DbeeApp, filter_bar};
 
 /// The automation ids.
 pub const EDITOR: &str = "query-editor";
@@ -806,10 +807,11 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
         let p = ui.painter();
         let fill = if enabled && r.hovered() { t.hover } else { t.card };
         p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
+        let muted = if enabled { t.text_muted } else { t.text_faint };
         let icon = Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(16.0, 16.0));
-        icons::schema(p, icon, if enabled { t.text_muted } else { t.text_faint });
+        Icon::Schema.paint(p, icon.center(), muted);
         let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(14.0, 14.0));
-        icons::chevron(p, arrow, if enabled { t.text_muted } else { t.text_faint }, true);
+        Icon::ChevronDown.paint(p, arrow.center(), muted);
         let none = format!("No {one} chosen");
         let unknown = format!("{} not known", capitalized(one));
         let shown = chip.database.database.as_deref().filter(|_| chip.database.known);

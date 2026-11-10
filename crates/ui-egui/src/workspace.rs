@@ -41,6 +41,7 @@ use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, RichText, ScrollAre
 use serde_json::json;
 
 use crate::app::Origin;
+use crate::components::icon::Icon;
 use crate::connections::{line_galley, line_job};
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
@@ -50,7 +51,7 @@ use crate::theme::{
     size::{self, RADIUS_CONTROL, RADIUS_FLOAT},
 };
 use crate::tree::{self, Refresh, Tree, TreeAct};
-use crate::{DbeeApp, icons, menu, value_panel};
+use crate::{DbeeApp, menu, value_panel};
 
 /// The tabs strip's height: its band.
 const STRIP_H: f32 = 36.0;
@@ -409,7 +410,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             if r.hovered() {
                 ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), t.hover);
             }
-            icons::plus(ui.painter(), Rect::from_center_size(rect.center(), vec2(14.0, 14.0)), t.text_muted);
+            Icon::Plus.paint(ui.painter(), rect.center(), t.text_muted);
             let r = r.on_hover_text("New query tab (Ctrl+T)");
             tags.tag("tab-new", &r);
             if r.clicked() {
@@ -452,10 +453,9 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     let icon_rect = Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 8.0), vec2(16.0, 16.0));
     if tab.busy {
         egui::Spinner::new().size(size::SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
-    } else if tab.query {
-        icons::query(&p, icon_rect, t.text_muted);
     } else {
-        icons::table(&p, icon_rect, t.text_muted);
+        let icon = if tab.query { Icon::TabQuery } else { Icon::TabTable };
+        icon.paint(&p, icon_rect.center(), t.text_muted);
     }
     let text_left = icon_rect.right() + 6.0;
     let galley_w = galley.size().x;
@@ -476,7 +476,7 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
         p.rect_filled(close_rect, CornerRadius::same(RADIUS_CONTROL), t.hover);
     }
     let cross = if tab.active || r.hovered() || close.hovered() { t.text_muted } else { t.line };
-    icons::close(&p, close_rect.shrink(3.0), cross);
+    Icon::Close.paint(&p, close_rect.center(), cross);
     let close = close.on_hover_text("Close (Ctrl+W)");
     tags.tag(&format!("tab-close-{}", tab.id.0), &close);
     if close.clicked() || r.middle_clicked() {

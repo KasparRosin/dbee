@@ -8,7 +8,7 @@ Every non-code asset in this repository (images, icons, fonts, example files, pr
 
 Drawn or defined in code and original to dbee (Kaspar Rosin and the dbee contributors, MIT OR Apache-2.0), so no asset file is involved:
 
-- the UI icon set: `crates/ui-egui/src/icons.rs`, shapes drawn with egui's painter;
+- the UI icon set: `crates/ui-egui/src/components/icon.rs`, shapes drawn with egui's painter from dbee's own design (`plan/design/dbee.figcraft`, page Components);
 - the colour theme: `crates/ui-egui/src/theme/tokens.rs`, dbee's own colour tokens and syntax colours;
 - the test databases: `xtask/testdb/seed.sql` and the tests' own setup SQL, synthetic data only.
 

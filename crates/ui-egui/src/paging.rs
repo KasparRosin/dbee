@@ -31,7 +31,7 @@ use egui::{Align, Button, CornerRadius, Layout, Rect, RichText, Sense, Stroke, S
 use serde_json::json;
 
 use crate::automation::Tags;
-use crate::icons::{self, Step};
+use crate::components::icon::Icon;
 use crate::theme::{
     self, Text,
     size::{self, RADIUS_CONTROL, SPINNER},
@@ -106,9 +106,9 @@ pub fn edits_text(n: usize) -> String {
 }
 
 /// A square button with a paging arrow; `true` when clicked.
-fn step_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, step: Step, why_not: Option<&str>, hover: &str) -> bool {
+fn step_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, step: Icon, why_not: Option<&str>, hover: &str) -> bool {
     let enabled = why_not.is_none();
-    let r = square_button(ui, enabled, |p, rect, color| icons::step(p, rect, color, step));
+    let r = square_button(ui, enabled, |p, rect, colour| step.paint(p, rect.center(), colour));
     let r = match why_not {
         Some(why) => r.on_hover_text(format!("{hover}: not now, {why}")),
         None => r.on_hover_text(hover),
@@ -312,10 +312,10 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     let first = p.page == 0;
     let back = p.blocked.or(if first { Some("this is the first page") } else { None });
     let on = p.blocked.or(if p.at_end { Some("this is the last page") } else { None });
-    if step_button(ui, tags, "page-first", Step::First, back, "First page") {
+    if step_button(ui, tags, "page-first", Icon::First, back, "First page") {
         runs.push(("table.page", json!({ "to": "first" })));
     }
-    if step_button(ui, tags, "page-prev", Step::Prev, back, "Previous page") {
+    if step_button(ui, tags, "page-prev", Icon::Previous, back, "Previous page") {
         runs.push(("table.page", json!({ "to": "prev" })));
     }
     let r = ui.add(egui::Label::new(Text::Label.rich(parts.page.as_str()).color(t.text_muted)).selectable(false));
@@ -323,10 +323,10 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     if p.loading {
         ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
     }
-    if step_button(ui, tags, "page-next", Step::Next, on, "Next page") {
+    if step_button(ui, tags, "page-next", Icon::Next, on, "Next page") {
         runs.push(("table.page", json!({ "to": "next" })));
     }
-    if step_button(ui, tags, "page-last", Step::Last, on, "Last page (counts the rows)") {
+    if step_button(ui, tags, "page-last", Icon::Last, on, "Last page (counts the rows)") {
         runs.push(("table.page", json!({ "to": "last" })));
     }
     ui.add_space(SPACE);
@@ -355,7 +355,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
         ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
     }
     let refresh_enabled = p.blocked.is_none();
-    let r = square_button(ui, refresh_enabled, icons::refresh);
+    let r = square_button(ui, refresh_enabled, |p, rect, colour| Icon::Refresh.paint(p, rect.center(), colour));
     let r = match p.blocked {
         Some(why) => r.on_hover_text(format!("Refresh: not now, {why}")),
         None => r.on_hover_text("Load the page again"),

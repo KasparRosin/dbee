@@ -4,6 +4,7 @@
 
 pub mod chip;
 pub mod focus;
+pub mod icon;
 pub mod keycap;
 pub mod showcase;
 

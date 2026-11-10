@@ -35,13 +35,13 @@ use dbee_engine::{Json, TabId};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Filter, Op};
 use egui::{
-    Align, Button, ComboBox, CornerRadius, InnerResponse, Key, Layout, Rect, Response, RichText, Sense, TextEdit, TextWrapMode, WidgetInfo,
-    WidgetType, pos2, vec2,
+    Align, Button, ComboBox, CornerRadius, InnerResponse, Key, Layout, Response, RichText, Sense, TextEdit, TextWrapMode, WidgetInfo, WidgetType,
+    pos2, vec2,
 };
 use serde_json::json;
 
 use crate::automation::Tags;
-use crate::icons;
+use crate::components::icon::Icon;
 use crate::theme::{self, Text, size::RADIUS_CONTROL};
 
 /// The height of every control in a row: the toggle, the choices, the value field and the
@@ -135,7 +135,7 @@ fn apply() -> Run {
 }
 
 /// A square button with an icon; `true` when clicked.
-fn icon_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, hover: &str, selected: bool, icon: impl Fn(&egui::Painter, Rect)) -> bool {
+fn icon_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, hover: &str, selected: bool, icon: Icon) -> bool {
     let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(SQUARE, ROW_H), Sense::click());
     let fill = if selected {
@@ -146,7 +146,7 @@ fn icon_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, hover: &str, select
         t.card
     };
     ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, egui::Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
-    icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)));
+    icon.paint(ui.painter(), rect.center(), t.text_muted);
     let r = r.on_hover_text(hover);
     tags.tag_value(id, &r, selected);
     r.clicked()
@@ -170,9 +170,8 @@ pub(crate) fn show(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags) -> Vec<Run
 }
 
 fn toggle(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
-    let t = theme::tokens(ui.ctx());
     let hover = if bar.raw_mode { "Back to filter rows" } else { "Write a raw WHERE condition" };
-    if icon_button(ui, tags, "filter-raw-toggle", hover, bar.raw_mode, |p, r| icons::brackets(p, r, t.text_muted)) {
+    if icon_button(ui, tags, "filter-raw-toggle", hover, bar.raw_mode, Icon::Code) {
         runs.push(("table.setFilters", json!({ "rawMode": !bar.raw_mode, "apply": false })));
     }
 }
@@ -380,8 +379,8 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                 ui.allocate_exact_size(vec2(value_w, ROW_H), Sense::hover());
             }
             // Remove, then (first row) add and apply.
-            let removed = icon_button(ui, tags, &format!("filter-{n}-remove"), "Remove this filter", false, |p, r| icons::minus(p, r, t.text_muted));
-            let added = n == 0 && icon_button(ui, tags, "filter-add", "Add a filter (AND)", false, |p, r| icons::plus(p, r, t.text_muted));
+            let removed = icon_button(ui, tags, &format!("filter-{n}-remove"), "Remove this filter", false, Icon::Minus);
+            let added = n == 0 && icon_button(ui, tags, "filter-add", "Add a filter (AND)", false, Icon::Plus);
             if n == 0 {
                 apply_button(ui, bar, tags, runs);
             }

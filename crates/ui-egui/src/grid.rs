@@ -57,8 +57,8 @@ use egui_extras::{Column, TableBuilder};
 use serde_json::{Map, json};
 
 use crate::automation::{CellBlock, Tags};
+use crate::components::icon::{self, Icon};
 use crate::connections::{line_galley, line_galley_as_written};
-use crate::icons;
 use crate::theme::{self, Text};
 
 /// A row's height.
@@ -297,7 +297,7 @@ fn gutter_width(last: u64) -> f32 {
 }
 
 /// The mark `display::grid_text` puts for a line break. egui's built-in fonts have no glyph for
-/// it, so the grid draws it ([`icons::line_break`]).
+/// it, so the grid draws it ([`icon::line_break`]).
 const BREAK: char = '↵';
 /// The room a drawn line break takes.
 const BREAK_W: f32 = 12.0;
@@ -313,7 +313,7 @@ fn paint_text(ui: &egui::Ui, p: &egui::Painter, text: &str, (x, y, right): (f32,
                 p.galley(pos2(at, y - g.size().y / 2.0), g, color);
                 break;
             }
-            icons::line_break(p, Rect::from_center_size(pos2(at + BREAK_W / 2.0, y), vec2(10.0, 10.0)), color);
+            icon::line_break(p, Rect::from_center_size(pos2(at + BREAK_W / 2.0, y), vec2(10.0, 10.0)), color);
             at += BREAK_W;
         }
         if part.is_empty() {
@@ -551,10 +551,10 @@ impl Grid<'_> {
         p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.line));
         p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, t.line));
         let mut x = rect.left() + PAD;
-        let icon = |x: f32| Rect::from_min_size(pos2(x, rect.center().y - 7.0), vec2(14.0, 14.0));
+        let slot = pos2(x + 7.0, rect.center().y);
         match self.key(col) {
-            Key::Primary => icons::key_primary(&p, icon(x), t.key),
-            Key::Foreign => icons::key_foreign(&p, icon(x), t.text_muted),
+            Key::Primary => Icon::Key.paint(&p, slot, t.key),
+            Key::Foreign => Icon::KeyForeign.paint(&p, slot, t.text_muted),
             Key::None => {}
         }
         if self.key(col) != Key::None {
@@ -572,7 +572,8 @@ impl Grid<'_> {
         }
         if let Some(dir) = self.sort_of(col) {
             let r = Rect::from_min_size(pos2(rect.right() - PAD - 12.0, rect.center().y - 6.0), vec2(12.0, 12.0));
-            icons::sort(&p, r, t.ink, dir == SortDir::Asc);
+            let arrow = if dir == SortDir::Asc { Icon::SortAscending } else { Icon::SortDescending };
+            arrow.paint(&p, r.center(), t.ink);
         }
         resp
     }
@@ -644,7 +645,7 @@ impl Grid<'_> {
         let link = link.then(|| {
             let r = Rect::from_min_size(pos2(rect.right() - PAD - 15.0, rect.center().y - 8.0), vec2(16.0, 16.0));
             let resp = ui.interact(r, ui.id().with(("dbee-fk-link", row, col)), Sense::click());
-            icons::follow(&p, r.shrink(1.0), if resp.hovered() { t.ink } else { t.text_muted });
+            icon::follow(&p, r.shrink(1.0), if resp.hovered() { t.ink } else { t.text_muted });
             resp
         });
         Drawn { text, null, resp, link }

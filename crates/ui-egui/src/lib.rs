@@ -14,7 +14,6 @@ pub mod dialogs;
 pub mod editors;
 pub mod filter_bar;
 pub mod grid;
-pub mod icons;
 pub mod menu;
 pub mod paging;
 pub mod picker;

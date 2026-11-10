@@ -29,7 +29,7 @@ use std::sync::Arc;
 use dbee_config::{ConnectionColor, ConnectionConfig};
 use dbee_core::{Catalog, RelKind, TableRef};
 use dbee_engine::{Json, Outcome, Screen, State, Which};
-use egui::{Align2, Color32, CornerRadius, Frame, Key, Margin, Modifiers, Rect, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, Frame, Key, Margin, Modifiers, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -386,7 +386,7 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
                 let x = rect.left() + 32.0;
                 match hit {
                     Hit::Table { table, kind } => {
-                        kind_icon(*kind)(p, Rect::from_center_size(mark, vec2(16.0, 16.0)), t.text_muted);
+                        kind_icon(*kind).paint(p, mark, t.text_muted);
                         let schema = line_galley(ui, &format!("{}.", table.schema), Text::Body, t.text_muted, WIDTH * 0.4);
                         let schema_w = schema.size().x;
                         p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);

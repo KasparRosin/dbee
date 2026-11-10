@@ -69,13 +69,14 @@ use serde_json::{Value as Json, json};
 
 use crate::DbeeApp;
 use crate::automation::Tags;
+use crate::components::icon::Icon;
 use crate::connections::{line_galley, line_galley_as_written};
 use crate::editors::size_text;
+use crate::shortcuts;
 use crate::theme::{
     self, Text,
     size::{RADIUS_CONTROL, RADIUS_FLOAT},
 };
-use crate::{icons, shortcuts};
 
 /// The automation ids.
 pub const PANEL: &str = "value-panel";
@@ -684,7 +685,7 @@ pub(crate) fn toggle(ui: &mut egui::Ui, open: bool, tags: &mut Tags) -> bool {
         ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), t.hover);
     }
     let colour = if open { t.ink } else { t.text_muted };
-    icons::side_panel(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), colour, open);
+    Icon::Panel.paint(ui.painter(), rect.center(), colour);
     let r = r.on_hover_text(if open { "Hide the value panel" } else { "Show the value panel" });
     tags.tag_value(TOGGLE, &r, open);
     r.clicked()

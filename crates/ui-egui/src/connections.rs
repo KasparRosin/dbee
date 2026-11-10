@@ -60,9 +60,11 @@ use egui::text::{LayoutJob, TextWrapping};
 use egui::{Align, Button, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
+use crate::DbeeApp;
 use crate::app::{Origin, sentence};
 use crate::automation::Tags;
 use crate::components::chip::Chip;
+use crate::components::icon::Icon;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
@@ -70,7 +72,6 @@ use crate::theme::{
     self, Text, connection_color,
     size::{RADIUS_CONTROL, RADIUS_FLOAT},
 };
-use crate::{DbeeApp, icons};
 
 pub(crate) const OPEN: &str = "connection.open";
 pub(crate) const TEST: &str = "connection.test";
@@ -763,7 +764,7 @@ pub(crate) fn line_job(ui: &egui::Ui, mut job: LayoutJob, width: f32) -> std::sy
 }
 
 /// A full-width button with a code-drawn icon left of its label.
-fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, Rect, Color32)) -> egui::Response {
+fn icon_button(ui: &mut egui::Ui, label: &str, icon: Icon) -> egui::Response {
     let t = theme::tokens(ui.ctx());
     let size = vec2(ui.available_width(), 36.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -776,8 +777,7 @@ fn icon_button(ui: &mut egui::Ui, label: &str, icon: fn(&egui::Painter, Rect, Co
     };
     let p = ui.painter();
     p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
-    let icon_rect = Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), vec2(16.0, 16.0));
-    icon(p, icon_rect, t.ink);
+    icon.paint(p, pos2(rect.left() + 20.0, rect.center().y), t.ink);
     Text::ButtonCaps.paint(p, pos2(rect.left() + 36.0, rect.center().y), egui::Align2::LEFT_CENTER, label, t.text);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     response
@@ -799,7 +799,7 @@ fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, a
     egui::Panel::left("connections-side").resizable(false).exact_size(300.0).frame(Frame::new().fill(t.bg).inner_margin(Margin::same(14))).show(
         ui,
         |ui| {
-            let new = icon_button(ui, "New connection", icons::plus);
+            let new = icon_button(ui, "New connection", Icon::Plus);
             tags.tag("conn-new", &new);
             if new.clicked() {
                 acts.push(Act::New);

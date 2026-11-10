@@ -4,7 +4,7 @@
 //! - User schemas first: the catalog's default schema (Postgres `public`, the database a MySQL
 //!   connection names, SQLite `main`) first and open, or without one the first user schema open,
 //!   the others closed, in the catalog's order. Each lists its tables, views and materialized
-//!   views, each kind with its own icon ([`crate::icons`]). A table's chevron shows its visible
+//!   views, each kind with its own icon ([`Icon`]). A table's chevron shows its visible
 //!   columns with their types, and a key icon on primary and foreign key columns.
 //! - The system schemas, those the catalog marks (Postgres's `pg_catalog` and
 //!   `information_schema`, MySQL's `mysql`, `sys`, …), sit in one group at the bottom, closed, and
@@ -39,8 +39,8 @@ use egui::{Align, Color32, CornerRadius, Margin, Rect, ScrollArea, Sense, TextEd
 use serde_json::json;
 
 use crate::automation::Tags;
+use crate::components::icon::{self, Icon};
 use crate::connections::{line_galley, line_galley_as_written};
-use crate::icons;
 use crate::theme::{
     self, Text,
     size::{self, RADIUS_CONTROL},
@@ -204,12 +204,17 @@ pub fn kind_name(kind: RelKind) -> &'static str {
 }
 
 /// The icon for a relation of `kind`; every kind draws in `text_muted`.
-pub fn kind_icon(kind: RelKind) -> fn(&egui::Painter, Rect, Color32) {
+pub fn kind_icon(kind: RelKind) -> Icon {
     match kind {
-        RelKind::Table | RelKind::PartitionedTable | RelKind::ForeignTable => icons::table,
-        RelKind::View => icons::view,
-        RelKind::MaterializedView => icons::materialized_view,
+        RelKind::Table | RelKind::PartitionedTable | RelKind::ForeignTable => Icon::Table,
+        RelKind::View => Icon::View,
+        RelKind::MaterializedView => Icon::MaterializedView,
     }
+}
+
+/// A row's expander: down while `open`.
+fn chevron(open: bool) -> Icon {
+    if open { Icon::ChevronDown } else { Icon::ChevronRight }
 }
 
 /// `1,234`.
@@ -422,8 +427,8 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
             Refresh::Running => {
                 egui::Spinner::new().size(size::SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
             }
-            Refresh::Ready => icons::refresh(ui.painter(), icon_rect, t.text_muted),
-            Refresh::Disabled(_) => icons::refresh(ui.painter(), icon_rect, t.text_faint),
+            Refresh::Ready => Icon::Refresh.paint(ui.painter(), icon_rect.center(), t.text_muted),
+            Refresh::Disabled(_) => Icon::Refresh.paint(ui.painter(), icon_rect.center(), t.text_faint),
         }
         let r = match &tree.refresh {
             Refresh::Ready => r.on_hover_text(format!("Refresh the {many}")),
@@ -586,8 +591,8 @@ fn draw_row(
     };
     match row {
         Row::System { open, schemas } => {
-            icons::chevron(&p, chevron_rect, t.text_muted, open);
-            icons::schema(&p, icon_rect, t.text_muted);
+            chevron(open).paint(&p, chevron_rect.center(), t.text_muted);
+            Icon::Schema.paint(&p, icon_rect.center(), t.text_muted);
             let right = muted_right(&schemas.to_string(), Text::Small);
             label(system_label, t.text_muted, right);
             tags.tag_value(id, &r, json!({ "open": open }));
@@ -597,8 +602,8 @@ fn draw_row(
         }
         Row::Schema { s, open, tables, system } => {
             let name = catalog.schemas.get(s).map_or("", |x| x.name.as_str());
-            icons::chevron(&p, chevron_rect, t.text_muted, open);
-            icons::schema(&p, icon_rect, t.text_muted);
+            chevron(open).paint(&p, chevron_rect.center(), t.text_muted);
+            Icon::Schema.paint(&p, icon_rect.center(), t.text_muted);
             let right = muted_right(&thousands(tables as u64), Text::Small);
             label(name, t.text, right);
             tags.tag_value(id, &r, json!({ "open": open, "tables": tables }));
@@ -608,8 +613,8 @@ fn draw_row(
         }
         Row::Table { s, t: ti, open, .. } => {
             let Some(info) = catalog.schemas.get(s).and_then(|x| x.tables.get(ti)) else { return Click::None };
-            icons::chevron(&p, chevron_rect, t.text_muted, open);
-            kind_icon(info.kind)(&p, icon_rect, t.text_muted);
+            chevron(open).paint(&p, chevron_rect.center(), t.text_muted);
+            kind_icon(info.kind).paint(&p, icon_rect.center(), t.text_muted);
             label(&info.table.name, t.text, rect.right() - 8.0);
             let mut hover = format!("{} · {}", info.table.display(), kind_name(info.kind));
             if let Some(n) = row_estimate(info) {
@@ -641,9 +646,9 @@ fn draw_row(
                 None
             };
             match key {
-                Some("primary") => icons::key_primary(&p, icon_rect, t.key),
-                Some(_) => icons::key_foreign(&p, icon_rect, t.text_muted),
-                None => icons::column(&p, icon_rect, t.text_muted),
+                Some("primary") => Icon::KeyPrimary.paint(&p, icon_rect.center(), t.key),
+                Some(_) => Icon::KeyForeign.paint(&p, icon_rect.center(), t.text_muted),
+                None => icon::column(&p, icon_rect, t.text_muted),
             }
             let right = muted_right(col.label(), Text::Data);
             label(&col.name, t.text, right);

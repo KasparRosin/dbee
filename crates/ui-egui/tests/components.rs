@@ -125,7 +125,7 @@ fn the_showcase_draws_in_both_modes() {
                 _ => None,
             })
             .collect();
-        for caption in ["KEYCAP: DEFAULT, DISABLED", "CHIP: NEXT, AVAILABLE"] {
+        for caption in ["ICON/, TODAY'S DRAWINGS IN THEIR USUAL COLOUR", "KEYCAP: DEFAULT, DISABLED", "CHIP: NEXT, AVAILABLE"] {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");
         }
         let tokens = every(&t);
