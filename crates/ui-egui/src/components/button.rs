@@ -782,6 +782,31 @@ mod tests {
     }
 
     #[test]
+    fn bar_buttons_are_as_wide_as_the_pages() {
+        // The instances of the page's bar row (161306) and the icon kind, to a point: egui
+        // measures these words a little narrower than the page's font does.
+        let mut widths = Vec::new();
+        painted(Theme::Light, |ui| {
+            widths = [
+                BarButton::label(Icon::Refresh, "Refresh"),
+                BarButton::label(Icon::Plus, "Row"),
+                BarButton::label(Icon::Import, "Import"),
+                BarButton::label(Icon::Wrap, "Wrap"),
+                BarButton::label(Icon::Copy, "Copy"),
+                BarButton::icon(Icon::Panel),
+            ]
+            .iter()
+            .map(|b| b.width(ui))
+            .collect();
+        });
+        let page = [90.0, 63.0, 83.0, 69.0, 69.0, 36.0];
+        assert_eq!(widths.len(), page.len());
+        for (ours, page) in widths.iter().zip(page) {
+            assert!((ours - page).abs() <= 1.0, "{widths:?} against the page's {page}");
+        }
+    }
+
+    #[test]
     fn a_bar_button_that_is_on_says_so() {
         use egui::accesskit::{Role, Toggled};
         use egui_kittest::kittest::NodeT;
