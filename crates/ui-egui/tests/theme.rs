@@ -481,21 +481,33 @@ fn the_frame_after_a_switch_is_wholly_in_the_new_mode() {
 fn switching_recolours_what_is_already_open() {
     let db = dbee_testkit::require_testdb!();
     let (l, d) = (dbee_ui_egui::theme::LIGHT, dbee_ui_egui::theme::DARK);
-    let mut ui = Ui::connected(db);
-    ui.open("shop", "orders");
-    ui.until("the grid", |ui| ui.tag("grid-cell-0-5").is_some());
-    ui.click("grid-cell-0-5");
-    ui.frame();
-    ui.execute("tab.newQuery", json!({ "text": "select 'x' -- note" }));
-    ui.frame();
-    ui.frame();
     let colours = |ui: &Ui| -> Vec<egui::Color32> {
         ui.texts().iter().flat_map(|(_, g)| g.job.sections.iter().map(|s| s.format.color).collect::<Vec<_>>()).collect()
     };
-    assert!(colours(&ui).contains(&l.syn_keyword) && colours(&ui).contains(&l.syn_string), "the editor is coloured in light");
+    let none_of =
+        |shown: &[egui::Color32], t: &dbee_ui_egui::theme::Tokens| ![t.syn_keyword, t.syn_string, t.syn_number].iter().any(|c| shown.contains(c));
+    let mut ui = Ui::connected(db);
+    // The value panel's JSON, on the table tab: its keys and strings.
+    ui.open("shop", "orders");
+    ui.until("the grid", |ui| ui.tag("grid-cell-0-5").is_some());
+    ui.click("grid-cell-0-5");
+    ui.until("the JSON's colours", |ui| ui.tag("value-text").is_some_and(|t| t["value"]["highlighted"] == true));
+    let before = colours(&ui);
+    assert!(before.contains(&l.syn_keyword) && before.contains(&l.syn_string), "the JSON is coloured in light");
     ui.execute("ui.themeDark", json!({}));
     ui.frame();
     let after = colours(&ui);
-    assert!(after.contains(&d.syn_keyword) && after.contains(&d.syn_string), "the editor is coloured in dark");
-    assert!(!after.contains(&l.syn_keyword) && !after.contains(&l.syn_string), "no light syntax colour is left");
+    assert!(after.contains(&d.syn_keyword) && after.contains(&d.syn_string), "the JSON is coloured in dark");
+    assert!(none_of(&after, &l), "no light syntax colour is left in the JSON");
+    // The editor, and back to light.
+    ui.execute("tab.newQuery", json!({ "text": "select 'x' -- note" }));
+    ui.frame();
+    ui.frame();
+    let before = colours(&ui);
+    assert!(before.contains(&d.syn_keyword) && before.contains(&d.syn_string), "the editor is coloured in dark");
+    ui.execute("ui.themeLight", json!({}));
+    ui.frame();
+    let after = colours(&ui);
+    assert!(after.contains(&l.syn_keyword) && after.contains(&l.syn_string), "the editor is coloured in light");
+    assert!(none_of(&after, &d), "no dark syntax colour is left in the editor");
 }
