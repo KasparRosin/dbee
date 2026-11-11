@@ -2,12 +2,13 @@
 //! at them against the page's light and dark frames (`examples/components.rs`): one section per
 //! page component, in the page's order, each headed with the page's caption.
 
-use egui::{Align2, Color32, CornerRadius, Label, Rect, Sense, Ui, Vec2, pos2, vec2};
+use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use super::Look;
 use super::button::{BarButton, BoxButton, IconButton, TextButton};
 use super::chip::Chip;
 use super::icon::Icon;
+use super::input::{Field, Input};
 use super::keycap::Keycap;
 use crate::theme::size::{RADIUS_CONTROL, SPACE_8, SPACE_16, SPACE_24};
 use crate::theme::{Text, Tokens, tokens};
@@ -18,6 +19,8 @@ const BETWEEN: f32 = 20.0;
 const ROW_GAP: f32 = 20.0;
 /// Between the keys of one shortcut.
 const KEY_GAP: f32 = 3.0;
+/// The Field and input frame's inputs and fields.
+const INPUT_W: f32 = 160.0;
 /// The Icons frame: 20 under its caption; cells of 120 by 40, nine to a row, 8 apart and 20
 /// between rows. In a cell the icon's box ends 18 down, centred, and its name starts 24 down.
 const ICONS_UNDER_CAPTION: f32 = 20.0;
@@ -78,6 +81,7 @@ pub fn show(ui: &mut Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
         section(ui, "icon/, today's drawings in their usual colour", ICONS_UNDER_CAPTION, icons);
         buttons(ui);
+        inputs(ui);
         section(ui, "keycap: default, disabled", SPACE_8, |ui| {
             ui.spacing_mut().item_spacing.x = KEY_GAP;
             for key in ["Ctrl", "Shift", "Z"] {
@@ -164,6 +168,38 @@ fn buttons(ui: &mut Ui) {
         ui.add(IconButton::plain(Icon::Next).look(hovered));
         ui.add(IconButton::plain(Icon::Next).look(focused));
         ui.add_enabled(false, IconButton::plain(Icon::First));
+    });
+}
+
+/// The inputs in each of their states and two fields, as the page's Field and input frame shows
+/// them.
+fn inputs(ui: &mut Ui) {
+    let focused = Look { focused: true, ..Look::default() };
+    let rows: [(&str, fn(&mut String) -> Input<'_>, &str, &str, &str); 2] = [
+        ("input body: empty, placeholder, filled, focus, disabled, error", Input::body, "shop", "Optional", "shop"),
+        ("input data: empty, placeholder, filled, focus, disabled, error", Input::data, "42", "None", "pg14.internal"),
+    ];
+    for (caption, new, typed, placeholder, wrong) in rows {
+        section(ui, caption, SPACE_8, |ui| {
+            ui.spacing_mut().item_spacing.x = ROW_GAP;
+            let mut text = [String::new(), String::new(), typed.to_owned(), typed.to_owned(), typed.to_owned(), wrong.to_owned()];
+            let [empty, hint, filled, focus, off, error] = &mut text;
+            ui.add(new(empty).desired_width(INPUT_W));
+            ui.add(new(hint).placeholder(placeholder).desired_width(INPUT_W));
+            ui.add(new(filled).desired_width(INPUT_W));
+            ui.add(new(focus).look(focused).desired_width(INPUT_W));
+            ui.add_enabled(false, new(off).desired_width(INPUT_W));
+            ui.add(new(error).error(true).desired_width(INPUT_W));
+        });
+    }
+    section(ui, "field: label plus input; with an error line", SPACE_8, |ui| {
+        // The page's fields stand on one line, their tops level.
+        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = ROW_GAP;
+            let (mut name, mut url) = ("shop".to_owned(), "shop".to_owned());
+            ui.add(Field::new("Name", Input::body(&mut name).desired_width(INPUT_W)));
+            ui.add(Field::new("Database URL", Input::body(&mut url).desired_width(INPUT_W)).error(Some("Not a database URL")));
+        });
     });
 }
 

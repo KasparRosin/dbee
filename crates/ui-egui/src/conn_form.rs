@@ -18,22 +18,19 @@ use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, 
 use dbee_engine::Json;
 use egui::{
     Align, Button, Checkbox, CornerRadius, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect, RectAlign, RichText,
-    ScrollArea, Sense, Stroke, TextEdit, UiBuilder, pos2, vec2,
+    ScrollArea, Sense, Stroke, UiBuilder, pos2, vec2,
 };
 
 use crate::automation::Tags;
 use crate::components::button::{BoxButton, TextButton};
+use crate::components::input::{self, Field, Input};
 use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
 use crate::filter_bar;
 use crate::picker::Pick;
 use crate::theme::{self, Text, connection_color, size::RADIUS_CONTROL};
 
-/// The height of a label above a field.
-const LABEL_H: f32 = 16.0;
-/// The height of a field.
+/// The height of a row under a field's label: an input, the choices, a file box, the colours.
 const FIELD_H: f32 = 28.0;
-/// A field with its label.
-const ROW_H: f32 = LABEL_H + FIELD_H;
 /// The slot under the buttons for an error or a test result.
 const MESSAGE_H: f32 = 52.0;
 /// Save · Test · Connect and the message slot under them, with the space between.
@@ -276,12 +273,12 @@ impl Form {
 
 // ---- drawing ---------------------------------------------------------------------------------
 
-/// A field's label and the field under it, `width` wide.
+/// A field's label over what `add` draws under it (the colours, the choices, a file box, an input
+/// with a button beside it), `width` wide.
 fn column<R>(ui: &mut egui::Ui, width: f32, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
+    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
-        Text::Small.paint(ui.painter(), rect.left_center(), egui::Align2::LEFT_CENTER, label, theme::tokens(ui.ctx()).text_muted);
+        input::label(ui, label, |_| {});
         add(ui)
     })
     .inner
@@ -298,14 +295,13 @@ fn column_noted<R>(
     id: &str,
     add: impl FnOnce(&mut egui::Ui, &mut Tags) -> R,
 ) -> R {
-    ui.allocate_ui_with_layout(vec2(width, ROW_H), Layout::top_down(Align::Min), |ui| {
+    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
-        let (rect, _) = ui.allocate_exact_size(vec2(width, LABEL_H), Sense::hover());
-        let shown = Text::Small.paint(ui.painter(), rect.left_center(), egui::Align2::LEFT_CENTER, label, theme::tokens(ui.ctx()).text_muted);
-        let room = Rect::from_min_max(pos2((shown.right() + 8.0).min(rect.right()), rect.top()), rect.max);
-        let note_ui = UiBuilder::new().max_rect(room).layout(Layout::left_to_right(Align::Center));
-        let r = ui.scope_builder(note_ui, |ui| ui.add(Label::new(Text::Small.rich(note).color(theme::tokens(ui.ctx()).text_muted)).truncate())).inner;
-        tags.tag_value(id, &r, note);
+        input::label(ui, label, |ui| {
+            ui.add_space(8.0);
+            let r = ui.add(Label::new(Text::Small.rich(note).color(theme::tokens(ui.ctx()).text_muted)).truncate());
+            tags.tag_value(id, &r, note);
+        });
         add(ui, tags)
     })
     .inner
@@ -319,16 +315,20 @@ pub(crate) fn field_id(id: &str) -> egui::Id {
     egui::Id::new(("dbee-form", id))
 }
 
-/// A one-line text field tagged `id` with its text.
-fn text_field(ui: &mut egui::Ui, tags: &mut Tags, id: &'static str, text: &mut String, hint: &str) -> egui::Response {
-    let r = ui.add(
-        TextEdit::singleline(text)
-            .id(field_id(id))
-            .hint_text(hint)
-            .desired_width(f32::INFINITY)
-            .min_size(vec2(0.0, FIELD_H))
-            .margin(Margin::symmetric(6, 5)),
-    );
+/// A field `width` wide: `label` over a one-line input of `text` (`font` is `Input::body` or
+/// `Input::data`) showing `hint` while empty; tagged `id` with its text, its text edit's id from
+/// [`field_id`].
+fn text_field(
+    ui: &mut egui::Ui,
+    tags: &mut Tags,
+    width: f32,
+    label: &str,
+    id: &'static str,
+    font: fn(&mut String) -> Input<'_>,
+    text: &mut String,
+    hint: &str,
+) -> egui::Response {
+    let r = ui.add(Field::new(label, font(text).id(field_id(id)).placeholder(hint).desired_width(width)));
     tags.tag_value(id, &r, text.as_str());
     r
 }
@@ -518,7 +518,7 @@ fn name_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
     let dots_w = dot * colors.len() as f32 + 6.0 * (colors.len() as f32 - 1.0);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = GAP;
-        column(ui, w - dots_w - GAP, "Name", |ui| text_field(ui, tags, "conn-name", &mut f.name, "Optional"));
+        text_field(ui, tags, w - dots_w - GAP, "Name", "conn-name", Input::body, &mut f.name, "Optional");
         column(ui, dots_w, "Colour", |ui| {
             let row = ui.allocate_ui_with_layout(vec2(dots_w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -558,27 +558,21 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
     let f = &mut conn.form;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = GAP;
-        column(ui, w - PORT_W - GAP, "Host", |ui| text_field(ui, tags, "conn-host", &mut f.host, "localhost"));
-        column(ui, PORT_W, "Port", |ui| text_field(ui, tags, "conn-port", &mut f.port, &default_port(f.kind)));
+        text_field(ui, tags, w - PORT_W - GAP, "Host", "conn-host", Input::data, &mut f.host, "localhost");
+        text_field(ui, tags, PORT_W, "Port", "conn-port", Input::data, &mut f.port, &default_port(f.kind));
     });
 
     let half = (w - GAP) / 2.0;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = GAP;
-        column(ui, half, "User", |ui| text_field(ui, tags, "conn-user", &mut f.user, ""));
+        text_field(ui, tags, half, "User", "conn-user", Input::data, &mut f.user, "");
         column(ui, half, "Password", |ui| {
             ui.allocate_ui_with_layout(vec2(half, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 // As wide for both words, so the field keeps its width.
                 let show_w = BoxButton::outline("Show").width(ui).max(BoxButton::outline("Hide").width(ui));
-                let r = ui.add(
-                    TextEdit::singleline(&mut f.password)
-                        .id(field_id("conn-password"))
-                        .password(!f.show_password)
-                        .desired_width(half - show_w - 6.0)
-                        .min_size(vec2(0.0, FIELD_H))
-                        .margin(Margin::symmetric(6, 5)),
-                );
+                let password = Input::data(&mut f.password).id(field_id("conn-password")).password(!f.show_password);
+                let r = ui.add(password.desired_width(half - show_w - 6.0));
                 tags.tag_secret("conn-password", &r, !f.password.is_empty());
                 let label = if f.show_password { "Hide" } else { "Show" };
                 let s = ui.add(BoxButton::outline(label).min_width(show_w));
@@ -670,13 +664,7 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
         ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             let field_w = w - LIST_BUTTON_W - 6.0;
-            let field = ui.add(
-                TextEdit::singleline(&mut form.database)
-                    .id(field_id("conn-database"))
-                    .desired_width(field_w)
-                    .min_size(vec2(0.0, FIELD_H))
-                    .margin(Margin::symmetric(6, 5)),
-            );
+            let field = ui.add(Input::data(&mut form.database).id(field_id("conn-database")).desired_width(field_w));
             tags.tag_value("conn-database", &field, form.database.as_str());
             if field.changed() {
                 databases.open = false;
@@ -847,10 +835,10 @@ fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut
             ui.add_space(4.0);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
-                column(ui, w - PORT_W - GAP, "SSH host", |ui| text_field(ui, tags, "conn-ssh-host", &mut f.ssh_host, "bastion.example.com"));
-                column(ui, PORT_W, "SSH port", |ui| text_field(ui, tags, "conn-ssh-port", &mut f.ssh_port, "22"));
+                text_field(ui, tags, w - PORT_W - GAP, "SSH host", "conn-ssh-host", Input::data, &mut f.ssh_host, "bastion.example.com");
+                text_field(ui, tags, PORT_W, "SSH port", "conn-ssh-port", Input::data, &mut f.ssh_port, "22");
             });
-            column(ui, w, "SSH user", |ui| text_field(ui, tags, "conn-ssh-user", &mut f.ssh_user, ""));
+            text_field(ui, tags, w, "SSH user", "conn-ssh-user", Input::data, &mut f.ssh_user, "");
             let auths = [(Auth::Key, "Key", "key"), (Auth::Agent, "Agent", "agent"), (Auth::Password, "Password", "password")];
             column(ui, w, "Login", |ui| segments(ui, tags, "conn-ssh-auth", &mut f.ssh_auth, &auths, w));
             // What the login will use: one fixed slot for every choice.

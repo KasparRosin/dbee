@@ -361,46 +361,11 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
-    use crate::components::{Edge, edges, fills, painted, showcase, texts};
-    use crate::theme::{DARK, LIGHT, Tokens};
-
-    fn both() -> [(Theme, Tokens); 2] {
-        [(Theme::Light, LIGHT), (Theme::Dark, DARK)]
-    }
-
-    /// Fills drawn within `at`.
-    fn fills_in(shapes: &[egui::epaint::ClippedShape], at: Rect) -> Vec<(Rect, Color32)> {
-        fills(shapes).into_iter().filter(|(r, _)| at.contains_rect(*r)).collect()
-    }
-
-    /// Edges drawn on or within `at` grown by `out`.
-    fn edges_in(shapes: &[egui::epaint::ClippedShape], at: Rect, out: f32) -> Vec<Edge> {
-        edges(shapes).into_iter().filter(|e| at.expand(out).contains_rect(e.outer)).collect()
-    }
-
-    /// Room above a button drawn alone: the harness paints a ground the size of what it holds.
-    const ROOM: f32 = 10.0;
+    use crate::components::{Edge, ROOM, both, edges_in, fills_in, harness, painted, texts};
+    use crate::theme::DARK;
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() <= 0.5
-    }
-
-    /// A harness drawing `add` in `theme` with dbee's theme and fonts, from its second frame on.
-    fn harness<S>(theme: Theme, state: S, mut add: impl FnMut(&mut Ui, &mut S) + 'static) -> Harness<'static, S> {
-        let mut ready = false;
-        Harness::builder().with_size(egui::vec2(600.0, 200.0)).build_ui_state(
-            move |ui, s: &mut S| {
-                if !ready {
-                    showcase::prepare(ui.ctx(), theme);
-                    ui.ctx().all_styles_mut(|style| style.interaction.tooltip_delay = 0.0);
-                    ready = true;
-                    ui.ctx().request_repaint();
-                    return;
-                }
-                add(ui, s);
-            },
-            state,
-        )
     }
 
     #[test]

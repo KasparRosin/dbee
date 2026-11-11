@@ -24,12 +24,13 @@
 
 use dbee_config::{ConnectionConfig, DbKind};
 use dbee_engine::{EngineError, Json, Need, Outcome};
-use egui::{Align, Align2, Checkbox, CornerRadius, Frame, Key, Layout, Margin, Stroke, TextEdit, vec2};
+use egui::{Align, Align2, Checkbox, CornerRadius, Frame, Key, Layout, Margin, Stroke, vec2};
 use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::button::BoxButton;
+use crate::components::input::{Field, Input};
 use crate::connections;
 use crate::theme::{
     self, Text,
@@ -385,25 +386,17 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             title(ui, "Fill from URL");
             text(ui, tags, "dialog-text", &format!("Paste a {} URL. The parts it has replace those in the form.", schemes(kinds)));
             ui.add_space(8.0);
-            let r = ui.add(
-                TextEdit::singleline(url)
-                    .id(egui::Id::new("dialog-url"))
-                    .hint_text(url_hint(kinds))
-                    .desired_width(WIDTH)
-                    .margin(Margin::symmetric(6, 5)),
-            );
+            let hint = url_hint(kinds);
+            let input = Input::data(url).id(egui::Id::new("dialog-url")).placeholder(&hint).desired_width(WIDTH).error(error.is_some());
+            // The line for the reason a URL did not parse keeps its room.
+            let shown = Field::unlabelled(input).error(error.as_deref()).keep_error_room(true).show(ui);
+            let r = shown.input;
             // The URL can carry a password.
             tags.tag_secret_as("dialog-url", &r, !url.is_empty(), true);
             focus(&r, focused);
             let entered = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            // A reserved line for the reason a URL did not parse.
-            let (rect, line) = ui.allocate_exact_size(vec2(WIDTH, 20.0), egui::Sense::hover());
-            if let Some(e) = error {
-                let mut job = Text::Small.job(e, t.danger);
-                job.wrap = egui::text::TextWrapping::truncate_at_width(WIDTH);
-                let galley = ui.painter().layout_job(job);
-                ui.painter().galley(egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.danger);
-                tags.tag_value_as("dialog-error", &line, e.as_str(), true);
+            if let (Some(e), Some(line)) = (error.as_ref(), shown.error.as_ref()) {
+                tags.tag_value_as("dialog-error", line, e.as_str(), true);
             }
             let (ok, cancel) = buttons(ui, tags, "Fill", !url.trim().is_empty(), false, true);
             if cancel {
@@ -441,9 +434,7 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             title(ui, heading);
             text(ui, tags, "dialog-text", line);
             ui.add_space(8.0);
-            let r = ui.add(
-                TextEdit::singleline(value).id(egui::Id::new("dialog-secret")).password(true).desired_width(WIDTH).margin(Margin::symmetric(6, 5)),
-            );
+            let r = ui.add(Input::body(value).id(egui::Id::new("dialog-secret")).password(true).desired_width(WIDTH));
             tags.tag_secret_as("dialog-secret", &r, !value.is_empty(), true);
             focus(&r, focused);
             let entered = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));

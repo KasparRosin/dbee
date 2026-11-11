@@ -6,6 +6,7 @@ pub mod button;
 pub mod chip;
 pub mod focus;
 pub mod icon;
+pub mod input;
 pub mod keycap;
 pub mod showcase;
 
@@ -69,6 +70,36 @@ pub(crate) fn painted(theme: egui::Theme, mut add: impl FnMut(&mut egui::Ui)) ->
     h.output().shapes.clone()
 }
 
+/// Both modes with their tokens.
+#[cfg(test)]
+pub(crate) fn both() -> [(egui::Theme, crate::theme::Tokens); 2] {
+    [(egui::Theme::Light, crate::theme::LIGHT), (egui::Theme::Dark, crate::theme::DARK)]
+}
+
+/// Room above a control drawn alone: the harness paints a ground the size of what it holds.
+#[cfg(test)]
+pub(crate) const ROOM: f32 = 10.0;
+
+/// A harness drawing `add` in `theme` with dbee's theme and fonts, from its second frame on, with
+/// hover texts at once.
+#[cfg(test)]
+pub(crate) fn harness<S>(theme: egui::Theme, state: S, mut add: impl FnMut(&mut egui::Ui, &mut S) + 'static) -> egui_kittest::Harness<'static, S> {
+    let mut ready = false;
+    egui_kittest::Harness::builder().with_size(egui::vec2(600.0, 200.0)).build_ui_state(
+        move |ui, s: &mut S| {
+            if !ready {
+                showcase::prepare(ui.ctx(), theme);
+                ui.ctx().all_styles_mut(|style| style.interaction.tooltip_delay = 0.0);
+                ready = true;
+                ui.ctx().request_repaint();
+                return;
+            }
+            add(ui, s);
+        },
+        state,
+    )
+}
+
 /// A rect's edge as drawn: the outside of its stroke, its width, colour and corners.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -96,6 +127,18 @@ pub(crate) fn edges(shapes: &[egui::epaint::ClippedShape]) -> Vec<Edge> {
             _ => None,
         })
         .collect()
+}
+
+/// The edges drawn on or within `at` grown by `out`.
+#[cfg(test)]
+pub(crate) fn edges_in(shapes: &[egui::epaint::ClippedShape], at: egui::Rect, out: f32) -> Vec<Edge> {
+    edges(shapes).into_iter().filter(|e| at.expand(out).contains_rect(e.outer)).collect()
+}
+
+/// The fills drawn within `at`.
+#[cfg(test)]
+pub(crate) fn fills_in(shapes: &[egui::epaint::ClippedShape], at: egui::Rect) -> Vec<(egui::Rect, egui::Color32)> {
+    fills(shapes).into_iter().filter(|(r, _)| at.contains_rect(*r)).collect()
 }
 
 /// The filled rects in `shapes`, each with its fill.

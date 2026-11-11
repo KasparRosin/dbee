@@ -1307,3 +1307,144 @@ fn moved_buttons_keep_their_ids_values_and_flags() {
     ui.click("dialog-cancel");
     assert!(ui.tag("dialog-ok").is_none(), "Cancel closed the dialog");
 }
+
+/// The rect of automation entry `e`.
+fn rect_of(e: &Json) -> egui::Rect {
+    let [x, y, w, h] = rect(e).map(|v| v as f32);
+    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+}
+
+/// The edges the last frame drew on `at`: each rect's stroke, drawn inside it, as (width, colour).
+fn edges_on(ui: &Ui, at: egui::Rect) -> Vec<(f32, egui::Color32)> {
+    let same = |a: egui::Rect| (a.min - at.min).length() < 0.5 && (a.max - at.max).length() < 0.5;
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke_kind == egui::StrokeKind::Inside && same(r.rect) => {
+                Some((r.stroke.width, r.stroke.color))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The form's fields and the URL dialog's, moved to `components::input`, say in `ui.inspect` what
+/// they said before (ids, values, secrets, enabled flags), are the page's 28 tall, keep what is
+/// typed as typed, and have their label drawn in capitals over them.
+#[test]
+fn moved_inputs_keep_their_ids_values_and_secrets() {
+    const SECRET: &str = "typed-Secret-3";
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = ui();
+    ui.click("conn-ssh-on");
+    let fields = [
+        ("conn-name", "Shop (Live)", "NAME"),
+        ("conn-host", "Db.Example.COM", "HOST"),
+        ("conn-port", "6543", "PORT"),
+        ("conn-user", "Ann", "USER"),
+        ("conn-database", "Shop", "DATABASE"),
+        ("conn-ssh-host", "Bastion.Example.com", "SSH HOST"),
+        ("conn-ssh-port", "2222", "SSH PORT"),
+        ("conn-ssh-user", "Deploy", "SSH USER"),
+    ];
+    for (id, typed, _) in fields {
+        ui.replace(id, typed);
+    }
+    ui.click("conn-password");
+    ui.text(SECRET);
+    let i = ui.inspect();
+    for (id, typed, label) in fields {
+        let e = tag_in(&i, id).unwrap_or_else(|| panic!("`{id}` is drawn"));
+        assert_eq!(e["value"], typed, "`{id}`'s value");
+        assert!(e.get("enabled").is_none() && e.get("masked").is_none(), "`{id}`: {e}");
+        let at = rect_of(&e);
+        assert_eq!(at.height(), 28.0, "`{id}` is the page's 28 tall: {at:?}");
+        assert!(ui.text_in(at, typed).is_some(), "`{id}` draws `{typed}` as typed");
+        assert!(typed == typed.to_uppercase() || ui.text_in(at, &typed.to_uppercase()).is_none(), "`{id}`: never in capitals");
+        let above = egui::Rect::from_min_max(egui::pos2(at.left(), at.top() - 18.0), egui::pos2(at.right(), at.top() - 4.0));
+        assert!(ui.text_in(above, label).is_some(), "`{id}`: its label `{label}` 4 above it, in {above:?}");
+        assert_eq!(edges_on(&ui, at), [(1.0, t.line_strong)], "`{id}`: the input's edge");
+    }
+    let password = tag_in(&i, "conn-password").unwrap();
+    assert_eq!((password["masked"].clone(), password["set"].clone()), (json!(true), json!(true)), "conn-password stays a secret");
+    assert!(password.get("value").is_none(), "conn-password has no value in ui.inspect");
+    assert!(!i.to_string().contains(SECRET), "the typed password is not in ui.inspect");
+    let at = rect_of(&password);
+    assert_eq!(at.height(), 28.0, "conn-password is the page's 28 tall: {at:?}");
+    assert!(ui.text_in(at, &"•".repeat(SECRET.len())).is_some(), "conn-password draws a dot for each letter");
+    let above = egui::Rect::from_min_max(egui::pos2(at.left(), at.top() - 18.0), egui::pos2(at.right(), at.top() - 4.0));
+    assert!(ui.text_in(above, "PASSWORD").is_some(), "conn-password: its label 4 above it");
+    ui.click("conn-password-show");
+    assert!(ui.text_in(at, SECRET).is_some(), "Show draws the password");
+    assert!(!ui.inspect().to_string().contains(SECRET), "shown, it is still not in ui.inspect");
+
+    // A click keeps a field's edge; Shift+Tab's focus shows, and nothing moves.
+    ui.click("conn-port");
+    let (host, port) = (rect_of(&ui.tag("conn-host").unwrap()), rect_of(&ui.tag("conn-port").unwrap()));
+    assert_eq!(edges_on(&ui, port), [(1.0, t.line_strong)], "clicked, conn-port keeps its edge");
+    ui.key_with("Tab", json!({ "shift": true }));
+    assert_eq!(edges_on(&ui, host), [(2.0, t.ink)], "Shift+Tab: conn-host shows the keyboard's focus");
+    assert_eq!(edges_on(&ui, port), [(1.0, t.line_strong)], "and conn-port its edge");
+    assert_eq!((rect_of(&ui.tag("conn-host").unwrap()), rect_of(&ui.tag("conn-port").unwrap())), (host, port), "nothing moved");
+
+    // The URL dialog: its field a secret, focused as it opens; the reason a URL didn't parse under
+    // it, with a red edge.
+    ui.click("conn-fill-url");
+    ui.frame();
+    let url = ui.tag("dialog-url").unwrap();
+    assert_eq!((url["masked"].clone(), url["set"].clone()), (json!(true), json!(false)), "{url}");
+    assert!(url.get("enabled").is_none(), "{url}");
+    let at = rect_of(&url);
+    assert_eq!(at.height(), 28.0, "dialog-url is the page's 28 tall: {at:?}");
+    assert_eq!(edges_on(&ui, at), [(2.0, t.ink)], "the dialog gives it focus, and it shows");
+    ui.text("oracle://Nope.Example");
+    ui.click("dialog-ok");
+    let i = ui.inspect();
+    let url = tag_in(&i, "dialog-url").unwrap();
+    assert_eq!((url["masked"].clone(), url["set"].clone()), (json!(true), json!(true)), "{url}");
+    assert!(!i.to_string().contains("Nope.Example"), "the URL is not in ui.inspect");
+    let error = tag_in(&i, "dialog-error").expect("the reason shows");
+    let reason = error["value"].as_str().unwrap().to_string();
+    assert!(reason.contains("postgres://"), "{error}");
+    assert_eq!(rect_of(&url), at, "the field didn't move");
+    assert_eq!(edges_on(&ui, at), [(1.0, t.danger)], "a red edge");
+    let line = rect_of(&error);
+    assert!((line.top() - at.bottom() - 4.0).abs() < 0.5 && (line.left() - at.left()).abs() < 0.5, "the reason 4 under the field: {line:?} {at:?}");
+    assert!(ui.text_in(line, &reason).is_some(), "the reason is drawn as it reads");
+    ui.click("dialog-cancel");
+    assert!(ui.tag("dialog-url").is_none(), "Cancel closed the dialog");
+}
+
+/// The secret dialog's field, moved to `components::input`: a secret in `ui.inspect`, focused as
+/// the dialog opens, its text drawn as dots.
+#[test]
+fn the_moved_secret_field_stays_a_secret() {
+    const SECRET: &str = "not-the-Password-4";
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = ui();
+    let pg = pg14(db);
+    ui.replace("conn-host", &pg.host);
+    ui.replace("conn-port", &pg.port.to_string());
+    ui.replace("conn-user", &pg.user);
+    ui.replace("conn-database", &pg.database);
+    ui.click("conn-connect");
+    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+    ui.frame();
+    let secret = ui.tag("dialog-secret").unwrap();
+    assert_eq!((secret["masked"].clone(), secret["set"].clone()), (json!(true), json!(false)), "{secret}");
+    assert!(secret.get("enabled").is_none(), "{secret}");
+    let at = rect_of(&secret);
+    assert_eq!(at.height(), 28.0, "dialog-secret is the page's 28 tall: {at:?}");
+    assert_eq!(edges_on(&ui, at), [(2.0, t.ink)], "the dialog gives it focus, and it shows");
+    ui.text(SECRET);
+    let i = ui.inspect();
+    let secret = tag_in(&i, "dialog-secret").unwrap();
+    assert_eq!((secret["masked"].clone(), secret["set"].clone()), (json!(true), json!(true)), "dialog-secret is set and masked");
+    assert!(!i.to_string().contains(SECRET), "the typed secret is not in ui.inspect");
+    assert!(!ui.document().to_string().contains(SECRET), "nor in document.inspect");
+    assert!(ui.text_in(at, &"•".repeat(SECRET.len())).is_some(), "a dot for each letter");
+    assert!(ui.text_in(at, SECRET).is_none(), "the secret itself is not drawn");
+    ui.click("dialog-cancel");
+    assert_eq!(ui.inspect()["dialog"], Json::Null);
+}

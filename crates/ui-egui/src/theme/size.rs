@@ -33,6 +33,12 @@ pub const BAR_BUTTON_PAD_X: f32 = 12.0;
 pub const BAR_BUTTON_GAP: f32 = 8.0;
 pub const BAR_BUTTON_DIVIDER: f32 = 1.0;
 
+/// An input (`input`): this tall, its words this far inside its 1 px edge.
+pub const INPUT_H: f32 = 28.0;
+pub const INPUT_PAD_X: f32 = 8.0;
+/// A field (`field`): between its label and its input, and between its input and its error line.
+pub const FIELD_GAP: f32 = 4.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key.
 pub const KEYCAP_PAD_X: f32 = 4.0;
