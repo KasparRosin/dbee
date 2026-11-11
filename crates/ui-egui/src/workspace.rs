@@ -1,7 +1,8 @@
 //! The workspace, shown once a connection is open ([`screen`]):
 //!
 //! - the menu bar at the top ([`crate::menu`]);
-//! - the status bar at the bottom ([`status`]): the connection's name on its colour, the server
+//! - the status bar at the bottom ([`status`]): the connection's name on its colour, its address
+//!   as typed in its form ([`address`]: never the password), the server
 //!   version, the link's security while it is weaker than fully checked, READ-ONLY when the
 //!   session is, SAVE CONNECTION while the saved list doesn't hold the connection (one opened
 //!   from a file, say), and at the right one activity ([`activity`]): a reconnect, the lost
@@ -29,20 +30,23 @@
 //! results ([`crate::query_tab`]).
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
-//! `tab-new`; `status-connection` (value: the name), `status-server`, `status-tls` (value: what
+//! `tab-new`; `status-connection` (value: the name), `status-address` (value: the address, whole),
+//! `status-server`, `status-tls` (value: what
 //! protects the link, while it is weaker than fully checked), `status-read-only`, `status-save`,
 //! `status-job` (value: what runs, or `Reconnecting…`), `status-cancel`, `status-lost`,
 //! `status-reconnect`, `status-transaction`, `value-toggle`.
 
+use std::path::Path;
 use std::sync::Arc;
 
+use dbee_config::ConnectionConfig;
 use dbee_engine::{Session, State, Tab, TabId, TlsState, TransactionState, Which};
 use dbee_sql::filter::Condition;
 use egui::{Align, Frame, Layout, Margin, RichText};
 use serde_json::json;
 
 use crate::app::Origin;
-use crate::components::status::{self, Activity};
+use crate::components::status::{self, Activity, Address};
 use crate::components::tab::{self, Asked, NewTab};
 use crate::components::tooltip::Hint;
 use crate::editors::CellEditor;
@@ -165,6 +169,30 @@ pub fn live_job(session: &Session) -> Option<LiveJob> {
     }
 }
 
+/// The connection's address for the status bar, as typed in its form (the design agent,
+/// 2026-11-11): `user@host:port/database`, empty parts left out (an IPv6 host in brackets before
+/// its port), then through a tunnel ` via ` and the SSH host; a file's path with `home` as `~`.
+/// A config never holds a password. `None` when the name block already is the address: a name
+/// dbee made up, or one that reads the same.
+pub(crate) fn address(config: &ConnectionConfig, home: Option<&Path>) -> Option<Address> {
+    if config.name.is_empty() {
+        return None;
+    }
+    let address = if config.kind.uses_file() {
+        Address::File(crate::connections::tilde_at(&config.file.as_ref()?.display().to_string(), home))
+    } else {
+        let user = if config.user.is_empty() { String::new() } else { format!("{}@", config.user) };
+        let host = match config.port {
+            0 => config.host.clone(),
+            port if config.host.contains(':') => format!("[{}]:{port}", config.host),
+            port => format!("{}:{port}", config.host),
+        };
+        let via = config.ssh.as_ref().map(|ssh| format!(" via {}", ssh.host)).unwrap_or_default();
+        Address::Server(format!("{user}{host}{}{via}", config.database_suffix()))
+    };
+    (!address.text().is_empty() && address.text() != config.name).then_some(address)
+}
+
 /// What the status bar shows at its right, one at a time, the first that holds: a reconnect
 /// running, the connection lost, the active tab's live job (with the command that cancels it), a
 /// transaction open or failed on the connection's query session. The job comes before the
@@ -253,6 +281,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let name = c.config.display_name();
     let own = !c.config.name.is_empty();
     let colour = c.config.color;
+    let address = address(&c.config, dbee_config::home_dir().as_deref());
     let read_only = c.info.read_only;
     let server = dbee_engine::state::server_text(&c.info);
     // The link is named only while it is weaker than fully checked (the design agent, #9).
@@ -264,12 +293,15 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let tags = &mut app.tags;
     egui::Panel::bottom("dbee-status").exact_size(STATUS_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| {
         let connection = status::Connection { name: &name, colour, own };
-        let facts = status::Facts { server: Some(&server), link, read_only, unsaved };
+        let facts = status::Facts { address: address.as_ref(), server: Some(&server), link, read_only, unsaved };
         // The value panel's toggle at the right end, as the panel is the window's.
         let shown = status::bar(ui, &connection, &facts, activity.as_ref().map(|(a, _)| a), |ui| {
             toggled = value_panel::toggle(ui, panel_open, tags);
         });
         tags.tag_value("status-connection", &shown.connection, name.as_str());
+        if let (Some(r), Some(a)) = (&shown.address, &address) {
+            tags.tag_value("status-address", r, a.text());
+        }
         if let Some(r) = &shown.server {
             tags.tag_value("status-server", r, server.as_str());
         }
@@ -420,9 +452,61 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use dbee_config::{DbKind, SshConfig};
     use dbee_sql::filter::{Filter, Op};
 
     use super::*;
+
+    #[test]
+    fn the_address_is_the_connection_as_typed() {
+        let server = |s: &str| Some(Address::Server(s.into()));
+        let pg = ConnectionConfig {
+            name: "Shop live".into(),
+            kind: DbKind::Postgres,
+            host: "pg14".into(),
+            port: 5432,
+            user: "postgres".into(),
+            database: "dbee".into(),
+            ..ConnectionConfig::default()
+        };
+        assert_eq!(address(&pg, None), server("postgres@pg14:5432/dbee"));
+        assert_eq!(address(&ConnectionConfig { user: String::new(), ..pg.clone() }, None), server("pg14:5432/dbee"), "no user");
+        assert_eq!(address(&ConnectionConfig { database: String::new(), ..pg.clone() }, None), server("postgres@pg14:5432"), "no database");
+        assert_eq!(address(&ConnectionConfig { port: 0, ..pg.clone() }, None), server("postgres@pg14/dbee"), "no port");
+        assert_eq!(address(&ConnectionConfig { host: "::1".into(), ..pg.clone() }, None), server("postgres@[::1]:5432/dbee"), "IPv6");
+        // MySQL's and MariaDB's forms the same.
+        for kind in [DbKind::MySql, DbKind::MariaDb] {
+            let my = ConnectionConfig { kind, host: "mysql80".into(), port: 3306, user: "root".into(), database: String::new(), ..pg.clone() };
+            assert_eq!(address(&my, None), server("root@mysql80:3306"), "{kind:?}");
+            assert_eq!(address(&ConnectionConfig { database: "Shop".into(), ..my }, None), server("root@mysql80:3306/Shop"), "{kind:?}");
+        }
+        // Through a tunnel: the database's address as typed, then the SSH host, never its port,
+        // its user or the tunnel's local port.
+        let ssh = SshConfig { host: "bastion.example.com".into(), port: 2222, user: "me".into(), ..SshConfig::default() };
+        let tunnel = ConnectionConfig { host: "db.internal".into(), ssh: Some(ssh), ..pg.clone() };
+        assert_eq!(address(&tunnel, None), server("postgres@db.internal:5432/dbee via bastion.example.com"));
+        // A file: its path with the home folder as ~.
+        let file = ConnectionConfig {
+            kind: DbKind::Sqlite,
+            file: Some(PathBuf::from("/home/me/data/shop.sqlite")),
+            host: String::new(),
+            port: 0,
+            user: String::new(),
+            database: String::new(),
+            ..pg.clone()
+        };
+        let home = Some(Path::new("/home/me"));
+        assert_eq!(address(&file, home), Some(Address::File("~/data/shop.sqlite".into())));
+        assert_eq!(address(&file, None), Some(Address::File("/home/me/data/shop.sqlite".into())));
+        assert_eq!(address(&file, Some(Path::new("/home/m"))), Some(Address::File("/home/me/data/shop.sqlite".into())), "a whole folder only");
+        // None when the name block already is it: a name dbee made up, or one that reads the same.
+        for made in [ConnectionConfig { name: String::new(), ..pg.clone() }, ConnectionConfig { name: String::new(), ..file }] {
+            assert_eq!(address(&made, home), None, "{made:?}");
+        }
+        assert_eq!(address(&ConnectionConfig { name: "postgres@pg14:5432/dbee".into(), ..pg }, None), None);
+    }
 
     #[test]
     fn the_marker_counts_applied_filters() {

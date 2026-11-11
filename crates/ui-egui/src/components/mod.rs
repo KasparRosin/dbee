@@ -68,9 +68,15 @@ pub(crate) fn flat(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Shape> {
 /// One frame's shapes of `add`, drawn in `theme` with dbee's theme and fonts: the frame after the
 /// fonts are bound.
 #[cfg(test)]
-pub(crate) fn painted(theme: egui::Theme, mut add: impl FnMut(&mut egui::Ui)) -> Vec<egui::epaint::ClippedShape> {
+pub(crate) fn painted(theme: egui::Theme, add: impl FnMut(&mut egui::Ui)) -> Vec<egui::epaint::ClippedShape> {
+    painted_in(egui::vec2(800.0, 400.0), theme, add)
+}
+
+/// [`painted`] in a window of `size`.
+#[cfg(test)]
+pub(crate) fn painted_in(size: egui::Vec2, theme: egui::Theme, mut add: impl FnMut(&mut egui::Ui)) -> Vec<egui::epaint::ClippedShape> {
     let mut ready = false;
-    let h = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 400.0)).build_ui(move |ui| {
+    let h = egui_kittest::Harness::builder().with_size(size).build_ui(move |ui| {
         if !ready {
             showcase::prepare(ui.ctx(), theme);
             ready = true;

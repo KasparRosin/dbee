@@ -278,7 +278,12 @@ impl ConnScreen {
 
 /// `path` with the home directory as `~`.
 pub(crate) fn tilde(path: &str) -> String {
-    if let Some(home) = dbee_config::home_dir()
+    tilde_at(path, dbee_config::home_dir().as_deref())
+}
+
+/// `path` with `home` as `~`.
+pub(crate) fn tilde_at(path: &str, home: Option<&std::path::Path>) -> String {
+    if let Some(home) = home
         && let Some(home) = home.to_str().filter(|h| !h.is_empty())
         && let Some(rest) = path.strip_prefix(home)
         && (rest.starts_with('/') || rest.starts_with('\\'))

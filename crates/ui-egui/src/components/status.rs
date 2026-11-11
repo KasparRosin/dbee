@@ -3,13 +3,15 @@
 //!
 //! From the left: the connection's name on a block of its colour, under an edge of that colour
 //! along the bar's top (a connection with no colour keeps a quiet bar: a `line` edge and the name
-//! in `text`); then the facts in grey: the server's version as written, the link's security while
-//! it is weaker than fully checked, and READ-ONLY; then SAVE CONNECTION while the saved list
-//! doesn't hold the connection. At the right end, what the screen puts there (the value panel's
-//! toggle, until the Phase 3 screens move it), and before it one activity.
+//! in `text`); then the facts in grey: the connection's address as typed, the server's version as
+//! written, the link's security while it is weaker than fully checked, and READ-ONLY; then SAVE
+//! CONNECTION while the saved list doesn't hold the connection. At the right end, what the screen
+//! puts there (the value panel's toggle, until the Phase 3 screens move it), and before it one
+//! activity.
 //!
 //! When the bar is too narrow, the facts give way in this order: the server version, the link's
-//! security, READ-ONLY; then the name is cut. SAVE CONNECTION, the activity and its button stay.
+//! security, the address (a file's path is first cut in the middle, and reads whole on hover),
+//! READ-ONLY; then the name is cut. SAVE CONNECTION, the activity and its button stay.
 //!
 //! A bar is a view: it takes what to show and says what was clicked ([`Shown`]); the screen tags
 //! what it drew and acts.
@@ -33,6 +35,13 @@ use crate::theme::{Text, Tokens, Words, connection_color, on_connection_color, t
 
 /// A connection with no colour: a `line` edge this thick.
 const QUIET_EDGE: f32 = 1.0;
+/// The facts by place, left to right: the address first.
+const ADDRESS: usize = 0;
+/// The order the facts give way in: the server version, the link's security, the address,
+/// READ-ONLY.
+const GIVE_WAY: [usize; 4] = [1, 2, ADDRESS, 3];
+/// A path cut in the middle keeps at least this many letters at either end, or goes.
+const CUT_KEEP: usize = 6;
 
 /// The connection the bar is about: its name and its colour.
 #[derive(Clone, Copy, Debug)]
@@ -44,9 +53,28 @@ pub struct Connection<'a> {
     pub own: bool,
 }
 
+/// Where the connection goes, as typed in its form; drawn as written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Address {
+    /// `user@host:port/database`, and through a tunnel ` via ` its SSH host: it goes whole when
+    /// short of room.
+    Server(String),
+    /// A file's path: cut in the middle when short of room, whole on hover.
+    File(String),
+}
+
+impl Address {
+    pub fn text(&self) -> &str {
+        match self {
+            Address::Server(s) | Address::File(s) => s,
+        }
+    }
+}
+
 /// The facts after the name.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Facts<'a> {
+    pub address: Option<&'a Address>,
     /// The server's product and version, as it reports them.
     pub server: Option<&'a str>,
     /// What protects the link, and its longer text for the hover, while it is weaker than fully
@@ -94,6 +122,7 @@ pub enum Act {
 /// The bar as drawn: each part shown, and what a click asked for.
 pub struct Shown {
     pub connection: Response,
+    pub address: Option<Response>,
     pub server: Option<Response>,
     pub link: Option<Response>,
     pub read_only: Option<Response>,
@@ -170,28 +199,40 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
         job
     };
     let mut name = Piece::new(ui, name_job(STATUS_NAME_MAX), connection.name);
+    let address = facts.address.map(|a| Piece::new(ui, Text::Data.job_as_written(a.text(), t.text_muted), a.text()));
     let server = facts.server.map(|s| Piece::new(ui, Text::Data.job_as_written(s, t.text_muted), s));
     let link = facts.link.map(|(words, _)| Piece::new(ui, Text::Label.job(words, t.text_muted), words));
     let read_only = facts.read_only.then(|| Piece::new(ui, Text::Label.job("Read-only", t.text_muted), "Read-only"));
     let save = facts.unsaved.then(|| TextButton::new("Save connection"));
     let save_w = save.as_ref().map_or(0.0, |b| b.width(ui));
-    let mut kept = [server.is_some(), link.is_some(), read_only.is_some()];
-    let widths = [server.as_ref(), link.as_ref(), read_only.as_ref()].map(|f| f.map_or(0.0, Piece::width));
+    // Left to right: the address, the server version, the link's security, READ-ONLY.
+    let mut pieces = [address, server, link, read_only];
+    let mut kept = pieces.each_ref().map(Option::is_some);
     let room = x - under.left();
     // The block, 20, the facts 12 apart, then 8 and SAVE CONNECTION.
-    let used = |kept: &[bool; 3], name_w: f32| {
-        let facts: Vec<f32> = (0..3).filter(|i| kept[*i]).map(|i| widths[i]).collect();
+    let used = |pieces: &[Option<Piece>; 4], kept: &[bool; 4], name_w: f32| {
+        let facts: Vec<f32> = pieces.iter().zip(kept).filter(|(_, k)| **k).map(|(p, _)| p.as_ref().map_or(0.0, Piece::width)).collect();
         let facts_w = facts.iter().sum::<f32>() + STATUS_FACT_GAP * facts.len().saturating_sub(1) as f32;
         let save_w = if save_w > 0.0 && !facts.is_empty() { STATUS_GAP + save_w } else { save_w };
         name_w + 2.0 * STATUS_BLOCK_PAD_X + STATUS_AFTER_BLOCK + facts_w + save_w
     };
-    // The facts give way one by one, then the name is cut.
-    for i in 0..3 {
-        if used(&kept, name.width()) > room {
-            kept[i] = false;
+    // The facts give way one by one (a path is cut first), then the name is cut.
+    let mut cut = false;
+    for i in GIVE_WAY {
+        let over = used(&pieces, &kept, name.width()) - room;
+        if over <= 0.0 {
+            break;
         }
+        if let (Some(Address::File(path)), Some(whole)) = (facts.address.filter(|_| i == ADDRESS), &pieces[ADDRESS])
+            && let Some(shorter) = cut_middle(ui, path, t.text_muted, whole.width() - over)
+        {
+            pieces[ADDRESS] = Some(shorter);
+            cut = true;
+            continue;
+        }
+        kept[i] = false;
     }
-    let over = used(&kept, name.width()) - room;
+    let over = used(&pieces, &kept, name.width()) - room;
     if over > 0.0 {
         name = Piece::new(ui, name_job(name.width() - over), connection.name);
     }
@@ -214,9 +255,15 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
             r
         })
     };
-    let server = fact(server, kept[0], "server");
-    let link = fact(link, kept[1], "link");
-    let read_only = fact(read_only, kept[2], "read-only");
+    let [address, server, link, read_only] = pieces;
+    let address = fact(address, kept[ADDRESS], "address");
+    let server = fact(server, kept[1], "server");
+    let link = fact(link, kept[2], "link");
+    let read_only = fact(read_only, kept[3], "read-only");
+    let address = address.map(|r| match facts.address {
+        Some(whole) if cut => r.hint(whole.text()),
+        _ => r,
+    });
     let link = link.zip(facts.link).map(|(r, (_, hover))| r.hint(hover));
     if any {
         x += STATUS_GAP;
@@ -228,7 +275,7 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
         }
         r
     });
-    Shown { connection: shown_connection, server, link, read_only, save, activity: shown_activity, button, act }
+    Shown { connection: shown_connection, address, server, link, read_only, save, activity: shown_activity, button, act }
 }
 
 /// Draws `piece` from `left`, centred on `mid`, in `colour`; it answers to hover as a label.
@@ -239,6 +286,28 @@ pub(super) fn piece(ui: &Ui, id: Id, piece: &Piece, at: egui::Pos2, colour: Colo
     let says = piece.says.clone();
     r.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, says.clone()));
     r
+}
+
+/// `whole` cut in the middle with `…` to fit `width`, in `data`, read out whole; `None` when it
+/// would keep fewer than [`CUT_KEEP`] letters at either end.
+fn cut_middle(ui: &Ui, whole: &str, colour: Color32, width: f32) -> Option<Piece> {
+    let letters: Vec<char> = whole.chars().collect();
+    let cut = |keep: usize| {
+        let head = keep / 2;
+        let tail = keep - head;
+        let text: String = letters.iter().take(head).chain(['…'].iter()).chain(letters.iter().skip(letters.len().saturating_sub(tail))).collect();
+        Piece::new(ui, Text::Data.job_as_written(&text, colour), whole)
+    };
+    // The most letters that fit: a cut is only as wide as the letters it keeps.
+    let (mut lo, mut hi) = (2 * CUT_KEEP, letters.len().checked_sub(1)?);
+    if lo > hi || cut(lo).width() > width {
+        return None;
+    }
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if cut(mid).width() <= width { lo = mid } else { hi = mid - 1 }
+    }
+    Some(cut(lo))
 }
 
 /// The timer's words: minutes, seconds and tenths, `00:04.1`.
@@ -320,9 +389,10 @@ fn show_activity(ui: &mut Ui, t: &Tokens, id: Id, activity: &Activity, right: f3
 #[cfg(test)]
 mod tests {
     use egui::Theme;
+    use egui_kittest::kittest::Queryable;
 
     use super::*;
-    use crate::components::{ROOM, both, fills_in, icon_in, painted, texts};
+    use crate::components::{ROOM, both, fills_in, icon_in, painted, painted_in, texts};
 
     /// The page's bar is 1100 wide; the harness holds this much.
     const W: f32 = 760.0;
@@ -470,12 +540,15 @@ mod tests {
     #[test]
     fn the_facts_give_way_in_order_then_the_name_is_cut() {
         // Narrower and narrower: the server version goes first, then the link's security, then
-        // READ-ONLY; then the name is cut. SAVE CONNECTION and the activity stay.
-        let facts = Facts { server: Some("PostgreSQL 14.24"), link: Some(("Not encrypted", "")), read_only: true, unsaved: true };
+        // the address, then READ-ONLY; then the name is cut. SAVE CONNECTION and the activity
+        // stay.
+        let address = Address::Server("postgres@pg14:5432/dbee".into());
+        let facts =
+            Facts { address: Some(&address), server: Some("PostgreSQL 14.24"), link: Some(("Not encrypted", "")), read_only: true, unsaved: true };
         let job = Activity::Job { text: Words::from("Counting rows"), elapsed: None, cancel: true };
         let shown_at = |width: f32| {
             let mut seen = Vec::new();
-            let shapes = painted(Theme::Light, |ui| {
+            let shapes = painted_in(vec2(1200.0, 100.0), Theme::Light, |ui| {
                 ui.allocate_ui(vec2(width, SLIM_BAR_H), |ui| {
                     bar(ui, &Connection { name: "Shop live replica", colour: ConnectionColor::Red, own: true }, &facts, Some(&job), |_| {});
                 });
@@ -487,11 +560,13 @@ mod tests {
         };
         let has = |seen: &[(String, Rect)], w: &str| seen.iter().any(|(s, _)| s == w);
         let name_w = |seen: &[(String, Rect)]| seen.iter().find(|(s, _)| s == "SHOP LIVE REPLICA").map_or(0.0, |(_, r)| r.width());
-        let whole = name_w(&shown_at(760.0));
+        let widest = shown_at(1100.0);
+        assert!(["postgres@pg14:5432/dbee", "PostgreSQL 14.24", "NOT ENCRYPTED", "READ-ONLY"].iter().all(|w| has(&widest, w)), "{widest:?}");
+        let whole = name_w(&widest);
         let mut gone = Vec::new();
         let mut cut = false;
         // Down to where the name has a few letters left.
-        for width in (440..=760).rev().step_by(10) {
+        for width in (440..=1100).rev().step_by(10) {
             let seen = shown_at(width as f32);
             for (w, r) in &seen {
                 assert!(r.right() <= width as f32 + 0.5, "{width}: `{w}` {r:?} inside the bar");
@@ -504,8 +579,9 @@ mod tests {
             for w in ["SAVE CONNECTION", "COUNTING ROWS", "CANCEL"] {
                 assert!(has(&seen, w), "{width}: `{w}` stays: {seen:?}");
             }
-            assert!(!has(&seen, "POSTGRESQL 14.24"), "{width}: the server version as written");
-            let now: Vec<&str> = ["PostgreSQL 14.24", "NOT ENCRYPTED", "READ-ONLY"].into_iter().filter(|w| !has(&seen, w)).collect();
+            assert!(!has(&seen, "POSTGRESQL 14.24") && !has(&seen, "POSTGRES@PG14:5432/DBEE"), "{width}: data as written");
+            let facts = ["PostgreSQL 14.24", "NOT ENCRYPTED", "postgres@pg14:5432/dbee", "READ-ONLY"];
+            let now: Vec<&str> = facts.into_iter().filter(|w| !has(&seen, w)).collect();
             for w in now {
                 if !gone.contains(&w) {
                     gone.push(w);
@@ -513,11 +589,59 @@ mod tests {
             }
             if name_w(&seen) < whole - 0.5 {
                 cut = true;
-                assert_eq!(gone.len(), 3, "{width}: the name is cut only once every fact has gone: {gone:?}");
+                assert_eq!(gone.len(), 4, "{width}: the name is cut only once every fact has gone: {gone:?}");
             }
         }
         assert!(cut, "the name was cut at last");
-        assert_eq!(gone, ["PostgreSQL 14.24", "NOT ENCRYPTED", "READ-ONLY"], "in that order");
+        assert_eq!(gone, ["PostgreSQL 14.24", "NOT ENCRYPTED", "postgres@pg14:5432/dbee", "READ-ONLY"], "in that order");
+    }
+
+    /// A bar `width` wide in a harness, with the facts `facts` and nothing at its right.
+    fn facts_bar(width: f32, facts: Facts<'static>) -> egui_kittest::Harness<'static, ()> {
+        let mut h = crate::components::harness(Theme::Light, (), move |ui, _| {
+            ui.allocate_ui(vec2(width, SLIM_BAR_H), |ui| {
+                bar(ui, &Connection { name: "Shop live", colour: ConnectionColor::Red, own: true }, &facts, None, |_| {});
+            });
+        });
+        h.run();
+        h
+    }
+
+    #[test]
+    fn a_long_sqlite_path_is_cut_in_the_middle() {
+        // The design agent (2026-11-11): a file's path with `~`, cut in the middle with … when
+        // short of room, the whole path on hover; READ-ONLY outlasts it.
+        const PATH: &str = "~/Projects/clients/northwind-traders/archive/2026/exports/nightly/shop.sqlite";
+        let path: &'static Address = Box::leak(Box::new(Address::File(PATH.into())));
+        let facts = Facts { address: Some(path), read_only: true, ..Facts::default() };
+        // Room enough: whole, as written.
+        let shapes = painted_in(vec2(1200.0, 100.0), Theme::Light, |ui| {
+            ui.allocate_ui(vec2(1100.0, SLIM_BAR_H), |ui| {
+                bar(ui, &Connection { name: "Shop live", colour: ConnectionColor::Red, own: true }, &facts, None, |_| {});
+            });
+        });
+        let all = texts(&shapes);
+        assert!(all.iter().any(|(w, _, c)| w == PATH && *c == crate::theme::LIGHT.text_muted), "whole and grey: {all:?}");
+        // Short of room: cut in the middle, the start and the file's name kept, READ-ONLY 12 after.
+        let mut h = facts_bar(560.0, facts);
+        let all = texts(&h.output().shapes);
+        let (cut, at) =
+            all.iter().find(|(w, _, _)| w.contains('…')).map(|(w, r, _)| (w.clone(), *r)).unwrap_or_else(|| panic!("a cut path: {all:?}"));
+        let (head, tail) = cut.split_once('…').unwrap_or_default();
+        assert!(PATH.starts_with(head) && PATH.ends_with(tail) && head.len() >= 6 && tail.ends_with("shop.sqlite"), "`{cut}`");
+        assert!((head.chars().count() as i64 - tail.chars().count() as i64).abs() <= 1, "cut in the middle: `{cut}`");
+        let (read_only, _) = word(&h.output().shapes, "READ-ONLY");
+        assert!(close(read_only.left() - at.right(), 12.0) && read_only.right() <= 560.0 + 0.5, "READ-ONLY 12 after {at:?}: {read_only:?}");
+        // Read out whole; whole on hover.
+        assert!(h.query_by_label(PATH).is_some(), "read out whole");
+        h.get_by_label(PATH).hover();
+        h.run();
+        h.run();
+        assert!(texts(&h.output().shapes).iter().any(|(w, _, _)| w == PATH), "whole on hover");
+        // Shorter still: the path goes before READ-ONLY.
+        let h = facts_bar(200.0, facts);
+        let all = texts(&h.output().shapes);
+        assert!(all.iter().all(|(w, _, _)| !w.contains("sqlite")) && all.iter().any(|(w, _, _)| w == "READ-ONLY"), "{all:?}");
     }
 
     #[test]

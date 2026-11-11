@@ -2,6 +2,7 @@
 //! at them against the page's light and dark frames (`examples/components.rs`): one section per
 //! page component, in the page's order, each headed with the page's caption.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
@@ -60,6 +61,14 @@ const STRIP_W: f32 = 840.0;
 /// The status bar frames: bars this wide, this far apart.
 const STATUS_W: f32 = 1100.0;
 const STATUS_APART: f32 = 10.0;
+/// The status bars' addresses, as the page writes them, and a long path.
+static PG14: LazyLock<status::Address> = LazyLock::new(|| status::Address::Server("postgres@pg14:5432/dbee".into()));
+static TUNNEL: LazyLock<status::Address> = LazyLock::new(|| status::Address::Server("postgres@db.internal:5432/dbee via bastion.example.com".into()));
+static SHOP_FILE: LazyLock<status::Address> = LazyLock::new(|| status::Address::File("~/data/shop.sqlite".into()));
+static LONG_PATH: LazyLock<status::Address> =
+    LazyLock::new(|| status::Address::File("~/Projects/clients/northwind-traders/archive/2026/exports/nightly/shop.sqlite".into()));
+/// A bar too narrow for the long path.
+const LONG_PATH_W: f32 = 560.0;
 /// The Dialogs frame's scrim scene: a window of this size, its query text this far in, the dialog
 /// this far in.
 const DIALOG_SCENE: Vec2 = vec2(640.0, 240.0);
@@ -165,55 +174,64 @@ fn bars(ui: &mut Ui) {
             }
         });
     };
+    let pg14 = Some(&*PG14);
     section(ui, "status bar: the connection colour as a 2 px top edge and the name block; no colour keeps a quiet footer", SPACE_8, |ui| {
         let mut colours: Vec<ConnectionColor> = COLOURS.into_iter().filter(|c| *c != ConnectionColor::None).collect();
         colours.push(ConnectionColor::None);
-        stack(ui, colours.into_iter().map(|c| (shop(c), Facts::default(), None)).collect());
+        stack(ui, colours.into_iter().map(|c| (shop(c), Facts { address: pg14, ..Facts::default() }, None)).collect());
     });
     section(
         ui,
-        "new: server version, link security (only when weaker than fully checked), read-only, save connection; right side, one at a time: the activity states",
+        "new: address as typed, server version, link security (only when weaker than fully checked), read-only, SAVE CONNECTION; right: one activity at a time",
         SPACE_8,
         |ui| {
             let red = shop(ConnectionColor::Red);
             let server = Some("PostgreSQL 14.24");
             let link = |words| Some((words, "The link's longer text, on hover."));
             let s = Duration::from_millis;
+            let at = |address: &'static status::Address| Facts { address: Some(address), ..Facts::default() };
             stack(
                 ui,
                 vec![
-                    (red, Facts { server, link: link("Not encrypted"), unsaved: true, ..Facts::default() }, Some(Activity::InTransaction)),
-                    (red, Facts { server, read_only: true, ..Facts::default() }, Some(Activity::Disconnected)),
+                    (red, Facts { server, link: link("Not encrypted"), unsaved: true, ..at(&PG14) }, Some(Activity::InTransaction)),
+                    (red, Facts { server, read_only: true, ..at(&PG14) }, Some(Activity::Disconnected)),
                     (
                         red,
-                        Facts { link: link("Encrypted, server not checked"), ..Facts::default() },
+                        Facts { link: link("Encrypted, server not checked"), ..at(&PG14) },
                         Some(Activity::Reconnecting { elapsed: Some(s(4100)) }),
                     ),
                     (
                         red,
-                        Facts { link: link("Encrypted, certificate checked"), ..Facts::default() },
+                        Facts { link: link("Encrypted, certificate checked"), ..at(&PG14) },
                         Some(Activity::Exporting { elapsed: Some(s(12_400)) }),
                     ),
-                    (red, Facts::default(), Some(Activity::Importing { elapsed: Some(s(3900)) })),
-                    (red, Facts::default(), Some(Activity::Job { text: Words::from("Counting rows"), elapsed: Some(s(1200)), cancel: true })),
+                    (red, at(&TUNNEL), Some(Activity::Importing { elapsed: Some(s(3900)) })),
+                    (red, at(&SHOP_FILE), Some(Activity::Job { text: Words::from("Counting rows"), elapsed: Some(s(1200)), cancel: true })),
                 ],
             );
         },
     );
     section(
         ui,
-        "not on the page yet: a job before the app gives timers, today's spinner in the timer's place; a table's name keeps its case; a name dbee made, as written",
+        "not on the page yet: a job before the app gives timers, today's spinner in the timer's place; a table's name keeps its case; a name dbee made, as written, with no address; a long path cut in the middle",
         SPACE_8,
         |ui| {
             let job = Activity::Job { text: Words::from("Loading ").name("Orders").plain("…"), elapsed: None, cancel: true };
             let made = Connection { name: "postgres@pg14.internal/Shop", colour: ConnectionColor::None, own: false };
-            stack(
-                ui,
-                vec![
-                    (shop(ConnectionColor::Blue), Facts::default(), Some(job)),
-                    (made, Facts { server: Some("PostgreSQL 14.24"), ..Facts::default() }, None),
-                ],
-            );
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = STATUS_APART;
+                stack(
+                    ui,
+                    vec![
+                        (shop(ConnectionColor::Blue), Facts { address: pg14, ..Facts::default() }, Some(job)),
+                        (made, Facts { server: Some("PostgreSQL 14.24"), ..Facts::default() }, None),
+                    ],
+                );
+                ui.allocate_ui(vec2(LONG_PATH_W, SLIM_BAR_H), |ui| {
+                    let facts = Facts { address: Some(&LONG_PATH), read_only: true, ..Facts::default() };
+                    status::bar(ui, &shop(ConnectionColor::Red), &facts, None, |_| {});
+                });
+            });
         },
     );
 }

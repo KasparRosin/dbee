@@ -1735,3 +1735,83 @@ fn in_transaction_shows_from_the_engine() {
         assert!(ui.tag("status-transaction").is_none(), "{server}: COMMIT clears it");
     }
 }
+
+/// The text `words` the last frame drew within `within`: its colour and font.
+fn drawn_as(ui: &Ui, within: egui::Rect, words: &str) -> Option<(egui::Color32, egui::FontId)> {
+    ui.shapes().into_iter().find_map(|(_, s)| match s {
+        egui::Shape::Text(t) if t.galley.text() == words && within.expand(1.0).contains_rect(t.galley.rect.translate(t.pos.to_vec2())) => {
+            let section = t.galley.job.sections.first()?;
+            let colour = if section.format.color == egui::Color32::PLACEHOLDER { t.fallback_color } else { section.format.color };
+            Some((t.override_text_color.unwrap_or(colour), section.format.font_id.clone()))
+        }
+        _ => None,
+    })
+}
+
+/// The status bar's address (the design agent, 2026-11-11): after the name block, in `data`
+/// grey, the connection as typed in its form. Postgres and MySQL, through the SSH tunnel (the
+/// database's address as typed, then ` via ` and the SSH host, never the tunnel's local port),
+/// and a SQLite file with the home folder as `~`. `status-address` holds it.
+#[test]
+fn the_address_is_the_connection_as_typed() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite seed");
+    let file = sqlite.file().unwrap().display().to_string();
+    let home = dbee_config::home_dir().map(|h| h.display().to_string());
+    let in_home = home.as_deref().and_then(|h| file.strip_prefix(h)).filter(|rest| rest.starts_with('/'));
+    let file_address = in_home.map_or_else(|| file.clone(), |rest| format!("~{rest}"));
+    let plain = || temp_home(None, None);
+    let tunnel = || temp_home(Some(&db.keys.plain), Some(&db.sshd.known_hosts_line));
+    let cases: Vec<(&str, ConnectionConfig, TempHome, String)> = vec![
+        ("pg14", pg14(db), plain(), format!("postgres@127.0.0.1:{}/dbee", pg14_server(db).port)),
+        ("mysql80, no database", config_of(&mysql), plain(), format!("root@127.0.0.1:{}", mysql.server().unwrap().port)),
+        ("through the tunnel", via_ssh(db, SshAuth::Key { path: None }), tunnel(), "postgres@pg14:5432/dbee via 127.0.0.1".to_string()),
+        ("sqlite", config_of(&sqlite), plain(), file_address),
+    ];
+    for (what, config, home, want) in cases {
+        let mut ui = ui_in(home, true);
+        ui.execute("connection.open", json!({ "config": config, "password": db.password }));
+        ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+        assert_eq!(ui.value("status-address"), json!(want), "{what}");
+        let at = rect_of(&ui.tag("status-address").unwrap());
+        let name = rect_of(&ui.tag("status-connection").unwrap());
+        let (colour, font) = drawn_as(&ui, at, &want).unwrap_or_else(|| panic!("{what}: `{want}` drawn as written in {at:?}"));
+        assert_eq!((colour, font), (t.text_muted, dbee_ui_egui::theme::Text::Data.font()), "{what}: in `data` grey");
+        assert!(at.left() > name.right() && (at.center().y - name.center().y).abs() < 1.0, "{what}: after the name {name:?}: {at:?}");
+    }
+}
+
+/// The address never holds the password: not a connection's whose URL held one (Fill from URL),
+/// named like a URL, nor one opened with a password and a name dbee made up. The password is in
+/// no drawn text, no hover and no tag.
+#[test]
+fn the_address_never_holds_the_password() {
+    let db = dbee_testkit::require_testdb!();
+    let port = pg14_server(db).port;
+    let mut ui = cards();
+    ui.click("conn-fill-url");
+    ui.text(&format!("postgres://postgres:{}@127.0.0.1:{port}/dbee", db.password));
+    ui.click("dialog-ok");
+    ui.replace("conn-name", &format!("postgres://postgres@127.0.0.1:{port}/dbee"));
+    ui.click("conn-connect");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    let want = format!("postgres@127.0.0.1:{port}/dbee");
+    assert_eq!(ui.value("status-address"), json!(want), "the address shows");
+    let at = ui.centre("status-address");
+    ui.rest(at);
+    let nowhere = |ui: &mut Ui, what: &str| {
+        let texts: Vec<String> = ui.texts().iter().map(|(_, g)| g.text().to_string()).collect();
+        assert!(texts.iter().all(|t| !t.contains(&db.password)), "{what}: drawn: {texts:?}");
+        let inspect = ui.inspect().to_string();
+        assert!(!inspect.contains(&db.password), "{what}: tags: {inspect}");
+    };
+    nowhere(&mut ui, "a URL-shaped name");
+    // A name dbee made up: no address, and still no password.
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.execute("connection.open", json!({ "config": ConnectionConfig { name: String::new(), ..pg14(db) }, "password": db.password }));
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    assert!(ui.tag("status-address").is_none(), "the name block already is the address");
+    nowhere(&mut ui, "a made-up name");
+}

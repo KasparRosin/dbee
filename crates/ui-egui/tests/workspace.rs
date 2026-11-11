@@ -1152,8 +1152,8 @@ fn a_server_version_keeps_its_case() {
 
 /// Review Focus 5: at the smallest window nothing in the status bar is drawn over anything
 /// else; the facts give way in the order the bar states (the server version, then the link's
-/// security, then READ-ONLY), and the name, SAVE CONNECTION, the job with its CANCEL and the
-/// value panel's toggle stay.
+/// security, then the address, then READ-ONLY), and the name, SAVE CONNECTION, the job with its
+/// CANCEL and the value panel's toggle stay.
 #[test]
 fn the_status_bar_gives_way_at_the_smallest_window() {
     let db = dbee_testkit::require_testdb!();
@@ -1163,8 +1163,17 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
         ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
         ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
         ui.until("the run", |ui| ui.tag("status-job").is_some());
-        let parts =
-            ["status-connection", "status-server", "status-tls", "status-read-only", "status-save", "status-job", "status-cancel", "value-toggle"];
+        let parts = [
+            "status-connection",
+            "status-address",
+            "status-server",
+            "status-tls",
+            "status-read-only",
+            "status-save",
+            "status-job",
+            "status-cancel",
+            "value-toggle",
+        ];
         let drawn: Vec<(&str, egui::Rect)> = parts.iter().filter_map(|id| shown_rect(&mut ui, id).map(|r| (*id, r))).collect();
         for (id, r) in &drawn {
             assert!(r.left() >= 0.0 && r.right() <= size.x, "{at}: `{id}` {r:?} inside the window");
@@ -1178,14 +1187,14 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
         for id in ["status-connection", "status-save", "status-job", "status-cancel", "value-toggle"] {
             assert!(has(id), "{at}: `{id}` stays: {drawn:?}");
         }
-        let facts = ["status-server", "status-tls", "status-read-only"];
+        let facts = ["status-server", "status-tls", "status-address", "status-read-only"];
         for (k, id) in facts.iter().enumerate() {
             if has(id) {
                 assert!(facts[k..].iter().all(|later| has(later)), "{at}: `{id}` shows, so the facts after it in the order do: {drawn:?}");
             }
         }
         if size == APP_SIZE {
-            assert!(facts.iter().all(|id| has(id)), "{at}: every fact fits: {drawn:?}");
+            assert!(facts[1..].iter().all(|id| has(id)), "{at}: every fact but the server version fits: {drawn:?}");
         } else {
             assert!(!has("status-server"), "{at}: the server version gave way first: {drawn:?}");
         }
