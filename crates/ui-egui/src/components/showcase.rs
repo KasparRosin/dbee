@@ -300,7 +300,7 @@ fn results(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: before the app gives timers, today's spinner in the timer's place; a result's name and the numbers keep their case",
+        "not on the page yet: before the app gives timers, today's spinner in the timer's place; a result's name keeps its case",
         SPACE_8,
         |ui| {
             stack(ui, &mut |ui| {

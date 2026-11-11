@@ -4,8 +4,9 @@
 //! table bar holds.
 //!
 //! Each is a view: it takes what to show and says what was clicked; the screen tags what it drew
-//! and acts. Numbers, timings and a result's name are data: drawn as written (in `data` where the
-//! page's words are mono), so only dbee's own words go to capitals.
+//! and acts. A result's name is data, drawn as written. The counts and how long a run took are
+//! facts in `label` capitals, as the page writes them (a number has no case to keep); a running
+//! timer is in `data`. All of them are read out as written.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +24,7 @@ use crate::theme::size::{
     BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, RESULT_FACT_GAP, RESULT_TAB_PAD_X, RESULT_TAB_TITLE_MAX, ROW_COUNT_COUNTING_GAP, ROW_COUNT_GAP,
     RUN_ROW_GAP, RUN_ROW_PAD_X, SPINNER, TAB_ACTIVE_LINE,
 };
-use crate::theme::{Text, Tokens, Words, tokens};
+use crate::theme::{Text, Tokens, tokens};
 use crate::tree::thousands;
 
 /// Why EXPORT is off, on its hover.
@@ -220,9 +221,9 @@ pub struct ResultShown {
     pub asked: Option<ResultAsked>,
 }
 
-/// `n rows`, `1 row`: the number as written in `data`.
-fn rows_of(words: Words, n: u64) -> Words {
-    words.name(thousands(n)).plain(if n == 1 { " row" } else { " rows" })
+/// `n rows`, `1 row`.
+fn rows_of(n: u64) -> String {
+    format!("{} {}", thousands(n), if n == 1 { "row" } else { "rows" })
 }
 
 /// How long something took: `24 ms`, `3.2 s`, and past a minute as the timer reads.
@@ -241,7 +242,15 @@ enum Time {
 }
 
 impl Time {
-    fn of(ui: &Ui, t: &Tokens, words: String) -> Time {
+    /// How long something took, in `label` capitals: `24 MS`.
+    fn took(ui: &Ui, t: &Tokens, d: Duration) -> Time {
+        let words = took(d);
+        Time::Words(Piece::new(ui, Text::Label.job(&words, t.text_muted), words))
+    }
+
+    /// A running timer, in `data`: `00:02.4`.
+    fn timer(ui: &Ui, t: &Tokens, d: Duration) -> Time {
+        let words = timer(d);
         Time::Words(Piece::new(ui, Text::Data.job_as_written(&words, t.text_muted), words))
     }
 
@@ -265,22 +274,20 @@ impl Time {
 
 impl ResultBar<'_> {
     /// The facts: the words and their colour, and how long the run took or has gone.
-    fn facts(&self, ui: &Ui, t: &Tokens) -> (Words, Color32, Option<Time>) {
-        let ms = |ms: Option<u64>| ms.map(|ms| Time::of(ui, t, took(Duration::from_millis(ms))));
+    fn facts(&self, ui: &Ui, t: &Tokens) -> (String, Color32, Option<Time>) {
+        let ms = |ms: Option<u64>| ms.map(|ms| Time::took(ui, t, Duration::from_millis(ms)));
         match self.state {
             RunState::Done { rows, ms: m } => {
                 let words = match self.first_of {
-                    Some((kept, seen)) => rows_of(Words::from("First ").name(thousands(kept)).plain(" of "), seen),
-                    None => rows_of(Words::default(), rows),
+                    Some((kept, seen)) => format!("First {} of {}", thousands(kept), rows_of(seen)),
+                    None => rows_of(rows),
                 };
                 (words, t.text_muted, ms(m))
             }
-            RunState::Running { elapsed } => {
-                (Words::from("Running"), t.text_muted, Some(elapsed.map_or(Time::Spinner, |e| Time::of(ui, t, timer(e)))))
-            }
-            RunState::Failed { ms: m } => (Words::from("Failed"), t.danger, ms(m)),
-            RunState::Cancelled { elapsed } => (Words::from("Cancelled"), t.text_muted, elapsed.map(|e| Time::of(ui, t, took(e)))),
-            RunState::Affected { rows, ms: m } => (rows_of(Words::default(), rows).plain(" affected"), t.text_muted, ms(m)),
+            RunState::Running { elapsed } => ("Running".to_owned(), t.text_muted, Some(elapsed.map_or(Time::Spinner, |e| Time::timer(ui, t, e)))),
+            RunState::Failed { ms: m } => ("Failed".to_owned(), t.danger, ms(m)),
+            RunState::Cancelled { elapsed } => ("Cancelled".to_owned(), t.text_muted, elapsed.map(|e| Time::took(ui, t, e))),
+            RunState::Affected { rows, ms: m } => (format!("{} affected", rows_of(rows)), t.text_muted, ms(m)),
         }
     }
 
@@ -297,9 +304,8 @@ impl ResultBar<'_> {
         let export = self.export.then(|| BarButton::label(Icon::Export, "Export").over_line());
         let export_rect =
             export.as_ref().map(|b| Rect::from_min_max(pos2(value_rect.left() - b.width(&ui), cell.top()), pos2(value_rect.left(), cell.bottom())));
-        let (words, colour, mut time) = self.facts(&ui, t);
-        let says = words.to_string();
-        let mut job = words.caps_job(colour);
+        let (says, colour, mut time) = self.facts(&ui, t);
+        let mut job = Text::Label.job(&says, colour);
         let laid = Piece::new(&ui, job.clone(), says.clone());
         // Short of room the time goes, then the words are cut.
         let facts_end = export_rect.unwrap_or(value_rect).left() - RESULT_FACT_GAP;
@@ -375,7 +381,7 @@ pub struct CountShown {
 impl RowCount {
     /// The words: the rows shown (`1–100`) and how many there are (`of 25,000 rows`, `of ~100,000
     /// rows`), either alone when the other isn't there.
-    fn words(self, shown: Option<(u64, u64)>) -> Words {
+    fn words(self, shown: Option<(u64, u64)>) -> String {
         let total = match self {
             RowCount::Exact(n) => Some(thousands(n)),
             RowCount::Estimate(n) | RowCount::Counting { estimate: Some(n), .. } if n > 0 => Some(format!("~{}", thousands(n))),
@@ -385,14 +391,13 @@ impl RowCount {
             RowCount::Exact(n) | RowCount::Estimate(n) | RowCount::Counting { estimate: Some(n), .. } => n,
             _ => 0,
         };
-        let rows = if n == 1 { " row" } else { " rows" };
-        match (shown, total) {
-            (Some((first, last)), Some(total)) => {
-                Words::default().name(format!("{}–{}", thousands(first), thousands(last))).plain(" of ").name(total).plain(rows)
-            }
-            (Some((first, last)), None) => Words::default().name(format!("{}–{}", thousands(first), thousands(last))),
-            (None, Some(total)) => Words::default().name(total).plain(rows),
-            (None, None) => Words::default(),
+        let rows = if n == 1 { "row" } else { "rows" };
+        let range = shown.map(|(first, last)| format!("{}–{}", thousands(first), thousands(last)));
+        match (range, total) {
+            (Some(range), Some(total)) => format!("{range} of {total} {rows}"),
+            (Some(range), None) => range,
+            (None, Some(total)) => format!("{total} {rows}"),
+            (None, None) => String::new(),
         }
     }
 
@@ -400,9 +405,8 @@ impl RowCount {
     /// the rows shown (`1–100`), if any.
     pub fn show(self, ui: &mut Ui, shown: Option<(u64, u64)>) -> CountShown {
         let t = tokens(ui.ctx());
-        let words = self.words(shown);
-        let says = words.to_string();
-        let words = (!says.is_empty()).then(|| Piece::new(ui, words.caps_job(t.text_muted), says));
+        let says = self.words(shown);
+        let words = (!says.is_empty()).then(|| Piece::new(ui, Text::Label.job(&says, t.text_muted), says));
         let button = match self {
             RowCount::Estimate(n) if n > 0 => Some(TextButton::new("Count")),
             RowCount::Estimate(_) | RowCount::Unknown => Some(TextButton::new("Count rows")),
@@ -410,7 +414,7 @@ impl RowCount {
         };
         let counting = match self {
             RowCount::Counting { elapsed, .. } => {
-                let time = elapsed.map_or(Time::Spinner, |e| Time::of(ui, t, timer(e)));
+                let time = elapsed.map_or(Time::Spinner, |e| Time::timer(ui, t, e));
                 Some((Piece::new(ui, Text::Label.job("Counting", t.text_muted), "Counting"), time))
             }
             _ => None,
@@ -619,47 +623,37 @@ mod tests {
         // bottom. From the left the result tabs, side by side; at the right end the value panel's
         // toggle (a bar button, 36 wide), EXPORT before it (off), each with its divider and 35
         // tall; before them, 12 in, the facts 12 apart, centred above the line: what the result
-        // holds or what became of the run in `label` capitals with its numbers in `data` as
-        // written, and how long it took in `data`, all `text_muted` but FAILED in `danger`.
+        // holds or what became of the run in `label` capitals, numbers and all, and how long it
+        // took in `label` too (a running timer in `data`), all `text_muted` but FAILED in `danger`.
         use Text::{Data, Label};
         let s = Duration::from_millis;
         for (theme, t) in both() {
             let m = t.text_muted;
-            let rows: Vec<(&str, ResultBar<'static>, Vec<(&str, Text, Color32)>, Option<&str>)> = vec![
-                (
-                    "done",
-                    bar(true, RunState::Done { rows: 10, ms: Some(24) }, None, true, false),
-                    vec![("10", Data, m), (" ROWS", Label, m)],
-                    Some("24 ms"),
-                ),
-                ("running", bar(true, RunState::Running { elapsed: Some(s(2400)) }, None, true, false), vec![("RUNNING", Label, m)], Some("00:02.4")),
-                ("failed", bar(false, RunState::Failed { ms: Some(12) }, None, false, false), vec![("FAILED", Label, t.danger)], Some("12 ms")),
+            let rows: Vec<(&str, ResultBar<'static>, (&str, Color32), Option<(&str, Text)>)> = vec![
+                ("done", bar(true, RunState::Done { rows: 10, ms: Some(24) }, None, true, false), ("10 ROWS", m), Some(("24 MS", Label))),
+                ("running", bar(true, RunState::Running { elapsed: Some(s(2400)) }, None, true, false), ("RUNNING", m), Some(("00:02.4", Data))),
+                ("failed", bar(false, RunState::Failed { ms: Some(12) }, None, false, false), ("FAILED", t.danger), Some(("12 MS", Label))),
                 (
                     "cancelled",
                     bar(false, RunState::Cancelled { elapsed: Some(s(3200)) }, None, false, false),
-                    vec![("CANCELLED", Label, m)],
-                    Some("3.2 s"),
+                    ("CANCELLED", m),
+                    Some(("3.2 S", Label)),
                 ),
                 (
                     "affected",
                     bar(true, RunState::Affected { rows: 2, ms: Some(5) }, None, false, false),
-                    vec![("2", Data, m), (" ROWS AFFECTED", Label, m)],
-                    Some("5 ms"),
+                    ("2 ROWS AFFECTED", m),
+                    Some(("5 MS", Label)),
                 ),
                 (
                     "first of",
                     bar(true, RunState::Done { rows: 10_000, ms: Some(80) }, Some((10_000, 25_000)), true, false),
-                    vec![("FIRST ", Label, m), ("10,000", Data, m), (" OF ", Label, m), ("25,000", Data, m), (" ROWS", Label, m)],
-                    Some("80 ms"),
+                    ("FIRST 10,000 OF 25,000 ROWS", m),
+                    Some(("80 MS", Label)),
                 ),
-                (
-                    "value on",
-                    bar(true, RunState::Done { rows: 10, ms: Some(24) }, None, true, true),
-                    vec![("10", Data, m), (" ROWS", Label, m)],
-                    Some("24 ms"),
-                ),
+                ("value on", bar(true, RunState::Done { rows: 10, ms: Some(24) }, None, true, true), ("10 ROWS", m), Some(("24 MS", Label))),
             ];
-            for (name, result, want, time) in rows {
+            for (name, result, (want, colour), time) in rows {
                 let at_ = format!("{theme:?} {name}");
                 let (tabs, export, value_on) = (result.tabs.len(), result.export, result.value_on);
                 let mut seen = (Vec::new(), None, Rect::NOTHING);
@@ -691,24 +685,22 @@ mod tests {
                         value.left()
                     }
                 };
-                // The facts.
-                let whole_words: String = want.iter().map(|(w, _, _)| *w).collect();
-                let (words, _) = word(&shapes, &whole_words);
-                let parts: Vec<(String, egui::FontId, Color32)> = want.iter().map(|(w, style, c)| ((*w).to_owned(), style.font(), *c)).collect();
-                assert_eq!(sections(&shapes, &whole_words), parts, "{at_}: the words, their numbers in data");
+                // The facts: the words in `label` capitals, numbers and all, as the page writes them.
+                let (words, _) = word(&shapes, want);
+                assert_eq!(sections(&shapes, want), [(want.to_owned(), Label.font(), colour)], "{at_}: the words in label");
                 let mid = cell.center().y;
                 assert!(close(words.center().y, mid), "{at_}: the words centred above the line: {words:?}");
                 // egui puts the letter spacing after a caps text's last letter too.
-                let trail = if want.last().is_some_and(|(_, style, _)| *style == Label) { Label.spacing() } else { 0.0 };
+                let trail = |style: Text| if style == Label { Label.spacing() } else { 0.0 };
                 let last = match time {
-                    Some(time) => {
-                        assert_eq!(sections(&shapes, time), [(time.to_owned(), Data.font(), m)], "{at_}: the time in data, as written");
+                    Some((time, style)) => {
+                        assert_eq!(sections(&shapes, time), [(time.to_owned(), style.font(), m)], "{at_}: the time in {style:?}");
                         let (at_time, _) = word(&shapes, time);
-                        assert!(close(at_time.left() - (words.right() - trail), 12.0), "{at_}: 12 between the facts: {words:?} {at_time:?}");
+                        assert!(close(at_time.left() - (words.right() - trail(Label)), 12.0), "{at_}: 12 between the facts: {words:?} {at_time:?}");
                         assert!(close(at_time.center().y, mid), "{at_}: the time centred: {at_time:?}");
-                        at_time.right()
+                        at_time.right() - trail(style)
                     }
-                    None => words.right() - trail,
+                    None => words.right() - trail(Label),
                 };
                 assert!(close(end - last, 12.0), "{at_}: the facts end 12 before {end}: {last}");
                 // The tabs, from the left end.
@@ -733,29 +725,18 @@ mod tests {
     #[test]
     fn each_row_count_matches_the_page() {
         // Node 164223: 28 tall; the rows shown and how many there are in `label` capitals,
-        // `text_muted`, the numbers in `data` as written; an estimate with COUNT and no count with
+        // `text_muted`, numbers and all; an estimate with COUNT and no count with
         // COUNT ROWS (`button/text`), 8 after the words; counting: 12, COUNTING in `label`, 12,
         // the timer in `data`. The page's COUNT is 56 wide, COUNT ROWS 92.
         use Text::{Data, Label};
         let s = Duration::from_millis;
         for (theme, t) in both() {
             let m = t.text_muted;
-            let range = ("1–100", Data, m);
-            let rows: Vec<(RowCount, Vec<(&str, Text, Color32)>, Option<(&str, f32)>, Option<&str>)> = vec![
-                (RowCount::Exact(25_000), vec![range, (" OF ", Label, m), ("25,000", Data, m), (" ROWS", Label, m)], None, None),
-                (
-                    RowCount::Estimate(100_000),
-                    vec![range, (" OF ", Label, m), ("~100,000", Data, m), (" ROWS", Label, m)],
-                    Some(("COUNT", 56.0)),
-                    None,
-                ),
-                (RowCount::Unknown, vec![range], Some(("COUNT ROWS", 92.0)), None),
-                (
-                    RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) },
-                    vec![range, (" OF ", Label, m), ("~100,000", Data, m), (" ROWS", Label, m)],
-                    None,
-                    Some("00:01.2"),
-                ),
+            let rows: Vec<(RowCount, &str, Option<(&str, f32)>, Option<&str>)> = vec![
+                (RowCount::Exact(25_000), "1–100 OF 25,000 ROWS", None, None),
+                (RowCount::Estimate(100_000), "1–100 OF ~100,000 ROWS", Some(("COUNT", 56.0)), None),
+                (RowCount::Unknown, "1–100", Some(("COUNT ROWS", 92.0)), None),
+                (RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }, "1–100 OF ~100,000 ROWS", None, Some("00:01.2")),
             ];
             for (count, want, button, timer) in rows {
                 let at_ = format!("{theme:?} {count:?}");
@@ -770,13 +751,11 @@ mod tests {
                 });
                 let (at, words_r, count_r) = seen;
                 assert_eq!(at.height(), 28.0, "{at_}: 28 tall");
-                let whole_words: String = want.iter().map(|(w, _, _)| *w).collect();
-                let (words, _) = word(&shapes, &whole_words);
-                let parts: Vec<(String, egui::FontId, Color32)> = want.iter().map(|(w, style, c)| ((*w).to_owned(), style.font(), *c)).collect();
-                assert_eq!(sections(&shapes, &whole_words), parts, "{at_}: the words, their numbers in data");
+                let (words, _) = word(&shapes, want);
+                assert_eq!(sections(&shapes, want), [(want.to_owned(), Label.font(), m)], "{at_}: the words in label");
                 assert!(close(words.left(), at.left()) && close(words.center().y, at.center().y), "{at_}: the words first, centred: {words:?}");
                 assert!(words_r.is_some_and(|r| r.contains_rect(words.shrink(0.5))), "{at_}: the words' response: {words_r:?}");
-                let trail = if want.last().is_some_and(|(_, style, _)| *style == Label) { Label.spacing() } else { 0.0 };
+                let trail = Label.spacing();
                 let mut end = words.right() - trail;
                 match button {
                     Some((label, width)) => {
@@ -804,8 +783,8 @@ mod tests {
 
     #[test]
     fn numbers_and_names_keep_their_case() {
-        // A result's name is drawn and read out as written; the facts' numbers too, and the
-        // words read out as written; only dbee's words are drawn in capitals.
+        // A result's name is drawn and read out as written. The facts are drawn in `label`
+        // capitals as the page writes them (a number has no case to keep) and read out as written.
         let mut h = harness(Theme::Light, (), |ui, _| {
             ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
                 let tabs = vec![ResultTab::new("select … Orders").active(true), ResultTab::new("select … Line_Items")];
@@ -827,27 +806,40 @@ mod tests {
             assert!(!drawn.iter().any(|w| *w == name.to_uppercase()), "never in capitals: {drawn:?}");
             assert!(h.query_by_label(name).is_some(), "`{name}` read out as written");
         }
-        for number in ["10,000", "25,000", "~25,000", "1–100"] {
-            assert!(drawn.iter().any(|w| w == number), "`{number}` drawn as written: {drawn:?}");
-        }
-        for says in ["First 10,000 of 25,000 rows", "1–100 of ~25,000 rows", "80 ms"] {
+        for (says, caps) in
+            [("First 10,000 of 25,000 rows", "FIRST 10,000 OF 25,000 ROWS"), ("1–100 of ~25,000 rows", "1–100 OF ~25,000 ROWS"), ("80 ms", "80 MS")]
+        {
+            assert!(drawn.iter().any(|w| w == caps), "`{caps}` drawn: {drawn:?}");
             assert!(h.query_by_label(says).is_some(), "`{says}` read out as written");
+            assert!(h.query_by_label(caps).is_none(), "the capitals are only drawn");
         }
-        assert!(h.query_by_label("FIRST 10,000 OF 25,000 ROWS").is_none(), "the capitals are only drawn");
     }
 
     #[test]
     fn timings_read_as_the_page_writes_them() {
+        // How long a run took: read out as written (`24 ms`), drawn in `label` capitals
+        // (`24 MS`), past a minute as the timer reads; a running timer in `data`.
         let ms = Duration::from_millis;
         assert_eq!(took(ms(24)), "24 ms");
         assert_eq!(took(ms(999)), "999 ms");
         assert_eq!(took(ms(3200)), "3.2 s");
         assert_eq!(took(ms(65_300)), "01:05.3", "past a minute, as the timer reads");
-        assert_eq!(rows_of(Words::default(), 1).to_string(), "1 row");
-        assert_eq!(RowCount::Exact(1).words(Some((1, 1))).to_string(), "1–1 of 1 row");
-        assert_eq!(RowCount::Estimate(0).words(Some((1, 100))).to_string(), "1–100", "never ~0");
-        assert_eq!(RowCount::Exact(0).words(None).to_string(), "0 rows");
-        assert_eq!(RowCount::Unknown.words(None).to_string(), "");
+        assert_eq!(rows_of(1), "1 row");
+        assert_eq!(RowCount::Exact(1).words(Some((1, 1))), "1–1 of 1 row");
+        assert_eq!(RowCount::Estimate(0).words(Some((1, 100))), "1–100", "never ~0");
+        assert_eq!(RowCount::Exact(0).words(None), "0 rows");
+        assert_eq!(RowCount::Unknown.words(None), "");
+        for (state, caps, style) in [
+            (RunState::Done { rows: 3, ms: Some(24) }, "24 MS", Text::Label),
+            (RunState::Done { rows: 3, ms: Some(65_300) }, "01:05.3", Text::Label),
+            (RunState::Cancelled { elapsed: Some(ms(3200)) }, "3.2 S", Text::Label),
+            (RunState::Running { elapsed: Some(ms(2400)) }, "00:02.4", Text::Data),
+        ] {
+            let (shapes, _) = drawn(Theme::Light, |ui| {
+                ResultBar { tabs: Vec::new(), state, first_of: None, export: false, value_on: false }.show(ui);
+            });
+            assert_eq!(sections(&shapes, caps), [(caps.to_owned(), style.font(), crate::theme::LIGHT.text_muted)], "{state:?}");
+        }
     }
 
     #[test]
@@ -902,8 +894,8 @@ mod tests {
             for (w, r) in &facts_drawn {
                 assert!(r.left() >= at.left() - 0.5 && r.right() <= export.left() + 0.5, "{width}: `{w}` {r:?} between the bar's start and EXPORT");
             }
-            if let Some((_, time)) = drawn.iter().find(|(w, _)| w == "80 ms") {
-                assert!(time.right() <= export.left() - 11.5, "{width}: the time 12 before EXPORT: {time:?}");
+            if let Some((_, time)) = drawn.iter().find(|(w, _)| w == "80 MS") {
+                assert!(time.right() - Text::Label.spacing() <= export.left() - 11.5, "{width}: the time 12 before EXPORT: {time:?}");
             }
             for (i, tab) in tabs.iter().enumerate() {
                 assert!(tab.width() <= 0.0 || tab.right() <= facts.left() - 11.5, "{width}: tab {i} {tab:?} cut 12 before the facts {facts:?}");
