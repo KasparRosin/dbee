@@ -555,6 +555,17 @@ impl Session {
         self.jobs.spawn_stoppable(label, stop, fut)
     }
 
+    /// [`Session::spawn_job`] for a connection attempt, made by `attempt` with the `Stop` that
+    /// `connection.cancel` sets.
+    pub(crate) fn spawn_attempt<F>(&mut self, label: &'static str, attempt: impl FnOnce(Arc<jobs::Stop>) -> F) -> JobId
+    where
+        F: Future<Output = Apply> + Send + 'static,
+    {
+        let stop = Arc::new(jobs::Stop::default());
+        let fut = attempt(Arc::clone(&stop));
+        self.jobs.spawn_attempt(label, stop, fut)
+    }
+
     /// The job whose result is being applied, inside an [`Apply`]; `None` elsewhere.
     pub(crate) fn applying_job(&self) -> Option<JobId> {
         self.jobs.applying()

@@ -124,6 +124,17 @@ async fn stoppable_with<T>(
     }
 }
 
+/// `work`, or `None` once `stop` is set (also when both are ready): `work` is then dropped where it
+/// stands, which closes what it holds, such as a connection attempt's socket. For work no cancel
+/// request reaches, as a connect; a statement stops through [`stoppable`].
+pub(crate) async fn unless_stopped<T>(stop: &Stop, work: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        () = stop.stopped() => None,
+        done = work => Some(done),
+    }
+}
+
 /// The end of a statement dbee sent a cancel request for: the server's interrupt is that cancel.
 fn cancelled_by_dbee<T>(ended: Result<T, DbError>) -> Result<T, DbError> {
     ended.map_err(|e| if e.is_interrupted() { DbError::Cancelled } else { e })
@@ -180,6 +191,9 @@ pub(crate) struct Jobs {
     delivered: VecDeque<(JobId, Result<Json, EngineError>)>,
     /// How to stop the running jobs that can be stopped ([`Jobs::spawn_stoppable`]).
     stops: BTreeMap<JobId, Arc<Stop>>,
+    /// How to stop the running connection attempts ([`Jobs::spawn_attempt`]); kept apart from
+    /// `stops`, as closing or reconnecting a connection stops what runs on it, never an attempt.
+    attempts: BTreeMap<JobId, Arc<Stop>>,
     last: u64,
     applying: Option<JobId>,
     notify: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -204,6 +218,7 @@ impl Jobs {
             orphaned: BTreeSet::new(),
             delivered: VecDeque::new(),
             stops: BTreeMap::new(),
+            attempts: BTreeMap::new(),
             last: 0,
             applying: None,
             notify,
@@ -247,7 +262,28 @@ impl Jobs {
         self.stops.get(&job).map(|stop| stop.stop())
     }
 
-    /// Stops every running job that can be stopped.
+    /// [`Jobs::spawn`] for a connection attempt that `stop` stops ([`Jobs::stop_attempts`]).
+    pub fn spawn_attempt(&mut self, label: &'static str, stop: Arc<Stop>, fut: impl Future<Output = Apply> + Send + 'static) -> JobId {
+        let job = self.spawn(label, fut);
+        self.attempts.insert(job, stop);
+        job
+    }
+
+    /// Stops every running connection attempt: how many this stopped, and how many were stopping
+    /// already.
+    pub fn stop_attempts(&self) -> (usize, usize) {
+        let (mut stopped, mut stopping) = (0usize, 0usize);
+        for stop in self.attempts.values() {
+            if stop.stop() {
+                stopped = stopped.saturating_add(1);
+            } else {
+                stopping = stopping.saturating_add(1);
+            }
+        }
+        (stopped, stopping)
+    }
+
+    /// Stops every running job that can be stopped, except the connection attempts.
     pub fn stop_all(&self) {
         for stop in self.stops.values() {
             stop.stop();
@@ -301,6 +337,7 @@ impl Jobs {
     pub fn finish(&mut self, job: JobId) -> bool {
         self.running.remove(&job);
         self.stops.remove(&job);
+        self.attempts.remove(&job);
         self.orphaned.remove(&job)
     }
 

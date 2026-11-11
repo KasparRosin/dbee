@@ -44,7 +44,11 @@
 //!
 //! Connecting is a job: the tunnel, the browse connection and, for open and reconnect, the
 //! catalog, whose load is bounded ([`CATALOG_TIMEOUT`]: past it, it is cancelled, the connection
-//! is discarded and the job fails with `timeout`). The prompts come back as
+//! is discarded and the job fails with `timeout`). `connection.cancel` stops the attempts of open,
+//! openFile, reconnect and test wherever they are: the step that runs is dropped (with the socket
+//! it holds), what the attempt opened before it is closed, the tunnel last, and the job ends
+//! [`ATTEMPT_CANCELLED`]; so does one whose work had ended but whose result was not applied yet,
+//! and what it opened is closed. The prompts come back as
 //! [`EngineError::Needs`]: an unknown host key, a key passphrase, the SSH password, or the
 //! database password when none was given; the caller asks the user and runs the command again
 //! with the answer in its params.
@@ -72,6 +76,7 @@ use serde_json::json;
 
 use super::{CommandSpec, LOST, MAX_OPEN, NOT_CONNECTED, always, bad, connected, disabled, ignored, needed_connection, needs_db, not_connected, p};
 use crate::allowed;
+use crate::jobs::{Stop, unless_stopped};
 use crate::state::{Connected, Credentials, CurrentDatabase, server_text};
 use crate::turns::{self, InTurn};
 use crate::{Apply, ConnectionId, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest, Which};
@@ -91,8 +96,15 @@ pub const OPEN_FILE: &str = "connection.openFile";
 const SAVE_OPEN: &str = "connection.saveOpen";
 /// The command that opens the open connection again.
 pub const RECONNECT: &str = "connection.reconnect";
+const CANCEL: &str = "connection.cancel";
 const REFRESH: &str = "schema.refresh";
 const CLOSE: &str = "connection.close";
+
+/// How a connection attempt that `connection.cancel` stopped ends (code `cancelled`).
+pub const ATTEMPT_CANCELLED: &str = "the connection attempt was cancelled";
+
+/// What `connection.cancel` says when no attempt runs.
+pub const NO_ATTEMPT: &str = "no connection attempt is running";
 
 pub(crate) const SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -226,6 +238,17 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         enabled: connected,
         run: reconnect,
         journal: true,
+        undoable: false,
+    },
+    CommandSpec {
+        id: CANCEL,
+        label: "Cancel Connecting",
+        menu: &[],
+        shortcut: None,
+        params: "{}",
+        enabled: always,
+        run: cancel,
+        journal: false,
         undoable: false,
     },
     CommandSpec {
@@ -681,10 +704,15 @@ fn connect_error(e: DbError, creds: &Credentials) -> EngineError {
     }
 }
 
+/// The error of a connection attempt that `connection.cancel` stopped.
+fn attempt_cancelled() -> EngineError {
+    EngineError::Db { code: DbError::Cancelled.code(), message: ATTEMPT_CANCELLED.into(), data: json!({}) }
+}
+
 /// Checks the config's key and CA files against `allowed_dirs` (an isolated run's folders), then
 /// opens the tunnel (when the config has one and its type takes one) and a connection through it
 /// with `driver`, which checks a file against the same folders and makes a missing one only with
-/// `create_file`.
+/// `create_file`. Once `stop` is set, the step that runs is dropped and the tunnel closed.
 async fn open_connection(
     driver: &dyn Driver,
     config: &ConnectionConfig,
@@ -692,19 +720,20 @@ async fn open_connection(
     create_file: bool,
     env: &SshEnv,
     creds: &Credentials,
+    stop: &Stop,
 ) -> Result<Opened, EngineError> {
     allowed::check_files(allowed_dirs, config).map_err(|e| db_error(&e))?;
-    let tunnel = open_tunnel(config, env, creds).await?;
+    let tunnel = unless_stopped(stop, open_tunnel(config, env, creds)).await.ok_or_else(attempt_cancelled)??;
     let target = Target { config, password: creds.password.as_deref(), tunnel: tunnel.clone(), purpose: Purpose::Browse, create_file, allowed_dirs };
-    match driver.connect(target).await {
-        Ok(conn) => Ok(Opened { conn, tunnel }),
-        Err(e) => {
-            if let Some(t) = &tunnel {
-                t.close().await;
-            }
-            Err(connect_error(e, creds))
-        }
+    let failed = match unless_stopped(stop, driver.connect(target)).await {
+        Some(Ok(conn)) => return Ok(Opened { conn, tunnel }),
+        Some(Err(e)) => connect_error(e, creds),
+        None => attempt_cancelled(),
+    };
+    if let Some(t) = &tunnel {
+        t.close().await;
     }
+    Err(failed)
 }
 
 /// The databases `driver` lists on `config`'s server, through the tunnel when there is one, with
@@ -794,8 +823,8 @@ fn catalog_error(e: CatalogLoad) -> EngineError {
     }
 }
 
-/// [`open_connection`], then the catalog (bounded by [`CATALOG_TIMEOUT`]). On any failure the
-/// new connection and tunnel are closed.
+/// [`open_connection`], then the catalog (bounded by [`CATALOG_TIMEOUT`]). On any failure, and
+/// once `stop` is set, the new connection and tunnel are closed.
 async fn connect_and_load(
     driver: &dyn Driver,
     config: &ConnectionConfig,
@@ -803,15 +832,28 @@ async fn connect_and_load(
     create_file: bool,
     env: &SshEnv,
     creds: &Credentials,
+    stop: &Stop,
 ) -> Result<(Opened, Catalog), EngineError> {
-    let opened = open_connection(driver, config, allowed_dirs, create_file, env, creds).await?;
-    match load_catalog_within(opened.conn.as_ref(), CATALOG_TIMEOUT).await {
-        Ok(catalog) => Ok((opened, catalog)),
-        Err(e) => {
-            opened.close().await;
-            Err(catalog_error(e))
-        }
+    let opened = open_connection(driver, config, allowed_dirs, create_file, env, creds, stop).await?;
+    let failed = match unless_stopped(stop, load_catalog_within(opened.conn.as_ref(), CATALOG_TIMEOUT)).await {
+        Some(Ok(catalog)) => return Ok((opened, catalog)),
+        Some(Err(e)) => catalog_error(e),
+        None => attempt_cancelled(),
+    };
+    opened.close().await;
+    Err(failed)
+}
+
+/// `result`, an attempt's, unless `connection.cancel` stopped the attempt after its work ended and
+/// before this apply: then what it opened is closed, and it ends cancelled all the same.
+fn unless_cancelled(s: &Session, stop: &Stop, result: Result<(Opened, Catalog), EngineError>) -> Result<(Opened, Catalog), EngineError> {
+    if !stop.is_set() {
+        return result;
     }
+    if let Ok((opened, _)) = result {
+        s.jobs.spawn_detached(opened.close());
+    }
+    Err(attempt_cancelled())
 }
 
 /// `{connection, server, tables, warnings}` for an open or a reconnect; `saved` as
@@ -1021,20 +1063,25 @@ fn test(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let creds = given(params)?;
     let saved = saved_settings(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
-    let job = s.spawn_job(TEST, async move {
-        let creds = fill_from_store(creds, store, &config, saved).await;
-        let result = match open_connection(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, &creds).await {
-            Ok(opened) => {
-                let info = opened.conn.info();
-                let via = config.kind.takes_ssh().then(|| opened.via());
-                let r = json!({ "server": server_text(info), "via": via, "warnings": info.warnings });
-                let unsaved = unsaved_host_key(opened.tunnel.as_ref());
-                opened.close().await;
-                Ok((r, unsaved))
-            }
-            Err(e) => Err(e),
+    let job = s.spawn_attempt(TEST, move |stop| async move {
+        let result = match unless_stopped(&stop, fill_from_store(creds, store, &config, saved)).await {
+            None => Err(attempt_cancelled()),
+            Some(creds) => match open_connection(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, &creds, &stop).await {
+                Ok(opened) => {
+                    let info = opened.conn.info();
+                    let via = config.kind.takes_ssh().then(|| opened.via());
+                    let r = json!({ "server": server_text(info), "via": via, "warnings": info.warnings });
+                    let unsaved = unsaved_host_key(opened.tunnel.as_ref());
+                    opened.close().await;
+                    Ok((r, unsaved))
+                }
+                Err(e) => Err(e),
+            },
         };
         let apply: Apply = Box::new(move |s: &mut Session| {
+            if stop.is_set() {
+                return Err(attempt_cancelled());
+            }
             let (r, unsaved) = result?;
             tell(s, unsaved);
             Ok(r)
@@ -1109,11 +1156,14 @@ fn start_open(s: &mut Session, mut config: ConnectionConfig, create_file: bool, 
     }
     let saved = saved_settings(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
-    let job = s.spawn_job(OPEN, async move {
-        let creds = fill_from_store(typed.clone(), store, &config, saved).await;
-        let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, &creds).await;
+    let job = s.spawn_attempt(OPEN, move |stop| async move {
+        let creds = unless_stopped(&stop, fill_from_store(typed.clone(), store, &config, saved)).await;
+        let result = match &creds {
+            Some(creds) => connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, creds, &stop).await,
+            None => Err(attempt_cancelled()),
+        };
         let typed = keep.then_some(typed);
-        let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds, result, typed));
+        let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds.unwrap_or_default(), result, typed, &stop));
         apply
     });
     Ok(Outcome::Started(job))
@@ -1258,8 +1308,9 @@ fn apply_open(
     credentials: Credentials,
     result: Result<(Opened, Catalog), EngineError>,
     keep: Option<Credentials>,
+    stop: &Stop,
 ) -> Result<Json, EngineError> {
-    let (opened, catalog) = result?;
+    let (opened, catalog) = unless_cancelled(s, stop, result)?;
     if s.state.connections.len() >= MAX_OPEN {
         // Open is disabled then and runs one at a time, so this cannot happen; the new connection
         // closes as it is dropped.
@@ -1375,10 +1426,13 @@ fn reconnect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let driver = driver_for(&s.drivers, config.kind)?;
     let saved = saved_settings(s, &config);
     let (env, store) = (s.ssh.clone(), s.secrets.clone());
-    let job = s.spawn_job(RECONNECT, async move {
-        let creds = fill_from_store(creds, store, &config, saved).await;
-        let result = connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), false, &env, &creds).await;
-        let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, id, &old, creds, result));
+    let job = s.spawn_attempt(RECONNECT, move |stop| async move {
+        let filled = unless_stopped(&stop, fill_from_store(creds, store, &config, saved)).await;
+        let result = match &filled {
+            Some(creds) => connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), false, &env, creds, &stop).await,
+            None => Err(attempt_cancelled()),
+        };
+        let apply: Apply = Box::new(move |s: &mut Session| apply_reconnect(s, id, &old, filled.unwrap_or_default(), result, &stop));
         apply
     });
     Ok(Outcome::Started(job))
@@ -1390,14 +1444,16 @@ fn apply_reconnect(
     old: &Arc<InTurn>,
     credentials: Credentials,
     result: Result<(Opened, Catalog), EngineError>,
+    stop: &Stop,
 ) -> Result<Json, EngineError> {
     let saved = s.state.connection(Which::Id(id)).is_some_and(|c| s.state.store.is_saved(&c.config.id));
-    let Some(c) = s.state.connection_mut(Which::Id(id)).filter(|c| Arc::ptr_eq(&c.browse, old)) else {
+    if !s.state.connection(Which::Id(id)).is_some_and(|c| Arc::ptr_eq(&c.browse, old)) {
         // Closed or reconnected meanwhile: ignored, whatever the outcome (a new connection closes
         // as it is dropped, and a prompt is answered by nobody).
         return Ok(ignored());
-    };
-    let (opened, catalog) = result?;
+    }
+    let (opened, catalog) = unless_cancelled(s, stop, result)?;
+    let Some(c) = s.state.connection_mut(Which::Id(id)) else { return Ok(ignored()) };
     let Opened { conn, tunnel } = opened;
     let unsaved = unsaved_host_key(tunnel.as_ref());
     c.info = conn.info().clone();
@@ -1451,6 +1507,18 @@ fn tell(s: &mut Session, note: Option<String>) {
     if let Some(note) = note {
         s.ui_requests.push(UiRequest::Notice(note));
     }
+}
+
+/// `{}` → `{stopped: true}`: stops every connection attempt that runs (open, openFile, reconnect,
+/// test), which then ends [`ATTEMPT_CANCELLED`] with nothing it opened left open (see the module
+/// docs). Asked again before such an attempt has ended: `{stopped: false, stopping: true}`. With
+/// none running it does nothing: `{stopped: false, note}`, no error.
+fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
+    Ok(Outcome::Done(match s.jobs.stop_attempts() {
+        (0, 0) => json!({ "stopped": false, "note": NO_ATTEMPT }),
+        (0, _) => json!({ "stopped": false, "stopping": true }),
+        _ => json!({ "stopped": true }),
+    }))
 }
 
 /// `{connection?}` → a job returning `{tables, connection}`: reloads the catalog on the browse
