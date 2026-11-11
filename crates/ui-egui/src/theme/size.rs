@@ -109,6 +109,19 @@ pub const TOAST_CLOSE: f32 = 28.0;
 pub const TOAST_MARGIN: f32 = 12.0;
 pub const TOAST_STACK_GAP: f32 = 8.0;
 
+/// A tab (`tab`): this tall, the strip too; its icon, title, dot and close this far in from its
+/// ends and this far apart; its title cut at this width; the unsaved dot this wide; the square
+/// round the close's glyph that a click reaches; the active line this tall along its top.
+pub const TAB_H: f32 = 36.0;
+pub const TAB_PAD_X: f32 = 12.0;
+pub const TAB_GAP: f32 = 8.0;
+pub const TAB_TITLE_MAX: f32 = 200.0;
+pub const TAB_DOT: f32 = 8.0;
+pub const TAB_CLOSE: f32 = 18.0;
+pub const TAB_ACTIVE_LINE: f32 = 2.0;
+/// The new tab button (`tab/new`): this wide, as tall as a tab.
+pub const NEW_TAB_W: f32 = 32.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;

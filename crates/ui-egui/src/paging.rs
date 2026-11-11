@@ -33,10 +33,11 @@ use serde_json::json;
 use crate::automation::Tags;
 use crate::components::button::{BarButton, BoxButton, IconButton, TextButton};
 use crate::components::icon::Icon;
+use crate::components::spinner::Spinner;
 use crate::components::tooltip::Hint;
 use crate::theme::{
     self, Text,
-    size::{self, ICON_BUTTON, RADIUS_CONTROL, SPINNER},
+    size::{ICON_BUTTON, RADIUS_CONTROL, SPINNER},
 };
 use crate::tree::thousands;
 
@@ -327,7 +328,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     let r = ui.add(egui::Label::new(Text::Label.rich(parts.page.as_str()).color(t.text_muted)).selectable(false));
     tags.tag_value("page-number", &r, parts.page.as_str());
     if p.loading {
-        ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
+        ui.add(Spinner::new());
     }
     if step_button(ui, tags, "page-next", Icon::Next, on, "Next page") {
         runs.push(("table.page", json!({ "to": "next" })));
@@ -358,7 +359,7 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
         runs.push(("table.count", json!({})));
     }
     if counting {
-        ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
+        ui.add(Spinner::new());
     }
     let refresh_enabled = p.blocked.is_none();
     let r = ui.add_enabled(refresh_enabled, IconButton::plain(Icon::Refresh));

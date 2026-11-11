@@ -18,9 +18,10 @@ use super::keycap::Keycap;
 use super::menu::{self, BarTitle, Item};
 use super::segmented::{Segment, Segmented};
 use super::swatch::{COLOURS, Swatch};
+use super::tab::{self, NewTab, Tab};
 use super::toast::Toast;
 use super::tooltip;
-use crate::theme::size::{KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32};
+use crate::theme::size::{KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, TAB_H};
 use crate::theme::{Text, Tokens, tokens};
 
 /// The page's frames: 20 between sections.
@@ -51,6 +52,8 @@ const SCENE: Vec2 = vec2(560.0, 190.0);
 const MENU_BAR_W: f32 = 240.0;
 const MENU_BAR_PAD: Vec2 = vec2(4.0, 3.0);
 const SUBMENU_OVERLAP: f32 = 4.0;
+/// The Tabs and bars frame's tab strip.
+const STRIP_W: f32 = 840.0;
 /// The Dialogs frame's scrim scene: a window of this size, its query text this far in, the dialog
 /// this far in.
 const DIALOG_SCENE: Vec2 = vec2(640.0, 240.0);
@@ -128,6 +131,45 @@ pub fn show(ui: &mut Ui) {
         menus(ui);
         tooltips_and_toasts(ui);
         dialogs(ui);
+        tabs(ui);
+    });
+}
+
+/// The tabs and the strip, as the page's Tabs and bars frame shows them, and a busy tab.
+fn tabs(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    section(
+        ui,
+        "tab: table and query; inactive, hover (shows close), active (unsaved dot, close), focus (inferred, like a bar button)",
+        SPACE_8,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_16;
+            for (tab, title) in [(Tab::table as fn(&'static str) -> Tab<'static>, "orders [3]"), (Tab::query, "Query 1")] {
+                tab(title).show(ui);
+                tab(title).look(hovered).show(ui);
+                tab(title).active(true).unsaved(true).show(ui);
+                tab(title).look(focused).show(ui);
+            }
+        },
+    );
+    section(ui, "tab strip: tabs, then the new tab button (default, hover, focus), on card with the line under the inactive tabs", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        ui.allocate_ui(vec2(STRIP_W, TAB_H), |ui| {
+            tab::strip(ui, |ui| {
+                Tab::table("orders [3]").show(ui);
+                Tab::table("customers [1]").show(ui);
+                Tab::query("Query 1").active(true).unsaved(true).show(ui);
+                ui.add(NewTab::new());
+            });
+        });
+        ui.add(NewTab::new().look(hovered));
+        ui.add(NewTab::new().look(focused));
+    });
+    section(ui, "not on the page yet: a busy tab, the spinner in its icon's place; inactive, active", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        Tab::table("orders").busy(true).show(ui);
+        Tab::query("Query 1").busy(true).active(true).show(ui);
     });
 }
 

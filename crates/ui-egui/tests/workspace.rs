@@ -679,104 +679,68 @@ fn tabs_open_close_and_mark_filters_and_text() {
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1));
 }
 
-/// The tabs strip as the last frame drew it: a band with a line along its bottom, the tabs on it,
-/// and the active one (`active`) open into the content (no line under it) with its sides and its
-/// `ink` line along the top drawn; no other tab has that line.
+/// The tabs strip as the last frame drew it (the page's `tab strip`, node 163870): a band on
+/// `card` that the tabs fill top to bottom, side by side, each with a 1 px `line` at its right
+/// end; the `line` along the band's bottom under everything but the active tab (`active`), which
+/// has the 2 px `ink` line along its top; no other tab has that line.
 fn assert_band(ui: &Ui, active: u64, at: &str) {
     let t = dbee_ui_egui::theme::LIGHT;
     let tags = ui.harness.state().tags();
-    let tabs: Vec<(u64, egui::Rect)> = tags
+    let mut tabs: Vec<(u64, egui::Rect)> = tags
         .ids()
         .into_iter()
         .filter_map(|id| id.strip_prefix("tab-")?.parse::<u64>().ok())
         .filter_map(|n| Some((n, tags.rect(&format!("tab-{n}"))?)))
         .collect();
+    tabs.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
     let tab = tabs.iter().find(|(n, _)| *n == active).map(|(_, r)| *r).unwrap_or_else(|| panic!("{at}: the active tab shows: {tabs:?}"));
-    let shapes = ui.shapes();
-    let fills: Vec<(egui::Rect, egui::Color32)> = shapes
+    let fills: Vec<(egui::Rect, egui::Color32)> = ui
+        .shapes()
         .iter()
         .filter_map(|(clip, s)| match s {
             egui::Shape::Rect(r) if r.fill.a() > 0 => Some((r.rect.intersect(*clip), r.fill)),
             _ => None,
         })
+        .filter(|(r, _)| r.width() > 0.0 && r.height() > 0.0)
         .collect();
-    // The band: the strip's fill (the smallest card fill around the tabs, as bg is the same colour), as wide as the strip, behind every tab, which sits on its bottom edge.
+    // The band: the smallest card fill around the tabs in view (bg is the same colour).
     let band = fills
         .iter()
         .filter(|(r, fill)| *fill == t.card && tabs.iter().all(|(_, tab)| r.expand(0.5).contains_rect(*tab)))
         .map(|(r, _)| *r)
         .min_by(|a, b| a.area().total_cmp(&b.area()))
         .unwrap_or_else(|| panic!("{at}: no band in the card fill behind the tabs {tabs:?}"));
+    assert_eq!(band.height(), 36.0, "{at}: the band {band:?} is 36 tall");
     for (n, r) in &tabs {
-        assert!((r.bottom() - band.bottom()).abs() <= 0.5, "{at}: tab {n} {r:?} does not end on the band's bottom edge {band:?}");
-        assert!(r.top() > band.top() + 1.0, "{at}: tab {n} {r:?} fills the band {band:?} to its top");
+        assert_eq!((r.top(), r.bottom()), (band.top(), band.bottom()), "{at}: tab {n} {r:?} fills the band {band:?}");
+        // A tab cut by the band's end is tagged by its part in view.
+        let right = egui::Rect::from_min_max(egui::pos2(r.right() - 1.0, r.top()), r.max);
+        assert!(r.right() >= band.right() || fills.contains(&(right, t.line)), "{at}: tab {n} {r:?} has the line at its right end");
     }
-    // The line along the band's bottom: in the line colour, everywhere but under the active tab.
-    let y = band.bottom() - 0.5;
-    let mut covered: Vec<(f32, f32)> = shapes
+    for pair in tabs.windows(2) {
+        assert_eq!(pair[0].1.right(), pair[1].1.left(), "{at}: the tabs side by side: {tabs:?}");
+    }
+    // The line along the band's bottom: 1 px fills end to end, but for one gap under the active tab.
+    let mut under: Vec<(f32, f32)> = fills
         .iter()
-        .filter_map(|(clip, s)| match s {
-            egui::Shape::LineSegment { points: [a, b], stroke } if stroke.color == t.line && (a.y - y).abs() <= 0.6 && (b.y - y).abs() <= 0.6 => {
-                let (l, r) = (a.x.min(b.x).max(clip.left()), a.x.max(b.x).min(clip.right()));
-                (r > l).then_some((l, r))
-            }
-            _ => None,
-        })
+        .filter(|(r, c)| *c == t.line && r.height() == 1.0 && r.bottom() == band.bottom() && band.contains_rect(*r))
+        .map(|(r, _)| (r.left(), r.right()))
         .collect();
-    covered.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let gaps = {
-        let mut gaps = Vec::new();
-        let mut x = band.left();
-        for (l, r) in &covered {
-            if *l > x + 1.0 {
-                gaps.push((x, *l));
-            }
-            x = x.max(*r);
+    under.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut gaps = Vec::new();
+    let mut x = band.left();
+    for (l, r) in &under {
+        if *l > x {
+            gaps.push((x, *l));
         }
-        if band.right() > x + 1.0 {
-            gaps.push((x, band.right()));
-        }
-        gaps
-    };
-    assert_eq!(gaps.len(), 1, "{at}: the bottom line {covered:?} along {band:?} leaves one gap, under the active tab {tab:?}: {gaps:?}");
-    let (l, r) = gaps[0];
-    assert!(
-        (l - tab.left()).abs() <= 1.5 && (r - tab.right()).abs() <= 1.5,
-        "{at}: the line's gap {:?} is not the active tab's width {tab:?}",
-        (l, r)
-    );
-    // Its sides in the line colour, the `ink` line along its top.
-    let along = |a: egui::Pos2, b: egui::Pos2, colour: egui::Color32| {
-        shapes.iter().any(|(_, s)| match s {
-            egui::Shape::LineSegment { points: [p, q], stroke } => {
-                stroke.color == colour && ((p.distance(a) <= 2.5 && q.distance(b) <= 2.5) || (p.distance(b) <= 2.5 && q.distance(a) <= 2.5))
-            }
-            egui::Shape::Rect(rs) => {
-                rs.stroke.color == colour && rs.stroke.width >= 1.0 && rs.rect.expand(1.0).contains(a) && rs.rect.expand(1.0).contains(b) && {
-                    let r = rs.rect;
-                    let on_edge = |p: egui::Pos2| (p.x - r.left()).abs() <= 1.0 || (p.x - r.right()).abs() <= 1.0 || (p.y - r.top()).abs() <= 1.0;
-                    on_edge(a) && on_edge(b)
-                }
-            }
-            _ => false,
-        })
-    };
-    let (tl, tr, bl, br) = (tab.left_top(), tab.right_top(), tab.left_bottom(), tab.right_bottom());
-    assert!(along(egui::pos2(tl.x + 0.5, tl.y + 4.0), egui::pos2(bl.x + 0.5, bl.y - 1.0), t.line), "{at}: the active tab's left side is drawn");
-    assert!(along(egui::pos2(tr.x - 0.5, tr.y + 4.0), egui::pos2(br.x - 0.5, br.y - 1.0), t.line), "{at}: the active tab's right side is drawn");
-    let ink_line = |tab: egui::Rect| {
-        shapes.iter().any(|(_, s)| match s {
-            egui::Shape::LineSegment { points: [p, q], stroke } => {
-                stroke.color == t.ink
-                    && (p.y - tab.top()).abs() <= 2.5
-                    && (q.x - p.x).abs() >= tab.width() - 8.0
-                    && p.x >= tab.left() - 1.0
-                    && q.x <= tab.right() + 1.0
-            }
-            _ => false,
-        })
-    };
-    assert!(ink_line(tab), "{at}: the active tab keeps its ink line along the top");
+        x = x.max(*r);
+    }
+    if band.right() > x {
+        gaps.push((x, band.right()));
+    }
+    assert_eq!(gaps, [(tab.left(), tab.right())], "{at}: the bottom line {under:?} along {band:?} leaves one gap, under the active tab {tab:?}");
+    let ink_line = |r: egui::Rect| fills.contains(&(egui::Rect::from_min_size(r.min, egui::vec2(r.width(), 2.0)), t.ink));
+    assert!(ink_line(tab), "{at}: the active tab {tab:?} has its ink line along the top");
     for (n, r) in tabs.iter().filter(|(n, _)| *n != active) {
         assert!(!ink_line(*r), "{at}: tab {n} is not active but has the ink line");
     }
@@ -832,6 +796,66 @@ fn the_tabs_sit_on_their_own_band() {
     let last = ui.active();
     ui.click(&format!("tab-close-{last}"));
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), before, "× closes it");
+}
+
+/// The smallest window: more tabs than fit scroll sideways, the tab made active is scrolled into
+/// view, and the strip keeps the page's look (Review Focus 2 and 5).
+#[test]
+fn many_tabs_scroll_and_the_active_one_shows() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, egui::vec2(640.0, 420.0));
+    for n in 1..=8 {
+        ui.execute("table.open", json!({ "schema": "many", "table": format!("t_{n:03}") }));
+    }
+    let tabs: Vec<u64> = ui.document()["tabs"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
+    let (first, last) = (tabs[0], tabs[tabs.len() - 1]);
+    ui.until("the last tab in view", |ui| visible(&ui.tag(&format!("tab-{last}"))));
+    assert!(!visible(&ui.tag(&format!("tab-{first}"))), "the strip is wider than the window, and scrolled");
+    ui.harness.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(600.0, 400.0)));
+    ui.frame();
+    assert_band(&ui, last, "640 wide, the last tab active");
+    // Made active elsewhere, the first one comes into view.
+    ui.execute("tab.activate", json!({ "tab": first }));
+    ui.until("the first tab in view", |ui| visible(&ui.tag(&format!("tab-{first}"))));
+    assert!(!visible(&ui.tag(&format!("tab-{last}"))), "and the last one out of view");
+    ui.frame();
+    assert_band(&ui, first, "640 wide, the first tab active");
+    // The strip stays in the content: over neither the tree nor the status bar.
+    let strip = ui.tag(&format!("tab-{first}")).map(|e| e["rect"][0].as_f64().unwrap() as f32).unwrap();
+    let tree = ui.tag("tree-filter").map(|e| e["rect"][0].as_f64().unwrap() as f32 + e["rect"][2].as_f64().unwrap() as f32).unwrap();
+    assert!(strip >= tree, "the first tab at {strip} starts after the tree's filter, which ends at {tree}");
+}
+
+/// Every tab keeps its tags: `tab-<id>` with its title as written, `tab-dirty-<id>` while closing
+/// it would lose something, `tab-close-<id>` on every tab, also those not active, and `tab-new`.
+/// The close of a tab that isn't active closes it, and so does a middle click (Review Focus 2, 3).
+#[test]
+fn tabs_keep_their_tags_and_middle_click_closes() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.execute("table.open", json!({ "schema": "shop", "table": "orders" }));
+    let orders = ui.active();
+    ui.execute("table.open", json!({ "schema": "odd", "table": "Odd \"Name\" 🐙" }));
+    let odd = ui.active();
+    ui.execute("tab.newQuery", json!({ "text": "select 1" }));
+    let query = ui.active();
+    ui.frame();
+    for (tab, title) in [(orders, "orders"), (odd, "Odd \"Name\" 🐙"), (query, "Query 1")] {
+        assert_eq!(ui.value(&format!("tab-{tab}")), title, "the tab's title as written");
+        let rect = rect_of(&ui.tag(&format!("tab-{tab}")).unwrap());
+        assert!(ui.text_in(rect, title).is_some(), "`{title}` drawn in its tab as written");
+        assert!(visible(&ui.tag(&format!("tab-close-{tab}"))), "tab {tab} has its close, active or not");
+    }
+    assert!(ui.tag(&format!("tab-dirty-{query}")).is_some(), "the query text's dot");
+    assert!(ui.tag(&format!("tab-dirty-{orders}")).is_none(), "nothing to lose in orders");
+    assert!(ui.tag("tab-new").is_some());
+    ui.click(&format!("tab-close-{orders}"));
+    assert_eq!(ui.active(), query, "closing a tab that isn't active leaves the active one");
+    let left: Vec<u64> = ui.document()["tabs"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
+    assert_eq!(left, [odd, query], "the close of a tab that isn't active closes it");
+    ui.click_with(&format!("tab-{odd}"), json!({ "button": "middle" }));
+    let left: Vec<u64> = ui.document()["tabs"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
+    assert_eq!(left, [query], "a middle click closes it");
 }
 
 #[test]

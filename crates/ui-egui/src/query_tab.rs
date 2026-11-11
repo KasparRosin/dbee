@@ -101,6 +101,7 @@ use crate::automation::Tags;
 use crate::components::button::{BoxButton, TextButton};
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
+use crate::components::spinner::Spinner;
 use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
 use crate::connections::line_galley;
@@ -1127,7 +1128,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         // The summary's own width at the right, measured as it is drawn.
         let right_room = summary.as_ref().map_or(0.0, |(text, _)| bar.painter().layout_job(Text::Label.job(text, t.text)).size().x + 16.0);
         if running {
-            let spinner = bar.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
+            let spinner = bar.add(Spinner::new());
             let words = Text::Label.rich("Running…").color(t.text_muted);
             let words_w = bar.painter().layout_job(Text::Label.job("Running…", t.text_muted)).size().x;
             let after = bar.cursor().min.x + bar.spacing().item_spacing.x + words_w + 10.0;

@@ -40,12 +40,10 @@ use serde_json::json;
 
 use crate::automation::Tags;
 use crate::components::icon::{self, Icon};
+use crate::components::spinner::Spinner;
 use crate::components::tooltip::Hint;
 use crate::connections::{line_galley, line_galley_as_written};
-use crate::theme::{
-    self, Text,
-    size::{self, RADIUS_CONTROL},
-};
+use crate::theme::{self, Text, size::RADIUS_CONTROL};
 
 /// The height of a row.
 pub const ROW_H: f32 = 22.0;
@@ -426,7 +424,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         let icon_rect = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
         match &tree.refresh {
             Refresh::Running => {
-                egui::Spinner::new().size(size::SPINNER).color(t.text_muted).paint_at(ui, icon_rect);
+                Spinner::new().paint(ui, icon_rect.center());
             }
             Refresh::Ready => Icon::Refresh.paint(ui.painter(), icon_rect.center(), t.text_muted),
             Refresh::Disabled(_) => Icon::Refresh.paint(ui.painter(), icon_rect.center(), t.text_faint),

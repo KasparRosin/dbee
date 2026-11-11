@@ -33,15 +33,13 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::spinner::Spinner;
 use crate::components::toast::Kind;
 use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{self, BAR_H, Paging};
-use crate::theme::{
-    self, Text,
-    size::{self, RADIUS_CONTROL},
-};
+use crate::theme::{self, Text, size::RADIUS_CONTROL};
 
 /// The commands that load a page, whose database errors the tab's card shows.
 const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "table.refresh"];
@@ -320,7 +318,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             }
             None if tab.loading.is_some() => {
                 top.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(size::SPINNER).color(t.text_muted));
+                    ui.add(Spinner::new());
                     ui.label(RichText::new(format!("Loading {}…", tab.table.display())).color(t.text_muted));
                 });
             }
