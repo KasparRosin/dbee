@@ -12,7 +12,7 @@ pub use text::Text;
 pub use tokens::{DARK, LIGHT, Tokens, connection_color, on_connection_color, tokens};
 
 use egui::{Color32, CornerRadius, Shadow, Stroke};
-use size::{RADIUS_CONTROL, RADIUS_FLOAT};
+use size::{CARET_W, RADIUS_CONTROL, RADIUS_FLOAT};
 
 /// The design's one shadow, under every popup and dialog.
 pub fn float_shadow(t: &Tokens) -> Shadow {
@@ -35,7 +35,7 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     v.hyperlink_color = t.ink;
     v.selection.bg_fill = t.selection;
     v.selection.stroke = Stroke::new(1.0, t.ink);
-    v.text_cursor.stroke = Stroke::new(v.text_cursor.stroke.width, t.ink);
+    v.text_cursor.stroke = Stroke::new(CARET_W, t.ink);
     // egui thickens light text on a dark ground; the design's text weighs the same in both modes.
     v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
     v.text_options.font_hinting = false;

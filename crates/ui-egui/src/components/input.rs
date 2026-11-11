@@ -470,6 +470,43 @@ mod tests {
     }
 
     #[test]
+    fn the_caret_is_one_pixel_of_ink() {
+        // The page's caret is 1 px of `ink`, 16 tall. egui draws it as tall as the text's row and
+        // 1.5 more at either end, which can't be set: 21 in `body`, 19 in `data`.
+        for (theme, t) in both() {
+            for font in [Text::Body, Text::Data] {
+                let mut h = harness(theme, Seen::default(), move |ui, s: &mut Seen| {
+                    ui.add_space(ROOM);
+                    let input = if font == Text::Body { Input::body(&mut s.text) } else { Input::data(&mut s.text) };
+                    let r = ui.add(input.desired_width(160.0));
+                    s.at = r.rect;
+                    s.focus = r.has_focus();
+                });
+                h.run();
+                h.key_press(Key::Tab);
+                h.run();
+                h.get_by_role(Role::TextInput).type_text("shop");
+                h.run();
+                let (at, focus) = (h.state().at, h.state().focus);
+                assert!(focus, "{theme:?} {font:?}: Tab gave it focus");
+                let carets: Vec<(Rect, egui::Stroke)> = flat(&h.output().shapes)
+                    .into_iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::LineSegment { points: [a, b], stroke } if a.x == b.x && at.contains(a) => {
+                            Some((Rect::from_two_pos(a, b), stroke))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let [(caret, stroke)] = carets.as_slice() else { panic!("{theme:?} {font:?}: one caret in {at:?}: {carets:?}") };
+                assert_eq!((stroke.width, stroke.color), (1.0, t.ink), "{theme:?} {font:?}: 1 px of ink");
+                assert!(close(caret.center().y, at.center().y), "{theme:?} {font:?}: {caret:?} centred in {at:?}");
+                assert_eq!(caret.height(), font.line() + 3.0, "{theme:?} {font:?}: as tall as egui draws it");
+            }
+        }
+    }
+
+    #[test]
     fn a_password_input_hides_its_text() {
         let mut h = harness(Theme::Light, Seen::default(), |ui, s: &mut Seen| {
             ui.add(Field::new("Password", Input::data(&mut s.text).password(true)));
