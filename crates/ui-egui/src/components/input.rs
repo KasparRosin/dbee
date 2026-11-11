@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use egui::epaint::RectShape;
-use egui::text::TextWrapping;
 use egui::{
     Align, CornerRadius, Frame, Galley, Id, Layout, Margin, Rect, Response, Sense, Shape, Stroke, StrokeKind, TextBuffer, TextEdit, Ui, UiBuilder,
     Widget, WidgetInfo, WidgetType, pos2, vec2,
@@ -230,16 +229,17 @@ pub fn label(ui: &mut Ui, words: &str, beside: impl FnOnce(&mut Ui)) -> Response
 }
 
 /// The error line under a field's input, `width` wide: 4 under it, `words` in `small`, `danger`,
-/// cut to the width. Reported to accessibility as written.
+/// wrapping at the width, never cut: the reason is what the user needs. Reported to
+/// accessibility as written.
 fn error_line(ui: &mut Ui, words: &str, width: f32) -> Response {
     let t = tokens(ui.ctx());
     ui.add_space(FIELD_GAP);
     let mut job = Text::Small.job_as_written(words, t.danger);
-    job.wrap = TextWrapping::truncate_at_width(width);
+    job.wrap.max_width = width;
     let galley = ui.painter().layout_job(job);
-    let (rect, r) = ui.allocate_exact_size(vec2(width, Text::Small.line()), Sense::hover());
+    let (rect, r) = ui.allocate_exact_size(vec2(width, galley.size().y.max(Text::Small.line())), Sense::hover());
     r.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), words));
-    painter(ui).galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.danger);
+    painter(ui).galley(rect.min, galley, t.danger);
     r
 }
 

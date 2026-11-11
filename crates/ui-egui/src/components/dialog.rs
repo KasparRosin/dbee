@@ -236,7 +236,12 @@ mod tests {
         (a - b).abs() <= 0.5
     }
 
-    /// The page's five contents (node 162771), and a confirm with a long message.
+    /// An engine's reason a URL didn't parse: three lines at the field's width.
+    const LONG_ERROR: &str = "invalid connection URL: expected a postgres://, postgresql://, mysql:// or mariadb:// URL, but this one \
+                              starts with shop@pg14. Paste the whole URL your provider gave you, its scheme and two slashes first.";
+
+    /// The page's five contents (node 162771), a confirm with a long message and a field with a
+    /// long error.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Content {
         Confirm,
@@ -245,6 +250,7 @@ mod tests {
         FieldWithError,
         ThreeButtons,
         Long,
+        LongError,
     }
 
     const FIVE: [Content; 5] = [Content::Confirm, Content::Field, Content::FieldAndCheckbox, Content::FieldWithError, Content::ThreeButtons];
@@ -288,10 +294,11 @@ mod tests {
                     *checkbox = Some(ui.add(Checkbox::new(save, "Save in keyring")).rect);
                 })
                 .buttons(two(Button::primary("Connect", "dialog-ok"))),
-            Content::FieldWithError => Dialog::new(id, "Fill from URL")
+            Content::FieldWithError | Content::LongError => Dialog::new(id, "Fill from URL")
                 .text(URL)
-                .body(|ui, _| {
-                    let shown = Field::unlabelled(Input::data(typed).error(true)).error(Some("Not a database URL")).keep_error_room(true).show(ui);
+                .body(move |ui, _| {
+                    let error = if content == Content::LongError { LONG_ERROR } else { "Not a database URL" };
+                    let shown = Field::unlabelled(Input::data(typed).error(true)).error(Some(error)).keep_error_room(true).show(ui);
                     *field = Some(shown.input.rect);
                     *line = shown.error.map(|r| r.rect);
                 })
@@ -308,7 +315,7 @@ mod tests {
     /// A window drawing `content`'s dialog in `theme` over a button ("Behind") at its top left,
     /// its field holding `typed`.
     fn open(theme: Theme, content: Content) -> Harness<'static, Seen> {
-        open_with(theme, content, if content == Content::FieldWithError { "shop@pg14:5432" } else { "secretpass" })
+        open_with(theme, content, if matches!(content, Content::FieldWithError | Content::LongError) { "shop@pg14:5432" } else { "secretpass" })
     }
 
     fn open_with(theme: Theme, content: Content, typed: &str) -> Harness<'static, Seen> {
@@ -384,7 +391,7 @@ mod tests {
                 let title = match content {
                     Content::Confirm | Content::Long => "Close anyway?",
                     Content::Field | Content::FieldAndCheckbox => "Database password",
-                    Content::FieldWithError => "Fill from URL",
+                    Content::FieldWithError | Content::LongError => "Fill from URL",
                     Content::ThreeButtons => "Commit the transaction?",
                 };
                 let (_, title_at, colour) = drawn.iter().find(|(w, _, _)| w == title).cloned().unwrap_or_else(|| panic!("{at}: the title"));
@@ -399,7 +406,7 @@ mod tests {
                 let words = match content {
                     Content::Confirm | Content::Long => CLOSE,
                     Content::Field | Content::FieldAndCheckbox => PASSWORD,
-                    Content::FieldWithError => URL,
+                    Content::FieldWithError | Content::LongError => URL,
                     Content::ThreeButtons => COMMIT,
                 };
                 assert_eq!(font_of(&h, words), Some(Text::Body.font()), "{at}: the text in body");
@@ -462,9 +469,8 @@ mod tests {
                     Content::Confirm | Content::ThreeButtons => 138.0,
                     Content::Field => 186.0,
                     Content::FieldAndCheckbox => 216.0,
-                    // The page draws 8 between the field and its line; `Field` keeps its 4.
                     Content::FieldWithError => 206.0,
-                    Content::Long => 0.0,
+                    Content::Long | Content::LongError => 0.0,
                 };
                 assert_eq!(outer.height(), height, "{at}: its height");
             }
@@ -536,6 +542,44 @@ mod tests {
             assert!(close(text.width(), 398.0) || text.width() < 398.0, "{theme:?}: within 398: {text:?}");
             let button = s.buttons.first().map(|(_, r)| *r).unwrap_or(Rect::NOTHING);
             assert!(close(button.top(), text.bottom() + 20.0), "{theme:?}: the buttons 20 under it: {button:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_field_error_wraps_and_the_dialog_grows() {
+        // The design: a long error wraps under the field, at the field's width, and the dialog
+        // grows by its lines; it is never cut, since the reason is what the user needs.
+        for (theme, t) in both() {
+            let one = open(theme, Content::FieldWithError);
+            let height = |h: &Harness<'_, Seen>| {
+                let edge = edges(&h.output().shapes).into_iter().find(|e| e.colour == t.line && e.radius == CornerRadius::same(4));
+                edge.unwrap_or_else(|| panic!("{theme:?}: the frame")).outer.height()
+            };
+            let h = open(theme, Content::LongError);
+            let drawn = flat(&h.output().shapes).into_iter().find_map(|sh| match sh {
+                Shape::Text(x) if x.galley.text() == LONG_ERROR => Some(x),
+                _ => None,
+            });
+            let drawn = drawn.unwrap_or_else(|| panic!("{theme:?}: the error drawn"));
+            let rows: Vec<String> = drawn.galley.rows.iter().map(|r| r.text()).collect();
+            assert_eq!(rows.len(), 3, "{theme:?}: three lines: {rows:?}");
+            assert!(!drawn.galley.elided, "{theme:?}: not cut");
+            let shown: String = rows.concat();
+            for word in LONG_ERROR.split_whitespace() {
+                assert!(shown.contains(word), "{theme:?}: `{word}` drawn: {rows:?}");
+            }
+            let s = h.state();
+            let (field, line) = (s.field.unwrap_or(Rect::NOTHING), s.line.unwrap_or(Rect::NOTHING));
+            let at = drawn.galley.rect.translate(drawn.pos.to_vec2());
+            assert!(close(at.top(), field.bottom() + 4.0) && close(at.left(), field.left()), "{theme:?}: 4 under the field: {at:?}");
+            assert!(at.width() <= field.width() + 0.5, "{theme:?}: at the field's width: {at:?} under {field:?}");
+            assert!(line.contains_rect(at), "{theme:?}: its line holds it: {at:?} in {line:?}");
+            assert_eq!(height(&h), height(&one) + 2.0 * Text::Small.line(), "{theme:?}: the dialog grew by two lines");
+            for (b, r) in &s.buttons {
+                assert!(close(r.top(), at.bottom() + 20.0), "{theme:?} {}: 20 under the error, not over it: {r:?}", b.label);
+            }
+            let words = texts(&h.output().shapes).into_iter().find(|(w, _, _)| w == LONG_ERROR).map(|(_, _, c)| c);
+            assert_eq!(words, Some(t.danger), "{theme:?}: in danger");
         }
     }
 
