@@ -361,6 +361,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
+    use crate::components::tooltip::Hint;
     use crate::components::{Edge, ROOM, both, edges_in, fills_in, harness, icon_in, painted, texts};
     use crate::theme::DARK;
 
@@ -515,7 +516,7 @@ mod tests {
                 ui.horizontal(|ui| {
                     let rs = [
                         ui.add(TextButton::new("Before")),
-                        ui.add_enabled(false, BoxButton::primary("Run")).on_disabled_hover_text("Run: not now, nothing to run"),
+                        ui.add_enabled(false, BoxButton::primary("Run")).hint_disabled("Run: not now, nothing to run"),
                         ui.add(TextButton::new("After")),
                     ];
                     s.at = rs[1].rect;

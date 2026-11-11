@@ -102,6 +102,7 @@ use crate::components::button::{BoxButton, TextButton};
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
 use crate::components::toast::Kind;
+use crate::components::tooltip::Hint;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{
@@ -774,8 +775,8 @@ fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, button
     let enabled = why_not.is_none();
     let r = ui.add_enabled(enabled, button);
     let r = match why_not {
-        Some(why) => r.on_disabled_hover_text(format!("{hover}: not now, {why}")),
-        None => r.on_hover_text(hover),
+        Some(why) => r.hint_disabled(format!("{hover}: not now, {why}")),
+        None => r.hint(hover),
     };
     tags.tag_value_as(id, &r, label, enabled);
     r.clicked()
@@ -829,8 +830,8 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
             ),
         };
         let r = match &chip.why_not {
-            Some(why) => r.on_disabled_hover_text(format!("Choose the {one}: not now, {why}")),
-            None => r.on_hover_text(hover),
+            Some(why) => r.hint_disabled(format!("Choose the {one}: not now, {why}")),
+            None => r.hint(hover),
         };
         tags.tag_value_as(DATABASE, &r, shown, enabled);
         if !enabled {
@@ -995,7 +996,7 @@ fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], sh
         }
         let n = i.saturating_add(1);
         let r = ui.add(Button::selectable(i == shown, Text::Data.rich(n.to_string())).min_size(vec2(22.0, 22.0)));
-        let r = r.on_hover_text(format!("Statement {n}: {}", what(o)));
+        let r = r.hint(format!("Statement {n}: {}", what(o)));
         tags.tag_value(&format!("{RESULT}{n}"), &r, value(i, o));
         if r.clicked() && i != shown {
             picked = Some(i);
@@ -1003,7 +1004,7 @@ fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], sh
     }
     if fit.more {
         let r = ui.add(Button::new(Text::Data.rich("…")).min_size(vec2(22.0, 22.0)));
-        let r = r.on_hover_text(format!("Choose one of the {} results", results.len()));
+        let r = r.hint(format!("Choose one of the {} results", results.len()));
         tags.tag_value(RESULT_MORE, &r, results.len());
         Popup::menu(&r).width(RESULT_LIST_W).style(menu::style(ui.ctx())).show(|ui| {
             ui.set_min_width(ui.available_width());
@@ -1133,7 +1134,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             if q.results.len() < 2 || bar_rect.right() - right_room - after >= MORE_W + result_width(q.results.len()) {
                 bar.label(words);
             } else {
-                spinner.on_hover_text("Running…");
+                spinner.hint("Running…");
             }
         }
         // The selector between the buttons and the summary, kept within its room.
@@ -1157,7 +1158,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 let ui = &mut sum;
                 let rich = if *cut { Text::Label.rich(text.as_str()).color(t.text) } else { Text::Label.rich(text.as_str()).color(t.text_muted) };
                 let r = ui.add(Label::new(rich).selectable(false));
-                let r = if *cut { r.on_hover_text(cap_hover()) } else { r };
+                let r = if *cut { r.hint(cap_hover()) } else { r };
                 tags.tag_value(ROWS, &r, text.as_str());
             }
         }

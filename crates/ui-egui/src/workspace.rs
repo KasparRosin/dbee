@@ -42,6 +42,7 @@ use serde_json::json;
 
 use crate::app::Origin;
 use crate::components::icon::Icon;
+use crate::components::tooltip::Hint;
 use crate::connections::{line_galley, line_job};
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
@@ -281,12 +282,12 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
             tags.tag_value("status-server", &r, server.as_str());
             if let Some((text, hover)) = tls {
                 ui.add_space(6.0);
-                let r = ui.label(Text::Label.rich(text).color(t.text_muted)).on_hover_text(hover);
+                let r = ui.label(Text::Label.rich(text).color(t.text_muted)).hint(hover);
                 tags.tag_value("status-tls", &r, text);
             }
             if !saved {
                 ui.add_space(8.0);
-                let r = status_button(ui, "Save connection", true).on_hover_text("Add this connection to the saved ones");
+                let r = status_button(ui, "Save connection", true).hint("Add this connection to the saved ones");
                 tags.tag_value("status-save", &r, "Save connection");
                 if r.clicked() {
                     acts.push(Act::SaveOpen);
@@ -411,7 +412,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
                 ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), t.hover);
             }
             Icon::Plus.paint(ui.painter(), rect.center(), t.text_muted);
-            let r = r.on_hover_text("New query tab (Ctrl+T)");
+            let r = r.hint("New query tab (Ctrl+T)");
             tags.tag("tab-new", &r);
             if r.clicked() {
                 acts.push(Act::NewQuery);
@@ -460,7 +461,7 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     let text_left = icon_rect.right() + 6.0;
     let galley_w = galley.size().x;
     p.galley(pos2(text_left, rect.center().y - galley.size().y / 2.0), galley, colour);
-    let r = r.on_hover_text(tab.hover.as_str());
+    let r = r.hint(tab.hover.as_str());
     tags.tag_value(&format!("tab-{}", tab.id.0), &r, tab.title.as_str());
     let mut x = text_left + galley_w + 6.0;
     if tab.dirty {
@@ -477,7 +478,7 @@ fn draw_tab(ui: &mut egui::Ui, tab: &TabView, tags: &mut crate::automation::Tags
     }
     let cross = if tab.active || r.hovered() || close.hovered() { t.text_muted } else { t.line };
     Icon::Close.paint(&p, close_rect.center(), cross);
-    let close = close.on_hover_text("Close (Ctrl+W)");
+    let close = close.hint("Close (Ctrl+W)");
     tags.tag(&format!("tab-close-{}", tab.id.0), &close);
     if close.clicked() || r.middle_clicked() {
         acts.push(Act::Close(tab.id));

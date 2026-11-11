@@ -40,6 +40,7 @@ use serde_json::json;
 use crate::automation::Tags;
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
+use crate::components::tooltip::Hint;
 use crate::theme::{self, Text, size::RADIUS_CONTROL};
 
 /// The height of every control in a row: the toggle, the choices, the value field and the
@@ -141,7 +142,7 @@ fn icon_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, hover: &str, select
     };
     ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, egui::Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
     icon.paint(ui.painter(), rect.center(), t.text_muted);
-    let r = r.on_hover_text(hover);
+    let r = r.hint(hover);
     tags.tag_value(id, &r, selected);
     r.clicked()
 }
@@ -176,8 +177,8 @@ fn apply_button(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Ve
     let b = Button::new(RichText::new("Apply").color(t.on_ink)).fill(t.ink).min_size(vec2(APPLY_W, ROW_H));
     let r = ui.add_enabled(enabled, b);
     let r = match bar.blocked {
-        Some(why) => r.on_disabled_hover_text(format!("Apply the filters: not now, {why}")),
-        None => r.on_hover_text("Apply the filters (Enter)"),
+        Some(why) => r.hint_disabled(format!("Apply the filters: not now, {why}")),
+        None => r.hint("Apply the filters (Enter)"),
     };
     tags.tag_value("filter-apply", &r, "Apply");
     if r.clicked() {
@@ -226,7 +227,7 @@ fn raw_row(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run
                 .code_editor(),
             width,
         ));
-        let r = r.on_hover_text(enter_hover(bar));
+        let r = r.hint(enter_hover(bar));
         tags.tag_value("filter-raw", &r, text.as_str());
         if r.changed() {
             runs.push(("table.setFilters", json!({ "raw": text, "apply": false })));
@@ -292,7 +293,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             let mut column = None;
             let combo = choice(ui, ("dbee-filter-column", bar.tab.0, n), column_w, 360.0, shown(row.column.clone()), |ui| {
                 for (name, ty) in &bar.columns {
-                    let r = ui.add(Item::new(name).choice(Some(*name == row.column))).on_hover_text(*ty);
+                    let r = ui.add(Item::new(name).choice(Some(*name == row.column))).hint(*ty);
                     tags.tag_value_as(&format!("filter-{n}-column-{name}"), &r, *ty, true);
                     if r.clicked() {
                         column = Some((*name).to_string());
@@ -333,7 +334,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                 };
                 let r =
                     ui.add(field(TextEdit::singleline(&mut text).id(egui::Id::new(("dbee-filter-value", bar.tab.0, n))).hint_text(hint), value_w));
-                let r = if unapplied { r.on_hover_text(UNAPPLIED_HOVER) } else { r.on_hover_text(enter_hover(bar)) };
+                let r = if unapplied { r.hint(UNAPPLIED_HOVER) } else { r.hint(enter_hover(bar)) };
                 tags.tag_value(&format!("filter-{n}-value"), &r, text.as_str());
                 if unapplied {
                     tags.tag_value(&format!("filter-{n}-unapplied"), &r, UNAPPLIED_HINT);
@@ -380,7 +381,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
 /// `r` with `note` as its hover, when there is one.
 fn noted(r: Response, note: Option<&str>) -> Response {
     match note {
-        Some(note) => r.on_hover_text(note),
+        Some(note) => r.hint(note),
         None => r,
     }
 }

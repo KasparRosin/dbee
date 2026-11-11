@@ -59,6 +59,7 @@ use serde_json::{Map, json};
 use crate::automation::{CellBlock, Tags};
 use crate::components::icon::{self, Icon};
 use crate::components::menu::{self, Item};
+use crate::components::tooltip::Hint;
 use crate::connections::{line_galley, line_galley_as_written};
 use crate::theme::{self, Text};
 
@@ -424,8 +425,8 @@ impl Grid<'_> {
                     let Some(r) = resp else { continue };
                     *head = (r.rect.left(), r.rect.right());
                     let r = match (self.sortable, self.blocked) {
-                        (true, None) => r.on_hover_text("Sort by this column"),
-                        (true, Some(why)) => r.on_hover_text(format!("Sort by this column: not now, {why}")),
+                        (true, None) => r.hint("Sort by this column"),
+                        (true, Some(why)) => r.hint(format!("Sort by this column: not now, {why}")),
                         (false, _) => r,
                     };
                     tags.tag_value(&format!("grid-header-{col}"), &r, self.head_value(col));
@@ -447,7 +448,7 @@ impl Grid<'_> {
                             first_drawn = Some((r, resp.rect.top()));
                         }
                         if let Some(link) = &drawn.link {
-                            let link = link.clone().on_hover_text("Open the row this key points at");
+                            let link = link.clone().hint("Open the row this key points at");
                             tags.tag(&format!("{LINK}{r}-{c}"), &link);
                             if link.clicked() {
                                 acts.push(GridAct::Follow { row: r, col: c });
@@ -665,7 +666,7 @@ impl Grid<'_> {
             let mut r = ui.add_enabled(blocked.is_none(), entry);
             let mut value = json!({ "label": label, "shortcut": keys });
             if let Some(why) = blocked.filter(|w| !w.is_empty()) {
-                r = r.on_disabled_hover_text(why);
+                r = r.hint_disabled(why);
                 value["why"] = json!(why);
             }
             // A menu's first frame reads every widget as disabled: tag what the code knows.

@@ -28,6 +28,7 @@ use crate::components::input::{self, Field, Input};
 use crate::components::menu::{self, Item};
 use crate::components::segmented::Segmented;
 use crate::components::swatch::{self, Swatch};
+use crate::components::tooltip::Hint;
 use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
 use crate::picker::Pick;
 use crate::theme::size::{MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP};
@@ -355,7 +356,7 @@ fn path_box(ui: &mut egui::Ui, tags: &mut Tags, id: &str, width: f32, path: Opti
     let galley = line_galley(ui, &text, Text::Body, color, width - 14.0);
     let y = rect.center().y - galley.size().y / 2.0;
     p.galley(pos2(rect.left() + 7.0, y), galley, color);
-    let r = if text.chars().count() > 40 { r.on_hover_text(text.as_str()) } else { r };
+    let r = if text.chars().count() > 40 { r.hint(text.as_str()) } else { r };
     tags.tag_value(id, &r, shown.map_or(Json::Null, Json::from));
 }
 
@@ -384,7 +385,7 @@ fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, style): (&str, 
     let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
     let x = if right { rect.right() - galley.size().x } else { rect.left() };
     ui.painter().galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, t.text);
-    let r = if elided { r.on_hover_text(text) } else { r };
+    let r = if elided { r.hint(text) } else { r };
     tags.tag_value(id, &r, value);
 }
 
@@ -495,7 +496,7 @@ fn name_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
                 ui.spacing_mut().item_spacing.x = SWATCH_GAP;
                 for colour in swatch::COLOURS {
                     let (name, chosen) = (swatch::name(colour), f.color == colour);
-                    let r = ui.add(Swatch::new(colour, chosen)).on_hover_text(name);
+                    let r = ui.add(Swatch::new(colour, chosen)).hint(name);
                     tags.tag_value(&format!("conn-color-{name}"), &r, chosen);
                     if r.clicked() {
                         f.color = colour;
@@ -629,9 +630,8 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
                 field.request_focus();
             }
             let label = if listing { "Listing…" } else { "List…" };
-            let button = ui
-                .add_enabled(can_list, Button::new(label).min_size(vec2(LIST_BUTTON_W, FIELD_H)))
-                .on_hover_text("Choose from the server's databases");
+            let button =
+                ui.add_enabled(can_list, Button::new(label).min_size(vec2(LIST_BUTTON_W, FIELD_H))).hint("Choose from the server's databases");
             tags.tag_value("conn-database-list", &button, label);
             databases.button = Some(button.id);
             if button.clicked() {
@@ -831,7 +831,7 @@ fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut
                 let (rect, r) = ui.allocate_exact_size(vec2(line_w, FIELD_H), Sense::hover());
                 let galley = line_galley(ui, &text, Text::Body, color, line_w);
                 ui.painter().galley(pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, color);
-                let r = if text.chars().count() > 50 { r.on_hover_text(text.as_str()) } else { r };
+                let r = if text.chars().count() > 50 { r.hint(text.as_str()) } else { r };
                 tags.tag_value("conn-ssh-key", &r, text.as_str());
                 if f.ssh_auth == Auth::Key {
                     let change = ui.add_enabled(
@@ -845,7 +845,7 @@ fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut
                     if f.ssh_key.is_some() {
                         let auto = ui
                             .add(Button::new("Automatic").min_size(vec2(button_w, FIELD_H)))
-                            .on_hover_text("Use the agent, then ~/.ssh/id_ed25519, id_ecdsa or id_rsa");
+                            .hint("Use the agent, then ~/.ssh/id_ed25519, id_ecdsa or id_rsa");
                         tags.tag("conn-ssh-auto", &auto);
                         if auto.clicked() {
                             acts.push(Act::AutoKey);

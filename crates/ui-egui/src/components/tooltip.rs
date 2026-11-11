@@ -1,16 +1,11 @@
-//! Tooltips (`tooltip`): every hover text in the app (`on_hover_text`, `on_disabled_hover_text`)
-//! takes this look from the theme's style ([`apply`], called where the theme is applied), so a
-//! call names only its words.
-//!
-//! What egui decides, and the page draws otherwise: a tooltip sits 4 under the widget it belongs
-//! to, its left edge at the widget's (the page: 4 under the pointer, at the pointer), and its
-//! words are in the theme's `body` (the page: `small`). egui places and words a hover text
-//! itself; matching the page would mean a change at every call.
+//! Tooltips (`tooltip`): every hover text in the app goes through [`Hint`], which words it in
+//! `small` and puts it 4 below the pointer, its left edge at the pointer. Its frame comes from the
+//! theme's style ([`apply`], called where the theme is applied), so a call names only its words.
 
-use egui::{CornerRadius, Frame, Label, Margin, Response, Stroke, Style, Ui};
+use egui::{CornerRadius, Frame, Label, Margin, Response, Stroke, Style, Tooltip, Ui};
 
-use crate::theme::size::{RADIUS_FLOAT, TOOLTIP_PAD_X, TOOLTIP_PAD_Y, TOOLTIP_W};
-use crate::theme::{Tokens, float_shadow};
+use crate::theme::size::{RADIUS_FLOAT, TOOLTIP_GAP, TOOLTIP_PAD_X, TOOLTIP_PAD_Y, TOOLTIP_W};
+use crate::theme::{Text, Tokens, float_shadow};
 
 /// The tooltip's look in `style`: `raised`, a 1 px `raised_line` edge, corners 4, the one shadow,
 /// its words 8 and 4 in from the outside edge, wrapping to keep it at most 320 wide. Its words
@@ -28,13 +23,48 @@ pub fn apply(style: &mut Style, t: &Tokens) {
     style.spacing.tooltip_width = TOOLTIP_W - 2.0 * f32::from(TOOLTIP_PAD_X);
 }
 
-/// A tooltip saying `words`, drawn where it stands (the showcase), as egui draws a hover text.
+/// A widget's hover text, the one way the app shows one.
+pub trait Hint {
+    /// `words` while the pointer rests on it, if it is on.
+    fn hint(self, words: impl Into<String>) -> Response;
+    /// `words` while the pointer rests on it, if it is off: why.
+    fn hint_disabled(self, words: impl Into<String>) -> Response;
+}
+
+impl Hint for Response {
+    fn hint(self, words: impl Into<String>) -> Response {
+        show(Tooltip::for_enabled(&self), words);
+        self
+    }
+
+    fn hint_disabled(self, words: impl Into<String>) -> Response {
+        show(Tooltip::for_disabled(&self), words);
+        self
+    }
+}
+
+/// `tooltip`, if it is to show, at the pointer, saying `words`. egui's own at-pointer tooltip sits
+/// 12 off the pointer; the page's sits 4 below it.
+fn show(tooltip: Tooltip<'_>, words: impl Into<String>) {
+    tooltip.at_pointer().gap(TOOLTIP_GAP).show(|ui| {
+        // As egui's hover text: the area's size doesn't shrink a tooltip whose words change.
+        ui.set_max_width(ui.spacing().tooltip_width);
+        ui.add(label(words));
+    });
+}
+
+/// The tooltip's words: `small`, as written (they can name a table or a column).
+fn label(words: impl Into<String>) -> Label {
+    Label::new(Text::Small.rich_as_written(words)).selectable(false)
+}
+
+/// A tooltip saying `words`, drawn where it stands (the showcase), as [`Hint`] draws one.
 pub fn in_place(ui: &mut Ui, words: &str) -> Response {
     Frame::popup(ui.style())
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.set_max_width(ui.spacing().tooltip_width);
-                ui.add(Label::new(words).selectable(false));
+                ui.add(label(words));
             });
         })
         .response
@@ -42,7 +72,7 @@ pub fn in_place(ui: &mut Ui, words: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use egui::{Align, Button, CornerRadius, FontFamily, Layout, Rect, Sense, vec2};
+    use egui::{Align, Button, CornerRadius, Layout, Rect, Sense, vec2};
 
     use super::*;
     use crate::components::{ROOM, both, flat, harness};
@@ -55,26 +85,32 @@ mod tests {
         (a - b).abs() <= 0.5
     }
 
-    /// The tooltip egui shows for a button hovered in `theme`: the button, the tooltip's frame,
-    /// its shadow and its words (where, the font, the colour).
+    /// Where the pointer rests on the button, from its top left: off its centre and its left
+    /// edge, so a tooltip placed by the widget shows apart from one placed by the pointer.
+    const REST: egui::Vec2 = vec2(37.0, 6.0);
+
+    /// The tooltip shown for a button hovered in `theme`, on (`hint`) or off (`hint_disabled`):
+    /// the button, where the pointer rests, the tooltip's frame, its shadow and its words (where,
+    /// the font, the colour).
     struct Seen {
-        button: Rect,
+        pointer: egui::Pos2,
         frame: egui::epaint::RectShape,
         shadow: Option<egui::epaint::RectShape>,
         words: Vec<(Rect, egui::FontId, egui::Color32)>,
     }
 
-    fn hovered(theme: egui::Theme, t: &Tokens, words: &'static str) -> Seen {
+    fn hovered(theme: egui::Theme, t: &Tokens, words: &'static str, off: bool) -> Seen {
         let mut h = harness(theme, Rect::NOTHING, move |ui, at| {
             ui.add_space(ROOM);
             ui.horizontal(|ui| {
                 ui.add_space(ROOM);
-                *at = ui.add(Button::new("Hover me").sense(Sense::click())).on_hover_text(words).rect;
+                let r = ui.add_enabled(!off, Button::new("Hover me, a wide button").sense(Sense::click()));
+                *at = if off { r.hint_disabled(words) } else { r.hint(words) }.rect;
             });
         });
         h.run();
-        let button = *h.state();
-        h.hover_at(button.center());
+        let pointer = h.state().min + REST;
+        h.hover_at(pointer);
         h.run();
         h.run();
         let shapes = flat(&h.output().shapes);
@@ -104,7 +140,16 @@ mod tests {
             egui::Shape::Rect(r) if r.blur_width > 0.0 && close(r.rect.left(), frame.rect.left()) => Some(r.clone()),
             _ => None,
         });
-        Seen { button, frame, shadow, words: words_drawn }
+        Seen { pointer, frame, shadow, words: words_drawn }
+    }
+
+    /// The outside of the tooltip's frame, its edge included.
+    fn outside(frame: &egui::epaint::RectShape) -> Rect {
+        match frame.stroke_kind {
+            egui::StrokeKind::Inside => frame.rect,
+            egui::StrokeKind::Middle => frame.rect.expand(frame.stroke.width / 2.0),
+            egui::StrokeKind::Outside => frame.rect.expand(frame.stroke.width),
+        }
     }
 
     #[test]
@@ -115,7 +160,7 @@ mod tests {
         for (theme, t) in both() {
             for words in [ONE, WRAPPED] {
                 let at = format!("{theme:?} {words:?}");
-                let seen = hovered(theme, &t, words);
+                let seen = hovered(theme, &t, words, false);
                 let frame = seen.frame.rect;
                 assert_eq!((seen.frame.stroke.width, seen.frame.stroke.color), (1.0, t.raised_line), "{at}: the edge");
                 assert_eq!(seen.frame.corner_radius, CornerRadius::same(4), "{at}: the corners");
@@ -124,17 +169,11 @@ mod tests {
                 assert!(close(shadow.rect.top(), frame.top() + 6.0), "{at}: the shadow 6 down: {:?} under {frame:?}", shadow.rect);
                 let rows: Vec<Rect> = seen.words.iter().map(|(r, _, _)| *r).collect();
                 assert!(!rows.is_empty(), "{at}: the words drawn");
-                for (r, font, colour) in &seen.words {
+                for (_, _, colour) in &seen.words {
                     assert_eq!(*colour, t.text, "{at}: the words in text");
-                    // egui words a hover text in the theme's `body`, not the page's `small`.
-                    assert_eq!((font.family.clone(), font.size), (FontFamily::Proportional, Text::Body.font().size), "{at}: {r:?}");
                 }
                 let words_box = rows.iter().fold(Rect::NOTHING, |a, r| a.union(*r));
-                let outside = match seen.frame.stroke_kind {
-                    egui::StrokeKind::Inside => frame,
-                    egui::StrokeKind::Middle => frame.expand(seen.frame.stroke.width / 2.0),
-                    egui::StrokeKind::Outside => frame.expand(seen.frame.stroke.width),
-                };
+                let outside = outside(&seen.frame);
                 assert!(close(words_box.left() - outside.left(), 8.0), "{at}: 8 in: {words_box:?} in {outside:?}");
                 assert!(close(words_box.top() - outside.top(), 4.0), "{at}: 4 down: {words_box:?} in {outside:?}");
                 assert!(close(outside.right() - words_box.right(), 8.0) || words == WRAPPED, "{at}: one line hugs its words");
@@ -146,14 +185,76 @@ mod tests {
                 } else {
                     assert_eq!(rows.len(), 1, "{at}: one line");
                 }
-                // egui's place for it: 4 under the widget, its left edge at the widget's.
+            }
+        }
+    }
+
+    #[test]
+    fn a_tooltip_is_small_text_at_the_pointer() {
+        // Node 162737: the words in `small` (Inter 12, a 16 line) in `text`, one line 24 tall; the
+        // tooltip 4 below the pointer, its left edge at the pointer. A widget that is off says
+        // why the same way.
+        for (theme, t) in both() {
+            for off in [false, true] {
+                let at = format!("{theme:?} off {off}");
+                let seen = hovered(theme, &t, ONE, off);
+                assert!(!seen.words.is_empty(), "{at}: the words drawn");
+                for (r, font, colour) in &seen.words {
+                    assert_eq!(*font, Text::Small.font(), "{at}: the words in small: {r:?}");
+                    assert_eq!(*colour, t.text, "{at}: the words in text");
+                    assert!(close(r.height(), Text::Small.line()), "{at}: a 16 line: {r:?}");
+                }
+                let outside = outside(&seen.frame);
+                assert!(close(outside.height(), 24.0), "{at}: one line is 24 tall: {outside:?}");
                 assert!(
-                    close(outside.top(), seen.button.bottom() + 4.0) && close(outside.left(), seen.button.left()),
-                    "{at}: {outside:?} under {:?}",
-                    seen.button
+                    close(outside.top(), seen.pointer.y + 4.0) && close(outside.left(), seen.pointer.x),
+                    "{at}: {outside:?} 4 below the pointer at {:?}, its left edge there",
+                    seen.pointer
                 );
             }
         }
+    }
+
+    #[test]
+    fn no_hover_text_bypasses_the_hint() {
+        // Every hover text goes through `Hint`, so each one is `small` at the pointer.
+        const BYPASSES: [&str; 8] = [
+            ".on_hover_text(",
+            ".on_disabled_hover_text(",
+            ".on_hover_text_at_pointer(",
+            ".on_hover_ui(",
+            ".on_disabled_hover_ui(",
+            ".on_hover_ui_at_pointer(",
+            ".show_tooltip_text(",
+            ".show_tooltip_ui(",
+        ];
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for dir in ["src", "tests", "examples"] {
+            walk(&root.join(dir), &mut files);
+        }
+        assert!(files.len() > 20, "the crate's files: {files:?}");
+        let this = root.join("src/components/tooltip.rs");
+        let mut found = Vec::new();
+        for file in files.iter().filter(|f| **f != this) {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                if BYPASSES.iter().any(|b| line.contains(b)) {
+                    found.push(format!("{}:{}: {}", file.strip_prefix(root).unwrap().display(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(found.is_empty(), "hover texts outside `Hint`:\n{}", found.join("\n"));
     }
 
     #[test]

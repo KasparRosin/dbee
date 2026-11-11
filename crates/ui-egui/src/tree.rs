@@ -40,6 +40,7 @@ use serde_json::json;
 
 use crate::automation::Tags;
 use crate::components::icon::{self, Icon};
+use crate::components::tooltip::Hint;
 use crate::connections::{line_galley, line_galley_as_written};
 use crate::theme::{
     self, Text,
@@ -431,9 +432,9 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
             Refresh::Disabled(_) => Icon::Refresh.paint(ui.painter(), icon_rect.center(), t.text_faint),
         }
         let r = match &tree.refresh {
-            Refresh::Ready => r.on_hover_text(format!("Refresh the {many}")),
-            Refresh::Running => r.on_hover_text(format!("Refreshing the {many}…")),
-            Refresh::Disabled(why) => r.on_hover_text(format!("Cannot refresh: {why}")),
+            Refresh::Ready => r.hint(format!("Refresh the {many}")),
+            Refresh::Running => r.hint(format!("Refreshing the {many}…")),
+            Refresh::Disabled(why) => r.hint(format!("Cannot refresh: {why}")),
         };
         tags.tag_value_as("tree-refresh", &r, "Refresh", enabled);
         if enabled && r.clicked() {
@@ -620,7 +621,7 @@ fn draw_row(
             if let Some(n) = row_estimate(info) {
                 hover.push_str(&format!(" · ~{} rows", thousands(n)));
             }
-            let r = r.on_hover_text(hover);
+            let r = r.hint(hover);
             tags.tag_value(id, &r, kind_name(info.kind));
             // The chevron is its own target, above the row.
             let expand = ui.interact(chevron_rect.expand(2.0), egui::Id::new(("dbee-tree-expand", id)), Sense::click());
@@ -653,7 +654,7 @@ fn draw_row(
             let right = muted_right(col.label(), Text::Data);
             label(&col.name, t.text, right);
             let r = match info.fk_for(&col.name) {
-                Some(fk) => r.on_hover_text(format!("{} → {}", col.name, fk.target.display())),
+                Some(fk) => r.hint(format!("{} → {}", col.name, fk.target.display())),
                 None => r,
             };
             tags.tag_value(id, &r, json!({ "type": col.label(), "key": key }));

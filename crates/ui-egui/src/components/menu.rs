@@ -315,6 +315,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
+    use crate::components::tooltip::Hint;
     use crate::components::{Edge, ROOM, both, edges_in, flat, harness, icon_in, painted, texts};
 
     /// The page's items are 230 wide.
@@ -598,7 +599,7 @@ mod tests {
                 let shown = Popup::from_response(&anchor)
                     .open(true)
                     .style(style(ui.ctx()))
-                    .show(|ui| ui.add(Item::new("New Query Tab").shortcut("Ctrl+T")).on_hover_text(TIP).rect);
+                    .show(|ui| ui.add(Item::new("New Query Tab").shortcut("Ctrl+T")).hint(TIP).rect);
                 *item = shown.map_or(Rect::NOTHING, |s| s.inner);
             });
             h.run();

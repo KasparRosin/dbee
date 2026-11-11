@@ -33,6 +33,7 @@ use serde_json::json;
 use crate::automation::Tags;
 use crate::components::button::{BarButton, BoxButton, IconButton, TextButton};
 use crate::components::icon::Icon;
+use crate::components::tooltip::Hint;
 use crate::theme::{
     self, Text,
     size::{self, ICON_BUTTON, RADIUS_CONTROL, SPINNER},
@@ -111,8 +112,8 @@ fn step_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, step: Icon, why_not
     let enabled = why_not.is_none();
     let r = ui.add_enabled(enabled, IconButton::plain(step));
     let r = match why_not {
-        Some(why) => r.on_disabled_hover_text(format!("{hover}: not now, {why}")),
-        None => r.on_hover_text(hover),
+        Some(why) => r.hint_disabled(format!("{hover}: not now, {why}")),
+        None => r.hint(hover),
     };
     tags.tag_value_as(id, &r, hover, enabled);
     enabled && r.clicked()
@@ -341,15 +342,15 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     let r = if fit.count_icon {
         let r = count_button(ui, enabled);
         match (p.count_blocked, counting) {
-            (Some(why), _) => r.on_hover_text(format!("{count}. Can't count now: {why}.")),
-            (None, true) => r.on_hover_text(format!("{count}: counting the rows")),
-            (None, false) => r.on_hover_text(format!("{count}: count the rows exactly")),
+            (Some(why), _) => r.hint(format!("{count}. Can't count now: {why}.")),
+            (None, true) => r.hint(format!("{count}: counting the rows")),
+            (None, false) => r.hint(format!("{count}: count the rows exactly")),
         }
     } else {
         let r = ui.add_enabled(enabled, Button::new(Text::Label.rich(count)).min_size(vec2(parts.count_w, SQUARE)));
         match p.count_blocked {
-            Some(why) => r.on_disabled_hover_text(format!("Can't count now: {why}.")),
-            None => r.on_hover_text("Count the rows exactly"),
+            Some(why) => r.hint_disabled(format!("Can't count now: {why}.")),
+            None => r.hint("Count the rows exactly"),
         }
     };
     tags.tag_value_as("page-count", &r, count, enabled);
@@ -362,8 +363,8 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     let refresh_enabled = p.blocked.is_none();
     let r = ui.add_enabled(refresh_enabled, IconButton::plain(Icon::Refresh));
     let r = match p.blocked {
-        Some(why) => r.on_disabled_hover_text(format!("Refresh: not now, {why}")),
-        None => r.on_hover_text("Load the page again"),
+        Some(why) => r.hint_disabled(format!("Refresh: not now, {why}")),
+        None => r.hint("Load the page again"),
     };
     tags.tag_value_as("table-refresh", &r, "Refresh", refresh_enabled);
     if refresh_enabled && r.clicked() {
@@ -377,8 +378,8 @@ fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fi
     let enabled = p.add_blocked.is_none();
     let r = ui.add_enabled(enabled, add_row());
     let r = match &p.add_blocked {
-        Some(why) => r.on_disabled_hover_text(format!("Cannot add a row now: {why}")),
-        None => r.on_hover_text("Add a row, written with the other changes on Apply"),
+        Some(why) => r.hint_disabled(format!("Cannot add a row now: {why}")),
+        None => r.hint("Add a row, written with the other changes on Apply"),
     };
     tags.tag_value_as("row-add", &r, "+ Row", enabled);
     if r.clicked() {
@@ -395,7 +396,7 @@ fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fi
         // The label's one widget id, so Reset and Apply keep theirs when it is left out.
         ui.skip_ahead_auto_ids(1);
     }
-    let r = ui.add(TextButton::new("Reset")).on_hover_text("Drop the staged changes");
+    let r = ui.add(TextButton::new("Reset")).hint("Drop the staged changes");
     tags.tag_value("edit-reset", &r, "Reset");
     if r.clicked() {
         runs.push(("edit.reset", json!({})));
@@ -403,8 +404,8 @@ fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fi
     let apply_enabled = p.apply_blocked.is_none();
     let r = ui.add_enabled(apply_enabled, BoxButton::primary("Apply"));
     let r = match p.apply_blocked {
-        Some(why) => r.on_disabled_hover_text(format!("Cannot apply {} now: {why}", parts.edits)),
-        None => r.on_hover_text(format!("Write {} in one transaction (Ctrl+S)", parts.edits)),
+        Some(why) => r.hint_disabled(format!("Cannot apply {} now: {why}", parts.edits)),
+        None => r.hint(format!("Write {} in one transaction (Ctrl+S)", parts.edits)),
     };
     tags.tag_value_as("edit-apply", &r, "Apply", apply_enabled);
     if r.clicked() {

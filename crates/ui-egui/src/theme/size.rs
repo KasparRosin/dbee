@@ -79,10 +79,11 @@ pub const MENU_TITLE_H: f32 = 24.0;
 pub const MENU_TITLE_PAD_X: f32 = 8.0;
 
 /// A tooltip (`tooltip`): its words this far in from its outside edge, across and down; at most
-/// this wide, its words wrapping inside.
+/// this wide, its words wrapping inside; this far below the pointer.
 pub const TOOLTIP_PAD_X: i8 = 8;
 pub const TOOLTIP_PAD_Y: i8 = 4;
 pub const TOOLTIP_W: f32 = 320.0;
+pub const TOOLTIP_GAP: f32 = 4.0;
 
 /// A toast (`toast`): this tall for one line of words (a wrapped one grows by its lines), its
 /// parts this far in from its ends and this far apart; at most this wide, its words wrapping.

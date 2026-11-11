@@ -70,6 +70,7 @@ use serde_json::{Value as Json, json};
 use crate::DbeeApp;
 use crate::automation::Tags;
 use crate::components::icon::Icon;
+use crate::components::tooltip::Hint;
 use crate::connections::{line_galley, line_galley_as_written};
 use crate::editors::size_text;
 use crate::shortcuts;
@@ -686,7 +687,7 @@ pub(crate) fn toggle(ui: &mut egui::Ui, open: bool, tags: &mut Tags) -> bool {
     }
     let colour = if open { t.ink } else { t.text_muted };
     Icon::Panel.paint(ui.painter(), rect.center(), colour);
-    let r = r.on_hover_text(if open { "Hide the value panel" } else { "Show the value panel" });
+    let r = r.hint(if open { "Hide the value panel" } else { "Show the value panel" });
     tags.tag_value(TOGGLE, &r, open);
     r.clicked()
 }

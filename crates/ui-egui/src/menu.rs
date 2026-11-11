@@ -22,6 +22,7 @@ use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::menu::{self, Item};
+use crate::components::tooltip::Hint;
 use crate::shortcuts::SHORTCUTS;
 
 /// The top menus that come first, in this order.
@@ -96,7 +97,7 @@ fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], checked: 
             value["checked"] = json!(true);
         }
         if let Some(why) = &c.disabled_reason {
-            r = r.on_disabled_hover_text(why.as_str());
+            r = r.hint_disabled(why.as_str());
             value["why"] = json!(why);
         }
         // A menu's first frame is a sizing pass, which reads every widget as disabled.
