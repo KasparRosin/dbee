@@ -619,13 +619,53 @@ mod tests {
             assert_eq!(menu.corner_radius, CornerRadius::same(4), "{theme:?}: the menu's corners");
             assert!(close(item.left() - menu.rect.left(), 5.0) && close(item.top() - menu.rect.top(), 5.0), "{theme:?}: 4 inside the edge");
             let shadow = shapes.iter().any(
-                |s| matches!(s, egui::Shape::Rect(r) if r.blur_width == 18.0 && r.fill == t.shadow && close(r.rect.top(), menu.rect.top() + 6.0)),
+                |s| matches!(s, egui::Shape::Rect(r) if r.blur_width == f32::from(theme::float_shadow(&t).blur) && r.fill == t.shadow && close(r.rect.top(), menu.rect.top() + 6.0)),
             );
             assert!(shadow, "{theme:?}: the menu's shadow");
             let words = texts(&h.output().shapes).into_iter().find(|(s, _, _)| s == TIP).map(|(_, r, _)| r);
             let words = words.unwrap_or_else(|| panic!("{theme:?}: the tooltip shows"));
             let tooltip = frame(words).unwrap_or_else(|| panic!("{theme:?}: the tooltip's frame"));
             assert_eq!((tooltip.stroke.width, tooltip.stroke.color), (1.0, t.raised_line), "{theme:?}: the tooltip's edge");
+        }
+    }
+
+    #[test]
+    fn the_float_shadow_reaches_as_far_as_the_design() {
+        // The page's shadow (0 6, blur 18) fades out 24 under a menu's bottom edge, 12 over its
+        // top and 18 beside it. Measured on the painted mesh: where its fade ends.
+        for (theme, t) in both() {
+            let mut h = harness(theme, Rect::NOTHING, |ui, items| {
+                ui.add_space(ROOM);
+                let anchor = ui.add(Label::new("menu").sense(Sense::hover()));
+                let shown = Popup::from_response(&anchor)
+                    .open(true)
+                    .style(style(ui.ctx()))
+                    .show(|ui| ["Undo", "Redo", "Cut"].map(|w| ui.add(Item::new(w)).rect).into_iter().fold(Rect::NOTHING, Rect::union));
+                *items = shown.map_or(Rect::NOTHING, |s| s.inner);
+            });
+            h.run();
+            let items = *h.state();
+            let shapes = flat(&h.output().shapes);
+            let menu = shapes.iter().find_map(|s| match s {
+                egui::Shape::Rect(r) if r.blur_width == 0.0 && r.fill == t.raised && r.rect.contains_rect(items) => Some(r.rect),
+                _ => None,
+            });
+            let menu = menu.unwrap_or_else(|| panic!("{theme:?}: the menu's frame around {items:?}"));
+            let shadow = shapes.iter().find_map(|s| match s {
+                egui::Shape::Rect(r) if r.blur_width > 0.0 && r.fill == t.shadow && r.rect.intersects(menu) => Some(r.clone()),
+                _ => None,
+            });
+            let shadow = shadow.unwrap_or_else(|| panic!("{theme:?}: the menu's shadow"));
+            let clipped = egui::epaint::ClippedShape { clip_rect: Rect::EVERYTHING, shape: egui::Shape::Rect(shadow) };
+            let painted = h.ctx.tessellate(vec![clipped], h.ctx.pixels_per_point()).into_iter().fold(Rect::NOTHING, |r, p| match p.primitive {
+                egui::epaint::Primitive::Mesh(m) => m.vertices.iter().fold(r, |r, v| r.union(Rect::from_min_size(v.pos, Vec2::ZERO))),
+                egui::epaint::Primitive::Callback(_) => r,
+            });
+            let (below, above, side) = (painted.bottom() - menu.bottom(), menu.top() - painted.top(), menu.left() - painted.left());
+            let at = format!("{theme:?}: {below} below, {above} above, {side} beside {menu:?}");
+            assert!(below >= 17.0, "{at}: at least 17 under the bottom edge");
+            assert!((10.0..=22.0).contains(&above), "{at}: 10 to 22 over the top edge");
+            assert!((10.0..=22.0).contains(&side), "{at}: 10 to 22 beside it");
         }
     }
 

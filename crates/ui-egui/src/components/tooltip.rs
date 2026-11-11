@@ -155,8 +155,8 @@ mod tests {
     #[test]
     fn a_tooltip_matches_the_page() {
         // Node 162737: `raised`, a 1 px `raised_line` edge inside, corners 4, the shadow (0 6,
-        // blur 18); the words 8 in from the outside edge and 4 down, in `text`; one line hugs its
-        // words, a long text wraps to keep the tooltip at most 320 wide.
+        // the page's blur 18, egui's 36); the words 8 in from the outside edge and 4 down, in
+        // `text`; one line hugs its words, a long text wraps to keep the tooltip at most 320 wide.
         for (theme, t) in both() {
             for words in [ONE, WRAPPED] {
                 let at = format!("{theme:?} {words:?}");
@@ -165,7 +165,7 @@ mod tests {
                 assert_eq!((seen.frame.stroke.width, seen.frame.stroke.color), (1.0, t.raised_line), "{at}: the edge");
                 assert_eq!(seen.frame.corner_radius, CornerRadius::same(4), "{at}: the corners");
                 let shadow = seen.shadow.unwrap_or_else(|| panic!("{at}: the shadow"));
-                assert_eq!((shadow.blur_width, shadow.fill), (18.0, t.shadow), "{at}: the shadow's blur and colour");
+                assert_eq!((shadow.blur_width, shadow.fill), (f32::from(float_shadow(&t).blur), t.shadow), "{at}: the shadow's blur and colour");
                 assert!(close(shadow.rect.top(), frame.top() + 6.0), "{at}: the shadow 6 down: {:?} under {frame:?}", shadow.rect);
                 let rows: Vec<Rect> = seen.words.iter().map(|(r, _, _)| *r).collect();
                 assert!(!rows.is_empty(), "{at}: the words drawn");

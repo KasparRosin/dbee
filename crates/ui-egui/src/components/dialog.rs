@@ -347,11 +347,11 @@ mod tests {
 
     #[test]
     fn each_dialog_matches_the_page() {
-        // Node 162771: 440 wide, `raised`, a 1 px `line` edge, corners 4, the shadow (0 6,
-        // blur 18); 20 inside the edge; the title (`title`) and 6 under it the text (`body`), both
-        // `text`; 20 to the body (a field, 12 to a checkbox; a field's error line under it), 20
-        // to the buttons: 28 tall, at least 80 wide, 8 apart, the first on the right. Over a
-        // `scrim` covering the window, the dialog centred near the top.
+        // Node 162771: 440 wide, `raised`, a 1 px `line` edge, corners 4, the shadow (0 6, the
+        // page's blur 18, egui's 36); 20 inside the edge; the title (`title`) and 6 under it the
+        // text (`body`), both `text`; 20 to the body (a field, 12 to a checkbox; a field's error
+        // line under it), 20 to the buttons: 28 tall, at least 80 wide, 8 apart, the first on the
+        // right. Over a `scrim` covering the window, the dialog centred near the top.
         for (theme, t) in both() {
             for content in FIVE {
                 let at = format!("{theme:?} {content:?}");
@@ -376,7 +376,7 @@ mod tests {
                     _ => None,
                 });
                 let shadow = shadow.unwrap_or_else(|| panic!("{at}: the shadow"));
-                assert_eq!(shadow.blur_width, 18.0, "{at}: blur 18");
+                assert_eq!(shadow.blur_width, f32::from(float_shadow(&t).blur), "{at}: the one shadow's blur");
                 assert!(close(shadow.rect.top(), outer.top() + 6.0) && close(shadow.rect.left(), outer.left()), "{at}: 6 down: {:?}", shadow.rect);
                 let inside = outer.shrink(21.0);
                 // The title and the text.

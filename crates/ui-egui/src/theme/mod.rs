@@ -16,7 +16,9 @@ use size::{CARET_W, RADIUS_CONTROL, RADIUS_FLOAT};
 
 /// The design's one shadow, under every popup and dialog.
 pub fn float_shadow(t: &Tokens) -> Shadow {
-    Shadow { offset: [0, 6], blur: 18, spread: 0, color: t.shadow }
+    // The design's blur 18 is a radius: its fade reaches 18 past the edge. egui's blur is the
+    // fade's whole width, centred on the edge, so it takes twice that.
+    Shadow { offset: [0, 6], blur: 36, spread: 0, color: t.shadow }
 }
 
 fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {

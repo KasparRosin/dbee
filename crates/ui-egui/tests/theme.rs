@@ -231,8 +231,10 @@ fn a_dialog_sits_on_raised_over_the_scrim() {
     let has = |ui: &Ui, fill: egui::Color32, stroke: Option<egui::Color32>| {
         ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == fill && stroke.is_none_or(|c| r.stroke.color == c)))
     };
-    let shadowed =
-        |ui: &Ui, color: egui::Color32| ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == color && r.blur_width == 18.0));
+    let blur = dbee_ui_egui::theme::float_shadow(&d).blur;
+    let shadowed = |ui: &Ui, color: egui::Color32| {
+        ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == color && r.blur_width == f32::from(blur)))
+    };
     ui.ctrl("P");
     ui.frame();
     assert!(ui.tag("qs-input").is_some());
@@ -283,7 +285,12 @@ fn a_dialog_recolours_on_a_theme_switch() {
         // In light the connection card under the scrim is `raised` with a `line` edge too.
         let frame = rects.iter().rev().find(|r| r.rect.contains_rect(ok) && r.fill == t.raised && r.stroke.color == t.line && r.stroke.width == 1.0);
         let frame = frame.unwrap_or_else(|| panic!("{mode}: the dialog on raised with a line edge"));
-        assert!(rects.iter().any(|r| r.blur_width == 18.0 && r.fill == t.shadow && r.rect.intersects(frame.rect)), "{mode}: the dialog's shadow");
+        assert!(
+            rects.iter().any(|r| r.blur_width == f32::from(dbee_ui_egui::theme::float_shadow(&t).blur)
+                && r.fill == t.shadow
+                && r.rect.intersects(frame.rect)),
+            "{mode}: the dialog's shadow"
+        );
         assert_eq!(fills_in(&ui, ok), [t.ink], "{mode}: Fill on ink");
         assert_eq!(colour_of(&ui, ok, "FILL"), Some(t.on_ink), "{mode}: its words on_ink");
         let cancel = tagged(&ui, "dialog-cancel");
