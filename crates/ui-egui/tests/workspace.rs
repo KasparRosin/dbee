@@ -609,6 +609,73 @@ fn tree_refresh_reloads_the_catalog() {
     assert_eq!(ui.document()["connection"]["lost"], false);
 }
 
+/// The last frame drew the keyboard's focus ring 2 inside `field`: a 2 px `ink` box.
+fn ring_in(ui: &Ui, field: egui::Rect) -> bool {
+    let ink = dbee_ui_egui::theme::tokens(&ui.harness.ctx).ink;
+    let at = field.shrink(2.0);
+    ui.shapes().iter().any(|(_, s)| {
+        matches!(s, egui::Shape::Rect(r) if r.stroke.width == 2.0 && r.stroke.color == ink
+            && (r.rect.min - at.min).length() < 0.5 && (r.rect.max - at.max).length() < 0.5)
+    })
+}
+
+/// The tree's header is the sidebar's filter and count (`components::sidebar`). `tree-filter`
+/// keeps its id and its value as typed, `tree-refresh` its value, enabled flag and hover. The
+/// field is the page's 35 above the row's line with the refresh's 28 square beside it; what is
+/// typed is drawn as typed; the count under the row says dbee's word in capitals. A click gives
+/// the field focus without the ring, Shift+Tab back to it shows the ring; a refresh keeps the
+/// filter.
+#[test]
+fn the_tree_filter_keeps_its_tags_and_behaviour() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    let i = ui.inspect();
+    let filter = tag_in(&i, "tree-filter").expect("the filter is drawn");
+    let refresh = tag_in(&i, "tree-refresh").expect("the refresh is drawn");
+    assert_eq!((&filter["value"], filter.get("enabled")), (&json!(""), None), "{filter}");
+    assert_eq!((&refresh["value"], refresh.get("enabled")), (&json!("Refresh"), None), "{refresh}");
+    let tags = |ui: &Ui, id: &str| ui.harness.state().tags().rect(id).unwrap_or_else(|| panic!("`{id}` is drawn"));
+    let (f, r) = (tags(&ui, "tree-filter"), tags(&ui, "tree-refresh"));
+    assert_eq!(f.height(), 35.0, "the field, 35 above the row's line: {f:?}");
+    assert_eq!(r.size(), egui::vec2(28.0, 28.0), "the refresh, a 28 square: {r:?}");
+    assert!((r.left() - f.right()).abs() < 0.5 && (r.center().y - f.center().y).abs() < 0.5, "the refresh beside the field: {f:?} {r:?}");
+    assert!(ui.text_in(f, "Filter tables").is_some(), "the placeholder as written");
+    // The count, under the row: every table, in capitals.
+    let count =
+        |ui: &Ui| ui.texts().into_iter().map(|(at, g)| (at, g.text().to_string())).find(|(at, w)| w.ends_with(" TABLES") && at.top() >= f.bottom());
+    let (at, all) = count(&ui).unwrap_or_else(|| panic!("the count is drawn: {:?}", ui.texts().iter().map(|(_, g)| g.text()).collect::<Vec<_>>()));
+    let total = all.strip_suffix(" TABLES").unwrap_or_default().to_string();
+    assert!(!total.is_empty() && total.chars().all(|c| c.is_ascii_digit() || c == ','), "{all}");
+    assert!(at.top() >= f.bottom() + 1.0, "under the row's line: {at:?}");
+    assert!(ui.texts().iter().all(|(_, g)| g.text() != format!("{total} tables")), "dbee's word only in capitals");
+    // Clicked, typed: the value and the drawn words as typed, no ring.
+    ui.click("tree-filter");
+    ui.text("Order");
+    ui.frame();
+    assert_eq!(ui.value("tree-filter"), "Order");
+    assert!(ui.text_in(f, "Order").is_some() && ui.text_in(f, "ORDER").is_none(), "drawn as typed");
+    assert!(!ring_in(&ui, f), "a click shows no ring");
+    let tables = ids(&ui.inspect()).iter().filter(|id| id.starts_with("tree-table-")).count();
+    assert!(tables > 0 && visible(&ui.tag("tree-table-shop.orders")), "the matches show");
+    let (_, some) = count(&ui).expect("the count while filtering");
+    assert_eq!(some, format!("{} OF {total} TABLES", tree::thousands(tables as u64)));
+    // Tab on to the refresh, Shift+Tab back: the ring.
+    ui.key("Tab");
+    ui.frame();
+    ui.key_with("Tab", json!({ "shift": true }));
+    ui.frame();
+    assert!(ring_in(&ui, f), "Shift+Tab back shows the ring");
+    assert_eq!(tags(&ui, "tree-filter"), f, "nothing moved");
+    // The refresh's hover, and a refresh keeps the filter.
+    ui.rest(r.center());
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == "Refresh the schemas"), "the refresh's hover");
+    ui.click("tree-refresh");
+    ui.ok("engine.wait", json!({}));
+    ui.frame();
+    assert_eq!(ui.value("tree-filter"), "Order", "the filter stays");
+    assert!(ui.tag("tree-table-shop.orders").is_some());
+}
+
 #[test]
 fn disconnect_with_query_text_asks_first() {
     let db = dbee_testkit::require_testdb!();
@@ -1042,6 +1109,10 @@ fn lost_connection_offers_reconnect() {
     let lost = ui.value("status-lost");
     assert_eq!(lost, "Connection lost");
     assert_eq!(ui.tag("tree-refresh").unwrap()["enabled"], false, "the tree cannot refresh while lost");
+    let refresh = ui.harness.state().tags().rect("tree-refresh").expect("the refresh is drawn");
+    ui.rest(refresh.center());
+    let why = "Cannot refresh: the connection is lost; reconnect first";
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == why), "the refresh says why it is off");
     ui.click("status-reconnect");
     ui.until("the reconnect", |ui| ui.document()["connection"]["lost"] == false);
     ui.frame();

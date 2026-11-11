@@ -35,12 +35,12 @@ use std::sync::Arc;
 
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
 use dbee_sql::Dialect;
-use egui::{Align, Color32, CornerRadius, Margin, Rect, ScrollArea, Sense, TextEdit, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, Rect, ScrollArea, Sense, pos2, vec2};
 use serde_json::json;
 
 use crate::automation::Tags;
 use crate::components::icon::{self, Icon};
-use crate::components::spinner::Spinner;
+use crate::components::sidebar::{self, Count};
 use crate::components::tooltip::Hint;
 use crate::connections::{line_galley, line_galley_as_written};
 use crate::theme::{self, Text, size::RADIUS_CONTROL};
@@ -407,51 +407,33 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     let t = theme::tokens(ui.ctx());
     let mut acts = Vec::new();
     let many = dialect.schema_word().1.to_lowercase();
-    ui.horizontal(|ui| {
-        let width = (ui.available_width() - 34.0).max(60.0);
-        let r = ui.add(
-            TextEdit::singleline(&mut tree.filter)
-                .id(egui::Id::new("tree-filter"))
-                .hint_text("Filter tables")
-                .desired_width(width)
-                .margin(Margin::symmetric(6, 4)),
-        );
-        tags.tag_value("tree-filter", &r, tree.filter.as_str());
-        let enabled = tree.refresh == Refresh::Ready;
-        let (rect, r) = ui.allocate_exact_size(vec2(26.0, 26.0), if enabled { Sense::click() } else { Sense::hover() });
-        let fill = if enabled && r.hovered() { t.hover } else { Color32::TRANSPARENT };
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), fill);
-        let icon_rect = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
-        match &tree.refresh {
-            Refresh::Running => {
-                Spinner::new().paint(ui, icon_rect.center());
-            }
-            Refresh::Ready => Icon::Refresh.paint(ui.painter(), icon_rect.center(), t.text_muted),
-            Refresh::Disabled(_) => Icon::Refresh.paint(ui.painter(), icon_rect.center(), t.text_faint),
-        }
+    // The header (`sidebar/filter`, `sidebar/count`), the rows straight under it.
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let refresh = match tree.refresh {
+        Refresh::Ready => sidebar::Refresh::Idle,
+        Refresh::Running => sidebar::Refresh::Running,
+        Refresh::Disabled(_) => sidebar::Refresh::Off,
+    };
+    let shown = sidebar::Filter::new(&mut tree.filter, "Filter tables").id(egui::Id::new("tree-filter")).refresh(refresh).show(ui);
+    tags.tag_value("tree-filter", &shown.field, tree.filter.as_str());
+    if let Some(r) = shown.refresh {
         let r = match &tree.refresh {
             Refresh::Ready => r.hint(format!("Refresh the {many}")),
             Refresh::Running => r.hint(format!("Refreshing the {many}…")),
-            Refresh::Disabled(why) => r.hint(format!("Cannot refresh: {why}")),
+            Refresh::Disabled(why) => r.hint_disabled(format!("Cannot refresh: {why}")),
         };
-        tags.tag_value_as("tree-refresh", &r, "Refresh", enabled);
-        if enabled && r.clicked() {
-            acts.push(TreeAct::Refresh);
-        }
-    });
+        tags.tag_value_as("tree-refresh", &r, "Refresh", tree.refresh == Refresh::Ready);
+    }
+    if shown.asked {
+        acts.push(TreeAct::Refresh);
+    }
     let filtering = !tree.filter.trim().is_empty();
     let (matching, total) = {
         let rows = tree.rows(catalog);
-        (rows.matching, rows.total)
+        (rows.matching as u64, rows.total as u64)
     };
-    let count = if filtering {
-        format!("{} of {} tables", thousands(matching as u64), thousands(total as u64))
-    } else {
-        format!("{} tables", thousands(total as u64))
-    };
-    ui.add_space(2.0);
-    ui.label(Text::Small.rich(count).color(t.text_muted));
-    ui.add_space(2.0);
+    let count = if filtering { Count::Some(matching, total, "tables") } else { Count::All(total, "tables") };
+    count.show(ui);
     let mut click = Click::None;
     let selected = tree.selected.clone();
     let pending = tags.scroll_pending().map(str::to_owned);

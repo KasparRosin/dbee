@@ -57,7 +57,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use dbee_config::{ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, JobId, Json, Screen, State, Which};
 use egui::text::{LayoutJob, TextWrapping};
-use egui::{Align, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -66,6 +66,7 @@ use crate::automation::Tags;
 use crate::components::chip::Chip;
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
+use crate::components::sidebar;
 use crate::components::toast;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
@@ -812,13 +813,7 @@ fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, a
                 acts.push(Act::New);
             }
             ui.add_space(10.0);
-            let filter = ui.add(
-                TextEdit::singleline(&mut conn.filter)
-                    .id(egui::Id::new("conn-filter"))
-                    .hint_text("Filter")
-                    .desired_width(f32::INFINITY)
-                    .margin(Margin::symmetric(6, 5)),
-            );
+            let filter = sidebar::Filter::new(&mut conn.filter, "Filter").id(egui::Id::new("conn-filter")).show(ui).field;
             tags.tag_value("conn-filter", &filter, conn.filter.as_str());
             if let Some(w) = &st.store_warning {
                 ui.add_space(8.0);

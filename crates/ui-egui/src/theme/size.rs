@@ -179,6 +179,12 @@ pub const PAGING_GAP: f32 = 4.0;
 pub const STAGED_MARK: f32 = 8.0;
 pub const STAGED_MARK_GAP: f32 = 8.0;
 pub const CHANGES_GAP: f32 = 12.0;
+/// The sidebar's header (`sidebar/filter`, `sidebar/count`): the filter is a bar with its line
+/// along the bottom, its words this far in from the left, the refresh this far from its right end;
+/// the count's row is this tall, its words this far in.
+pub const SIDEBAR_PAD_X: f32 = 12.0;
+pub const SIDEBAR_PAD_RIGHT: f32 = 4.0;
+pub const SIDEBAR_COUNT_H: f32 = 28.0;
 
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.

@@ -21,6 +21,7 @@ use super::keycap::Keycap;
 use super::menu::{self, BarTitle, Item};
 use super::results::{ResultBar, ResultTab, RowCount, RunRow, RunState};
 use super::segmented::{Segment, Segmented};
+use super::sidebar::{self, Count};
 use super::status::{self, Activity, Connection, Facts};
 use super::swatch::{COLOURS, Swatch};
 use super::tab::{self, NewTab, Tab};
@@ -63,6 +64,8 @@ const STRIP_W: f32 = 840.0;
 const FILTER_COLUMN_W: f32 = 140.0;
 const FILTER_OP_W: f32 = 160.0;
 const FILTER_VALUE_W: f32 = 140.0;
+/// The sidebar header frame's filters and counts, as wide as the page draws them.
+const SIDEBAR_W: f32 = 259.0;
 /// The status bar frames: bars this wide, this far apart.
 const STATUS_W: f32 = 1100.0;
 const STATUS_APART: f32 = 10.0;
@@ -171,6 +174,7 @@ fn bars(ui: &mut Ui) {
     });
     results(ui);
     table_tab_bars(ui);
+    sidebar_header(ui);
     let shop = |colour| Connection { name: "Shop live", colour, own: true };
     let stack = |ui: &mut Ui, rows: Vec<(Connection<'static>, Facts<'static>, Option<Activity>)>| {
         ui.vertical(|ui| {
@@ -424,6 +428,72 @@ fn table_tab_bars(ui: &mut Ui) {
             }
         });
     });
+}
+
+/// The sidebar's filter and count, as the page's Tabs and bars frame shows them, and the
+/// refresh's states the page doesn't draw.
+fn sidebar_header(ui: &mut Ui) {
+    let focused = Look { focused: true, ..Look::default() };
+    let row = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui, usize)| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_24;
+            for n in 0..4 {
+                ui.allocate_ui(vec2(SIDEBAR_W, BAR_H), |ui| add(ui, n));
+            }
+        });
+    };
+    section(
+        ui,
+        "sidebar header: the filter (placeholder, filled, focus) with REFRESH; the count under it (516 tables, 3 of 516 tables, 0 tables, loading)",
+        SPACE_8,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = SPACE_8;
+                row(ui, &mut |ui, n| {
+                    let (typed, look) = match n {
+                        0 => ("", None),
+                        1 => ("ord", None),
+                        2 => ("ord", Some(focused)),
+                        _ => return,
+                    };
+                    let mut text = typed.to_owned();
+                    let filter = sidebar::Filter::new(&mut text, "Filter tables").refresh(sidebar::Refresh::Idle);
+                    match look {
+                        Some(look) => filter.look(look).show(ui),
+                        None => filter.show(ui),
+                    };
+                });
+                let counts = [Count::All(516, "tables"), Count::Some(3, 516, "tables"), Count::All(0, "tables"), Count::Loading];
+                row(ui, &mut |ui, n| {
+                    if let Some(count) = counts.get(n) {
+                        count.show(ui);
+                    }
+                });
+            });
+        },
+    );
+    section(
+        ui,
+        "not on the page yet: the refresh while a refresh runs and off; the connection list's filter, no refresh; typed text keeps its case",
+        SPACE_8,
+        |ui| {
+            row(ui, &mut |ui, n| {
+                let (typed, refresh) = match n {
+                    0 => ("", Some(sidebar::Refresh::Running)),
+                    1 => ("", Some(sidebar::Refresh::Off)),
+                    2 => ("", None),
+                    _ => ("Order_Items", Some(sidebar::Refresh::Idle)),
+                };
+                let mut text = typed.to_owned();
+                let placeholder = if refresh.is_some() { "Filter tables" } else { "Filter" };
+                let filter = sidebar::Filter::new(&mut text, placeholder);
+                match refresh {
+                    Some(refresh) => filter.refresh(refresh).show(ui),
+                    None => filter.show(ui),
+                };
+            });
+        },
+    );
 }
 
 /// The tabs and the strip, as the page's Tabs and bars frame shows them, and a busy tab.
