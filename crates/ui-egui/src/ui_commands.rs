@@ -20,6 +20,7 @@ use serde_json::json;
 
 use crate::DbeeApp;
 use crate::components::toast::Kind;
+use crate::theme::Words;
 
 /// One UI-only command; the same fields as the engine's `CommandSpec`.
 pub struct UiCommand {
@@ -190,9 +191,9 @@ fn copy(app: &mut DbeeApp, params: Json) -> Result<Outcome, EngineError> {
 }
 
 /// The notice after a grid copy: `Copied 1 row`, `Copied 1,250 rows`.
-fn copied_notice(rows: u64) -> String {
+pub(crate) fn copied_notice(rows: u64) -> Words {
     let unit = if rows == 1 { "row" } else { "rows" };
-    format!("Copied {} {unit}", crate::tree::thousands(rows))
+    Words::from("Copied ").name(crate::tree::thousands(rows)).plain(format!(" {unit}"))
 }
 
 #[cfg(test)]
@@ -201,9 +202,9 @@ mod tests {
 
     #[test]
     fn the_copy_notice_counts_rows() {
-        assert_eq!(copied_notice(1), "Copied 1 row");
-        assert_eq!(copied_notice(0), "Copied 0 rows");
-        assert_eq!(copied_notice(2), "Copied 2 rows");
-        assert_eq!(copied_notice(10_000), "Copied 10,000 rows");
+        assert_eq!(copied_notice(1).to_string(), "Copied 1 row");
+        assert_eq!(copied_notice(0).to_string(), "Copied 0 rows");
+        assert_eq!(copied_notice(2).to_string(), "Copied 2 rows");
+        assert_eq!(copied_notice(10_000).to_string(), "Copied 10,000 rows");
     }
 }

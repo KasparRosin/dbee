@@ -217,6 +217,19 @@ pub(crate) fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui:
     out
 }
 
+/// The parts of the text `whole` drawn in `shapes`: each section's words, font and colour as seen.
+#[cfg(test)]
+pub(crate) fn sections(shapes: &[egui::epaint::ClippedShape], whole: &str) -> Vec<(String, egui::FontId, egui::Color32)> {
+    let drawn = flat(shapes).into_iter().find_map(|s| match s {
+        egui::Shape::Text(t) if t.galley.text() == whole => Some(t),
+        _ => None,
+    });
+    let Some(t) = drawn else { return Vec::new() };
+    let fonts = t.galley.job.sections.iter().map(|s| s.format.font_id.clone());
+    let seen = texts(&[egui::epaint::ClippedShape { clip_rect: egui::Rect::EVERYTHING, shape: egui::Shape::Text(t.clone()) }]);
+    seen.into_iter().zip(fonts).map(|((words, _, colour), font)| (words, font, colour)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use egui::{CornerRadius, Rect, pos2, vec2};

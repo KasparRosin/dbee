@@ -2,8 +2,8 @@
 //! near the top of the window over a scrim that covers the window. A click on the scrim does
 //! nothing; Escape presses the dialog's cancel button.
 //!
-//! A dialog is laid out top to bottom: its title (`title`) and, 6 under it, its text (`body`,
-//! wrapping); 20 under that its body (a field, a checkbox: whatever the screen puts there, 12
+//! A dialog is laid out top to bottom: its title (`title`) and, 6 under it, its text (`body`, the
+//! names in it in `data`, wrapping); 20 under that its body (a field, a checkbox: whatever the screen puts there, 12
 //! apart); 20 under that its buttons, the first on the right, 8 apart, each at least 80 wide.
 //! The buttons are drawn from the left, so Tab reaches them in the order they read.
 
@@ -13,7 +13,7 @@ use super::button::BoxButton;
 use crate::theme::size::{
     BUTTON_H, DIALOG_BODY_GAP, DIALOG_BUTTON_GAP, DIALOG_BUTTON_MIN_W, DIALOG_GAP, DIALOG_HEAD_GAP, DIALOG_PAD, DIALOG_W, RADIUS_FLOAT,
 };
-use crate::theme::{Text, Tokens, float_shadow, tokens};
+use crate::theme::{Text, Tokens, Words, float_shadow, tokens};
 
 /// The dialog's edge.
 const EDGE: f32 = 1.0;
@@ -85,7 +85,7 @@ type Body<'a> = Box<dyn FnOnce(&mut Ui, &mut [Button]) + 'a>;
 pub struct Dialog<'a> {
     id: Id,
     title: &'a str,
-    text: Option<&'a str>,
+    text: Option<Words>,
     body: Option<Body<'a>>,
     buttons: Vec<Button>,
 }
@@ -96,8 +96,8 @@ impl<'a> Dialog<'a> {
     }
 
     /// The words under the title.
-    pub fn text(mut self, words: &'a str) -> Dialog<'a> {
-        self.text = Some(words);
+    pub fn text(mut self, words: impl Into<Words>) -> Dialog<'a> {
+        self.text = Some(words.into());
         self
     }
 
@@ -152,7 +152,7 @@ impl<'a> Dialog<'a> {
             ui.add(Label::new(Text::Title.rich_as_written(title)).wrap());
             let text = text.map(|words| {
                 ui.add_space(DIALOG_HEAD_GAP);
-                ui.add(Label::new(Text::Body.rich_as_written(words)).wrap())
+                ui.add(Label::new(words.job(tokens(ui.ctx()).text)).wrap())
             });
             if let Some(body) = body {
                 ui.add_space(DIALOG_GAP);

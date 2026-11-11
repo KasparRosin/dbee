@@ -521,7 +521,7 @@ fn open_switch(app: &mut DbeeApp, to: &SwitchTo) {
 fn connect_saved(app: &mut DbeeApp, id: &str) {
     match app.session.state().store.get(id).cloned() {
         Some(c) => apply_connect(app, &c),
-        None => app.notice(toast::Kind::Error, "That connection is not saved any more.".into()),
+        None => app.notice(toast::Kind::Error, "That connection is not saved any more."),
     }
 }
 

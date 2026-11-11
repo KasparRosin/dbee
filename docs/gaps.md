@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-11 · **Change:** minor (entry 56: `connection.cancel` stops a connection attempt; the CANCEL button is left)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-11 · **Change:** minor (entry 66: names inside the engine's messages are drawn in `body`)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -488,10 +488,18 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** with 59 in place, the version can't be seen from the workspace.
 - **Estimate:** 1 h (estimated), once drawn.
 
+### 66. Names inside the engine's messages are drawn in `body`, not `data` (U)
+
+- **Limit:** the design draws the names, hosts, paths and numbers in a dialog's or a toast's text in `data` mono, as written. dbee marks those it puts into its own sentences: the password dialogs' user and host, the passphrase dialog's key path, the host key dialog's host and key type, Delete connection's name, the requested dialog's name, the copied row count, the theme notice's file and folder, and the sizes in the two notices about values too large to edit inline. A message from the engine arrives as one string, so the names in it stay in `body`: the tab named in Close anyway ("Close Query 1? Its query text will be lost."), the engine's own notices (a secret not kept, a connection's warning), every error shown as a notice (a table, a column, a file), the reason after "The password was not saved:", and the URL dialog's error line.
+- **Evidence:** `Need::Confirm` carries `what` and one message (`crates/engine/src/lib.rs`), which `crates/engine/src/cmd/tabs.rs` and `connection.rs` build with the tab's title in it; `UiRequest::Notice` is one `String`; `notice_text` in `crates/ui-egui/src/app.rs` reads an error as its text. The marked sentences use `theme::Words` (`crates/ui-egui/src/theme/text.rs`).
+- **Impact:** small: every word is there, but the name doesn't stand out, which matters most in Close anyway, a prompt that loses work.
+- **Estimate:** 2–3 h (estimated): the engine gives a message's names as parts (a confirm naming its tab, a notice its file) and the window marks them; with the wording pass (spec §7).
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | Entry 66: dbee draws the names in its own dialog and toast sentences in `data`; names inside the engine's messages stay in `body` until the engine gives them as parts. |
 | 2026-11-11 | minor | Entry 56: `connection.cancel` stops the attempt of an open, an openFile, a reconnect or a test, closing what it had opened, the SSH tunnel included; the CANCEL button beside `CONNECTING` is left for the connection screens. |
 | 2026-11-10 | minor | Entry 59 decided (the update button's states and where it sits) and entry 65 (no Help menu or About). |
 | 2026-11-10 | minor | Entries 14 and 53: the connection's `transaction` says whether the query session has one open, as each driver reports it, and which tab's run opened it; `query.commit` and `query.rollback` end it. The footer mark and the prompt on close are left for the Shell screen, the ROLLBACK button for the Query tab screen. |

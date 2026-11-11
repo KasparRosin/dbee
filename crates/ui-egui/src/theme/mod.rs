@@ -8,7 +8,7 @@ mod text;
 mod tokens;
 pub use fonts::{INTER_MEDIUM, MONO_MEDIUM};
 pub use system::desktop_mode;
-pub use text::Text;
+pub use text::{Text, Words};
 pub use tokens::{DARK, LIGHT, Tokens, connection_color, on_connection_color, tokens};
 
 use egui::{Color32, CornerRadius, Shadow, Stroke};

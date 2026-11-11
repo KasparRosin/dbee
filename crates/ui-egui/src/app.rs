@@ -52,7 +52,7 @@ use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
 use crate::dialogs::{self, Dialog, Rerun};
 use crate::quick_search::{self, QuickSearch};
-use crate::theme;
+use crate::theme::{self, Words};
 use crate::workspace::Workspace;
 use crate::{editors, shortcuts, ui_commands, workspace};
 
@@ -99,19 +99,21 @@ pub(crate) fn sentence(text: &str) -> String {
 }
 
 /// What the notice says when a theme choice couldn't be saved: the file, and what to do.
-fn not_saved(e: &dbee_config::SaveError) -> String {
+fn not_saved(e: &dbee_config::SaveError) -> Words {
     match e {
-        dbee_config::SaveError::Newer(file) => format!("The theme is set for now, but a newer dbee wrote {}, so it isn't changed.", file.display()),
+        dbee_config::SaveError::Newer(file) => {
+            Words::from("The theme is set for now, but a newer dbee wrote ").name(file.display().to_string()).plain(", so it isn't changed.")
+        }
         dbee_config::SaveError::Io(file, why) => {
             // The system's words, without their number: "Permission denied (os error 13)".
             let why = why.to_string();
             let why = why.split(" (os error").next().unwrap_or_default().trim_end_matches('.');
             let folder = file.parent().unwrap_or(file);
-            format!(
-                "The theme is set for now, but it couldn't be saved in {} ({why}): check that you can write to {}.",
-                file.display(),
-                folder.display()
-            )
+            Words::from("The theme is set for now, but it couldn't be saved in ")
+                .name(file.display().to_string())
+                .plain(format!(" ({why}): check that you can write to "))
+                .name(folder.display().to_string())
+                .plain(".")
         }
     }
 }
@@ -247,11 +249,11 @@ impl View {
 /// Most notices kept; older ones are dropped.
 const MAX_NOTICES: usize = 8;
 
-/// A notice: what it says, whether it reports a result or a failure, and when it goes (on egui's
-/// clock; `None` until it first shows).
+/// A notice: what it says (its names marked), whether it reports a result or a failure, and when
+/// it goes (on egui's clock; `None` until it first shows).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Notice {
-    pub text: String,
+    pub text: Words,
     pub kind: Kind,
     pub until: Option<f64>,
 }
@@ -425,7 +427,8 @@ impl DbeeApp {
     }
 
     /// Shows `text` as a notice of `kind` (a result or a failure) for a few seconds.
-    pub(crate) fn notice(&mut self, kind: Kind, text: String) {
+    pub(crate) fn notice(&mut self, kind: Kind, text: impl Into<Words>) {
+        let text = text.into();
         // The same text waiting or showing already (a button clicked twice): once is enough.
         if self.view.notices.iter().any(|n| n.text == text) {
             return;
@@ -438,7 +441,8 @@ impl DbeeApp {
 
     /// [`DbeeApp::notice`], except that the same text waiting or showing already starts its time
     /// again: a second copy of as many rows says so again.
-    pub(crate) fn notice_again(&mut self, kind: Kind, text: String) {
+    pub(crate) fn notice_again(&mut self, kind: Kind, text: impl Into<Words>) {
+        let text = text.into();
         match self.view.notices.iter_mut().find(|n| n.text == text) {
             Some(n) => n.until = None,
             None => self.notice(kind, text),
@@ -663,9 +667,9 @@ impl DbeeApp {
         };
         let Some(notice) = self.view.notices.front_mut() else { return };
         let until = *notice.until.get_or_insert(now + NOTICE_SECS);
-        let shown = toast::show(&ctx, &[Toast::new(notice.kind, &notice.text)], lift);
+        let shown = toast::show(&ctx, &[Toast::new(notice.kind, notice.text.clone())], lift);
         if let Some(r) = shown.toasts.first() {
-            self.tags.tag_value("notice", r, notice.text.as_str());
+            self.tags.tag_value("notice", r, notice.text.to_string());
         }
         if let Some(r) = shown.closes.first() {
             self.tags.tag("notice-close", r);
@@ -791,7 +795,7 @@ mod tests {
         let home = temp_home(None, None);
         let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
         let mut app = DbeeApp::new(session, None);
-        let shown = |app: &DbeeApp| app.view.notices.iter().map(|n| n.text.clone()).collect::<Vec<_>>();
+        let shown = |app: &DbeeApp| app.view.notices.iter().map(|n| n.text.to_string()).collect::<Vec<_>>();
         // A user's click on something that cannot run now says why.
         let disabled = EngineError::Disabled { id: "table.sort".into(), why: "apply or reset your changes first".into() };
         app.outcome("table.sort", json!({}), Origin::Page, None, Err(disabled));
@@ -810,7 +814,7 @@ mod tests {
         assert!(app.view.notices.iter().all(|n| n.kind == Kind::Error), "failures: {:?}", app.view.notices);
         // The same text twice (a button clicked again) shows once.
         let n = shown(&app).len();
-        app.notice(Kind::Error, "The count failed.".into());
+        app.notice(Kind::Error, "The count failed.");
         assert_eq!(shown(&app).len(), n);
     }
 
@@ -820,13 +824,13 @@ mod tests {
         let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
         let mut app = DbeeApp::new(session, None);
         let copied = |until| Notice { text: "Copied 2 rows".into(), kind: Kind::Success, until };
-        app.notice_again(Kind::Success, "Copied 2 rows".into());
+        app.notice_again(Kind::Success, "Copied 2 rows");
         app.view.notices[0].until = Some(10.0);
-        app.notice(Kind::Success, "Copied 2 rows".into());
+        app.notice(Kind::Success, "Copied 2 rows");
         assert_eq!(app.view.notices, [copied(Some(10.0))], "notice: once is enough");
-        app.notice_again(Kind::Success, "Copied 2 rows".into());
+        app.notice_again(Kind::Success, "Copied 2 rows");
         assert_eq!(app.view.notices, [copied(None)], "shown afresh, still once");
-        app.notice_again(Kind::Success, "Copied 1 row".into());
+        app.notice_again(Kind::Success, "Copied 1 row");
         assert_eq!(app.view.notices.len(), 2);
     }
 
@@ -871,8 +875,8 @@ mod tests {
         // Decided by the design: a notice can be closed. Its close is tagged `notice-close`, so
         // an agent can close it too; the next notice shows then.
         let (mut h, tx, _home) = window();
-        h.state_mut().notice(Kind::Error, "The count failed.".into());
-        h.state_mut().notice(Kind::Success, "Copied 2 rows".into());
+        h.state_mut().notice(Kind::Error, "The count failed.");
+        h.state_mut().notice(Kind::Success, "Copied 2 rows");
         until_shown(&mut h);
         assert_eq!(h.state().tags.value("notice"), Some(&json!("The count failed.")));
         let (req, reply) = ControlRequest::new("ui.click", json!({ "id": "notice-close" }));
@@ -887,7 +891,7 @@ mod tests {
         }
         assert_eq!(answer.map(|a| a["ok"].clone()), Some(json!(true)), "the close was clicked");
         frame(&mut h);
-        let texts: Vec<&str> = h.state().view.notices.iter().map(|n| n.text.as_str()).collect();
+        let texts: Vec<String> = h.state().view.notices.iter().map(|n| n.text.to_string()).collect();
         assert_eq!(texts, ["Copied 2 rows"], "the closed notice is gone, the next one shows");
         assert_eq!(h.state().tags.value("notice"), Some(&json!("Copied 2 rows")));
     }
@@ -897,7 +901,7 @@ mod tests {
         // On egui's clock, moved here rather than waited for: a notice shows until four seconds
         // after it first showed.
         let (mut h, _tx, _home) = window();
-        h.state_mut().notice(Kind::Error, "The count failed.".into());
+        h.state_mut().notice(Kind::Error, "The count failed.");
         frame(&mut h);
         let first = h.ctx.input(|i| i.time);
         let until = h.state().view.notices.front().and_then(|n| n.until).unwrap_or_else(|| panic!("the notice showed"));
@@ -917,7 +921,7 @@ mod tests {
         let long = "The theme is set for now, but it couldn't be saved in /home/someone/.config/dbee/settings.json (Permission denied): \
                     check that you can write to /home/someone/.config/dbee.";
         let (mut h, _tx, _home) = window();
-        h.state_mut().notice(Kind::Error, long.into());
+        h.state_mut().notice(Kind::Error, long);
         until_shown(&mut h);
         let toast = h.state().tags.rect("notice").unwrap_or(egui::Rect::NOTHING);
         assert!(toast.width() <= 480.0 + 0.5 && toast.width() > 420.0, "at most 480 wide, the words filling it: {toast:?}");
@@ -933,11 +937,55 @@ mod tests {
     }
 
     #[test]
+    fn numbers_and_paths_in_toasts_are_mono() {
+        // The design: the names, paths and numbers dbee puts in a toast's words are drawn in
+        // `data` as written, the rest in `body`; the `notice` tag still says it all as plain words.
+        use crate::theme::Text::{Body, Data};
+        let (_, _, home) = window();
+        let folder = home.home.join("Settings-Is-A-File");
+        std::fs::write(&folder, "").unwrap();
+        let file = folder.join("settings.json");
+        let cases: [(&str, Box<dyn Fn(&mut DbeeApp)>); 4] = [
+            ("copied", Box::new(|app| app.notice_again(Kind::Success, crate::ui_commands::copied_notice(1_250)))),
+            ("pasted", Box::new(|app| app.notice(Kind::Error, crate::editors::pasted_too_large(3 * 1024 * 1024)))),
+            ("too large", Box::new(|app| app.notice(Kind::Error, crate::editors::too_large(2 * 1024 * 1024)))),
+            (
+                "theme",
+                Box::new(move |app| {
+                    app.settings_dir = Some(folder.clone());
+                    app.choose_theme(dbee_config::ThemeChoice::Light);
+                }),
+            ),
+        ];
+        for (case, push) in cases {
+            let (mut h, _tx, _home) = window();
+            push(h.state_mut());
+            until_shown(&mut h);
+            let whole = h.state().tags.value("notice").and_then(Json::as_str).unwrap_or_else(|| panic!("{case}: the notice")).to_owned();
+            let drawn = crate::components::sections(&h.output().shapes, &whole);
+            let colour = drawn.first().map(|(_, _, c)| *c);
+            assert!(drawn.iter().all(|(_, _, c)| Some(*c) == colour), "{case}: one colour: {drawn:?}");
+            let got: Vec<(&str, egui::FontId)> = drawn.iter().map(|(w, f, _)| (w.as_str(), f.clone())).collect();
+            let names: Vec<&str> = got.iter().filter(|(_, f)| *f == Data.font()).map(|(w, _)| *w).collect();
+            assert!(got.iter().all(|(_, f)| *f == Data.font() || *f == Body.font()), "{case}: only body and data: {got:?}");
+            let shown = file.display().to_string();
+            let want: Vec<&str> = match case {
+                "copied" => vec!["1,250"],
+                "pasted" => vec!["3.0 MiB", "32 KiB"],
+                "too large" => vec!["2.0 MiB", "32 KiB"],
+                _ => vec![shown.as_str(), shown.strip_suffix("/settings.json").unwrap_or_default()],
+            };
+            assert_eq!(names, want, "{case}: the names in data: {got:?}");
+            assert_eq!(got.iter().map(|(w, _)| *w).collect::<String>(), whole, "{case}: every word drawn, as tagged");
+        }
+    }
+
+    #[test]
     fn a_query_runs_errors_on_its_tab_show_in_the_card_only() {
         let home = temp_home(None, None);
         let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
         let mut app = DbeeApp::new(session, None);
-        let shown = |app: &DbeeApp| app.view.notices.iter().map(|n| n.text.clone()).collect::<Vec<_>>();
+        let shown = |app: &DbeeApp| app.view.notices.iter().map(|n| n.text.to_string()).collect::<Vec<_>>();
         let db = |code, message: &str, data| EngineError::Db { code, message: message.into(), data };
         // The engine records these on the tab (their data names the statement): the card shows them.
         let server = db("server", "column \"nope\" does not exist", json!({ "serverCode": "42703", "position": 7, "statement": 0 }));

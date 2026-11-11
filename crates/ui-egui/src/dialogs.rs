@@ -34,7 +34,7 @@ use crate::components::checkbox::Checkbox;
 use crate::components::dialog::{self, Button};
 use crate::components::input::{Field, Input};
 use crate::connections;
-use crate::theme::{self, Text};
+use crate::theme::{self, Text, Words};
 use crate::{DbeeApp, connections::tilde};
 
 /// Where a dialog's main button and its Cancel are among its buttons (the first on the right).
@@ -95,7 +95,7 @@ pub(crate) enum Dialog {
     /// An SSH server not in `known_hosts`.
     HostKey { host: String, key_type: String, fingerprint: String, rerun: Rerun },
     /// A password or passphrase; `line` says whose.
-    Secret { ask: SecretAsk, line: String, value: String, keep: Keep, save: bool, focused: bool, rerun: Rerun },
+    Secret { ask: SecretAsk, line: Words, value: String, keep: Keep, save: bool, focused: bool, rerun: Rerun },
     /// Something will be lost.
     Confirm { message: String, what: String, rerun: Rerun },
     /// Deleting a saved connection (and its secrets).
@@ -187,17 +187,17 @@ fn config_of(app: &DbeeApp, rerun: &Rerun) -> Option<ConnectionConfig> {
 
 /// What the secret dialog says it asks for: whose password, or plain wording when the command
 /// names no connection dbee knows (never blanks).
-fn secret_line(app: &DbeeApp, ask: &SecretAsk, rerun: &Rerun) -> String {
+fn secret_line(app: &DbeeApp, ask: &SecretAsk, rerun: &Rerun) -> Words {
     let config = config_of(app, rerun);
     let named = |user: &str, host: &str| !user.trim().is_empty() && !host.trim().is_empty();
     match ask {
-        SecretAsk::Passphrase { key } => format!("The key {} is protected by a passphrase.", tilde(key)),
+        SecretAsk::Passphrase { key } => Words::from("The key ").name(tilde(key)).plain(" is protected by a passphrase."),
         SecretAsk::Password => match config.filter(|c| named(&c.user, &c.host)) {
-            Some(c) => format!("Enter the password of {} on {}.", c.user, c.host),
+            Some(c) => Words::from("Enter the password of ").name(c.user).plain(" on ").name(c.host).plain("."),
             None => "Enter the database password.".into(),
         },
         SecretAsk::SshPassword => match config.and_then(|c| c.ssh).filter(|s| named(&s.user, &s.host)) {
-            Some(s) => format!("Enter the SSH password of {} on {}.", s.user, s.host),
+            Some(s) => Words::from("Enter the SSH password of ").name(s.user).plain(" on ").name(s.host).plain("."),
             None => "Enter the SSH password.".into(),
         },
     }
@@ -312,7 +312,7 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             let hint = url_hint(kinds);
             let mut entered = false;
             let shown = dialog::Dialog::new(id, "Fill from URL")
-                .text(&text)
+                .text(text.as_str())
                 .body(|ui, buttons| {
                     let input = Input::data(url).id(egui::Id::new("dialog-url")).placeholder(&hint).error(error.is_some());
                     // The line for the reason a URL did not parse keeps its room.
@@ -338,9 +338,13 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             }
         }
         Dialog::HostKey { host, key_type, fingerprint, rerun } => {
-            let text = format!("dbee has not connected to {host} before. Its {key_type} host key has this fingerprint:");
+            let text = Words::from("dbee has not connected to ")
+                .name(host.as_str())
+                .plain(" before. Its ")
+                .name(key_type.as_str())
+                .plain(" host key has this fingerprint:");
             let shown = dialog::Dialog::new(id, "Unknown SSH server")
-                .text(&text)
+                .text(text.clone())
                 .body(|ui, _| {
                     let r = ui.add(egui::Label::new(Text::Data.rich(fingerprint.as_str())).selectable(true));
                     tags.tag_value_as("dialog-fingerprint", &r, fingerprint.as_str(), true);
@@ -367,7 +371,7 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             let t = theme::tokens(ctx);
             let mut entered = false;
             let shown = dialog::Dialog::new(id, heading)
-                .text(line)
+                .text(line.clone())
                 .body(|ui, buttons| {
                     let r = ui.add(Input::body(value).id(egui::Id::new("dialog-secret")).password(true));
                     tags.tag_secret_as("dialog-secret", &r, !value.is_empty(), true);
@@ -407,7 +411,7 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
         }
         Dialog::Confirm { message, what, rerun } => {
             let (heading, button) = confirm_words(what);
-            let shown = dialog::Dialog::new(id, heading).text(message).buttons([Button::danger(button, "dialog-ok"), cancel]).show(ctx);
+            let shown = dialog::Dialog::new(id, heading).text(message.as_str()).buttons([Button::danger(button, "dialog-ok"), cancel]).show(ctx);
             match tagged(tags, &shown, message) {
                 Some(OK) => {
                     let params = with(rerun.params.take(), "force", json!(true));
@@ -418,8 +422,9 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             }
         }
         Dialog::DeleteConnection { id: connection, name } => {
-            let text = format!("Delete “{name}”? Its saved passwords are deleted with it.");
-            let shown = dialog::Dialog::new(id, "Delete connection").text(&text).buttons([Button::danger("Delete", "dialog-ok"), cancel]).show(ctx);
+            let text = Words::from("Delete “").name(name.as_str()).plain("”? Its saved passwords are deleted with it.");
+            let shown =
+                dialog::Dialog::new(id, "Delete connection").text(text.clone()).buttons([Button::danger("Delete", "dialog-ok"), cancel]).show(ctx);
             match tagged(tags, &shown, &text) {
                 Some(OK) => Act::Delete(connection.clone()),
                 Some(_) => Act::Cancel,
@@ -427,18 +432,18 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             }
         }
         Dialog::Requested { name } => {
-            let text = format!("A command asked for the “{name}” dialog, which this version of dbee does not have.");
+            let text = Words::from("A command asked for the “").name(*name).plain("” dialog, which this version of dbee does not have.");
             // Its one button, Close, is its cancel too: Escape presses it.
-            let shown = dialog::Dialog::new(id, name).text(&text).buttons([ok("Close")]).show(ctx);
+            let shown = dialog::Dialog::new(id, name).text(text.clone()).buttons([ok("Close")]).show(ctx);
             if tagged(tags, &shown, &text).is_some() { Act::Cancel } else { Act::None }
         }
     }
 }
 
-/// Tags what `shown` drew, its text (`text`) and its buttons; the button pressed.
-fn tagged(tags: &mut Tags, shown: &dialog::Shown, text: &str) -> Option<usize> {
+/// Tags what `shown` drew, its text (`text`, as plain words) and its buttons; the button pressed.
+fn tagged(tags: &mut Tags, shown: &dialog::Shown, text: impl std::fmt::Display) -> Option<usize> {
     if let Some(r) = &shown.text {
-        tags.tag_value_as("dialog-text", r, text, true);
+        tags.tag_value_as("dialog-text", r, text.to_string(), true);
     }
     for (button, r) in &shown.buttons {
         tags.tag_value_as(button.tag, r, button.label, button.enabled);
@@ -469,7 +474,7 @@ mod tests {
 
     use super::*;
 
-    fn line_of(app: &DbeeApp) -> String {
+    fn line_of(app: &DbeeApp) -> Words {
         match &app.view.dialog {
             Some(Dialog::Secret { line, .. }) => line.clone(),
             other => panic!("not a secret dialog: {other:?}"),
@@ -480,7 +485,7 @@ mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable;
 
-    use crate::components::{Edge, both, edges_in, fills_in, showcase, texts};
+    use crate::components::{Edge, both, edges_in, fills_in, sections, showcase, texts};
 
     /// What a dialog's answer does, as `draw` says it (the params with any secret in them).
     #[derive(Debug, PartialEq)]
@@ -845,6 +850,63 @@ mod tests {
     }
 
     #[test]
+    fn names_in_dialogs_are_mono_as_written() {
+        // The design's Dialogs (DA): the names, hosts and paths dbee puts in a dialog's text are
+        // drawn in `data` as written, the rest in `body`, all in `text`; `dialog-text` still says
+        // it all as plain words.
+        use Text::{Body, Data};
+        let rows = || -> Vec<(Dialog, Vec<(&str, Text)>)> {
+            vec![
+                (
+                    Dialog::DeleteConnection { id: "c1".into(), name: "Shop Live".into() },
+                    vec![("Delete “", Body), ("Shop Live", Data), ("”? Its saved passwords are deleted with it.", Body)],
+                ),
+                (
+                    Dialog::HostKey {
+                        host: "Db.Example:22".into(),
+                        key_type: "ssh-ed25519".into(),
+                        fingerprint: "SHA256:abcdef".into(),
+                        rerun: rerun(),
+                    },
+                    vec![
+                        ("dbee has not connected to ", Body),
+                        ("Db.Example:22", Data),
+                        (" before. Its ", Body),
+                        ("ssh-ed25519", Data),
+                        (" host key has this fingerprint:", Body),
+                    ],
+                ),
+                (
+                    Dialog::Secret {
+                        ask: SecretAsk::Password,
+                        line: Words::default().plain("Enter the password of ").name("Ann").plain(" on ").name("pg14.internal").plain("."),
+                        value: String::new(),
+                        keep: Keep::NotOffered,
+                        save: false,
+                        focused: false,
+                        rerun: rerun(),
+                    },
+                    vec![("Enter the password of ", Body), ("Ann", Data), (" on ", Body), ("pg14.internal", Data), (".", Body)],
+                ),
+                (
+                    Dialog::Requested { name: "export" },
+                    vec![("A command asked for the “", Body), ("export", Data), ("” dialog, which this version of dbee does not have.", Body)],
+                ),
+            ]
+        };
+        for (theme, t) in both() {
+            for (dialog, want) in rows() {
+                let at = format!("{theme:?} {}", dialog.name());
+                let h = open(theme, dialog);
+                let whole: String = want.iter().map(|(w, _)| *w).collect();
+                assert_eq!(h.state().tags.value("dialog-text"), Some(&json!(whole)), "{at}: dialog-text as plain words");
+                let want: Vec<_> = want.into_iter().map(|(w, style)| (w.to_owned(), style.font(), t.text)).collect();
+                assert_eq!(sections(&h.output().shapes, &whole), want, "{at}: the names in data, the rest in body");
+            }
+        }
+    }
+
+    #[test]
     fn a_secret_dialog_names_the_connection_its_command_names_by_id() {
         let home = temp_home(None, None);
         let session = Session::new(SessionOptions {
@@ -860,11 +922,17 @@ mod tests {
         let needs = |need: Need| EngineError::Needs { need, message: "asked".into() };
         let rerun = |params: Json| Rerun { command: connections::OPEN, params, origin: Origin::Menu };
         assert!(ask(&mut app, &needs(Need::Password), rerun(json!({ "id": id }))));
-        assert_eq!(line_of(&app), "Enter the password of ann on db.example.");
+        let named = Words::default().plain("Enter the password of ").name("ann").plain(" on ").name("db.example").plain(".");
+        assert_eq!(line_of(&app), named, "the user and the host marked as names");
+        assert_eq!(line_of(&app).to_string(), "Enter the password of ann on db.example.");
+        // A key's path is a name too.
+        assert!(ask(&mut app, &needs(Need::Passphrase { key: "/keys/Id_Ed25519".into() }), rerun(json!({ "id": id }))));
+        let key = Words::default().plain("The key ").name("/keys/Id_Ed25519").plain(" is protected by a passphrase.");
+        assert_eq!(line_of(&app), key, "the key's path marked as a name");
         // An id nothing has, or a connection without a tunnel: no blanks, plain wording.
         assert!(ask(&mut app, &needs(Need::Password), rerun(json!({ "id": "nope" }))));
-        assert_eq!(line_of(&app), "Enter the database password.");
+        assert_eq!(line_of(&app).to_string(), "Enter the database password.");
         assert!(ask(&mut app, &needs(Need::SshPassword), rerun(json!({ "id": id }))));
-        assert_eq!(line_of(&app), "Enter the SSH password.");
+        assert_eq!(line_of(&app).to_string(), "Enter the SSH password.");
     }
 }

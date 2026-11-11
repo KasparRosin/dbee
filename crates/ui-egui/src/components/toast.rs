@@ -1,5 +1,6 @@
 //! Toasts (`toast`): a result (`success`, on `ink`) or a failure (`error`, on `danger`) said in
-//! the window's bottom right corner, with its icon, its words, an optional action and a close.
+//! the window's bottom right corner, with its icon, its words (the names in them in `data`), an
+//! optional action and a close.
 //! Toasts float without a shadow: their ground is solid. [`show`] stands them over the status
 //! bar, one above the other.
 
@@ -16,7 +17,7 @@ use crate::theme::size::{
     RADIUS_CONTROL, RADIUS_FLOAT, TOAST_ACTION_H, TOAST_ACTION_PAD_X, TOAST_CLOSE, TOAST_GAP, TOAST_H, TOAST_MARGIN, TOAST_MAX_W, TOAST_PAD_X,
     TOAST_STACK_GAP,
 };
-use crate::theme::{Text, tokens};
+use crate::theme::{Text, Words, tokens};
 
 /// The action's edge: the toast's words' colour at this opacity.
 const ACTION_EDGE: f32 = 0.7;
@@ -38,10 +39,10 @@ pub enum Act {
 }
 
 /// One toast: its kind, its words (drawn as written) and its action's label, if it has one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toast<'a> {
     kind: Kind,
-    text: &'a str,
+    words: Words,
     action: Option<&'a str>,
 }
 
@@ -55,16 +56,16 @@ struct Laid {
 }
 
 impl<'a> Toast<'a> {
-    pub fn new(kind: Kind, text: &'a str) -> Toast<'a> {
-        Toast { kind, text, action: None }
+    pub fn new(kind: Kind, words: impl Into<Words>) -> Toast<'a> {
+        Toast { kind, words: words.into(), action: None }
     }
 
-    pub fn success(text: &'a str) -> Toast<'a> {
-        Toast::new(Kind::Success, text)
+    pub fn success(words: impl Into<Words>) -> Toast<'a> {
+        Toast::new(Kind::Success, words)
     }
 
-    pub fn error(text: &'a str) -> Toast<'a> {
-        Toast::new(Kind::Error, text)
+    pub fn error(words: impl Into<Words>) -> Toast<'a> {
+        Toast::new(Kind::Error, words)
     }
 
     /// An action, `label` drawn in capitals in a box after the words.
@@ -91,7 +92,7 @@ impl<'a> Toast<'a> {
         });
         let action_w = action.as_ref().map_or(0.0, |(_, w)| TOAST_GAP + w);
         let rest = 2.0 * TOAST_PAD_X + self.icon().size().x + TOAST_GAP + action_w + TOAST_GAP + Icon::Close.size().x;
-        let mut job = Text::Body.job_as_written(self.text, Color32::PLACEHOLDER);
+        let mut job = self.words.job(Color32::PLACEHOLDER);
         job.wrap.max_width = (TOAST_MAX_W - rest).max(TOAST_PAD_X);
         let words = painter.layout_job(job);
         let words_w = words.size().x.ceil();
@@ -103,7 +104,7 @@ impl<'a> Toast<'a> {
     fn draw(&self, ui: &mut Ui) -> Drawn {
         let Laid { words, words_w, action, size } = self.lay(ui.painter());
         let (rect, toast) = ui.allocate_exact_size(size, Sense::hover());
-        toast.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), self.text));
+        toast.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), self.words.to_string()));
         let y = rect.center().y;
         let icon = self.icon();
         let icon_at = pos2(rect.left() + TOAST_PAD_X + icon.size().x / 2.0, y);

@@ -69,7 +69,7 @@ use crate::automation::Tags;
 use crate::components::toast;
 use crate::grid::{CELL, GridSource, ROW_H};
 use crate::shortcuts;
-use crate::theme::{self, Text};
+use crate::theme::{self, Text, Words};
 
 /// The longest value an editor opens inline, in bytes of text (see the module docs).
 pub const MAX_INLINE_BYTES: usize = 32 * 1024;
@@ -366,11 +366,25 @@ pub(crate) fn size_text(n: usize) -> String {
     if n >= MIB { format!("{:.1} MiB", n as f64 / MIB as f64) } else { format!("{} KiB", n.div_ceil(1024)) }
 }
 
+/// Why a value of `len` bytes can't be edited inline.
+pub(crate) fn too_large(len: usize) -> Words {
+    Words::from("This value is too large to edit inline (").name(size_text(len)).plain("; at most ").name(size_text(MAX_INLINE_BYTES)).plain(").")
+}
+
+/// Why a paste that would make the value `len` bytes was dropped.
+pub(crate) fn pasted_too_large(len: usize) -> Words {
+    Words::from("The pasted text is too large to edit inline: the value would be ")
+        .name(size_text(len))
+        .plain(" (at most ")
+        .name(size_text(MAX_INLINE_BYTES))
+        .plain(").")
+}
+
 /// The editor for cell `(row, col)` of the active tab; `Err` says why it cannot open, `Ok(None)`
 /// when there is no such cell.
-pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>, String> {
+pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>, Words> {
     if let Err(why) = can_edit(s) {
-        return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why }));
+        return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why }).into());
     }
     let Some(Tab::Table(t)) = s.state().active_tab() else { return Ok(None) };
     let Some(data) = &t.data else { return Ok(None) };
@@ -382,11 +396,11 @@ pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>
     }
     let value = t.edits.shown(data, row, col).unwrap_or_else(|| data.cell(row, col));
     if let Some(v) = value.filter(|v| v.len() > MAX_INLINE_BYTES) {
-        return Err(format!("This value is too large to edit inline ({}; at most {}).", size_text(v.len()), size_text(MAX_INLINE_BYTES)));
+        return Err(too_large(v.len()));
     }
     let info = s.state().connection(Which::Tab(t.id)).and_then(|c| c.catalog.table(&t.table)).and_then(|i| i.column(data.column_name(col)));
     if let Some(why) = info.and_then(|i| i.not_editable()) {
-        return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why: why.into() }));
+        return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why: why.into() }).into());
     }
     Ok(Some(CellEditor::new(t.id, (row, col), Kind::of(info), value, data, t.edits.revision())))
 }
@@ -524,10 +538,7 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
     }
     app.carry.extend(wait);
     if let Some(n) = dropped {
-        app.notice(
-            toast::Kind::Error,
-            format!("The pasted text is too large to edit inline: the value would be {} (at most {}).", size_text(n), size_text(MAX_INLINE_BYTES)),
-        );
+        app.notice(toast::Kind::Error, pasted_too_large(n));
     }
 }
 

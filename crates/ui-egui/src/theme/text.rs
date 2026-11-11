@@ -1,6 +1,6 @@
 //! The ten text styles. Capitals are applied only when drawing, never to the stored text.
 
-use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, RichText, TextFormat, text::LayoutJob};
+use egui::{Align, Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, RichText, TextFormat, text::LayoutJob};
 
 use super::{INTER_MEDIUM, MONO_MEDIUM};
 
@@ -93,6 +93,72 @@ impl Text {
     }
 }
 
+/// A sentence dbee writes for a dialog or a toast, the names in it marked: a connection, a user,
+/// a host, a path, a number. Laid out as one job, the names in `data` as written and the rest in
+/// `body`; read out and tagged as the parts run together.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Words {
+    /// Each part, and whether it is a name.
+    parts: Vec<(String, bool)>,
+}
+
+impl Words {
+    /// More words, in `body`.
+    pub fn plain(self, s: impl Into<String>) -> Words {
+        self.push(s.into(), false)
+    }
+
+    /// A name, in `data` as written.
+    pub fn name(self, s: impl Into<String>) -> Words {
+        self.push(s.into(), true)
+    }
+
+    fn push(mut self, s: String, name: bool) -> Words {
+        match self.parts.last_mut() {
+            _ if s.is_empty() => {}
+            Some((last, was)) if *was == name => last.push_str(&s),
+            _ => self.parts.push((s, name)),
+        }
+        self
+    }
+
+    /// The parts in `color`, as one job: the words in `body`, the names in `data`.
+    pub fn job(&self, color: Color32) -> LayoutJob {
+        let mut job = LayoutJob::default();
+        for (s, name) in &self.parts {
+            // egui puts each part's letters at the top of its own line; a name's 16 line centred
+            // in the words' 18 puts its baseline on theirs.
+            let format = if *name { TextFormat { valign: Align::Center, ..Text::Data.format(color) } } else { Text::Body.format(color) };
+            job.append(s, 0.0, format);
+        }
+        job
+    }
+}
+
+impl std::fmt::Display for Words {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.parts.iter().try_for_each(|(s, _)| f.write_str(s))
+    }
+}
+
+impl From<&str> for Words {
+    fn from(s: &str) -> Words {
+        Words::default().plain(s)
+    }
+}
+
+impl From<String> for Words {
+    fn from(s: String) -> Words {
+        Words::default().plain(s)
+    }
+}
+
+impl From<&String> for Words {
+    fn from(s: &String) -> Words {
+        Words::default().plain(s.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +187,36 @@ mod tests {
             assert_eq!(style.line(), line, "{style:?}");
             assert_eq!(style.spacing(), spacing, "{style:?}");
             assert_eq!(style.caps(), caps, "{style:?}");
+        }
+    }
+
+    #[test]
+    fn a_sentences_names_sit_on_its_words_baseline() {
+        // A name in `data` amid words in `body`: the same baseline, the words' 18 line, and the
+        // parts read out together.
+        let words = Words::from("Delete ").name("Shop xp").plain(" xp?");
+        assert_eq!(words.to_string(), "Delete Shop xp xp?");
+        for ppp in [1.0, 1.15] {
+            let mut ready = false;
+            let mut h = egui_kittest::Harness::builder().with_pixels_per_point(ppp).build_ui_state(
+                move |ui, seen: &mut Vec<f32>| {
+                    if !ready {
+                        crate::components::showcase::prepare(ui.ctx(), egui::Theme::Light);
+                        ready = true;
+                        ui.ctx().request_repaint();
+                        return;
+                    }
+                    let g = ui.fonts_mut(|f| f.layout_job(Words::from("Delete ").name("Shop xp").plain(" xp?").job(Color32::PLACEHOLDER)));
+                    let row = &g.rows[0];
+                    *seen = row.glyphs.iter().filter(|g| g.chr == 'x').map(|g| g.pos.y).chain([row.size.y]).collect();
+                },
+                Vec::new(),
+            );
+            h.run();
+            let seen = h.state();
+            assert_eq!(seen.len(), 3, "{ppp}: an x in the name and one in the words, and the row: {seen:?}");
+            assert_eq!(seen[0], seen[1], "{ppp}: one baseline: {seen:?}");
+            assert!((seen[2] - Text::Body.line()).abs() < 0.5, "{ppp}: the words' 18 line: {seen:?}");
         }
     }
 

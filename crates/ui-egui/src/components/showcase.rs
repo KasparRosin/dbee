@@ -22,7 +22,7 @@ use super::tab::{self, NewTab, Tab};
 use super::toast::Toast;
 use super::tooltip;
 use crate::theme::size::{KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, TAB_H};
-use crate::theme::{Text, Tokens, tokens};
+use crate::theme::{Text, Tokens, Words, tokens};
 
 /// The page's frames: 20 between sections.
 const BETWEEN: f32 = 20.0;
@@ -189,7 +189,7 @@ fn dialogs(ui: &mut Ui) {
                 ui.horizontal_top(|ui| {
                     let (mut password, mut save, mut url) = ("secretpass".to_owned(), true, "shop@pg14:5432".to_owned());
                     Dialog::new(id("password"), "Database password")
-                        .text("Enter the password of shop on pg14.internal.")
+                        .text(Words::from("Enter the password of ").name("shop").plain(" on ").name("pg14.internal").plain("."))
                         .body(|ui, _| {
                             ui.add(Input::body(&mut password).password(true).look(focused));
                             ui.add(Checkbox::new(&mut save, "Save in keyring"));
@@ -209,7 +209,7 @@ fn dialogs(ui: &mut Ui) {
                         .buttons([Button::danger("Close anyway", "dialog-ok"), cancel])
                         .in_place(ui);
                     Dialog::new(id("delete"), "Delete connection")
-                        .text("Delete “Shop live”? Its saved passwords are deleted with it.")
+                        .text(Words::from("Delete “").name("Shop live").plain("”? Its saved passwords are deleted with it."))
                         .buttons([Button::danger("Delete", "dialog-ok"), cancel])
                         .in_place(ui);
                 });
@@ -269,7 +269,7 @@ fn tooltips_and_toasts(ui: &mut Ui) {
     section(ui, "toast: success, error, error without an action; icon/success, icon/error", SPACE_8, |ui| {
         let t = tokens(ui.ctx());
         ui.spacing_mut().item_spacing.x = SPACE_24;
-        ui.add(Toast::success("Exported 25,000 rows to orders.csv").action("Open folder"));
+        ui.add(Toast::success(Words::from("Exported ").name("25,000").plain(" rows to ").name("orders.csv")).action("Open folder"));
         ui.add(Toast::error("Export failed: disk full").action("Details"));
         ui.add(Toast::error("Export failed: disk full"));
         for icon in [Icon::Success, Icon::Error] {
