@@ -293,8 +293,6 @@ fn sqlite_shows_only_file_rows() {
 fn mysql_url_fills_type_and_fields() {
     let mut ui = cards();
     ui.click("conn-fill-url");
-    let text = ui.value("dialog-text");
-    assert!(text.as_str().unwrap().contains("mysql://"), "{text}");
     ui.text("mysql://u@h:3307/shop");
     ui.click("dialog-ok");
     let i = ui.inspect();
@@ -433,15 +431,13 @@ fn an_upcoming_engine_cannot_be_chosen() {
     assert!(ui.text_in(card, "Upcoming").is_none(), "only drawn in capitals");
     ui.click("conn-kind-mysql");
     assert!(ui.tag("conn-host").is_none() && ui.tag("conn-kind-mysql").is_some(), "nothing was chosen");
-    // Nor through a URL: the dialog names what this build opens.
+    // Nor through a URL: the error names what this build opens.
     ui.click("conn-fill-url");
-    let text = ui.value("dialog-text").as_str().unwrap().to_string();
-    assert!(text.contains("postgres://") && !text.contains("mysql://"), "{text}");
     ui.text("mysql://u@h/shop");
     ui.click("dialog-ok");
     assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
     let error = ui.value("dialog-error").as_str().unwrap().to_string();
-    assert!(error.contains("postgres://"), "{error}");
+    assert!(error.contains("postgres://") && !error.contains("mysql://"), "{error}");
     ui.click("dialog-cancel");
     assert!(ui.tag("conn-kind-mysql").is_some(), "still the cards");
 }

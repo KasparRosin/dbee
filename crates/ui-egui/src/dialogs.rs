@@ -308,11 +308,9 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
     let cancel = Button::outline("Cancel", "dialog-cancel");
     match dialog {
         Dialog::FillFromUrl { url, error, focused, kinds } => {
-            let text = format!("Paste a {} URL. The parts it has replace those in the form.", schemes(kinds));
             let hint = url_hint(kinds);
             let mut entered = false;
             let shown = dialog::Dialog::new(id, "Fill from URL")
-                .text(text.as_str())
                 .body(|ui, buttons| {
                     let input = Input::data(url).id(egui::Id::new("dialog-url")).placeholder(&hint).error(error.is_some());
                     // The line for the reason a URL did not parse keeps its room.
@@ -328,7 +326,7 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 })
                 .buttons([ok("Fill"), cancel])
                 .show(ctx);
-            let pressed = tagged(tags, &shown, &text);
+            let pressed = tagged(tags, &shown, "");
             if pressed == Some(CANCEL) {
                 Act::Cancel
             } else if (pressed == Some(OK) || entered) && !url.trim().is_empty() {
@@ -668,6 +666,25 @@ mod tests {
     }
 
     #[test]
+    fn fill_from_url_has_no_intro_line() {
+        // The design's dialog is its title, the field and the error line: the field 20 under the
+        // title, no words between them and no `dialog-text` (the error names the schemes when a
+        // paste is wrong).
+        let h = open(Theme::Light, Dialog::fill_from_url(vec![DbKind::Postgres, DbKind::MySql]));
+        let mut ids = h.state().tags.ids();
+        ids.sort_unstable();
+        assert_eq!(ids, ["dialog-cancel", "dialog-ok", "dialog-url"], "no dialog-text");
+        let drawn = texts(&h.output().shapes);
+        let title = drawn.iter().find(|(w, _, _)| w == "Fill from URL").map(|(_, r, _)| *r).unwrap_or_else(|| panic!("the title: {drawn:?}"));
+        let url = rect(&h, "dialog-url");
+        assert!((url.top() - title.bottom() - 20.0).abs() < 0.5, "the field 20 under the title: {title:?} {url:?}");
+        let between: Vec<&String> =
+            drawn.iter().filter(|(_, r, _)| r.top() >= title.bottom() && r.bottom() <= url.top()).map(|(w, _, _)| w).collect();
+        assert!(between.is_empty(), "nothing between the title and the field: {between:?}");
+        assert!(!drawn.iter().any(|(w, _, _)| w.contains("Paste")), "no intro sentence: {drawn:?}");
+    }
+
+    #[test]
     fn a_password_dialog_focuses_its_field_with_the_focus_edge() {
         // Review Focus 3: the field has focus as the dialog opens, given by code, and shows it.
         for (theme, t) in both() {
@@ -704,20 +721,19 @@ mod tests {
 
     #[test]
     fn dialogs_keep_their_tags_and_outcomes() {
-        let fill_text = "Paste a postgres:// or postgresql:// URL. The parts it has replace those in the form.";
         let host_text = "dbee has not connected to db.example:22 before. Its ssh-ed25519 host key has this fingerprint:";
-        let rows: Vec<(Dialog, &str, Vec<&str>, &str, Option<&str>, Done)> = vec![
+        let rows: Vec<(Dialog, Option<&str>, Vec<&str>, &str, Option<&str>, Done)> = vec![
             (
                 Dialog::fill_from_url(vec![DbKind::Postgres]),
-                fill_text,
-                vec!["dialog-url", "dialog-text", "dialog-ok", "dialog-cancel"],
+                None,
+                vec!["dialog-url", "dialog-ok", "dialog-cancel"],
                 "Fill",
                 Some("postgres://h/db"),
                 Done::ParseUrl("postgres://h/db".into()),
             ),
             (
                 Dialog::HostKey { host: "db.example:22".into(), key_type: "ssh-ed25519".into(), fingerprint: "SHA256:abcdef".into(), rerun: rerun() },
-                host_text,
+                Some(host_text),
                 vec!["dialog-fingerprint", "dialog-text", "dialog-ok", "dialog-cancel"],
                 "Trust and connect",
                 None,
@@ -725,7 +741,7 @@ mod tests {
             ),
             (
                 secret(SecretAsk::Password, Keep::Yes { checked: true }),
-                "Enter the password of ann on db.example.",
+                Some("Enter the password of ann on db.example."),
                 vec!["dialog-secret", "dialog-save", "dialog-text", "dialog-ok", "dialog-cancel"],
                 "Connect",
                 Some("pw"),
@@ -733,7 +749,7 @@ mod tests {
             ),
             (
                 secret(SecretAsk::Passphrase { key: "/k".into() }, Keep::No("There is no keyring, so dbee asks each time.")),
-                "Enter the password of ann on db.example.",
+                Some("Enter the password of ann on db.example."),
                 vec!["dialog-secret", "dialog-save", "dialog-text", "dialog-ok", "dialog-cancel"],
                 "Connect",
                 Some("pp"),
@@ -741,7 +757,7 @@ mod tests {
             ),
             (
                 secret(SecretAsk::SshPassword, Keep::NotOffered),
-                "Enter the password of ann on db.example.",
+                Some("Enter the password of ann on db.example."),
                 vec!["dialog-secret", "dialog-text", "dialog-ok", "dialog-cancel"],
                 "Connect",
                 Some("sp"),
@@ -749,7 +765,7 @@ mod tests {
             ),
             (
                 confirm("closeTab"),
-                "Close Query 1? Its query text will be lost.",
+                Some("Close Query 1? Its query text will be lost."),
                 vec!["dialog-text", "dialog-ok", "dialog-cancel"],
                 "Close anyway",
                 None,
@@ -757,7 +773,7 @@ mod tests {
             ),
             (
                 confirm("applyAfterUnknownOutcome"),
-                "Close Query 1? Its query text will be lost.",
+                Some("Close Query 1? Its query text will be lost."),
                 vec!["dialog-text", "dialog-ok", "dialog-cancel"],
                 "Apply again",
                 None,
@@ -765,7 +781,7 @@ mod tests {
             ),
             (
                 Dialog::DeleteConnection { id: "c1".into(), name: "Shop live".into() },
-                "Delete “Shop live”? Its saved passwords are deleted with it.",
+                Some("Delete “Shop live”? Its saved passwords are deleted with it."),
                 vec!["dialog-text", "dialog-ok", "dialog-cancel"],
                 "Delete",
                 None,
@@ -773,7 +789,7 @@ mod tests {
             ),
             (
                 Dialog::Requested { name: "export" },
-                "A command asked for the “export” dialog, which this version of dbee does not have.",
+                Some("A command asked for the “export” dialog, which this version of dbee does not have."),
                 vec!["dialog-text", "dialog-ok"],
                 "Close",
                 None,
@@ -790,7 +806,7 @@ mod tests {
             let mut want = ids.clone();
             want.sort_unstable();
             assert_eq!(drawn, want, "{at}: its tags");
-            assert_eq!(h.state().tags.value("dialog-text"), Some(&json!(text)), "{at}: dialog-text");
+            assert_eq!(h.state().tags.value("dialog-text"), text.map(|t| json!(t)).as_ref(), "{at}: dialog-text");
             assert_eq!(h.state().tags.value("dialog-ok"), Some(&json!(ok)), "{at}: dialog-ok");
             if ids.contains(&"dialog-cancel") {
                 assert_eq!(h.state().tags.value("dialog-cancel"), Some(&json!("Cancel")), "{at}: dialog-cancel");
