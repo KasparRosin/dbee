@@ -339,6 +339,30 @@ async fn nothing_listening_is_a_connect_error() {
     assert!(e.to_string().contains(&port.to_string()), "{e}");
 }
 
+/// An open dropped while the key exchange runs (the server sent its first line and then nothing)
+/// closes its socket: the session russh runs for it on a task of its own would keep it open.
+#[tokio::test]
+async fn a_dropped_open_closes_its_socket() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let home = temp_home(None, None);
+    let c = SshConfig { host: "127.0.0.1".into(), port, user: "x".into(), auth: SshAuth::Password, ..SshConfig::default() };
+    let opening = tokio::spawn(async move { Tunnel::open(&c, &env(&home), &secrets(Some("pw"), None), None).await.map(drop) });
+    let (mut server, _) = listener.accept().await.unwrap();
+    server.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").await.unwrap();
+    // The client's first line, then its key exchange: the session runs.
+    let (mut got, mut buf) = (Vec::new(), [0u8; 4096]);
+    while got.iter().position(|b| *b == b'\n').is_none_or(|at| at + 1 == got.len()) {
+        let n = server.read(&mut buf).await.unwrap();
+        assert!(n > 0, "the client closed before its key exchange");
+        got.extend_from_slice(&buf[..n]);
+    }
+    opening.abort();
+    let closed = async { while server.read(&mut buf).await.is_ok_and(|n| n > 0) {} };
+    // The limit is only for a test that fails: the socket closes as the open is dropped.
+    assert!(tokio::time::timeout(Duration::from_secs(30), closed).await.is_ok(), "the socket stayed open after the open was dropped");
+}
+
 #[tokio::test]
 async fn plan_shows_what_will_be_used() {
     let home = temp_home(None, None);

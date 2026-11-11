@@ -275,12 +275,20 @@ impl Tunnel {
         let config = client::Config {
             keepalive_interval: Some(KEEPALIVE),
             keepalive_max: 3,
-            nodelay: true,
             preferred: Preferred { key: Cow::Owned(key_order), ..Preferred::DEFAULT },
             ..client::Config::default()
         };
         log::info!("ssh: connecting to {addr}");
-        let connecting = client::connect(Arc::new(config), (cfg.host.as_str(), cfg.port), handler);
+        let mut unfinished = None;
+        let connecting = async {
+            let tcp = tokio::net::TcpStream::connect((cfg.host.as_str(), cfg.port)).await?;
+            if tcp.set_nodelay(true).is_err() {
+                log::debug!("ssh: could not turn Nagle's algorithm off");
+            }
+            let (tcp, socket) = Unfinished::watch(tcp)?;
+            unfinished = Some(socket);
+            client::connect_stream(Arc::new(config), tcp, handler).await
+        };
         let mut handle = match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
             Err(_) => return Err(SshError::Connect(format!("{addr} did not answer within {} s", CONNECT_TIMEOUT.as_secs()))),
             Ok(Ok(handle)) => handle,
@@ -302,7 +310,12 @@ impl Tunnel {
             _ => None,
         };
         match login(&mut handle, cfg, env, secrets, &addr).await {
-            Ok(used) => Ok(Tunnel { handle, used, unsaved }),
+            Ok(used) => {
+                if let Some(socket) = unfinished {
+                    socket.made();
+                }
+                Ok(Tunnel { handle, used, unsaved })
+            }
             Err(e) => {
                 let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
                 Err(e)
@@ -349,6 +362,36 @@ impl Tunnel {
         let deadline = Instant::now() + Duration::from_secs(2);
         while !self.handle.is_closed() && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+/// The SSH server's socket until [`Tunnel::open`] has made a tunnel of it. When the open ends any
+/// other way (an error, its time limit, or its caller dropping it), the socket is shut down here:
+/// the session russh runs for it, on a task of its own, does not notice during the key exchange
+/// that nobody waits for it any more, and would keep the socket open.
+struct Unfinished(Option<std::net::TcpStream>);
+
+impl Unfinished {
+    /// `tcp`, and a second handle on its socket to shut it down with.
+    fn watch(tcp: tokio::net::TcpStream) -> std::io::Result<(tokio::net::TcpStream, Unfinished)> {
+        let tcp = tcp.into_std()?;
+        let other = tcp.try_clone()?;
+        Ok((tokio::net::TcpStream::from_std(tcp)?, Unfinished(Some(other))))
+    }
+
+    /// The tunnel is made: its socket stays open.
+    fn made(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        if let Some(socket) = self.0.take()
+            && socket.shutdown(std::net::Shutdown::Both).is_err()
+        {
+            log::debug!("ssh: the socket of an unfinished open was closed already");
         }
     }
 }

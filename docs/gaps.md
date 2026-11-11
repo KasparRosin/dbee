@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-10 · **Change:** minor (entries 14 and 53: the engine knows the query session's transaction and its tab, and commits or rolls it back; the footer mark, the prompt on close and the ROLLBACK button are left)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-11 · **Change:** minor (entry 56: `connection.cancel` stops a connection attempt; the CANCEL button is left)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -417,12 +417,13 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** seeing a table's indexes or triggers means querying the system catalogs by hand.
 - **Estimate:** 6-10 h (estimated): reading indexes and triggers per engine, and the page. Planned for M3.
 
-### 56. A connection attempt can't be cancelled (F)
+### 56. Cancelling a connection attempt: the engine is done, the button is not (F)
 
-- **Missing:** a command that stops a connect, and the CANCEL the M3 connection screen draws beside `CONNECTING`.
-- **Evidence:** `engine.commands` has `query.cancel` and `table.cancel` but none for a connect; the form only relabels its button `Connecting…` (`crates/ui-egui/src/conn_form.rs`).
-- **Impact:** a host that doesn't answer keeps the user waiting until the connect limit passes.
-- **Estimate:** 1.5 h (estimated). Planned for M3.
+- **Done (engine):** `connection.cancel` stops the attempt of an open, an openFile, a reconnect or a test wherever it is (connecting, the SSH tunnel's handshake or login, the database's login, the catalog's load): the socket it was using closes, then the tunnel, and the attempt ends `cancelled`. A cancelled reconnect leaves the connection as it was, with its tabs. With no attempt running it does nothing and says so.
+- **Left:** the CANCEL button the M3 connection screen draws beside `CONNECTING`, which runs it; it goes with the connection screens (M3 Phase 3). Until then the form only relabels its button `Connecting…`.
+- **Evidence:** `connection.cancel` (`crates/engine/src/cmd/connection.rs`), `Unfinished` (`crates/ssh/src/lib.rs`); the tests `a_connect_to_a_silent_host_can_be_cancelled`, `a_connect_through_the_tunnel_can_be_cancelled`, `a_test_can_be_cancelled`, `a_reconnect_can_be_cancelled`, `cancel_with_nothing_running_is_harmless` and `a_cancelled_attempt_leaves_no_connection` (`crates/engine/tests/connection.rs`) and `a_dropped_open_closes_its_socket` (`crates/ssh/tests/tunnel.rs`); `crates/ui-egui/src/conn_form.rs` for the form.
+- **Impact:** until the button is drawn, a host that doesn't answer keeps the user waiting until the connect limit passes (15 s a step); an agent can call `connection.cancel`.
+- **Estimate:** part of the connection screens (M3 Phase 3); not estimated.
 
 ### 57. Saved connections aren't ordered by last use (F)
 
@@ -484,6 +485,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | Entry 56: `connection.cancel` stops the attempt of an open, an openFile, a reconnect or a test, closing what it had opened, the SSH tunnel included; the CANCEL button beside `CONNECTING` is left for the connection screens. |
 | 2026-11-10 | minor | Entries 14 and 53: the connection's `transaction` says whether the query session has one open, as each driver reports it, and which tab's run opened it; `query.commit` and `query.rollback` end it. The footer mark and the prompt on close are left for the Shell screen, the ROLLBACK button for the Query tab screen. |
 | 2026-11-10 | minor | Entry 54: the engine reads only its own cancel as cancelled, and a statement the server stopped by itself is a server error marked `interrupted`; the M3 error band for it is left for the Query tab screen. |
 | 2026-11-10 | minor | The check of the M3 Phase 1 fixes: entries 63 (a long column type may be cut in the grid header) and 64 (the tokens check can misread a test helper with a comma in its type). |

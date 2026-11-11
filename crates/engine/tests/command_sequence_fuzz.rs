@@ -68,6 +68,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("connection.openFile", &[("path", FILE_PATH), ("password", Hint::Text)]),
     ("connection.saveOpen", &[("connection", CONNECTION)]),
     ("connection.reconnect", RECONNECT),
+    ("connection.cancel", &[]),
     ("schema.refresh", &[("connection", CONNECTION)]),
     ("schema.inspect", &[("connection", CONNECTION), ("schema", Hint::Text), ("table", Hint::Text)]),
     ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count), ("connection", CONNECTION)]),
