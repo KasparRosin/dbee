@@ -20,13 +20,14 @@ pub struct Dropdown<'a> {
     selected: &'a str,
     width: f32,
     list_h: Option<f32>,
+    muted: bool,
     look: Option<Look>,
 }
 
 impl<'a> Dropdown<'a> {
     /// `selected_text` is drawn as written, cut short with `…` when it doesn't fit.
     pub fn new(id_salt: impl std::hash::Hash + std::fmt::Debug, selected_text: &'a str) -> Dropdown<'a> {
-        Dropdown { id_salt: Id::new(id_salt), selected: selected_text, width: f32::INFINITY, list_h: None, look: None }
+        Dropdown { id_salt: Id::new(id_salt), selected: selected_text, width: f32::INFINITY, list_h: None, muted: false, look: None }
     }
 
     /// This wide, or as wide as there is room for (the default fills the row).
@@ -38,6 +39,13 @@ impl<'a> Dropdown<'a> {
     /// The open list scrolls past this height (egui's combo box height by default).
     pub fn list_height(mut self, height: f32) -> Dropdown<'a> {
         self.list_h = Some(height);
+        self
+    }
+
+    /// Its text in `text_muted`: what it chose counts for nothing now (a filter row left out of
+    /// the condition). Not on the page yet.
+    pub fn muted(mut self, muted: bool) -> Dropdown<'a> {
+        self.muted = muted;
         self
     }
 
@@ -77,7 +85,11 @@ impl<'a> Dropdown<'a> {
             let mut job = Text::Body.job_as_written(self.selected, Color32::PLACEHOLDER);
             job.wrap = TextWrapping::truncate_at_width((width - 2.0 * inset - DROPDOWN_GAP - chevron).max(0.0));
             let words = p.layout_job(job);
-            let (text, mark) = if look.disabled { (t.text_faint, t.text_faint) } else { (t.text, t.text_muted) };
+            let (text, mark) = match (look.disabled, self.muted) {
+                (true, _) => (t.text_faint, t.text_faint),
+                (false, true) => (t.text_muted, t.text_muted),
+                (false, false) => (t.text, t.text_muted),
+            };
             p.galley(pos2(rect.left() + inset, rect.center().y - words.size().y / 2.0), words, text);
             Icon::ChevronDown.paint(&p, pos2(rect.right() - inset - chevron / 2.0, rect.center().y), mark);
         }

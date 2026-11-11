@@ -236,7 +236,7 @@ fn took(d: Duration) -> String {
 }
 
 /// A fact of a bar after its words: how long, or a spinner while that isn't known.
-enum Time {
+pub(super) enum Time {
     Words(Piece),
     Spinner,
 }
@@ -249,12 +249,12 @@ impl Time {
     }
 
     /// A running timer, in `data`: `00:02.4`.
-    fn timer(ui: &Ui, t: &Tokens, d: Duration) -> Time {
+    pub(super) fn timer(ui: &Ui, t: &Tokens, d: Duration) -> Time {
         let words = timer(d);
         Time::Words(Piece::new(ui, Text::Data.job_as_written(&words, t.text_muted), words))
     }
 
-    fn width(&self) -> f32 {
+    pub(super) fn width(&self) -> f32 {
         match self {
             Time::Words(p) => p.width(),
             Time::Spinner => SPINNER,
@@ -262,7 +262,7 @@ impl Time {
     }
 
     /// Draws it from `x`, centred on `mid`.
-    fn show(self, ui: &Ui, id: Id, x: f32, mid: f32, t: &Tokens) {
+    pub(super) fn show(self, ui: &Ui, id: Id, x: f32, mid: f32, t: &Tokens) {
         match self {
             Time::Words(p) => {
                 piece(ui, id, &p, pos2(x, mid), t.text_muted);
@@ -378,10 +378,18 @@ pub struct CountShown {
     pub asked: bool,
 }
 
+/// A row count's parts, measured.
+struct CountParts {
+    words: Option<Piece>,
+    button: Option<TextButton<'static>>,
+    counting: Option<(Piece, Time)>,
+    width: f32,
+}
+
 impl RowCount {
     /// The words: the rows shown (`1–100`) and how many there are (`of 25,000 rows`, `of ~100,000
     /// rows`), either alone when the other isn't there.
-    fn words(self, shown: Option<(u64, u64)>) -> String {
+    pub(super) fn words(self, shown: Option<(u64, u64)>) -> String {
         let total = match self {
             RowCount::Exact(n) => Some(thousands(n)),
             RowCount::Estimate(n) | RowCount::Counting { estimate: Some(n), .. } if n > 0 => Some(format!("~{}", thousands(n))),
@@ -401,9 +409,8 @@ impl RowCount {
         }
     }
 
-    /// Draws it where `ui` puts it next, as wide as what it holds and as tall as its button, with
-    /// the rows shown (`1–100`), if any.
-    pub fn show(self, ui: &mut Ui, shown: Option<(u64, u64)>) -> CountShown {
+    /// Its parts: the words, COUNT or COUNT ROWS, COUNTING with its time; and its width.
+    fn parts(self, ui: &Ui, shown: Option<(u64, u64)>) -> CountParts {
         let t = tokens(ui.ctx());
         let says = self.words(shown);
         let words = (!says.is_empty()).then(|| Piece::new(ui, Text::Label.job(&says, t.text_muted), says));
@@ -425,7 +432,23 @@ impl RowCount {
         let gap = |w: f32| if any { w } else { 0.0 };
         let button_w = button.as_ref().map_or(0.0, |b| gap(ROW_COUNT_GAP) + b.width(ui));
         let counting_w = counting.as_ref().map_or(0.0, |(c, time)| gap(ROW_COUNT_COUNTING_GAP) + c.width() + ROW_COUNT_COUNTING_GAP + time.width());
-        let (rect, r) = ui.allocate_exact_size(vec2((words_w + button_w + counting_w).ceil(), BUTTON_H), Sense::hover());
+        CountParts { words, button, counting, width: (words_w + button_w + counting_w).ceil() }
+    }
+
+    /// How wide it draws in `ui` with the rows shown.
+    pub fn width(self, ui: &Ui, shown: Option<(u64, u64)>) -> f32 {
+        self.parts(ui, shown).width
+    }
+
+    /// Draws it where `ui` puts it next, as wide as what it holds and as tall as its button, with
+    /// the rows shown (`1–100`), if any.
+    pub fn show(self, ui: &mut Ui, shown: Option<(u64, u64)>) -> CountShown {
+        let t = tokens(ui.ctx());
+        let CountParts { words, button, counting, width } = self.parts(ui, shown);
+        let words_w = words.as_ref().map_or(0.0, Piece::width);
+        let any = words.is_some();
+        let gap = |w: f32| if any { w } else { 0.0 };
+        let (rect, r) = ui.allocate_exact_size(vec2(width, BUTTON_H), Sense::hover());
         let id = r.id;
         let mid = rect.center().y;
         let words = words.map(|w| piece(ui, id.with("words"), &w, pos2(rect.left(), mid), t.text_muted));

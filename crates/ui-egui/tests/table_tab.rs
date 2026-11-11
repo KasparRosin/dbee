@@ -773,8 +773,11 @@ fn the_operator_choice_shows_each_label_whole() {
             assert!(!cut && rect.expand(0.5).contains_rect(text), "{at}: `{label}` is cut in its item: {text:?} in {rect:?}");
         }
         ui.click("filter-0-op");
-        // The closed choice shows the chosen operator's label whole, and the row still fits: left
-        // of the value panel, nothing over anything.
+        // The closed choice shows the chosen operator's label whole where the row has room for
+        // it (the wide window), cut with … inside its box where it hasn't (the app's window with
+        // the value panel open: the row at the page's sizes is narrower than every control at its
+        // least with the longest label), and the row still fits: left of the value panel, nothing
+        // over anything.
         for (id, label) in OPS {
             ui.click("filter-0-op");
             ui.click(&format!("filter-0-op-{id}"));
@@ -782,7 +785,8 @@ fn the_operator_choice_shows_each_label_whole() {
             assert_eq!(ui.value("filter-0-op"), id, "{at}");
             let rect = ui.rect("filter-0-op").unwrap();
             let (text, cut) = ui.text_in(rect, label).unwrap_or_else(|| panic!("{at}: the closed choice reads `{label}`"));
-            assert!(!cut && rect.contains_rect(text), "{at}: `{label}` is cut in the closed choice: {text:?} in {rect:?}");
+            assert!(rect.contains_rect(text), "{at}: `{label}` runs out of the closed choice: {text:?} in {rect:?}");
+            assert!(!cut || size.x < 1700.0, "{at}: `{label}` is cut in the closed choice: {text:?} in {rect:?}");
             let mut row = vec!["filter-raw-toggle", "filter-0-column", "filter-0-op", "filter-0-remove", "filter-add", "filter-apply"];
             if !matches!(id, "isNull" | "isNotNull") {
                 row.insert(3, "filter-0-value");
@@ -930,4 +934,120 @@ fn a_table_keyed_by_its_rowid_shows_no_rowid() {
     assert!(tag_in(&i, "tree-column-main.notes_nokey.rowid").is_none(), "{:?}", ids(&i));
     // The table takes edits, by the rowid it does not show.
     assert_eq!(ui.document()["table"]["editable"], true);
+}
+
+/// Of `ids`, those drawn with the keyboard's focus look in the last frame: their own edge 2 px
+/// `ink`.
+fn keyboard_focus(ui: &Ui, ids: &[&str]) -> Vec<String> {
+    let ink = dbee_ui_egui::theme::LIGHT.ink;
+    let shapes = ui.shapes();
+    ids.iter()
+        .filter(|id| {
+            ui.rect(id).is_some_and(|r| {
+                shapes.iter().any(|(_, s)| {
+                    matches!(s, egui::Shape::Rect(e) if e.stroke.width == 2.0 && e.stroke.color == ink
+                        && (e.rect.min - r.min).length() < 0.6 && (e.rect.max - r.max).length() < 0.6)
+                })
+            })
+        })
+        .map(|id| (*id).to_string())
+        .collect()
+}
+
+/// Review Focus 4: the filter row by keyboard. Tab reaches the raw SQL toggle, the column, the
+/// operator, the value, remove, add and APPLY in that order, then the next row's controls, each
+/// showing the keyboard's focus look; Shift+Tab goes back; Enter in a value applies, as today.
+#[test]
+fn the_filter_row_by_keyboard() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "orders");
+    ui.click("filter-add");
+    ui.frame();
+    let order = [
+        "filter-raw-toggle",
+        "filter-0-column",
+        "filter-0-op",
+        "filter-0-value",
+        "filter-0-remove",
+        "filter-add",
+        "filter-apply",
+        "filter-1-column",
+        "filter-1-op",
+        "filter-1-value",
+        "filter-1-remove",
+    ];
+    // A click gives the first value the keyboard (without the look); Shift+Tab goes back to the
+    // toggle.
+    ui.click("filter-0-value");
+    ui.frame();
+    assert!(keyboard_focus(&ui, &order).is_empty(), "a click shows no keyboard look");
+    for back in ["filter-0-op", "filter-0-column", "filter-raw-toggle"] {
+        ui.key_with("Tab", json!({ "shift": true }));
+        ui.frame();
+        assert_eq!(keyboard_focus(&ui, &order), [back], "Shift+Tab reaches `{back}`");
+    }
+    for id in &order[1..] {
+        ui.key("Tab");
+        ui.frame();
+        assert_eq!(keyboard_focus(&ui, &order), [*id], "Tab reaches `{id}`");
+    }
+    // Back to the first value; typing and Enter apply the bar.
+    for _ in 0..7 {
+        ui.key_with("Tab", json!({ "shift": true }));
+    }
+    ui.frame();
+    assert_eq!(keyboard_focus(&ui, &order), ["filter-0-value"]);
+    ui.text("42");
+    ui.key("Enter");
+    ui.until("the filtered page", |ui| ui.table()["applied"]["filters"][0]["value"] == "42" && ui.table()["loading"].is_null());
+}
+
+/// The filter row's tags keep their ids, values and enabled flags as the row moves to the
+/// shared controls (each now the page's 28 tall): the rows, the open lists, the raw field.
+#[test]
+fn filter_tags_keep_their_ids_and_values() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    let filters = json!([{ "column": "dealer_id", "op": "eq", "value": "42" }, { "column": "status", "op": "eq", "value": "" }]);
+    ui.execute("table.open", json!({ "schema": "shop", "table": "orders", "filters": filters }));
+    ui.until("the page", |ui| ui.table()["loading"].is_null());
+    ui.frame();
+    let i = ui.inspect();
+    let want = [
+        ("filter-raw-toggle", Some(json!(false))),
+        ("filter-0-column", Some(json!("dealer_id"))),
+        ("filter-0-op", Some(json!("eq"))),
+        ("filter-0-value", Some(json!("42"))),
+        ("filter-0-remove", Some(json!(false))),
+        ("filter-add", Some(json!(false))),
+        ("filter-apply", Some(json!("Apply"))),
+        ("filter-1-column", Some(json!("status"))),
+        ("filter-1-op", Some(json!("eq"))),
+        ("filter-1-value", Some(json!(""))),
+        ("filter-1-unapplied", Some(json!(dbee_ui_egui::filter_bar::UNAPPLIED_HINT))),
+        ("filter-1-remove", Some(json!(false))),
+    ];
+    for (id, value) in &want {
+        let e = tag_in(&i, id).unwrap_or_else(|| panic!("`{id}` drawn: {:?}", ids(&i)));
+        assert_eq!(e.get("value"), value.as_ref(), "`{id}`'s value: {e}");
+        assert_eq!(e.get("enabled"), None, "`{id}` enabled: {e}");
+        assert_eq!(ui.rect(id).map(|r| r.height()), Some(28.0), "`{id}` is the page's 28 tall");
+    }
+    let filter_ids: Vec<String> = ids(&i).into_iter().filter(|id| id.starts_with("filter-")).collect();
+    assert_eq!(filter_ids, want.iter().map(|(id, _)| (*id).to_string()).collect::<Vec<_>>(), "no other filter tags, in this order");
+    // The open lists: each column with its type, each operator with its label.
+    ui.click("filter-0-column");
+    ui.frame();
+    assert!(ui.value("filter-0-column-status").as_str().is_some_and(|ty| ty.contains("order_status")), "the column's type");
+    ui.click("filter-0-column");
+    ui.click("filter-0-op");
+    ui.frame();
+    assert_eq!(ui.value("filter-0-op-gt"), "greater than");
+    ui.click("filter-0-op");
+    // The raw field and its toggle.
+    ui.click("filter-raw-toggle");
+    ui.frame();
+    assert_eq!((ui.value("filter-raw-toggle"), ui.value("filter-raw"), ui.value("filter-apply")), (json!(true), json!(""), json!("Apply")));
+    assert_eq!(ui.rect("filter-raw").map(|r| r.height()), Some(28.0));
 }

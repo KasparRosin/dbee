@@ -24,6 +24,7 @@ use super::segmented::{Segment, Segmented};
 use super::status::{self, Activity, Connection, Facts};
 use super::swatch::{COLOURS, Swatch};
 use super::tab::{self, NewTab, Tab};
+use super::table_bars::{self, Loading, PagingBar, TableBar, View};
 use super::toast::Toast;
 use super::tooltip;
 use crate::theme::size::{BAR_H, KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, TAB_H};
@@ -58,6 +59,10 @@ const MENU_BAR_W: f32 = 240.0;
 const SUBMENU_OVERLAP: f32 = 4.0;
 /// The Tabs and bars frame's tab strip and menu bars.
 const STRIP_W: f32 = 840.0;
+/// The filter bar frame's column, operator and value, as wide as the page draws them.
+const FILTER_COLUMN_W: f32 = 140.0;
+const FILTER_OP_W: f32 = 160.0;
+const FILTER_VALUE_W: f32 = 140.0;
 /// The status bar frames: bars this wide, this far apart.
 const STATUS_W: f32 = 1100.0;
 const STATUS_APART: f32 = 10.0;
@@ -165,6 +170,7 @@ fn bars(ui: &mut Ui) {
         });
     });
     results(ui);
+    table_tab_bars(ui);
     let shop = |colour| Connection { name: "Shop live", colour, own: true };
     let stack = |ui: &mut Ui, rows: Vec<(Connection<'static>, Facts<'static>, Option<Activity>)>| {
         ui.vertical(|ui| {
@@ -334,6 +340,90 @@ fn results(ui: &mut Ui) {
             });
         },
     );
+}
+
+/// The table bar, the filter bar and the paging bar, as the page's Tabs and bars frame shows
+/// them, and a page loading before the app gives timers.
+fn table_tab_bars(ui: &mut Ui) {
+    let stack = |ui: &mut Ui, rows: &mut dyn FnMut(&mut Ui)| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_12;
+            rows(ui);
+        });
+    };
+    let bar = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+        ui.allocate_ui(vec2(STRIP_W, BAR_H), |ui| add(ui));
+    };
+    let s = Duration::from_millis;
+    let first = Some((1, 100));
+    let table = |view, loading, count| TableBar { view, loading, count, shown: first, columns: 8, can_refresh: true, can_add: true, value_on: false };
+    section(
+        ui,
+        "table bar: data, structure, loading; the row count: estimate with COUNT, unknown with COUNT ROWS, counting (its CANCEL is the footer job)",
+        SPACE_8,
+        |ui| {
+            let rows = [
+                table(View::Data, None, RowCount::Exact(25_000)),
+                table(View::Structure, None, RowCount::Estimate(25_000)),
+                table(View::Data, Some(Loading { elapsed: Some(s(800)) }), RowCount::Exact(25_000)),
+                table(View::Data, None, RowCount::Estimate(100_000)),
+                table(View::Data, None, RowCount::Unknown),
+                table(View::Data, None, RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }),
+            ];
+            stack(ui, &mut |ui| {
+                for row in rows {
+                    bar(ui, &mut |ui| {
+                        row.show(ui);
+                    });
+                }
+            });
+        },
+    );
+    section(ui, "not on the page yet: a page loading before the app gives timers, today's spinner in the timer's place", SPACE_8, |ui| {
+        bar(ui, &mut |ui| {
+            table(View::Data, Some(Loading { elapsed: None }), RowCount::Exact(25_000)).show(ui);
+        });
+    });
+    section(
+        ui,
+        "filter bar: filter row first (raw SQL toggle, column, operator, value, remove, add, APPLY), then AND rows; on card, 4 by 12 inset, line under",
+        SPACE_8,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(STRIP_W);
+                table_bars::filter_bar(ui, |ui| {
+                    let rows = [("dealer_id", "equals (=)", "42"), ("status", "equals (=)", "completed"), ("total", "greater than (>)", "100")];
+                    for (n, (column, op, value)) in rows.into_iter().enumerate() {
+                        table_bars::filter_row(ui, |ui| {
+                            if n == 0 {
+                                ui.add(IconButton::boxed(Icon::Code));
+                            } else {
+                                table_bars::and_mark(ui);
+                            }
+                            Dropdown::new(("showcase-filter-column", n), column).width(FILTER_COLUMN_W).show(ui, |_| ());
+                            Dropdown::new(("showcase-filter-op", n), op).width(FILTER_OP_W).show(ui, |_| ());
+                            let mut value = value.to_owned();
+                            ui.add(Input::data(&mut value).desired_width(FILTER_VALUE_W));
+                            ui.add(IconButton::boxed(Icon::Minus));
+                            if n == 0 {
+                                ui.add(IconButton::boxed(Icon::Plus));
+                                ui.add(BoxButton::outline("Apply"));
+                            }
+                        });
+                    }
+                });
+            });
+        },
+    );
+    section(ui, "paging bar: with staged changes (1 CHANGE, RESET, APPLY); without", SPACE_8, |ui| {
+        stack(ui, &mut |ui| {
+            for changes in [1, 0] {
+                bar(ui, &mut |ui| {
+                    PagingBar { page: "Page 1 of 250", back: false, forward: true, changes, can_apply: true }.show(ui);
+                });
+            }
+        });
+    });
 }
 
 /// The tabs and the strip, as the page's Tabs and bars frame shows them, and a busy tab.

@@ -19,6 +19,7 @@ pub mod spinner;
 pub mod status;
 pub mod swatch;
 pub mod tab;
+pub mod table_bars;
 pub mod toast;
 pub mod tooltip;
 
@@ -101,9 +102,20 @@ pub(crate) const ROOM: f32 = 10.0;
 /// A harness drawing `add` in `theme` with dbee's theme and fonts, from its second frame on, with
 /// hover texts at once.
 #[cfg(test)]
-pub(crate) fn harness<S>(theme: egui::Theme, state: S, mut add: impl FnMut(&mut egui::Ui, &mut S) + 'static) -> egui_kittest::Harness<'static, S> {
+pub(crate) fn harness<S>(theme: egui::Theme, state: S, add: impl FnMut(&mut egui::Ui, &mut S) + 'static) -> egui_kittest::Harness<'static, S> {
+    harness_in(egui::vec2(600.0, 200.0), theme, state, add)
+}
+
+/// [`harness`] in a window of `size`.
+#[cfg(test)]
+pub(crate) fn harness_in<S>(
+    size: egui::Vec2,
+    theme: egui::Theme,
+    state: S,
+    mut add: impl FnMut(&mut egui::Ui, &mut S) + 'static,
+) -> egui_kittest::Harness<'static, S> {
     let mut ready = false;
-    egui_kittest::Harness::builder().with_size(egui::vec2(600.0, 200.0)).build_ui_state(
+    egui_kittest::Harness::builder().with_size(size).build_ui_state(
         move |ui, s: &mut S| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
