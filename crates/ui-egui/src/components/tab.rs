@@ -6,13 +6,21 @@
 //! written, the unsaved dot and the close, and a `line` at its right end. Its close shows while it
 //! is the active tab or under the pointer. The close's room is kept on every tab, so no tab grows
 //! under the pointer and every tab's close can be clicked by its tag.
+//!
+//! A strip that scrolls comes to rest with a tab whole at its left edge (the design agent's rule
+//! until the overflow of tabs is decided): after the wheel or the scroll bar, it goes on to the
+//! next tab's edge the way it moved; after a scroll it didn't do itself, to the nearest one. The
+//! new tab button can always be scrolled to: the strip leaves room after it for that.
 
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
 
 use egui::text::TextWrapping;
-use egui::{Color32, CornerRadius, Galley, Id, Rect, Response, ScrollArea, Sense, Ui, UiBuilder, Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2};
+use egui::{
+    Color32, CornerRadius, Galley, Id, Rect, Response, ScrollArea, Sense, Ui, UiBuilder, UiStackInfo, Vec2, Widget, WidgetInfo, WidgetType, pos2,
+    vec2,
+};
 
 use super::icon::Icon;
 use super::spinner::Spinner;
@@ -22,6 +30,23 @@ use crate::theme::{Text, tokens};
 
 /// The strip's lines: at a tab's right end and along the bottom.
 const LINE_W: f32 = 1.0;
+
+/// The tag a strip puts on its `Ui`: the key under which the tabs in it note their cells.
+const STRIP_TAG: &str = "dbee-tab-strip";
+
+/// What the tabs of a strip noted this frame: where each one is, and the one to bring into view.
+#[derive(Clone, Debug, Default)]
+struct Cells {
+    tabs: Vec<(f32, f32)>,
+    reveal: Option<(f32, f32)>,
+}
+
+/// Where a strip last came to rest, and whether the user has scrolled it since.
+#[derive(Clone, Copy, Debug, Default)]
+struct Rest {
+    offset: f32,
+    by_user: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -45,6 +70,7 @@ pub struct Tab<'a> {
     active: bool,
     unsaved: bool,
     busy: bool,
+    reveal: bool,
     id: Option<Id>,
     look: Option<Look>,
 }
@@ -70,7 +96,7 @@ impl<'a> Tab<'a> {
     }
 
     fn new(kind: Kind, title: &'a str) -> Tab<'a> {
-        Tab { kind, title, active: false, unsaved: false, busy: false, id: None, look: None }
+        Tab { kind, title, active: false, unsaved: false, busy: false, reveal: false, id: None, look: None }
     }
 
     /// The active tab: `card`, the `ink` line along its top, no line under it, its close shown.
@@ -89,6 +115,12 @@ impl<'a> Tab<'a> {
     /// for a tab yet.
     pub fn busy(mut self, busy: bool) -> Tab<'a> {
         self.busy = busy;
+        self
+    }
+
+    /// Scroll the strip it stands in so it shows whole (a tab just made the active one).
+    pub fn reveal(mut self, reveal: bool) -> Tab<'a> {
+        self.reveal = reveal;
         self
     }
 
@@ -129,6 +161,7 @@ impl<'a> Tab<'a> {
     pub fn show(self, ui: &mut Ui) -> Shown {
         let (title, title_w, width) = self.parts(ui);
         let (auto, rect) = ui.allocate_space(vec2(width, TAB_H));
+        note(ui, rect, self.reveal);
         let id = self.id.unwrap_or(auto);
         let tab = ui.interact(rect, id, Sense::click());
         tab.widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, ui.is_enabled(), self.active, self.title));
@@ -244,22 +277,128 @@ impl Widget for NewTab {
 /// The strip: a band [`TAB_H`] tall on `card`, as wide as `ui`, holding what `add` adds side by
 /// side (the tabs, then [`NewTab`]) and scrolling sideways when they don't fit. Each tab but the
 /// active one and the new tab button draw the line along its bottom under them; the strip draws it
-/// on from the last of them to its end.
+/// on from the last of them to its end. Tabs added straight into the `Ui` `add` gets are the
+/// strip's: it rests at their edges, and brings the one to [`Tab::reveal`] into view.
 pub fn strip<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     let t = tokens(ui.ctx());
     let (band, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
     ui.painter().rect_filled(band, CornerRadius::ZERO, t.card);
-    let mut inside = ui.new_child(UiBuilder::new().max_rect(band).layout(egui::Layout::left_to_right(egui::Align::Min)));
-    let out = ScrollArea::horizontal().id_salt("tab-strip").auto_shrink([false, false]).show(&mut inside, |ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        add(ui)
+    let key = ui.id().with(STRIP_TAG);
+    ui.ctx().data_mut(|d| d.insert_temp(key, Cells::default()));
+    // Read before the scroll area takes this frame's wheel.
+    let scrolling = ui.input(|i| {
+        let over = i.pointer.hover_pos().is_some_and(|p| band.contains(p));
+        i.pointer.any_down() || (over && i.smooth_scroll_delta != Vec2::ZERO)
     });
-    let end = out.inner_rect.left() + out.content_size.x - out.state.offset.x;
+    let width = band.width();
+    let info = UiStackInfo::default().with_tag_value(STRIP_TAG, key);
+    let mut inside = ui.new_child(UiBuilder::new().max_rect(band).layout(egui::Layout::left_to_right(egui::Align::Min)).ui_stack_info(info));
+    // Not animated: a scroll to a tab (`scroll_to_me`) lands in the frame it is asked, and the
+    // strip comes to rest in that same frame, so nothing moves under a click aimed at it.
+    let out = ScrollArea::horizontal().id_salt("tab-strip").auto_shrink([false, false]).animated(false).show(&mut inside, |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let origin = ui.cursor().left();
+        let inner = add(ui);
+        let end = ui.min_rect().right();
+        let cells = ui.ctx().data_mut(|d| d.remove_temp::<Cells>(key)).unwrap_or_default();
+        let tabs: Vec<(f32, f32)> = cells.tabs.iter().map(|(left, right)| (left - origin, right - origin)).collect();
+        let rests = Rests::new(&tabs, end - origin, width);
+        // Room after the new tab button, so the strip can rest at a tab's edge with it in view.
+        let room = rests.last + width - (end - origin);
+        if room > 0.0 {
+            ui.add_space(room);
+        }
+        (inner, end, rests, cells.reveal.map(|(left, right)| (left - origin, right - origin)))
+    });
+    let (inner, end, rests, reveal) = out.inner;
     if end < band.right() {
         let rest = Rect::from_min_max(pos2(end.max(band.left()), band.bottom() - LINE_W), band.max);
         ui.painter().rect_filled(rest, CornerRadius::ZERO, t.line);
     }
-    out.inner
+    let offset = out.state.offset.x;
+    let rest_id = out.id.with("rest");
+    let mut rest: Rest = ui.ctx().data(|d| d.get_temp(rest_id)).unwrap_or_default();
+    let target = match reveal {
+        Some((left, right)) => Some(rests.showing(left, right, offset)),
+        None if scrolling || out.state.velocity() != Vec2::ZERO => {
+            rest.by_user |= offset != rest.offset;
+            None
+        }
+        None => Some(rests.after(offset, rest)),
+    };
+    if let Some(target) = target {
+        if target != offset {
+            let mut state = out.state;
+            state.offset.x = target;
+            state.store(ui.ctx(), out.id);
+            ui.ctx().request_repaint();
+        }
+        rest = Rest { offset: target, by_user: false };
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(rest_id, rest));
+    inner
+}
+
+/// Notes `rect` with the strip `ui` stands in, if it stands in one; `reveal` to bring it into view.
+fn note(ui: &Ui, rect: Rect, reveal: bool) {
+    let Some(key) = ui.stack().iter().find_map(|s| s.info.tags.get_downcast::<Id>(STRIP_TAG).copied()) else { return };
+    ui.ctx().data_mut(|d| {
+        let cells = d.get_temp_mut_or_default::<Cells>(key);
+        cells.tabs.push((rect.left(), rect.right()));
+        if reveal {
+            cells.reveal = Some((rect.left(), rect.right()));
+        }
+    });
+}
+
+/// Where a strip can rest, from its left end: at each tab's start, up to the first one from which
+/// the strip shows the new tab button whole (`last`). A strip too narrow for the last tab and the
+/// button rests last with the button at its left edge.
+#[derive(Clone, Debug)]
+struct Rests {
+    at: Vec<f32>,
+    last: f32,
+    width: f32,
+}
+
+impl Rests {
+    /// The rests of `tabs` (each one's left and right), left to right, in content ending at `end`,
+    /// seen through a strip `width` wide.
+    fn new(tabs: &[(f32, f32)], end: f32, width: f32) -> Rests {
+        let button = tabs.last().map_or(0.0, |(_, right)| *right);
+        let mut at: Vec<f32> = std::iter::once(0.0).chain(tabs.iter().map(|(left, _)| *left)).chain(std::iter::once(button)).collect();
+        at.dedup();
+        let last = at.iter().copied().find(|s| s + width >= end).unwrap_or((end - width).max(0.0));
+        at.retain(|s| *s < last);
+        at.push(last);
+        Rests { at, last, width }
+    }
+
+    /// The rest nearest `offset` that shows the tab from `left` to `right` whole; a tab wider than
+    /// the strip, at its start.
+    fn showing(&self, left: f32, right: f32, offset: f32) -> f32 {
+        self.at
+            .iter()
+            .copied()
+            .filter(|s| *s <= left + 0.5 && s + self.width >= right - 0.5)
+            .min_by(|a, b| (a - offset).abs().total_cmp(&(b - offset).abs()))
+            .unwrap_or(left.min(self.last))
+    }
+
+    /// Where the strip comes to rest from `offset`: there if it is a rest; after the user scrolled
+    /// it, the next rest the way it moved since `rest`; else the nearest.
+    fn after(&self, offset: f32, rest: Rest) -> f32 {
+        if let Some(at) = self.at.iter().copied().find(|s| (s - offset).abs() < 0.5) {
+            return at;
+        }
+        let next = || self.at.iter().copied().find(|s| *s > offset).unwrap_or(self.last);
+        let before = || self.at.iter().copied().rev().find(|s| *s < offset).unwrap_or(0.0);
+        match (rest.by_user, offset > rest.offset) {
+            (true, true) => next(),
+            (true, false) => before(),
+            (false, _) => self.at.iter().copied().min_by(|a, b| (a - offset).abs().total_cmp(&(b - offset).abs())).unwrap_or(0.0),
+        }
+    }
 }
 
 #[cfg(test)]

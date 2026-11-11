@@ -1168,6 +1168,144 @@ fn a_new_tab_is_scrolled_into_view_when_the_strip_overflows() {
     ui.until("the first tab in view", |ui| visible(&ui.tag(&format!("tab-{first}"))));
 }
 
+/// A tab in view in the last frame: its id, the rect it is drawn in whole, the part of it the
+/// strip shows, and the strip's own rect (what the tabs are clipped to).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct InView {
+    tab: u64,
+    whole: egui::Rect,
+    shown: egui::Rect,
+    strip: egui::Rect,
+}
+
+/// The tabs in view in the last frame, left to right. A tab's whole rect is that of its ground,
+/// the 36 tall fill the strip clips to the part it shows. `None` while the tags and the shapes
+/// read are of different frames (the strip moved between them).
+fn tabs_in_view(ui: &mut Ui) -> Option<Vec<InView>> {
+    let i = ui.inspect();
+    let shapes = ui.shapes();
+    let near = |a: egui::Rect, b: egui::Rect| (a.min - b.min).length() < 0.01 && (a.max - b.max).length() < 0.01;
+    let mut out = Vec::new();
+    for e in i["automation"].as_array().unwrap() {
+        let Some(tab) = e["id"].as_str().and_then(|id| id.strip_prefix("tab-")).and_then(|n| n.parse::<u64>().ok()) else { continue };
+        if e.get("visible") == Some(&json!(false)) {
+            continue;
+        }
+        let shown = rect_of(e);
+        let (whole, strip) = shapes.iter().find_map(|(clip, s)| match s {
+            egui::Shape::Rect(r) if r.fill.a() > 0 && r.rect.height() == 36.0 && near(r.rect.intersect(*clip), shown) => Some((r.rect, *clip)),
+            _ => None,
+        })?;
+        out.push(InView { tab, whole, shown, strip });
+    }
+    out.sort_by(|a, b| a.shown.left().total_cmp(&b.shown.left()));
+    Some(out)
+}
+
+/// Frames until the strip's tabs are where they were the frame before; where they are then.
+fn settle(ui: &mut Ui) -> Vec<InView> {
+    let mut last: Option<Vec<InView>> = None;
+    let mut seen = Vec::new();
+    ui.until("the strip to come to rest", |ui| {
+        let now = tabs_in_view(ui);
+        let same = now.is_some() && last == now;
+        last = now;
+        if same {
+            seen = last.clone().unwrap_or_default();
+        }
+        same
+    });
+    seen
+}
+
+/// The first tab in view is whole, at the strip's left edge, and `active` is whole in view.
+fn assert_rests(ui: &mut Ui, active: u64, at: &str) {
+    let tabs = settle(ui);
+    let first = tabs.first().unwrap_or_else(|| panic!("{at}: no tab in view"));
+    assert_eq!(first.whole.left(), first.shown.left(), "{at}: the first tab in view, {}, is whole: {first:?}", first.tab);
+    assert_eq!(first.shown.left(), first.strip.left(), "{at}: and at the strip's left edge: {first:?}");
+    let a = tabs.iter().find(|t| t.tab == active).unwrap_or_else(|| panic!("{at}: the active tab {active} in view: {tabs:?}"));
+    assert_eq!(a.whole, a.shown, "{at}: the active tab {active} is whole in view: {a:?}");
+}
+
+/// The design agent's rule until the overflow of tabs is decided (2026-11-11): a strip that
+/// scrolls rests with the first tab in view whole at its left edge; each tab made active comes
+/// into view whole.
+#[test]
+fn the_strip_rests_at_a_tab_edge() {
+    let db = dbee_testkit::require_testdb!();
+    let tables = ["customer_counts", "order_items", "shipments", "all_types", "customers", "orders", "big_rows", "big_cell"];
+    for (size, n) in [(APP_SIZE, 4), (APP_SIZE, 8), (egui::vec2(640.0, 420.0), 4), (egui::vec2(640.0, 420.0), 8)] {
+        let at = format!("{n} tabs, {} wide", size.x);
+        let mut ui = Ui::connected_in(db, size);
+        if size == APP_SIZE && ui.value("value-toggle") != true {
+            // With the value panel open, as the design agent saw it: four tabs overflow.
+            ui.click("value-toggle");
+            assert_eq!(ui.value("value-toggle"), true, "{at}: the value panel shows");
+        }
+        for table in &tables[..n] {
+            ui.execute("table.open", json!({ "schema": "shop", "table": table }));
+        }
+        let tabs: Vec<u64> = ui.document()["tabs"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
+        ui.harness.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(size.x / 2.0, size.y - 60.0)));
+        let (first, last) = (tabs[0], tabs[n - 1]);
+        assert_rests(&mut ui, last, &format!("{at}, the last one just opened"));
+        assert!(!visible(&ui.tag(&format!("tab-{first}"))), "{at}: the strip overflows, and the first tab is out of view");
+        for (k, tab) in tabs.iter().chain(tabs.iter().rev()).enumerate() {
+            ui.execute("tab.activate", json!({ "tab": tab }));
+            assert_rests(&mut ui, *tab, &format!("{at}, step {k}: tab {tab} made active"));
+        }
+    }
+}
+
+/// The new tab button can be scrolled to, by the wheel and by the control channel, and the strip
+/// rests at a tab's edge with it in view whole.
+#[test]
+fn the_new_tab_button_can_be_reached() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, egui::vec2(640.0, 420.0));
+    for n in 1..=8 {
+        ui.execute("table.open", json!({ "schema": "many", "table": format!("t_{n:03}") }));
+    }
+    let tabs: Vec<u64> = ui.document()["tabs"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
+    ui.execute("tab.activate", json!({ "tab": tabs[0] }));
+    let start = settle(&mut ui)[0];
+    let (over, strip_left) = (start.shown.center(), start.strip.left());
+    assert!(!visible(&ui.tag("tab-new")), "the new tab button is out of view");
+    // The wheel, a notch at a time: each comes to rest at the next tab's edge.
+    let whole = |ui: &mut Ui| ui.tag("tab-new").filter(|e| visible(&Some(e.clone()))).is_some_and(|e| (rect_of(&e).width() - 32.0).abs() < 0.01);
+    let mut notches = 0;
+    while !whole(&mut ui) {
+        notches += 1;
+        assert!(notches <= tabs.len(), "the wheel never brought the new tab button into view");
+        ui.hover(over);
+        ui.frame_with(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(-40.0, 0.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        match settle(&mut ui).first() {
+            Some(first) => {
+                assert_eq!(first.whole.left(), first.strip.left(), "notch {notches}: the strip rests at a tab's edge: {first:?}");
+                assert!(tabs.get(notches) == Some(&first.tab) || whole(&mut ui), "notch {notches}: one tab further: {first:?}");
+            }
+            // A strip too narrow for a tab and the button rests last with the button at its edge.
+            None => assert_eq!(rect_of(&ui.tag("tab-new").unwrap()).left(), strip_left, "notch {notches}: the new tab button at the strip's edge"),
+        }
+    }
+    ui.click("tab-new");
+    assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(tabs.len() + 1), "the new tab button opens a query tab");
+    // From the start of the strip, through the control channel, which scrolls to it first.
+    ui.execute("tab.activate", json!({ "tab": tabs[0] }));
+    settle(&mut ui);
+    assert!(!visible(&ui.tag("tab-new")), "the new tab button is out of view again");
+    ui.click("tab-new");
+    assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(tabs.len() + 2), "a click on it from out of view opens a query tab");
+    let active = ui.active();
+    assert_rests(&mut ui, active, "the new query tab");
+}
+
 // ---- menus and popup lists (`components::menu`) ------------------------------------------------
 
 /// The rect of a `ui.inspect` entry.

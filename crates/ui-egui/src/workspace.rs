@@ -382,10 +382,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     tab::strip(ui, |ui| {
         for view in &tabs {
             let one = if view.query { tab::Tab::query(&view.title) } else { tab::Tab::table(&view.title) };
-            let shown = one.id_salt(view.id.0).active(view.active).unsaved(view.dirty).busy(view.busy).show(ui);
-            if view.active && reveal {
-                ui.scroll_to_rect(shown.tab.rect, None);
-            }
+            let shown = one.id_salt(view.id.0).active(view.active).unsaved(view.dirty).busy(view.busy).reveal(view.active && reveal).show(ui);
             let r = shown.tab.hint(view.hover.as_str());
             tags.tag_value(&format!("tab-{}", view.id.0), &r, view.title.as_str());
             if let Some(dot) = &shown.unsaved {
