@@ -253,6 +253,90 @@ fn a_dialog_sits_on_raised_over_the_scrim() {
     assert!(shadowed(&ui, l.shadow), "the light dialog's shadow");
 }
 
+/// Where the last frame painted a fade: a mesh whose corners differ in colour, as egui paints over
+/// the ends of a scroll area that has more to scroll to. dbee paints no gradient of its own.
+fn fades(ui: &Ui) -> Vec<egui::Rect> {
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Mesh(m) if m.vertices.iter().any(|v| v.color.a() > 0) && m.vertices.windows(2).any(|w| w[0].color != w[1].color) => {
+                Some(m.calc_bounds())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The wheel over automation entry `over`, `delta` points, then frames for egui to ease the scroll.
+fn wheel(ui: &mut Ui, over: &str, delta: egui::Vec2) {
+    let at = rect_of(ui, over).center();
+    ui.hover(at);
+    ui.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta,
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    for _ in 0..12 {
+        ui.frame();
+    }
+}
+
+/// Foundations: flat. egui fades the ends of a scroll area that has more to scroll to; the
+/// connection form scrolled part way paints none.
+#[test]
+fn the_connection_form_paints_no_fade() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 560.0));
+    ui.click("conn-kind-postgres");
+    ui.frame();
+    // Opening the SSH box scrolls the form to it, part way: fields hidden above and below.
+    ui.click("conn-ssh-on");
+    ui.frame();
+    let hidden = |ui: &mut Ui, id: &str| ui.tag(id).is_some_and(|e| e["visible"] == false);
+    assert!(hidden(&mut ui, "conn-name") && hidden(&mut ui, "conn-ssh-user"), "the form is scrolled part way");
+    assert_eq!(fades(&ui), [], "the connection form");
+}
+
+/// The workspace's scroll areas, scrolled part way, paint no fade: the tree, the grid (its rows
+/// and its columns), the query editor and the quick search's list.
+#[test]
+fn the_workspaces_scroll_areas_paint_no_fade() {
+    let db = dbee_testkit::require_testdb!();
+    let mut found = Vec::new();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.click("tree-schema-many");
+    ui.until("the many schema's tables", |ui| ids(&ui.inspect()).iter().filter(|id| id.starts_with("tree-table-many.")).count() > 30);
+    let before = rect_of(&mut ui, "tree-schema-many");
+    wheel(&mut ui, "tree-schema-many", egui::vec2(0.0, -200.0));
+    assert!(!visible(&ui.tag("tree-schema-many")) || rect_of(&mut ui, "tree-schema-many").top() < before.top(), "the tree scrolled");
+    found.push(("the tree", fades(&ui)));
+
+    ui.open("shop", "orders");
+    ui.until("the grid", |ui| ui.tag("grid-cell-0-1").is_some());
+    let before = rect_of(&mut ui, "grid-cell-0-1");
+    wheel(&mut ui, "grid-cell-0-1", egui::vec2(-200.0, -200.0));
+    assert!(!visible(&ui.tag("grid-cell-0-1")) || rect_of(&mut ui, "grid-cell-0-1") != before, "the grid scrolled");
+    found.push(("the grid", fades(&ui)));
+
+    let text: Vec<String> = (1..=200).map(|n| format!("select {n};")).collect();
+    ui.execute("tab.newQuery", json!({ "text": text.join("\n") }));
+    ui.frame();
+    let first = |ui: &Ui| ui.texts().into_iter().find(|(_, g)| g.text().starts_with("select 1;")).map(|(r, _)| r.top());
+    let before = first(&ui);
+    wheel(&mut ui, "query-editor", egui::vec2(0.0, -200.0));
+    let after = first(&ui);
+    assert!(matches!((before, after), (Some(b), Some(a)) if a < b), "the editor scrolled: {before:?} to {after:?}");
+    found.push(("the query editor", fades(&ui)));
+
+    ui.ctrl("P");
+    ui.frame();
+    assert!(ui.tag("qs-input").is_some(), "the quick search is open");
+    found.push(("the quick search", fades(&ui)));
+
+    found.retain(|(_, f)| !f.is_empty());
+    assert_eq!(found, [], "where fades were painted");
+}
+
 fn drawn(ui: &Ui, text: &str) -> bool {
     ui.texts().iter().any(|(_, g)| g.text() == text)
 }

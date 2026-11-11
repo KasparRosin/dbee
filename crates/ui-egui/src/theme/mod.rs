@@ -73,6 +73,8 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     .map(|(style, text)| (style, text.font()))
     .collect();
     style.spacing.scroll.foreground_color = false;
+    // egui fades the ends of a scroll area that has more to scroll to; the design is flat.
+    style.spacing.scroll.fade.strength = 0.0;
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
 }
@@ -143,6 +145,7 @@ mod tests {
             let style = ctx.style_of(theme);
             assert_eq!(style.visuals.panel_fill, t.bg);
             assert!(!style.spacing.scroll.foreground_color);
+            assert_eq!(style.spacing.scroll.fade.strength, 0.0, "no fade at a scroll area's ends");
             assert_eq!(style.visuals.widgets.inactive.bg_fill, t.fill);
             assert_eq!(style.visuals.widgets.inactive.weak_bg_fill, t.card);
         }
