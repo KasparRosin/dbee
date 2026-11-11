@@ -39,6 +39,25 @@ pub const INPUT_PAD_X: f32 = 8.0;
 /// A field (`field`): between its label and its input, and between its input and its error line.
 pub const FIELD_GAP: f32 = 4.0;
 
+/// A dropdown (`dropdown`): this tall, its words this far inside its 1 px edge, this between its
+/// words and its chevron.
+pub const DROPDOWN_H: f32 = 28.0;
+pub const DROPDOWN_PAD_X: f32 = 8.0;
+pub const DROPDOWN_GAP: f32 = 6.0;
+/// A checkbox (`checkbox`): its box, and between the box and its label.
+pub const CHECKBOX_BOX: f32 = 14.0;
+pub const CHECKBOX_GAP: f32 = 8.0;
+/// A segmented control (`segmented`): a box this tall, its segments this tall inside its 1 px
+/// edge; a caps segment has this between its ends and its words; a segment ends in a 1 px slot
+/// for the divider between it and the next.
+pub const SEGMENTED_H: f32 = 28.0;
+pub const SEGMENT_H: f32 = 26.0;
+pub const SEGMENT_PAD_X: f32 = 12.0;
+pub const SEGMENT_DIVIDER: f32 = 1.0;
+/// A colour swatch (`swatch`): a square of this side, this far from the next.
+pub const SWATCH: f32 = 20.0;
+pub const SWATCH_GAP: f32 = 8.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key.
 pub const KEYCAP_PAD_X: f32 = 4.0;

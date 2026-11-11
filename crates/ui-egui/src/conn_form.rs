@@ -17,17 +17,21 @@ use std::path::{Path, PathBuf};
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
-    Align, Button, Checkbox, CornerRadius, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect, RectAlign, RichText,
-    ScrollArea, Sense, Stroke, UiBuilder, pos2, vec2,
+    Align, Button, CornerRadius, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect, RectAlign, RichText, ScrollArea,
+    Sense, Stroke, UiBuilder, pos2, vec2,
 };
 
 use crate::automation::Tags;
 use crate::components::button::{BoxButton, TextButton};
+use crate::components::checkbox::Checkbox;
 use crate::components::input::{self, Field, Input};
+use crate::components::segmented::Segmented;
+use crate::components::swatch::{self, Swatch};
 use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
 use crate::filter_bar;
 use crate::picker::Pick;
-use crate::theme::{self, Text, connection_color, size::RADIUS_CONTROL};
+use crate::theme::size::{RADIUS_CONTROL, SWATCH, SWATCH_GAP};
+use crate::theme::{self, Text};
 
 /// The height of a row under a field's label: an input, the choices, a file box, the colours.
 const FIELD_H: f32 = 28.0;
@@ -503,50 +507,24 @@ fn picking(conn: &ConnScreen) -> Option<Pick> {
 
 /// Name and colour.
 fn name_row(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
-    let t = theme::tokens(ui.ctx());
-    let colors: [(ConnectionColor, &str); 8] = [
-        (ConnectionColor::None, "none"),
-        (ConnectionColor::Red, "red"),
-        (ConnectionColor::Orange, "orange"),
-        (ConnectionColor::Yellow, "yellow"),
-        (ConnectionColor::Green, "green"),
-        (ConnectionColor::Blue, "blue"),
-        (ConnectionColor::Purple, "purple"),
-        (ConnectionColor::Gray, "gray"),
-    ];
-    let dot = 20.0;
-    let dots_w = dot * colors.len() as f32 + 6.0 * (colors.len() as f32 - 1.0);
+    let n = swatch::COLOURS.len() as f32;
+    let swatches_w = SWATCH * n + SWATCH_GAP * (n - 1.0);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = GAP;
-        text_field(ui, tags, w - dots_w - GAP, "Name", "conn-name", Input::body, &mut f.name, "Optional");
-        column(ui, dots_w, "Colour", |ui| {
-            let row = ui.allocate_ui_with_layout(vec2(dots_w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                for (color, name) in colors {
-                    let (rect, r) = ui.allocate_exact_size(vec2(dot, dot), Sense::click());
-                    let chosen = f.color == color;
-                    let p = ui.painter();
-                    match connection_color(color) {
-                        Some(c) => {
-                            p.circle_filled(rect.center(), dot / 2.0 - 2.0, c);
-                        }
-                        None => {
-                            p.circle_stroke(rect.center(), dot / 2.0 - 3.0, Stroke::new(1.5, t.line_strong));
-                        }
-                    }
-                    if chosen || r.hovered() {
-                        p.circle_stroke(rect.center(), dot / 2.0, Stroke::new(1.5, if chosen { t.text } else { t.line_strong }));
-                    }
-                    let r = r.on_hover_text(name);
-                    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, chosen, name));
+        text_field(ui, tags, w - swatches_w - GAP, "Name", "conn-name", Input::body, &mut f.name, "Optional");
+        column(ui, swatches_w, "Colour", |ui| {
+            let row = ui.allocate_ui_with_layout(vec2(swatches_w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = SWATCH_GAP;
+                for colour in swatch::COLOURS {
+                    let (name, chosen) = (swatch::name(colour), f.color == colour);
+                    let r = ui.add(Swatch::new(colour, chosen)).on_hover_text(name);
                     tags.tag_value(&format!("conn-color-{name}"), &r, chosen);
                     if r.clicked() {
-                        f.color = color;
+                        f.color = colour;
                     }
                 }
             });
-            let chosen = colors.iter().find(|(c, _)| *c == f.color).map_or("none", |(_, n)| *n);
-            tags.tag_value("conn-color", &row.response, chosen);
+            tags.tag_value("conn-color", &row.response, swatch::name(f.color));
         });
     });
 }
@@ -587,7 +565,7 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
     // Save passwords, or why it cannot.
     ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
         if has_store {
-            let r = ui.checkbox(&mut f.save_secrets, "Save passwords in the keyring");
+            let r = ui.add(Checkbox::new(&mut f.save_secrets, "Save passwords in the keyring"));
             tags.tag_value("conn-save-secrets", &r, f.save_secrets);
         } else {
             let mut off = false;
@@ -732,15 +710,23 @@ fn ssl_note(mode: SslMode) -> &'static str {
 fn tls_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let picking = picking(conn);
     let f = &mut conn.form;
+    // Each mode's words are its name.
     let modes = [
-        (SslMode::Disable, "disable", "disable"),
-        (SslMode::Prefer, "prefer", "prefer"),
-        (SslMode::Require, "require", "require"),
-        (SslMode::VerifyCa, "verify-ca", "verify-ca"),
-        (SslMode::VerifyFull, "verify-full", "verify-full"),
+        (SslMode::Disable, "disable"),
+        (SslMode::Prefer, "prefer"),
+        (SslMode::Require, "require"),
+        (SslMode::VerifyCa, "verify-ca"),
+        (SslMode::VerifyFull, "verify-full"),
     ];
     let note = ssl_note(f.ssl_mode);
-    column_noted(ui, w, "SSL mode", note, tags, "conn-ssl-note", |ui, tags| segments(ui, tags, "conn-ssl", &mut f.ssl_mode, &modes, w));
+    column_noted(ui, w, "SSL mode", note, tags, "conn-ssl-note", |ui, tags| {
+        let shown = Segmented::small(&mut f.ssl_mode, &modes).width(w).show(ui);
+        for ((mode, name), r) in modes.iter().zip(&shown.segments) {
+            tags.tag_value(&format!("conn-ssl-{name}"), r, f.ssl_mode == *mode);
+        }
+        let chosen = modes.iter().find(|(m, _)| *m == f.ssl_mode).map_or("", |(_, name)| *name);
+        tags.tag_value("conn-ssl", &shown.row, chosen);
+    });
     column(ui, w, "CA file (optional)", |ui| {
         ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -798,11 +784,11 @@ const READ_ONLY_NOTE: &str = "Read-only guards against mistakes: dbee refuses ed
 fn read_only_and_options(ui: &mut egui::Ui, f: &mut Form, tags: &mut Tags, w: f32) {
     ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
         ui.spacing_mut().item_spacing.x = 2.0 * GAP;
-        let r = ui.checkbox(&mut f.read_only, "Read-only");
+        let r = ui.add(Checkbox::new(&mut f.read_only, "Read-only"));
         tags.tag_value("conn-readonly", &r, f.read_only);
         for option in f.kind.info().options {
             let mut on = f.option_on(option.id);
-            let r = ui.checkbox(&mut on, option.label);
+            let r = ui.add(Checkbox::new(&mut on, option.label));
             if r.changed() {
                 f.set_option(option.id, on);
             }
@@ -826,7 +812,7 @@ fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut
             let w = w - 20.0;
             ui.set_width(w);
             ui.allocate_ui_with_layout(vec2(w, 22.0), Layout::left_to_right(Align::Center), |ui| {
-                let r = ui.checkbox(&mut f.ssh_on, Text::Button.rich("SSH tunnel"));
+                let r = ui.add(Checkbox::new(&mut f.ssh_on, "SSH tunnel"));
                 tags.tag_value("conn-ssh-on", &r, f.ssh_on);
             });
             if !f.ssh_on {

@@ -24,12 +24,13 @@
 
 use dbee_config::{ConnectionConfig, DbKind};
 use dbee_engine::{EngineError, Json, Need, Outcome};
-use egui::{Align, Align2, Checkbox, CornerRadius, Frame, Key, Layout, Margin, Stroke, vec2};
+use egui::{Align, Align2, CornerRadius, Frame, Key, Layout, Margin, Stroke, vec2};
 use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::button::BoxButton;
+use crate::components::checkbox::Checkbox;
 use crate::components::input::{Field, Input};
 use crate::connections;
 use crate::theme::{
@@ -442,7 +443,7 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
             match keep {
                 Keep::NotOffered => {}
                 Keep::Yes { .. } => {
-                    let r = ui.checkbox(save, "Save in keyring");
+                    let r = ui.add(Checkbox::new(save, "Save in keyring"));
                     tags.tag_value_as("dialog-save", &r, *save, true);
                 }
                 Keep::No(why) => {

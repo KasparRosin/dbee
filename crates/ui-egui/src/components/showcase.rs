@@ -4,13 +4,19 @@
 
 use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Rect, Sense, Ui, Vec2, pos2, vec2};
 
+use dbee_config::ConnectionColor;
+
 use super::Look;
 use super::button::{BarButton, BoxButton, IconButton, TextButton};
+use super::checkbox::Checkbox;
 use super::chip::Chip;
+use super::dropdown::Dropdown;
 use super::icon::Icon;
 use super::input::{Field, Input};
 use super::keycap::Keycap;
-use crate::theme::size::{RADIUS_CONTROL, SPACE_8, SPACE_16, SPACE_24};
+use super::segmented::{Segment, Segmented};
+use super::swatch::{COLOURS, Swatch};
+use crate::theme::size::{RADIUS_CONTROL, SPACE_8, SPACE_12, SPACE_16, SPACE_24};
 use crate::theme::{Text, Tokens, tokens};
 
 /// The page's frames: 20 between sections.
@@ -19,8 +25,11 @@ const BETWEEN: f32 = 20.0;
 const ROW_GAP: f32 = 20.0;
 /// Between the keys of one shortcut.
 const KEY_GAP: f32 = 3.0;
-/// The Field and input frame's inputs and fields.
+/// The Field and input frame's inputs and fields, and the Dropdown frame's dropdowns.
 const INPUT_W: f32 = 160.0;
+/// The Segmented frame's small boxes, and the width of a small segment shown alone.
+const SEGMENTED_W: f32 = 386.0;
+const SMALL_SEGMENT_W: f32 = 77.0;
 /// The Icons frame: 20 under its caption; cells of 120 by 40, nine to a row, 8 apart and 20
 /// between rows. In a cell the icon's box ends 18 down, centred, and its name starts 24 down.
 const ICONS_UNDER_CAPTION: f32 = 20.0;
@@ -82,6 +91,7 @@ pub fn show(ui: &mut Ui) {
         section(ui, "icon/, today's drawings in their usual colour", ICONS_UNDER_CAPTION, icons);
         buttons(ui);
         inputs(ui);
+        choices(ui);
         section(ui, "keycap: default, disabled", SPACE_8, |ui| {
             ui.spacing_mut().item_spacing.x = KEY_GAP;
             for key in ["Ctrl", "Shift", "Z"] {
@@ -201,6 +211,69 @@ fn inputs(ui: &mut Ui) {
             ui.add(Field::new("Database URL", Input::body(&mut url).desired_width(INPUT_W)).error(Some("Not a database URL")));
         });
     });
+}
+
+/// The dropdown, checkbox, segmented control and swatch in each of their states, as the page's
+/// Dropdown, Checkbox, Segmented and Swatch frames show them.
+fn choices(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    section(ui, "dropdown: default, focus, disabled", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        Dropdown::new("showcase-dropdown", "equals (=)").width(INPUT_W).show(ui, |_| ());
+        Dropdown::new("showcase-dropdown-focus", "equals (=)").width(INPUT_W).look(focused).show(ui, |_| ());
+        ui.add_enabled_ui(false, |ui| Dropdown::new("showcase-dropdown-off", "equals (=)").width(INPUT_W).show(ui, |_| ()));
+    });
+    section(ui, "checkbox: on, off, on disabled, off disabled, on focus, off focus", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_24;
+        for (mut on, enabled, look) in [
+            (true, true, None),
+            (false, true, None),
+            (true, false, None),
+            (false, false, None),
+            (true, true, Some(focused)),
+            (false, true, Some(focused)),
+        ] {
+            let c = Checkbox::new(&mut on, "Read-only");
+            ui.add_enabled(enabled, if let Some(look) = look { c.look(look) } else { c });
+        }
+    });
+    let views = [(0, "Data"), (1, "Structure")];
+    let modes = [(0, "disable"), (1, "prefer"), (2, "require"), (3, "verify-ca"), (4, "verify-full")];
+    let three = [(3, "verify-ca"), (4, "verify-full"), (1, "prefer")];
+    section(ui, "segmented caps, 2 segments", SPACE_8, |ui| {
+        ui.add(Segmented::caps(&mut 0, &views));
+    });
+    section(ui, "segmented small, 3 and 5 segments", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        ui.add(Segmented::small(&mut 1, &three).width(SEGMENTED_W));
+        ui.add(Segmented::small(&mut 1, &modes).width(SEGMENTED_W));
+    });
+    let states = |ui: &mut Ui, segment: &dyn Fn(bool) -> Segment<'static>| {
+        ui.spacing_mut().item_spacing.x = SPACE_12;
+        ui.add(segment(true));
+        ui.add(segment(false));
+        ui.add(segment(false).look(hovered));
+        ui.add_enabled(false, segment(false));
+        ui.add_enabled(false, segment(true));
+        ui.add(segment(true).look(focused));
+        ui.add(segment(false).look(focused));
+    };
+    section(ui, "segmented/segment: selected, default, hover, disabled, selected disabled, selected focus, focus", SPACE_8, |ui| {
+        states(ui, &|selected| Segment::caps("Data", selected));
+    });
+    section(ui, "segmented/segment small: selected, default, hover, disabled, selected disabled, selected focus, focus", SPACE_8, |ui| {
+        states(ui, &|selected| Segment::small(if selected { "prefer" } else { "require" }, selected).width(SMALL_SEGMENT_W));
+    });
+    for (caption, selected) in [("swatch: not selected; the last one has focus", false), ("swatch: selected; the last one has focus", true)] {
+        section(ui, caption, SPACE_8, |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_12;
+            for colour in COLOURS {
+                ui.add(Swatch::new(colour, selected));
+            }
+            ui.add(Swatch::new(ConnectionColor::Red, selected).look(focused));
+        });
+    }
 }
 
 /// A section: the page's caption, `gap` under it, then `row`.

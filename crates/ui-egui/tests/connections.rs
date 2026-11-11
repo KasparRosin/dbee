@@ -1448,3 +1448,174 @@ fn the_moved_secret_field_stays_a_secret() {
     ui.click("dialog-cancel");
     assert_eq!(ui.inspect()["dialog"], Json::Null);
 }
+
+/// The fills the last frame drew on `at`: each rect's ground.
+fn fills_on(ui: &Ui, at: egui::Rect) -> Vec<egui::Color32> {
+    let same = |a: egui::Rect| (a.min - at.min).length() < 0.5 && (a.max - at.max).length() < 0.5;
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.fill.a() > 0 && same(r.rect) => Some(r.fill),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The checkbox `id` (moved to `components::checkbox`) says `value` and `enabled` in `i` as before,
+/// is the page's 18 tall, with its 14 box at its left, `ink` when ticked (`text_faint` when off),
+/// and its label drawn as written 8 after the box.
+fn assert_checkbox(ui: &Ui, i: &Json, id: &str, value: bool, enabled: bool, label: &str) {
+    let t = dbee_ui_egui::theme::LIGHT;
+    let e = tag_in(i, id).unwrap_or_else(|| panic!("`{id}` is drawn"));
+    assert_eq!(e["value"], value, "`{id}`'s value: {e}");
+    assert_eq!(e.get("enabled") != Some(&json!(false)), enabled, "`{id}` enabled: {e}");
+    let at = rect_of(&e);
+    assert_eq!(at.height(), 18.0, "`{id}` is the page's 18 tall: {at:?}");
+    let boxed = egui::Rect::from_min_size(at.min + egui::vec2(0.0, 2.0), egui::Vec2::splat(14.0));
+    let ground = match (value, enabled) {
+        (true, true) => t.ink,
+        (true, false) => t.text_faint,
+        (false, _) => t.card,
+    };
+    assert_eq!(fills_on(ui, boxed), [ground], "`{id}`: its box");
+    let (words, _) = ui.text_in(at, label).unwrap_or_else(|| panic!("`{id}` draws `{label}` as written in {at:?}"));
+    assert!((words.left() - boxed.right() - 8.0).abs() < 0.5, "`{id}`: its label 8 after its box: {words:?} in {at:?}");
+}
+
+/// The form's checkboxes, SSL mode and colours, moved to `components`, say in `ui.inspect` what
+/// they said before (ids, values, enabled flags) and change as before; they are drawn as the page
+/// draws them. The SSH login stays as it was (Screens doesn't draw it).
+#[test]
+fn moved_choices_keep_their_ids_and_values() {
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = ui();
+    ui.click("conn-ssh-on");
+    let i = ui.inspect();
+    assert_checkbox(&ui, &i, "conn-save-secrets", true, true, "Save passwords in the keyring");
+    assert_checkbox(&ui, &i, "conn-readonly", false, true, "Read-only");
+    assert_checkbox(&ui, &i, "conn-ssh-on", true, true, "SSH tunnel");
+
+    // SSL mode: the box, then a segment for each mode, its words as written.
+    let ssl = tag_in(&i, "conn-ssl").expect("SSL mode is drawn");
+    assert_eq!(ssl["value"], "prefer", "{ssl}");
+    let row = rect_of(&ssl);
+    assert_eq!(row.height(), 28.0, "the SSL box is the page's 28 tall: {row:?}");
+    assert_eq!((edges_on(&ui, row), fills_on(&ui, row)), (vec![(1.0, t.line_strong)], vec![t.card]), "the SSL box");
+    let modes = ["disable", "prefer", "require", "verify-ca", "verify-full"];
+    for mode in modes {
+        let e = tag_in(&i, &format!("conn-ssl-{mode}")).unwrap_or_else(|| panic!("`conn-ssl-{mode}` is drawn"));
+        assert_eq!(e["value"], mode == "prefer", "{e}");
+        assert!(e.get("enabled").is_none(), "{e}");
+        let at = rect_of(&e);
+        assert_eq!(at.height(), 26.0, "`conn-ssl-{mode}` is 26 tall inside the box: {at:?}");
+        assert!(row.shrink(1.0).expand(0.01).contains_rect(at), "`conn-ssl-{mode}` inside the box's edge: {at:?} {row:?}");
+        assert!(ui.text_in(at, mode).is_some(), "`conn-ssl-{mode}` draws `{mode}` as written");
+    }
+    assert_eq!(fills_on(&ui, rect_of(&tag_in(&i, "conn-ssl-prefer").unwrap())), [t.ink], "the chosen mode on ink");
+
+    // The colours: squares, none chosen.
+    let colours = tag_in(&i, "conn-color").expect("the colours are drawn");
+    assert_eq!(colours["value"], "none", "{colours}");
+    for name in ["none", "red", "orange", "yellow", "green", "blue", "purple", "gray"] {
+        let e = tag_in(&i, &format!("conn-color-{name}")).unwrap_or_else(|| panic!("`conn-color-{name}` is drawn"));
+        assert_eq!(e["value"], name == "none", "{e}");
+        assert_eq!(rect_of(&e).size(), egui::Vec2::splat(20.0), "`conn-color-{name}` is a 20 square");
+    }
+    let swatches = rect_of(&colours);
+    // The no-colour mark's round line ends are discs too, but small ones.
+    let dots = ui.shapes().into_iter().filter(|(_, s)| matches!(s, egui::Shape::Circle(c) if swatches.contains(c.center) && c.radius >= 4.0)).count();
+    assert_eq!(dots, 0, "a colour is a square, never a circle");
+    assert_eq!(edges_on(&ui, rect_of(&tag_in(&i, "conn-color-none").unwrap())), [(2.0, t.ink)], "the chosen one's 2 px ink edge");
+
+    // The SSH login stays as it was.
+    assert_eq!(tag_in(&i, "conn-ssh-auth").unwrap()["value"], "key");
+
+    // They change as before.
+    ui.click("conn-ssl-require");
+    ui.click("conn-color-green");
+    ui.click("conn-readonly");
+    ui.click("conn-save-secrets");
+    ui.click("conn-ssh-on");
+    let i = ui.inspect();
+    let shown = |id: &str| tag_in(&i, id).unwrap_or_else(|| panic!("`{id}` is drawn"))["value"].clone();
+    assert_eq!(
+        [shown("conn-ssl"), shown("conn-ssl-require"), shown("conn-ssl-prefer"), shown("conn-color"), shown("conn-color-green")],
+        [json!("require"), json!(true), json!(false), json!("green"), json!(true)]
+    );
+    assert_eq!([shown("conn-readonly"), shown("conn-save-secrets"), shown("conn-ssh-on")], [json!(true), json!(false), json!(false)]);
+    assert!(tag_in(&i, "conn-ssh-host").is_none(), "the SSH tunnel is off");
+
+    // MySQL's own option.
+    ui.click("conn-change-engine");
+    ui.click("conn-kind-mysql");
+    let i = ui.inspect();
+    assert_checkbox(&ui, &i, "conn-option-allowPublicKey", false, true, "Allow the server's public key without encryption");
+    ui.click("conn-option-allowPublicKey");
+    assert_eq!(ui.value("conn-option-allowPublicKey"), true);
+
+    // No keyring: Save passwords is off and says why.
+    let mut without = ui_in(temp_home(None, None), false);
+    without.click("conn-kind-postgres");
+    let i = without.inspect();
+    assert_checkbox(&without, &i, "conn-save-secrets", false, false, "Save passwords");
+    assert!(tag_in(&i, "conn-no-keyring").is_some(), "the note says why");
+}
+
+/// The colour is chosen with the keyboard as with a click: Tab to a swatch shows its focus box,
+/// Space chooses it. A click shows no focus.
+#[test]
+fn a_swatch_is_chosen_with_the_keyboard() {
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = ui();
+    ui.click("conn-name");
+    ui.key("Tab");
+    ui.frame();
+    let none = rect_of(&ui.tag("conn-color-none").unwrap());
+    assert_eq!(edges_on(&ui, none.expand(4.0)), [(2.0, t.ink)], "Tab from the name: the first swatch shows the keyboard's focus");
+    ui.key("Tab");
+    ui.frame();
+    ui.key("Space");
+    ui.frame();
+    assert_eq!(ui.value("conn-color"), "red", "Space chose red, as a click does");
+    assert_eq!(ui.value("conn-color-red"), true);
+    let red = rect_of(&ui.tag("conn-color-red").unwrap());
+    assert_eq!(edges_on(&ui, red), [(2.0, t.ink)], "red is chosen");
+    assert_eq!(edges_on(&ui, red.expand(4.0)), [(2.0, t.ink)], "and keeps the keyboard's focus");
+    assert_eq!(edges_on(&ui, none.expand(4.0)), [], "the focus left none");
+    ui.click("conn-color-blue");
+    assert_eq!(ui.value("conn-color"), "blue", "a click chose blue");
+    let blue = rect_of(&ui.tag("conn-color-blue").unwrap());
+    assert_eq!(edges_on(&ui, blue.expand(4.0)), [], "a click shows no focus");
+    assert_eq!(edges_on(&ui, red), [], "red is no longer chosen");
+}
+
+/// The password dialog's "Save in keyring", moved to `components::checkbox`: its id, value and
+/// enabled flag as before, drawn as the page's checkbox.
+#[test]
+fn the_moved_keyring_checkbox_keeps_its_id_and_value() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ui();
+    let card = ui.save(&pg14(db), None);
+    ui.click(&card);
+    ui.click("conn-connect");
+    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+    ui.frame();
+    let i = ui.inspect();
+    assert_checkbox(&ui, &i, "dialog-save", true, true, "Save in keyring");
+    ui.click("dialog-save");
+    assert_eq!(ui.value("dialog-save"), false, "a click unticks it");
+    ui.click("dialog-cancel");
+    // A connection that isn't saved: nothing to keep the password for.
+    let mut ui = self::ui();
+    let pg = pg14(db);
+    ui.replace("conn-host", &pg.host);
+    ui.replace("conn-port", &pg.port.to_string());
+    ui.replace("conn-user", &pg.user);
+    ui.replace("conn-database", &pg.database);
+    ui.click("conn-connect");
+    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+    ui.frame();
+    let i = ui.inspect();
+    assert_checkbox(&ui, &i, "dialog-save", false, false, "Save in keyring");
+    ui.click("dialog-cancel");
+}

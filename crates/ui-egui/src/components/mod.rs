@@ -3,12 +3,16 @@
 //! response, so a screen never sets a control's colour, size, padding or edge.
 
 pub mod button;
+pub mod checkbox;
 pub mod chip;
+pub mod dropdown;
 pub mod focus;
 pub mod icon;
 pub mod input;
 pub mod keycap;
+pub mod segmented;
 pub mod showcase;
+pub mod swatch;
 
 /// How a control is drawn this frame: hovered, showing keyboard focus, off.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -151,6 +155,36 @@ pub(crate) fn fills(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, e
             _ => None,
         })
         .collect()
+}
+
+/// The colours of the icon drawn within `at` (its lines and discs), and the box it fills.
+#[cfg(test)]
+pub(crate) fn icon_in(shapes: &[egui::epaint::ClippedShape], at: egui::Rect) -> (Vec<egui::Color32>, egui::Rect) {
+    let solid = |c: &egui::epaint::ColorMode| match c {
+        egui::epaint::ColorMode::Solid(c) => *c,
+        egui::epaint::ColorMode::UV(_) => egui::Color32::RED,
+    };
+    let mut colours = Vec::new();
+    let mut bounds = egui::Rect::NOTHING;
+    for s in flat(shapes) {
+        let drawn = match &s {
+            egui::Shape::Path(p) => vec![p.fill, solid(&p.stroke.color)],
+            egui::Shape::Circle(c) => vec![c.fill, c.stroke.color],
+            egui::Shape::LineSegment { stroke, .. } => vec![stroke.color],
+            _ => continue,
+        };
+        let r = s.visual_bounding_rect();
+        if !at.contains_rect(r) {
+            continue;
+        }
+        bounds = bounds.union(r);
+        for c in drawn.into_iter().filter(|c| *c != egui::Color32::TRANSPARENT) {
+            if !colours.contains(&c) {
+                colours.push(c);
+            }
+        }
+    }
+    (colours, bounds)
 }
 
 /// The texts in `shapes`: each section's words as drawn, where its text was drawn, and its colour

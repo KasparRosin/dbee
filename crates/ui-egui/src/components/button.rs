@@ -361,7 +361,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
-    use crate::components::{Edge, ROOM, both, edges_in, fills_in, harness, painted, texts};
+    use crate::components::{Edge, ROOM, both, edges_in, fills_in, harness, icon_in, painted, texts};
     use crate::theme::DARK;
 
     fn close(a: f32, b: f32) -> bool {
@@ -580,35 +580,6 @@ mod tests {
         h.key_press(Key::Space);
         h.run();
         assert_eq!(*h.state(), [1, 1], "Space pressed the next");
-    }
-
-    /// The colours of the icon drawn within `at` (its lines and discs), and the box it fills.
-    fn icon_in(shapes: &[egui::epaint::ClippedShape], at: Rect) -> (Vec<Color32>, Rect) {
-        let solid = |c: &egui::epaint::ColorMode| match c {
-            egui::epaint::ColorMode::Solid(c) => *c,
-            egui::epaint::ColorMode::UV(_) => Color32::RED,
-        };
-        let mut colours = Vec::new();
-        let mut bounds = Rect::NOTHING;
-        for s in crate::components::flat(shapes) {
-            let drawn = match &s {
-                egui::Shape::Path(p) => vec![p.fill, solid(&p.stroke.color)],
-                egui::Shape::Circle(c) => vec![c.fill, c.stroke.color],
-                egui::Shape::LineSegment { stroke, .. } => vec![stroke.color],
-                _ => continue,
-            };
-            let r = s.visual_bounding_rect();
-            if !at.contains_rect(r) {
-                continue;
-            }
-            bounds = bounds.union(r);
-            for c in drawn.into_iter().filter(|c| *c != Color32::TRANSPARENT) {
-                if !colours.contains(&c) {
-                    colours.push(c);
-                }
-            }
-        }
-        (colours, bounds)
     }
 
     #[test]
