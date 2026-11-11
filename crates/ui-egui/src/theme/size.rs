@@ -186,6 +186,19 @@ pub const SIDEBAR_PAD_X: f32 = 12.0;
 pub const SIDEBAR_PAD_RIGHT: f32 = 4.0;
 pub const SIDEBAR_COUNT_H: f32 = 28.0;
 
+/// The grid's cells (`grid/header cell`, `grid/cell`, `grid/row number`): what a cell holds is
+/// this far in from its sides; a header's parts are this far apart, the two arrows of its sort
+/// hint this far; the row numbers are at least this wide; a selected cell's outline is this thick;
+/// the follow link stands this far after the text; the failed mark is a triangle this big in the
+/// top right corner.
+pub const GRID_CELL_PAD_X: f32 = 8.0;
+pub const GRID_HEADER_GAP: f32 = 6.0;
+pub const GRID_SORT_HINT_GAP: f32 = 1.0;
+pub const GRID_ROW_NUMBER_MIN_W: f32 = 36.0;
+pub const GRID_OUTLINE_W: f32 = 2.0;
+pub const GRID_LINK_GAP: f32 = 6.0;
+pub const GRID_FAILED_MARK: f32 = 6.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;

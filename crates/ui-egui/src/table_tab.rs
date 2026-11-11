@@ -73,18 +73,18 @@ impl GridSource for Source<'_> {
             None => self.data.cell(row, col),
         }
     }
-    fn mark(&self, row: usize, col: usize) -> Mark {
+    fn mark(&self, row: usize, col: usize) -> Option<Mark> {
         let loaded = self.data.rows.len();
         if self.edits.failed.as_ref().is_some_and(|f| f.row == row) {
-            Mark::Failed
+            Some(Mark::Failed)
         } else if row >= loaded {
-            Mark::New
+            Some(Mark::New)
         } else if self.edits.deleted.contains(&row) {
-            Mark::Deleted
+            Some(Mark::Deleted)
         } else if self.edits.cells.contains_key(&(row, col)) {
-            Mark::Staged
+            Some(Mark::Staged)
         } else {
-            Mark::Plain
+            None
         }
     }
     fn right_aligned(&self, col: usize) -> bool {
@@ -96,13 +96,13 @@ impl GridSource for Source<'_> {
 }
 
 /// The key of each column of `data` in `info`.
-fn keys(data: &ResultSet, info: Option<&TableInfo>) -> Vec<Key> {
+fn keys(data: &ResultSet, info: Option<&TableInfo>) -> Vec<Option<Key>> {
     data.columns
         .iter()
         .map(|c| match info {
-            Some(i) if i.primary_key.contains(&c.name) => Key::Primary,
-            Some(i) if i.fk_for(&c.name).is_some() => Key::Foreign,
-            _ => Key::None,
+            Some(i) if i.primary_key.contains(&c.name) => Some(Key::Primary),
+            Some(i) if i.fk_for(&c.name).is_some() => Some(Key::Foreign),
+            _ => None,
         })
         .collect()
 }
@@ -383,14 +383,14 @@ mod tests {
         assert_eq!((s.cell(0, 1), s.cell(1, 1), s.cell(3, 1), s.cell(3, 0)), (None, None, Some("new"), None));
         assert_eq!(
             [s.mark(0, 1), s.mark(0, 0), s.mark(1, 0), s.mark(2, 0), s.mark(3, 0)],
-            [Mark::Staged, Mark::Plain, Mark::Failed, Mark::Deleted, Mark::New]
+            [Some(Mark::Staged), None, Some(Mark::Failed), Some(Mark::Deleted), Some(Mark::New)]
         );
         assert!(s.right_aligned(0) && !s.right_aligned(1));
         assert!(s.deleted(2) && !s.deleted(1) && !s.deleted(3));
         // A row to delete whose delete failed shows as failed, and stays struck through.
         edits.failed = Some(dbee_engine::Failed { row: 2, column: None, message: "still referenced".into(), code: "server" });
         let s = Source { data: &data, edits: &edits };
-        assert_eq!((s.mark(2, 0), s.deleted(2)), (Mark::Failed, true));
+        assert_eq!((s.mark(2, 0), s.deleted(2)), (Some(Mark::Failed), true));
     }
 
     #[test]
@@ -437,7 +437,7 @@ mod tests {
             estimated_rows: None,
             no_edit_reason: None,
         };
-        assert_eq!(keys(&data, Some(&info)), [Key::Primary, Key::Foreign]);
-        assert_eq!(keys(&data, None), [Key::None, Key::None]);
+        assert_eq!(keys(&data, Some(&info)), [Some(Key::Primary), Some(Key::Foreign)]);
+        assert_eq!(keys(&data, None), [None, None]);
     }
 }

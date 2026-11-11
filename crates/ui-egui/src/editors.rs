@@ -87,7 +87,7 @@ const CHOICE_W: f32 = 120.0;
 const LINES_MAX_H: f32 = 180.0;
 /// The editor's border, and the text's inset as in the grid.
 const BORDER: f32 = 1.5;
-const PAD: f32 = 6.0;
+const PAD: f32 = crate::theme::size::GRID_CELL_PAD_X;
 
 /// The keys an open editor keeps from focus moves: Tab, the arrows and Escape are its own.
 const KEYS_KEPT: EventFilter = EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };

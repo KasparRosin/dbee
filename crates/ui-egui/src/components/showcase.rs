@@ -15,6 +15,7 @@ use super::checkbox::Checkbox;
 use super::chip::Chip;
 use super::dialog::{Button, Dialog};
 use super::dropdown::Dropdown;
+use super::grid_cell::{self, Align as CellAlign, Cell, CellText, Header, Key, Mark, RowNumber, Sort};
 use super::icon::Icon;
 use super::input::{Field, Input};
 use super::keycap::Keycap;
@@ -28,7 +29,9 @@ use super::tab::{self, NewTab, Tab};
 use super::table_bars::{self, Loading, PagingBar, TableBar, View};
 use super::toast::Toast;
 use super::tooltip;
-use crate::theme::size::{BAR_H, KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, TAB_H};
+use crate::theme::size::{
+    BAR_H, GRID_HEADER_H, KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, TAB_H,
+};
 use crate::theme::{Text, Tokens, Words, tokens};
 
 /// The page's frames: 20 between sections.
@@ -156,6 +159,143 @@ pub fn show(ui: &mut Ui) {
         dialogs(ui);
         tabs(ui);
         bars(ui);
+        grid(ui);
+    });
+}
+
+/// The Grid frame's columns: the row numbers, then each column's width, name, type, key and
+/// whether its values sit right.
+const GRID_ROW_NUMBERS: f32 = 36.0;
+const GRID_COLUMNS: [(f32, &str, &str, Option<Key>, bool); 5] = [
+    (100.0, "id", "int8", Some(Key::Primary), true),
+    (150.0, "customer", "text", None, false),
+    (110.0, "total", "numeric", None, true),
+    (150.0, "customer_id", "int4", Some(Key::Foreign), true),
+    (90.0, "paid", "bool", None, false),
+];
+
+/// One of the Grid frame's rows: its values (`None` for NULL), and how it is drawn.
+struct GridRow {
+    values: [Option<&'static str>; 5],
+    hovered: bool,
+    /// Every cell selected; with the focus in this column.
+    selected: bool,
+    focus: Option<usize>,
+    /// The whole row selected (#17).
+    whole: bool,
+    new: bool,
+    deleted: bool,
+    /// Cells with a mark, and whether each is selected.
+    marks: &'static [(usize, Mark, bool)],
+}
+
+const PLAIN: GridRow =
+    GridRow { values: [None; 5], hovered: false, selected: false, focus: None, whole: false, new: false, deleted: false, marks: &[] };
+
+/// The Grid frame's twelve rows, as the page draws them. Rows 10 and 11, where the page shows the
+/// cell editor over a cell, are plain: the editor is not one of the cells.
+const GRID_ROWS: [GridRow; 12] = [
+    GridRow { values: [Some("91"), Some("Customer 91"), Some("207.29"), Some("12"), Some("true")], ..PLAIN },
+    GridRow { values: [Some("391"), Some("Customer 391"), Some("464.29"), Some("7"), Some("false")], hovered: true, ..PLAIN },
+    GridRow { values: [Some("691"), Some("Customer 191"), Some("221.29"), Some("42"), Some("true")], selected: true, focus: Some(3), ..PLAIN },
+    GridRow {
+        values: [Some("991"), Some("Customer 491"), Some("512.00"), Some("9"), Some("false")],
+        marks: &[(2, Mark::Staged, false), (4, Mark::Staged, true)],
+        ..PLAIN
+    },
+    GridRow { values: [Some("1291"), Some("Customer 291"), Some("240.00"), Some("3"), Some("true")], marks: &[(2, Mark::Saved, false)], ..PLAIN },
+    GridRow { values: [Some("1591"), Some("Customer 91"), Some("492.29"), Some("12"), Some("true")], marks: &[(2, Mark::Failed, false)], ..PLAIN },
+    GridRow {
+        values: [Some(""), Some("Customer 999"), Some("100.00"), Some("42"), Some("true")],
+        new: true,
+        marks: &[(0, Mark::New, false), (1, Mark::New, false), (2, Mark::New, false), (3, Mark::New, false), (4, Mark::New, false)],
+        ..PLAIN
+    },
+    GridRow {
+        values: [Some("2791"), Some("Customer 791"), Some("263.29"), Some("42"), Some("false")],
+        deleted: true,
+        marks: &[
+            (0, Mark::Deleted, false),
+            (1, Mark::Deleted, false),
+            (2, Mark::Deleted, false),
+            (3, Mark::Deleted, false),
+            (4, Mark::Deleted, false),
+        ],
+        ..PLAIN
+    },
+    GridRow { values: [Some("3091"), Some("Leave at↵Ring twice"), None, Some("42"), Some("")], ..PLAIN },
+    GridRow { values: [Some("3691"), Some("Customer 3691"), Some("291.29"), Some("42"), Some("false")], ..PLAIN },
+    GridRow { values: [Some("4291"), Some("Customer 91"), Some("305.29"), Some("42"), Some("false")], ..PLAIN },
+    GridRow {
+        values: [Some("4891"), Some("Customer 491"), Some("319.29"), Some("42"), Some("true")],
+        selected: true,
+        whole: true,
+        marks: &[(2, Mark::Staged, true)],
+        ..PLAIN
+    },
+];
+
+/// The grid's cells as the page's Grid frame shows them, then the two icons it draws with.
+fn grid(ui: &mut Ui) {
+    section(
+        ui,
+        "grid: header (sorted, text, number, foreign key hovered); rows: plain, hover, selected with the focus on a key (its link), staged and staged focus, saved, failed, new, deleted, NULL / line break / empty, two plain rows where the page shows the cell editor, #17 the whole row selected",
+        SPACE_8,
+        |ui| {
+            let width = GRID_ROW_NUMBERS + GRID_COLUMNS.iter().map(|c| c.0).sum::<f32>();
+            let (table, _) = ui.allocate_exact_size(vec2(width, GRID_HEADER_H + ROW_H * GRID_ROWS.len() as f32), Sense::hover());
+            ui.painter().rect_filled(table, CornerRadius::ZERO, tokens(ui.ctx()).card);
+            let mut x = table.left();
+            grid_cell::corner(ui, Rect::from_min_size(table.min, vec2(GRID_ROW_NUMBERS, GRID_HEADER_H)));
+            x += GRID_ROW_NUMBERS;
+            for (i, &(w, name, ty, key, right)) in GRID_COLUMNS.iter().enumerate() {
+                let head = Header {
+                    name,
+                    ty,
+                    key,
+                    sort: (i == 0).then_some(Sort::Asc),
+                    align: if right { CellAlign::Right } else { CellAlign::Left },
+                    sortable: true,
+                    hovered: i == 3,
+                };
+                head.paint(ui, Rect::from_min_size(pos2(x, table.top()), vec2(w, GRID_HEADER_H)));
+                x += w;
+            }
+            for (r, row) in GRID_ROWS.iter().enumerate() {
+                let top = table.top() + GRID_HEADER_H + ROW_H * r as f32;
+                let number =
+                    RowNumber { n: r as u64 + 1, new: row.new, deleted: row.deleted, selected: row.selected, whole: row.whole, hovered: row.hovered };
+                number.paint(ui, Rect::from_min_size(pos2(table.left(), top), vec2(GRID_ROW_NUMBERS, ROW_H)));
+                let mut x = table.left() + GRID_ROW_NUMBERS;
+                for (c, &(w, _, _, key, right)) in GRID_COLUMNS.iter().enumerate() {
+                    let mark = row.marks.iter().find(|m| m.0 == c);
+                    let cell = Cell {
+                        text: row.values[c].map_or(CellText::Null, CellText::Text),
+                        align: if right { CellAlign::Right } else { CellAlign::Left },
+                        mark: mark.map(|m| m.1),
+                        selected: row.selected || mark.is_some_and(|m| m.2),
+                        focused: row.focus == Some(c),
+                        deleted: row.deleted,
+                        link: key == Some(Key::Foreign),
+                        row_selected: row.focus.is_some(),
+                        hovered: row.hovered,
+                    };
+                    let at = Rect::from_min_size(pos2(x, top), vec2(w, ROW_H));
+                    cell.show(ui, at, ui.id().with(("showcase-grid-link", r, c)));
+                    x += w;
+                }
+            }
+        },
+    );
+    section(ui, "icon/follow, icon/line-break: the grid's follow link and a line break in a cell", ICONS_UNDER_CAPTION, |ui| {
+        let t = tokens(ui.ctx());
+        ui.spacing_mut().item_spacing.x = ICON_CELL_GAP.x;
+        for (icon, colour) in [(Icon::Follow, t.text_muted), (Icon::LineBreak, t.text)] {
+            let (cell, _) = ui.allocate_exact_size(ICON_CELL, Sense::hover());
+            let p = ui.painter();
+            icon.paint(p, pos2(cell.center().x, cell.top() + ICON_BOTTOM - icon.size().y / 2.0), colour);
+            Text::Small.paint(p, pos2(cell.center().x, cell.top() + ICON_NAME_TOP), Align2::CENTER_TOP, icon.name(), t.text_muted);
+        }
     });
 }
 

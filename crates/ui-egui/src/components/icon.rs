@@ -6,13 +6,13 @@
 //! its width past it. Corners are joined the way egui joins a path (mitred, a sharp one cut);
 //! the page's round joins sit inside that by under a third of a pixel.
 //!
-//! The icons Screens uses that the page doesn't have yet ([`column`], [`follow`],
-//! [`line_break`]) stay as they were drawn before, until their screens.
+//! The icon Screens uses that the page doesn't have yet ([`column`]) stays as it was drawn
+//! before, until its screen.
 
 use egui::epaint::RectShape;
 use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2, pos2, vec2};
 
-/// One of the page's 34 icons, named as on the page (`icon/none` is [`Icon::NoColour`]).
+/// One of the page's 36 icons, named as on the page (`icon/none` is [`Icon::NoColour`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     ChevronDown,
@@ -49,6 +49,8 @@ pub enum Icon {
     KeyForeign,
     Success,
     Error,
+    Follow,
+    LineBreak,
 }
 
 /// The table's header band: the page's 45 % of the icon's colour.
@@ -57,7 +59,7 @@ const TABLE_BAND: f32 = 0.45;
 const CURVE_STEPS: usize = 12;
 
 impl Icon {
-    pub const ALL: [Icon; 34] = [
+    pub const ALL: [Icon; 36] = [
         Icon::ChevronDown,
         Icon::ChevronRight,
         Icon::SortAscending,
@@ -92,6 +94,8 @@ impl Icon {
         Icon::KeyForeign,
         Icon::Success,
         Icon::Error,
+        Icon::Follow,
+        Icon::LineBreak,
     ];
 
     /// The page's name for it, after `icon/`.
@@ -131,6 +135,8 @@ impl Icon {
             Icon::KeyForeign => "key-foreign",
             Icon::Success => "success",
             Icon::Error => "error",
+            Icon::Follow => "follow",
+            Icon::LineBreak => "line-break",
         }
     }
 
@@ -157,9 +163,16 @@ impl Icon {
             Icon::NoColour => vec2(12.0, 12.0),
             Icon::Link => vec2(9.8, 9.8),
             Icon::Schema => vec2(13.0, 9.0),
-            Icon::Search | Icon::Table | Icon::View | Icon::MaterializedView | Icon::KeyPrimary | Icon::KeyForeign | Icon::Success | Icon::Error => {
-                vec2(14.0, 14.0)
-            }
+            Icon::Search
+            | Icon::Table
+            | Icon::View
+            | Icon::MaterializedView
+            | Icon::KeyPrimary
+            | Icon::KeyForeign
+            | Icon::Success
+            | Icon::Error
+            | Icon::Follow => vec2(14.0, 14.0),
+            Icon::LineBreak => vec2(10.0, 10.0),
         }
     }
 
@@ -176,7 +189,9 @@ impl Icon {
             | Icon::Link
             | Icon::Table
             | Icon::View
-            | Icon::MaterializedView => 1.1,
+            | Icon::MaterializedView
+            | Icon::Follow
+            | Icon::LineBreak => 1.1,
             Icon::CheckBox => 1.5,
             _ => 1.2,
         }
@@ -345,6 +360,15 @@ impl Icon {
                 pen.round(&[p(7.0, 3.9), p(7.0, 8.0)]);
                 pen.dot(p(7.0, 10.0), 0.7);
             }
+            Icon::Follow => {
+                pen.ring(p(7.0, 7.0), 5.05);
+                pen.round(&[p(3.9, 7.0), p(9.8, 7.0)]);
+                pen.round(&[p(7.3, 4.6), p(9.8, 7.0), p(7.3, 9.4)]);
+            }
+            Icon::LineBreak => {
+                pen.round(&[p(8.0, 1.5), p(8.0, 6.5), p(2.0, 6.5)]);
+                pen.round(&[p(4.2, 4.2), p(2.0, 6.5), p(4.2, 8.8)]);
+            }
         }
     }
 }
@@ -474,24 +498,6 @@ pub fn column(p: &Painter, rect: Rect, color: Color32) {
     p.line_segment([at(r, 0.32, 0.62), at(r, 0.68, 0.62)], s);
 }
 
-/// A circle with an arrow through it, pointing right: "follow this reference".
-pub fn follow(p: &Painter, rect: Rect, color: Color32) {
-    let Some(r) = square(rect) else { return };
-    let s = stroke(r.width(), color);
-    p.circle_stroke(r.center(), r.width() * 0.4, s);
-    p.line_segment([at(r, 0.28, 0.5), at(r, 0.7, 0.5)], s);
-    p.add(Shape::line(vec![at(r, 0.52, 0.33), at(r, 0.7, 0.5), at(r, 0.52, 0.67)], s));
-}
-
-/// A line break as the grid shows it inside a cell's one line: a short drop, then an arrow back
-/// to the left.
-pub fn line_break(p: &Painter, rect: Rect, color: Color32) {
-    let Some(r) = square(rect) else { return };
-    let s = Stroke::new((r.width() / 10.0).clamp(1.0, 1.5), color);
-    p.add(Shape::line(vec![at(r, 0.8, 0.15), at(r, 0.8, 0.65), at(r, 0.2, 0.65)], s));
-    p.add(Shape::line(vec![at(r, 0.42, 0.42), at(r, 0.2, 0.65), at(r, 0.42, 0.88)], s));
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -500,8 +506,9 @@ mod tests {
 
     use super::*;
 
-    /// The page's icon nodes, 160919 to 160986, and 162610 and 162613: name and box.
-    const PAGE: [(&str, f32, f32); 34] = [
+    /// The page's icon nodes, 160919 to 160986, 162610 and 162613, and 166645 and 166648: name
+    /// and box.
+    const PAGE: [(&str, f32, f32); 36] = [
         ("icon/chevron-down", 8.0, 4.0),
         ("icon/chevron-right", 4.0, 8.0),
         ("icon/sort-ascending", 6.0, 8.0),
@@ -536,6 +543,8 @@ mod tests {
         ("icon/key-foreign", 14.0, 14.0),
         ("icon/success", 14.0, 14.0),
         ("icon/error", 14.0, 14.0),
+        ("icon/follow", 14.0, 14.0),
+        ("icon/line-break", 10.0, 10.0),
     ];
 
     /// Every shape `icon` paints centred on `center`, at `ppp` pixels per point.
@@ -578,9 +587,9 @@ mod tests {
     }
 
     #[test]
-    fn there_are_the_pages_34_icons() {
+    fn there_are_the_pages_36_icons() {
         let names: Vec<String> = Icon::ALL.iter().map(|i| format!("icon/{}", i.name())).collect();
-        assert_eq!(names.iter().collect::<HashSet<_>>().len(), 34, "34 distinct names: {names:?}");
+        assert_eq!(names.iter().collect::<HashSet<_>>().len(), 36, "36 distinct names: {names:?}");
         for (icon, name) in Icon::ALL.into_iter().zip(&names) {
             let page = PAGE.iter().find(|(n, _, _)| n == name);
             let Some((_, w, h)) = page else { panic!("{icon:?}: {name} isn't on the page") };
@@ -617,6 +626,55 @@ mod tests {
                 .any(|s| matches!(s, Shape::Circle(c) if c.radius == 0.7 && c.fill == Color32::BLACK && near(c.center, at((7.0, 10.0)))));
             assert_eq!(dot, icon == Icon::Error, "{icon:?}: the dot only in the error");
         }
+    }
+
+    #[test]
+    fn follow_and_line_break_are_the_pages_drawings() {
+        // Node 166645 (`icon/follow`, 14 square): a ring inside the ellipse at (1.4, 1.4) of 11.2,
+        // its 1.1 stroke inside, so centred on radius 5.05 round (7, 7); the glyph's frame at
+        // (3.9, 4.6) holds the line (0, 2.4) to (5.9, 2.4) and the head (3.4, 0) (5.9, 2.4)
+        // (3.4, 4.8), round ends. Node 166648 (`icon/line-break`, 10 square): the glyph's frame
+        // at (2, 1.5) holds (6, 0) (6, 5) (0, 5) and the head (2.2, 2.7) (0, 5) (2.2, 7.3).
+        let near = |a: Pos2, b: Pos2| (a - b).length() < 1e-3;
+        let follow = drawn(Icon::Follow, pos2(40.0, 30.0), Color32::BLACK, 1.0);
+        let ring = follow.iter().find_map(|s| match s {
+            Shape::Circle(c) if c.stroke.width > 0.0 => Some(*c),
+            _ => None,
+        });
+        let Some(ring) = ring else { panic!("the follow's ring: {follow:?}") };
+        assert_eq!((ring.radius, ring.stroke.width), (5.05, 1.1), "the follow's ring");
+        let corner = ring.center - vec2(7.0, 7.0);
+        let lines = |shapes: &[Shape]| -> Vec<Vec<Pos2>> {
+            shapes
+                .iter()
+                .filter_map(|s| match s {
+                    Shape::Path(p) => Some(p.points.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let at = |corner: Pos2, pts: &[(f32, f32)]| -> Vec<Pos2> { pts.iter().map(|&(x, y)| corner + vec2(x, y)).collect() };
+        let want = [at(corner, &[(3.9, 7.0), (9.8, 7.0)]), at(corner, &[(7.3, 4.6), (9.8, 7.0), (7.3, 9.4)])];
+        let got = lines(&follow);
+        assert_eq!(got.len(), 2, "the follow's line and head: {got:?}");
+        for (g, w) in got.iter().zip(&want) {
+            assert!(g.len() == w.len() && g.iter().zip(w).all(|(a, b)| near(*a, *b)), "the follow: {g:?} is not {w:?}");
+        }
+        let ends = follow.iter().filter(|s| matches!(s, Shape::Circle(c) if c.fill == Color32::BLACK && c.radius == 0.55)).count();
+        assert_eq!(ends, 4, "the follow's round ends");
+
+        let shapes = drawn(Icon::LineBreak, pos2(40.0, 30.0), Color32::BLACK, 1.0);
+        let got = lines(&shapes);
+        assert_eq!(got.len(), 2, "the line break's drop and head: {got:?}");
+        // Its box's corner, from the drop's top: (8, 1.5) in the box.
+        let corner = got[0][0] - vec2(8.0, 1.5);
+        let want = [at(corner, &[(8.0, 1.5), (8.0, 6.5), (2.0, 6.5)]), at(corner, &[(4.2, 4.2), (2.0, 6.5), (4.2, 8.8)])];
+        for (g, w) in got.iter().zip(&want) {
+            assert!(g.len() == w.len() && g.iter().zip(w).all(|(a, b)| near(*a, *b)), "the line break: {g:?} is not {w:?}");
+        }
+        assert!((corner - (pos2(40.0, 30.0) - vec2(5.0, 5.0))).length() < 0.75, "its box centred, moved to the pixel grid: {corner:?}");
+        let ends = shapes.iter().filter(|s| matches!(s, Shape::Circle(c) if c.radius == 0.55)).count();
+        assert_eq!(ends, 4, "the line break's round ends");
     }
 
     #[test]
@@ -670,9 +728,7 @@ mod tests {
                 Rect::EVERYTHING,
                 Rect::from_min_max(pos2(f32::NAN, 0.0), pos2(1.0, f32::INFINITY)),
             ] {
-                for draw in [column, follow, line_break] {
-                    draw(ui.painter(), r, Color32::BLACK);
-                }
+                column(ui.painter(), r, Color32::BLACK);
             }
         });
         output.drop_without_applying_deltas();

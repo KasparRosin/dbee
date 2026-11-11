@@ -8,6 +8,7 @@ pub mod chip;
 pub mod dialog;
 pub mod dropdown;
 pub mod focus;
+pub mod grid_cell;
 pub mod icon;
 pub mod input;
 pub mod keycap;

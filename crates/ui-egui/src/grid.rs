@@ -4,11 +4,11 @@
 //! ([`GridAct`]) and the caller runs the commands.
 //!
 //! **Drawing.** An `egui_extras` table in a horizontal scroll area: only the rows in view are
-//! laid out, so a page of 100 rows or a result of 10,000 costs the same per frame. A cell shows
-//! `display::grid_text` of its value (one line, cut at 200 characters), so a 20 MB value lays out
-//! as 200 characters; NULL is a dim italic `NULL`, an empty string an empty cell. Numbers sit
-//! right. Each header shows the column's name, its type in small text and a key icon (primary or
-//! foreign); the sorted column shows its direction.
+//! laid out, so a page of 100 rows or a result of 10,000 costs the same per frame. The header,
+//! the cells and the row numbers are the components' ([`crate::components::grid_cell`]): a cell
+//! shows `display::grid_text` of its value (one line, cut at 200 characters), so a 20 MB value
+//! lays out as 200 characters; NULL is the word in `text_muted`, an empty string an empty cell.
+//! Numbers sit right. The row under the pointer lights up, but for its selected and marked cells.
 //!
 //! **Column widths** start from a bounded guess per column (its header, and the cut text of the
 //! first rows, clamped to [`MIN_WIDTH`]..=[`MAX_WIDTH`]) worked out once; after that egui keeps
@@ -32,7 +32,7 @@
 //! column of a row in view is laid out, so the cell can be drawn scrolled away to the side.
 //!
 //! **Marks.** A staged cell, a new row, a row to delete and the row whose change the last Apply
-//! failed on each have their own colour ([`crate::theme::Tokens`]); a row to delete is also
+//! failed on each have their own ground, kept when selected ([`Mark`]); a row to delete is also
 //! struck through, failed or not.
 //!
 //! **Foreign keys.** With [`Grid::links`], each non-NULL foreign key cell of the selected row
@@ -40,8 +40,8 @@
 //!
 //! Automation ids: `grid-header-<col>` (value `{name, type, key, sort}`), `grid-cell-<row>-<col>`
 //! (value `{text, null, state?, deleted?}`: the text as shown, `NULL` for NULL, `state` one of
-//! `staged`, `new`, `deleted`, `failed`, and `deleted: true` on a row to delete, also when it is
-//! the failed one), `fk-link-<row>-<col>`, and while the menu is open `grid-menu-null`,
+//! `staged`, `new`, `deleted`, `failed`, `saved`, and `deleted: true` on a row to delete, also
+//! when it is the failed one), `fk-link-<row>-<col>`, and while the menu is open `grid-menu-null`,
 //! `grid-menu-copy`, `grid-menu-copy-header`, `grid-menu-copy-csv`, `grid-menu-copy-json`,
 //! `grid-menu-copy-markdown`, `grid-menu-delete` (value `{label, shortcut, why?}`, `why` saying
 //! why a disabled entry cannot run now). Cells of rows out of view are listed with
@@ -51,80 +51,30 @@ use dbee_core::display::grid_text;
 use dbee_core::{ResultSet, TypeClass};
 use dbee_engine::Selection;
 use dbee_sql::filter::SortDir;
-use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Color32, CornerRadius, Layout, Rect, Response, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
+use egui::{Align, Layout, Rect, Response, ScrollArea, Sense, Stroke, UiBuilder, pos2};
 use egui_extras::{Column, TableBuilder};
 use serde_json::{Map, json};
 
 use crate::automation::{CellBlock, Tags};
-use crate::components::icon::{self, Icon};
+use crate::components::grid_cell::{self, Cell, CellText, DATA_CHAR_W, Header, RowNumber};
+pub use crate::components::grid_cell::{Key, Mark};
+use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
 use crate::components::tooltip::Hint;
-use crate::connections::{line_galley, line_galley_as_written};
-use crate::theme::{self, Text};
+use crate::theme::{self, size};
 
 /// A row's height.
-pub const ROW_H: f32 = 24.0;
+pub const ROW_H: f32 = size::ROW_H;
 /// The header's height.
-const HEADER_H: f32 = 30.0;
+const HEADER_H: f32 = size::GRID_HEADER_H;
 /// The narrowest and the widest a column starts.
 pub const MIN_WIDTH: f32 = 56.0;
 pub const MAX_WIDTH: f32 = 320.0;
-/// What a character of cell text is taken to need when guessing widths.
-const CHAR_W: f32 = 7.2;
-/// The text's inset from a cell's sides.
-const PAD: f32 = 6.0;
 /// Rows looked at when guessing widths.
 const SAMPLE_ROWS: usize = 100;
-/// The room the foreign key link takes at a cell's right.
-const LINK_W: f32 = 20.0;
 /// The id prefixes of a cell and of a foreign key link.
 pub const CELL: &str = "grid-cell-";
 pub const LINK: &str = "fk-link-";
-
-/// What a cell holds besides its value: a staged change, a new row, a row to delete, or the row
-/// the last Apply failed on.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Mark {
-    #[default]
-    Plain,
-    Staged,
-    New,
-    Deleted,
-    Failed,
-}
-
-impl Mark {
-    /// The `state` a cell's automation value names, if any.
-    pub fn id(self) -> Option<&'static str> {
-        match self {
-            Mark::Plain => None,
-            Mark::Staged => Some("staged"),
-            Mark::New => Some("new"),
-            Mark::Deleted => Some("deleted"),
-            Mark::Failed => Some("failed"),
-        }
-    }
-}
-
-/// A column's key, for its header's icon.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Key {
-    #[default]
-    None,
-    Primary,
-    Foreign,
-}
-
-impl Key {
-    fn id(self) -> Option<&'static str> {
-        match self {
-            Key::None => None,
-            Key::Primary => Some("primary"),
-            Key::Foreign => Some("foreign"),
-        }
-    }
-}
 
 /// The rows a grid shows. Read every frame for the rows in view only, so each call must be
 /// cheap; out-of-range rows and columns read as NULL and empty names.
@@ -136,8 +86,8 @@ pub trait GridSource {
     fn rows(&self) -> usize;
     /// The text of cell `(row, col)`; `None` is NULL.
     fn cell(&self, row: usize, col: usize) -> Option<&str>;
-    fn mark(&self, _row: usize, _col: usize) -> Mark {
-        Mark::Plain
+    fn mark(&self, _row: usize, _col: usize) -> Option<Mark> {
+        None
     }
     /// Row `row` is to be deleted: its text is struck through, whatever its mark.
     fn deleted(&self, _row: usize) -> bool {
@@ -243,7 +193,7 @@ pub struct Grid<'a> {
     pub id: egui::Id,
     pub source: &'a dyn GridSource,
     /// Each column's key (missing ones: none).
-    pub keys: &'a [Key],
+    pub keys: &'a [Option<Key>],
     pub selection: Option<Selection>,
     /// The sorted column and its direction.
     pub sort: Option<(usize, SortDir)>,
@@ -274,70 +224,25 @@ fn covers(sel: Option<Selection>, (row, col): (usize, usize)) -> bool {
 
 /// The widths the columns of `source` start with: room for the header (name, type, key icon and
 /// sort mark) and for the cut text of the first [`SAMPLE_ROWS`] rows, clamped.
-pub fn initial_widths(source: &dyn GridSource, keys: &[Key]) -> Vec<f32> {
+pub fn initial_widths(source: &dyn GridSource, keys: &[Option<Key>]) -> Vec<f32> {
     let chars = |s: &str| s.chars().count() as f32;
+    let (pad, gap) = (size::GRID_CELL_PAD_X, size::GRID_HEADER_GAP);
     let rows = source.rows().min(SAMPLE_ROWS);
     (0..source.columns())
         .map(|col| {
-            let key = if keys.get(col).copied().unwrap_or_default() == Key::None { 0.0 } else { 18.0 };
-            let head = 2.0 * PAD + key + chars(source.column_name(col)) * CHAR_W + 6.0 + chars(source.column_type(col)) * CHAR_W * 0.85 + 16.0;
+            let key = if keys.get(col).copied().flatten().is_some() { Icon::Key.size().x + gap } else { 0.0 };
+            let sort = gap + 2.0 * Icon::SortAscending.size().x + size::GRID_SORT_HINT_GAP;
+            let head =
+                2.0 * pad + key + chars(source.column_name(col)) * DATA_CHAR_W + gap + chars(source.column_type(col)) * DATA_CHAR_W * 0.85 + sort;
             let cells = (0..rows)
                 .map(|row| match source.cell(row, col) {
                     None => 4.0,
                     Some(v) => grid_text(v).chars().count() as f32,
                 })
                 .fold(0.0, f32::max);
-            head.max(cells * CHAR_W + 2.0 * PAD).clamp(MIN_WIDTH, MAX_WIDTH)
+            head.max(cells * DATA_CHAR_W + 2.0 * pad).clamp(MIN_WIDTH, MAX_WIDTH)
         })
         .collect()
-}
-
-/// The gutter's width for row numbers up to `last`.
-fn gutter_width(last: u64) -> f32 {
-    let digits = last.max(1).ilog10() + 1;
-    (digits as f32 * 8.0 + 2.0 * PAD).max(36.0)
-}
-
-/// The mark `display::grid_text` puts for a line break. egui's built-in fonts have no glyph for
-/// it, so the grid draws it ([`icon::line_break`]).
-const BREAK: char = '↵';
-/// The room a drawn line break takes.
-const BREAK_W: f32 = 12.0;
-
-/// Paints `text` on one line from `x`, centred on `y`, no further right than `right`, cut with
-/// `…`, with each [`BREAK`] drawn as an icon. Returns how wide it came out.
-fn paint_text(ui: &egui::Ui, p: &egui::Painter, text: &str, (x, y, right): (f32, f32, f32), color: Color32, italics: bool) -> f32 {
-    let mut at = x;
-    for (i, part) in text.split(BREAK).enumerate() {
-        if i > 0 {
-            if at + BREAK_W > right {
-                let g = galley(ui, "…", color, (right - at).max(1.0), false);
-                p.galley(pos2(at, y - g.size().y / 2.0), g, color);
-                break;
-            }
-            icon::line_break(p, Rect::from_center_size(pos2(at + BREAK_W / 2.0, y), vec2(10.0, 10.0)), color);
-            at += BREAK_W;
-        }
-        if part.is_empty() {
-            continue;
-        }
-        let g = galley(ui, part, color, (right - at).max(1.0), italics);
-        let (w, h, cut) = (g.size().x, g.size().y, g.elided);
-        p.galley(pos2(at, y - h / 2.0), g, color);
-        at += w;
-        if cut {
-            break;
-        }
-    }
-    at - x
-}
-
-/// A one-line galley of `text` cut with `…` at `width`, italic when `italics`.
-fn galley(ui: &egui::Ui, text: &str, color: Color32, width: f32, italics: bool) -> std::sync::Arc<egui::Galley> {
-    let format = TextFormat { italics, ..Text::Data.format(color) };
-    let mut job = LayoutJob::single_section(text.to_string(), format);
-    job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
-    ui.painter().layout_job(job)
 }
 
 /// What drawing a cell left for the frame to act on.
@@ -362,7 +267,7 @@ impl Grid<'_> {
             state.widths = Some(initial_widths(src, self.keys));
         }
         let widths = state.widths.clone().unwrap_or_default();
-        let gutter = gutter_width(self.first_number.saturating_add(rows as u64));
+        let gutter = RowNumber::width(self.first_number.saturating_add(rows as u64));
         // A click waits for a cell out of view: bring its row in, and its column. (egui's own
         // scrolling to a widget stops at the table's inner, vertical scroll area, which takes the
         // sideways part too.)
@@ -414,11 +319,7 @@ impl Grid<'_> {
                 table = table.scroll_to_row(row, Some(Align::Center));
             }
             let table = table.header(HEADER_H, |mut header| {
-                header.col(|ui| {
-                    let r = ui.max_rect();
-                    ui.painter().rect_filled(r, CornerRadius::ZERO, theme::tokens(ui.ctx()).card);
-                    ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, theme::tokens(ui.ctx()).line));
-                });
+                header.col(|ui| grid_cell::corner(ui, ui.max_rect()));
                 for (col, head) in heads.iter_mut().enumerate() {
                     let mut resp = None;
                     header.col(|ui| resp = Some(self.draw_head(ui, col)));
@@ -438,10 +339,16 @@ impl Grid<'_> {
             table.body(|body| {
                 body.rows(ROW_H, rows, |mut row| {
                     let r = row.index();
-                    row.col(|ui| self.draw_gutter(ui, r));
+                    // The row lights up under the pointer, across the rows in view.
+                    let mut hovered = false;
+                    row.col(|ui| {
+                        let at = ui.max_rect();
+                        hovered = ui.rect_contains_pointer(Rect::from_x_y_ranges(ui.clip_rect().x_range(), at.y_range()));
+                        self.draw_gutter(ui, r, hovered);
+                    });
                     for c in 0..cols {
                         let mut drawn = None;
-                        row.col(|ui| drawn = Some(self.draw_cell(ui, r, c, focus)));
+                        row.col(|ui| drawn = Some(self.draw_cell(ui, r, c, focus, hovered)));
                         let Some(drawn) = drawn else { continue };
                         let resp = &drawn.resp;
                         if first_drawn.is_none() {
@@ -457,8 +364,8 @@ impl Grid<'_> {
                         let mut value = Map::new();
                         value.insert("text".into(), json!(drawn.text));
                         value.insert("null".into(), json!(drawn.null));
-                        if let Some(state) = src.mark(r, c).id() {
-                            value.insert("state".into(), json!(state));
+                        if let Some(mark) = src.mark(r, c) {
+                            value.insert("state".into(), json!(mark.id()));
                         }
                         if src.deleted(r) {
                             value.insert("deleted".into(), json!(true));
@@ -527,12 +434,16 @@ impl Grid<'_> {
         acts
     }
 
-    fn key(&self, col: usize) -> Key {
-        self.keys.get(col).copied().unwrap_or_default()
+    fn key(&self, col: usize) -> Option<Key> {
+        self.keys.get(col).copied().flatten()
     }
 
     fn sort_of(&self, col: usize) -> Option<SortDir> {
         self.sort.filter(|(c, _)| *c == col).map(|(_, dir)| dir)
+    }
+
+    fn align(&self, col: usize) -> grid_cell::Align {
+        if self.source.right_aligned(col) { grid_cell::Align::Right } else { grid_cell::Align::Left }
     }
 
     fn head_value(&self, col: usize) -> serde_json::Value {
@@ -540,116 +451,61 @@ impl Grid<'_> {
             SortDir::Asc => "asc",
             SortDir::Desc => "desc",
         });
-        json!({ "name": self.source.column_name(col), "type": self.source.column_type(col), "key": self.key(col).id(), "sort": sort })
+        json!({ "name": self.source.column_name(col), "type": self.source.column_type(col), "key": self.key(col).map(Key::id), "sort": sort })
     }
 
     /// Draws column `col`'s header and returns its response.
     fn draw_head(&self, ui: &mut egui::Ui, col: usize) -> Response {
-        let t = theme::tokens(ui.ctx());
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.id().with("dbee-head"), Sense::click());
-        let p = ui.painter().clone();
-        p.rect_filled(rect, CornerRadius::ZERO, t.card);
-        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.line));
-        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, t.line));
-        let mut x = rect.left() + PAD;
-        let slot = pos2(x + 7.0, rect.center().y);
-        match self.key(col) {
-            Key::Primary => Icon::Key.paint(&p, slot, t.key),
-            Key::Foreign => Icon::KeyForeign.paint(&p, slot, t.text_muted),
-            Key::None => {}
-        }
-        if self.key(col) != Key::None {
-            x += 18.0;
-        }
-        let sort_w = if self.sort_of(col).is_some() { 16.0 } else { 0.0 };
-        let right = rect.right() - PAD - sort_w;
-        let name = line_galley_as_written(ui, self.source.column_name(col), Text::Header, t.text, (right - x).max(1.0));
-        let name_w = name.size().x;
-        p.galley(pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
-        x += name_w + 6.0;
-        if right - x > 12.0 {
-            let ty = line_galley_as_written(ui, self.source.column_type(col), Text::Data, t.text_muted, right - x);
-            p.galley(pos2(x, rect.center().y - ty.size().y / 2.0 + 1.0), ty, t.text_muted);
-        }
-        if let Some(dir) = self.sort_of(col) {
-            let r = Rect::from_min_size(pos2(rect.right() - PAD - 12.0, rect.center().y - 6.0), vec2(12.0, 12.0));
-            let arrow = if dir == SortDir::Asc { Icon::SortAscending } else { Icon::SortDescending };
-            arrow.paint(&p, r.center(), t.ink);
-        }
+        let head = Header {
+            name: self.source.column_name(col),
+            ty: self.source.column_type(col),
+            key: self.key(col),
+            sort: self.sort_of(col),
+            align: self.align(col),
+            sortable: self.sortable,
+            hovered: resp.hovered(),
+        };
+        head.paint(ui, rect);
         resp
     }
 
-    fn draw_gutter(&self, ui: &mut egui::Ui, row: usize) {
-        let t = theme::tokens(ui.ctx());
-        let rect = ui.max_rect();
-        let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::ZERO, t.card);
-        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, t.line));
-        let label = if self.source.columns() > 0 && self.source.mark(row, 0) == Mark::New {
-            "+".to_string()
-        } else {
-            crate::tree::thousands(self.first_number.saturating_add(row as u64))
+    /// Draws row `row`'s number; `hovered` when the row is under the pointer.
+    fn draw_gutter(&self, ui: &mut egui::Ui, row: usize, hovered: bool) {
+        let src = self.source;
+        let number = RowNumber {
+            n: self.first_number.saturating_add(row as u64),
+            new: src.columns() > 0 && src.mark(row, 0) == Some(Mark::New),
+            deleted: src.deleted(row),
+            selected: self.selection.map(bounds).is_some_and(|((r0, r1), _)| (r0..=r1).contains(&row)),
+            whole: false,
+            hovered,
         };
-        let g = line_galley(ui, &label, Text::Data, t.text_muted, rect.width());
-        p.galley(pos2(rect.right() - PAD - g.size().x, rect.center().y - g.size().y / 2.0), g, t.text_muted);
+        number.paint(ui, ui.max_rect());
     }
 
-    /// Draws cell `(row, col)` into its `ui`; `focus` is the selection's focus cell.
-    fn draw_cell(&self, ui: &mut egui::Ui, row: usize, col: usize, focus: Option<(usize, usize)>) -> Drawn {
-        let t = theme::tokens(ui.ctx());
+    /// Draws cell `(row, col)` into its `ui`; `focus` is the selection's focus cell, `hovered`
+    /// whether its row is under the pointer.
+    fn draw_cell(&self, ui: &mut egui::Ui, row: usize, col: usize, focus: Option<(usize, usize)>, hovered: bool) -> Drawn {
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.id().with("dbee-cell"), Sense::click_and_drag());
-        let p = ui.painter().clone();
-        let mark = self.source.mark(row, col);
-        let selected = covers(self.selection, (row, col));
-        let fill = if selected {
-            t.selection
-        } else {
-            match mark {
-                Mark::Staged => t.staged,
-                Mark::New => t.new_row,
-                Mark::Deleted => t.deleted,
-                Mark::Failed => t.failed,
-                Mark::Plain => t.card,
-            }
-        };
-        p.rect_filled(rect, CornerRadius::ZERO, fill);
-        let line = Stroke::new(1.0, t.line);
-        p.line_segment([rect.right_top(), rect.right_bottom()], line);
-        p.line_segment([rect.left_bottom(), rect.right_bottom()], line);
-        if focus == Some((row, col)) {
-            p.rect_stroke(rect.shrink(0.5), CornerRadius::ZERO, Stroke::new(1.5, t.ink), StrokeKind::Inside);
-        }
-        let value = self.source.cell(row, col);
-        let link = self.links && value.is_some() && self.key(col) == Key::Foreign && focus.is_some_and(|f| f.0 == row);
-        let right = rect.right() - PAD - if link { LINK_W } else { 0.0 };
-        let width = (right - rect.left() - PAD).max(1.0);
-        let (text, null) = match value {
+        let (text, null) = match self.source.cell(row, col) {
             None => ("NULL".to_string(), true),
             Some(v) => (grid_text(v).into_owned(), false),
         };
-        let deleted = self.source.deleted(row);
-        if !text.is_empty() {
-            let color = if null || deleted { t.text_muted } else { t.text };
-            let y = rect.center().y;
-            let x = if !null && self.source.right_aligned(col) && !text.contains(BREAK) {
-                // Numbers sit right: measure first.
-                right - galley(ui, &text, color, width, false).size().x
-            } else {
-                rect.left() + PAD
-            };
-            let drawn = paint_text(ui, &p, &text, (x, y, right), color, null);
-            if deleted {
-                p.line_segment([pos2(x, y), pos2(x + drawn, y)], Stroke::new(1.0, t.text_muted));
-            }
-        }
-        let link = link.then(|| {
-            let r = Rect::from_min_size(pos2(rect.right() - PAD - 15.0, rect.center().y - 8.0), vec2(16.0, 16.0));
-            let resp = ui.interact(r, ui.id().with(("dbee-fk-link", row, col)), Sense::click());
-            icon::follow(&p, r.shrink(1.0), if resp.hovered() { t.ink } else { t.text_muted });
-            resp
-        });
+        let cell = Cell {
+            text: if null { CellText::Null } else { CellText::Text(&text) },
+            align: self.align(col),
+            mark: self.source.mark(row, col),
+            selected: covers(self.selection, (row, col)),
+            focused: focus == Some((row, col)),
+            deleted: self.source.deleted(row),
+            link: self.links && self.key(col) == Some(Key::Foreign),
+            row_selected: focus.is_some_and(|f| f.0 == row),
+            hovered,
+        };
+        let link = cell.show(ui, rect, ui.id().with(("dbee-fk-link", row, col)));
         Drawn { text, null, resp, link }
     }
 
@@ -728,7 +584,7 @@ mod tests {
     fn widths_are_guessed_within_bounds() {
         let huge = "x".repeat(20_000_000);
         let rs = result(vec![vec![Some("1"), Some(&huge)], vec![None, Some("short")]]);
-        let w = initial_widths(&rs, &[Key::Primary]);
+        let w = initial_widths(&rs, &[Some(Key::Primary)]);
         assert_eq!(w.len(), 2);
         assert!(w.iter().all(|w| (MIN_WIDTH..=MAX_WIDTH).contains(w)), "{w:?}");
         assert_eq!(w[1], MAX_WIDTH, "a huge value asks for the most, no more");
@@ -743,28 +599,7 @@ mod tests {
         assert_eq!((src.columns(), src.rows(), src.column_name(1), src.column_type(0)), (2, 1, "note", "integer"));
         assert_eq!((src.cell(0, 0), src.cell(0, 1), src.cell(5, 5)), (Some("1"), None, None));
         assert!(src.right_aligned(0) && !src.right_aligned(1) && !src.right_aligned(9));
-        assert_eq!((src.column_name(9), src.mark(0, 0)), ("", Mark::Plain));
-    }
-
-    #[test]
-    fn text_with_line_breaks_stays_inside_its_cell() {
-        let ctx = egui::Context::default();
-        ctx.run_ui(egui::RawInput::default(), |ui| {
-            let p = ui.painter().clone();
-            let color = Color32::BLACK;
-            let short = paint_text(ui, &p, "a↵b", (0.0, 10.0, 200.0), color, false);
-            let plain = paint_text(ui, &p, "ab", (0.0, 10.0, 200.0), color, false);
-            assert!((short - plain - BREAK_W).abs() < 0.5, "a break takes its own room: {short} vs {plain}");
-            let long = grid_text(&"line↵".repeat(1000)).into_owned();
-            for right in [30.0, 120.0] {
-                let w = paint_text(ui, &p, &long, (0.0, 10.0, right), color, false);
-                assert!(w <= right + 0.5, "{w} > {right}");
-            }
-            // No room at all: one `…` (the cell clips it), not every part.
-            assert!(paint_text(ui, &p, &long, (0.0, 10.0, 1.0), color, false) < 20.0);
-            assert_eq!(paint_text(ui, &p, "", (0.0, 10.0, 50.0), color, true), 0.0);
-        })
-        .drop_without_applying_deltas();
+        assert_eq!((src.column_name(9), src.mark(0, 0)), ("", None));
     }
 
     #[test]
@@ -772,7 +607,5 @@ mod tests {
         let sel = Some(Selection { anchor: (5, 3), focus: (2, 1) });
         assert!(covers(sel, (2, 1)) && covers(sel, (5, 3)) && covers(sel, (3, 2)));
         assert!(!covers(sel, (6, 2)) && !covers(sel, (3, 0)) && !covers(None, (0, 0)));
-        assert_eq!(gutter_width(9), gutter_width(1));
-        assert!(gutter_width(1_000_000) > gutter_width(100));
     }
 }
