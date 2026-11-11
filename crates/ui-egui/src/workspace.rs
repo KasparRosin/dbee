@@ -1,10 +1,11 @@
 //! The workspace, shown once a connection is open ([`screen`]):
 //!
 //! - the menu bar at the top ([`crate::menu`]);
-//! - the status bar at the bottom: the connection's name on its colour (with `read-only` when the
-//!   session is), the server version, Save connection while the saved list doesn't hold the
-//!   connection (one opened from a file, say), and the active tab's running job with a Cancel
-//!   button. When the connection is lost it says so, with a Reconnect button;
+//! - the status bar at the bottom ([`status`]): the connection's name on its colour, the server
+//!   version, the link's security while it is weaker than fully checked, READ-ONLY when the
+//!   session is, SAVE CONNECTION while the saved list doesn't hold the connection (one opened
+//!   from a file, say), and at the right one activity ([`activity`]): a reconnect, the lost
+//!   connection with RECONNECT, the active tab's running job with CANCEL, or IN TRANSACTION;
 //! - the schema tree on the left ([`crate::tree`]);
 //! - the value panel on the right, while it shows ([`crate::value_panel`]), with its toggle at the
 //!   right end of the status bar;
@@ -28,33 +29,32 @@
 //! results ([`crate::query_tab`]).
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
-//! `tab-new`; `status-connection` (value: the name, and `read-only`), `status-server`,
-//! `status-tls` (value: what protects the link, for a server), `status-save`, `status-job` (value: what runs), `status-cancel`, `status-lost`,
-//! `status-reconnect`, `value-toggle`.
+//! `tab-new`; `status-connection` (value: the name), `status-server`, `status-tls` (value: what
+//! protects the link, while it is weaker than fully checked), `status-read-only`, `status-save`,
+//! `status-job` (value: what runs, or `Reconnecting…`), `status-cancel`, `status-lost`,
+//! `status-reconnect`, `status-transaction`, `value-toggle`.
 
 use std::sync::Arc;
 
-use dbee_engine::{Session, State, Tab, TabId, Which};
+use dbee_engine::{Session, State, Tab, TabId, TlsState, TransactionState, Which};
 use dbee_sql::filter::Condition;
-use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, pos2, vec2};
+use egui::{Align, Frame, Layout, Margin, RichText};
 use serde_json::json;
 
 use crate::app::Origin;
-use crate::components::spinner::Spinner;
+use crate::components::status::{self, Activity};
 use crate::components::tab::{self, Asked, NewTab};
 use crate::components::tooltip::Hint;
-use crate::connections::line_job;
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
 use crate::table_tab::{self, Grids};
-use crate::theme::{self, Text, connection_color, size::RADIUS_FLOAT};
+use crate::theme::size::SLIM_BAR_H;
+use crate::theme::{self, Text, Words};
 use crate::tree::{self, Refresh, Tree, TreeAct};
 use crate::{DbeeApp, menu, value_panel};
 
 /// The status bar's height.
-pub(crate) const STATUS_H: f32 = 30.0;
-/// The height of the status bar's buttons, as of the name on its colour.
-const STATUS_ITEM_H: f32 = 20.0;
+pub(crate) const STATUS_H: f32 = SLIM_BAR_H;
 
 /// What only the workspace keeps.
 #[derive(Debug, Default)]
@@ -141,30 +141,46 @@ fn busy(tab: &Tab) -> bool {
 /// A live job the status bar shows: what runs, and the command that cancels it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LiveJob {
-    pub text: String,
+    pub text: Words,
     pub cancel: Option<&'static str>,
 }
 
-/// The job the status bar shows: a reconnect, else the active tab's (by its markers).
+/// The active tab's live job, by its markers.
 pub fn live_job(session: &Session) -> Option<LiveJob> {
-    if session.running("connection.reconnect") {
-        return Some(LiveJob { text: "Reconnecting…".into(), cancel: None });
-    }
+    let job = |doing: &str, name: &str, cancel| Some(LiveJob { text: Words::from(doing).name(name).plain("…"), cancel: Some(cancel) });
     match session.state().active_tab()? {
         Tab::Table(t) => {
             let name = &t.table.name;
             if t.applying.is_some() {
-                Some(LiveJob { text: format!("Applying the changes to {name}…"), cancel: Some("table.cancel") })
+                job("Applying the changes to ", name, "table.cancel")
             } else if t.loading.is_some() {
-                Some(LiveJob { text: format!("Loading {name}…"), cancel: Some("table.cancel") })
+                job("Loading ", name, "table.cancel")
             } else if t.counting.is_some() {
-                Some(LiveJob { text: format!("Counting the rows of {name}…"), cancel: Some("table.cancel") })
+                job("Counting the rows of ", name, "table.cancel")
             } else {
                 None
             }
         }
-        Tab::Query(q) => q.running.map(|_| LiveJob { text: format!("Running {}…", q.title), cancel: Some("query.cancel") }),
+        Tab::Query(q) => q.running.and_then(|_| job("Running ", &q.title, "query.cancel")),
     }
+}
+
+/// What the status bar shows at its right, one at a time, the first that holds: a reconnect
+/// running, the connection lost, the active tab's live job (with the command that cancels it), a
+/// transaction open or failed on the connection's query session. The job comes before the
+/// transaction, which lasts, so its CANCEL is never hidden.
+fn activity(session: &Session) -> Option<(Activity, Option<&'static str>)> {
+    let c = session.state().connection(Which::Active)?;
+    if session.running("connection.reconnect") {
+        return Some((Activity::Reconnecting { elapsed: None }, None));
+    }
+    if c.lost {
+        return Some((Activity::Disconnected, None));
+    }
+    if let Some(job) = live_job(session) {
+        return Some((Activity::Job { text: job.text, elapsed: None, cancel: job.cancel.is_some() }, job.cancel));
+    }
+    c.transaction().filter(|t| matches!(t.state, TransactionState::Open | TransactionState::Failed)).map(|_| (Activity::InTransaction, None))
 }
 
 /// What the user did outside the tree and the menus this frame.
@@ -188,7 +204,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let tabs = &app.session.state().tabs;
     app.view.work.grids.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     app.view.work.queries.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
-    egui::Panel::top("dbee-menubar").frame(Frame::new().fill(t.bg).inner_margin(Margin::symmetric(8, 3))).show(ui, |ui| menu::bar(app, ui));
+    egui::Panel::top("dbee-menubar").exact_size(SLIM_BAR_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();
     if status_bar(app, ui, &mut acts) {
         // At once, so the panel goes or comes in this frame.
@@ -231,98 +247,67 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The status bar; true when the value panel's toggle was clicked.
+/// The status bar ([`status::bar`]); true when the value panel's toggle was clicked.
 fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool {
-    let t = theme::tokens(ui.ctx());
     let Some(c) = app.session.state().connection(Which::Active) else { return false };
     let name = c.config.display_name();
-    let own_name = !c.config.name.is_empty();
+    let own = !c.config.name.is_empty();
+    let colour = c.config.color;
     let read_only = c.info.read_only;
-    let label = if c.info.read_only { format!("{name} · read-only") } else { name.clone() };
-    let colour = connection_color(c.config.color).zip(theme::on_connection_color(c.config.color));
     let server = dbee_engine::state::server_text(&c.info);
-    let tls = dbee_engine::state::tls_text(&c.info, c.config.ssh.is_some());
-    let saved = app.session.state().store.is_saved(&c.config.id);
-    let lost = c.lost;
-    let job = live_job(&app.session);
-    let reconnecting = app.session.running("connection.reconnect");
+    // The link is named only while it is weaker than fully checked (the design agent, #9).
+    let link = dbee_engine::state::tls_text(&c.info, c.config.ssh.is_some()).filter(|_| c.info.tls != Some(TlsState::Checked));
+    let unsaved = !app.session.state().store.is_saved(&c.config.id);
+    let activity = activity(&app.session);
     let panel_open = app.view.value_panel;
     let mut toggled = false;
     let tags = &mut app.tags;
-    let frame = Frame::new().fill(t.bg).inner_margin(Margin::symmetric(8, 3)).stroke(Stroke::new(1.0, t.line));
-    egui::Panel::bottom("dbee-status").exact_size(STATUS_H).frame(frame).show(ui, |ui| {
-        ui.horizontal_centered(|ui| {
-            // The name on the connection's colour, so a live database is never mistaken for
-            // another.
-            let (fill, text) = match colour {
-                Some((fill, text)) => (fill, text),
-                None => (t.fill, t.text),
-            };
-            // A name the user gave may be drawn in capitals; one made from the user, host, database
-            // or file is case-sensitive.
-            let mut name_job = if own_name { Text::Label.job(&name, text) } else { Text::Label.job_as_written(&name, text) };
-            if read_only {
-                name_job.append(&Text::Label.job(" · read-only", text).text, 0.0, Text::Label.format(text));
-            }
-            let galley = line_job(ui, name_job, 360.0);
-            let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x + 18.0, STATUS_ITEM_H), Sense::hover());
-            ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_FLOAT), fill);
-            ui.painter().galley(pos2(rect.left() + 9.0, rect.center().y - galley.size().y / 2.0), galley, text);
-            tags.tag_value("status-connection", &r, label.as_str());
-            let r = ui.label(Text::Label.rich_as_written(server.as_str()).color(t.text_muted));
-            tags.tag_value("status-server", &r, server.as_str());
-            if let Some((text, hover)) = tls {
-                ui.add_space(6.0);
-                let r = ui.label(Text::Label.rich(text).color(t.text_muted)).hint(hover);
-                tags.tag_value("status-tls", &r, text);
-            }
-            if !saved {
-                ui.add_space(8.0);
-                let r = status_button(ui, "Save connection", true).hint("Add this connection to the saved ones");
-                tags.tag_value("status-save", &r, "Save connection");
-                if r.clicked() {
-                    acts.push(Act::SaveOpen);
-                }
-            }
-            if lost {
-                ui.add_space(8.0);
-                let r = ui.label(Text::Label.rich("Connection lost").color(t.danger));
-                tags.tag_value("status-lost", &r, "Connection lost");
-                let text = if reconnecting { "Reconnecting…" } else { "Reconnect" };
-                let r = status_button(ui, text, !reconnecting);
-                tags.tag_value_as("status-reconnect", &r, text, !reconnecting);
-                if r.clicked() {
-                    acts.push(Act::Reconnect);
-                }
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // The value panel's toggle at the right end, as the panel is the window's.
-                toggled = value_panel::toggle(ui, panel_open, tags);
-                let Some(job) = &job else { return };
-                if let Some(command) = job.cancel {
-                    let r = status_button(ui, "Cancel", true);
-                    tags.tag_value("status-cancel", &r, "Cancel");
-                    if r.clicked() {
-                        acts.push(Act::Cancel(command));
-                    }
-                }
-                let r = ui.label(Text::Label.rich_as_written(job.text.as_str()).color(t.text_muted));
-                tags.tag_value("status-job", &r, job.text.as_str());
-                ui.add(Spinner::new());
-            });
+    egui::Panel::bottom("dbee-status").exact_size(STATUS_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| {
+        let connection = status::Connection { name: &name, colour, own };
+        let facts = status::Facts { server: Some(&server), link, read_only, unsaved };
+        // The value panel's toggle at the right end, as the panel is the window's.
+        let shown = status::bar(ui, &connection, &facts, activity.as_ref().map(|(a, _)| a), |ui| {
+            toggled = value_panel::toggle(ui, panel_open, tags);
         });
+        tags.tag_value("status-connection", &shown.connection, name.as_str());
+        if let Some(r) = &shown.server {
+            tags.tag_value("status-server", r, server.as_str());
+        }
+        if let (Some(r), Some((words, _))) = (&shown.link, link) {
+            tags.tag_value("status-tls", r, words);
+        }
+        if let Some(r) = &shown.read_only {
+            tags.tag_value("status-read-only", r, "Read-only");
+        }
+        if let Some(r) = shown.save {
+            let r = r.hint("Add this connection to the saved ones");
+            tags.tag_value("status-save", &r, "Save connection");
+        }
+        let words = shown.activity.as_ref();
+        match (activity.as_ref(), words) {
+            (Some((Activity::Disconnected, _)), Some(r)) => tags.tag_value("status-lost", r, "Connection lost"),
+            (Some((Activity::Reconnecting { .. }, _)), Some(r)) => tags.tag_value("status-job", r, "Reconnecting…"),
+            (Some((Activity::Job { text, .. }, _)), Some(r)) => tags.tag_value("status-job", r, text.to_string()),
+            (Some((Activity::InTransaction, _)), Some(r)) => tags.tag_value("status-transaction", r, "In transaction"),
+            _ => {}
+        }
+        match (activity.as_ref(), &shown.button) {
+            (Some((Activity::Disconnected, _)), Some(r)) => tags.tag_value("status-reconnect", r, "Reconnect"),
+            (Some((Activity::Job { .. }, Some(_))), Some(r)) => tags.tag_value("status-cancel", r, "Cancel"),
+            _ => {}
+        }
+        match shown.act {
+            Some(status::Act::SaveConnection) => acts.push(Act::SaveOpen),
+            Some(status::Act::Reconnect) => acts.push(Act::Reconnect),
+            Some(status::Act::Cancel) => {
+                if let Some((_, Some(command))) = &activity {
+                    acts.push(Act::Cancel(command));
+                }
+            }
+            None => {}
+        }
     });
     toggled
-}
-
-/// A status bar button reading `text`, [`STATUS_ITEM_H`] tall: the bar's row keeps its height
-/// whether a button shows or not, so nothing in it moves when one comes or goes.
-fn status_button(ui: &mut egui::Ui, text: &str, enabled: bool) -> egui::Response {
-    ui.scope(|ui| {
-        ui.spacing_mut().button_padding.y = 0.0;
-        ui.add_enabled(enabled, egui::Button::new(Text::Label.rich(text)).min_size(vec2(0.0, STATUS_ITEM_H)))
-    })
-    .inner
 }
 
 /// The tree on the left.

@@ -15,6 +15,7 @@ pub mod menu;
 pub mod segmented;
 pub mod showcase;
 pub mod spinner;
+pub mod status;
 pub mod swatch;
 pub mod tab;
 pub mod toast;

@@ -122,6 +122,24 @@ pub const TAB_ACTIVE_LINE: f32 = 2.0;
 /// The new tab button (`tab/new`): this wide, as tall as a tab.
 pub const NEW_TAB_W: f32 = 32.0;
 
+/// The menu bar (`menu bar`): a slim bar, its titles this far in from its ends.
+pub const MENU_BAR_PAD_X: f32 = 4.0;
+
+/// The status bar (`status bar`): a slim bar with the connection's colour this thick along its
+/// top; the name's block this tall, the name this far in from its ends and cut at this width;
+/// this between the block and the first fact; this between the facts, and between an activity's
+/// words, its timer and its CANCEL; this between the bar's other parts; its right end this far
+/// in. IN TRANSACTION's square mark is this wide.
+pub const STATUS_EDGE: f32 = 2.0;
+pub const STATUS_BLOCK_H: f32 = 28.0;
+pub const STATUS_BLOCK_PAD_X: f32 = 12.0;
+pub const STATUS_NAME_MAX: f32 = 360.0;
+pub const STATUS_AFTER_BLOCK: f32 = 20.0;
+pub const STATUS_FACT_GAP: f32 = 12.0;
+pub const STATUS_GAP: f32 = 8.0;
+pub const STATUS_PAD_X: f32 = 12.0;
+pub const TRANSACTION_MARK: f32 = 8.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;

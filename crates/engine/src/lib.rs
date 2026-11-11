@@ -34,7 +34,7 @@ use serde_json::{Map, json};
 
 pub use cmd::selection::COPY_MAX_BYTES;
 pub use cmd::{CommandInfo, CommandSpec};
-pub use dbee_driver::{Meaning, allowed_file};
+pub use dbee_driver::{Meaning, TlsState, TransactionState, allowed_file};
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
 pub use state::{

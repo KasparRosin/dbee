@@ -1698,3 +1698,44 @@ fn the_database_list_still_moves_with_the_arrows() {
     ui.frame();
     assert_eq!(ui.value("conn-database"), "odd", "Enter picks the highlighted name");
 }
+
+/// IN TRANSACTION comes from the engine's report of the query session: a `BEGIN` lights it, a
+/// job running in the transaction shows in its place (with its CANCEL) and gives it back, and
+/// `COMMIT` clears it. On Postgres and MySQL.
+#[test]
+fn in_transaction_shows_from_the_engine() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    for (server, sleep) in [("pg14", "select pg_sleep(30)"), ("mysql80", "select sleep(30)")] {
+        let target = dbee_testkit::target(db.server(server).unwrap());
+        let mut ui = connected_to_target(db, &target, None, APP_SIZE);
+        assert!(ui.tag("status-transaction").is_none(), "{server}: no transaction yet");
+        ui.execute("tab.newQuery", json!({ "text": "BEGIN" }));
+        ui.execute("query.run", json!({}));
+        ui.frame();
+        assert_eq!(ui.document()["connection"]["transaction"]["state"], "open", "{server}");
+        assert_eq!(ui.value("status-transaction"), "In transaction", "{server}");
+        let tag = ui.tag("status-transaction").unwrap();
+        let f = |i: usize| tag["rect"][i].as_f64().unwrap() as f32;
+        let at = egui::Rect::from_min_size(egui::pos2(f(0), f(1)), egui::vec2(f(2), f(3)));
+        assert!(ui.text_in(at, "IN TRANSACTION").is_some(), "{server}: drawn in capitals");
+        let mark = egui::Rect::from_center_size(egui::pos2(at.left() - 8.0 - 4.0, at.center().y), egui::Vec2::splat(8.0));
+        let marked = ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.rect == mark && r.fill == t.staged_strong));
+        assert!(marked, "{server}: the staged_strong square before it at {mark:?}");
+        // A job in the transaction shows in its place, with its CANCEL, and gives it back.
+        ui.execute("query.setText", json!({ "text": sleep }));
+        ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
+        ui.until("the run", |ui| ui.tag("status-job").is_some());
+        assert!(ui.tag("status-transaction").is_none(), "{server}: one activity at a time");
+        assert!(ui.tag("status-cancel").is_some(), "{server}: the job's CANCEL");
+        ui.click("status-cancel");
+        ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+        ui.frame();
+        assert_eq!(ui.value("status-transaction"), "In transaction", "{server}: back once the job ended");
+        ui.execute("query.setText", json!({ "text": "COMMIT" }));
+        ui.execute("query.run", json!({}));
+        ui.frame();
+        assert_eq!(ui.document()["connection"]["transaction"], Json::Null, "{server}");
+        assert!(ui.tag("status-transaction").is_none(), "{server}: COMMIT clears it");
+    }
+}

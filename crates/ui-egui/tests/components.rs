@@ -109,7 +109,7 @@ fn every(t: &Tokens) -> Vec<egui::Color32> {
 fn the_showcase_draws_in_both_modes() {
     for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
         let mut ready = false;
-        let h = Harness::builder().with_size(egui::vec2(1240.0, 4200.0)).build_ui(|ui| {
+        let h = Harness::builder().with_size(egui::vec2(1240.0, 5200.0)).build_ui(|ui| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
                 ready = true;
@@ -161,6 +161,10 @@ fn the_showcase_draws_in_both_modes() {
             "TAB: TABLE AND QUERY; INACTIVE, HOVER (SHOWS CLOSE), ACTIVE (UNSAVED DOT, CLOSE), FOCUS (INFERRED, LIKE A BAR BUTTON)",
             "TAB STRIP: TABS, THEN THE NEW TAB BUTTON (DEFAULT, HOVER, FOCUS), ON CARD WITH THE LINE UNDER THE INACTIVE TABS",
             "NOT ON THE PAGE YET: A BUSY TAB, THE SPINNER IN ITS ICON'S PLACE; INACTIVE, ACTIVE",
+            "MENU BAR, 30 TALL, FROM MENUBAR/TITLE; THEN WITH VIEW OPEN",
+            "STATUS BAR: THE CONNECTION COLOUR AS A 2 PX TOP EDGE AND THE NAME BLOCK; NO COLOUR KEEPS A QUIET FOOTER",
+            "NEW: SERVER VERSION, LINK SECURITY (ONLY WHEN WEAKER THAN FULLY CHECKED), READ-ONLY, SAVE CONNECTION; RIGHT SIDE, ONE AT A TIME: THE ACTIVITY STATES",
+            "NOT ON THE PAGE YET: A JOB BEFORE THE APP GIVES TIMERS, TODAY'S SPINNER IN THE TIMER'S PLACE; A TABLE'S NAME KEEPS ITS CASE; A NAME DBEE MADE, AS WRITTEN",
         ];
         for caption in captions {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");

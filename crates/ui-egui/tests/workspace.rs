@@ -884,9 +884,8 @@ fn status_bar_shows_colour_and_read_only() {
     let db = dbee_testkit::require_testdb!();
     let config = ConnectionConfig { name: "Shop live".into(), color: ConnectionColor::Red, read_only: true, ..pg14(db) };
     let mut ui = connected_to(db, config, false);
-    let status = ui.value("status-connection");
-    let text = status.as_str().unwrap_or_default().to_string();
-    assert!(text.contains("Shop live") && text.contains("read-only"), "{status}");
+    assert_eq!(ui.value("status-connection"), "Shop live");
+    assert_eq!(ui.value("status-read-only"), "Read-only");
     let server = ui.value("status-server");
     assert!(server.as_str().is_some_and(|s| s.starts_with("PostgreSQL 14")), "{server}");
     // prefer, and the test server offers TLS: encrypted, its certificate not checked.
@@ -896,18 +895,20 @@ fn status_bar_shows_colour_and_read_only() {
 }
 
 /// The status bar tells a checked certificate from a checked server: `verify-ca` and `require`
-/// with a CA file do not check the name, and say so; `verify-full` does.
+/// with a CA file do not check the name, and say so; under `verify-full` it says nothing.
 #[test]
 fn the_status_bar_tells_what_was_checked() {
     let db = dbee_testkit::require_testdb!();
     let ca_file = Some(db.ca_file.clone());
     for (ssl_mode, says) in [
-        (SslMode::VerifyCa, "Encrypted, certificate checked"),
-        (SslMode::Require, "Encrypted, certificate checked"),
-        (SslMode::VerifyFull, "Encrypted, server checked"),
+        (SslMode::VerifyCa, Some("Encrypted, certificate checked")),
+        (SslMode::Require, Some("Encrypted, certificate checked")),
+        // Fully checked: the bar names the link only while it is weaker (the design agent, #9).
+        (SslMode::VerifyFull, None),
     ] {
         let mut ui = connected_to(db, ConnectionConfig { ssl_mode, ca_file: ca_file.clone(), ..pg14(db) }, false);
-        assert_eq!(ui.value("status-tls"), says, "{ssl_mode:?}");
+        assert!(ui.document()["connection"]["tls"].is_string(), "{ssl_mode:?}");
+        assert_eq!(ui.tag("status-tls").map(|e| e["value"].clone()), says.map(|s| json!(s)), "{ssl_mode:?}");
     }
 }
 
@@ -1046,6 +1047,193 @@ fn lost_connection_offers_reconnect() {
     ui.frame();
     assert!(ui.tag("status-reconnect").is_none());
     assert!(ui.tag("status-lost").is_none());
+}
+
+/// The rect of entry `id` in the last frame, if it was drawn in view.
+fn shown_rect(ui: &mut Ui, id: &str) -> Option<egui::Rect> {
+    ui.tag(id).filter(|e| visible(&Some(e.clone()))).map(|e| rect_of(&e))
+}
+
+/// An unsaved connection to pg14 named "Shop live", red, read-only, under `prefer`: every fact
+/// of the status bar at once, in a window of `size` (holding the lock alone when `exclusive`).
+fn every_fact(db: &TestDb, size: egui::Vec2, exclusive: bool) -> Ui {
+    let mut ui = Ui::window(Setup { size, exclusive, ..Setup::default() });
+    let config = ConnectionConfig { name: "Shop live".into(), color: ConnectionColor::Red, read_only: true, ..pg14(db) };
+    ui.execute("connection.open", json!({ "config": config, "password": db.password }));
+    ui.frame();
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"]["saved"].clone()), (json!("workspace"), json!(false)), "{d}");
+    ui
+}
+
+/// Review Focus 1: the status bar loses nothing a user relies on. The link's security with its
+/// hover, READ-ONLY (its own fact now), the server version, SAVE CONNECTION, a job with its
+/// CANCEL, DISCONNECTED with RECONNECT; each `status-*` tag with its value and enabled flag.
+#[test]
+fn the_status_bar_keeps_every_fact() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = every_fact(db, APP_SIZE, true);
+    assert_eq!(ui.value("status-connection"), "Shop live", "the name alone: read-only is a fact of its own");
+    assert_eq!(ui.value("status-read-only"), "Read-only");
+    assert!(ui.value("status-server").as_str().is_some_and(|s| s.starts_with("PostgreSQL 14.")), "the server version");
+    assert_eq!(ui.value("status-tls"), "Encrypted, server not checked");
+    let i = ui.inspect();
+    for (id, value, words) in [
+        ("status-connection", "Shop live", "SHOP LIVE"),
+        ("status-read-only", "Read-only", "READ-ONLY"),
+        ("status-tls", "Encrypted, server not checked", "ENCRYPTED, SERVER NOT CHECKED"),
+        ("status-save", "Save connection", "SAVE CONNECTION"),
+    ] {
+        let e = tag_in(&i, id).unwrap_or_else(|| panic!("`{id}` drawn: {:?}", ids(&i)));
+        assert_eq!((e["value"].clone(), e.get("enabled").cloned()), (json!(value), None), "`{id}`: {e}");
+        assert!(ui.text_in(rect_of(&e), words).is_some(), "`{id}` draws `{words}`");
+    }
+    for (words, colour) in [("READ-ONLY", t.text_muted), ("ENCRYPTED, SERVER NOT CHECKED", t.text_muted)] {
+        assert_eq!(colour_of(&ui, egui::Rect::EVERYTHING, words), Some(colour), "`{words}` in grey");
+    }
+    // The link's hover sentence, in the tooltip.
+    let at = ui.centre("status-tls");
+    ui.rest(at);
+    assert!(ui.texts().iter().any(|(_, g)| g.text().starts_with("The connection is encrypted, but dbee did not check")), "the link's hover");
+    // A job with its CANCEL.
+    ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
+    ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
+    ui.until("the run", |ui| ui.tag("status-job").is_some());
+    assert_eq!(ui.value("status-job"), "Running Query 1…");
+    let cancel = ui.tag("status-cancel").expect("the job's CANCEL");
+    assert_eq!((cancel["value"].clone(), cancel.get("enabled").cloned()), (json!("Cancel"), None), "{cancel}");
+    let job = rect_of(&ui.tag("status-job").unwrap());
+    assert!(ui.text_in(job, "RUNNING Query 1…").is_some(), "dbee's words in capitals, the tab's title as written");
+    assert!(ui.text_in(rect_of(&cancel), "CANCEL").is_some());
+    ui.click("status-cancel");
+    ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+    ui.frame();
+    assert!(ui.tag("status-job").is_none() && ui.tag("status-cancel").is_none(), "the job ended");
+    // Lost: DISCONNECTED with RECONNECT.
+    let sql = "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = 'dbee'";
+    dbee_testkit::psql(db.server("pg14").unwrap(), sql).unwrap();
+    ui.click("tree-refresh");
+    ui.until("the lost mark", |ui| ui.document()["connection"]["lost"] == true);
+    ui.frame();
+    assert_eq!(ui.value("status-lost"), "Connection lost");
+    let lost = rect_of(&ui.tag("status-lost").unwrap());
+    assert!(ui.text_in(lost, "DISCONNECTED").is_some(), "the page's word");
+    assert_eq!(colour_of(&ui, lost, "DISCONNECTED"), Some(t.danger));
+    let reconnect = ui.tag("status-reconnect").expect("RECONNECT");
+    assert_eq!((reconnect["value"].clone(), reconnect.get("enabled").cloned()), (json!("Reconnect"), None), "{reconnect}");
+    assert!(ui.text_in(rect_of(&reconnect), "RECONNECT").is_some());
+    ui.click("status-reconnect");
+    ui.until("the reconnect", |ui| ui.document()["connection"]["lost"] == false);
+    ui.frame();
+    assert!(ui.tag("status-lost").is_none() && ui.tag("status-reconnect").is_none());
+    // SAVE CONNECTION saves it.
+    ui.click("status-save");
+    ui.until("the save", |ui| ui.tag("status-save").is_none());
+    assert_eq!(ui.document()["connection"]["saved"], true);
+}
+
+/// Review Focus 3: a server version and a name dbee made from the user, host and database are
+/// data: drawn as written, never in capitals.
+#[test]
+fn a_server_version_keeps_its_case() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected_to(db, ConnectionConfig { name: String::new(), ..pg14(db) }, false);
+    let server = ui.value("status-server").as_str().unwrap().to_string();
+    assert!(server.starts_with("PostgreSQL 14."), "{server}");
+    let name = ui.value("status-connection").as_str().unwrap().to_string();
+    assert_eq!(name, "postgres@127.0.0.1/dbee");
+    for (id, words) in [("status-server", &server), ("status-connection", &name)] {
+        let at = rect_of(&ui.tag(id).unwrap());
+        assert!(ui.text_in(at, words).is_some(), "`{words}` drawn as written");
+        assert!(ui.text_in(at, &words.to_uppercase()).is_none(), "`{words}` not in capitals");
+    }
+}
+
+/// Review Focus 5: at the smallest window nothing in the status bar is drawn over anything
+/// else; the facts give way in the order the bar states (the server version, then the link's
+/// security, then READ-ONLY), and the name, SAVE CONNECTION, the job with its CANCEL and the
+/// value panel's toggle stay.
+#[test]
+fn the_status_bar_gives_way_at_the_smallest_window() {
+    let db = dbee_testkit::require_testdb!();
+    for size in [APP_SIZE, egui::vec2(640.0, 420.0)] {
+        let at = format!("{} wide", size.x);
+        let mut ui = every_fact(db, size, false);
+        ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
+        ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
+        ui.until("the run", |ui| ui.tag("status-job").is_some());
+        let parts =
+            ["status-connection", "status-server", "status-tls", "status-read-only", "status-save", "status-job", "status-cancel", "value-toggle"];
+        let drawn: Vec<(&str, egui::Rect)> = parts.iter().filter_map(|id| shown_rect(&mut ui, id).map(|r| (*id, r))).collect();
+        for (id, r) in &drawn {
+            assert!(r.left() >= 0.0 && r.right() <= size.x, "{at}: `{id}` {r:?} inside the window");
+        }
+        for (k, (a, ra)) in drawn.iter().enumerate() {
+            for (b, rb) in &drawn[k + 1..] {
+                assert!(!ra.intersects(*rb) || ra.intersect(*rb).area() == 0.0, "{at}: `{a}` {ra:?} and `{b}` {rb:?} overlap");
+            }
+        }
+        let has = |id: &str| drawn.iter().any(|(d, _)| *d == id);
+        for id in ["status-connection", "status-save", "status-job", "status-cancel", "value-toggle"] {
+            assert!(has(id), "{at}: `{id}` stays: {drawn:?}");
+        }
+        let facts = ["status-server", "status-tls", "status-read-only"];
+        for (k, id) in facts.iter().enumerate() {
+            if has(id) {
+                assert!(facts[k..].iter().all(|later| has(later)), "{at}: `{id}` shows, so the facts after it in the order do: {drawn:?}");
+            }
+        }
+        if size == APP_SIZE {
+            assert!(facts.iter().all(|id| has(id)), "{at}: every fact fits: {drawn:?}");
+        } else {
+            assert!(!has("status-server"), "{at}: the server version gave way first: {drawn:?}");
+        }
+        ui.click("status-cancel");
+        ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+    }
+}
+
+/// The menu bar is the page's: 30 tall on `bg` with a `line` along its bottom, its titles 24 tall
+/// side by side from 4 in, centred above the line; what is under it starts at 30. Its tags stay.
+#[test]
+fn the_menu_bar_is_30_tall_and_keeps_its_tags() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = connected(db);
+    ui.open("shop", "orders");
+    let titles: Vec<egui::Rect> = ["File", "Edit", "View", "Query"]
+        .iter()
+        .map(|top| rect_of(&ui.tag(&format!("menu-{top}")).unwrap_or_else(|| panic!("menu-{top}"))))
+        .collect();
+    let fills: Vec<(egui::Rect, egui::Color32)> = ui
+        .shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.fill.a() > 0 => Some((r.rect, r.fill)),
+            _ => None,
+        })
+        .collect();
+    // The bar: the bg fill 30 tall round the titles (the harness holds the window 8 in).
+    let bar = fills
+        .iter()
+        .find(|(r, c)| *c == t.bg && r.height() == 30.0 && r.contains_rect(titles[0]))
+        .map(|(r, _)| *r)
+        .unwrap_or_else(|| panic!("the bar on bg, 30 tall, round {:?}", titles[0]));
+    assert_eq!(titles[0].left() - bar.left(), 4.0, "the first title 4 in: {titles:?} in {bar:?}");
+    for r in &titles {
+        assert_eq!((r.top() - bar.top(), r.height()), (2.5, 24.0), "a title 24 tall, centred in the 29 above the line: {r:?}");
+    }
+    for pair in titles.windows(2) {
+        assert_eq!(pair[0].right(), pair[1].left(), "side by side: {titles:?}");
+    }
+    let line = egui::Rect::from_min_max(egui::pos2(bar.left(), bar.bottom() - 1.0), bar.max);
+    assert!(fills.contains(&(line, t.line)), "the line along its bottom: {line:?}");
+    let tab = ui.active();
+    assert_eq!(rect_of(&ui.tag(&format!("tab-{tab}")).unwrap()).top(), bar.bottom(), "the tab strip starts under it");
+    // A click opens its menu, which lists its entries as before.
+    ui.click("menu-File");
+    assert!(ui.tag("menu-tab.newQuery").is_some(), "File's entries");
 }
 
 /// The machine and its load average, which a timing test prints with its numbers

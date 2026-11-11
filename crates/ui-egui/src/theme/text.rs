@@ -133,6 +133,20 @@ impl Words {
         }
         job
     }
+
+    /// The parts in `color` as a bar says them: the words in `label` capitals, the names in
+    /// `data` as written, on one baseline.
+    pub fn caps_job(&self, color: Color32) -> LayoutJob {
+        let mut job = LayoutJob::default();
+        for (s, name) in &self.parts {
+            if *name {
+                job.append(s, 0.0, TextFormat { valign: Align::Center, ..Text::Data.format(color) });
+            } else {
+                job.append(&Text::Label.drawn(s.clone()), 0.0, TextFormat { valign: Align::Center, ..Text::Label.format(color) });
+            }
+        }
+        job
+    }
 }
 
 impl std::fmt::Display for Words {
@@ -217,6 +231,37 @@ mod tests {
             assert_eq!(seen.len(), 3, "{ppp}: an x in the name and one in the words, and the row: {seen:?}");
             assert_eq!(seen[0], seen[1], "{ppp}: one baseline: {seen:?}");
             assert!((seen[2] - Text::Body.line()).abs() < 0.5, "{ppp}: the words' 18 line: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn a_bars_names_sit_on_its_capitals_baseline() {
+        // dbee's words in `label` capitals and a table's name in `data` as written: one baseline,
+        // and the parts read out together, the name's case kept.
+        let words = Words::from("Loading ").name("Orders").plain("…");
+        assert_eq!(words.to_string(), "Loading Orders…");
+        // At some scales the two fonts' rounding leaves them a pixel apart.
+        for ppp in [1.0, 1.25] {
+            let mut ready = false;
+            let mut h = egui_kittest::Harness::builder().with_pixels_per_point(ppp).build_ui_state(
+                move |ui, seen: &mut (String, Vec<f32>)| {
+                    if !ready {
+                        crate::components::showcase::prepare(ui.ctx(), egui::Theme::Light);
+                        ready = true;
+                        ui.ctx().request_repaint();
+                        return;
+                    }
+                    let g = ui.fonts_mut(|f| f.layout_job(Words::from("Loading ").name("Orders").plain("…").caps_job(Color32::PLACEHOLDER)));
+                    let row = &g.rows[0];
+                    *seen = (g.text().to_owned(), row.glyphs.iter().filter(|g| g.chr == 'L' || g.chr == 'd').map(|g| g.pos.y).collect());
+                },
+                (String::new(), Vec::new()),
+            );
+            h.run();
+            let (text, ys) = h.state();
+            assert_eq!(text, "LOADING Orders…", "{ppp}");
+            assert_eq!(ys.len(), 2, "{ppp}: an L in the words and a d in the name: {ys:?}");
+            assert!((ys[0] - ys[1]).abs() < 0.5, "{ppp}: one baseline: {ys:?}");
         }
     }
 

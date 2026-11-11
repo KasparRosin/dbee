@@ -46,19 +46,21 @@ fn tops(commands: &[CommandInfo]) -> Vec<&str> {
     tops
 }
 
-/// Draws the menu bar into `ui` and runs the entry clicked, if any.
+/// Draws the menu bar ([`menu::bar`]) into `ui` and runs the entry clicked, if any.
 pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let commands = app.commands();
     let mut chosen: Option<&'static str> = None;
     let checked = crate::ui_commands::theme_id(app.theme_choice);
     let tags = &mut app.tags;
-    MenuBar::new().ui(ui, |ui| {
-        // The titles stand side by side: each holds its own room around its word.
-        ui.spacing_mut().item_spacing.x = 0.0;
-        for top in tops(&commands) {
-            let (r, _) = menu::bar_title(ui, top, |ui| entries(ui, &commands, &[top], checked, tags, &mut chosen));
-            tags.tag(&format!("menu-{top}"), &r);
-        }
+    menu::bar(ui, |ui| {
+        MenuBar::new().ui(ui, |ui| {
+            // The titles stand side by side: each holds its own room around its word.
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for top in tops(&commands) {
+                let (r, _) = menu::bar_title(ui, top, |ui| entries(ui, &commands, &[top], checked, tags, &mut chosen));
+                tags.tag(&format!("menu-{top}"), &r);
+            }
+        })
     });
     if let Some(id) = chosen {
         let shortcut = commands.iter().find(|c| c.id == id).and_then(|c| c.shortcut);

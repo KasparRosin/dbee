@@ -1,6 +1,7 @@
 //! Menus: the frame every menu and popup list floats in (`menu`, [`style`]), its items
 //! (`menu/item`, [`Item`]), the line between groups (`menu/separator`, [`separator`]), an item
-//! that opens a submenu ([`submenu`]) and the menu bar's titles (`menubar/title`, [`bar_title`]).
+//! that opens a submenu ([`submenu`]), the menu bar (`menu bar`, [`bar`]) and its titles
+//! (`menubar/title`, [`bar_title`]).
 //!
 //! An item is a plain egui widget: it takes keyboard focus as a button does (unless a list moves
 //! its own highlight, [`Item::focusable`]), so Tab and the arrows reach it and Enter or Space
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use egui::containers::menu::{MenuConfig, MenuState, SubMenu};
 use egui::style::StyleModifier;
 use egui::{
-    Align, Color32, Context, CornerRadius, Frame, Galley, InnerResponse, Layout, Margin, Popup, Rect, Response, Sense, Stroke, Ui, UiKind,
+    Align, Color32, Context, CornerRadius, Frame, Galley, InnerResponse, Layout, Margin, Popup, Rect, Response, Sense, Stroke, Ui, UiBuilder, UiKind,
     UiStackInfo, Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2,
 };
 
@@ -22,13 +23,15 @@ use super::icon::Icon;
 use super::keycap::Keycap;
 use super::{Look, focus, painter};
 use crate::theme::size::{
-    KEYCAP_GAP, MENU_HEADING_GAP, MENU_ITEM_GAP, MENU_ITEM_H, MENU_ITEM_PAD_X, MENU_KEYS_PAD, MENU_MARK, MENU_PAD, MENU_SEPARATOR_PAD, MENU_TITLE_H,
-    MENU_TITLE_PAD_X, RADIUS_CONTROL, RADIUS_FLOAT, SLIM_BAR_H,
+    KEYCAP_GAP, MENU_BAR_PAD_X, MENU_HEADING_GAP, MENU_ITEM_GAP, MENU_ITEM_H, MENU_ITEM_PAD_X, MENU_KEYS_PAD, MENU_MARK, MENU_PAD,
+    MENU_SEPARATOR_PAD, MENU_TITLE_H, MENU_TITLE_PAD_X, RADIUS_CONTROL, RADIUS_FLOAT, SLIM_BAR_H,
 };
 use crate::theme::{self, Text, tokens};
 
 /// A title's menu opens at the menu bar's bottom edge: the page's bar holds the titles centred.
 const UNDER_THE_BAR: f32 = (SLIM_BAR_H - MENU_TITLE_H) / 2.0;
+/// The menu bar's `line` along its bottom.
+const BAR_LINE: f32 = 1.0;
 
 /// The style of every menu and popup list in the mode `ctx` draws in: egui's menu style, the
 /// page's frame (`raised`, a 1 px `line` edge, corners 4, the one shadow, 4 inside the edge) and
@@ -289,6 +292,24 @@ impl Widget for BarTitle<'_> {
         paint_title(ui, rect, words, self.open, look);
         r
     }
+}
+
+/// The menu bar (`menu bar`): a band [`SLIM_BAR_H`] tall on `bg` with a 1 px `line` along its
+/// bottom, as wide as `ui`. `add` puts its titles ([`bar_title`]) side by side in a row from 4 in,
+/// centred in what is above the line.
+pub fn bar<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let t = tokens(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), SLIM_BAR_H), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::ZERO, t.bg);
+    p.rect_filled(Rect::from_min_max(pos2(rect.left(), rect.bottom() - BAR_LINE), rect.max), CornerRadius::ZERO, t.line);
+    let top = rect.top() + (SLIM_BAR_H - BAR_LINE - MENU_TITLE_H) / 2.0;
+    let row = Rect::from_min_max(pos2(rect.left() + MENU_BAR_PAD_X, top), pos2(rect.right() - MENU_BAR_PAD_X, top + MENU_TITLE_H));
+    ui.scope_builder(UiBuilder::new().max_rect(row).layout(Layout::left_to_right(Align::Min)), |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        add(ui)
+    })
+    .inner
 }
 
 /// A menu bar's title, its word as written in `body`, opening the menu `content` under the bar

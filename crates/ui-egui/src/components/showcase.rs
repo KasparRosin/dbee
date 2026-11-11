@@ -2,6 +2,8 @@
 //! at them against the page's light and dark frames (`examples/components.rs`): one section per
 //! page component, in the page's order, each headed with the page's caption.
 
+use std::time::Duration;
+
 use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use dbee_config::ConnectionColor;
@@ -17,6 +19,7 @@ use super::input::{Field, Input};
 use super::keycap::Keycap;
 use super::menu::{self, BarTitle, Item};
 use super::segmented::{Segment, Segmented};
+use super::status::{self, Activity, Connection, Facts};
 use super::swatch::{COLOURS, Swatch};
 use super::tab::{self, NewTab, Tab};
 use super::toast::Toast;
@@ -44,16 +47,18 @@ const ICON_NAME_TOP: f32 = 24.0;
 /// The check box's mark is shown on an `ink` tile, as in a checkbox.
 const ICON_TILE: f32 = 14.0;
 /// The Menus frame: the items' widths of its menus (Edit, View, Theme), its scene with the menu
-/// bar, the menu bar's room around its titles, and the Theme submenu's overlap of the View menu.
+/// bar, and the Theme submenu's overlap of the View menu.
 const MENU_W: f32 = 230.0;
 const VIEW_MENU_W: f32 = 190.0;
 const THEME_MENU_W: f32 = 130.0;
 const SCENE: Vec2 = vec2(560.0, 190.0);
 const MENU_BAR_W: f32 = 240.0;
-const MENU_BAR_PAD: Vec2 = vec2(4.0, 3.0);
 const SUBMENU_OVERLAP: f32 = 4.0;
-/// The Tabs and bars frame's tab strip.
+/// The Tabs and bars frame's tab strip and menu bars.
 const STRIP_W: f32 = 840.0;
+/// The status bar frames: bars this wide, this far apart.
+const STATUS_W: f32 = 1100.0;
+const STATUS_APART: f32 = 10.0;
 /// The Dialogs frame's scrim scene: a window of this size, its query text this far in, the dialog
 /// this far in.
 const DIALOG_SCENE: Vec2 = vec2(640.0, 240.0);
@@ -132,7 +137,82 @@ pub fn show(ui: &mut Ui) {
         tooltips_and_toasts(ui);
         dialogs(ui);
         tabs(ui);
+        bars(ui);
     });
+}
+
+/// The menu bar and the status bars, as the page's Tabs and bars frame shows them.
+fn bars(ui: &mut Ui) {
+    section(ui, "menu bar, 30 tall, from menubar/title; then with View open", SPACE_8, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_8;
+            for open in [None, Some("View")] {
+                let (rect, _) = ui.allocate_exact_size(vec2(STRIP_W, SLIM_BAR_H), Sense::hover());
+                let titles = ["File", "Edit", "View", "Query"].map(|w| (w, Some(w) == open));
+                menu_bar(ui, rect.min, STRIP_W, &titles);
+            }
+        });
+    });
+    let shop = |colour| Connection { name: "Shop live", colour, own: true };
+    let stack = |ui: &mut Ui, rows: Vec<(Connection<'static>, Facts<'static>, Option<Activity>)>| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = STATUS_APART;
+            for (connection, facts, activity) in &rows {
+                ui.allocate_ui(vec2(STATUS_W, SLIM_BAR_H), |ui| status::bar(ui, connection, facts, activity.as_ref(), |_| {}));
+            }
+        });
+    };
+    section(ui, "status bar: the connection colour as a 2 px top edge and the name block; no colour keeps a quiet footer", SPACE_8, |ui| {
+        let mut colours: Vec<ConnectionColor> = COLOURS.into_iter().filter(|c| *c != ConnectionColor::None).collect();
+        colours.push(ConnectionColor::None);
+        stack(ui, colours.into_iter().map(|c| (shop(c), Facts::default(), None)).collect());
+    });
+    section(
+        ui,
+        "new: server version, link security (only when weaker than fully checked), read-only, save connection; right side, one at a time: the activity states",
+        SPACE_8,
+        |ui| {
+            let red = shop(ConnectionColor::Red);
+            let server = Some("PostgreSQL 14.24");
+            let link = |words| Some((words, "The link's longer text, on hover."));
+            let s = Duration::from_millis;
+            stack(
+                ui,
+                vec![
+                    (red, Facts { server, link: link("Not encrypted"), unsaved: true, ..Facts::default() }, Some(Activity::InTransaction)),
+                    (red, Facts { server, read_only: true, ..Facts::default() }, Some(Activity::Disconnected)),
+                    (
+                        red,
+                        Facts { link: link("Encrypted, server not checked"), ..Facts::default() },
+                        Some(Activity::Reconnecting { elapsed: Some(s(4100)) }),
+                    ),
+                    (
+                        red,
+                        Facts { link: link("Encrypted, certificate checked"), ..Facts::default() },
+                        Some(Activity::Exporting { elapsed: Some(s(12_400)) }),
+                    ),
+                    (red, Facts::default(), Some(Activity::Importing { elapsed: Some(s(3900)) })),
+                    (red, Facts::default(), Some(Activity::Job { text: Words::from("Counting rows"), elapsed: Some(s(1200)), cancel: true })),
+                ],
+            );
+        },
+    );
+    section(
+        ui,
+        "not on the page yet: a job before the app gives timers, today's spinner in the timer's place; a table's name keeps its case; a name dbee made, as written",
+        SPACE_8,
+        |ui| {
+            let job = Activity::Job { text: Words::from("Loading ").name("Orders").plain("…"), elapsed: None, cancel: true };
+            let made = Connection { name: "postgres@pg14.internal/Shop", colour: ConnectionColor::None, own: false };
+            stack(
+                ui,
+                vec![
+                    (shop(ConnectionColor::Blue), Facts::default(), Some(job)),
+                    (made, Facts { server: Some("PostgreSQL 14.24"), ..Facts::default() }, None),
+                ],
+            );
+        },
+    );
 }
 
 /// The tabs and the strip, as the page's Tabs and bars frame shows them, and a busy tab.
@@ -339,18 +419,10 @@ fn menus(ui: &mut Ui) {
 }
 
 /// A menu bar `width` wide at `at` holding `titles` (each with whether it is open), as the
-/// page's Menus frame draws one: `bg` with a `line` under it. Returns where the titles are.
+/// page's Menus frame draws one ([`menu::bar`]). Returns where the titles are.
 fn menu_bar(ui: &mut Ui, at: egui::Pos2, width: f32, titles: &[(&str, bool)]) -> Vec<Rect> {
-    let t = tokens(ui.ctx());
-    let bar = Rect::from_min_size(at, vec2(width, SLIM_BAR_H));
-    ui.painter().rect_filled(bar, CornerRadius::ZERO, t.bg);
-    ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, t.line));
-    let inside = UiBuilder::new().max_rect(bar.shrink2(MENU_BAR_PAD)).layout(Layout::left_to_right(Align::Center));
-    ui.scope_builder(inside, |ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        titles.iter().map(|(words, open)| ui.add(BarTitle::new(words).open(*open)).rect).collect()
-    })
-    .inner
+    let mut bar = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(at, vec2(width, SLIM_BAR_H))).layout(Layout::top_down(Align::Min)));
+    menu::bar(&mut bar, |ui| titles.iter().map(|(words, open)| ui.add(BarTitle::new(words).open(*open)).rect).collect())
 }
 
 /// The boxed and text buttons in each of their states, as the page's Buttons frame shows them.
