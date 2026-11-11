@@ -156,7 +156,7 @@ pub(crate) fn show(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags) -> Vec<Run
 
 fn toggle(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
     let hover = if bar.raw_mode { "Back to filter rows" } else { "Write a raw WHERE condition" };
-    let r = ui.add(IconButton::boxed(Icon::Code)).hint(hover);
+    let r = ui.add(IconButton::boxed(Icon::Code).on(bar.raw_mode)).hint(hover);
     tags.tag_value("filter-raw-toggle", &r, bar.raw_mode);
     if r.clicked() {
         runs.push(("table.setFilters", json!({ "rawMode": !bar.raw_mode, "apply": false })));

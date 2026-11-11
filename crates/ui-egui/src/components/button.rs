@@ -207,18 +207,26 @@ enum IconStyle {
 pub struct IconButton {
     icon: Icon,
     style: IconStyle,
+    on: Option<bool>,
     look: Option<Look>,
 }
 
 impl IconButton {
     /// A `line_strong` edge and no ground of its own: the filter bar's add, remove and raw SQL.
     pub fn boxed(icon: Icon) -> IconButton {
-        IconButton { icon, style: IconStyle::Boxed, look: None }
+        IconButton { icon, style: IconStyle::Boxed, on: None, look: None }
     }
 
     /// No edge: the paging arrows.
     pub fn plain(icon: Icon) -> IconButton {
-        IconButton { icon, style: IconStyle::Plain, look: None }
+        IconButton { icon, style: IconStyle::Plain, on: None, look: None }
+    }
+
+    /// A toggle, on or off (the raw SQL toggle). On, a boxed one has a `fill` ground inside its
+    /// edge, hovered or not; the page draws no on look for a plain one.
+    pub fn on(mut self, on: bool) -> IconButton {
+        self.on = Some(on);
+        self
     }
 
     /// Draws it with `look` whatever its response says (the showcase only).
@@ -231,7 +239,10 @@ impl IconButton {
 impl Widget for IconButton {
     fn ui(self, ui: &mut Ui) -> Response {
         let (rect, r) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON), Sense::click());
-        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.icon.name()));
+        r.widget_info(|| match self.on {
+            Some(on) => WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, self.icon.name()),
+            None => WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.icon.name()),
+        });
         let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
         if !ui.is_rect_visible(rect) {
             return r;
@@ -239,7 +250,9 @@ impl Widget for IconButton {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         let radius = CornerRadius::same(RADIUS_CONTROL);
-        if look.hovered && !look.disabled {
+        if self.on == Some(true) && self.style == IconStyle::Boxed {
+            p.rect_filled(rect, radius, t.fill);
+        } else if look.hovered && !look.disabled {
             p.rect_filled(rect, radius, t.hover);
         }
         self.icon.paint(&p, rect.center(), if look.disabled { t.text_faint } else { t.text });
@@ -605,7 +618,7 @@ mod tests {
                         ui.add_space(ROOM);
                         ui.horizontal(|ui| {
                             ui.add_space(ROOM);
-                            let b = IconButton { icon: Icon::Plus, style, look: None };
+                            let b = IconButton { icon: Icon::Plus, style, on: None, look: None };
                             at = match state {
                                 "disabled" => ui.add_enabled(false, b).rect,
                                 "hover" => ui.add(b.look(hovered)).rect,
@@ -748,6 +761,43 @@ mod tests {
         for (ours, page) in widths.iter().zip(page) {
             assert!((ours - page).abs() <= 1.0, "{widths:?} against the page's {page}");
         }
+    }
+
+    #[test]
+    fn a_boxed_icon_button_that_is_on_matches_the_page() {
+        // Node 174286 (`style=boxed, state=on`): a `fill` ground inside its 1 px `line_strong`
+        // edge, the icon in `text` as in default; hovering changes nothing. Read out as on.
+        use egui::accesskit::Toggled;
+        use egui_kittest::kittest::NodeT;
+        let hovered = Look { hovered: true, ..Look::default() };
+        for (theme, t) in both() {
+            for look in [None, Some(hovered)] {
+                let at_ = format!("{theme:?} {look:?}");
+                let mut at = Rect::NOTHING;
+                let shapes = painted(theme, |ui| {
+                    ui.add_space(ROOM);
+                    ui.horizontal(|ui| {
+                        ui.add_space(ROOM);
+                        let b = IconButton::boxed(Icon::Code).on(true);
+                        at = ui.add(if let Some(l) = look { b.look(l) } else { b }).rect;
+                    });
+                });
+                assert_eq!(at.size(), egui::vec2(28.0, 28.0), "{at_}: 28 square");
+                assert_eq!(fills_in(&shapes, at), [(at, t.fill)], "{at_}: the fill ground, hovered or not");
+                let edge = Edge { outer: at, width: 1.0, colour: t.line_strong, radius: CornerRadius::same(2) };
+                assert_eq!(edges_in(&shapes, at, 4.0), [edge], "{at_}: the edge as in default");
+                assert_eq!(icon_in(&shapes, at).0, [t.text], "{at_}: the icon as in default");
+            }
+        }
+        let mut h = harness(Theme::Light, (), |ui, _| {
+            ui.horizontal(|ui| {
+                ui.add(IconButton::boxed(Icon::Code).on(true));
+                ui.add(IconButton::boxed(Icon::Plus));
+            });
+        });
+        h.run();
+        assert_eq!(h.get_by_label("code").accesskit_node().toggled(), Some(Toggled::True), "on, it says so");
+        assert_eq!(h.get_by_label("plus").accesskit_node().toggled(), None, "an icon button that is never on says nothing");
     }
 
     #[test]

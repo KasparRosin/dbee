@@ -1003,6 +1003,31 @@ fn the_filter_row_by_keyboard() {
     ui.until("the filtered page", |ui| ui.table()["applied"]["filters"][0]["value"] == "42" && ui.table()["loading"].is_null());
 }
 
+/// The raw SQL toggle is drawn on in the raw WHERE mode (`button/icon` `style=boxed, state=on`): a
+/// `fill` ground inside its edge; off in the filter rows, no ground. Its tag says the same.
+#[test]
+fn the_raw_toggle_is_drawn_on_in_raw_mode() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "orders");
+    ui.until("the page", |ui| ui.table()["loading"].is_null());
+    let fill = dbee_ui_egui::theme::tokens(&ui.harness.ctx).fill;
+    let ground = |ui: &Ui| {
+        let at = ui.rect("filter-raw-toggle").expect("the toggle is drawn");
+        ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == fill && (r.rect.min - at.min).length() < 0.5 && (r.rect.max - at.max).length() < 0.5))
+    };
+    ui.frame();
+    assert_eq!(ui.value("filter-raw-toggle"), false);
+    assert!(!ground(&ui), "the filter rows: off, no ground");
+    ui.click("filter-raw-toggle");
+    ui.frame();
+    assert_eq!(ui.value("filter-raw-toggle"), true);
+    assert!(ground(&ui), "raw WHERE: on, the fill ground");
+    ui.click("filter-raw-toggle");
+    ui.frame();
+    assert!(!ground(&ui), "back to the rows: off again");
+}
+
 /// The filter row's tags keep their ids, values and enabled flags as the row moves to the
 /// shared controls (each now the page's 28 tall): the rows, the open lists, the raw field.
 #[test]

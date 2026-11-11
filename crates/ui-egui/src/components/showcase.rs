@@ -756,7 +756,7 @@ fn buttons(ui: &mut Ui) {
         ui.add(TextButton::new("Reset").look(focused));
         ui.add_enabled(false, TextButton::new("Reset"));
     });
-    section(ui, "button/icon boxed: plus, minus, code, hover, focus, disabled", SPACE_8, |ui| {
+    section(ui, "button/icon boxed: plus, minus, code, hover, focus, disabled, on (code: raw WHERE; no change on hover)", SPACE_8, |ui| {
         ui.spacing_mut().item_spacing.x = ROW_GAP;
         ui.add(IconButton::boxed(Icon::Plus));
         ui.add(IconButton::boxed(Icon::Minus));
@@ -764,6 +764,7 @@ fn buttons(ui: &mut Ui) {
         ui.add(IconButton::boxed(Icon::Plus).look(hovered));
         ui.add(IconButton::boxed(Icon::Plus).look(focused));
         ui.add_enabled(false, IconButton::boxed(Icon::Minus));
+        ui.add(IconButton::boxed(Icon::Code).on(true));
     });
     section(ui, "button/icon plain: first, previous, next, last, hover, focus, disabled", SPACE_8, |ui| {
         ui.spacing_mut().item_spacing.x = ROW_GAP;
