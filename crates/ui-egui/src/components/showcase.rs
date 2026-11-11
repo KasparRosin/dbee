@@ -8,6 +8,7 @@ use std::time::Duration;
 use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use dbee_config::ConnectionColor;
+use dbee_core::RelKind;
 
 use super::Look;
 use super::button::{BarButton, BoxButton, IconButton, TextButton};
@@ -21,6 +22,7 @@ use super::input::{Field, Input};
 use super::keycap::Keycap;
 use super::menu::{self, BarTitle, Item};
 use super::results::{ResultBar, ResultTab, RowCount, RunRow, RunState};
+use super::rows::{ConnectionRow, TreeKind, TreeRow};
 use super::segmented::{Segment, Segmented};
 use super::sidebar::{self, Count};
 use super::status::{self, Activity, Connection, Facts};
@@ -30,9 +32,10 @@ use super::table_bars::{self, Loading, PagingBar, TableBar, View};
 use super::toast::Toast;
 use super::tooltip;
 use crate::theme::size::{
-    BAR_H, GRID_HEADER_H, KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, TAB_H,
+    BAR_H, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32,
+    TAB_H, TREE_ROW_H,
 };
-use crate::theme::{Text, Tokens, Words, tokens};
+use crate::theme::{Text, Tokens, Words, connection_color, tokens};
 
 /// The page's frames: 20 between sections.
 const BETWEEN: f32 = 20.0;
@@ -67,8 +70,10 @@ const STRIP_W: f32 = 840.0;
 const FILTER_COLUMN_W: f32 = 140.0;
 const FILTER_OP_W: f32 = 160.0;
 const FILTER_VALUE_W: f32 = 140.0;
-/// The sidebar header frame's filters and counts, as wide as the page draws them.
+/// The sidebar header frame's filters and counts, and the Tree and sidebar frame's tree rows, as
+/// wide as the page draws them; its connection rows.
 const SIDEBAR_W: f32 = 259.0;
+const CONNECTION_LIST_W: f32 = 279.0;
 /// The status bar frames: bars this wide, this far apart.
 const STATUS_W: f32 = 1100.0;
 const STATUS_APART: f32 = 10.0;
@@ -160,6 +165,7 @@ pub fn show(ui: &mut Ui) {
         tabs(ui);
         bars(ui);
         grid(ui);
+        sidebar_rows(ui);
     });
 }
 
@@ -297,6 +303,67 @@ fn grid(ui: &mut Ui) {
             Text::Small.paint(p, pos2(cell.center().x, cell.top() + ICON_NAME_TOP), Align2::CENTER_TOP, icon.name(), t.text_muted);
         }
     });
+}
+
+/// The tree's rows and the connection list's, as the page's Tree and sidebar frame shows them:
+/// each list on `bg` with a 1 px `line` at its right.
+fn sidebar_rows(ui: &mut Ui) {
+    let rel = TreeKind::Relation;
+    let row = |level, kind, name, right, open| TreeRow { level, kind, name, right, open, selected: false, focused: false, hovered: false };
+    let table = |name| row(1, rel(RelKind::Table), name, None, Some(false));
+    let tree = [
+        row(0, TreeKind::Schema, "shop", None, Some(true)),
+        table("customers"),
+        row(1, rel(RelKind::Table), "orders", None, Some(true)),
+        row(2, TreeKind::Column(Some(Key::Primary)), "id", Some("int8"), None),
+        row(2, TreeKind::Column(None), "dealer_id", Some("int4"), None),
+        row(2, TreeKind::Column(Some(Key::Foreign)), "customer_id", Some("int8"), None),
+        row(2, TreeKind::Column(None), "total", Some("numeric(12,2)"), None),
+        row(1, rel(RelKind::View), "orders_archive", None, Some(false)),
+        row(1, rel(RelKind::MaterializedView), "order_totals", None, Some(false)),
+        TreeRow { hovered: true, ..table("payments") },
+        TreeRow { selected: true, ..table("shipments") },
+        TreeRow { focused: true, ..table("users") },
+        row(0, TreeKind::System, "System schemas", None, Some(false)),
+    ];
+    section(
+        ui,
+        "tree/row: schema open, table, table open with its columns (primary key, plain, foreign key), view, materialized view, hover, selected, focus (inferred), schema",
+        SPACE_8,
+        |ui| list(ui, SIDEBAR_W, TREE_ROW_H, tree.len(), |ui, i, rect| tree[i].paint(ui, rect)),
+    );
+    let server = |engine: &str, address: &str| Words::from(format!("{engine} · ")).name(address);
+    let connection =
+        |name, line, colour| ConnectionRow { name, line, colour: connection_color(colour), selected: false, focused: false, hovered: false };
+    let connections = [
+        connection("Analytics replica", server("PostgreSQL", "analytics@replica:5432/analytics"), ConnectionColor::Blue),
+        ConnectionRow {
+            selected: true,
+            ..connection("Shop live", server("PostgreSQL", "postgres@pg14:5432/dbee").plain(" · SSH"), ConnectionColor::Red)
+        },
+        ConnectionRow { hovered: true, ..connection("Billing staging", server("MySQL", "billing@staging:3306/billing"), ConnectionColor::Orange) },
+        ConnectionRow { focused: true, ..connection("Shop dev", server("PostgreSQL", "postgres@localhost:5432/shop"), ConnectionColor::Green) },
+        connection("Local postgres", server("PostgreSQL", "postgres@localhost:5432/postgres"), ConnectionColor::None),
+        connection("Notes", server("SQLite", "~/data/notes.sqlite"), ConnectionColor::Purple),
+    ];
+    section(
+        ui,
+        "sidebar/connection: default, selected, hover, focus (inferred), no colour, other engines; their logos wait for the logo task, the line names the engine",
+        SPACE_8,
+        |ui| list(ui, CONNECTION_LIST_W, CONNECTION_ROW_H, connections.len(), |ui, i, rect| connections[i].paint(ui, rect)),
+    );
+}
+
+/// `n` rows `w` wide and `h` tall, one under the other, drawn by `row`, on `bg` with a 1 px `line`
+/// at the right.
+fn list(ui: &mut Ui, w: f32, h: f32, n: usize, row: impl Fn(&Ui, usize, Rect)) {
+    let t = tokens(ui.ctx());
+    let (frame, _) = ui.allocate_exact_size(vec2(w + 1.0, h * n as f32), Sense::hover());
+    ui.painter().rect_filled(frame, CornerRadius::ZERO, t.bg);
+    ui.painter().rect_filled(Rect::from_min_max(pos2(frame.right() - 1.0, frame.top()), frame.max), CornerRadius::ZERO, t.line);
+    for i in 0..n {
+        row(ui, i, Rect::from_min_size(pos2(frame.left(), frame.top() + h * i as f32), vec2(w, h)));
+    }
 }
 
 /// The menu bar, the query tab's bars and the status bars, as the page's Tabs and bars frame and

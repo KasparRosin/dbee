@@ -14,6 +14,7 @@ pub mod input;
 pub mod keycap;
 pub mod menu;
 pub mod results;
+pub mod rows;
 pub mod segmented;
 pub mod showcase;
 pub mod sidebar;

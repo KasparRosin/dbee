@@ -4,8 +4,9 @@
 //! - User schemas first: the catalog's default schema (Postgres `public`, the database a MySQL
 //!   connection names, SQLite `main`) first and open, or without one the first user schema open,
 //!   the others closed, in the catalog's order. Each lists its tables, views and materialized
-//!   views, each kind with its own icon ([`Icon`]). A table's chevron shows its visible
-//!   columns with their types, and a key icon on primary and foreign key columns.
+//!   views, each kind with its own icon. A table's chevron shows its visible columns with their
+//!   types, and a key icon on primary and foreign key columns. Each row is drawn by
+//!   [`TreeRow`].
 //! - The system schemas, those the catalog marks (Postgres's `pg_catalog` and
 //!   `information_schema`, MySQL's `mysql`, `sys`, …), sit in one group at the bottom, closed, and
 //!   each closed inside it.
@@ -35,23 +36,16 @@ use std::sync::Arc;
 
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
 use dbee_sql::Dialect;
-use egui::{Align, Color32, CornerRadius, Rect, ScrollArea, Sense, pos2, vec2};
+use egui::{Align, Rect, Response, ScrollArea, Sense, pos2, vec2};
 use serde_json::json;
 
 use crate::automation::Tags;
-use crate::components::icon::{self, Icon};
+use crate::components::Look;
+use crate::components::grid_cell::Key;
+use crate::components::rows::{TreeKind, TreeRow};
 use crate::components::sidebar::{self, Count};
 use crate::components::tooltip::Hint;
-use crate::connections::{line_galley, line_galley_as_written};
-use crate::theme::{self, Text, size::RADIUS_CONTROL};
-
-/// The height of a row.
-pub const ROW_H: f32 = 22.0;
-/// How far each level is indented.
-const INDENT: f32 = 14.0;
-/// The chevron's square, then the icon's, from a row's indented left edge.
-const CHEVRON: f32 = 16.0;
-const ICON: f32 = 16.0;
+use crate::theme::{self, size::TREE_ROW_H};
 
 /// What the user asked of the tree in a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,20 +194,6 @@ pub fn kind_name(kind: RelKind) -> &'static str {
         RelKind::MaterializedView => "materialized view",
         RelKind::ForeignTable => "foreign table",
     }
-}
-
-/// The icon for a relation of `kind`; every kind draws in `text_muted`.
-pub fn kind_icon(kind: RelKind) -> Icon {
-    match kind {
-        RelKind::Table | RelKind::PartitionedTable | RelKind::ForeignTable => Icon::Table,
-        RelKind::View => Icon::View,
-        RelKind::MaterializedView => Icon::MaterializedView,
-    }
-}
-
-/// A row's expander: down while `open`.
-fn chevron(open: bool) -> Icon {
-    if open { Icon::ChevronDown } else { Icon::ChevronRight }
 }
 
 /// `1,234`.
@@ -452,12 +432,12 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let frame = ui.max_rect();
-        let height = ROW_H * rows.list.len() as f32;
+        let height = TREE_ROW_H * rows.list.len() as f32;
         ui.set_min_height(height);
-        let first = (viewport.min.y / ROW_H).floor().max(0.0) as usize;
-        let last = ((viewport.max.y / ROW_H).ceil().max(0.0) as usize).saturating_add(1);
+        let first = (viewport.min.y / TREE_ROW_H).floor().max(0.0) as usize;
+        let last = ((viewport.max.y / TREE_ROW_H).ceil().max(0.0) as usize).saturating_add(1);
         for (i, ((row, id), expander)) in rows.list.iter().zip(&rows.ids).zip(&rows.expanders).enumerate() {
-            let rect = Rect::from_min_size(pos2(frame.left(), frame.top() + ROW_H * i as f32), vec2(frame.width(), ROW_H));
+            let rect = Rect::from_min_size(pos2(frame.left(), frame.top() + TREE_ROW_H * i as f32), vec2(frame.width(), TREE_ROW_H));
             if i >= first && i < last {
                 let c = draw_row(ui, rect, *row, id, expander, &rows.catalog, &system_label, selected.as_ref(), tags);
                 if !matches!(c, Click::None) {
@@ -466,7 +446,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
             } else if !matches!(row, Row::Column { .. }) {
                 tags.tag_out_of_view(id, rect);
                 if !expander.is_empty() {
-                    tags.tag_out_of_view(expander, Geometry::of(rect, *row).chevron);
+                    tags.tag_out_of_view(expander, TreeRow::expander(rect, level(*row)));
                 }
                 let wanted = pending.as_deref();
                 if wanted == Some(id.as_str()) || (!expander.is_empty() && wanted == Some(expander.as_str())) {
@@ -502,26 +482,13 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     acts
 }
 
-/// Where a row's parts go.
-struct Geometry {
-    chevron: Rect,
-    icon: Rect,
-    text_left: f32,
-}
-
-impl Geometry {
-    /// The parts of `row` drawn in `rect`: indented by its level.
-    fn of(rect: Rect, row: Row) -> Geometry {
-        let level = match row {
-            Row::System { .. } => 0.0,
-            Row::Schema { system, .. } => f32::from(u8::from(system)),
-            Row::Table { system, .. } => 1.0 + f32::from(u8::from(system)),
-            Row::Column { system, .. } => 2.0 + f32::from(u8::from(system)),
-        };
-        let left = rect.left() + 4.0 + INDENT * level;
-        let chevron = Rect::from_min_size(pos2(left, rect.top() + (ROW_H - CHEVRON) / 2.0), vec2(CHEVRON, CHEVRON));
-        let icon = Rect::from_min_size(pos2(left + CHEVRON + 2.0, rect.top() + (ROW_H - ICON) / 2.0), vec2(ICON, ICON));
-        Geometry { chevron, icon, text_left: icon.right() + 6.0 }
+/// How deep `row` sits: a system schema and what it holds one level deeper than a user one's.
+fn level(row: Row) -> usize {
+    match row {
+        Row::System { .. } => 0,
+        Row::Schema { system, .. } => usize::from(system),
+        Row::Table { system, .. } => 1 + usize::from(system),
+        Row::Column { system, .. } => 2 + usize::from(system),
     }
 }
 
@@ -539,9 +506,13 @@ fn draw_row(
     selected: Option<&Selected>,
     tags: &mut Tags,
 ) -> Click {
-    let t = theme::tokens(ui.ctx());
-    let Geometry { chevron: chevron_rect, icon: icon_rect, text_left } = Geometry::of(rect, row);
+    let level = level(row);
     let r = ui.interact(rect, egui::Id::new(("dbee-tree", id)), Sense::click());
+    // The chevron is its own target, above the row.
+    let expand = match row {
+        Row::Table { .. } => Some(ui.interact(TreeRow::expander(rect, level), egui::Id::new(("dbee-tree-expand", id)), Sense::click())),
+        _ => None,
+    };
     let is_selected = match (row, selected) {
         (Row::Table { s, t, .. }, Some(Selected::Table(sel))) => {
             catalog.schemas.get(s).and_then(|x| x.tables.get(t)).is_some_and(|x| x.table == *sel)
@@ -549,44 +520,23 @@ fn draw_row(
         (Row::Schema { s, .. }, Some(Selected::Schema(sel))) => catalog.schemas.get(s).is_some_and(|x| x.name == *sel),
         _ => false,
     };
-    let fill = if is_selected {
-        t.selection
-    } else if r.hovered() {
-        t.hover
-    } else {
-        Color32::TRANSPARENT
-    };
-    let p = ui.painter().clone();
-    p.rect_filled(rect.shrink2(vec2(2.0, 0.0)), CornerRadius::same(RADIUS_CONTROL), fill);
-    let text_w = |right: f32| (right - text_left).max(1.0);
-    let label = |text: &str, color: Color32, right: f32| {
-        let g = line_galley(ui, text, Text::Body, color, text_w(right));
-        p.galley(pos2(text_left, rect.center().y - g.size().y / 2.0), g, color);
-    };
-    let muted_right = |text: &str, style: Text| -> f32 {
-        let g = line_galley_as_written(ui, text, style, t.text_muted, (rect.width() * 0.45).max(1.0));
-        let x = rect.right() - 8.0 - g.size().x;
-        let w = g.size().x;
-        p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, t.text_muted);
-        rect.right() - 14.0 - w
+    let look = Look::of(ui, &r);
+    let hovered = look.hovered || expand.as_ref().is_some_and(Response::hovered);
+    let draw = |kind: TreeKind, name: &str, right: Option<&str>, open: Option<bool>| {
+        let drawn = TreeRow { level, kind, name, right, open, selected: is_selected, focused: look.focused, hovered };
+        drawn.paint(ui, rect);
+        r.widget_info(|| drawn.widget_info());
     };
     match row {
-        Row::System { open, schemas } => {
-            chevron(open).paint(&p, chevron_rect.center(), t.text_muted);
-            Icon::Schema.paint(&p, icon_rect.center(), t.text_muted);
-            let right = muted_right(&schemas.to_string(), Text::Small);
-            label(system_label, t.text_muted, right);
+        Row::System { open, .. } => {
+            draw(TreeKind::System, system_label, None, Some(open));
             tags.tag_value(id, &r, json!({ "open": open }));
             if r.clicked() {
                 return Click::ToggleSystem;
             }
         }
         Row::Schema { s, open, tables, system } => {
-            let name = catalog.schemas.get(s).map_or("", |x| x.name.as_str());
-            chevron(open).paint(&p, chevron_rect.center(), t.text_muted);
-            Icon::Schema.paint(&p, icon_rect.center(), t.text_muted);
-            let right = muted_right(&thousands(tables as u64), Text::Small);
-            label(name, t.text, right);
+            draw(TreeKind::Schema, catalog.schemas.get(s).map_or("", |x| x.name.as_str()), None, Some(open));
             tags.tag_value(id, &r, json!({ "open": open, "tables": tables }));
             if r.clicked() {
                 return Click::ToggleSchema(s, system);
@@ -594,20 +544,18 @@ fn draw_row(
         }
         Row::Table { s, t: ti, open, .. } => {
             let Some(info) = catalog.schemas.get(s).and_then(|x| x.tables.get(ti)) else { return Click::None };
-            chevron(open).paint(&p, chevron_rect.center(), t.text_muted);
-            kind_icon(info.kind).paint(&p, icon_rect.center(), t.text_muted);
-            label(&info.table.name, t.text, rect.right() - 8.0);
+            draw(TreeKind::Relation(info.kind), &info.table.name, None, Some(open));
             let mut hover = format!("{} · {}", info.table.display(), kind_name(info.kind));
             if let Some(n) = row_estimate(info) {
                 hover.push_str(&format!(" · ~{} rows", thousands(n)));
             }
             let r = r.hint(hover);
             tags.tag_value(id, &r, kind_name(info.kind));
-            // The chevron is its own target, above the row.
-            let expand = ui.interact(chevron_rect.expand(2.0), egui::Id::new(("dbee-tree-expand", id)), Sense::click());
-            tags.tag_value(expander, &expand, open);
-            if expand.clicked() {
-                return Click::ToggleTable(s, ti);
+            if let Some(expand) = expand {
+                tags.tag_value(expander, &expand, open);
+                if expand.clicked() {
+                    return Click::ToggleTable(s, ti);
+                }
             }
             if r.double_clicked() {
                 return Click::Open(s, ti);
@@ -620,24 +568,18 @@ fn draw_row(
             let Some(info) = catalog.schemas.get(s).and_then(|x| x.tables.get(ti)) else { return Click::None };
             let Some(col) = info.visible_columns().nth(c) else { return Click::None };
             let key = if info.primary_key.contains(&col.name) {
-                Some("primary")
+                Some(Key::Primary)
             } else if info.fk_for(&col.name).is_some() {
-                Some("foreign")
+                Some(Key::Foreign)
             } else {
                 None
             };
-            match key {
-                Some("primary") => Icon::KeyPrimary.paint(&p, icon_rect.center(), t.key),
-                Some(_) => Icon::KeyForeign.paint(&p, icon_rect.center(), t.text_muted),
-                None => icon::column(&p, icon_rect, t.text_muted),
-            }
-            let right = muted_right(col.label(), Text::Data);
-            label(&col.name, t.text, right);
+            draw(TreeKind::Column(key), &col.name, Some(col.label()), None);
             let r = match info.fk_for(&col.name) {
                 Some(fk) => r.hint(format!("{} → {}", col.name, fk.target.display())),
                 None => r,
             };
-            tags.tag_value(id, &r, json!({ "type": col.label(), "key": key }));
+            tags.tag_value(id, &r, json!({ "type": col.label(), "key": key.map(Key::id) }));
         }
     }
     Click::None

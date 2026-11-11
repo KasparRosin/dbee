@@ -109,7 +109,7 @@ fn every(t: &Tokens) -> Vec<egui::Color32> {
 fn the_showcase_draws_in_both_modes() {
     for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
         let mut ready = false;
-        let h = Harness::builder().with_size(egui::vec2(1240.0, 6900.0)).build_ui(|ui| {
+        let h = Harness::builder().with_size(egui::vec2(1240.0, 7700.0)).build_ui(|ui| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
                 ready = true;
@@ -178,6 +178,8 @@ fn the_showcase_draws_in_both_modes() {
             "NOT ON THE PAGE YET: A JOB BEFORE THE APP GIVES TIMERS, TODAY'S SPINNER IN THE TIMER'S PLACE; A TABLE'S NAME KEEPS ITS CASE; A NAME DBEE MADE, AS WRITTEN, WITH NO ADDRESS; A LONG PATH CUT IN THE MIDDLE",
             "GRID: HEADER (SORTED, TEXT, NUMBER, FOREIGN KEY HOVERED); ROWS: PLAIN, HOVER, SELECTED WITH THE FOCUS ON A KEY (ITS LINK), STAGED AND STAGED FOCUS, SAVED, FAILED, NEW, DELETED, NULL / LINE BREAK / EMPTY, TWO PLAIN ROWS WHERE THE PAGE SHOWS THE CELL EDITOR, #17 THE WHOLE ROW SELECTED",
             "ICON/FOLLOW, ICON/LINE-BREAK: THE GRID'S FOLLOW LINK AND A LINE BREAK IN A CELL",
+            "TREE/ROW: SCHEMA OPEN, TABLE, TABLE OPEN WITH ITS COLUMNS (PRIMARY KEY, PLAIN, FOREIGN KEY), VIEW, MATERIALIZED VIEW, HOVER, SELECTED, FOCUS (INFERRED), SCHEMA",
+            "SIDEBAR/CONNECTION: DEFAULT, SELECTED, HOVER, FOCUS (INFERRED), NO COLOUR, OTHER ENGINES; THEIR LOGOS WAIT FOR THE LOGO TASK, THE LINE NAMES THE ENGINE",
         ];
         for caption in captions {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");

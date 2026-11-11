@@ -35,12 +35,12 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::rows::relation_icon;
 use crate::connections::{self, line_galley};
 use crate::theme::{
     self, Text, connection_color,
     size::{RADIUS_CONTROL, RADIUS_FLOAT},
 };
-use crate::tree::kind_icon;
 
 /// The most results shown.
 pub const LIMIT: usize = 20;
@@ -386,7 +386,7 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
                 let x = rect.left() + 32.0;
                 match hit {
                     Hit::Table { table, kind } => {
-                        kind_icon(*kind).paint(p, mark, t.text_muted);
+                        relation_icon(*kind).paint(p, mark, t.text_muted);
                         let schema = line_galley(ui, &format!("{}.", table.schema), Text::Body, t.text_muted, WIDTH * 0.4);
                         let schema_w = schema.size().x;
                         p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);

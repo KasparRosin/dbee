@@ -199,6 +199,23 @@ pub const GRID_OUTLINE_W: f32 = 2.0;
 pub const GRID_LINK_GAP: f32 = 6.0;
 pub const GRID_FAILED_MARK: f32 = 6.0;
 
+/// A tree row (`tree/row`): a row's height; what it holds starts this far in, one level this much
+/// further; the chevron's square, then the icon's, then the name, this far apart; the type ends
+/// this far from the right. The chevron answers a click in a square this big round its own.
+pub const TREE_ROW_H: f32 = ROW_H;
+pub const TREE_PAD_X: f32 = 12.0;
+pub const TREE_INDENT: f32 = 16.0;
+pub const TREE_CHEVRON: f32 = 12.0;
+pub const TREE_ICON: f32 = 14.0;
+pub const TREE_GAP: f32 = 6.0;
+pub const TREE_EXPANDER: f32 = 20.0;
+/// A connection row (`sidebar/connection`): this tall, the connection's colour this wide along its
+/// left edge, its words this far in from either end; keyboard focus this far inside it.
+pub const CONNECTION_ROW_H: f32 = 40.0;
+pub const CONNECTION_COLOUR_W: f32 = 3.0;
+pub const CONNECTION_PAD_X: f32 = 12.0;
+pub const CONNECTION_FOCUS_INSET: f32 = 1.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;

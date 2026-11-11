@@ -365,7 +365,7 @@ fn paint_text(ui: &Ui, p: &Painter, text: &str, (x, y, right): (f32, f32, f32), 
 }
 
 /// `text` in `style` as written, on one line cut with `…` at `width`.
-fn one_line(ui: &Ui, text: &str, style: Text, colour: Color32, width: f32) -> Arc<Galley> {
+pub(super) fn one_line(ui: &Ui, text: &str, style: Text, colour: Color32, width: f32) -> Arc<Galley> {
     let mut job = style.job_as_written(text, colour);
     job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(1.0));
     ui.painter().layout_job(job)

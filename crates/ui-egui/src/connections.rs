@@ -63,17 +63,19 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::{Origin, sentence};
 use crate::automation::Tags;
+use crate::components::Look;
 use crate::components::chip::Chip;
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
+use crate::components::rows::ConnectionRow;
 use crate::components::sidebar;
 use crate::components::toast;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
 use crate::theme::{
-    self, Text, connection_color,
-    size::{RADIUS_CONTROL, RADIUS_FLOAT},
+    self, Text, Words, connection_color,
+    size::{CONNECTION_ROW_H, RADIUS_CONTROL, RADIUS_FLOAT},
 };
 
 pub(crate) const OPEN: &str = "connection.open";
@@ -87,8 +89,6 @@ const DUPLICATE: &str = "connection.duplicate";
 
 /// The form's width when the window allows it.
 const FORM_WIDTH: f32 = 600.0;
-/// A card in the lists.
-const CARD_H: f32 = 46.0;
 
 /// Which form job runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -831,9 +831,13 @@ fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, a
                     let empty = if st.store.saved.is_empty() { "No saved connections yet." } else { "No saved connection matches." };
                     ui.label(RichText::new(empty).color(t.text_muted));
                 }
-                for c in saved {
-                    card(ui, tags, &format!("conn-saved-{}", c.id), c, None, c.id == selected, busy, acts);
-                }
+                // The rows one under the other, the line along each one's bottom between them.
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for c in saved {
+                        card(ui, tags, &format!("conn-saved-{}", c.id), c, None, c.id == selected, busy, acts);
+                    }
+                });
                 ui.add_space(14.0);
                 let recent: Vec<(usize, &dbee_config::RecentEntry)> =
                     st.store.recent.iter().enumerate().filter(|(_, r)| matches(&r.config, &q)).collect();
@@ -842,41 +846,33 @@ fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, a
                     let empty = if st.store.recent.is_empty() { "Connections you open show here." } else { "No recent connection matches." };
                     ui.label(RichText::new(empty).color(t.text_muted));
                 }
-                for (n, r) in recent {
-                    card(ui, tags, &format!("conn-recent-{n}"), &r.config, Some(r.used_at), false, busy, acts);
-                }
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (n, r) in recent {
+                        card(ui, tags, &format!("conn-recent-{n}"), &r.config, Some(r.used_at), false, busy, acts);
+                    }
+                });
             });
         },
     );
 }
 
-/// One connection card: its colour on the left edge, the name and where it goes.
+/// One connection's row (`sidebar/connection`): its colour on the left edge, the name and where
+/// it goes.
 fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used_at: Option<u64>, selected: bool, busy: bool, acts: &mut Vec<Act>) {
-    let t = theme::tokens(ui.ctx());
-    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), CARD_H), Sense::click());
-    let fill = if selected {
-        t.selection
-    } else if r.hovered() {
-        t.hover
-    } else {
-        Color32::TRANSPARENT
-    };
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), fill);
-    let bar = Rect::from_min_size(pos2(rect.left() + 3.0, rect.top() + 7.0), vec2(4.0, rect.height() - 14.0));
-    p.rect_filled(bar, CornerRadius::same(2), connection_color(c.color).unwrap_or(t.line));
-    let text_w = rect.width() - 22.0;
+    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), CONNECTION_ROW_H), Sense::click());
     let name = c.display_name();
-    p.galley(pos2(rect.left() + 16.0, rect.top() + 6.0), line_galley(ui, &name, Text::Body, t.text, text_w), t.text);
-    let mut sub = card_line(c);
-    if c.ssh.is_some() && c.kind.takes_ssh() {
-        sub.push_str(" · SSH");
-    }
-    if let Some(at) = used_at {
-        sub = format!("{} · {sub}", ago(at));
-    }
-    p.galley(pos2(rect.left() + 16.0, rect.top() + 25.0), line_galley(ui, &sub, Text::Small, t.text_muted, text_w), t.text_muted);
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+    let look = Look::of(ui, &r);
+    let row = ConnectionRow {
+        name: &name,
+        line: card_line(c, used_at),
+        colour: connection_color(c.color),
+        selected,
+        focused: look.focused,
+        hovered: look.hovered,
+    };
+    row.paint(ui, rect);
+    r.widget_info(|| row.widget_info());
     tags.tag_value(id, &r, name.as_str());
     tags.tag_value(&format!("{id}-kind"), &r, c.kind.label());
     if r.clicked() {
@@ -1021,14 +1017,23 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &
     }
 }
 
-/// A card's second line: the type's label, then a server's `user@host:port/database` (no `/` without
-/// a database) or a file's path.
-fn card_line(c: &ConnectionConfig) -> String {
-    let label = c.kind.label();
-    match c.kind.info().settings {
-        Settings::Server { .. } => format!("{label} · {}@{}:{}{}", c.user, c.host, c.port, c.database_suffix()),
-        Settings::File { .. } => format!("{label} · {}", c.file.as_ref().map(|f| tilde(&f.display().to_string())).unwrap_or_default()),
+/// A row's second line: when it was used (a recent one), the type's label, then a server's
+/// `user@host:port/database` (no `/` without a database) or a file's path, as written; ` · SSH`
+/// through a tunnel.
+fn card_line(c: &ConnectionConfig, used_at: Option<u64>) -> Words {
+    let mut line = Words::default();
+    if let Some(at) = used_at {
+        line = line.plain(format!("{} · ", ago(at)));
     }
+    line = line.plain(format!("{} · ", c.kind.label()));
+    line = match c.kind.info().settings {
+        Settings::Server { .. } => line.name(format!("{}@{}:{}{}", c.user, c.host, c.port, c.database_suffix())),
+        Settings::File { .. } => line.name(c.file.as_ref().map(|f| tilde(&f.display().to_string())).unwrap_or_default()),
+    };
+    if c.ssh.is_some() && c.kind.takes_ssh() {
+        line = line.plain(" · SSH");
+    }
+    line
 }
 
 #[cfg(test)]
@@ -1473,11 +1478,12 @@ mod tests {
     fn a_cards_line_leaves_out_an_unset_database() {
         let server =
             ConnectionConfig { kind: DbKind::MariaDb, user: "root".into(), host: "127.0.0.1".into(), port: 32821, ..ConnectionConfig::default() };
-        assert_eq!(card_line(&server), "MariaDB · root@127.0.0.1:32821");
+        // dbee's words, and the address or path as written, in `data`.
+        assert_eq!(card_line(&server, None), Words::from("MariaDB · ").name("root@127.0.0.1:32821"));
         let shop = ConnectionConfig { database: "shop".into(), ..server };
-        assert_eq!(card_line(&shop), "MariaDB · root@127.0.0.1:32821/shop");
+        assert_eq!(card_line(&shop, None), Words::from("MariaDB · ").name("root@127.0.0.1:32821/shop"));
         let file = ConnectionConfig { kind: DbKind::Sqlite, file: Some(PathBuf::from("/data/shop.sqlite")), ..ConnectionConfig::default() };
-        assert_eq!(card_line(&file), "SQLite · /data/shop.sqlite");
+        assert_eq!(card_line(&file, None), Words::from("SQLite · ").name("/data/shop.sqlite"));
     }
 
     #[test]

@@ -5,12 +5,9 @@
 //! A stroke is centred on its line, as on the page, so a line along an icon's box reaches half
 //! its width past it. Corners are joined the way egui joins a path (mitred, a sharp one cut);
 //! the page's round joins sit inside that by under a third of a pixel.
-//!
-//! The icon Screens uses that the page doesn't have yet ([`column`]) stays as it was drawn
-//! before, until its screen.
 
 use egui::epaint::RectShape;
-use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2, pos2, vec2};
+use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, Vec2, pos2, vec2};
 
 /// One of the page's 36 icons, named as on the page (`icon/none` is [`Icon::NoColour`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -466,38 +463,6 @@ impl Trace {
     }
 }
 
-/// The square inside `rect` an icon draws in, or `None` when there is nothing to draw on.
-fn square(rect: Rect) -> Option<Rect> {
-    if !rect.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return None;
-    }
-    let side = rect.width().min(rect.height());
-    Some(Rect::from_center_size(rect.center(), vec2(side, side)))
-}
-
-fn stroke(side: f32, color: Color32) -> Stroke {
-    Stroke::new((side / 10.0).clamp(1.0, 2.5), color)
-}
-
-/// `(x, y)` as fractions of the square `r`.
-fn at(r: Rect, x: f32, y: f32) -> Pos2 {
-    pos2(r.left() + r.width() * x, r.top() + r.height() * y)
-}
-
-/// The rect from `(x0, y0)` to `(x1, y1)`, as fractions of the square `r`.
-fn part(r: Rect, x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
-    Rect::from_min_max(at(r, x0, y0), at(r, x1, y1))
-}
-
-/// A column: one tall cell stack.
-pub fn column(p: &Painter, rect: Rect, color: Color32) {
-    let Some(r) = square(rect) else { return };
-    let s = stroke(r.width(), color);
-    p.rect_stroke(part(r, 0.32, 0.14, 0.68, 0.86), CornerRadius::same(1), s, StrokeKind::Middle);
-    p.line_segment([at(r, 0.32, 0.38), at(r, 0.68, 0.38)], s);
-    p.line_segment([at(r, 0.32, 0.62), at(r, 0.68, 0.62)], s);
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -720,17 +685,5 @@ mod tests {
                 drawn(icon, center, Color32::BLACK, 1.0);
             }
         }
-        let ctx = egui::Context::default();
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            for r in [
-                Rect::from_min_size(pos2(0.0, 0.0), vec2(16.0, 16.0)),
-                Rect::NOTHING,
-                Rect::EVERYTHING,
-                Rect::from_min_max(pos2(f32::NAN, 0.0), pos2(1.0, f32::INFINITY)),
-            ] {
-                column(ui.painter(), r, Color32::BLACK);
-            }
-        });
-        output.drop_without_applying_deltas();
     }
 }
