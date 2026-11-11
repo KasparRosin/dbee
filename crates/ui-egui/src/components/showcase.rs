@@ -17,6 +17,8 @@ use super::keycap::Keycap;
 use super::menu::{self, BarTitle, Item};
 use super::segmented::{Segment, Segmented};
 use super::swatch::{COLOURS, Swatch};
+use super::toast::Toast;
+use super::tooltip;
 use crate::theme::size::{KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24};
 use crate::theme::{Text, Tokens, tokens};
 
@@ -117,6 +119,30 @@ pub fn show(ui: &mut Ui) {
             ui.add(Chip::available("Available"));
         });
         menus(ui);
+        tooltips_and_toasts(ui);
+    });
+}
+
+/// The tooltips, the toasts and the toasts' icons, as the page's Tooltips and toasts frame shows
+/// them.
+fn tooltips_and_toasts(ui: &mut Ui) {
+    section(ui, "tooltip: one line, wrapped at 320; 4 px below the pointer, its left edge at the pointer", SPACE_8, |ui| {
+        ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_24;
+            tooltip::in_place(ui, "New query tab (Ctrl+T)");
+            tooltip::in_place(ui, "Next page: not now, changes are staged. Apply or reset them first, then go to the next page.");
+        });
+    });
+    section(ui, "toast: success, error, error without an action; icon/success, icon/error", SPACE_8, |ui| {
+        let t = tokens(ui.ctx());
+        ui.spacing_mut().item_spacing.x = SPACE_24;
+        ui.add(Toast::success("Exported 25,000 rows to orders.csv").action("Open folder"));
+        ui.add(Toast::error("Export failed: disk full").action("Details"));
+        ui.add(Toast::error("Export failed: disk full"));
+        for icon in [Icon::Success, Icon::Error] {
+            let (cell, _) = ui.allocate_exact_size(icon.size(), Sense::hover());
+            icon.paint(ui.painter(), cell.center(), t.text_muted);
+        }
     });
 }
 

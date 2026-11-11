@@ -101,6 +101,7 @@ use crate::automation::Tags;
 use crate::components::button::{BoxButton, TextButton};
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
+use crate::components::toast::Kind;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{
@@ -1228,7 +1229,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     if let Some(text) = set_text
         && let Err(e) = app.run("query.setText", json!({ "text": text }))
     {
-        app.notice(crate::app::notice_text(&e));
+        app.notice(Kind::Error, crate::app::notice_text(&e));
     }
     for (command, params) in runs {
         app.start(command, params, Origin::Menu);

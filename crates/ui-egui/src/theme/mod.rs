@@ -25,8 +25,6 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     v.override_text_color = Some(t.text);
     v.weak_text_color = Some(t.text_muted);
     v.panel_fill = t.bg;
-    v.window_fill = t.raised;
-    v.window_stroke = Stroke::new(1.0, t.raised_line);
     v.extreme_bg_color = t.card;
     v.faint_bg_color = t.card;
     v.code_bg_color = t.card;
@@ -40,9 +38,7 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
     v.text_options.font_hinting = false;
     v.window_shadow = Shadow::NONE;
-    v.popup_shadow = float_shadow(t);
     v.window_corner_radius = CornerRadius::same(RADIUS_FLOAT);
-    v.menu_corner_radius = CornerRadius::same(RADIUS_FLOAT);
     let w = &mut v.widgets;
     w.noninteractive.weak_bg_fill = t.bg;
     w.noninteractive.bg_fill = t.bg;
@@ -77,6 +73,7 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     style.spacing.scroll.fade.strength = 0.0;
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    crate::components::tooltip::apply(style, t);
 }
 
 /// Applies the theme to `ctx`: fonts, and both modes' styles from [`LIGHT`] and [`DARK`].

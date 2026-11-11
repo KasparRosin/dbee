@@ -529,6 +529,37 @@ fn a_choice_that_cannot_be_saved_still_applies_and_says_so() {
     let _ = std::fs::remove_file(file);
 }
 
+/// Review Focus 5: a toast and a tooltip showing recolour on the very next frame after a switch.
+/// The toast is the notice that the choice couldn't be saved; the tooltip a colour swatch's.
+#[test]
+fn a_toast_recolours_on_a_theme_switch() {
+    let file = std::env::temp_dir().join(dbee_testkit::unique("theme-not-a-dir"));
+    std::fs::write(&file, "x").unwrap();
+    let mut ui = window_with(Some(file.clone()), None, None);
+    ui.click("conn-kind-postgres");
+    ui.execute("ui.themeLight", json!({}));
+    ui.until("the toast", |ui| ui.toast().is_some());
+    let swatch = rect_of(&mut ui, "conn-color-red");
+    ui.rest(swatch.center());
+    for (mode, t) in [("light", dbee_ui_egui::theme::LIGHT), ("dark", dbee_ui_egui::theme::DARK)] {
+        if mode == "dark" {
+            ui.execute("ui.themeDark", json!({}));
+            ui.frame();
+        }
+        let toast = ui.toast().unwrap_or_else(|| panic!("{mode}: the toast"));
+        toast.assert_in(t.danger, t.on_danger, mode);
+        let tip = ui.text_in(egui::Rect::EVERYTHING, "red").map(|(r, _)| r).unwrap_or_else(|| panic!("{mode}: the swatch's tooltip"));
+        let frame = ui.shapes().into_iter().rev().find_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.blur_width == 0.0 && r.fill.a() == 255 && r.rect.contains_rect(tip) => Some(r),
+            _ => None,
+        });
+        let frame = frame.unwrap_or_else(|| panic!("{mode}: the tooltip's frame"));
+        assert_eq!((frame.fill, frame.stroke.color), (t.raised, t.raised_line), "{mode}: the tooltip's ground and edge");
+        assert_eq!(colour_of(&ui, tip.expand(1.0), "red"), Some(t.text), "{mode}: the tooltip's words");
+    }
+    let _ = std::fs::remove_file(file);
+}
+
 /// The notice after choosing Dark with the settings kept in `dir`.
 fn notice_for(dir: &std::path::Path) -> serde_json::Value {
     let mut ui = window_with(Some(dir.to_path_buf()), None, None);

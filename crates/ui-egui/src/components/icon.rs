@@ -12,7 +12,7 @@
 use egui::epaint::RectShape;
 use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2, pos2, vec2};
 
-/// One of the page's 32 icons, named as on the page (`icon/none` is [`Icon::NoColour`]).
+/// One of the page's 34 icons, named as on the page (`icon/none` is [`Icon::NoColour`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     ChevronDown,
@@ -47,6 +47,8 @@ pub enum Icon {
     MaterializedView,
     KeyPrimary,
     KeyForeign,
+    Success,
+    Error,
 }
 
 /// The table's header band: the page's 45 % of the icon's colour.
@@ -55,7 +57,7 @@ const TABLE_BAND: f32 = 0.45;
 const CURVE_STEPS: usize = 12;
 
 impl Icon {
-    pub const ALL: [Icon; 32] = [
+    pub const ALL: [Icon; 34] = [
         Icon::ChevronDown,
         Icon::ChevronRight,
         Icon::SortAscending,
@@ -88,6 +90,8 @@ impl Icon {
         Icon::MaterializedView,
         Icon::KeyPrimary,
         Icon::KeyForeign,
+        Icon::Success,
+        Icon::Error,
     ];
 
     /// The page's name for it, after `icon/`.
@@ -125,6 +129,8 @@ impl Icon {
             Icon::MaterializedView => "materialized-view",
             Icon::KeyPrimary => "key-primary",
             Icon::KeyForeign => "key-foreign",
+            Icon::Success => "success",
+            Icon::Error => "error",
         }
     }
 
@@ -151,7 +157,9 @@ impl Icon {
             Icon::NoColour => vec2(12.0, 12.0),
             Icon::Link => vec2(9.8, 9.8),
             Icon::Schema => vec2(13.0, 9.0),
-            Icon::Search | Icon::Table | Icon::View | Icon::MaterializedView | Icon::KeyPrimary | Icon::KeyForeign => vec2(14.0, 14.0),
+            Icon::Search | Icon::Table | Icon::View | Icon::MaterializedView | Icon::KeyPrimary | Icon::KeyForeign | Icon::Success | Icon::Error => {
+                vec2(14.0, 14.0)
+            }
         }
     }
 
@@ -328,6 +336,15 @@ impl Icon {
                 pen.line(&[p(5.46, 7.0), p(12.6, 7.0)]);
                 pen.line(&[p(10.08, 4.48), p(12.6, 7.0), p(10.08, 9.52)]);
             }
+            Icon::Success => {
+                pen.ring(p(7.0, 7.0), 6.4);
+                pen.round(&[p(4.2, 7.1), p(6.2, 9.1), p(9.9, 5.2)]);
+            }
+            Icon::Error => {
+                pen.ring(p(7.0, 7.0), 6.4);
+                pen.round(&[p(7.0, 3.9), p(7.0, 8.0)]);
+                pen.dot(p(7.0, 10.0), 0.7);
+            }
         }
     }
 }
@@ -483,8 +500,8 @@ mod tests {
 
     use super::*;
 
-    /// The page's icon nodes, 160919 to 160986: name and box.
-    const PAGE: [(&str, f32, f32); 32] = [
+    /// The page's icon nodes, 160919 to 160986, and 162610 and 162613: name and box.
+    const PAGE: [(&str, f32, f32); 34] = [
         ("icon/chevron-down", 8.0, 4.0),
         ("icon/chevron-right", 4.0, 8.0),
         ("icon/sort-ascending", 6.0, 8.0),
@@ -517,6 +534,8 @@ mod tests {
         ("icon/materialized-view", 14.0, 14.0),
         ("icon/key-primary", 14.0, 14.0),
         ("icon/key-foreign", 14.0, 14.0),
+        ("icon/success", 14.0, 14.0),
+        ("icon/error", 14.0, 14.0),
     ];
 
     /// Every shape `icon` paints centred on `center`, at `ppp` pixels per point.
@@ -559,13 +578,44 @@ mod tests {
     }
 
     #[test]
-    fn there_are_the_pages_32_icons() {
+    fn there_are_the_pages_34_icons() {
         let names: Vec<String> = Icon::ALL.iter().map(|i| format!("icon/{}", i.name())).collect();
-        assert_eq!(names.iter().collect::<HashSet<_>>().len(), 32, "32 distinct names: {names:?}");
+        assert_eq!(names.iter().collect::<HashSet<_>>().len(), 34, "34 distinct names: {names:?}");
         for (icon, name) in Icon::ALL.into_iter().zip(&names) {
             let page = PAGE.iter().find(|(n, _, _)| n == name);
             let Some((_, w, h)) = page else { panic!("{icon:?}: {name} isn't on the page") };
             assert_eq!(icon.size(), vec2(*w, *h), "{icon:?}: the page node's box");
+        }
+    }
+
+    #[test]
+    fn success_and_error_are_the_pages_drawings() {
+        // Nodes 162610 and 162613: a 1.2 ring of radius 6.4 round the box's centre (7, 7); in it
+        // the check (4.2, 7.1) (6.2, 9.1) (9.9, 5.2), or the bar (7, 3.9) to (7, 8) over a dot of
+        // radius 0.7 at (7, 10).
+        let near = |a: Pos2, b: Pos2| (a - b).length() < 1e-3;
+        for (icon, line) in [(Icon::Success, vec![(4.2, 7.1), (6.2, 9.1), (9.9, 5.2)]), (Icon::Error, vec![(7.0, 3.9), (7.0, 8.0)])] {
+            let shapes = drawn(icon, pos2(40.0, 30.0), Color32::BLACK, 1.0);
+            let ring = shapes.iter().find_map(|s| match s {
+                Shape::Circle(c) if c.stroke.width > 0.0 => Some(*c),
+                _ => None,
+            });
+            let ring = ring.unwrap_or_else(|| panic!("{icon:?}: the ring"));
+            assert_eq!((ring.radius, ring.stroke.width), (6.4, 1.2), "{icon:?}: the ring");
+            let at = |(x, y): (f32, f32)| ring.center + vec2(x - 7.0, y - 7.0);
+            let path = shapes.iter().find_map(|s| match s {
+                Shape::Path(p) => Some(p.points.clone()),
+                _ => None,
+            });
+            let path = path.unwrap_or_else(|| panic!("{icon:?}: the line"));
+            assert_eq!(path.len(), line.len(), "{icon:?}: {path:?}");
+            for (got, want) in path.iter().zip(line.iter().copied().map(at)) {
+                assert!(near(*got, want), "{icon:?}: {got:?} is not {want:?}");
+            }
+            let dot = shapes
+                .iter()
+                .any(|s| matches!(s, Shape::Circle(c) if c.radius == 0.7 && c.fill == Color32::BLACK && near(c.center, at((7.0, 10.0)))));
+            assert_eq!(dot, icon == Icon::Error, "{icon:?}: the dot only in the error");
         }
     }
 

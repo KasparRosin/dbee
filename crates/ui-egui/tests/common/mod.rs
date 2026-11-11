@@ -358,6 +358,55 @@ impl Ui {
     pub fn text_in(&self, within: egui::Rect, text: &str) -> Option<(egui::Rect, bool)> {
         self.texts().into_iter().find(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).map(|(r, g)| (r, g.elided))
     }
+
+    /// The notice's toast as the last frame drew it, once it shows (`None` before).
+    pub fn toast(&mut self) -> Option<Toast> {
+        let tag = self.tag("notice")?;
+        let f = |i: usize| tag["rect"][i].as_f64().unwrap_or(0.0) as f32;
+        let rect = egui::Rect::from_min_size(egui::pos2(f(0), f(1)), egui::vec2(f(2), f(3)));
+        let shapes = self.shapes();
+        let at = shapes.iter().rposition(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.rect == rect && r.fill.a() > 0))?;
+        let ground = match &shapes[at].1 {
+            egui::Shape::Rect(r) => r.fill,
+            _ => return None,
+        };
+        let on_it = &shapes[at + 1..];
+        let inside = |s: &egui::Shape| rect.contains_rect(s.visual_bounding_rect());
+        let words = text_colours(&on_it.iter().filter(|(_, s)| inside(s)).cloned().collect::<Vec<_>>());
+        let mut marks = Vec::new();
+        for (_, s) in on_it.iter().filter(|(_, s)| inside(s)) {
+            let drawn = match s {
+                egui::Shape::Path(p) => vec![p.fill, if let egui::epaint::ColorMode::Solid(c) = p.stroke.color { c } else { egui::Color32::RED }],
+                egui::Shape::Circle(c) => vec![c.fill, c.stroke.color],
+                egui::Shape::LineSegment { stroke, .. } => vec![stroke.color],
+                _ => continue,
+            };
+            marks.extend(drawn.into_iter().filter(|c| *c != egui::Color32::TRANSPARENT));
+        }
+        let blurred = shapes.iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.blur_width > 0.0 && r.rect.intersects(rect)));
+        Some(Toast { rect, ground, words, marks, shadow: blurred })
+    }
+}
+
+/// The notice's toast as drawn ([`Ui::toast`]): where, its ground, the colours of the words and of
+/// the marks (its icon, its close) drawn on it, and whether a shadow falls round it.
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub rect: egui::Rect,
+    pub ground: egui::Color32,
+    pub words: Vec<egui::Color32>,
+    pub marks: Vec<egui::Color32>,
+    pub shadow: bool,
+}
+
+impl Toast {
+    /// It is on `ground`, with words and marks all in `fg`, and both drawn.
+    pub fn assert_in(&self, ground: egui::Color32, fg: egui::Color32, at: &str) {
+        assert_eq!(self.ground, ground, "{at}: the toast's ground: {self:?}");
+        assert!(!self.words.is_empty() && self.words.iter().all(|c| *c == fg), "{at}: its words in {fg:?}: {self:?}");
+        assert!(self.marks.len() >= 2 && self.marks.iter().all(|c| *c == fg), "{at}: its icon and close in {fg:?}: {self:?}");
+        assert!(!self.shadow, "{at}: no shadow: {self:?}");
+    }
 }
 
 /// `shapes` in paint order, nested lists flattened, each with the rect it is clipped to.

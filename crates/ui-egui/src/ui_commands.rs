@@ -19,6 +19,7 @@ use dbee_engine::{CommandInfo, EngineError, Json, Outcome};
 use serde_json::json;
 
 use crate::DbeeApp;
+use crate::components::toast::Kind;
 
 /// One UI-only command; the same fields as the engine's `CommandSpec`.
 pub struct UiCommand {
@@ -184,7 +185,7 @@ fn copy(app: &mut DbeeApp, params: Json) -> Result<Outcome, EngineError> {
         }
         _ => 0,
     };
-    app.notice_again(copied_notice(rows.as_u64().unwrap_or(0)));
+    app.notice_again(Kind::Success, copied_notice(rows.as_u64().unwrap_or(0)));
     Ok(Outcome::Done(json!({ "rows": rows, "columns": done.remove("columns").unwrap_or(Json::Null), "bytes": bytes })))
 }
 

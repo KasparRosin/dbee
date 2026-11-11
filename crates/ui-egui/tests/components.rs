@@ -153,6 +153,8 @@ fn the_showcase_draws_in_both_modes() {
             "MENU: EDIT AS ON SCREENS; MENU/ITEM, MENU/SEPARATOR, KEYCAPS",
             "MENUBAR/TITLE OPEN, VIEW MENU, THEME SUBMENU: THE CHOSEN MARK SITS IN A LEFT COLUMN",
             "MENU/ITEM: DEFAULT, HOVER (THE KEYBOARD HIGHLIGHT LOOKS THE SAME), DISABLED, DESTRUCTIVE, DESTRUCTIVE HOVER; MENUBAR/TITLE: DEFAULT, OPEN",
+            "TOOLTIP: ONE LINE, WRAPPED AT 320; 4 PX BELOW THE POINTER, ITS LEFT EDGE AT THE POINTER",
+            "TOAST: SUCCESS, ERROR, ERROR WITHOUT AN ACTION; ICON/SUCCESS, ICON/ERROR",
         ];
         for caption in captions {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");

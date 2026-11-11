@@ -66,6 +66,7 @@ use crate::automation::Tags;
 use crate::components::chip::Chip;
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
+use crate::components::toast;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
@@ -373,7 +374,7 @@ pub(crate) fn form_done(
                 // The file is there now.
                 conn.form.create_file = false;
                 if let Some(note) = v.get("secretsNote").and_then(Json::as_str) {
-                    app.notice(sentence(&format!("The password was not saved: {note}")));
+                    app.notice(toast::Kind::Error, sentence(&format!("The password was not saved: {note}")));
                 }
             }
             _ => {}
@@ -520,7 +521,7 @@ fn open_switch(app: &mut DbeeApp, to: &SwitchTo) {
 fn connect_saved(app: &mut DbeeApp, id: &str) {
     match app.session.state().store.get(id).cloned() {
         Some(c) => apply_connect(app, &c),
-        None => app.notice("That connection is not saved any more.".into()),
+        None => app.notice(toast::Kind::Error, "That connection is not saved any more.".into()),
     }
 }
 
@@ -540,7 +541,7 @@ pub(crate) fn delete(app: &mut DbeeApp, id: &str) {
                 app.view.conn.new_connection();
             }
         }
-        Err(e) => app.notice(crate::app::notice_text(&e)),
+        Err(e) => app.notice(toast::Kind::Error, crate::app::notice_text(&e)),
     }
 }
 
@@ -650,7 +651,7 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
                 }
             }
             Ok(_) => {}
-            Err(e) => app.notice(crate::app::notice_text(&e)),
+            Err(e) => app.notice(toast::Kind::Error, crate::app::notice_text(&e)),
         },
         Act::AskDelete { id, name } => app.view.dialog = Some(Dialog::DeleteConnection { id, name }),
         Act::Test if !busy => run_form(app, TEST),

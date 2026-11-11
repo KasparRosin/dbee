@@ -78,6 +78,28 @@ pub const MENU_HEADING_GAP: f32 = 6.0;
 pub const MENU_TITLE_H: f32 = 24.0;
 pub const MENU_TITLE_PAD_X: f32 = 8.0;
 
+/// A tooltip (`tooltip`): its words this far in from its outside edge, across and down; at most
+/// this wide, its words wrapping inside.
+pub const TOOLTIP_PAD_X: i8 = 8;
+pub const TOOLTIP_PAD_Y: i8 = 4;
+pub const TOOLTIP_W: f32 = 320.0;
+
+/// A toast (`toast`): this tall for one line of words (a wrapped one grows by its lines), its
+/// parts this far in from its ends and this far apart; at most this wide, its words wrapping.
+pub const TOAST_H: f32 = 44.0;
+pub const TOAST_PAD_X: f32 = 12.0;
+pub const TOAST_GAP: f32 = 12.0;
+pub const TOAST_MAX_W: f32 = 480.0;
+/// A toast's action: a box this tall, its words this far in from its ends.
+pub const TOAST_ACTION_H: f32 = 28.0;
+pub const TOAST_ACTION_PAD_X: f32 = 12.0;
+/// A toast's close: the square round its glyph that a click reaches.
+pub const TOAST_CLOSE: f32 = 28.0;
+/// Where toasts stand: this far from the window's right edge and above what they sit on (the
+/// status bar), and this far apart.
+pub const TOAST_MARGIN: f32 = 12.0;
+pub const TOAST_STACK_GAP: f32 = 8.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;

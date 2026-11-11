@@ -514,6 +514,25 @@ fn run_buttons_say_why_they_cannot_run() {
     assert_eq!(notice, "There is no statement to run.");
 }
 
+/// Review Focus 4: a failure reads as an error toast (`danger`, its words and marks in
+/// `on_danger`, no shadow), 12 from the window's right edge and 12 above the status bar; the
+/// `notice` tag says what it always said.
+#[test]
+fn a_failed_command_shows_an_error_toast() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text("-- nothing here");
+    ui.click("query-run");
+    ui.until("the toast", |ui| ui.toast().is_some());
+    assert_eq!(ui.value("notice"), "There is no statement to run.");
+    let t = dbee_ui_egui::theme::LIGHT;
+    let toast = ui.toast().unwrap_or_else(|| panic!("the toast"));
+    toast.assert_in(t.danger, t.on_danger, "a failure");
+    let window = ui.harness.ctx.content_rect();
+    assert_eq!(toast.rect.right(), window.right() - 12.0, "12 from the right: {:?}", toast.rect);
+    assert_eq!(toast.rect.bottom(), window.bottom() - 30.0 - 12.0, "12 above the 30 tall status bar: {:?}", toast.rect);
+}
+
 #[test]
 fn the_split_between_editor_and_results_drags() {
     let db = dbee_testkit::require_testdb!();

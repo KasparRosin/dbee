@@ -14,6 +14,8 @@ pub mod menu;
 pub mod segmented;
 pub mod showcase;
 pub mod swatch;
+pub mod toast;
+pub mod tooltip;
 
 /// How a control is drawn this frame: hovered, showing keyboard focus, off.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

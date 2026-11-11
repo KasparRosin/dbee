@@ -90,6 +90,21 @@ fn ctrl_c_copies_values_only() {
     assert_eq!(ui.notice().as_deref(), Some("Copied 2 rows"));
 }
 
+/// Review Focus 4: a result reads as a success toast (`ink`, its words and marks in `on_ink`, no
+/// shadow); the `notice` tag says what it always said.
+#[test]
+fn copying_shows_a_success_toast() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ran(db, CUSTOMERS);
+    ui.click("grid-cell-1-1");
+    ui.ctrl("A");
+    ui.ctrl("C");
+    ui.until("the toast", |ui| ui.toast().is_some());
+    assert_eq!(ui.notice().as_deref(), Some("Copied 5 rows"));
+    let t = dbee_ui_egui::theme::LIGHT;
+    ui.toast().unwrap_or_else(|| panic!("the toast")).assert_in(t.ink, t.on_ink, "a result");
+}
+
 #[test]
 fn ctrl_shift_c_copies_with_header() {
     let db = dbee_testkit::require_testdb!();

@@ -33,6 +33,7 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::toast::Kind;
 use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
@@ -221,7 +222,7 @@ fn add_row(app: &mut DbeeApp) {
             }
         }
         Ok(_) => {}
-        Err(e) => app.notice(crate::app::notice_text(&e)),
+        Err(e) => app.notice(Kind::Error, crate::app::notice_text(&e)),
     }
 }
 

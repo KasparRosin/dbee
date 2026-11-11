@@ -66,6 +66,7 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::toast;
 use crate::grid::{CELL, GridSource, ROW_H};
 use crate::shortcuts;
 use crate::theme::{self, Text};
@@ -405,7 +406,7 @@ pub(crate) fn open(app: &mut DbeeApp, ctx: &egui::Context, row: usize, col: usiz
             ctx.request_repaint();
         }
         Ok(None) => {}
-        Err(why) => app.notice(why),
+        Err(why) => app.notice(toast::Kind::Error, why),
     }
 }
 
@@ -489,7 +490,7 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
         if let Some(ed) = take(app, ctx)
             && let Some(text) = discarded(&ed, why)
         {
-            app.notice(text.to_string());
+            app.notice(toast::Kind::Error, text.to_string());
         }
         return;
     }
@@ -523,11 +524,10 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
     }
     app.carry.extend(wait);
     if let Some(n) = dropped {
-        app.notice(format!(
-            "The pasted text is too large to edit inline: the value would be {} (at most {}).",
-            size_text(n),
-            size_text(MAX_INLINE_BYTES)
-        ));
+        app.notice(
+            toast::Kind::Error,
+            format!("The pasted text is too large to edit inline: the value would be {} (at most {}).", size_text(n), size_text(MAX_INLINE_BYTES)),
+        );
     }
 }
 
