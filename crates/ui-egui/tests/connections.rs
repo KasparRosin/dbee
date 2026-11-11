@@ -732,6 +732,31 @@ fn single_click_loads_and_double_click_connects() {
     assert_eq!(recent["value"], "pg14");
 }
 
+/// The design: a click on the scrim does nothing for a dialog. It stays open, and what is under the
+/// scrim gets no click: a saved card there is neither chosen nor, on a double click, opened.
+/// Escape still cancels.
+#[test]
+fn a_click_on_the_scrim_does_nothing() {
+    let mut ui = ui();
+    let card = ui.save(&silent_config(1), None);
+    let at = ui.centre(&card);
+    ui.right_click(&card);
+    ui.click("conn-menu-delete");
+    assert_eq!(ui.inspect()["dialog"], "deleteConnection");
+    let before = ui.document();
+    for count in [1, 2] {
+        ui.ok("ui.click", json!({ "x": at.x, "y": at.y, "count": count }));
+        ui.frame();
+        let i = ui.inspect();
+        assert_eq!(i["dialog"], "deleteConnection", "a click ({count}) on the scrim leaves the dialog open: {i}");
+    }
+    assert_eq!(ui.document(), before, "nothing under the scrim was clicked");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"].as_array().map(Vec::len), Some(1), "nothing deleted");
+    ui.key("Escape");
+    assert_eq!(ui.inspect()["dialog"], Json::Null, "Escape cancels");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"].as_array().map(Vec::len), Some(1), "nothing deleted");
+}
+
 #[test]
 fn delete_asks_first() {
     let mut ui = ui();

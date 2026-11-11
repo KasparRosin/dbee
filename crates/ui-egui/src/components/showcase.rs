@@ -10,6 +10,7 @@ use super::Look;
 use super::button::{BarButton, BoxButton, IconButton, TextButton};
 use super::checkbox::Checkbox;
 use super::chip::Chip;
+use super::dialog::{Button, Dialog};
 use super::dropdown::Dropdown;
 use super::icon::Icon;
 use super::input::{Field, Input};
@@ -19,7 +20,7 @@ use super::segmented::{Segment, Segmented};
 use super::swatch::{COLOURS, Swatch};
 use super::toast::Toast;
 use super::tooltip;
-use crate::theme::size::{KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24};
+use crate::theme::size::{KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32};
 use crate::theme::{Text, Tokens, tokens};
 
 /// The page's frames: 20 between sections.
@@ -50,6 +51,12 @@ const SCENE: Vec2 = vec2(560.0, 190.0);
 const MENU_BAR_W: f32 = 240.0;
 const MENU_BAR_PAD: Vec2 = vec2(4.0, 3.0);
 const SUBMENU_OVERLAP: f32 = 4.0;
+/// The Dialogs frame's scrim scene: a window of this size, its query text this far in, the dialog
+/// this far in.
+const DIALOG_SCENE: Vec2 = vec2(640.0, 240.0);
+const BEHIND_AT: Vec2 = vec2(24.0, 20.0);
+const DIALOG_AT: Vec2 = vec2(100.0, 40.0);
+const BEHIND: &str = "select o.id, c.name as customer, o.total\nfrom shop.orders o\njoin shop.customers c on c.id = o.customer_id\nwhere o.total > 100\norder by o.id desc\nlimit 50;";
 
 /// The icons in the order of the page's Icons frame.
 const ICONS: [Icon; 32] = [
@@ -120,6 +127,90 @@ pub fn show(ui: &mut Ui) {
         });
         menus(ui);
         tooltips_and_toasts(ui);
+        dialogs(ui);
+    });
+}
+
+/// The dialogs and the scrim, as the page's Dialogs frame shows them: two to a row, 24 apart and
+/// 32 between rows.
+fn dialogs(ui: &mut Ui) {
+    let focused = Look { focused: true, ..Look::default() };
+    let id = |n: &str| egui::Id::new("showcase-dialog").with(n);
+    let cancel = Button::outline("Cancel", "dialog-cancel");
+    section(
+        ui,
+        "dialog: Screens' dialogs from the components (database password, fill from URL with an error, close anyway, delete connection)",
+        SPACE_8,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing = vec2(SPACE_24, SPACE_32);
+                ui.horizontal_top(|ui| {
+                    let (mut password, mut save, mut url) = ("secretpass".to_owned(), true, "shop@pg14:5432".to_owned());
+                    Dialog::new(id("password"), "Database password")
+                        .text("Enter the password of shop on pg14.internal.")
+                        .body(|ui, _| {
+                            ui.add(Input::body(&mut password).password(true).look(focused));
+                            ui.add(Checkbox::new(&mut save, "Save in keyring"));
+                        })
+                        .buttons([Button::primary("Connect", "dialog-ok"), cancel])
+                        .in_place(ui);
+                    Dialog::new(id("url"), "Fill from URL")
+                        .body(|ui, _| {
+                            Field::unlabelled(Input::body(&mut url).error(true)).error(Some("Not a database URL")).show(ui);
+                        })
+                        .buttons([Button::primary("Fill", "dialog-ok"), cancel])
+                        .in_place(ui);
+                });
+                ui.horizontal_top(|ui| {
+                    Dialog::new(id("close"), "Close anyway?")
+                        .text("Close Query 1? Its query text will be lost.")
+                        .buttons([Button::danger("Close anyway", "dialog-ok"), cancel])
+                        .in_place(ui);
+                    Dialog::new(id("delete"), "Delete connection")
+                        .text("Delete “Shop live”? Its saved passwords are deleted with it.")
+                        .buttons([Button::danger("Delete", "dialog-ok"), cancel])
+                        .in_place(ui);
+                });
+            });
+        },
+    );
+    section(
+        ui,
+        "new: Apply again (an Apply whose outcome is unknown); the commit prompt on closing a tab or switching connections, COMMIT is the main button",
+        SPACE_8,
+        |ui| {
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_24;
+                Dialog::new(id("apply"), "Apply again?")
+                    .text(
+                        "Connection lost during Apply — the outcome is unknown. Reset and reload to check what was written, or Apply again to retry.",
+                    )
+                    .buttons([Button::danger("Apply again", "dialog-ok"), cancel])
+                    .in_place(ui);
+                // The page's placeholder words: the commit prompt isn't built yet.
+                Dialog::new(id("commit"), "Commit the transaction?")
+                    .text("Query 1 has changes that aren't committed.")
+                    .buttons([Button::primary("Commit", "commit"), Button::outline("Rollback", "rollback"), cancel])
+                    .in_place(ui);
+            });
+        },
+    );
+    section(ui, "scrim: over the whole window; the dialog centred, near the top", SPACE_8, |ui| {
+        let t = tokens(ui.ctx());
+        let (scene, _) = ui.allocate_exact_size(DIALOG_SCENE, Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(scene, CornerRadius::ZERO, t.bg);
+        Text::Code.paint(p, scene.min + BEHIND_AT, Align2::LEFT_TOP, BEHIND, t.text);
+        p.rect_filled(scene, CornerRadius::ZERO, t.scrim);
+        // The page draws the scene's edge over what it holds, the scrim too.
+        p.rect_stroke(scene, CornerRadius::ZERO, Stroke::new(1.0, t.line), egui::StrokeKind::Inside);
+        let at = UiBuilder::new().max_rect(Rect::from_min_size(scene.min + DIALOG_AT, DIALOG_SCENE)).layout(Layout::top_down(Align::Min));
+        ui.scope_builder(at, |ui| {
+            Dialog::new(id("scrim"), "Close anyway?")
+                .text("Close Query 1? Its query text will be lost.")
+                .buttons([Button::danger("Close anyway", "dialog-ok"), cancel])
+                .in_place(ui);
+        });
     });
 }
 

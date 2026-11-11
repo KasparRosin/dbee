@@ -15,36 +15,31 @@
 //! Programmatic calls (the control channel's `engine.execute`) never come here: they get the
 //! `needs…` error back.
 //!
-//! Every dialog is a fixed-width card at a fixed place (centred, near the top), so its widgets are
-//! where `ui.inspect` says from its first frame on. Automation ids: `dialog-ok`, `dialog-cancel`,
-//! `dialog-text`, and per dialog `dialog-url`, `dialog-error`, `dialog-fingerprint`,
-//! `dialog-secret`, `dialog-save`. The URL and secret fields are tagged as secrets: `ui.inspect`
-//! says whether they are filled in, never what they hold, and neither `Debug` nor the logs show
-//! them.
+//! Every dialog is drawn by [`crate::components::dialog`]: a fixed-width card at a fixed place
+//! (centred, near the top) over the scrim, so its widgets are where `ui.inspect` says from its
+//! first frame on. Escape and Cancel close it; a click on the scrim does nothing. Automation ids:
+//! `dialog-ok`, `dialog-cancel`, `dialog-text`, and per dialog `dialog-url`, `dialog-error`,
+//! `dialog-fingerprint`, `dialog-secret`, `dialog-save`. The URL and secret fields are tagged as
+//! secrets: `ui.inspect` says whether they are filled in, never what they hold, and neither
+//! `Debug` nor the logs show them.
 
 use dbee_config::{ConnectionConfig, DbKind};
 use dbee_engine::{EngineError, Json, Need, Outcome};
-use egui::{Align, Align2, CornerRadius, Frame, Key, Layout, Margin, Stroke, vec2};
+use egui::Key;
 use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
-use crate::components::button::BoxButton;
 use crate::components::checkbox::Checkbox;
+use crate::components::dialog::{self, Button};
 use crate::components::input::{Field, Input};
 use crate::connections;
-use crate::theme::{
-    self, Text,
-    size::{BUTTON_H, DIALOG_BUTTON_MIN_W, RADIUS_FLOAT},
-};
+use crate::theme::{self, Text};
 use crate::{DbeeApp, connections::tilde};
 
-/// The width of a dialog's content.
-const WIDTH: f32 = 460.0;
-/// The space around a dialog's content.
-const MARGIN: i8 = 20;
-/// How far below the top of the window dialogs sit, at most.
-const TOP: f32 = 140.0;
+/// Where a dialog's main button and its Cancel are among its buttons (the first on the right).
+const OK: usize = 0;
+const CANCEL: usize = 1;
 
 /// A command to run again once the user has answered, with the params it ran with.
 pub(crate) struct Rerun {
@@ -308,122 +303,58 @@ fn with(mut params: Json, key: &str, value: Json) -> Json {
 }
 
 fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
-    let t = theme::tokens(ctx);
-    let screen = ctx.content_rect();
-    let outer = WIDTH + 2.0 * f32::from(MARGIN) + 2.0;
-    // Fixed left-top corner: the first frame (egui's sizing pass) puts every widget where the
-    // following frames do, so a click on a rect from `ui.inspect` lands.
-    let offset = vec2(((screen.width() - outer) / 2.0).max(0.0), (screen.height() * 0.18).min(TOP));
     let id = egui::Id::new("dbee-dialog").with(dialog.name());
-    // The sizing pass lays the content out in the default size: all the height below the corner,
-    // so no row gets less room than in the frames after it.
-    let below = (screen.height() - offset.y).max(1.0);
-    // No fade-in: a screenshot right after a dialog opens shows it as it is.
-    let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, offset).default_size(vec2(outer, below)).fade_in(false);
-    let frame = Frame::new()
-        .fill(t.raised)
-        .stroke(Stroke::new(1.0, t.line))
-        .shadow(theme::float_shadow(t))
-        .corner_radius(CornerRadius::same(RADIUS_FLOAT))
-        .inner_margin(Margin::same(MARGIN));
-    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(t.scrim).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        ui.with_layout(Layout::top_down(Align::Min), |ui| body(ui, dialog, tags)).inner
-    });
-    match modal.inner {
-        Act::None if modal.should_close() => Act::Cancel,
-        act => act,
-    }
-}
-
-fn title(ui: &mut egui::Ui, text: &str) {
-    ui.label(Text::Title.rich(text));
-    ui.add_space(6.0);
-}
-
-fn text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, text: &str) {
-    let r = ui.add(egui::Label::new(text).wrap());
-    tags.tag_value_as(id, &r, text, true);
-}
-
-fn muted(ui: &mut egui::Ui, text: &str) {
-    ui.add(egui::Label::new(Text::Small.rich(text).color(theme::tokens(ui.ctx()).text_muted)).wrap());
-}
-
-/// The OK and Cancel buttons, right-aligned: `(ok clicked, cancel clicked)`. Without `cancel`
-/// only OK shows.
-fn buttons(ui: &mut egui::Ui, tags: &mut Tags, ok: &str, ok_enabled: bool, danger: bool, cancel: bool) -> (bool, bool) {
-    ui.add_space(12.0);
-    // Top-aligned: egui centres nothing in a dialog's first frame (its sizing pass), so a centred
-    // row would sit a pixel off there.
-    ui.allocate_ui_with_layout(vec2(WIDTH, BUTTON_H), Layout::right_to_left(Align::Min), |ui| {
-        let button = if danger { BoxButton::danger(ok) } else { BoxButton::primary(ok) };
-        let ok_r = ui.add_enabled(ok_enabled, button.min_width(DIALOG_BUTTON_MIN_W));
-        tags.tag_value_as("dialog-ok", &ok_r, ok, ok_enabled);
-        let cancelled = if cancel {
-            let r = ui.add(BoxButton::outline("Cancel").min_width(DIALOG_BUTTON_MIN_W));
-            tags.tag_value_as("dialog-cancel", &r, "Cancel", true);
-            r.clicked()
-        } else {
-            false
-        };
-        (ok_r.clicked(), cancelled)
-    })
-    .inner
-}
-
-/// Asks for focus until the field has it (the first frame of a dialog may not grant it).
-fn focus(r: &egui::Response, focused: &mut bool) {
-    if !*focused {
-        r.request_focus();
-        *focused = r.has_focus();
-    }
-}
-
-fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
-    let t = theme::tokens(ui.ctx());
+    let ok = |label| Button::primary(label, "dialog-ok");
+    let cancel = Button::outline("Cancel", "dialog-cancel");
     match dialog {
         Dialog::FillFromUrl { url, error, focused, kinds } => {
-            title(ui, "Fill from URL");
-            text(ui, tags, "dialog-text", &format!("Paste a {} URL. The parts it has replace those in the form.", schemes(kinds)));
-            ui.add_space(8.0);
+            let text = format!("Paste a {} URL. The parts it has replace those in the form.", schemes(kinds));
             let hint = url_hint(kinds);
-            let input = Input::data(url).id(egui::Id::new("dialog-url")).placeholder(&hint).desired_width(WIDTH).error(error.is_some());
-            // The line for the reason a URL did not parse keeps its room.
-            let shown = Field::unlabelled(input).error(error.as_deref()).keep_error_room(true).show(ui);
-            let r = shown.input;
-            // The URL can carry a password.
-            tags.tag_secret_as("dialog-url", &r, !url.is_empty(), true);
-            focus(&r, focused);
-            let entered = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            if let (Some(e), Some(line)) = (error.as_ref(), shown.error.as_ref()) {
-                tags.tag_value_as("dialog-error", line, e.as_str(), true);
-            }
-            let (ok, cancel) = buttons(ui, tags, "Fill", !url.trim().is_empty(), false, true);
-            if cancel {
+            let mut entered = false;
+            let shown = dialog::Dialog::new(id, "Fill from URL")
+                .text(&text)
+                .body(|ui, buttons| {
+                    let input = Input::data(url).id(egui::Id::new("dialog-url")).placeholder(&hint).error(error.is_some());
+                    // The line for the reason a URL did not parse keeps its room.
+                    let field = Field::unlabelled(input).error(error.as_deref()).keep_error_room(true).show(ui);
+                    // The URL can carry a password.
+                    tags.tag_secret_as("dialog-url", &field.input, !url.is_empty(), true);
+                    focus(&field.input, focused);
+                    entered = field.input.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    if let (Some(e), Some(line)) = (error.as_ref(), field.error.as_ref()) {
+                        tags.tag_value_as("dialog-error", line, e.as_str(), true);
+                    }
+                    buttons[OK].enabled = !url.trim().is_empty();
+                })
+                .buttons([ok("Fill"), cancel])
+                .show(ctx);
+            let pressed = tagged(tags, &shown, &text);
+            if pressed == Some(CANCEL) {
                 Act::Cancel
-            } else if (ok || entered) && !url.trim().is_empty() {
+            } else if (pressed == Some(OK) || entered) && !url.trim().is_empty() {
                 Act::ParseUrl(url.clone())
             } else {
                 Act::None
             }
         }
         Dialog::HostKey { host, key_type, fingerprint, rerun } => {
-            title(ui, "Unknown SSH server");
-            text(ui, tags, "dialog-text", &format!("dbee has not connected to {host} before. Its {key_type} host key has this fingerprint:"));
-            ui.add_space(6.0);
-            let r = ui.add(egui::Label::new(Text::Data.rich(fingerprint.as_str())).selectable(true));
-            tags.tag_value_as("dialog-fingerprint", &r, fingerprint.as_str(), true);
-            ui.add_space(6.0);
-            muted(ui, "Trust it only if it is the fingerprint the server's administrator gave you. dbee then adds it to ~/.ssh/known_hosts.");
-            let (ok, cancel) = buttons(ui, tags, "Trust and connect", true, false, true);
-            if cancel {
-                Act::Cancel
-            } else if ok {
-                let params = with(rerun.params.take(), "trustHostKey", json!(fingerprint));
-                Act::Rerun(Rerun { command: rerun.command, params, origin: rerun.origin })
-            } else {
-                Act::None
+            let text = format!("dbee has not connected to {host} before. Its {key_type} host key has this fingerprint:");
+            let shown = dialog::Dialog::new(id, "Unknown SSH server")
+                .text(&text)
+                .body(|ui, _| {
+                    let r = ui.add(egui::Label::new(Text::Data.rich(fingerprint.as_str())).selectable(true));
+                    tags.tag_value_as("dialog-fingerprint", &r, fingerprint.as_str(), true);
+                    muted(ui, "Trust it only if it is the fingerprint the server's administrator gave you. dbee then adds it to ~/.ssh/known_hosts.");
+                })
+                .buttons([ok("Trust and connect"), cancel])
+                .show(ctx);
+            match tagged(tags, &shown, &text) {
+                Some(OK) => {
+                    let params = with(rerun.params.take(), "trustHostKey", json!(fingerprint));
+                    Act::Rerun(Rerun { command: rerun.command, params, origin: rerun.origin })
+                }
+                Some(_) => Act::Cancel,
+                None => Act::None,
             }
         }
         Dialog::Secret { ask, line, value, keep, save, focused, rerun } => {
@@ -432,34 +363,39 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 SecretAsk::Password => "Database password",
                 SecretAsk::SshPassword => "SSH password",
             };
-            title(ui, heading);
-            text(ui, tags, "dialog-text", line);
-            ui.add_space(8.0);
-            let r = ui.add(Input::body(value).id(egui::Id::new("dialog-secret")).password(true).desired_width(WIDTH));
-            tags.tag_secret_as("dialog-secret", &r, !value.is_empty(), true);
-            focus(&r, focused);
-            let entered = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            ui.add_space(4.0);
-            match keep {
-                Keep::NotOffered => {}
-                Keep::Yes { .. } => {
-                    let r = ui.add(Checkbox::new(save, "Save in keyring"));
-                    tags.tag_value_as("dialog-save", &r, *save, true);
-                }
-                Keep::No(why) => {
-                    let mut off = false;
-                    ui.horizontal_top(|ui| {
-                        let r = ui.add_enabled(false, Checkbox::new(&mut off, "Save in keyring"));
-                        tags.tag_value_as("dialog-save", &r, false, false);
-                        ui.label(Text::Small.rich(*why).color(t.text_muted));
-                    });
-                }
-            }
             let ok_label = if rerun.command == connections::TEST { "Test" } else { "Connect" };
-            let (ok, cancel) = buttons(ui, tags, ok_label, !value.is_empty(), false, true);
-            if cancel {
+            let t = theme::tokens(ctx);
+            let mut entered = false;
+            let shown = dialog::Dialog::new(id, heading)
+                .text(line)
+                .body(|ui, buttons| {
+                    let r = ui.add(Input::body(value).id(egui::Id::new("dialog-secret")).password(true));
+                    tags.tag_secret_as("dialog-secret", &r, !value.is_empty(), true);
+                    focus(&r, focused);
+                    entered = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    match keep {
+                        Keep::NotOffered => {}
+                        Keep::Yes { .. } => {
+                            let r = ui.add(Checkbox::new(save, "Save in keyring"));
+                            tags.tag_value_as("dialog-save", &r, *save, true);
+                        }
+                        Keep::No(why) => {
+                            let mut off = false;
+                            ui.horizontal_top(|ui| {
+                                let r = ui.add_enabled(false, Checkbox::new(&mut off, "Save in keyring"));
+                                tags.tag_value_as("dialog-save", &r, false, false);
+                                ui.label(Text::Small.rich(*why).color(t.text_muted));
+                            });
+                        }
+                    }
+                    buttons[OK].enabled = !value.is_empty();
+                })
+                .buttons([ok(ok_label), cancel])
+                .show(ctx);
+            let pressed = tagged(tags, &shown, line);
+            if pressed == Some(CANCEL) {
                 Act::Cancel
-            } else if (ok || entered) && !value.is_empty() {
+            } else if (pressed == Some(OK) || entered) && !value.is_empty() {
                 let mut params = with(rerun.params.take(), ask.param(), json!(std::mem::take(value)));
                 if *save && matches!(keep, Keep::Yes { .. }) {
                     params = with(params, "savePassword", json!(true));
@@ -471,36 +407,54 @@ fn body(ui: &mut egui::Ui, dialog: &mut Dialog, tags: &mut Tags) -> Act {
         }
         Dialog::Confirm { message, what, rerun } => {
             let (heading, button) = confirm_words(what);
-            title(ui, heading);
-            text(ui, tags, "dialog-text", message);
-            let (ok, cancel) = buttons(ui, tags, button, true, true, true);
-            if cancel {
-                Act::Cancel
-            } else if ok {
-                let params = with(rerun.params.take(), "force", json!(true));
-                Act::Rerun(Rerun { command: rerun.command, params, origin: rerun.origin })
-            } else {
-                Act::None
+            let shown = dialog::Dialog::new(id, heading).text(message).buttons([Button::danger(button, "dialog-ok"), cancel]).show(ctx);
+            match tagged(tags, &shown, message) {
+                Some(OK) => {
+                    let params = with(rerun.params.take(), "force", json!(true));
+                    Act::Rerun(Rerun { command: rerun.command, params, origin: rerun.origin })
+                }
+                Some(_) => Act::Cancel,
+                None => Act::None,
             }
         }
-        Dialog::DeleteConnection { id, name } => {
-            title(ui, "Delete connection");
-            text(ui, tags, "dialog-text", &format!("Delete “{name}”? Its saved passwords are deleted with it."));
-            let (ok, cancel) = buttons(ui, tags, "Delete", true, true, true);
-            if cancel {
-                Act::Cancel
-            } else if ok {
-                Act::Delete(id.clone())
-            } else {
-                Act::None
+        Dialog::DeleteConnection { id: connection, name } => {
+            let text = format!("Delete “{name}”? Its saved passwords are deleted with it.");
+            let shown = dialog::Dialog::new(id, "Delete connection").text(&text).buttons([Button::danger("Delete", "dialog-ok"), cancel]).show(ctx);
+            match tagged(tags, &shown, &text) {
+                Some(OK) => Act::Delete(connection.clone()),
+                Some(_) => Act::Cancel,
+                None => Act::None,
             }
         }
         Dialog::Requested { name } => {
-            title(ui, name);
-            text(ui, tags, "dialog-text", &format!("A command asked for the “{name}” dialog, which this version of dbee does not have."));
-            let (ok, _) = buttons(ui, tags, "Close", true, false, false);
-            if ok { Act::Cancel } else { Act::None }
+            let text = format!("A command asked for the “{name}” dialog, which this version of dbee does not have.");
+            // Its one button, Close, is its cancel too: Escape presses it.
+            let shown = dialog::Dialog::new(id, name).text(&text).buttons([ok("Close")]).show(ctx);
+            if tagged(tags, &shown, &text).is_some() { Act::Cancel } else { Act::None }
         }
+    }
+}
+
+/// Tags what `shown` drew, its text (`text`) and its buttons; the button pressed.
+fn tagged(tags: &mut Tags, shown: &dialog::Shown, text: &str) -> Option<usize> {
+    if let Some(r) = &shown.text {
+        tags.tag_value_as("dialog-text", r, text, true);
+    }
+    for (button, r) in &shown.buttons {
+        tags.tag_value_as(button.tag, r, button.label, button.enabled);
+    }
+    shown.pressed
+}
+
+fn muted(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(Text::Small.rich(text).color(theme::tokens(ui.ctx()).text_muted)).wrap());
+}
+
+/// Asks for focus until the field has it (the first frame of a dialog may not grant it).
+fn focus(r: &egui::Response, focused: &mut bool) {
+    if !*focused {
+        r.request_focus();
+        *focused = r.has_focus();
     }
 }
 
@@ -519,6 +473,374 @@ mod tests {
         match &app.view.dialog {
             Some(Dialog::Secret { line, .. }) => line.clone(),
             other => panic!("not a secret dialog: {other:?}"),
+        }
+    }
+
+    use egui::{Event, Key, Rect, Theme, vec2};
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use crate::components::{Edge, both, edges_in, fills_in, showcase, texts};
+
+    /// What a dialog's answer does, as `draw` says it (the params with any secret in them).
+    #[derive(Debug, PartialEq)]
+    enum Done {
+        Cancel,
+        Rerun(&'static str, Json),
+        ParseUrl(String),
+        Delete(String),
+    }
+
+    /// A dialog drawn by `draw` each frame, with its tags and what it answered.
+    struct Open {
+        dialog: Dialog,
+        tags: Tags,
+        done: Vec<Done>,
+    }
+
+    fn open(theme: Theme, dialog: Dialog) -> Harness<'static, Open> {
+        let mut ready = false;
+        let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
+            move |ui, s: &mut Open| {
+                if !ready {
+                    showcase::prepare(ui.ctx(), theme);
+                    ready = true;
+                    ui.ctx().request_repaint();
+                    return;
+                }
+                s.tags.begin_frame();
+                let done = match draw(ui.ctx(), &mut s.dialog, &mut s.tags) {
+                    Act::None => None,
+                    Act::Cancel => Some(Done::Cancel),
+                    Act::Rerun(r) => Some(Done::Rerun(r.command, r.params)),
+                    Act::ParseUrl(url) => Some(Done::ParseUrl(url)),
+                    Act::Delete(id) => Some(Done::Delete(id)),
+                };
+                s.done.extend(done);
+            },
+            Open { dialog, tags: Tags::default(), done: Vec::new() },
+        );
+        h.run();
+        h
+    }
+
+    fn rerun() -> Rerun {
+        Rerun { command: connections::OPEN, params: json!({ "id": "c1" }), origin: Origin::Menu }
+    }
+
+    fn secret(ask: SecretAsk, keep: Keep) -> Dialog {
+        let save = matches!(keep, Keep::Yes { checked: true });
+        Dialog::Secret {
+            ask,
+            line: "Enter the password of ann on db.example.".into(),
+            value: String::new(),
+            keep,
+            save,
+            focused: false,
+            rerun: rerun(),
+        }
+    }
+
+    fn confirm(what: &str) -> Dialog {
+        Dialog::Confirm { message: "Close Query 1? Its query text will be lost.".into(), what: what.into(), rerun: rerun() }
+    }
+
+    /// Every dialog, by what `ui.inspect` names it.
+    fn every() -> Vec<(&'static str, Dialog)> {
+        vec![
+            ("fillFromUrl", Dialog::fill_from_url(vec![DbKind::Postgres])),
+            (
+                "hostKey",
+                Dialog::HostKey { host: "db.example:22".into(), key_type: "ssh-ed25519".into(), fingerprint: "SHA256:abcdef".into(), rerun: rerun() },
+            ),
+            ("password", secret(SecretAsk::Password, Keep::Yes { checked: true })),
+            (
+                "passphrase",
+                secret(SecretAsk::Passphrase { key: "/home/ann/.ssh/id_ed25519".into() }, Keep::No("There is no keyring, so dbee asks each time.")),
+            ),
+            ("sshPassword", secret(SecretAsk::SshPassword, Keep::NotOffered)),
+            ("confirm", confirm("closeTab")),
+            ("confirm", confirm("applyAfterUnknownOutcome")),
+            ("deleteConnection", Dialog::DeleteConnection { id: "c1".into(), name: "Shop live".into() }),
+            ("export", Dialog::Requested { name: "export" }),
+        ]
+    }
+
+    /// The tag `id`'s entry in `ui.inspect`'s list.
+    fn entry(h: &Harness<'_, Open>, id: &str) -> Option<Json> {
+        h.state().tags.to_json().as_array().and_then(|a| a.iter().find(|e| e["id"] == id).cloned())
+    }
+
+    fn rect(h: &Harness<'_, Open>, id: &str) -> Rect {
+        h.state().tags.rect(id).unwrap_or_else(|| panic!("`{id}` drawn: {:?}", h.state().tags.ids()))
+    }
+
+    /// Types `text` into the focused field, then a frame.
+    fn type_in(h: &mut Harness<'_, Open>, text: &str) {
+        h.event(Event::Text(text.into()));
+        h.run();
+    }
+
+    #[test]
+    fn escape_cancels_every_dialog() {
+        for (name, dialog) in every() {
+            let mut h = open(Theme::Light, dialog);
+            assert!(h.state().done.is_empty(), "{name}: open");
+            h.key_press(Key::Escape);
+            h.run();
+            assert_eq!(h.state().done, [Done::Cancel], "{name}: Escape cancels");
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_scrim_does_nothing() {
+        // The design: a click on the scrim leaves the dialog open and answers nothing; Escape and
+        // Cancel still close it.
+        for (name, dialog) in every() {
+            let mut h = open(Theme::Light, dialog);
+            let ok = rect(&h, "dialog-ok");
+            for at in [egui::pos2(20.0, 20.0), egui::pos2(500.0, 690.0), egui::pos2(ok.right() + 60.0, ok.center().y)] {
+                h.hover_at(at);
+                h.drag_at(at);
+                h.drop_at(at);
+                h.run();
+            }
+            assert!(h.state().done.is_empty(), "{name}: the scrim answered nothing: {:?}", h.state().done);
+            assert_eq!(rect(&h, "dialog-ok"), ok, "{name}: still open, where it was");
+        }
+    }
+
+    #[test]
+    fn enter_submits_the_field_dialogs() {
+        let mut h = open(Theme::Light, Dialog::fill_from_url(vec![DbKind::Postgres]));
+        type_in(&mut h, "postgres://ann@db.example/shop");
+        h.key_press(Key::Enter);
+        h.run();
+        assert_eq!(h.state().done, [Done::ParseUrl("postgres://ann@db.example/shop".into())], "Enter in the URL field fills");
+        let mut h = open(Theme::Light, secret(SecretAsk::Password, Keep::Yes { checked: true }));
+        type_in(&mut h, "pw-4");
+        h.key_press(Key::Enter);
+        h.run();
+        let params = json!({ "id": "c1", "password": "pw-4", "savePassword": true });
+        assert_eq!(h.state().done, [Done::Rerun(connections::OPEN, params)], "Enter in the password field connects");
+        // Nothing typed: Enter does nothing.
+        let mut h = open(Theme::Light, secret(SecretAsk::SshPassword, Keep::NotOffered));
+        h.key_press(Key::Enter);
+        h.run();
+        assert!(h.state().done.is_empty(), "nothing typed, nothing sent");
+    }
+
+    #[test]
+    fn the_url_error_keeps_its_line_and_takes_the_red_edge() {
+        // Node 162794: the reason a URL didn't parse in `small` `danger` under the field, which
+        // takes a red edge even while it has focus; with no reason the line's room stays, so the
+        // buttons don't move.
+        for (theme, t) in both() {
+            let mut h = open(theme, Dialog::fill_from_url(vec![DbKind::Postgres]));
+            let (url, ok) = (rect(&h, "dialog-url"), rect(&h, "dialog-ok"));
+            let shapes = h.output().shapes.clone();
+            assert_eq!(
+                edges_in(&shapes, url, 0.0),
+                [Edge { outer: url, width: 2.0, colour: t.ink, radius: egui::CornerRadius::same(2) }],
+                "{theme:?}: focused"
+            );
+            if let Dialog::FillFromUrl { error, .. } = &mut h.state_mut().dialog {
+                *error = Some("Not a database URL".into());
+            }
+            h.run();
+            assert_eq!(h.ctx.memory(|m| m.focused()), Some(egui::Id::new("dialog-url")), "{theme:?}: still focused");
+            let shapes = h.output().shapes.clone();
+            let red = Edge { outer: url, width: 1.0, colour: t.danger, radius: egui::CornerRadius::same(2) };
+            assert_eq!(edges_in(&shapes, url, 0.0), [red], "{theme:?}: the red edge wins over the focus edge");
+            let line = rect(&h, "dialog-error");
+            assert_eq!(h.state().tags.value("dialog-error"), Some(&json!("Not a database URL")), "{theme:?}");
+            let drawn = texts(&shapes).into_iter().find(|(w, _, _)| w == "Not a database URL");
+            let (_, at, colour) = drawn.unwrap_or_else(|| panic!("{theme:?}: the reason drawn"));
+            assert_eq!(colour, t.danger, "{theme:?}: in danger");
+            assert!((at.top() - url.bottom() - 4.0).abs() < 0.5 && line.left() == url.left(), "{theme:?}: under the field: {at:?}");
+            assert_eq!((rect(&h, "dialog-url"), rect(&h, "dialog-ok")), (url, ok), "{theme:?}: nothing moved");
+        }
+    }
+
+    #[test]
+    fn a_password_dialog_focuses_its_field_with_the_focus_edge() {
+        // Review Focus 3: the field has focus as the dialog opens, given by code, and shows it.
+        for (theme, t) in both() {
+            let h = open(theme, secret(SecretAsk::Password, Keep::Yes { checked: false }));
+            assert_eq!(h.ctx.memory(|m| m.focused()), Some(egui::Id::new("dialog-secret")), "{theme:?}: the field has focus");
+            let at = rect(&h, "dialog-secret");
+            let ink = Edge { outer: at, width: 2.0, colour: t.ink, radius: egui::CornerRadius::same(2) };
+            assert_eq!(edges_in(&h.output().shapes, at, 0.0), [ink], "{theme:?}: and shows it");
+        }
+    }
+
+    #[test]
+    fn tab_reaches_every_part_of_the_secret_dialog() {
+        // Review Focus 3: from the field, Tab goes to the checkbox (Space ticks it), Cancel, then
+        // Connect, in the order they read.
+        let mut h = open(Theme::Light, secret(SecretAsk::Password, Keep::Yes { checked: false }));
+        assert_eq!(h.ctx.memory(|m| m.focused()), Some(egui::Id::new("dialog-secret")), "the field has focus");
+        type_in(&mut h, "pw");
+        for label in ["Save in keyring", "Cancel", "Connect"] {
+            h.key_press(Key::Tab);
+            h.run();
+            assert!(h.get_by_label(label).is_focused(), "Tab reached {label}");
+            if label == "Save in keyring" {
+                h.key_press(Key::Space);
+                h.run();
+                assert_eq!(h.state().tags.value("dialog-save"), Some(&json!(true)), "Space ticks it");
+            }
+        }
+        h.key_press(Key::Enter);
+        h.run();
+        let params = json!({ "id": "c1", "password": "pw", "savePassword": true });
+        assert_eq!(h.state().done, [Done::Rerun(connections::OPEN, params)], "Enter on Connect connects");
+    }
+
+    #[test]
+    fn dialogs_keep_their_tags_and_outcomes() {
+        let fill_text = "Paste a postgres:// or postgresql:// URL. The parts it has replace those in the form.";
+        let host_text = "dbee has not connected to db.example:22 before. Its ssh-ed25519 host key has this fingerprint:";
+        let rows: Vec<(Dialog, &str, Vec<&str>, &str, Option<&str>, Done)> = vec![
+            (
+                Dialog::fill_from_url(vec![DbKind::Postgres]),
+                fill_text,
+                vec!["dialog-url", "dialog-text", "dialog-ok", "dialog-cancel"],
+                "Fill",
+                Some("postgres://h/db"),
+                Done::ParseUrl("postgres://h/db".into()),
+            ),
+            (
+                Dialog::HostKey { host: "db.example:22".into(), key_type: "ssh-ed25519".into(), fingerprint: "SHA256:abcdef".into(), rerun: rerun() },
+                host_text,
+                vec!["dialog-fingerprint", "dialog-text", "dialog-ok", "dialog-cancel"],
+                "Trust and connect",
+                None,
+                Done::Rerun(connections::OPEN, json!({ "id": "c1", "trustHostKey": "SHA256:abcdef" })),
+            ),
+            (
+                secret(SecretAsk::Password, Keep::Yes { checked: true }),
+                "Enter the password of ann on db.example.",
+                vec!["dialog-secret", "dialog-save", "dialog-text", "dialog-ok", "dialog-cancel"],
+                "Connect",
+                Some("pw"),
+                Done::Rerun(connections::OPEN, json!({ "id": "c1", "password": "pw", "savePassword": true })),
+            ),
+            (
+                secret(SecretAsk::Passphrase { key: "/k".into() }, Keep::No("There is no keyring, so dbee asks each time.")),
+                "Enter the password of ann on db.example.",
+                vec!["dialog-secret", "dialog-save", "dialog-text", "dialog-ok", "dialog-cancel"],
+                "Connect",
+                Some("pp"),
+                Done::Rerun(connections::OPEN, json!({ "id": "c1", "sshPassphrase": "pp" })),
+            ),
+            (
+                secret(SecretAsk::SshPassword, Keep::NotOffered),
+                "Enter the password of ann on db.example.",
+                vec!["dialog-secret", "dialog-text", "dialog-ok", "dialog-cancel"],
+                "Connect",
+                Some("sp"),
+                Done::Rerun(connections::OPEN, json!({ "id": "c1", "sshPassword": "sp" })),
+            ),
+            (
+                confirm("closeTab"),
+                "Close Query 1? Its query text will be lost.",
+                vec!["dialog-text", "dialog-ok", "dialog-cancel"],
+                "Close anyway",
+                None,
+                Done::Rerun(connections::OPEN, json!({ "id": "c1", "force": true })),
+            ),
+            (
+                confirm("applyAfterUnknownOutcome"),
+                "Close Query 1? Its query text will be lost.",
+                vec!["dialog-text", "dialog-ok", "dialog-cancel"],
+                "Apply again",
+                None,
+                Done::Rerun(connections::OPEN, json!({ "id": "c1", "force": true })),
+            ),
+            (
+                Dialog::DeleteConnection { id: "c1".into(), name: "Shop live".into() },
+                "Delete “Shop live”? Its saved passwords are deleted with it.",
+                vec!["dialog-text", "dialog-ok", "dialog-cancel"],
+                "Delete",
+                None,
+                Done::Delete("c1".into()),
+            ),
+            (
+                Dialog::Requested { name: "export" },
+                "A command asked for the “export” dialog, which this version of dbee does not have.",
+                vec!["dialog-text", "dialog-ok"],
+                "Close",
+                None,
+                Done::Cancel,
+            ),
+        ];
+        for (dialog, text, ids, ok, typed, done) in rows {
+            let name = dialog.name();
+            let at = format!("{name} {ok}");
+            // OK.
+            let mut h = open(Theme::Light, dialog);
+            let mut drawn: Vec<&str> = h.state().tags.ids();
+            drawn.sort_unstable();
+            let mut want = ids.clone();
+            want.sort_unstable();
+            assert_eq!(drawn, want, "{at}: its tags");
+            assert_eq!(h.state().tags.value("dialog-text"), Some(&json!(text)), "{at}: dialog-text");
+            assert_eq!(h.state().tags.value("dialog-ok"), Some(&json!(ok)), "{at}: dialog-ok");
+            if ids.contains(&"dialog-cancel") {
+                assert_eq!(h.state().tags.value("dialog-cancel"), Some(&json!("Cancel")), "{at}: dialog-cancel");
+                assert!(entry(&h, "dialog-cancel").is_some_and(|e| e.get("enabled").is_none()), "{at}: Cancel is on");
+            }
+            let on = entry(&h, "dialog-ok").is_some_and(|e| e.get("enabled").is_none());
+            assert_eq!(on, typed.is_none(), "{at}: OK is off until something is typed");
+            if let Some(typed) = typed {
+                type_in(&mut h, typed);
+                assert!(entry(&h, "dialog-ok").is_some_and(|e| e.get("enabled").is_none()), "{at}: typed, OK is on");
+            }
+            h.get_by_label(ok).click();
+            h.run();
+            assert_eq!(h.state().done.first(), Some(&done), "{at}: what OK does");
+        }
+        // Cancel, where there is one.
+        for (name, dialog) in every() {
+            let mut h = open(Theme::Light, dialog);
+            if h.state().tags.rect("dialog-cancel").is_none() {
+                continue;
+            }
+            h.get_by_label("Cancel").click();
+            h.run();
+            assert_eq!(h.state().done, [Done::Cancel], "{name}: Cancel");
+        }
+    }
+
+    #[test]
+    fn close_anyway_apply_again_and_delete_are_danger_buttons() {
+        // The design: Close anyway, Apply again and Delete are `danger` with `on_danger` words;
+        // Fill, Trust and connect, Connect and Close are the `ink` main button; Cancel an outline.
+        for (theme, t) in both() {
+            for (name, dialog) in every() {
+                let h = open(theme, dialog);
+                let shapes = h.output().shapes.clone();
+                let ok = rect(&h, "dialog-ok");
+                let label = h.state().tags.value("dialog-ok").and_then(Json::as_str).unwrap_or_default().to_owned();
+                let at = format!("{theme:?} {name} {label}");
+                let danger = ["Close anyway", "Apply again", "Delete"].contains(&label.as_str());
+                let enabled = entry(&h, "dialog-ok").is_some_and(|e| e.get("enabled").is_none());
+                let (ground, words) = match (danger, enabled) {
+                    (true, _) => (t.danger, t.on_danger),
+                    (false, true) => (t.ink, t.on_ink),
+                    (false, false) => (t.fill, t.text_faint),
+                };
+                assert_eq!(fills_in(&shapes, ok), [(ok, ground)], "{at}: its ground");
+                let caps = label.to_uppercase();
+                let drawn = texts(&shapes).into_iter().find(|(w, _, _)| *w == caps).map(|(_, _, c)| c);
+                assert_eq!(drawn, Some(words), "{at}: its words");
+                if let Some(cancel) = h.state().tags.rect("dialog-cancel") {
+                    assert_eq!(fills_in(&shapes, cancel), [], "{at}: Cancel has no ground");
+                    let line = Edge { outer: cancel, width: 1.0, colour: t.line_strong, radius: egui::CornerRadius::same(2) };
+                    assert_eq!(edges_in(&shapes, cancel, 0.0), [line], "{at}: Cancel's outline");
+                }
+            }
         }
     }
 

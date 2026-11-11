@@ -5,6 +5,7 @@
 pub mod button;
 pub mod checkbox;
 pub mod chip;
+pub mod dialog;
 pub mod dropdown;
 pub mod focus;
 pub mod icon;

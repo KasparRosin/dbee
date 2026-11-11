@@ -22,8 +22,16 @@ pub const BUTTON_PAD_X: f32 = 12.0;
 pub const BUTTON_GAP: f32 = 8.0;
 /// A text button (`button/text`): 10 either side of its words.
 pub const TEXT_BUTTON_PAD_X: f32 = 10.0;
-/// The least width of a dialog's buttons (page component `dialog`).
+/// A dialog (`dialog`): this wide, its content this far inside its 1 px edge; this between its
+/// head, its body and its buttons; this between its title and its text; this between the parts
+/// of its body (a field, a checkbox); its buttons at least this wide, this far apart.
+pub const DIALOG_W: f32 = 440.0;
+pub const DIALOG_PAD: i8 = 20;
+pub const DIALOG_GAP: f32 = 20.0;
+pub const DIALOG_HEAD_GAP: f32 = 6.0;
+pub const DIALOG_BODY_GAP: f32 = 12.0;
 pub const DIALOG_BUTTON_MIN_W: f32 = 80.0;
+pub const DIALOG_BUTTON_GAP: f32 = 8.0;
 /// An icon button (`button/icon`): a square of this side.
 pub const ICON_BUTTON: f32 = 28.0;
 /// A bar button (`button/bar`): this tall, the icon kind as wide; the label kind has 12 between

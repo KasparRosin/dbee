@@ -253,6 +253,48 @@ fn a_dialog_sits_on_raised_over_the_scrim() {
     assert!(shadowed(&ui, l.shadow), "the light dialog's shadow");
 }
 
+/// Review Focus 5: an open dialog, its scrim, its buttons and its field recolour on the very next
+/// frame after a theme switch.
+#[test]
+fn a_dialog_recolours_on_a_theme_switch() {
+    let mut ui = window_with(None, None, None);
+    ui.click("conn-kind-postgres");
+    ui.execute("ui.themeLight", json!({}));
+    ui.click("conn-fill-url");
+    ui.text("postgres://db.example/shop");
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 720.0));
+    for (mode, t) in [("light", dbee_ui_egui::theme::LIGHT), ("dark", dbee_ui_egui::theme::DARK)] {
+        if mode == "dark" {
+            ui.execute("ui.themeDark", json!({}));
+            ui.frame();
+        }
+        let rects: Vec<egui::epaint::RectShape> = ui
+            .shapes()
+            .into_iter()
+            .filter_map(|(_, s)| match s {
+                egui::Shape::Rect(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert!(rects.iter().any(|r| r.rect == window && r.fill == t.scrim), "{mode}: the scrim over the window");
+        // Read from the app's tags: a control request would draw another frame first.
+        let tagged = |ui: &Ui, id: &str| ui.harness.state().tags().rect(id).unwrap_or_else(|| panic!("{mode}: `{id}` drawn"));
+        let ok = tagged(&ui, "dialog-ok");
+        // In light the connection card under the scrim is `raised` with a `line` edge too.
+        let frame = rects.iter().rev().find(|r| r.rect.contains_rect(ok) && r.fill == t.raised && r.stroke.color == t.line && r.stroke.width == 1.0);
+        let frame = frame.unwrap_or_else(|| panic!("{mode}: the dialog on raised with a line edge"));
+        assert!(rects.iter().any(|r| r.blur_width == 18.0 && r.fill == t.shadow && r.rect.intersects(frame.rect)), "{mode}: the dialog's shadow");
+        assert_eq!(fills_in(&ui, ok), [t.ink], "{mode}: Fill on ink");
+        assert_eq!(colour_of(&ui, ok, "FILL"), Some(t.on_ink), "{mode}: its words on_ink");
+        let cancel = tagged(&ui, "dialog-cancel");
+        assert_eq!(colour_of(&ui, cancel, "CANCEL"), Some(t.text), "{mode}: Cancel's words");
+        assert!(rects.iter().any(|r| r.rect == cancel && r.stroke.color == t.line_strong), "{mode}: Cancel's outline");
+        assert_eq!(colour_of(&ui, frame.rect, "Fill from URL"), Some(t.text), "{mode}: the title");
+        let url = tagged(&ui, "dialog-url");
+        assert!(rects.iter().any(|r| r.rect == url && r.fill == t.card), "{mode}: the field's ground");
+    }
+}
+
 /// Where the last frame painted a fade: a mesh whose corners differ in colour, as egui paints over
 /// the ends of a scroll area that has more to scroll to. dbee paints no gradient of its own.
 fn fades(ui: &Ui) -> Vec<egui::Rect> {

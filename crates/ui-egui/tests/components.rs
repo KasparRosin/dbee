@@ -109,7 +109,7 @@ fn every(t: &Tokens) -> Vec<egui::Color32> {
 fn the_showcase_draws_in_both_modes() {
     for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
         let mut ready = false;
-        let h = Harness::builder().with_size(egui::vec2(1240.0, 3200.0)).build_ui(|ui| {
+        let h = Harness::builder().with_size(egui::vec2(1240.0, 4200.0)).build_ui(|ui| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
                 ready = true;
@@ -155,6 +155,9 @@ fn the_showcase_draws_in_both_modes() {
             "MENU/ITEM: DEFAULT, HOVER (THE KEYBOARD HIGHLIGHT LOOKS THE SAME), DISABLED, DESTRUCTIVE, DESTRUCTIVE HOVER; MENUBAR/TITLE: DEFAULT, OPEN",
             "TOOLTIP: ONE LINE, WRAPPED AT 320; 4 PX BELOW THE POINTER, ITS LEFT EDGE AT THE POINTER",
             "TOAST: SUCCESS, ERROR, ERROR WITHOUT AN ACTION; ICON/SUCCESS, ICON/ERROR",
+            "DIALOG: SCREENS' DIALOGS FROM THE COMPONENTS (DATABASE PASSWORD, FILL FROM URL WITH AN ERROR, CLOSE ANYWAY, DELETE CONNECTION)",
+            "NEW: APPLY AGAIN (AN APPLY WHOSE OUTCOME IS UNKNOWN); THE COMMIT PROMPT ON CLOSING A TAB OR SWITCHING CONNECTIONS, COMMIT IS THE MAIN BUTTON",
+            "SCRIM: OVER THE WHOLE WINDOW; THE DIALOG CENTRED, NEAR THE TOP",
         ];
         for caption in captions {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");
