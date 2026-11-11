@@ -10,6 +10,7 @@ pub mod focus;
 pub mod icon;
 pub mod input;
 pub mod keycap;
+pub mod menu;
 pub mod segmented;
 pub mod showcase;
 pub mod swatch;

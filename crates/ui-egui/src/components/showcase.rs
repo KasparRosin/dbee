@@ -2,7 +2,7 @@
 //! at them against the page's light and dark frames (`examples/components.rs`): one section per
 //! page component, in the page's order, each headed with the page's caption.
 
-use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Rect, Sense, Ui, Vec2, pos2, vec2};
+use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use dbee_config::ConnectionColor;
 
@@ -14,17 +14,16 @@ use super::dropdown::Dropdown;
 use super::icon::Icon;
 use super::input::{Field, Input};
 use super::keycap::Keycap;
+use super::menu::{self, BarTitle, Item};
 use super::segmented::{Segment, Segmented};
 use super::swatch::{COLOURS, Swatch};
-use crate::theme::size::{RADIUS_CONTROL, SPACE_8, SPACE_12, SPACE_16, SPACE_24};
+use crate::theme::size::{KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24};
 use crate::theme::{Text, Tokens, tokens};
 
 /// The page's frames: 20 between sections.
 const BETWEEN: f32 = 20.0;
 /// Between the controls of a row of buttons.
 const ROW_GAP: f32 = 20.0;
-/// Between the keys of one shortcut.
-const KEY_GAP: f32 = 3.0;
 /// The Field and input frame's inputs and fields, and the Dropdown frame's dropdowns.
 const INPUT_W: f32 = 160.0;
 /// The Segmented frame's small boxes, and the width of a small segment shown alone.
@@ -40,6 +39,15 @@ const ICON_BOTTOM: f32 = 18.0;
 const ICON_NAME_TOP: f32 = 24.0;
 /// The check box's mark is shown on an `ink` tile, as in a checkbox.
 const ICON_TILE: f32 = 14.0;
+/// The Menus frame: the items' widths of its menus (Edit, View, Theme), its scene with the menu
+/// bar, the menu bar's room around its titles, and the Theme submenu's overlap of the View menu.
+const MENU_W: f32 = 230.0;
+const VIEW_MENU_W: f32 = 190.0;
+const THEME_MENU_W: f32 = 130.0;
+const SCENE: Vec2 = vec2(560.0, 190.0);
+const MENU_BAR_W: f32 = 240.0;
+const MENU_BAR_PAD: Vec2 = vec2(4.0, 3.0);
+const SUBMENU_OVERLAP: f32 = 4.0;
 
 /// The icons in the order of the page's Icons frame.
 const ICONS: [Icon; 32] = [
@@ -93,12 +101,12 @@ pub fn show(ui: &mut Ui) {
         inputs(ui);
         choices(ui);
         section(ui, "keycap: default, disabled", SPACE_8, |ui| {
-            ui.spacing_mut().item_spacing.x = KEY_GAP;
+            ui.spacing_mut().item_spacing.x = KEYCAP_GAP;
             for key in ["Ctrl", "Shift", "Z"] {
                 ui.add(Keycap::new(key));
             }
             // The page's 24 between the groups is an item of the row, with the gap either side.
-            ui.add_space(SPACE_24 + KEY_GAP);
+            ui.add_space(SPACE_24 + KEYCAP_GAP);
             for key in ["Ctrl", "Z"] {
                 ui.add_enabled(false, Keycap::new(key));
             }
@@ -108,7 +116,82 @@ pub fn show(ui: &mut Ui) {
             ui.add(Chip::next("Upcoming"));
             ui.add(Chip::available("Available"));
         });
+        menus(ui);
     });
+}
+
+/// The menus, their items and the menu bar's titles, as the page's Menus frame shows them.
+fn menus(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    section(ui, "menu: Edit as on Screens; menu/item, menu/separator, keycaps", SPACE_8, |ui| {
+        menu::in_place(ui, MENU_W, |ui| {
+            ui.add(Item::new("Undo").shortcut("Ctrl+Z"));
+            ui.add(Item::new("Redo").shortcut("Ctrl+Shift+Z"));
+            menu::separator(ui);
+            ui.add(Item::new("Copy").shortcut("Ctrl+C").look(hovered));
+            ui.add(Item::new("Select All").shortcut("Ctrl+A"));
+            menu::separator(ui);
+            ui.add_enabled(false, Item::new("Apply").shortcut("Ctrl+S"));
+            ui.add_enabled(false, Item::new("Reset"));
+        });
+    });
+    section(ui, "menubar/title open, View menu, Theme submenu: the chosen mark sits in a left column", SPACE_8, |ui| {
+        let (scene, _) = ui.allocate_exact_size(SCENE, Sense::hover());
+        let titles = menu_bar(ui, scene.min, SCENE.x, &[("File", false), ("Edit", false), ("View", true), ("Query", false)]);
+        let view = titles.get(2).map_or(scene.min.x, |r| r.left());
+        let at = |pos| UiBuilder::new().max_rect(Rect::from_min_size(pos, SCENE)).layout(Layout::top_down(Align::Min));
+        let shown = ui.scope_builder(at(pos2(view, scene.top() + SLIM_BAR_H)), |ui| {
+            menu::in_place(ui, VIEW_MENU_W, |ui| {
+                ui.add(Item::new("Refresh Schema"));
+                ui.add(Item::new("Toggle Value Panel"));
+                ui.add(Item::new("Theme").submenu(true).highlighted(true)).rect
+            })
+        });
+        let (menu_rect, theme) = (shown.response.rect, shown.inner.inner);
+        let edge = f32::from(MENU_PAD) + 1.0;
+        ui.scope_builder(at(pos2(menu_rect.right() - SUBMENU_OVERLAP, theme.top() - edge)), |ui| {
+            menu::in_place(ui, THEME_MENU_W, |ui| {
+                for (words, chosen) in [("System", false), ("Light", true), ("Dark", false)] {
+                    ui.add(Item::new(words).choice(Some(chosen)));
+                }
+            });
+        });
+    });
+    section(
+        ui,
+        "menu/item: default, hover (the keyboard highlight looks the same), disabled, destructive, destructive hover; menubar/title: default, open",
+        SPACE_8,
+        |ui| {
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_24;
+                menu::in_place(ui, MENU_W, |ui| {
+                    ui.add(Item::new("Copy").shortcut("Ctrl+C"));
+                    ui.add(Item::new("Copy").shortcut("Ctrl+C").look(hovered));
+                    ui.add_enabled(false, Item::new("Apply").shortcut("Ctrl+S"));
+                    menu::separator(ui);
+                    ui.add(Item::new("Delete row").destructive(true));
+                    ui.add(Item::new("Delete row").destructive(true).look(hovered));
+                });
+                let (bar, _) = ui.allocate_exact_size(vec2(MENU_BAR_W, SLIM_BAR_H), Sense::hover());
+                menu_bar(ui, bar.min, MENU_BAR_W, &[("File", false), ("Edit", true)]);
+            });
+        },
+    );
+}
+
+/// A menu bar `width` wide at `at` holding `titles` (each with whether it is open), as the
+/// page's Menus frame draws one: `bg` with a `line` under it. Returns where the titles are.
+fn menu_bar(ui: &mut Ui, at: egui::Pos2, width: f32, titles: &[(&str, bool)]) -> Vec<Rect> {
+    let t = tokens(ui.ctx());
+    let bar = Rect::from_min_size(at, vec2(width, SLIM_BAR_H));
+    ui.painter().rect_filled(bar, CornerRadius::ZERO, t.bg);
+    ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, t.line));
+    let inside = UiBuilder::new().max_rect(bar.shrink2(MENU_BAR_PAD)).layout(Layout::left_to_right(Align::Center));
+    ui.scope_builder(inside, |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        titles.iter().map(|(words, open)| ui.add(BarTitle::new(words).open(*open)).rect).collect()
+    })
+    .inner
 }
 
 /// The boxed and text buttons in each of their states, as the page's Buttons frame shows them.

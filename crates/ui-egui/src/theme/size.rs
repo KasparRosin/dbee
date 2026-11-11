@@ -58,9 +58,26 @@ pub const SEGMENT_DIVIDER: f32 = 1.0;
 pub const SWATCH: f32 = 20.0;
 pub const SWATCH_GAP: f32 = 8.0;
 
+/// A menu (`menu`): this far inside its 1 px edge.
+pub const MENU_PAD: i8 = 4;
+/// A menu's item (`menu/item`): this tall, its words this far in from either end; the chosen
+/// mark's column is this wide, and this is between the column, the words, the keys and the
+/// submenu's arrow, with this more before the keys.
+pub const MENU_ITEM_H: f32 = 28.0;
+pub const MENU_ITEM_PAD_X: f32 = 8.0;
+pub const MENU_MARK: f32 = 14.0;
+pub const MENU_ITEM_GAP: f32 = 8.0;
+pub const MENU_KEYS_PAD: f32 = 16.0;
+/// A menu's separator (`menu/separator`): its 1 px line has this above and below it.
+pub const MENU_SEPARATOR_PAD: f32 = 4.0;
+/// A menu bar's title (`menubar/title`): this tall, its word this far in from either end.
+pub const MENU_TITLE_H: f32 = 24.0;
+pub const MENU_TITLE_PAD_X: f32 = 8.0;
+
 pub const KEYCAP_H: f32 = 18.0;
-/// Between the keycap's edge and its key.
+/// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;
+pub const KEYCAP_GAP: f32 = 3.0;
 pub const CHIP_H: f32 = 18.0;
 /// Between the chip's edge and what it holds.
 pub const CHIP_PAD_X: f32 = 6.0;

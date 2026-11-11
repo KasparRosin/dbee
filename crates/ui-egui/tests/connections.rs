@@ -1635,3 +1635,41 @@ fn the_moved_keyring_checkbox_keeps_its_id_and_value() {
     assert_checkbox(&ui, &i, "dialog-save", false, false, "Save in keyring");
     ui.click("dialog-cancel");
 }
+
+/// The open database list moves its own highlight with Down and Up (its names take no keyboard
+/// focus), drawn as the menu item's hover: `raised_hover` over the page's 28 tall item.
+#[test]
+fn the_database_list_still_moves_with_the_arrows() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = form_for(db, db.server("mysql80").unwrap());
+    ui.click("conn-database-list");
+    ui.until("the list", |ui| !listed(&ui.inspect()).is_empty());
+    ui.frame();
+    for (keys, on) in [(&[][..], 0), (&["ArrowDown", "ArrowDown"][..], 2), (&["ArrowUp"][..], 1)] {
+        for key in keys {
+            ui.key(key);
+        }
+        ui.frame();
+        let i = ui.inspect();
+        for (n, (id, name)) in listed(&i).into_iter().enumerate().take(4) {
+            let r = rect(&tag_in(&i, &id).unwrap());
+            let at = egui::Rect::from_min_size(egui::pos2(r[0] as f32, r[1] as f32), egui::vec2(r[2] as f32, r[3] as f32));
+            assert_eq!(at.height(), 28.0, "{id}: the page's 28 tall item");
+            let grounds: Vec<egui::Color32> = ui
+                .shapes()
+                .into_iter()
+                .filter_map(|(_, s)| match s {
+                    egui::Shape::Rect(r) if r.rect == at && r.fill.a() > 0 => Some(r.fill),
+                    _ => None,
+                })
+                .collect();
+            let want = if n == on { vec![t.raised_hover] } else { vec![] };
+            assert_eq!(grounds, want, "after {keys:?}: {name} highlighted: {}", n == on);
+        }
+    }
+    assert_eq!(ui.value("conn-database"), "", "nothing chosen yet");
+    ui.key("Enter");
+    ui.frame();
+    assert_eq!(ui.value("conn-database"), "odd", "Enter picks the highlighted name");
+}

@@ -22,8 +22,8 @@
 //! choice is as wide as its longest label, so a chosen operator always reads whole; in a narrow
 //! tab (a small window with the value panel open) the column choice narrows first, then the
 //! operator's, their text cut short with `…` ([`choice_widths`]), so a row's buttons stay in view.
-//! A choice's list draws its items at one height whether hovered or not, so nothing in it moves
-//! under the pointer (egui's own items gain a frame, and its stroke, while hovered).
+//! A choice's list draws the menu's items ([`crate::components::menu::Item`]), the chosen one
+//! marked in the column on its left.
 //!
 //! Automation ids: `filter-<n>-column` (value: the column; while open its choices
 //! `filter-<n>-column-<column>`), `filter-<n>-op` (value: the operator's id; its choices
@@ -34,14 +34,12 @@
 use dbee_engine::{Json, TabId};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Filter, Op};
-use egui::{
-    Align, Button, ComboBox, CornerRadius, InnerResponse, Key, Layout, Response, RichText, Sense, TextEdit, TextWrapMode, WidgetInfo, WidgetType,
-    pos2, vec2,
-};
+use egui::{Align, Button, ComboBox, CornerRadius, InnerResponse, Key, Layout, Response, RichText, Sense, TextEdit, TextWrapMode, vec2};
 use serde_json::json;
 
 use crate::automation::Tags;
 use crate::components::icon::Icon;
+use crate::components::menu::{self, Item};
 use crate::theme::{self, Text, size::RADIUS_CONTROL};
 
 /// The height of every control in a row: the toggle, the choices, the value field and the
@@ -75,10 +73,6 @@ const VALUE_MIN_W: f32 = 56.0;
 const ARROW_W: f32 = 10.0;
 const ARROW_GAP: f32 = 4.0;
 const CHOICE_PAD: f32 = 7.0;
-/// A list item's height, the gap between items and the room left and right of an item's text.
-pub(crate) const ITEM_H: f32 = 24.0;
-pub(crate) const ITEM_GAP: f32 = 2.0;
-const ITEM_PAD: f32 = 8.0;
 
 /// The widths of the column and operator choices in a filter row `available` wide, the operator
 /// choice needing `op_fit` to show its longest label whole ([`op_fit`]). The operator choice gets
@@ -267,36 +261,10 @@ fn choice<R>(
             .width(width)
             .height(list_h)
             .wrap_mode(TextWrapMode::Truncate)
-            .popup_style(theme::popup_style(ui.ctx()))
-            .show_ui(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = ITEM_GAP;
-                list(ui)
-            })
+            .popup_style(menu::style(ui.ctx()))
+            .show_ui(ui, list)
     })
     .inner
-}
-
-/// An item of a list on `raised` reading `text`, marked when `selected`. It is [`ITEM_H`] tall,
-/// and as wide as the list or its text, whether hovered, pressed or not, so the list never moves
-/// under the pointer.
-pub(crate) fn item(ui: &mut egui::Ui, selected: bool, text: &str) -> Response {
-    item_sensing(ui, selected, text, Sense::click())
-}
-
-/// [`item`] sensing `sense`: `Sense::CLICK` for a list the keyboard moves through by its own
-/// keys, whose items take no focus.
-pub(crate) fn item_sensing(ui: &mut egui::Ui, selected: bool, text: &str, sense: Sense) -> Response {
-    let t = theme::tokens(ui.ctx());
-    let galley = ui.painter().layout_job(Text::Button.job(text, t.text));
-    let width = ui.available_width().max(galley.size().x + 2.0 * ITEM_PAD);
-    let (rect, r) = ui.allocate_exact_size(vec2(width, ITEM_H), sense);
-    let fill = if selected || r.hovered() { t.raised_hover } else { egui::Color32::TRANSPARENT };
-    let stroke = if r.hovered() { egui::Stroke::new(1.0, t.ink) } else { egui::Stroke::NONE };
-    // The stroke inside the rect: the item's size never changes.
-    ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, stroke, egui::StrokeKind::Inside);
-    ui.painter().galley(pos2(rect.left() + ITEM_PAD, rect.center().y - galley.size().y / 2.0), galley, t.text);
-    r.widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, text));
-    r
 }
 
 fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
@@ -324,7 +292,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             let mut column = None;
             let combo = choice(ui, ("dbee-filter-column", bar.tab.0, n), column_w, 360.0, shown(row.column.clone()), |ui| {
                 for (name, ty) in &bar.columns {
-                    let r = item(ui, *name == row.column, name).on_hover_text(*ty);
+                    let r = ui.add(Item::new(name).choice(Some(*name == row.column))).on_hover_text(*ty);
                     tags.tag_value_as(&format!("filter-{n}-column-{name}"), &r, *ty, true);
                     if r.clicked() {
                         column = Some((*name).to_string());
@@ -339,7 +307,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             let mut op = None;
             let combo = choice(ui, ("dbee-filter-op", bar.tab.0, n), op_w, 400.0, shown(op_text(row.op)), |ui| {
                 for o in Op::ALL {
-                    let r = noted(item(ui, o == row.op, &op_text(o)), bar.dialect.op_note(o));
+                    let r = noted(ui.add(Item::new(&op_text(o)).choice(Some(o == row.op))), bar.dialect.op_note(o));
                     tags.tag_value_as(&format!("filter-{n}-op-{}", o.id()), &r, o.label(), true);
                     if r.clicked() {
                         op = Some(o);

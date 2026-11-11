@@ -1143,3 +1143,263 @@ fn a_new_tab_is_scrolled_into_view_when_the_strip_overflows() {
     ui.execute("tab.activate", json!({ "tab": first }));
     ui.until("the first tab in view", |ui| visible(&ui.tag(&format!("tab-{first}"))));
 }
+
+// ---- menus and popup lists (`components::menu`) ------------------------------------------------
+
+/// The rect of a `ui.inspect` entry.
+fn rect_of(e: &Json) -> egui::Rect {
+    let f = |i: usize| e["rect"][i].as_f64().unwrap() as f32;
+    egui::Rect::from_min_size(egui::pos2(f(0), f(1)), egui::vec2(f(2), f(3)))
+}
+
+/// Entry `id` of `i` has `value`, is enabled or not, and is the page's 28 tall menu item.
+fn assert_item(i: &Json, id: &str, value: &Json, enabled: bool, at: &str) {
+    let e = tag_in(i, id).unwrap_or_else(|| panic!("{at}: `{id}` is listed: {:?}", ids(i)));
+    assert_eq!(&e["value"], value, "{at}: `{id}`'s value");
+    assert_eq!(e.get("enabled") != Some(&json!(false)), enabled, "{at}: `{id}` enabled: {e}");
+    assert_eq!(rect_of(&e).height(), 28.0, "{at}: `{id}` is the page's 28 tall item: {e}");
+}
+
+/// The colour `words` are drawn in within `within` in the last frame.
+fn colour_of(ui: &Ui, within: egui::Rect, words: &str) -> Option<egui::Color32> {
+    ui.shapes().into_iter().find_map(|(_, s)| match s {
+        egui::Shape::Text(t) if t.galley.text() == words && within.contains_rect(t.galley.rect.translate(t.pos.to_vec2())) => {
+            let section = t.galley.job.sections.first()?;
+            Some(t.override_text_color.unwrap_or(if section.format.color == egui::Color32::PLACEHOLDER {
+                t.fallback_color
+            } else {
+                section.format.color
+            }))
+        }
+        _ => None,
+    })
+}
+
+/// Review Focus 1 and 4 of group 1: every menu and popup list keeps its automation ids, values
+/// and enabled flags, as `menu.rs`, `grid.rs`, `connections.rs`, `conn_form.rs` and
+/// `query_tab.rs` tag them, now on the page's 28 tall items.
+#[test]
+fn menu_items_keep_their_ids_and_values() {
+    let db = dbee_testkit::require_testdb!();
+    {
+        let mut ui = connected(db);
+        // The menu bar: each entry `{label, shortcut, why?}`, enabled as its command is.
+        let commands = ui.ok("engine.commands", json!({})).as_array().unwrap().clone();
+        for top in ["File", "Edit", "View", "Query"] {
+            ui.click(&format!("menu-{top}"));
+            ui.frame();
+            let i = ui.inspect();
+            let listed: Vec<&Json> = commands.iter().filter(|c| c["menu"] == json!([top])).collect();
+            assert!(!listed.is_empty(), "{top} lists commands");
+            for c in listed {
+                let mut value = json!({ "label": c["label"], "shortcut": c["shortcut"] });
+                if let Some(why) = c["disabledReason"].as_str() {
+                    value["why"] = json!(why);
+                }
+                assert_item(&i, &format!("menu-{}", c["id"].as_str().unwrap()), &value, c["enabled"] == true, top);
+            }
+            ui.key("Escape");
+            ui.frame();
+            assert!(ui.tag(&format!("menu-{}", commands.iter().find(|c| c["menu"] == json!([top])).unwrap()["id"].as_str().unwrap())).is_none());
+        }
+        // View > Theme: the submenu's button, and its entries with the chosen one `checked`.
+        ui.click("menu-View");
+        ui.frame();
+        ui.click("menu-View-Theme");
+        ui.frame();
+        ui.frame();
+        let i = ui.inspect();
+        assert_eq!(rect_of(&tag_in(&i, "menu-View-Theme").expect("the Theme submenu's button")).height(), 28.0);
+        assert_item(&i, "menu-ui.themeSystem", &json!({ "label": "System", "shortcut": null, "checked": true }), true, "Theme");
+        assert_item(&i, "menu-ui.themeLight", &json!({ "label": "Light", "shortcut": null }), true, "Theme");
+        assert_item(&i, "menu-ui.themeDark", &json!({ "label": "Dark", "shortcut": null }), true, "Theme");
+        ui.key("Escape");
+        ui.frame();
+
+        // The grid's menu on a table that takes edits.
+        ui.open("shop", "orders");
+        ui.until("the grid", |ui| ui.tag("grid-cell-0-1").is_some());
+        ui.right_click("grid-cell-0-1");
+        ui.frame();
+        let i = ui.inspect();
+        for (id, label, shortcut) in [
+            ("grid-menu-null", "Set as NULL", Json::Null),
+            ("grid-menu-copy", "Copy", json!("Ctrl+C")),
+            ("grid-menu-copy-header", "Copy with header", json!("Ctrl+Shift+C")),
+            ("grid-menu-copy-csv", "Copy as CSV", Json::Null),
+            ("grid-menu-copy-json", "Copy as JSON", Json::Null),
+            ("grid-menu-copy-markdown", "Copy as Markdown", Json::Null),
+            ("grid-menu-delete", "Delete row", Json::Null),
+        ] {
+            assert_item(&i, id, &json!({ "label": label, "shortcut": shortcut }), true, "the grid's menu");
+        }
+        ui.key("Escape");
+        ui.frame();
+    }
+    {
+        // The database chip's list and the results list, on MySQL with no database chosen.
+        let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+        let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+        ui.ctrl("T");
+        ui.frame();
+        ui.click("query-database");
+        ui.frame();
+        let i = ui.inspect();
+        for name in ["many", "odd", "scratch", "shop"] {
+            assert_item(&i, &format!("query-database-{name}"), &json!(name), true, "the database chip's list");
+        }
+        ui.key("Escape");
+        ui.frame();
+        let sql: String = (1..=40).map(|n| format!("select {n} as n;\n")).collect();
+        ui.execute("query.setText", json!({ "text": sql }));
+        ui.ctrl("Enter");
+        ui.until("the run to end", |ui| ui.document()["query"]["results"].as_array().is_some_and(|r| r.len() == 40));
+        ui.frame();
+        ui.click("result-more");
+        ui.frame();
+        let i = ui.inspect();
+        // The list opens at its top; the shown result (the last) is further down.
+        for n in [1, 2] {
+            let e = tag_in(&i, &format!("result-list-{n}")).expect("the results list");
+            let value = json!({ "shown": false, "rows": 1, "rowsAffected": e["value"]["rowsAffected"] });
+            assert_item(&i, &format!("result-list-{n}"), &value, true, "the results list");
+        }
+    }
+    {
+        // A saved connection's menu, and the form's database list.
+        let mut ui = Ui::fresh(APP_SIZE);
+        let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
+        ui.frame();
+        ui.right_click(&format!("conn-saved-{id}"));
+        ui.frame();
+        let i = ui.inspect();
+        for (item, label) in
+            [("conn-menu-connect", "Connect"), ("conn-menu-edit", "Edit"), ("conn-menu-duplicate", "Duplicate"), ("conn-menu-delete", "Delete")]
+        {
+            assert_item(&i, item, &json!(label), true, "the connection's menu");
+        }
+        ui.key("Escape");
+        ui.frame();
+        ui.click(&format!("conn-saved-{id}"));
+        ui.click("conn-database-list");
+        ui.until("the list", |ui| ui.tag("conn-database-item-0").is_some());
+        ui.frame();
+        let i = ui.inspect();
+        let names: Vec<(String, Json)> = ids(&i)
+            .into_iter()
+            .filter(|id| id.starts_with("conn-database-item-"))
+            .map(|id| (id.clone(), tag_in(&i, &id).unwrap()["value"].clone()))
+            .collect();
+        assert!(names.iter().any(|(_, n)| n == "dbee"), "{names:?}");
+        for (item, name) in &names {
+            assert_item(&i, item, name, true, "the database list");
+        }
+    }
+}
+
+/// A menu's shortcut is drawn as one keycap per key (`CTRL`, `SHIFT`, `Z`) at the item's right
+/// end; the entry's `shortcut` value stays the text `shortcuts.rs` writes.
+#[test]
+fn shortcuts_draw_as_keycaps() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    let raised_line = dbee_ui_egui::theme::LIGHT.raised_line;
+    ui.click("menu-Edit");
+    ui.frame();
+    let redo = ui.tag("menu-edit.redo").expect("Edit lists Redo");
+    assert_eq!(redo["value"]["shortcut"], "Ctrl+Shift+Z", "{redo}");
+    let at = rect_of(&redo);
+    let keys: Vec<egui::Rect> =
+        ["CTRL", "SHIFT", "Z"].into_iter().map(|k| ui.text_in(at, k).unwrap_or_else(|| panic!("{k} drawn in Redo's item {at:?}")).0).collect();
+    assert!(keys.windows(2).all(|p| p[0].right() < p[1].left()), "in order: {keys:?}");
+    let caps: Vec<egui::Rect> = ui
+        .shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if at.contains_rect(r.rect) && r.stroke.color == raised_line && r.rect.height() == 18.0 => Some(r.rect),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(caps.len(), 3, "three keycaps: {caps:?}");
+    for (cap, key) in caps.iter().zip(&keys) {
+        assert!(cap.contains_rect(*key), "{key:?} in its keycap {cap:?}");
+    }
+    assert!((caps[2].right() - (at.right() - 8.0)).abs() < 0.5, "the keys end 8 in: {caps:?} {at:?}");
+    assert!(ui.text_in(at, "Ctrl+Shift+Z").is_none(), "no shortcut text");
+}
+
+/// Delete row and a saved connection's Delete are destructive: `danger`; the others `text`.
+#[test]
+fn delete_row_and_delete_connection_are_destructive() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    {
+        let mut ui = connected(db);
+        ui.open("shop", "orders");
+        ui.until("the grid", |ui| ui.tag("grid-cell-0-1").is_some());
+        ui.right_click("grid-cell-0-1");
+        ui.frame();
+        let delete = rect_of(&ui.tag("grid-menu-delete").unwrap());
+        let copy = rect_of(&ui.tag("grid-menu-copy").unwrap());
+        assert_eq!(colour_of(&ui, delete, "Delete row"), Some(t.danger), "Delete row");
+        assert_eq!(colour_of(&ui, copy, "Copy"), Some(t.text), "Copy");
+    }
+    let mut ui = Ui::fresh(APP_SIZE);
+    let id = ui.execute("connection.save", json!({ "config": pg14(db), "password": db.password }))["id"].as_str().unwrap().to_string();
+    ui.frame();
+    ui.right_click(&format!("conn-saved-{id}"));
+    ui.frame();
+    let delete = rect_of(&ui.tag("conn-menu-delete").unwrap());
+    let edit = rect_of(&ui.tag("conn-menu-edit").unwrap());
+    assert_eq!(colour_of(&ui, delete, "Delete"), Some(t.danger), "Delete");
+    assert_eq!(colour_of(&ui, edit, "Edit"), Some(t.text), "Edit");
+}
+
+/// Review Focus 1: the keys that work in the menu bar work as before. Tab reaches a title, Enter
+/// opens its menu, Down moves into it, with the hover look, and Enter runs the entry; a disabled
+/// entry can't be chosen and says why on hover.
+#[test]
+fn the_keyboard_still_works_in_the_menu_bar() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = connected(db);
+    ui.key("Tab");
+    ui.frame();
+    ui.key("Enter");
+    ui.frame();
+    ui.frame();
+    let new = ui.tag("menu-tab.newQuery").expect("Enter opened File");
+    ui.key("ArrowDown");
+    ui.frame();
+    let at = rect_of(&new);
+    let grounds: Vec<egui::Color32> = ui
+        .shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.rect == at && r.fill.a() > 0 => Some(r.fill),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(grounds, [t.raised_hover], "Down moved to New Query Tab, which looks hovered");
+    ui.key("Enter");
+    ui.frame();
+    assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1), "Enter ran it");
+    assert!(ui.tag("menu-tab.newQuery").is_none(), "and closed the menu");
+    // A disabled entry: a click runs nothing, and its hover says why.
+    ui.click("menu-File");
+    ui.frame();
+    let connect = ui.tag("menu-connection.open").expect("File lists Connect");
+    let why = connect["value"]["why"].as_str().unwrap().to_string();
+    ui.click("menu-connection.open");
+    ui.frame();
+    assert_eq!(ui.document()["screen"], "workspace", "the disabled Connect ran nothing");
+    assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1), "nothing ran");
+    // As before, the click closed the menu (egui closes a menu on any click in it).
+    if ui.tag("menu-connection.open").is_none() {
+        ui.click("menu-File");
+        ui.frame();
+    }
+    let at = rect_of(&ui.tag("menu-connection.open").expect("File lists Connect"));
+    ui.rest(at.center());
+    assert!(ui.texts().iter().any(|(_, g)| g.text().contains(&why)), "the hover says why: {why}");
+}

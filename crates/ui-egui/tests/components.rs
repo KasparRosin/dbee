@@ -107,7 +107,7 @@ fn every(t: &Tokens) -> Vec<egui::Color32> {
 fn the_showcase_draws_in_both_modes() {
     for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
         let mut ready = false;
-        let h = Harness::builder().with_size(egui::vec2(1240.0, 2400.0)).build_ui(|ui| {
+        let h = Harness::builder().with_size(egui::vec2(1240.0, 3200.0)).build_ui(|ui| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
                 ready = true;
@@ -148,6 +148,9 @@ fn the_showcase_draws_in_both_modes() {
             "SWATCH: SELECTED; THE LAST ONE HAS FOCUS",
             "KEYCAP: DEFAULT, DISABLED",
             "CHIP: NEXT, AVAILABLE",
+            "MENU: EDIT AS ON SCREENS; MENU/ITEM, MENU/SEPARATOR, KEYCAPS",
+            "MENUBAR/TITLE OPEN, VIEW MENU, THEME SUBMENU: THE CHOSEN MARK SITS IN A LEFT COLUMN",
+            "MENU/ITEM: DEFAULT, HOVER (THE KEYBOARD HIGHLIGHT LOOKS THE SAME), DISABLED, DESTRUCTIVE, DESTRUCTIVE HOVER; MENUBAR/TITLE: DEFAULT, OPEN",
         ];
         for caption in captions {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");

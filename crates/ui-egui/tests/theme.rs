@@ -93,6 +93,51 @@ fn assert_marked(ui: &mut Ui, id: &str) {
     assert_ne!(over(d.raised_hover, d.raised), d.raised);
 }
 
+/// A menu item's column for the chosen mark: 14 square, 8 in from its left end.
+fn mark_column(item: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(egui::pos2(item.left() + 8.0, item.top() + 7.0), egui::vec2(14.0, 14.0))
+}
+
+/// The colours of the lines and discs (an icon) the last frame drew within `within`, over the
+/// last opaque ground drawn there (a menu's), so not what lies under the menu.
+fn icon_colours(ui: &Ui, within: egui::Rect) -> Vec<egui::Color32> {
+    let shapes = ui.shapes();
+    let ground = shapes.iter().rposition(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill.a() == 255 && r.rect.contains_rect(within)));
+    let mut out = Vec::new();
+    for (_, s) in shapes.into_iter().skip(ground.map_or(0, |g| g + 1)) {
+        let drawn = match &s {
+            egui::Shape::Path(p) => vec![p.fill, if let egui::epaint::ColorMode::Solid(c) = p.stroke.color { c } else { egui::Color32::RED }],
+            egui::Shape::Circle(c) => vec![c.fill, c.stroke.color],
+            egui::Shape::LineSegment { stroke, .. } => vec![stroke.color],
+            _ => continue,
+        };
+        if !within.contains_rect(s.visual_bounding_rect()) {
+            continue;
+        }
+        for c in drawn.into_iter().filter(|c| *c != egui::Color32::TRANSPARENT) {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// The colour `words` are drawn in within `within` in the last frame.
+fn colour_of(ui: &Ui, within: egui::Rect, words: &str) -> Option<egui::Color32> {
+    ui.shapes().into_iter().find_map(|(_, s)| match s {
+        egui::Shape::Text(t) if t.galley.text() == words && within.contains_rect(t.galley.rect.translate(t.pos.to_vec2())) => {
+            let section = t.galley.job.sections.first()?;
+            Some(t.override_text_color.unwrap_or(if section.format.color == egui::Color32::PLACEHOLDER {
+                t.fallback_color
+            } else {
+                section.format.color
+            }))
+        }
+        _ => None,
+    })
+}
+
 #[test]
 fn popups_mark_hovered_and_chosen_items_and_draw_lines_on_raised_in_dark() {
     let db = dbee_testkit::require_testdb!();
@@ -116,13 +161,14 @@ fn popups_mark_hovered_and_chosen_items_and_draw_lines_on_raised_in_dark() {
     ui.key("Escape");
     ui.frame();
 
-    // A list: the chosen column.
+    // A list: the chosen column, marked in the left column (the design's menu with choices).
     ui.open("shop", "orders");
     ui.until("the grid", |ui| ui.tag("grid-cell-0-1").is_some());
     let chosen = ui.value("filter-0-column");
     ui.click("filter-0-column");
     ui.frame();
-    assert_marked(&mut ui, &format!("filter-0-column-{}", chosen.as_str().unwrap()));
+    let at = rect_of(&mut ui, &format!("filter-0-column-{}", chosen.as_str().unwrap()));
+    assert_eq!(icon_colours(&ui, mark_column(at)), [d.text], "the chosen column's mark");
     ui.key("Escape");
     ui.frame();
 
@@ -455,6 +501,71 @@ fn the_menu_marks_the_chosen_entry() {
     ui.click("menu-ui.themeLight");
     ui.frame();
     assert_eq!(state(&mut ui)["choice"], "light");
+}
+
+/// View > Theme draws its choices with the chosen mark in a left column (the design's menu with
+/// choices), not a `✔` on the right; the entries' `checked` value is as before.
+#[test]
+fn the_theme_menu_marks_the_choice_on_the_left() {
+    let db = dbee_testkit::require_testdb!();
+    let d = dbee_ui_egui::theme::DARK;
+    let mut ui = Ui::connected(db);
+    ui.execute("ui.themeDark", json!({}));
+    ui.frame();
+    ui.click("menu-View");
+    ui.frame();
+    ui.click("menu-View-Theme");
+    ui.frame();
+    ui.frame();
+    for (id, words, chosen) in [("menu-ui.themeSystem", "System", false), ("menu-ui.themeLight", "Light", false), ("menu-ui.themeDark", "Dark", true)]
+    {
+        let at = rect_of(&mut ui, id);
+        let (drawn, _) = ui.text_in(at, words).unwrap_or_else(|| panic!("{words} drawn in {at:?}"));
+        assert!((drawn.left() - (at.left() + 30.0)).abs() < 0.5, "{words} after the 14 px column: {drawn:?} in {at:?}");
+        let marks = icon_colours(&ui, mark_column(at));
+        assert_eq!(marks, if chosen { vec![d.text] } else { vec![] }, "{words}: the chosen mark in the left column");
+        let value = ui.value(id);
+        assert_eq!(value.get("checked"), chosen.then_some(&json!(true)), "{words}: `checked` as before: {value}");
+    }
+    assert!(!ui.texts().iter().any(|(_, g)| g.text().contains('✔')), "no ✔ drawn");
+    ui.click("menu-ui.themeLight");
+    ui.frame();
+    assert_eq!(state(&mut ui)["choice"], "light");
+}
+
+/// Review Focus 5: an open menu, its hovered entry and its title's box recolour on the very
+/// next frame after a theme switch.
+#[test]
+fn an_open_menu_recolours_on_a_theme_switch() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.click("menu-View");
+    ui.frame();
+    let entry = rect_of(&mut ui, "menu-ui.toggleValuePanel");
+    ui.hover(entry.center());
+    let label = ui.value("menu-ui.toggleValuePanel")["label"].as_str().unwrap().to_string();
+    for (mode, t) in [("light", dbee_ui_egui::theme::LIGHT), ("dark", dbee_ui_egui::theme::DARK)] {
+        if mode == "dark" {
+            ui.execute("ui.themeDark", json!({}));
+            ui.frame();
+        }
+        let entry = rect_of(&mut ui, "menu-ui.toggleValuePanel");
+        let title = rect_of(&mut ui, "menu-View");
+        let rects: Vec<egui::epaint::RectShape> = ui
+            .shapes()
+            .into_iter()
+            .filter_map(|(_, s)| match s {
+                egui::Shape::Rect(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        let frame = rects.iter().rev().find(|r| r.blur_width == 0.0 && r.rect != entry && r.rect.contains_rect(entry) && r.fill.a() == 255);
+        let frame = frame.unwrap_or_else(|| panic!("{mode}: the menu's frame"));
+        assert_eq!((frame.fill, frame.stroke.color), (t.raised, t.line), "{mode}: the menu's ground and edge");
+        assert!(rects.iter().any(|r| r.rect == entry && r.fill == t.raised_hover), "{mode}: the hovered entry");
+        assert_eq!(colour_of(&ui, entry, &label), Some(t.text), "{mode}: the entry's words");
+        assert!(rects.iter().any(|r| r.rect == title && r.fill == t.fill), "{mode}: the open title's box");
+    }
 }
 
 #[test]

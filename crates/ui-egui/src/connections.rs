@@ -57,7 +57,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use dbee_config::{ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, JobId, Json, Screen, State, Which};
 use egui::text::{LayoutJob, TextWrapping};
-use egui::{Align, Button, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -65,6 +65,7 @@ use crate::app::{Origin, sentence};
 use crate::automation::Tags;
 use crate::components::chip::Chip;
 use crate::components::icon::Icon;
+use crate::components::menu::{self, Item};
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
@@ -883,12 +884,16 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     if r.double_clicked() {
         acts.push(Act::Connect(c.clone()));
     }
-    egui::Popup::context_menu(&r).style(theme::popup_style(&r.ctx)).show(|ui| {
-        let items =
-            [("Connect", "conn-menu-connect"), ("Edit", "conn-menu-edit"), ("Duplicate", "conn-menu-duplicate"), ("Delete", "conn-menu-delete")];
-        for (label, item) in items {
+    egui::Popup::context_menu(&r).style(menu::style(&r.ctx)).show(|ui| {
+        let items = [
+            ("Connect", "conn-menu-connect", false),
+            ("Edit", "conn-menu-edit", false),
+            ("Duplicate", "conn-menu-duplicate", false),
+            ("Delete", "conn-menu-delete", true),
+        ];
+        for (label, item, destructive) in items {
             let enabled = !(busy && item == "conn-menu-connect");
-            let b = ui.add_enabled(enabled, Button::new(label));
+            let b = ui.add_enabled(enabled, Item::new(label).destructive(destructive));
             // The menu's first frame is a sizing pass, which reads every widget as disabled.
             tags.tag_value_as(item, &b, label, enabled);
             if b.clicked() {

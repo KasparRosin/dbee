@@ -2,8 +2,9 @@
 //! the UI-only ones): File, Edit, View and Query in that order, then any other top menu a command
 //! names, each listing its commands in registry order, a deeper path as a submenu.
 //!
-//! An entry shows its label and its shortcut text, and is enabled as the command is now; hovering
-//! a disabled entry shows why. Clicking an entry runs the command through [`DbeeApp::start`], as
+//! An entry shows its label and its shortcut's keys, and is enabled as the command is now;
+//! hovering a disabled entry shows why. A menu with a chosen entry (View > Theme) marks it in a
+//! column on the left. Clicking an entry runs the command through [`DbeeApp::start`], as
 //! a button would, so a `needs…` answer opens its dialog and an error shows as a notice. It runs
 //! with the params of its shortcut's row ([`SHORTCUTS`]), so an entry does what its keys do (Copy
 //! copies as tab-separated values); without a shortcut, with `{}`.
@@ -14,13 +15,13 @@
 //! (and tagged) only while their menu is open.
 
 use dbee_engine::{CommandInfo, Json};
-use egui::Button;
-use egui::containers::menu::{MenuBar, MenuButton, MenuConfig};
+use egui::containers::menu::MenuBar;
 use serde_json::json;
 
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::menu::{self, Item};
 use crate::shortcuts::SHORTCUTS;
 
 /// The top menus that come first, in this order.
@@ -50,12 +51,11 @@ pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let mut chosen: Option<&'static str> = None;
     let checked = crate::ui_commands::theme_id(app.theme_choice);
     let tags = &mut app.tags;
-    MenuBar::new().config(MenuConfig::new().style(crate::theme::popup_style(ui.ctx()))).ui(ui, |ui| {
+    MenuBar::new().ui(ui, |ui| {
+        // The titles stand side by side: each holds its own room around its word.
+        ui.spacing_mut().item_spacing.x = 0.0;
         for top in tops(&commands) {
-            let (r, _) = MenuButton::new(top).ui(ui, |ui| {
-                ui.set_min_width(260.0);
-                entries(ui, &commands, &[top], checked, tags, &mut chosen);
-            });
+            let (r, _) = menu::bar_title(ui, top, |ui| entries(ui, &commands, &[top], checked, tags, &mut chosen));
             tags.tag(&format!("menu-{top}"), &r);
         }
     });
@@ -69,6 +69,8 @@ pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
 /// each deeper path, in registry order.
 fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], checked: &str, tags: &mut Tags, chosen: &mut Option<&'static str>) {
     let mut subs: Vec<&str> = Vec::new();
+    // A menu holding the chosen entry is a menu of choices: each entry has the mark's column.
+    let choices = commands.iter().any(|c| c.menu == path && c.id == checked);
     for c in commands {
         if c.menu.len() > path.len() && c.menu.starts_with(path) {
             if let Some(sub) = c.menu.get(path.len())
@@ -76,22 +78,19 @@ fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], checked: 
             {
                 subs.push(sub);
                 let deeper: Vec<&str> = path.iter().copied().chain(std::iter::once(*sub)).collect();
-                let r = ui.menu_button(*sub, |ui| entries(ui, commands, &deeper, checked, tags, chosen));
-                tags.tag(&format!("menu-{}", deeper.join("-")), &r.response);
+                let (r, _) = menu::submenu(ui, sub, |ui| entries(ui, commands, &deeper, checked, tags, chosen));
+                tags.tag(&format!("menu-{}", deeper.join("-")), &r);
             }
             continue;
         }
         if c.menu != path {
             continue;
         }
-        let mut button = Button::new(c.label);
+        let mut item = Item::new(c.label).choice(choices.then_some(c.id == checked));
         if let Some(keys) = c.shortcut {
-            button = button.shortcut_text(keys);
+            item = item.shortcut(keys);
         }
-        if c.id == checked {
-            button = button.right_text("✔");
-        }
-        let mut r = ui.add_enabled(c.enabled, button);
+        let mut r = ui.add_enabled(c.enabled, item);
         let mut value = json!({ "label": c.label, "shortcut": c.shortcut });
         if c.id == checked {
             value["checked"] = json!(true);

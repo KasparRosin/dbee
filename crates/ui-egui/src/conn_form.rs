@@ -25,12 +25,12 @@ use crate::automation::Tags;
 use crate::components::button::{BoxButton, TextButton};
 use crate::components::checkbox::Checkbox;
 use crate::components::input::{self, Field, Input};
+use crate::components::menu::{self, Item};
 use crate::components::segmented::Segmented;
 use crate::components::swatch::{self, Swatch};
 use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
-use crate::filter_bar;
 use crate::picker::Pick;
-use crate::theme::size::{RADIUS_CONTROL, SWATCH, SWATCH_GAP};
+use crate::theme::size::{MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP};
 use crate::theme::{self, Text};
 
 /// The height of a row under a field's label: an input, the choices, a file box, the colours.
@@ -596,8 +596,8 @@ fn list_keys(ui: &egui::Ui, list: &mut DatabaseList, acts: &mut Vec<Act>) {
 /// The scroll offset that brings row `n` of a list into a view `view_h` tall, scrolled to
 /// `offset`, moving it as little as it can.
 fn reveal_offset(n: usize, offset: f32, view_h: f32) -> f32 {
-    let top = n as f32 * (filter_bar::ITEM_H + filter_bar::ITEM_GAP);
-    let bottom = top + filter_bar::ITEM_H;
+    let top = n as f32 * MENU_ITEM_H;
+    let bottom = top + MENU_ITEM_H;
     if top < offset {
         top
     } else if bottom > offset + view_h {
@@ -653,12 +653,12 @@ fn database_row(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts:
                 .sense(Sense::CLICK)
                 .align(RectAlign::BOTTOM_START)
                 .width(field_w)
-                .style(theme::popup_style(ui.ctx()))
+                .style(menu::style(ui.ctx()))
                 .show(|ui| {
-                    ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
-                    let shown = scroll.show_rows(ui, filter_bar::ITEM_H, names.len(), |ui, rows| {
+                    ui.set_min_width(ui.available_width());
+                    let shown = scroll.show_rows(ui, MENU_ITEM_H, names.len(), |ui, rows| {
                         for (n, name) in names.iter().enumerate().skip(rows.start).take(rows.len()) {
-                            let r = filter_bar::item_sensing(ui, n == *highlight, name, Sense::CLICK);
+                            let r = ui.add(Item::new(name).highlighted(n == *highlight).focusable(false));
                             // A popup's first frame is a sizing pass, which reads every widget as disabled.
                             tags.tag_value_as(&format!("conn-database-item-{n}"), &r, name.as_str(), true);
                             if r.clicked() {

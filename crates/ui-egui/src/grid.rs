@@ -52,12 +52,13 @@ use dbee_core::{ResultSet, TypeClass};
 use dbee_engine::Selection;
 use dbee_sql::filter::SortDir;
 use egui::text::{LayoutJob, TextFormat, TextWrapping};
-use egui::{Align, Button, Color32, CornerRadius, Layout, Rect, Response, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, Layout, Rect, Response, ScrollArea, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
 use egui_extras::{Column, TableBuilder};
 use serde_json::{Map, json};
 
 use crate::automation::{CellBlock, Tags};
 use crate::components::icon::{self, Icon};
+use crate::components::menu::{self, Item};
 use crate::connections::{line_galley, line_galley_as_written};
 use crate::theme::{self, Text};
 
@@ -492,7 +493,7 @@ impl Grid<'_> {
                         if primary_down && pointer.is_some_and(|p| resp.rect.contains(p)) {
                             drag_over = Some(here);
                         }
-                        egui::Popup::context_menu(resp).style(theme::popup_style(&resp.ctx)).show(|ui| self.menu(ui, here, tags, &mut acts));
+                        egui::Popup::context_menu(resp).style(menu::style(&resp.ctx)).show(|ui| self.menu(ui, here, tags, &mut acts));
                     }
                 });
             });
@@ -653,15 +654,15 @@ impl Grid<'_> {
 
     /// The right-click menu of cell `here`.
     fn menu(&self, ui: &mut egui::Ui, here: (usize, usize), tags: &mut Tags, acts: &mut Vec<GridAct>) {
-        ui.set_min_width(220.0);
         let (row, col) = here;
         // `blocked`: why the entry cannot run now, or `Some("")` when it is disabled without one.
         let mut item = |ui: &mut egui::Ui, id: &str, label: &str, keys: Option<&str>, blocked: Option<&str>, act: GridAct| {
-            let mut button = Button::new(label);
+            let destructive = matches!(act, GridAct::DeleteRows(_));
+            let mut entry = Item::new(label).destructive(destructive);
             if let Some(k) = keys {
-                button = button.shortcut_text(k);
+                entry = entry.shortcut(k);
             }
-            let mut r = ui.add_enabled(blocked.is_none(), button);
+            let mut r = ui.add_enabled(blocked.is_none(), entry);
             let mut value = json!({ "label": label, "shortcut": keys });
             if let Some(why) = blocked.filter(|w| !w.is_empty()) {
                 r = r.on_disabled_hover_text(why);
@@ -683,7 +684,7 @@ impl Grid<'_> {
             // A row to delete takes no new values.
             let null = blocked.or(self.source.deleted(row).then_some(""));
             item(ui, "grid-menu-null", "Set as NULL", None, null, GridAct::SetNull { row, col });
-            ui.separator();
+            menu::separator(ui);
         }
         item(ui, "grid-menu-copy", "Copy", Some("Ctrl+C"), None, GridAct::Copy("tsv"));
         item(ui, "grid-menu-copy-header", "Copy with header", Some("Ctrl+Shift+C"), None, GridAct::Copy("tsvHeader"));
@@ -691,7 +692,7 @@ impl Grid<'_> {
         item(ui, "grid-menu-copy-json", "Copy as JSON", None, None, GridAct::Copy("json"));
         item(ui, "grid-menu-copy-markdown", "Copy as Markdown", None, None, GridAct::Copy("markdown"));
         if let Some(blocked) = edit {
-            ui.separator();
+            menu::separator(ui);
             let rows: Vec<usize> = match self.selection.filter(|_| covers(self.selection, here)).map(bounds) {
                 Some(((r0, r1), _)) => (r0..=r1).collect(),
                 None => vec![row],

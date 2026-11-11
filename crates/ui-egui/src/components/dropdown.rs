@@ -1,6 +1,6 @@
 //! The dropdown (`dropdown`): the closed control, its chosen text as written in `body` and a
-//! chevron, opening a list under it. The open list keeps the popup style ([`theme::popup_style`])
-//! and the keyboard of egui's combo box until the menus group draws it.
+//! chevron, opening a list under it: the menu's frame ([`menu::style`]) with the keyboard of
+//! egui's combo box; its rows are the caller's, the menu's items.
 
 use egui::text::TextWrapping;
 use egui::{
@@ -9,9 +9,9 @@ use egui::{
 };
 
 use super::icon::Icon;
-use super::{Look, focus, painter};
+use super::{Look, focus, menu, painter};
 use crate::theme::size::{DROPDOWN_GAP, DROPDOWN_H, DROPDOWN_PAD_X, RADIUS_CONTROL};
-use crate::theme::{self, Text, tokens};
+use crate::theme::{Text, tokens};
 
 /// A dropdown, 28 tall, showing `selected_text`; off when added inside `ui.add_enabled_ui(false,
 /// …)`.
@@ -87,7 +87,7 @@ impl<'a> Dropdown<'a> {
             .id(id.with("popup"))
             .width(rect.width())
             .close_behavior(PopupCloseBehavior::CloseOnClick)
-            .style(theme::popup_style(ui.ctx()))
+            .style(menu::style(ui.ctx()))
             .show(|ui| {
                 ui.set_min_width(ui.available_width());
                 ScrollArea::vertical()
@@ -110,8 +110,8 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
+    use crate::components::menu::Item;
     use crate::components::{Edge, ROOM, both, edges_in, fills_in, harness, icon_in, painted, texts};
-    use crate::filter_bar;
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() <= 0.5
@@ -183,7 +183,7 @@ mod tests {
                 let shown = Dropdown::new("column", chosen.as_str()).width(200.0).show(ui, |ui| {
                     let mut picked = None;
                     for name in NAMES {
-                        if filter_bar::item(ui, name == chosen.as_str(), name).clicked() {
+                        if ui.add(Item::new(name).choice(Some(name == chosen.as_str()))).clicked() {
                             picked = Some(name);
                         }
                     }

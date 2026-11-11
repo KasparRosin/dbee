@@ -95,10 +95,12 @@ use egui::{
 };
 use serde_json::json;
 
+use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::button::{BoxButton, TextButton};
 use crate::components::icon::Icon;
+use crate::components::menu::{self, Item};
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
 use crate::theme::{
@@ -106,7 +108,6 @@ use crate::theme::{
     size::{self, RADIUS_CONTROL},
 };
 use crate::tree::thousands;
-use crate::{DbeeApp, filter_bar};
 
 /// The automation ids.
 pub const EDITOR: &str = "query-editor";
@@ -835,12 +836,13 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
             // egui closes a popup that is not drawn: no list while the chip waits.
             return;
         }
-        Popup::menu(&r).width(CHIP_W).style(theme::popup_style(ui.ctx())).show(|ui| {
+        Popup::menu(&r).width(CHIP_W).style(menu::style(ui.ctx())).show(|ui| {
+            // At least as wide as the chip.
+            ui.set_min_width(ui.available_width());
             ui.add(Label::new(Text::Label.rich(many).color(t.text_muted)).selectable(false));
             ScrollArea::vertical().max_height(CHIP_LIST_H).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
                 for name in &chip.choices {
-                    let r = filter_bar::item(ui, shown == Some(*name), name);
+                    let r = ui.add(Item::new(name).choice(Some(shown == Some(*name))));
                     // A menu's first frame is a sizing pass, which reads every widget as disabled.
                     tags.tag_value_as(&format!("{DATABASE}-{name}"), &r, *name, true);
                     if r.clicked() {
@@ -1002,12 +1004,12 @@ fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], sh
         let r = ui.add(Button::new(Text::Data.rich("…")).min_size(vec2(22.0, 22.0)));
         let r = r.on_hover_text(format!("Choose one of the {} results", results.len()));
         tags.tag_value(RESULT_MORE, &r, results.len());
-        Popup::menu(&r).width(RESULT_LIST_W).style(theme::popup_style(ui.ctx())).show(|ui| {
-            ui.spacing_mut().item_spacing.y = filter_bar::ITEM_GAP;
-            ScrollArea::vertical().max_height(CHIP_LIST_H).show_rows(ui, filter_bar::ITEM_H, results.len(), |ui, rows| {
+        Popup::menu(&r).width(RESULT_LIST_W).style(menu::style(ui.ctx())).show(|ui| {
+            ui.set_min_width(ui.available_width());
+            ScrollArea::vertical().max_height(CHIP_LIST_H).show_rows(ui, size::MENU_ITEM_H, results.len(), |ui, rows| {
                 for (i, o) in results.iter().enumerate().take(rows.end).skip(rows.start) {
                     let n = i.saturating_add(1);
-                    let r = filter_bar::item(ui, i == shown, &format!("Statement {n}: {}", what(o)));
+                    let r = ui.add(Item::new(&format!("Statement {n}: {}", what(o))).choice(Some(i == shown)));
                     // A menu's first frame is a sizing pass, which reads every widget as disabled.
                     tags.tag_value_as(&format!("{RESULT_LIST}{n}"), &r, value(i, o), true);
                     if r.clicked() && i != shown {
