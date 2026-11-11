@@ -1482,9 +1482,9 @@ fn assert_checkbox(ui: &Ui, i: &Json, id: &str, value: bool, enabled: bool, labe
     assert!((words.left() - boxed.right() - 8.0).abs() < 0.5, "`{id}`: its label 8 after its box: {words:?} in {at:?}");
 }
 
-/// The form's checkboxes, SSL mode and colours, moved to `components`, say in `ui.inspect` what
-/// they said before (ids, values, enabled flags) and change as before; they are drawn as the page
-/// draws them. The SSH login stays as it was (Screens doesn't draw it).
+/// The form's checkboxes, SSL mode, SSH login and colours, moved to `components`, say in
+/// `ui.inspect` what they said before (ids, values, enabled flags) and change as before; they are
+/// drawn as the page draws them.
 #[test]
 fn moved_choices_keep_their_ids_and_values() {
     let t = dbee_ui_egui::theme::LIGHT;
@@ -1527,11 +1527,27 @@ fn moved_choices_keep_their_ids_and_values() {
     assert_eq!(dots, 0, "a colour is a square, never a circle");
     assert_eq!(edges_on(&ui, rect_of(&tag_in(&i, "conn-color-none").unwrap())), [(2.0, t.ink)], "the chosen one's 2 px ink edge");
 
-    // The SSH login stays as it was.
-    assert_eq!(tag_in(&i, "conn-ssh-auth").unwrap()["value"], "key");
+    // The SSH login, as SSL mode.
+    let login = tag_in(&i, "conn-ssh-auth").expect("the SSH login is drawn");
+    assert_eq!(login["value"], "key", "{login}");
+    let row = rect_of(&login);
+    assert_eq!((row.height(), edges_on(&ui, row)), (28.0, vec![(1.0, t.line_strong)]), "the login's box");
+    for (name, words) in [("key", "Key"), ("agent", "Agent"), ("password", "Password")] {
+        let e = tag_in(&i, &format!("conn-ssh-auth-{name}")).unwrap_or_else(|| panic!("`conn-ssh-auth-{name}` is drawn"));
+        assert_eq!(e["value"], name == "key", "{e}");
+        assert!(e.get("enabled").is_none(), "{e}");
+        let at = rect_of(&e);
+        assert_eq!(at.height(), 26.0, "`conn-ssh-auth-{name}` is 26 tall inside the box: {at:?}");
+        assert!(ui.text_in(at, words).is_some(), "`conn-ssh-auth-{name}` draws `{words}` as written");
+    }
 
     // They change as before.
     ui.click("conn-ssl-require");
+    ui.click("conn-ssh-auth-agent");
+    assert_eq!(
+        (ui.value("conn-ssh-auth"), ui.value("conn-ssh-auth-agent"), ui.value("conn-ssh-auth-key")),
+        (json!("agent"), json!(true), json!(false))
+    );
     ui.click("conn-color-green");
     ui.click("conn-readonly");
     ui.click("conn-save-secrets");

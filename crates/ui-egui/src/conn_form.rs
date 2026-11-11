@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
-    Align, Button, CornerRadius, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, Rect, RectAlign, RichText, ScrollArea,
-    Sense, Stroke, UiBuilder, pos2, vec2,
+    Align, Button, CornerRadius, Frame, Key, Label, Layout, Margin, Modifiers, Popup, PopupCloseBehavior, RectAlign, RichText, ScrollArea, Sense,
+    Stroke, UiBuilder, pos2, vec2,
 };
 
 use crate::automation::Tags;
@@ -335,28 +335,6 @@ fn text_field(
     let r = ui.add(Field::new(label, font(text).id(field_id(id)).placeholder(hint).desired_width(width)));
     tags.tag_value(id, &r, text.as_str());
     r
-}
-
-/// A row of exclusive choices, tagged `id` (with the chosen one's name) and `<id>-<name>` each.
-fn segments<T: Copy + PartialEq>(ui: &mut egui::Ui, tags: &mut Tags, id: &str, value: &mut T, options: &[(T, &str, &str)], width: f32) {
-    let n = options.len().max(1) as f32;
-    let gap = 4.0;
-    let each = ((width - gap * (n - 1.0)) / n).max(20.0);
-    let t = theme::tokens(ui.ctx());
-    let frame = Rect::from_min_size(ui.cursor().min, vec2(width, FIELD_H));
-    ui.painter().rect(frame, CornerRadius::same(RADIUS_CONTROL), t.card, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
-    let row = ui.allocate_ui_with_layout(vec2(width, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for (option, label, name) in options {
-            let r = ui.add_sized(vec2(each, FIELD_H), Button::selectable(*value == *option, *label));
-            tags.tag_value(&format!("{id}-{name}"), &r, *value == *option);
-            if r.clicked() {
-                *value = *option;
-            }
-        }
-    });
-    let chosen = options.iter().find(|(o, ..)| *o == *value).map_or("", |(_, _, name)| *name);
-    tags.tag_value(id, &row.response, chosen);
 }
 
 /// A read-only path box (`id`) with the path it shows.
@@ -825,8 +803,16 @@ fn ssh_box(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut
                 text_field(ui, tags, PORT_W, "SSH port", "conn-ssh-port", Input::data, &mut f.ssh_port, "22");
             });
             text_field(ui, tags, w, "SSH user", "conn-ssh-user", Input::data, &mut f.ssh_user, "");
-            let auths = [(Auth::Key, "Key", "key"), (Auth::Agent, "Agent", "agent"), (Auth::Password, "Password", "password")];
-            column(ui, w, "Login", |ui| segments(ui, tags, "conn-ssh-auth", &mut f.ssh_auth, &auths, w));
+            let auths = [(Auth::Key, "Key"), (Auth::Agent, "Agent"), (Auth::Password, "Password")];
+            let names = ["key", "agent", "password"];
+            column(ui, w, "Login", |ui| {
+                let shown = Segmented::small(&mut f.ssh_auth, &auths).width(w).show(ui);
+                for (((auth, _), name), r) in auths.iter().zip(names).zip(&shown.segments) {
+                    tags.tag_value(&format!("conn-ssh-auth-{name}"), r, f.ssh_auth == *auth);
+                }
+                let chosen = auths.iter().zip(names).find(|((a, _), _)| *a == f.ssh_auth).map_or("", |(_, name)| name);
+                tags.tag_value("conn-ssh-auth", &shown.row, chosen);
+            });
             // What the login will use: one fixed slot for every choice.
             ui.add_space(2.0);
             ui.allocate_ui_with_layout(vec2(w, FIELD_H), Layout::left_to_right(Align::Center), |ui| {
