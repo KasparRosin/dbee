@@ -274,20 +274,22 @@ pub struct BarButton<'a> {
     icon: Icon,
     label: Option<&'a str>,
     on: bool,
+    done: bool,
     divider: bool,
     height: f32,
+    min_width: f32,
     look: Option<Look>,
 }
 
 impl<'a> BarButton<'a> {
     /// `icon` and `label`, as REFRESH and + ROW in the table bar.
     pub fn label(icon: Icon, label: &'a str) -> BarButton<'a> {
-        BarButton { icon, label: Some(label), on: false, divider: true, height: BAR_BUTTON_H, look: None }
+        BarButton { icon, label: Some(label), on: false, done: false, divider: true, height: BAR_BUTTON_H, min_width: 0.0, look: None }
     }
 
     /// `icon` alone, as the value panel's toggle.
     pub fn icon(icon: Icon) -> BarButton<'a> {
-        BarButton { icon, label: None, on: false, divider: true, height: BAR_BUTTON_H, look: None }
+        BarButton { icon, label: None, on: false, done: false, divider: true, height: BAR_BUTTON_H, min_width: 0.0, look: None }
     }
 
     /// In a bar with a line along its bottom: as tall as the room above the line.
@@ -299,6 +301,19 @@ impl<'a> BarButton<'a> {
     /// On: what it shows is showing (`fill` over the cell, whether hovered or not).
     pub fn on(mut self, on: bool) -> BarButton<'a> {
         self.on = on;
+        self
+    }
+
+    /// Done: what it did has just happened, and it says so in `text_muted` (the value panel's
+    /// ✓ COPIED).
+    pub fn done(mut self, done: bool) -> BarButton<'a> {
+        self.done = done;
+        self
+    }
+
+    /// At least `width` wide, what it holds centred: COPY keeps COPIED's width, so nothing moves.
+    pub fn min_width(mut self, width: f32) -> BarButton<'a> {
+        self.min_width = width;
         self
     }
 
@@ -328,7 +343,7 @@ impl<'a> BarButton<'a> {
         // egui puts the letter spacing after the last letter too; the page's measure has none there.
         let words_w = words.size().x - Text::Label.spacing();
         let width = (2.0 * BAR_BUTTON_PAD_X + self.icon.size().x + BAR_BUTTON_GAP + words_w).ceil();
-        (Some(words), width)
+        (Some(words), width.max(self.min_width))
     }
 }
 
@@ -354,11 +369,19 @@ impl Widget for BarButton<'_> {
         if let Some(ground) = ground {
             p.rect_filled(rect, CornerRadius::ZERO, ground);
         }
-        let colour = if look.disabled { t.text_faint } else { t.text };
+        let colour = if look.disabled {
+            t.text_faint
+        } else if self.done {
+            t.text_muted
+        } else {
+            t.text
+        };
         match words {
             Some(words) => {
-                let x = rect.left() + BAR_BUTTON_PAD_X;
                 let icon_w = self.icon.size().x;
+                let held = icon_w + BAR_BUTTON_GAP + words.size().x - Text::Label.spacing();
+                let natural = (2.0 * BAR_BUTTON_PAD_X + held).ceil();
+                let x = if rect.width() > natural { rect.center().x - held / 2.0 } else { rect.left() + BAR_BUTTON_PAD_X };
                 self.icon.paint(&p, pos2(x + icon_w / 2.0, rect.center().y), colour);
                 p.galley(pos2(x + icon_w + BAR_BUTTON_GAP, rect.center().y - words.size().y / 2.0), words, colour);
             }

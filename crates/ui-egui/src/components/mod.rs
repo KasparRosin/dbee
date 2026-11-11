@@ -25,6 +25,7 @@ pub mod tab;
 pub mod table_bars;
 pub mod toast;
 pub mod tooltip;
+pub mod value;
 
 /// How a control is drawn this frame: hovered, showing keyboard focus, off.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

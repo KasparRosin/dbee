@@ -760,11 +760,6 @@ pub(crate) fn line_galley(ui: &egui::Ui, text: &str, style: Text, color: Color32
     line_job(ui, style.job(text, color), width)
 }
 
-/// [`line_galley`] with the case untouched, for what came from a database or the user.
-pub(crate) fn line_galley_as_written(ui: &egui::Ui, text: &str, style: Text, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
-    line_job(ui, style.job_as_written(text, color), width)
-}
-
 /// `job` on one line, cut with "…" to `width`.
 pub(crate) fn line_job(ui: &egui::Ui, mut job: LayoutJob, width: f32) -> std::sync::Arc<egui::Galley> {
     job.wrap = TextWrapping::truncate_at_width(width.max(1.0));

@@ -31,6 +31,7 @@ use super::tab::{self, NewTab, Tab};
 use super::table_bars::{self, Loading, PagingBar, TableBar, View};
 use super::toast::Toast;
 use super::tooltip;
+use super::value::{self, Facts as ValueFacts, Panel, State as ValueState};
 use crate::theme::size::{
     BAR_H, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32,
     TAB_H, TREE_ROW_H,
@@ -166,6 +167,7 @@ pub fn show(ui: &mut Ui) {
         bars(ui);
         grid(ui);
         sidebar_rows(ui);
+        value_panels(ui);
     });
 }
 
@@ -352,6 +354,114 @@ fn sidebar_rows(ui: &mut Ui) {
         SPACE_8,
         |ui| list(ui, CONNECTION_LIST_W, CONNECTION_ROW_H, connections.len(), |ui, i, rect| connections[i].paint(ui, rect)),
     );
+}
+
+/// The value panel's frame on the page: 340 by 372, three to a row, 16 apart.
+const VALUE_PANEL: Vec2 = vec2(340.0, 372.0);
+const VALUE_PANELS_PER_ROW: usize = 3;
+const VALUE_PANEL_GAP: f32 = 16.0;
+
+/// The page's values: the `meta` jsonb, the `notes` text, the value being edited, row 3.
+const VALUE_JSON: &str =
+    r#"{"src": "web", "gift": true, "tags": ["express", "fragile"], "items": 3, "notes": "Leave at the door", "coupon": null, "weight_kg": 1.25}"#;
+const VALUE_TEXT: &str = "Leave at the door.\nRing twice, then wait.";
+const VALUE_EDITING: &str = "{\n  \"src\": \"web\",\n  \"gift\": false,\n  \"tags\": [\"new\", \"eu\"],\n  \"note\": null\n}";
+const VALUE_ROW: &str = r#"{"id": 691, "customer": "Customer 191", "total": 221.29, "shipped_at": "2025-04-02", "note": null, "paid": true}"#;
+
+/// One of the value panel's states as the page shows it: the panel, and the value in it (its text,
+/// whether it is JSON, where the editing caret is).
+pub(crate) struct ValueSample {
+    pub panel: Panel<'static>,
+    pub value: Option<(String, bool, Option<usize>)>,
+}
+
+/// The value panel's eight states with the page's values, in the page's order.
+pub(crate) fn value_samples() -> [ValueSample; 8] {
+    let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_else(|| VALUE_JSON.to_owned());
+    let row = dbee_core::json::pretty(VALUE_ROW).unwrap_or_else(|| VALUE_ROW.to_owned());
+    let lines = |s: &str| s.split('\n').count();
+    let panel = |state, title, ty, facts| Panel { state, title, ty, kind: None, note: None, facts, buttons: true, wrap: false, edge: true };
+    let json_facts = Some(ValueFacts { lines: lines(&json), bytes: VALUE_JSON.len() });
+    // The value being edited, the caret after `false`.
+    let caret = VALUE_EDITING.find("false").map(|at| at + "false".len());
+    [
+        ValueSample { panel: panel(ValueState::Json, "meta", "jsonb", json_facts), value: Some((json.clone(), true, None)) },
+        ValueSample {
+            panel: panel(ValueState::Text, "notes", "text", Some(ValueFacts { lines: lines(VALUE_TEXT), bytes: VALUE_TEXT.len() })),
+            value: Some((VALUE_TEXT.to_owned(), false, None)),
+        },
+        ValueSample { panel: panel(ValueState::Null, "coupon", "text", None), value: None },
+        ValueSample { panel: panel(ValueState::Empty, "coupon", "text", None), value: None },
+        ValueSample { panel: panel(ValueState::NoCell, "", "", None), value: None },
+        ValueSample { panel: panel(ValueState::Copied, "meta", "jsonb", json_facts), value: Some((json, true, None)) },
+        ValueSample {
+            panel: panel(ValueState::Editing, "meta", "json", Some(ValueFacts { lines: lines(VALUE_EDITING), bytes: 58 })),
+            value: Some((VALUE_EDITING.to_owned(), true, caret)),
+        },
+        // The page's facts for the row: a row's size is the value panel screen's to work out.
+        ValueSample {
+            panel: panel(ValueState::Row, "Row 3", "", Some(ValueFacts { lines: lines(&row), bytes: 134 })),
+            value: Some((row, true, None)),
+        },
+    ]
+}
+
+/// Draws `sample` into `at`.
+pub(crate) fn value_panel(ui: &mut Ui, sample: &ValueSample, at: Rect) -> value::Shown {
+    let shown = sample.panel.show(ui, at);
+    if let Some((text, json, caret)) = &sample.value {
+        let spans = json.then(|| crate::value_panel::spans(text));
+        value::paint_value(ui, shown.text, text, spans.as_deref(), *caret);
+    }
+    shown
+}
+
+/// The value panel in each state as the page's Value panel frame shows it; then as the app draws it
+/// until the value panel screen, with today's kind chip and note.
+fn value_panels(ui: &mut Ui) {
+    let samples = value_samples();
+    section(
+        ui,
+        "value panel: json, text, NULL, empty (inferred), no cell selected (B4), COPIED, editing several lines (MC+), #17 a row as JSON (inferred)",
+        SPACE_8,
+        |ui| panels(ui, samples.len(), |ui, i, at| _ = value_panel(ui, &samples[i], at)),
+    );
+    let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_default();
+    let apps = [
+        ValueSample {
+            panel: Panel { kind: Some(Words::default().name("jsonb")), buttons: false, ..value_samples()[0].panel.clone() },
+            value: Some((json, true, None)),
+        },
+        ValueSample {
+            panel: Panel {
+                kind: Some(Words::from("text containing JSON")),
+                note: Some("Showing the first 10.0 MiB of 19.1 MiB. Too long to format."),
+                buttons: false,
+                ..value_samples()[0].panel.clone()
+            },
+            value: Some((VALUE_JSON.to_owned(), true, None)),
+        },
+        ValueSample { panel: Panel { buttons: false, ..value_samples()[4].panel.clone() }, value: None },
+    ];
+    section(
+        ui,
+        "not on the page yet: the app's panel until the value panel screen, no COPY or WRAP; today's kind chip (a type as written) and the note on a cut value, under the bar",
+        SPACE_8,
+        |ui| panels(ui, apps.len(), |ui, i, at| _ = value_panel(ui, &apps[i], at)),
+    );
+}
+
+/// `n` value panels, three to a row, drawn by `panel`.
+fn panels(ui: &mut Ui, n: usize, mut panel: impl FnMut(&mut Ui, usize, Rect)) {
+    let rows = n.div_ceil(VALUE_PANELS_PER_ROW);
+    let width = VALUE_PANEL.x * VALUE_PANELS_PER_ROW as f32 + VALUE_PANEL_GAP * (VALUE_PANELS_PER_ROW - 1) as f32;
+    let height = VALUE_PANEL.y * rows as f32 + VALUE_PANEL_GAP * rows.saturating_sub(1) as f32;
+    let (frame, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    for i in 0..n {
+        let (row, col) = (i / VALUE_PANELS_PER_ROW, i % VALUE_PANELS_PER_ROW);
+        let at = pos2(frame.left() + (VALUE_PANEL.x + VALUE_PANEL_GAP) * col as f32, frame.top() + (VALUE_PANEL.y + VALUE_PANEL_GAP) * row as f32);
+        panel(ui, i, Rect::from_min_size(at, VALUE_PANEL));
+    }
 }
 
 /// `n` rows `w` wide and `h` tall, one under the other, drawn by `row`, on `bg` with a 1 px `line`

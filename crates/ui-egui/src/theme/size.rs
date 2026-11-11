@@ -216,6 +216,23 @@ pub const CONNECTION_COLOUR_W: f32 = 3.0;
 pub const CONNECTION_PAD_X: f32 = 12.0;
 pub const CONNECTION_FOCUS_INSET: f32 = 1.0;
 
+/// The value panel (`value panel`): the bar's words, the value and the facts this far in from its
+/// sides, the value this far below the bar and above the facts; the bar's parts (the column's
+/// name and type, COPY and WRAP) this far apart; the facts in a slim bar along the bottom, this far apart; CANCEL and SAVE this far
+/// apart; the editing caret this tall in its row. Under the bar, today's kind chip (this tall, its
+/// words this far in), then the note on a cut value this far under it, then this much before the
+/// value.
+pub const VALUE_INSET: f32 = 12.0;
+pub const VALUE_BAR_GAP: f32 = 6.0;
+pub const VALUE_FACTS_H: f32 = SLIM_BAR_H;
+pub const VALUE_FACT_GAP: f32 = 12.0;
+pub const VALUE_EDIT_GAP: f32 = 8.0;
+pub const VALUE_CARET_H: f32 = 16.0;
+pub const VALUE_KIND_H: f32 = 18.0;
+pub const VALUE_KIND_PAD_X: f32 = 6.0;
+pub const VALUE_KIND_GAP: f32 = 2.0;
+pub const VALUE_NOTE_GAP: f32 = 6.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;
