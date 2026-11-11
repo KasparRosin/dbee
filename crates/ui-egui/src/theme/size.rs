@@ -72,6 +72,8 @@ pub const MENU_ITEM_GAP: f32 = 8.0;
 pub const MENU_KEYS_PAD: f32 = 16.0;
 /// A menu's separator (`menu/separator`): its 1 px line has this above and below it.
 pub const MENU_SEPARATOR_PAD: f32 = 4.0;
+/// A menu's heading over its items (the database chip's list): this between it and the first.
+pub const MENU_HEADING_GAP: f32 = 6.0;
 /// A menu bar's title (`menubar/title`): this tall, its word this far in from either end.
 pub const MENU_TITLE_H: f32 = 24.0;
 pub const MENU_TITLE_PAD_X: f32 = 8.0;

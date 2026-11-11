@@ -22,8 +22,8 @@ use super::icon::Icon;
 use super::keycap::Keycap;
 use super::{Look, focus, painter};
 use crate::theme::size::{
-    KEYCAP_GAP, MENU_ITEM_GAP, MENU_ITEM_H, MENU_ITEM_PAD_X, MENU_KEYS_PAD, MENU_MARK, MENU_PAD, MENU_SEPARATOR_PAD, MENU_TITLE_H, MENU_TITLE_PAD_X,
-    RADIUS_CONTROL, RADIUS_FLOAT, SLIM_BAR_H,
+    KEYCAP_GAP, MENU_HEADING_GAP, MENU_ITEM_GAP, MENU_ITEM_H, MENU_ITEM_PAD_X, MENU_KEYS_PAD, MENU_MARK, MENU_PAD, MENU_SEPARATOR_PAD, MENU_TITLE_H,
+    MENU_TITLE_PAD_X, RADIUS_CONTROL, RADIUS_FLOAT, SLIM_BAR_H,
 };
 use crate::theme::{self, Text, tokens};
 
@@ -210,6 +210,18 @@ pub fn separator(ui: &mut Ui) -> Response {
         let t = tokens(ui.ctx());
         painter(ui).hline(rect.x_range(), rect.top() + MENU_SEPARATOR_PAD + 0.5, Stroke::new(1.0, t.raised_line));
     }
+    r
+}
+
+/// A heading over a menu's items (the database chip's list): its words in `label` capitals,
+/// `text_muted`, [`MENU_HEADING_GAP`] above the first item. Reported to accessibility as written.
+pub fn heading(ui: &mut Ui, words: &str) -> Response {
+    let t = tokens(ui.ctx());
+    let galley = ui.painter().layout_job(Text::Label.job(words, t.text_muted));
+    let (rect, r) = ui.allocate_exact_size(galley.size(), Sense::hover());
+    r.widget_info(|| WidgetInfo::labeled(WidgetType::Label, ui.is_enabled(), words));
+    painter(ui).galley(rect.min, galley, t.text_muted);
+    ui.add_space(MENU_HEADING_GAP);
     r
 }
 
@@ -545,6 +557,31 @@ mod tests {
             let seen = over(item[0].0, menu);
             let c = contrast(*words, seen);
             assert!(c >= 4.5, "{theme:?}: danger on raised_hover on raised: {c:.2}");
+        }
+    }
+
+    #[test]
+    fn a_heading_sits_6_over_the_first_item() {
+        // The database chip's list: its heading in `label` capitals, `text_muted`, then the menu's
+        // 6 to its first item. Read out as written.
+        for (theme, t) in both() {
+            let mut h = harness(theme, [Rect::NOTHING; 2], |ui, at: &mut [Rect; 2]| {
+                at[0] = column(ui, |ui| {
+                    let r = heading(ui, "Databases");
+                    at[1] = ui.add(Item::new("many").choice(Some(false))).rect;
+                    r.rect
+                });
+            });
+            h.run();
+            let [head, first] = *h.state();
+            let drawn = texts(&h.output().shapes);
+            let words = drawn.iter().find(|(s, _, _)| s == "DATABASES").unwrap_or_else(|| panic!("{theme:?}: the heading drawn: {drawn:?}"));
+            assert_eq!(words.2, t.text_muted, "{theme:?}: the heading's colour");
+            assert_eq!((words.1.min, words.1.height()), (head.min, 14.0), "{theme:?}: the heading's words {:?} in label's 14 in {head:?}", words.1);
+            assert!(close(head.height(), 14.0) && close(head.left(), first.left()), "{theme:?}: label's 14, at the menu's left: {head:?}");
+            assert!(!drawn.iter().any(|(s, _, _)| s == "Databases"), "{theme:?}: drawn only in capitals");
+            assert_eq!(first.top() - head.bottom(), 6.0, "{theme:?}: 6 between the heading {head:?} and the first item {first:?}");
+            assert!(h.query_by_label("Databases").is_some(), "{theme:?}: read out as written");
         }
     }
 

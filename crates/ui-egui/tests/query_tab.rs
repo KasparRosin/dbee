@@ -608,6 +608,10 @@ fn mysql_query_tab_shows_and_changes_its_database() {
     for system in ["mysql", "information_schema", "performance_schema", "sys"] {
         assert!(tag_in(&i, &format!("query-database-{system}")).is_none(), "{system} is the server's own");
     }
+    // The list's heading, the menu's 6 over its first row.
+    let first = ui.rect("query-database-many");
+    let heading = ui.texts().into_iter().find(|(_, g)| g.text() == "DATABASES").map(|(r, _)| r).expect("the list's heading is drawn");
+    assert!((first[1] - heading.bottom() - 6.0).abs() < 0.5, "6 between the heading {heading:?} and the first row {first:?}");
     ui.click("query-database-many");
     ui.frame();
     assert_eq!(ui.query()["database"], "many");

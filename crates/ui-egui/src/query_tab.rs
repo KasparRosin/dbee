@@ -839,7 +839,7 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
         Popup::menu(&r).width(CHIP_W).style(menu::style(ui.ctx())).show(|ui| {
             // At least as wide as the chip.
             ui.set_min_width(ui.available_width());
-            ui.add(Label::new(Text::Label.rich(many).color(t.text_muted)).selectable(false));
+            menu::heading(ui, many);
             ScrollArea::vertical().max_height(CHIP_LIST_H).show(ui, |ui| {
                 for name in &chip.choices {
                     let r = ui.add(Item::new(name).choice(Some(shown == Some(*name))));
