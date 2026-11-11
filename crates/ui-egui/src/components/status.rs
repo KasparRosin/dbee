@@ -105,21 +105,21 @@ pub struct Shown {
     pub act: Option<Act>,
 }
 
-/// One text of the bar: laid out, with what it reads as written.
-struct Piece {
-    galley: Arc<Galley>,
+/// One text of a bar: laid out, with what it reads as written.
+pub(super) struct Piece {
+    pub(super) galley: Arc<Galley>,
     says: String,
     /// The letter spacing egui puts after the last letter too; the page's measure has none there.
     trail: f32,
 }
 
 impl Piece {
-    fn new(ui: &Ui, job: LayoutJob, says: impl Into<String>) -> Piece {
+    pub(super) fn new(ui: &Ui, job: LayoutJob, says: impl Into<String>) -> Piece {
         let trail = job.sections.last().map_or(0.0, |s| s.format.extra_letter_spacing);
         Piece { galley: ui.painter().layout_job(job), says: says.into(), trail }
     }
 
-    fn width(&self) -> f32 {
+    pub(super) fn width(&self) -> f32 {
         self.galley.size().x - self.trail
     }
 }
@@ -232,7 +232,7 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
 }
 
 /// Draws `piece` from `left`, centred on `mid`, in `colour`; it answers to hover as a label.
-fn piece(ui: &Ui, id: Id, piece: &Piece, at: egui::Pos2, colour: Color32) -> Response {
+pub(super) fn piece(ui: &Ui, id: Id, piece: &Piece, at: egui::Pos2, colour: Color32) -> Response {
     let rect = Rect::from_min_size(pos2(at.x, at.y - piece.galley.size().y / 2.0), piece.galley.size());
     ui.painter().galley(rect.min, Arc::clone(&piece.galley), colour);
     let r = ui.interact(rect, id, Sense::hover());

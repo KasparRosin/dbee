@@ -18,13 +18,14 @@ use super::icon::Icon;
 use super::input::{Field, Input};
 use super::keycap::Keycap;
 use super::menu::{self, BarTitle, Item};
+use super::results::{ResultBar, ResultTab, RowCount, RunRow, RunState};
 use super::segmented::{Segment, Segmented};
 use super::status::{self, Activity, Connection, Facts};
 use super::swatch::{COLOURS, Swatch};
 use super::tab::{self, NewTab, Tab};
 use super::toast::Toast;
 use super::tooltip;
-use crate::theme::size::{KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, TAB_H};
+use crate::theme::size::{BAR_H, KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, TAB_H};
 use crate::theme::{Text, Tokens, Words, tokens};
 
 /// The page's frames: 20 between sections.
@@ -141,7 +142,8 @@ pub fn show(ui: &mut Ui) {
     });
 }
 
-/// The menu bar and the status bars, as the page's Tabs and bars frame shows them.
+/// The menu bar, the query tab's bars and the status bars, as the page's Tabs and bars frame and
+/// its Status bar frame show them.
 fn bars(ui: &mut Ui) {
     section(ui, "menu bar, 30 tall, from menubar/title; then with View open", SPACE_8, |ui| {
         ui.vertical(|ui| {
@@ -153,6 +155,7 @@ fn bars(ui: &mut Ui) {
             }
         });
     });
+    results(ui);
     let shop = |colour| Connection { name: "Shop live", colour, own: true };
     let stack = |ui: &mut Ui, rows: Vec<(Connection<'static>, Facts<'static>, Option<Activity>)>| {
         ui.vertical(|ui| {
@@ -211,6 +214,106 @@ fn bars(ui: &mut Ui) {
                     (made, Facts { server: Some("PostgreSQL 14.24"), ..Facts::default() }, None),
                 ],
             );
+        },
+    );
+}
+
+/// The run row, the result tabs, the result bar and the row count, as the page's Tabs and bars
+/// frame shows them, and their states before the app gives timers.
+fn results(ui: &mut Ui) {
+    let hovered = Look { hovered: true, ..Look::default() };
+    let focused = Look { focused: true, ..Look::default() };
+    let stack = |ui: &mut Ui, rows: &mut dyn FnMut(&mut Ui)| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_12;
+            rows(ui);
+        });
+    };
+    let bar = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+        ui.allocate_ui(vec2(STRIP_W, BAR_H), |ui| add(ui));
+    };
+    section(
+        ui,
+        "run row: idle; running (RUN off, CANCEL the ink button); RUN CURRENT as an option, hidden by default: Kaspar hasn't decided on it",
+        SPACE_8,
+        |ui| {
+            stack(ui, &mut |ui| {
+                for (running, run_current) in [(false, false), (true, false), (false, true)] {
+                    bar(ui, &mut |ui| {
+                        RunRow { running, run_current, can_run: true }.show(ui);
+                    });
+                }
+            });
+        },
+    );
+    section(ui, "result tab: inactive, hover, active, focus (inferred)", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        ui.add(ResultTab::new("select ... series"));
+        ui.add(ResultTab::new("select ... series").look(hovered));
+        ui.add(ResultTab::new("select ... series").active(true));
+        ui.add(ResultTab::new("select ... series").look(focused));
+    });
+    let two = || vec![ResultTab::new("select ... orders").active(true), ResultTab::new("select ... series")];
+    let s = Duration::from_millis;
+    section(
+        ui,
+        "result bar: done, running, failed, cancelled; new facts: 2 rows affected, first 10,000 of 25,000 rows; the value panel open (on)",
+        SPACE_8,
+        |ui| {
+            let done = RunState::Done { rows: 10, ms: Some(24) };
+            let rows = [
+                ResultBar { tabs: two(), state: done, first_of: None, export: true, value_on: false },
+                ResultBar { tabs: two(), state: RunState::Running { elapsed: Some(s(2400)) }, first_of: None, export: true, value_on: false },
+                ResultBar { tabs: Vec::new(), state: RunState::Failed { ms: Some(12) }, first_of: None, export: false, value_on: false },
+                ResultBar { tabs: Vec::new(), state: RunState::Cancelled { elapsed: Some(s(3200)) }, first_of: None, export: false, value_on: false },
+                ResultBar { tabs: two(), state: RunState::Affected { rows: 2, ms: Some(5) }, first_of: None, export: false, value_on: false },
+                ResultBar {
+                    tabs: two(),
+                    state: RunState::Done { rows: 10_000, ms: Some(80) },
+                    first_of: Some((10_000, 25_000)),
+                    export: true,
+                    value_on: false,
+                },
+                ResultBar { tabs: two(), state: done, first_of: None, export: true, value_on: true },
+            ];
+            stack(ui, &mut |ui| {
+                for row in &rows {
+                    bar(ui, &mut |ui| {
+                        row.clone().show(ui);
+                    });
+                }
+            });
+        },
+    );
+    section(
+        ui,
+        "rows/count: exact; estimate with COUNT; unknown with COUNT ROWS; counting with its timer (its CANCEL is the footer job)",
+        SPACE_8,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_32;
+            let first = Some((1, 100));
+            RowCount::Exact(25_000).show(ui, first);
+            RowCount::Estimate(100_000).show(ui, first);
+            RowCount::Unknown.show(ui, first);
+            RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }.show(ui, first);
+        },
+    );
+    section(
+        ui,
+        "not on the page yet: before the app gives timers, today's spinner in the timer's place; a result's name and the numbers keep their case",
+        SPACE_8,
+        |ui| {
+            stack(ui, &mut |ui| {
+                bar(ui, &mut |ui| {
+                    let tabs = vec![ResultTab::new("select … Orders").active(true), ResultTab::new("select … Line_Items")];
+                    ResultBar { tabs, state: RunState::Running { elapsed: None }, first_of: None, export: true, value_on: false }.show(ui);
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_32;
+                    RowCount::Counting { estimate: None, elapsed: None }.show(ui, Some((101, 200)));
+                    RowCount::Exact(1).show(ui, Some((1, 1)));
+                });
+            });
         },
     );
 }

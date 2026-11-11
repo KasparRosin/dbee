@@ -140,6 +140,24 @@ pub const STATUS_GAP: f32 = 8.0;
 pub const STATUS_PAD_X: f32 = 12.0;
 pub const TRANSACTION_MARK: f32 = 8.0;
 
+/// A bar with a line along its bottom (`run row`, `result bar`, `table bar`): the line this thick;
+/// what stands in the bar (a result tab, a bar button) is this tall, above it.
+pub const BAR_LINE: f32 = 1.0;
+pub const BAR_CELL_H: f32 = BAR_H - BAR_LINE;
+/// The run row (`run row`): its buttons this far in from its left end and this far apart.
+pub const RUN_ROW_PAD_X: f32 = 12.0;
+pub const RUN_ROW_GAP: f32 = 4.0;
+/// A result tab (`result tab`): its title this far in from its ends, cut at this width.
+pub const RESULT_TAB_PAD_X: f32 = 12.0;
+pub const RESULT_TAB_TITLE_MAX: f32 = 200.0;
+/// The result bar (`result bar`): its facts this far apart, and the last this far before EXPORT
+/// or the value panel's toggle.
+pub const RESULT_FACT_GAP: f32 = 12.0;
+/// The row count (`rows/count`): this between its words and COUNT; while counting, this between
+/// its words, COUNTING and the timer.
+pub const ROW_COUNT_GAP: f32 = 8.0;
+pub const ROW_COUNT_COUNTING_GAP: f32 = 12.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;

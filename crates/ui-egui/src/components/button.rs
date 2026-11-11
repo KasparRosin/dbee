@@ -11,7 +11,7 @@ use egui::{Color32, CornerRadius, Galley, Rect, Response, Sense, Stroke, StrokeK
 use super::icon::Icon;
 use super::{Look, focus, painter};
 use crate::theme::size::{
-    BAR_BUTTON_DIVIDER, BAR_BUTTON_GAP, BAR_BUTTON_H, BAR_BUTTON_PAD_X, BUTTON_GAP, BUTTON_H, BUTTON_PAD_X, ICON_BUTTON, RADIUS_CONTROL,
+    BAR_BUTTON_DIVIDER, BAR_BUTTON_GAP, BAR_BUTTON_H, BAR_BUTTON_PAD_X, BAR_CELL_H, BUTTON_GAP, BUTTON_H, BUTTON_PAD_X, ICON_BUTTON, RADIUS_CONTROL,
     TEXT_BUTTON_PAD_X,
 };
 use crate::theme::{Text, tokens};
@@ -262,18 +262,25 @@ pub struct BarButton<'a> {
     label: Option<&'a str>,
     on: bool,
     divider: bool,
+    height: f32,
     look: Option<Look>,
 }
 
 impl<'a> BarButton<'a> {
     /// `icon` and `label`, as REFRESH and + ROW in the table bar.
     pub fn label(icon: Icon, label: &'a str) -> BarButton<'a> {
-        BarButton { icon, label: Some(label), on: false, divider: true, look: None }
+        BarButton { icon, label: Some(label), on: false, divider: true, height: BAR_BUTTON_H, look: None }
     }
 
     /// `icon` alone, as the value panel's toggle.
     pub fn icon(icon: Icon) -> BarButton<'a> {
-        BarButton { icon, label: None, on: false, divider: true, look: None }
+        BarButton { icon, label: None, on: false, divider: true, height: BAR_BUTTON_H, look: None }
+    }
+
+    /// In a bar with a line along its bottom: as tall as the room above the line.
+    pub fn over_line(mut self) -> BarButton<'a> {
+        self.height = BAR_CELL_H;
+        self
     }
 
     /// On: what it shows is showing (`fill` over the cell, whether hovered or not).
@@ -315,7 +322,7 @@ impl<'a> BarButton<'a> {
 impl Widget for BarButton<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let (words, width) = self.parts(ui);
-        let (rect, r) = ui.allocate_exact_size(vec2(width, BAR_BUTTON_H), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(vec2(width, self.height), Sense::click());
         let name = self.label.unwrap_or(self.icon.name());
         r.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), self.on, name));
         let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
