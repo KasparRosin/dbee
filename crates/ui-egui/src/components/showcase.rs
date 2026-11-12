@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
-use dbee_config::ConnectionColor;
+use dbee_config::{ConnectionColor, DbKind};
 use dbee_core::RelKind;
 
 use super::Look;
@@ -22,12 +22,14 @@ use super::grid_cell::{self, Align as CellAlign, Cell, CellText, Header, Key, Ma
 use super::icon::Icon;
 use super::input::{Field, Input};
 use super::keycap::Keycap;
+use super::logo::Logo;
 use super::menu::{self, BarTitle, Item};
 use super::results::{ResultBar, ResultTab, RowCount, RunRow, RunState};
 use super::rows::{ConnectionRow, TreeKind, TreeRow};
 use super::segmented::{Segment, Segmented};
 use super::sidebar::{self, Count};
 use super::status::{self, Activity, Connection, Facts};
+use super::structure::{self, HeaderCell, Heading};
 use super::swatch::{COLOURS, Swatch};
 use super::tab::{self, NewTab, Tab};
 use super::table_bars::{self, Loading, PagingBar, TableBar, View};
@@ -35,8 +37,8 @@ use super::toast::Toast;
 use super::tooltip;
 use super::value::{self, Facts as ValueFacts, Panel, State as ValueState};
 use crate::theme::size::{
-    BAR_H, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16,
-    SPACE_24, SPACE_32, TAB_H, TREE_ROW_H,
+    BAR_H, CONNECTION_LOGO, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8,
+    SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_ROW_H, TAB_H, TREE_ROW_H,
 };
 use crate::theme::{Text, Tokens, Words, connection_color, tokens};
 
@@ -143,6 +145,12 @@ pub fn show(ui: &mut Ui) {
     egui::Frame::NONE.inner_margin(SPACE_24).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         section(ui, "icon/, today's drawings in their usual colour", ICONS_UNDER_CAPTION, icons);
+        section(
+            ui,
+            "logo/: the engines' logos from Simple Icons 13.21.0 in their usual colour, at 24 and at the connection row's 14",
+            ICONS_UNDER_CAPTION,
+            logos,
+        );
         buttons(ui);
         inputs(ui);
         choices(ui);
@@ -172,6 +180,7 @@ pub fn show(ui: &mut Ui) {
         value_panels(ui);
         error_bands(ui);
         editor_sample(ui);
+        structure_sample(ui);
     });
 }
 
@@ -338,23 +347,26 @@ fn sidebar_rows(ui: &mut Ui) {
         SPACE_8,
         |ui| list(ui, SIDEBAR_W, TREE_ROW_H, tree.len(), |ui, i, rect| tree[i].paint(ui, rect)),
     );
-    let server = |engine: &str, address: &str| Words::from(format!("{engine} · ")).name(address);
-    let connection =
-        |name, line, colour| ConnectionRow { name, line, colour: connection_color(colour), selected: false, focused: false, hovered: false };
+    let connection = |name, engine, line: &str, colour| ConnectionRow {
+        name,
+        engine,
+        line: Words::default().name(line),
+        colour: connection_color(colour),
+        selected: false,
+        focused: false,
+        hovered: false,
+    };
     let connections = [
-        connection("Analytics replica", server("PostgreSQL", "analytics@replica:5432/analytics"), ConnectionColor::Blue),
-        ConnectionRow {
-            selected: true,
-            ..connection("Shop live", server("PostgreSQL", "postgres@pg14:5432/dbee").plain(" · SSH"), ConnectionColor::Red)
-        },
-        ConnectionRow { hovered: true, ..connection("Billing staging", server("MySQL", "billing@staging:3306/billing"), ConnectionColor::Orange) },
-        ConnectionRow { focused: true, ..connection("Shop dev", server("PostgreSQL", "postgres@localhost:5432/shop"), ConnectionColor::Green) },
-        connection("Local postgres", server("PostgreSQL", "postgres@localhost:5432/postgres"), ConnectionColor::None),
-        connection("Notes", server("SQLite", "~/data/notes.sqlite"), ConnectionColor::Purple),
+        connection("Analytics replica", DbKind::Postgres, "analytics@replica:5432/analytics", ConnectionColor::Blue),
+        ConnectionRow { selected: true, ..connection("Shop live", DbKind::Postgres, "postgres@pg14:5432/dbee  SSH", ConnectionColor::Red) },
+        ConnectionRow { hovered: true, ..connection("Billing staging", DbKind::MySql, "billing@staging:3306/billing", ConnectionColor::Orange) },
+        ConnectionRow { focused: true, ..connection("Shop dev", DbKind::Postgres, "postgres@localhost:5432/shop", ConnectionColor::Green) },
+        connection("Local postgres", DbKind::Postgres, "postgres@localhost:5432/postgres", ConnectionColor::None),
+        connection("Notes", DbKind::Sqlite, "~/data/notes.sqlite", ConnectionColor::Purple),
     ];
     section(
         ui,
-        "sidebar/connection: default, selected, hover, focus (inferred), no colour, other engines; their logos wait for the logo task, the line names the engine",
+        "sidebar/connection: default, selected, hover, focus (inferred), no colour, other engines (logo/mysql, logo/sqlite)",
         SPACE_8,
         |ui| list(ui, CONNECTION_LIST_W, CONNECTION_ROW_H, connections.len(), |ui, i, rect| connections[i].paint(ui, rect)),
     );
@@ -560,6 +572,46 @@ fn editor_sample(ui: &mut Ui) {
                 x = ErrorToken { token }.paint(p, pos2(x, top)).right();
             }
             code(p, pos2(x, top), after);
+        }
+    });
+}
+
+/// The Error band frame's structure table: 840 wide on `card`; its columns' widths and titles,
+/// then its rows.
+const STRUCTURE_W: f32 = 840.0;
+const STRUCTURE_COLUMNS: [(f32, &str); 6] = [(40.0, ""), (150.0, "Name"), (140.0, "Type"), (76.0, "Nullable"), (150.0, "Default"), (284.0, "Keys")];
+const STRUCTURE_ROWS: [[structure::Cell<'static>; 6]; 4] = {
+    use structure::Cell::{ForeignKey, Muted, Nullable, Position, PrimaryKey, Text};
+    [
+        [Position(1), Text("id"), Muted("int8"), Muted(""), Muted("identity"), PrimaryKey],
+        [Position(2), Text("customer_id"), Muted("int8"), Muted(""), Muted(""), ForeignKey("shop.customers.id")],
+        [Position(3), Text("dealer_id"), Muted("int4"), Nullable, Muted(""), Muted("")],
+        [Position(4), Text("status"), Muted("text"), Muted(""), Muted("'pending'::text"), Muted("")],
+    ]
+};
+
+/// The structure view's parts as the page's frame draws them: COLUMNS, the header, four columns.
+fn structure_sample(ui: &mut Ui) {
+    let caption = "structure view (SA): a section heading, the header (ink line under it), rows with position, name, type, nullable check, default, keys (primary key, foreign key link)";
+    section(ui, caption, 0.0, |ui| {
+        let rows = STRUCTURE_ROWS.len() as f32;
+        let (frame, _) = ui.allocate_exact_size(vec2(STRUCTURE_W, STRUCTURE_HEADING_H + STRUCTURE_HEADER_H + STRUCTURE_ROW_H * rows), Sense::hover());
+        ui.painter().rect_filled(frame, CornerRadius::ZERO, tokens(ui.ctx()).card);
+        Heading { title: "Columns" }.paint(ui, Rect::from_min_size(frame.min, vec2(STRUCTURE_W, STRUCTURE_HEADING_H)));
+        let mut top = frame.top() + STRUCTURE_HEADING_H;
+        let mut x = frame.left();
+        for (w, title) in STRUCTURE_COLUMNS {
+            HeaderCell { title }.paint(ui, Rect::from_min_size(pos2(x, top), vec2(w, STRUCTURE_HEADER_H)));
+            x += w;
+        }
+        top += STRUCTURE_HEADER_H;
+        for row in STRUCTURE_ROWS {
+            let mut x = frame.left();
+            for ((w, _), cell) in STRUCTURE_COLUMNS.into_iter().zip(row) {
+                cell.paint(ui, Rect::from_min_size(pos2(x, top), vec2(w, STRUCTURE_ROW_H)));
+                x += w;
+            }
+            top += STRUCTURE_ROW_H;
         }
     });
 }
@@ -1347,6 +1399,29 @@ fn icons(ui: &mut Ui) {
             });
         }
     });
+}
+
+/// The logo cells: 120 by 46, each logo at 24 and at 14 side by side, centred, their bottoms 24
+/// down, its name 30 down.
+const LOGO_CELL: Vec2 = vec2(120.0, 46.0);
+const LOGO_BIG: f32 = 24.0;
+const LOGO_BOTTOM: f32 = 24.0;
+const LOGO_NAME_TOP: f32 = 30.0;
+
+/// Each engine's logo with its name, in their usual colour (the page's `logo/*`, `text_muted`).
+fn logos(ui: &mut Ui) {
+    let t = tokens(ui.ctx());
+    ui.spacing_mut().item_spacing.x = ICON_CELL_GAP.x;
+    for logo in Logo::ALL {
+        let (cell, _) = ui.allocate_exact_size(LOGO_CELL, Sense::hover());
+        let p = ui.painter();
+        let left = cell.center().x - (LOGO_BIG + SPACE_8 + CONNECTION_LOGO) / 2.0;
+        let bottom = cell.top() + LOGO_BOTTOM;
+        logo.paint(p, Rect::from_min_max(pos2(left, bottom - LOGO_BIG), pos2(left + LOGO_BIG, bottom)), t.text_muted);
+        let left = left + LOGO_BIG + SPACE_8;
+        logo.paint(p, Rect::from_min_max(pos2(left, bottom - CONNECTION_LOGO), pos2(left + CONNECTION_LOGO, bottom)), t.text_muted);
+        Text::Small.paint(p, pos2(cell.center().x, cell.top() + LOGO_NAME_TOP), Align2::CENTER_TOP, logo.name(), t.text_muted);
+    }
 }
 
 /// The colour the page's Icons frame draws `icon` in.

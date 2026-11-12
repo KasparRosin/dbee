@@ -860,6 +860,7 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     let look = Look::of(ui, &r);
     let row = ConnectionRow {
         name: &name,
+        engine: c.kind,
         line: card_line(c, used_at),
         colour: connection_color(c.color),
         selected,
@@ -1012,21 +1013,20 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &
     }
 }
 
-/// A row's second line: when it was used (a recent one), the type's label, then a server's
-/// `user@host:port/database` (no `/` without a database) or a file's path, as written; ` · SSH`
-/// through a tunnel.
+/// A row's second line (its logo names the type): when it was used (a recent one), then a
+/// server's `user@host:port/database` (no `/` without a database) or a file's path, as written;
+/// `  SSH` after it through a tunnel, as the page writes it.
 fn card_line(c: &ConnectionConfig, used_at: Option<u64>) -> Words {
     let mut line = Words::default();
     if let Some(at) = used_at {
         line = line.plain(format!("{} · ", ago(at)));
     }
-    line = line.plain(format!("{} · ", c.kind.label()));
     line = match c.kind.info().settings {
         Settings::Server { .. } => line.name(format!("{}@{}:{}{}", c.user, c.host, c.port, c.database_suffix())),
         Settings::File { .. } => line.name(c.file.as_ref().map(|f| tilde(&f.display().to_string())).unwrap_or_default()),
     };
     if c.ssh.is_some() && c.kind.takes_ssh() {
-        line = line.plain(" · SSH");
+        line = line.name("  SSH");
     }
     line
 }
@@ -1473,12 +1473,17 @@ mod tests {
     fn a_cards_line_leaves_out_an_unset_database() {
         let server =
             ConnectionConfig { kind: DbKind::MariaDb, user: "root".into(), host: "127.0.0.1".into(), port: 32821, ..ConnectionConfig::default() };
-        // dbee's words, and the address or path as written, in `data`.
-        assert_eq!(card_line(&server, None), Words::from("MariaDB · ").name("root@127.0.0.1:32821"));
-        let shop = ConnectionConfig { database: "shop".into(), ..server };
-        assert_eq!(card_line(&shop, None), Words::from("MariaDB · ").name("root@127.0.0.1:32821/shop"));
+        // The address or path alone, as written, in `data`: the row's logo names the engine.
+        assert_eq!(card_line(&server, None), Words::default().name("root@127.0.0.1:32821"));
+        let shop = ConnectionConfig { database: "shop".into(), ..server.clone() };
+        assert_eq!(card_line(&shop, None), Words::default().name("root@127.0.0.1:32821/shop"));
         let file = ConnectionConfig { kind: DbKind::Sqlite, file: Some(PathBuf::from("/data/shop.sqlite")), ..ConnectionConfig::default() };
-        assert_eq!(card_line(&file, None), Words::from("SQLite · ").name("/data/shop.sqlite"));
+        assert_eq!(card_line(&file, None), Words::default().name("/data/shop.sqlite"));
+        // Through a tunnel, as the page writes it; a recent one says when it was used, as before.
+        let tunnel = ConnectionConfig { ssh: Some(Default::default()), ..shop };
+        assert_eq!(card_line(&tunnel, None), Words::default().name("root@127.0.0.1:32821/shop  SSH"));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        assert_eq!(card_line(&server, Some(now)), Words::from("just now · ").name("root@127.0.0.1:32821"));
     }
 
     #[test]

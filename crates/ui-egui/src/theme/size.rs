@@ -210,11 +210,27 @@ pub const TREE_ICON: f32 = 14.0;
 pub const TREE_GAP: f32 = 6.0;
 pub const TREE_EXPANDER: f32 = 20.0;
 /// A connection row (`sidebar/connection`): this tall, the connection's colour this wide along its
-/// left edge, its words this far in from either end; keyboard focus this far inside it.
+/// left edge, its engine's logo this far in from either end in a square this big, its words this
+/// far after the logo; keyboard focus this far inside it.
 pub const CONNECTION_ROW_H: f32 = 40.0;
 pub const CONNECTION_COLOUR_W: f32 = 3.0;
 pub const CONNECTION_PAD_X: f32 = 12.0;
+pub const CONNECTION_LOGO: f32 = 14.0;
+pub const CONNECTION_LOGO_GAP: f32 = 8.0;
 pub const CONNECTION_FOCUS_INSET: f32 = 1.0;
+
+/// The structure view (`structure/heading`, `structure/header cell`, `structure/cell`): a section's
+/// heading this tall, its words this far in; the header this tall; a row this tall; what a cell
+/// holds this far in from its sides, a column's position this far from the left; a key's icon this
+/// far before its words, a foreign key's arrow this far after the column it points at.
+pub const STRUCTURE_HEADING_H: f32 = BAR_H;
+pub const STRUCTURE_HEADING_PAD_X: f32 = 12.0;
+pub const STRUCTURE_HEADER_H: f32 = SLIM_BAR_H;
+pub const STRUCTURE_ROW_H: f32 = ROW_H;
+pub const STRUCTURE_CELL_PAD_X: f32 = 8.0;
+pub const STRUCTURE_POSITION_PAD_X: f32 = 12.0;
+pub const STRUCTURE_ICON_GAP: f32 = 6.0;
+pub const STRUCTURE_LINK_GAP: f32 = 4.0;
 
 /// The value panel (`value panel`): the bar's words, the value and the facts this far in from its
 /// sides, the value this far below the bar and above the facts; the bar's parts (the column's

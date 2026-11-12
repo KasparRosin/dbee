@@ -14,6 +14,7 @@ pub mod grid_cell;
 pub mod icon;
 pub mod input;
 pub mod keycap;
+pub mod logo;
 pub mod menu;
 pub mod results;
 pub mod rows;
@@ -22,6 +23,7 @@ pub mod showcase;
 pub mod sidebar;
 pub mod spinner;
 pub mod status;
+pub mod structure;
 pub mod swatch;
 pub mod tab;
 pub mod table_bars;
@@ -217,6 +219,26 @@ pub(crate) fn icon_in(shapes: &[egui::epaint::ClippedShape], at: egui::Rect) -> 
         }
     }
     (colours, bounds)
+}
+
+/// The images drawn in `shapes` (a mesh on a texture other than the fonts'): each one's rect, its
+/// tint, and its texture's name and size in pixels in `ctx`.
+#[cfg(test)]
+pub(crate) fn images(ctx: &egui::Context, shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, egui::Color32, String, [usize; 2])> {
+    let textures = ctx.tex_manager();
+    let textures = textures.read();
+    flat(shapes)
+        .into_iter()
+        .filter_map(|s| match s {
+            egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default() => {
+                let tint = m.vertices.first().map_or(egui::Color32::TRANSPARENT, |v| v.color);
+                assert!(m.vertices.iter().all(|v| v.color == tint), "an image in one tint: {:?}", m.vertices);
+                let (name, size) = textures.meta(m.texture_id).map(|t| (t.name.clone(), t.size)).unwrap_or_default();
+                Some((m.calc_bounds(), tint, name, size))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The texts in `shapes`: each section's words as drawn, where its text was drawn, and its colour

@@ -7,16 +7,18 @@
 //! drawn as written. A selected row doesn't change on hover. Keyboard focus is a 2 px `ink` box
 //! inside the row.
 
+use dbee_config::DbKind;
 use dbee_core::RelKind;
 use egui::text::TextWrapping;
 use egui::{Color32, CornerRadius, Rect, Ui, Vec2, WidgetInfo, WidgetType, pos2, vec2};
 
 use super::grid_cell::{Key, one_line};
 use super::icon::Icon;
+use super::logo::Logo;
 use super::{focus, painter};
 use crate::theme::size::{
-    CONNECTION_COLOUR_W, CONNECTION_FOCUS_INSET, CONNECTION_PAD_X, RADIUS_CONTROL, TREE_CHEVRON, TREE_EXPANDER, TREE_GAP, TREE_ICON, TREE_INDENT,
-    TREE_PAD_X,
+    CONNECTION_COLOUR_W, CONNECTION_FOCUS_INSET, CONNECTION_LOGO, CONNECTION_LOGO_GAP, CONNECTION_PAD_X, RADIUS_CONTROL, TREE_CHEVRON, TREE_EXPANDER,
+    TREE_GAP, TREE_ICON, TREE_INDENT, TREE_PAD_X,
 };
 use crate::theme::{Text, Tokens, Words, tokens};
 
@@ -135,7 +137,9 @@ fn chevron_slot(rect: Rect, level: usize) -> Rect {
 pub struct ConnectionRow<'a> {
     /// The connection's name, the user's own.
     pub name: &'a str,
-    /// The line under the name: dbee's words, with the address or path in them.
+    /// Its engine, shown by its logo.
+    pub engine: DbKind,
+    /// The line under the name: the address or path, as the list words it.
     pub line: Words,
     /// The colour the user gave it.
     pub colour: Option<Color32>,
@@ -156,9 +160,11 @@ impl ConnectionRow<'_> {
         if let Some(colour) = self.colour {
             p.rect_filled(Rect::from_min_size(rect.min, vec2(CONNECTION_COLOUR_W, rect.height())), CornerRadius::ZERO, colour);
         }
+        let logo = Rect::from_min_size(pos2(rect.left() + CONNECTION_PAD_X, rect.center().y - CONNECTION_LOGO / 2.0), Vec2::splat(CONNECTION_LOGO));
+        Logo::of(self.engine).paint(&p, logo, t.text_muted);
         // As on the page: the name's line over a `data` line, the pair centred in the row.
         let (name_h, line_h) = (Text::Body.line(), Text::Data.line());
-        let left = rect.left() + CONNECTION_PAD_X;
+        let left = logo.right() + CONNECTION_LOGO_GAP;
         let width = (rect.right() - CONNECTION_PAD_X - left).max(0.0);
         let top = rect.center().y - (name_h + line_h) / 2.0;
         p.galley(pos2(left, top), one_line(ui, self.name, Text::Body, t.text, width), t.text);
@@ -173,9 +179,9 @@ impl ConnectionRow<'_> {
         }
     }
 
-    /// What it reads out: its name as written.
+    /// What it reads out: its name as written, then its engine, which only its logo shows.
     pub fn widget_info(&self) -> WidgetInfo {
-        WidgetInfo::labeled(WidgetType::Button, true, self.name)
+        WidgetInfo::labeled(WidgetType::Button, true, format!("{}, {}", self.name, self.engine.label()))
     }
 }
 
@@ -207,7 +213,7 @@ mod tests {
     use super::*;
     use crate::DbeeApp;
     use crate::automation::Tags;
-    use crate::components::{Edge, ROOM, both, edges_in, fills_in, flat, harness_in, icon_in, painted, sections, texts};
+    use crate::components::{Edge, ROOM, both, edges_in, fills_in, flat, harness_in, icon_in, images, painted, sections, texts};
     use crate::tree::{Tree, TreeAct};
 
     /// The page's rows are this wide (`tree/row` 167592, `sidebar/connection` 167734).
@@ -219,7 +225,7 @@ mod tests {
     }
 
     /// One frame of `paint` drawing into a rect of `size`: the shapes and the rect.
-    fn drawn(theme: Theme, size: Vec2, paint: impl Fn(&Ui, Rect)) -> (Vec<ClippedShape>, Rect) {
+    fn drawn(theme: Theme, size: Vec2, mut paint: impl FnMut(&Ui, Rect)) -> (Vec<ClippedShape>, Rect) {
         let mut at = Rect::NOTHING;
         let shapes = painted(theme, |ui| {
             ui.add_space(ROOM);
@@ -326,18 +332,38 @@ mod tests {
         assert_eq!(TreeRow::expander(rect, 1), Rect::from_center_size(pos2(8.0 + 28.0 + 6.0, 113.0), vec2(20.0, 20.0)));
     }
 
+    /// One frame of `paint` drawing into a rect of `size`: the shapes, the rect and the images in
+    /// it (rect, tint, texture's name, size).
+    fn drawn_with_images(theme: Theme, size: Vec2, paint: impl Fn(&Ui, Rect)) -> (Vec<ClippedShape>, Rect, Vec<(Rect, Color32, String, [usize; 2])>) {
+        let mut ctx = None;
+        let (shapes, r) = drawn(theme, size, |ui, rect| {
+            ctx = Some(ui.ctx().clone());
+            paint(ui, rect);
+        });
+        let shown = ctx.map(|ctx| images(&ctx, &shapes)).unwrap_or_default();
+        (shapes, r, shown)
+    }
+
     #[test]
     fn each_connection_row_matches_the_page() {
         // Node 167734's variants 167726 (default), 167735 (hover), 167743 (selected), 167751
         // (focus): 40 tall on `bg`, `hover` or `selection` (also when hovered), square, a 1 px
         // `line` along the bottom; the connection's colour 3 wide down the whole left edge, none
-        // without one; the name in `body` `text` 12 in and 3 down; under it the line in
-        // `text_muted`, dbee's words in `body` and the address in `data`, centred 29 down; keyboard
-        // focus a 2 px `ink` box 1 inside, corners 2. The engine's logo waits for its own task: the
-        // line names the engine.
-        let line = || Words::from("PostgreSQL · ").name("postgres@pg14:5432/dbee");
+        // without one; the engine's logo (`logo/postgresql`) in its 14 square 12 in, centred
+        // down the row (13 down), `text_muted` in every state; the name in `body` `text` 34 in
+        // and 3 down; under it the address in `data` `text_muted`, centred 29 down; keyboard
+        // focus a 2 px `ink` box 1 inside, corners 2.
+        let line = || Words::default().name("postgres@pg14:5432/dbee");
         for (theme, t) in both() {
-            let row = |colour| ConnectionRow { name: "Shop live", line: line(), colour, selected: false, focused: false, hovered: false };
+            let row = |colour| ConnectionRow {
+                name: "Shop live",
+                engine: DbKind::Postgres,
+                line: line(),
+                colour,
+                selected: false,
+                focused: false,
+                hovered: false,
+            };
             let red = Some(t.conn_red);
             for (state, row, ground, focus) in [
                 ("default", row(red), t.bg, false),
@@ -348,7 +374,7 @@ mod tests {
                 ("no colour", row(None), t.bg, false),
             ] {
                 let at_ = format!("{theme:?} {state}");
-                let (shapes, r) = drawn(theme, vec2(CONNECTION_W, 40.0), |ui, rect| row.paint(ui, rect));
+                let (shapes, r, logos) = drawn_with_images(theme, vec2(CONNECTION_W, 40.0), |ui, rect| row.paint(ui, rect));
                 let mut want = vec![(r, ground), (Rect::from_min_max(pos2(r.left(), r.bottom() - 1.0), r.max), t.line)];
                 if let Some(colour) = row.colour {
                     want.push((Rect::from_min_size(r.min, vec2(3.0, 40.0)), colour));
@@ -356,20 +382,30 @@ mod tests {
                 assert_eq!(fills_in(&shapes, r), want, "{at_}: the ground, the line along the bottom, the colour down the left edge");
                 let ring = Edge { outer: r.shrink(1.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
                 assert_eq!(edges_in(&shapes, r, 0.0), if focus { vec![ring] } else { vec![] }, "{at_}: the focus box");
+                let logo = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 13.0), Vec2::splat(14.0));
+                assert_eq!(logos, [(logo, t.text_muted, "logo/postgresql 14px".to_owned(), [14, 14])], "{at_}: the engine's logo");
                 let words = words_in(&shapes, r);
-                let [(name, n, nc), (said, l, lc), (address, a, ac)] = words.as_slice() else { panic!("{at_}: the name and the line: {words:?}") };
+                let [(name, n, nc), (address, a, ac)] = words.as_slice() else { panic!("{at_}: the name and the line: {words:?}") };
                 assert_eq!((name.as_str(), *nc), ("Shop live", t.text), "{at_}: the name");
-                assert_eq!(
-                    (said.as_str(), *lc, address.as_str(), *ac),
-                    ("PostgreSQL · ", t.text_muted, "postgres@pg14:5432/dbee", t.text_muted),
-                    "{at_}"
-                );
-                assert_eq!(l, a, "{at_}: one line");
-                assert!(close(n.left(), r.left() + 12.0) && close(n.top(), r.top() + 3.0), "{at_}: the name 12 in, 3 down: {n:?}");
-                assert!(close(l.left(), r.left() + 12.0) && close(l.center().y, r.top() + 29.0), "{at_}: the line 12 in, centred 29 down: {l:?}");
+                assert_eq!((address.as_str(), *ac), ("postgres@pg14:5432/dbee", t.text_muted), "{at_}: the address alone");
+                assert!(close(n.left(), r.left() + 34.0) && close(n.top(), r.top() + 3.0), "{at_}: the name 34 in, 3 down: {n:?}");
+                assert!(close(a.left(), r.left() + 34.0) && close(a.center().y, r.top() + 29.0), "{at_}: the line 34 in, centred 29 down: {a:?}");
                 assert_eq!(sections(&shapes, "Shop live").first().map(|s| s.1.clone()), Some(Text::Body.font()), "{at_}: the name in `body`");
-                let fonts: Vec<_> = sections(&shapes, "PostgreSQL · postgres@pg14:5432/dbee").into_iter().map(|s| (s.0, s.1)).collect();
-                assert_eq!(fonts, [("PostgreSQL · ".into(), Text::Body.font()), ("postgres@pg14:5432/dbee".into(), Text::Data.font())], "{at_}");
+                let fonts: Vec<_> = sections(&shapes, "postgres@pg14:5432/dbee").into_iter().map(|s| (s.0, s.1)).collect();
+                assert_eq!(fonts, [("postgres@pg14:5432/dbee".into(), Text::Data.font())], "{at_}: the address in `data`");
+                assert_eq!(row.widget_info().label.as_deref(), Some("Shop live, PostgreSQL"), "{at_}: read out with its engine");
+            }
+            // The other engines show their own logos, and say their own names.
+            for (engine, logo, label) in [
+                (DbKind::MySql, "logo/mysql 14px", "Shop live, MySQL"),
+                (DbKind::MariaDb, "logo/mariadb 14px", "Shop live, MariaDB"),
+                (DbKind::Sqlite, "logo/sqlite 14px", "Shop live, SQLite"),
+            ] {
+                let row = ConnectionRow { engine, ..row(red) };
+                let (_, r, logos) = drawn_with_images(theme, vec2(CONNECTION_W, 40.0), |ui, rect| row.paint(ui, rect));
+                let at = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 13.0), Vec2::splat(14.0));
+                assert_eq!(logos, [(at, t.text_muted, logo.to_owned(), [14, 14])], "{theme:?} {engine:?}");
+                assert_eq!(row.widget_info().label.as_deref(), Some(label), "{theme:?} {engine:?}");
             }
         }
     }
@@ -457,7 +493,8 @@ mod tests {
             }
             let row = ConnectionRow {
                 name: "Shop (Live)",
-                line: Words::from("MariaDB · ").name("Root@DB.Example.com:3306/Shop"),
+                engine: DbKind::MariaDb,
+                line: Words::default().name("Root@DB.Example.com:3306/Shop"),
                 colour: Some(t.conn_blue),
                 selected: false,
                 focused: false,
@@ -465,7 +502,7 @@ mod tests {
             };
             let (shapes, r) = drawn(theme, vec2(CONNECTION_W, 40.0), |ui, rect| row.paint(ui, rect));
             let words: Vec<String> = words_in(&shapes, r).into_iter().map(|w| w.0).collect();
-            assert_eq!(words, ["Shop (Live)", "MariaDB · ", "Root@DB.Example.com:3306/Shop"], "{theme:?}: as written");
+            assert_eq!(words, ["Shop (Live)", "Root@DB.Example.com:3306/Shop"], "{theme:?}: as written");
         }
         // Through the tree: its tags and what it draws keep the catalog's case.
         let mut sales = table("Sales", "Orders", RelKind::Table, vec![column("id", "int8"), column("Mood", "enum('small','Large')")]);
@@ -611,7 +648,10 @@ mod tests {
         crate::theme::apply(&ctx);
         let frame = |app: &mut DbeeApp, events: Vec<Event>| {
             let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 900.0))), events, ..Default::default() };
-            ctx.run_ui(raw, |ui| app.ui(ui)).drop_without_applying_deltas();
+            let mut out = ctx.run_ui(raw, |ui| app.ui(ui));
+            let shapes = std::mem::take(&mut out.shapes);
+            out.drop_without_applying_deltas();
+            shapes
         };
         frame(&mut app, vec![]);
         let file = home.home.join("Notes.sqlite");
@@ -634,7 +674,7 @@ mod tests {
         assert_eq!(app.session.state().screen, Screen::Workspace);
         app.session.run_blocking("connection.close", json!({ "force": true }), Duration::from_secs(30)).unwrap_or_else(|e| panic!("{e:?}"));
         frame(&mut app, vec![]);
-        frame(&mut app, vec![]);
+        let shapes = frame(&mut app, vec![]);
         let tags = app.tags();
         let saved: Vec<String> = ids.iter().map(|id| format!("conn-saved-{id}")).collect();
         let names: Vec<_> = saved.iter().map(|id| tags.value(id).cloned()).collect();
@@ -645,6 +685,17 @@ mod tests {
         let rows: Vec<Rect> = saved.iter().map(|id| tags.rect(id).unwrap_or(Rect::NOTHING)).collect();
         assert!(rows.iter().all(|r| r.height() == 40.0), "rows 40 tall: {rows:?}");
         assert_eq!(rows[1].top(), rows[0].bottom(), "one under the other, the line between them");
+        // Each row shows its engine's logo; its line is the path alone.
+        let recent = tags.rect("conn-recent-0").unwrap_or(Rect::NOTHING);
+        let shown = images(&ctx, &shapes);
+        for r in rows.iter().chain([&recent]) {
+            let logo = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 13.0), Vec2::splat(14.0));
+            let here: Vec<_> = shown.iter().filter(|i| r.contains_rect(i.0)).cloned().collect();
+            assert_eq!(here, [(logo, tokens(&ctx).text_muted, "logo/sqlite 14px".to_owned(), [14, 14])], "the row at {r:?}: SQLite's logo");
+        }
+        let lines: Vec<String> = texts(&shapes).into_iter().filter(|(_, at, _)| rows[0].contains_rect(*at)).map(|w| w.0).collect();
+        let [name, path] = lines.as_slice() else { panic!("the name and the line: {lines:?}") };
+        assert!(name == "Notes (Live)" && path.ends_with("Notes.sqlite") && !path.contains("SQLite"), "the name, then the path alone: {lines:?}");
         let at = rows[1].center();
         frame(&mut app, vec![Event::PointerMoved(at)]);
         frame(&mut app, vec![press(at, true, PointerButton::Primary)]);
