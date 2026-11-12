@@ -85,8 +85,9 @@ const LINES_W: f32 = 320.0;
 const CHOICE_W: f32 = 120.0;
 /// The tallest a several-lines editor grows before it scrolls.
 const LINES_MAX_H: f32 = 180.0;
-/// The editor's border, and the text's inset as in the grid.
-const BORDER: f32 = 1.5;
+/// The editor's edge, `ink` on `card` as the page's `editing` cell (the grid's outline), and the
+/// text's inset as in the grid.
+const BORDER: f32 = crate::theme::size::GRID_OUTLINE_W;
 const PAD: f32 = crate::theme::size::GRID_CELL_PAD_X;
 
 /// The keys an open editor keeps from focus moves: Tab, the arrows and Escape are its own.
@@ -791,6 +792,103 @@ mod tests {
 
     fn editor(kind: Kind, value: Option<&str>) -> CellEditor {
         CellEditor::new(TabId(1), (2, 3), kind, value, &page(), 0)
+    }
+
+    /// `ed` drawn over `cell` in `theme` until it has the keyboard; with `collapsed`, its caret
+    /// then put at the end of its text, as after typing. The last frame's shapes.
+    fn drawn(theme: egui::Theme, ed: CellEditor, cell: Rect, collapsed: bool) -> Vec<egui::epaint::ClippedShape> {
+        let view = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 300.0));
+        let mut h = crate::components::harness_in(vec2(600.0, 300.0), theme, (ed, Tags::default()), move |ui, (ed, tags)| {
+            tags.begin_frame();
+            show(ui.ctx(), ed, cell, view, tags);
+        });
+        h.run_steps(3);
+        if collapsed {
+            let mut state = TextEdit::load_state(&h.ctx, text_id()).unwrap_or_default();
+            let end = h.state().0.text.chars().count();
+            state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(end))));
+            TextEdit::store_state(&h.ctx, text_id(), state);
+        }
+        h.run_steps(2);
+        h.output().shapes.clone()
+    }
+
+    #[test]
+    fn the_editor_takes_the_pages_editing_look() {
+        // `grid/cell` (node 166898), `editing` (167055) and `editing selected` (167068): over its
+        // cell, on `card`, square, a 2 px `ink` edge inside it (the grid's outline); the value in
+        // `data` `text` 8 in, as the grid draws it, 5 down in the 26 tall row; the caret 1 px
+        // `ink` down the value's 16 tall line, after it (egui draws it 1.5 longer at either end,
+        // as in every input). As an editor opens, all of its text is selected (`editing
+        // selected`): `text_selection` behind it, the caret at its end.
+        use crate::components::{Edge, both, edges_in, fills_in, sections, texts};
+        let cell = Rect::from_min_size(pos2(20.0, 30.0), vec2(150.0, 26.0));
+        for (theme, t) in both() {
+            for selected in [true, false] {
+                let at_ = format!("{theme:?} {}", if selected { "editing selected" } else { "editing" });
+                let shapes = drawn(theme, editor(Kind::Line, Some("Customer 191")), cell, !selected);
+                assert_eq!(fills_in(&shapes, cell), [(cell, t.card)], "{at_}: on `card`, over the whole cell");
+                let edge = Edge { outer: cell, width: 2.0, colour: t.ink, radius: CornerRadius::ZERO };
+                assert_eq!(edges_in(&shapes, cell, 0.0), [edge], "{at_}: a 2 px `ink` edge inside the cell, square");
+                let (_, value, colour) = texts(&shapes)
+                    .into_iter()
+                    .find(|(w, _, _)| w == "Customer 191")
+                    .unwrap_or_else(|| panic!("{at_}: the value: {:?}", texts(&shapes)));
+                assert_eq!(colour, t.text, "{at_}: the value in `text`");
+                assert_eq!(sections(&shapes, "Customer 191").first().map(|s| s.1.clone()), Some(Text::Data.font()), "{at_}: in `data`");
+                let close = |a: f32, b: f32| (a - b).abs() <= 0.5;
+                assert!(
+                    close(value.left(), cell.left() + 8.0) && close(value.top(), cell.top() + 5.0) && close(value.height(), 16.0),
+                    "{at_}: the value 8 in, 5 down, 16 tall: {value:?} in {cell:?}"
+                );
+                // The caret: 1 px `ink` down the value's line, at its end, as tall as egui draws it.
+                let carets: Vec<_> = crate::components::flat(&shapes)
+                    .into_iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::LineSegment { points, stroke } => Some((points, stroke)),
+                        _ => None,
+                    })
+                    .collect();
+                let [([top, bottom], stroke)] = carets.as_slice() else { panic!("{at_}: one caret: {carets:?}") };
+                assert_eq!(*stroke, Stroke::new(1.0, t.ink), "{at_}: the caret 1 px `ink`");
+                assert!(
+                    close(top.x, value.right()) && close(bottom.x, top.x) && close(top.y, value.top() - 1.5) && close(bottom.y, value.bottom() + 1.5),
+                    "{at_}: the caret down the value's line at its end: {top:?} {bottom:?}, the value {value:?}"
+                );
+                // Selected: `text_selection` behind the value, as wide as it.
+                let ground: Vec<egui::Pos2> = crate::components::flat(&shapes)
+                    .into_iter()
+                    .filter_map(|s| match s {
+                        egui::Shape::Text(text) => Some(
+                            text.galley
+                                .rows
+                                .iter()
+                                .flat_map(|row| {
+                                    row.visuals.mesh.vertices.iter().filter(|v| v.color == t.text_selection).map(|v| v.pos + row.pos.to_vec2())
+                                })
+                                .map(|p| p + text.pos.to_vec2())
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                if selected {
+                    let behind = Rect::from_points(&ground);
+                    assert!(
+                        close(behind.left(), value.left()) && close(behind.right(), value.right()) && close(behind.height(), 16.0),
+                        "{at_}: `text_selection` behind the value: {behind:?}, the value {value:?}"
+                    );
+                } else {
+                    assert!(ground.is_empty(), "{at_}: nothing selected: {ground:?}");
+                }
+            }
+            // The boolean choice: the same edge round its three rows.
+            let shapes = drawn(theme, editor(Kind::Bool, Some("t")), cell, false);
+            let choice = Rect::from_min_size(cell.min, vec2(150.0, 3.0 * ROW_H + 4.0));
+            let edge = Edge { outer: choice, width: 2.0, colour: t.ink, radius: CornerRadius::ZERO };
+            assert!(edges_in(&shapes, choice, 0.0).contains(&edge), "{theme:?}: the choice's edge: {:?}", edges_in(&shapes, choice, 0.0));
+        }
     }
 
     #[test]
