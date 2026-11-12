@@ -350,10 +350,11 @@ fn sidebar_rows(ui: &mut Ui) {
         SPACE_8,
         |ui| list(ui, SIDEBAR_W, TREE_ROW_H, tree.len(), |ui, i, rect| tree[i].paint(ui, rect)),
     );
-    let connection = |name, engine, line: &str, colour| ConnectionRow {
+    let connection = |name, engine: DbKind, line: &str, colour| ConnectionRow {
         name,
         engine,
-        line: Words::default().name(line),
+        address: if engine.uses_file() { status::Address::File(line.into()) } else { status::Address::Server(line.into()) },
+        used: None,
         colour: connection_color(colour),
         selected: false,
         focused: false,
@@ -371,7 +372,11 @@ fn sidebar_rows(ui: &mut Ui) {
         ui,
         "sidebar/connection: default, selected, hover, focus (inferred), no colour, other engines (logo/mysql, logo/sqlite)",
         SPACE_8,
-        |ui| list(ui, CONNECTION_LIST_W, CONNECTION_ROW_H, connections.len(), |ui, i, rect| connections[i].paint(ui, rect)),
+        |ui| {
+            list(ui, CONNECTION_LIST_W, CONNECTION_ROW_H, connections.len(), |ui, i, rect| {
+                connections[i].paint(ui, rect);
+            })
+        },
     );
 }
 

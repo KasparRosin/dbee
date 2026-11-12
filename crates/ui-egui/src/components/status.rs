@@ -217,6 +217,7 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
         name_w + 2.0 * STATUS_BLOCK_PAD_X + STATUS_AFTER_BLOCK + facts_w + save_w
     };
     // The facts give way one by one (a path is cut first), then the name is cut.
+    let data = |text: &str| Piece::new(ui, Text::Data.job_as_written(text, t.text_muted), text);
     let mut cut = false;
     for i in GIVE_WAY {
         let over = used(&pieces, &kept, name.width()) - room;
@@ -224,9 +225,9 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
             break;
         }
         if let (Some(Address::File(path)), Some(whole)) = (facts.address.filter(|_| i == ADDRESS), &pieces[ADDRESS])
-            && let Some(shorter) = cut_middle(ui, path, t.text_muted, whole.width() - over)
+            && let Some(shorter) = cut_middle(path, |cut| data(cut).width() <= whole.width() - over)
         {
-            pieces[ADDRESS] = Some(shorter);
+            pieces[ADDRESS] = Some(Piece::new(ui, Text::Data.job_as_written(&shorter, t.text_muted), path.as_str()));
             cut = true;
             continue;
         }
@@ -288,24 +289,26 @@ pub(super) fn piece(ui: &Ui, id: Id, piece: &Piece, at: egui::Pos2, colour: Colo
     r
 }
 
-/// `whole` cut in the middle with `…` to fit `width`, in `data`, read out whole; `None` when it
-/// would keep fewer than [`CUT_KEEP`] letters at either end.
-fn cut_middle(ui: &Ui, whole: &str, colour: Color32, width: f32) -> Option<Piece> {
+/// A file's path, `whole`, cut in the middle with `…`: the most letters for which `fits` holds,
+/// as many from its start as from its end, but the end keeps the file's name (with the `/` before
+/// it) whole while the start keeps [`CUT_KEEP`]; `None` when it would keep fewer than that at
+/// either end. The status bar's address and a connection row's line cut a path so.
+pub(super) fn cut_middle(whole: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
     let letters: Vec<char> = whole.chars().collect();
-    let cut = |keep: usize| {
-        let head = keep / 2;
-        let tail = keep - head;
-        let text: String = letters.iter().take(head).chain(['…'].iter()).chain(letters.iter().skip(letters.len().saturating_sub(tail))).collect();
-        Piece::new(ui, Text::Data.job_as_written(&text, colour), whole)
+    let name = letters.iter().rev().position(|c| matches!(c, '/' | '\\')).map_or(0, |i| i + 1);
+    let cut = |keep: usize| -> String {
+        let tail = (keep - keep / 2).max(name.min(keep - CUT_KEEP));
+        let head = keep - tail;
+        letters.iter().take(head).chain(['…'].iter()).chain(letters.iter().skip(letters.len().saturating_sub(tail))).collect()
     };
     // The most letters that fit: a cut is only as wide as the letters it keeps.
     let (mut lo, mut hi) = (2 * CUT_KEEP, letters.len().checked_sub(1)?);
-    if lo > hi || cut(lo).width() > width {
+    if lo > hi || !fits(&cut(lo)) {
         return None;
     }
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if cut(mid).width() <= width { lo = mid } else { hi = mid - 1 }
+        if fits(&cut(mid)) { lo = mid } else { hi = mid - 1 }
     }
     Some(cut(lo))
 }
@@ -642,6 +645,20 @@ mod tests {
         let h = facts_bar(200.0, facts);
         let all = texts(&h.output().shapes);
         assert!(all.iter().all(|(w, _, _)| !w.contains("sqlite")) && all.iter().any(|(w, _, _)| w == "READ-ONLY"), "{all:?}");
+    }
+
+    #[test]
+    fn a_cut_keeps_the_files_name() {
+        // As many letters from the start as from the end, while the file's name fits in that end;
+        // a longer name keeps its whole self and the start its 6; shorter room cuts the name too.
+        let fits = |n: usize| move |cut: &str| cut.chars().count() <= n;
+        let path = "~/Projects/clients/northwind/archive/shop.sqlite";
+        assert_eq!(cut_middle(path, fits(31)).as_deref(), Some("~/Projects/clie…ive/shop.sqlite"));
+        let long = "~/Projects/clients/northwind/archive/northwind-traders-nightly.sqlite";
+        assert_eq!(cut_middle(long, fits(40)).as_deref(), Some("~/Proj…/northwind-traders-nightly.sqlite"));
+        assert_eq!(cut_middle(long, fits(25)).as_deref(), Some("~/Proj…ers-nightly.sqlite"));
+        assert_eq!(cut_middle(long, fits(12)), None, "fewer than 6 at either end");
+        assert_eq!(cut_middle("C:\\data\\a-long-file-name.db", fits(20)).as_deref(), Some("C:\\dat…-file-name.db"));
     }
 
     #[test]

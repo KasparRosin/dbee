@@ -334,6 +334,33 @@ fn cards_name_the_type() {
     assert_eq!(ui.value(&format!("{pg}-kind")), "PostgreSQL");
 }
 
+/// A SQLite file on a row follows the status bar's path rule: in the home folder (the process's
+/// `HOME`; the file is never opened), its path starts with `~`; short of room it is cut in the
+/// middle with `…`, the file's name kept; hovered, the row shows it whole.
+#[test]
+fn a_sqlite_path_on_a_row_is_cut_in_the_middle_and_whole_on_hover() {
+    let Some(home) = dbee_config::home_dir().filter(|h| h.to_str().is_some_and(|h| !h.is_empty())) else {
+        eprintln!("SKIPPED: no home folder to write `~` for");
+        return;
+    };
+    let file = home.join("Projects").join("clients").join("northwind-traders").join("archive").join("2026").join("nightly").join("notes.sqlite");
+    let path = file.to_str().unwrap_or_default().to_owned();
+    let whole = format!("~{}", &path[home.to_str().unwrap_or_default().len()..]);
+    let mut ui = cards();
+    let card = ui.save(&file_of(&path, "Notes"), None);
+    let row = rect_of(&ui.tag(&card).unwrap());
+    let drawn: Vec<String> = ui.texts().into_iter().filter(|(r, _)| row.contains_rect(*r)).map(|(_, g)| g.text().to_owned()).collect();
+    let [name, line] = drawn.as_slice() else { panic!("the name and the line: {drawn:?}") };
+    assert_eq!(name, "Notes");
+    let (head, tail) = line.split_once('…').unwrap_or_else(|| panic!("cut in the middle: `{line}` of `{whole}`"));
+    assert!(head.starts_with('~') && whole.starts_with(head) && whole.ends_with(tail), "`{line}` of `{whole}`");
+    assert!(tail.ends_with("notes.sqlite") && tail.len() > "notes.sqlite".len(), "the file's name kept, with the folder mark: `{line}`");
+    assert!(ui.texts().iter().all(|(_, g)| g.text() != whole), "not whole before the hover");
+    let at = ui.centre(&card);
+    ui.rest(at);
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == whole), "whole on hover: {:?}", ui.texts().iter().map(|(_, g)| g.text()).collect::<Vec<_>>());
+}
+
 #[test]
 fn the_filter_finds_what_the_cards_show() {
     let mut ui = cards();

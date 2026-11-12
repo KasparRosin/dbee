@@ -69,12 +69,14 @@ use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
 use crate::components::rows::ConnectionRow;
 use crate::components::sidebar;
+use crate::components::status::Address;
 use crate::components::toast;
+use crate::components::tooltip::Hint;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
 use crate::theme::{
-    self, Text, Words, connection_color,
+    self, Text, connection_color,
     size::{CONNECTION_ROW_H, RADIUS_CONTROL, RADIUS_FLOAT},
 };
 
@@ -861,13 +863,14 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     let row = ConnectionRow {
         name: &name,
         engine: c.kind,
-        line: card_line(c, used_at),
+        address: card_address(c),
+        used: used_at.map(|at| format!("{} · ", ago(at))),
         colour: connection_color(c.color),
         selected,
         focused: look.focused,
         hovered: look.hovered,
     };
-    row.paint(ui, rect);
+    let r = if row.paint(ui, rect) { r.hint(row.address.text()) } else { r };
     r.widget_info(|| row.widget_info());
     tags.tag_value(id, &r, name.as_str());
     tags.tag_value(&format!("{id}-kind"), &r, c.kind.label());
@@ -1013,22 +1016,17 @@ fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &
     }
 }
 
-/// A row's second line (its logo names the type): when it was used (a recent one), then a
-/// server's `user@host:port/database` (no `/` without a database) or a file's path, as written;
-/// `  SSH` after it through a tunnel, as the page writes it.
-fn card_line(c: &ConnectionConfig, used_at: Option<u64>) -> Words {
-    let mut line = Words::default();
-    if let Some(at) = used_at {
-        line = line.plain(format!("{} · ", ago(at)));
+/// A row's second line (its logo names the type): a server's `user@host:port/database` (no `/`
+/// without a database), `  SSH` after it through a tunnel, as the page writes it; or a file's
+/// path, with the home folder as `~`.
+fn card_address(c: &ConnectionConfig) -> Address {
+    match c.kind.info().settings {
+        Settings::Server { .. } => {
+            let ssh = if c.ssh.is_some() && c.kind.takes_ssh() { "  SSH" } else { "" };
+            Address::Server(format!("{}@{}:{}{}{ssh}", c.user, c.host, c.port, c.database_suffix()))
+        }
+        Settings::File { .. } => Address::File(c.file.as_ref().map(|f| tilde(&f.display().to_string())).unwrap_or_default()),
     }
-    line = match c.kind.info().settings {
-        Settings::Server { .. } => line.name(format!("{}@{}:{}{}", c.user, c.host, c.port, c.database_suffix())),
-        Settings::File { .. } => line.name(c.file.as_ref().map(|f| tilde(&f.display().to_string())).unwrap_or_default()),
-    };
-    if c.ssh.is_some() && c.kind.takes_ssh() {
-        line = line.name("  SSH");
-    }
-    line
 }
 
 #[cfg(test)]
@@ -1473,17 +1471,21 @@ mod tests {
     fn a_cards_line_leaves_out_an_unset_database() {
         let server =
             ConnectionConfig { kind: DbKind::MariaDb, user: "root".into(), host: "127.0.0.1".into(), port: 32821, ..ConnectionConfig::default() };
-        // The address or path alone, as written, in `data`: the row's logo names the engine.
-        assert_eq!(card_line(&server, None), Words::default().name("root@127.0.0.1:32821"));
+        // The address or path alone, as written: the row's logo names the engine.
+        assert_eq!(card_address(&server), Address::Server("root@127.0.0.1:32821".into()));
         let shop = ConnectionConfig { database: "shop".into(), ..server.clone() };
-        assert_eq!(card_line(&shop, None), Words::default().name("root@127.0.0.1:32821/shop"));
+        assert_eq!(card_address(&shop), Address::Server("root@127.0.0.1:32821/shop".into()));
         let file = ConnectionConfig { kind: DbKind::Sqlite, file: Some(PathBuf::from("/data/shop.sqlite")), ..ConnectionConfig::default() };
-        assert_eq!(card_line(&file, None), Words::default().name("/data/shop.sqlite"));
-        // Through a tunnel, as the page writes it; a recent one says when it was used, as before.
+        assert_eq!(card_address(&file), Address::File("/data/shop.sqlite".into()));
+        // Through a tunnel, as the page writes it.
         let tunnel = ConnectionConfig { ssh: Some(Default::default()), ..shop };
-        assert_eq!(card_line(&tunnel, None), Words::default().name("root@127.0.0.1:32821/shop  SSH"));
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        assert_eq!(card_line(&server, Some(now)), Words::from("just now · ").name("root@127.0.0.1:32821"));
+        assert_eq!(card_address(&tunnel), Address::Server("root@127.0.0.1:32821/shop  SSH".into()));
+        // A file in the home folder, with `~`.
+        if let Some(home) = dbee_config::home_dir().filter(|h| h.to_str().is_some_and(|h| !h.is_empty())) {
+            let notes = ConnectionConfig { file: Some(home.join("data").join("notes.sqlite")), ..file };
+            let at = format!("~{}data{}notes.sqlite", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR);
+            assert_eq!(card_address(&notes), Address::File(at));
+        }
     }
 
     #[test]

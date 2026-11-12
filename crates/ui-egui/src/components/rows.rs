@@ -15,6 +15,7 @@ use egui::{Color32, CornerRadius, Rect, Ui, Vec2, WidgetInfo, WidgetType, pos2, 
 use super::grid_cell::{Key, one_line};
 use super::icon::Icon;
 use super::logo::Logo;
+use super::status::{Address, cut_middle};
 use super::{focus, painter};
 use crate::theme::size::{
     CONNECTION_COLOUR_W, CONNECTION_FOCUS_INSET, CONNECTION_LOGO, CONNECTION_LOGO_GAP, CONNECTION_PAD_X, RADIUS_CONTROL, TREE_CHEVRON, TREE_EXPANDER,
@@ -139,8 +140,11 @@ pub struct ConnectionRow<'a> {
     pub name: &'a str,
     /// Its engine, shown by its logo.
     pub engine: DbKind,
-    /// The line under the name: the address or path, as the list words it.
-    pub line: Words,
+    /// The line under the name, in `data`: a server's address, cut at its end when short of room,
+    /// or a file's path, cut in the middle as the status bar cuts it.
+    pub address: Address,
+    /// Words before the address, in `body`: when a recent one was used (`3 min ago · `).
+    pub used: Option<String>,
     /// The colour the user gave it.
     pub colour: Option<Color32>,
     pub selected: bool,
@@ -151,8 +155,8 @@ pub struct ConnectionRow<'a> {
 }
 
 impl ConnectionRow<'_> {
-    /// Draws it into `rect`.
-    pub fn paint(&self, ui: &Ui, rect: Rect) {
+    /// Draws it into `rect`; true when its path was cut, for the list to show it whole on hover.
+    pub fn paint(&self, ui: &Ui, rect: Rect) -> bool {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         p.rect_filled(rect, CornerRadius::ZERO, ground(t, self.selected, self.hovered));
@@ -168,7 +172,12 @@ impl ConnectionRow<'_> {
         let width = (rect.right() - CONNECTION_PAD_X - left).max(0.0);
         let top = rect.center().y - (name_h + line_h) / 2.0;
         p.galley(pos2(left, top), one_line(ui, self.name, Text::Body, t.text, width), t.text);
-        let mut job = self.line.job(t.text_muted);
+        let words = |address: &str| Words::default().plain(self.used.as_deref().unwrap_or_default()).name(address).job(t.text_muted);
+        let fits = |address: &str| ui.painter().layout_job(words(address)).size().x <= width;
+        let (mut job, cut) = match &self.address {
+            Address::File(path) if !fits(path) => (words(&cut_middle(path, fits).unwrap_or_else(|| path.clone())), true),
+            address => (words(address.text()), false),
+        };
         job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
         let line = ui.painter().layout_job(job);
         let mid = top + name_h + line_h / 2.0;
@@ -177,6 +186,7 @@ impl ConnectionRow<'_> {
         if self.focused {
             focus::own_edge(&p, rect.shrink(CONNECTION_FOCUS_INSET), RADIUS_CONTROL);
         }
+        cut
     }
 
     /// What it reads out: its name as written, then its engine, which only its logo shows.
@@ -353,12 +363,13 @@ mod tests {
         // down the row (13 down), `text_muted` in every state; the name in `body` `text` 34 in
         // and 3 down; under it the address in `data` `text_muted`, centred 29 down; keyboard
         // focus a 2 px `ink` box 1 inside, corners 2.
-        let line = || Words::default().name("postgres@pg14:5432/dbee");
+        let line = || Address::Server("postgres@pg14:5432/dbee".into());
         for (theme, t) in both() {
             let row = |colour| ConnectionRow {
                 name: "Shop live",
                 engine: DbKind::Postgres,
-                line: line(),
+                address: line(),
+                used: None,
                 colour,
                 selected: false,
                 focused: false,
@@ -374,7 +385,9 @@ mod tests {
                 ("no colour", row(None), t.bg, false),
             ] {
                 let at_ = format!("{theme:?} {state}");
-                let (shapes, r, logos) = drawn_with_images(theme, vec2(CONNECTION_W, 40.0), |ui, rect| row.paint(ui, rect));
+                let (shapes, r, logos) = drawn_with_images(theme, vec2(CONNECTION_W, 40.0), |ui, rect| {
+                    row.paint(ui, rect);
+                });
                 let mut want = vec![(r, ground), (Rect::from_min_max(pos2(r.left(), r.bottom() - 1.0), r.max), t.line)];
                 if let Some(colour) = row.colour {
                     want.push((Rect::from_min_size(r.min, vec2(3.0, 40.0)), colour));
@@ -402,11 +415,88 @@ mod tests {
                 (DbKind::Sqlite, "logo/sqlite 14px", "Shop live, SQLite"),
             ] {
                 let row = ConnectionRow { engine, ..row(red) };
-                let (_, r, logos) = drawn_with_images(theme, vec2(CONNECTION_W, 40.0), |ui, rect| row.paint(ui, rect));
+                let (_, r, logos) = drawn_with_images(theme, vec2(CONNECTION_W, 40.0), |ui, rect| {
+                    row.paint(ui, rect);
+                });
                 let at = Rect::from_min_size(pos2(r.left() + 12.0, r.top() + 13.0), Vec2::splat(14.0));
                 assert_eq!(logos, [(at, t.text_muted, logo.to_owned(), [14, 14])], "{theme:?} {engine:?}");
                 assert_eq!(row.widget_info().label.as_deref(), Some(label), "{theme:?} {engine:?}");
             }
+        }
+    }
+
+    /// The line `row` draws in a row `width` wide: its words, where, whether egui cut its end, the
+    /// fonts of its parts, and whether `paint` said its path was cut.
+    fn line_of(theme: Theme, row: &ConnectionRow<'_>, width: f32) -> (String, Rect, bool, Vec<(String, egui::FontId, Color32)>, bool, Rect) {
+        let mut cut = false;
+        let (shapes, r) = drawn(theme, vec2(width, 40.0), |ui, rect| cut = row.paint(ui, rect));
+        let line = flat(&shapes)
+            .into_iter()
+            .find_map(|s| match s {
+                Shape::Text(t) if t.galley.text() != row.name && r.contains_rect(t.galley.rect.translate(t.pos.to_vec2())) => Some(t),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{theme:?}: the line under the name"));
+        let text = line.galley.text().to_owned();
+        let at = line.galley.rect.translate(line.pos.to_vec2());
+        (text.clone(), at, line.galley.elided, sections(&shapes, &text), cut, r)
+    }
+
+    #[test]
+    fn a_sqlite_path_is_cut_in_the_middle_as_the_status_bar_cuts_it() {
+        // The status bar's path rule (`a_long_sqlite_path_is_cut_in_the_middle`), on a row: the
+        // home folder as `~` (the list's), cut in the middle with `…` when short of room, as many
+        // letters kept at the start as at the end, so the file's name stays; the whole path on
+        // hover (the list's, through `Hint`). A recent row keeps its words before the path. A
+        // server's address is still cut at its end.
+        const LONG: &str = "~/Projects/clients/northwind-traders/archive/2026/exports/nightly/notes.sqlite";
+        for (theme, t) in both() {
+            let row = |address: Address, used: Option<&str>| ConnectionRow {
+                name: "Notes",
+                engine: DbKind::Sqlite,
+                address,
+                used: used.map(str::to_owned),
+                colour: Some(t.conn_purple),
+                selected: false,
+                focused: false,
+                hovered: false,
+            };
+            // Room enough: whole, as the page draws `~/data/notes.sqlite`.
+            let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File("~/data/notes.sqlite".into()), None), CONNECTION_W);
+            assert_eq!((text.as_str(), elided, cut), ("~/data/notes.sqlite", false, false), "{theme:?}: whole");
+            assert!(close(at.left(), r.left() + 34.0), "{theme:?}: 34 in: {at:?}");
+            // The page's row, alone and recent (the name then needs more than half), and narrower.
+            for (width, used) in [(CONNECTION_W, None), (CONNECTION_W, Some("3 min ago · ")), (220.0, None)] {
+                let at_ = format!("{theme:?} {width} {used:?}");
+                let (text, at, elided, parts, cut, r) = line_of(theme, &row(Address::File(LONG.into()), used), width);
+                assert!(cut && !elided, "{at_}: cut in the middle, not at the end: `{text}`");
+                let path = text.strip_prefix(used.unwrap_or_default()).unwrap_or_else(|| panic!("{at_}: the words before it kept: `{text}`"));
+                let (head, tail) = path.split_once('…').unwrap_or_else(|| panic!("{at_}: a cut path: `{text}`"));
+                assert!(head.starts_with("~/") && LONG.starts_with(head) && LONG.ends_with(tail), "{at_}: `{path}`");
+                assert!(tail.ends_with("/notes.sqlite") && head.chars().count() >= 6, "{at_}: the file's name kept: `{path}`");
+                let even = head.chars().count().abs_diff(tail.chars().count()) <= 1;
+                assert!(even || tail == "/notes.sqlite", "{at_}: cut in the middle, or just before the file's name: `{path}`");
+                // Inside the row's right 12, and no letter more would fit.
+                let room = r.right() - 12.0 - at.left();
+                assert!(at.right() <= r.right() - 12.0 + 0.5 && room - at.width() < 7.2 + 0.5, "{at_}: {at:?} in {room}");
+                let want: Vec<(String, egui::FontId, Color32)> = used
+                    .map(|u| (u.to_owned(), Text::Body.font(), t.text_muted))
+                    .into_iter()
+                    .chain([(path.to_owned(), Text::Data.font(), t.text_muted)])
+                    .collect();
+                assert_eq!(parts, want, "{at_}: the path in `data` `text_muted`");
+            }
+            // Too narrow to keep 6 letters at either end (the status bar then drops the path): cut
+            // at its end, and still whole on hover.
+            let (text, _, elided, _, cut, _) = line_of(theme, &row(Address::File(LONG.into()), None), 120.0);
+            assert!(elided && cut && !text.contains('…'), "{theme:?}: a row with no room for the cut: `{text}`");
+            // A server's address too long for its row is cut at its end, as before.
+            let server = ConnectionRow {
+                engine: DbKind::Postgres,
+                ..row(Address::Server("postgres@analytics-replica.internal.example.com:5432/analytics".into()), None)
+            };
+            let (text, _, elided, _, cut, _) = line_of(theme, &server, 200.0);
+            assert!(elided && !cut && !text.contains('…'), "{theme:?}: a server's address cut at its end: `{text}`");
         }
     }
 
@@ -494,13 +584,16 @@ mod tests {
             let row = ConnectionRow {
                 name: "Shop (Live)",
                 engine: DbKind::MariaDb,
-                line: Words::default().name("Root@DB.Example.com:3306/Shop"),
+                address: Address::Server("Root@DB.Example.com:3306/Shop".into()),
+                used: None,
                 colour: Some(t.conn_blue),
                 selected: false,
                 focused: false,
                 hovered: false,
             };
-            let (shapes, r) = drawn(theme, vec2(CONNECTION_W, 40.0), |ui, rect| row.paint(ui, rect));
+            let (shapes, r) = drawn(theme, vec2(CONNECTION_W, 40.0), |ui, rect| {
+                row.paint(ui, rect);
+            });
             let words: Vec<String> = words_in(&shapes, r).into_iter().map(|w| w.0).collect();
             assert_eq!(words, ["Shop (Live)", "Root@DB.Example.com:3306/Shop"], "{theme:?}: as written");
         }
