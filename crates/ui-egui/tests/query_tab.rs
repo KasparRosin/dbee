@@ -137,6 +137,18 @@ fn error_card_and_cursor_jump() {
     assert!(card["message"].as_str().is_some_and(|m| m.contains("nope")), "{card}");
     assert_eq!((card["position"].clone(), card["line"].clone(), card["column"].clone()), (json!(7), json!(1), json!(8)), "{card}");
     assert!(ui.tag("notice").is_none(), "the card says it, not a notice too");
+    // The band, as the page draws it: its heading, where the error is at the right of it, and
+    // that line's number in `danger` in the gutter, though the cursor is on it too.
+    assert_eq!(card["heading"], "Query failed", "{card}");
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let [x, y, w, h] = ui.rect("query-error");
+    let band = egui::Rect::from_min_size(Pos2::new(x, y), egui::vec2(w, h));
+    let (link, _) = ui.text_in(band, "Line 1, column 8 →").expect("the position at the band's right");
+    assert!((link.right() - (band.right() - 12.0)).abs() < 0.5, "{link:?} in {band:?}");
+    assert!(ui.text_in(band, "Click to put the cursor there.").is_none(), "the page drops the old line");
+    let [text_left, ..] = ui.rect("query-editor");
+    let number = ui.texts().into_iter().find(|(r, g)| g.text() == "1" && r.right() < text_left).map(|(_, g)| g.job.sections[0].format.color);
+    assert_eq!(number, Some(t.danger), "the error's line number");
     // Elsewhere first: the cursor at the start, and the keyboard taken away.
     ui.ctrl("Home");
     ui.key("Escape");
@@ -760,7 +772,7 @@ fn the_layouter_tokenizes_only_when_the_text_changes() {
     let mut ed = EditorState::new("select 1;\n-- two\nselect 'x' from t".into());
     let frame = |ed: &mut EditorState| {
         ctx.run_ui(egui::RawInput::default(), |ui| {
-            editor(ui, egui::Id::new("timing-editor"), ed);
+            editor(ui, egui::Id::new("timing-editor"), ed, None);
         })
         .drop_without_applying_deltas();
     };
@@ -831,7 +843,7 @@ fn editor_keystrokes(text: &str, highlighted: bool, keys: usize) -> (Duration, D
                 egui::TextEdit::store_state(ui.ctx(), id, state);
             }
             if highlighted {
-                editor(ui, id, &mut ed);
+                editor(ui, id, &mut ed, None);
             } else {
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                     egui::TextEdit::multiline(&mut plain).id(id).code_editor().desired_width(f32::INFINITY).show(ui);

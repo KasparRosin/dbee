@@ -109,7 +109,7 @@ fn every(t: &Tokens) -> Vec<egui::Color32> {
 fn the_showcase_draws_in_both_modes() {
     for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
         let mut ready = false;
-        let h = Harness::builder().with_size(egui::vec2(1240.0, 9600.0)).build_ui(|ui| {
+        let h = Harness::builder().with_size(egui::vec2(1240.0, 11000.0)).build_ui(|ui| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
                 ready = true;
@@ -182,6 +182,9 @@ fn the_showcase_draws_in_both_modes() {
             "SIDEBAR/CONNECTION: DEFAULT, SELECTED, HOVER, FOCUS (INFERRED), NO COLOUR, OTHER ENGINES; THEIR LOGOS WAIT FOR THE LOGO TASK, THE LINE NAMES THE ENGINE",
             "VALUE PANEL: JSON, TEXT, NULL, EMPTY (INFERRED), NO CELL SELECTED (B4), COPIED, EDITING SEVERAL LINES (MC+), #17 A ROW AS JSON (INFERRED)",
             "NOT ON THE PAGE YET: THE APP'S PANEL UNTIL THE VALUE PANEL SCREEN, NO COPY OR WRAP; TODAY'S KIND CHIP (A TYPE AS WRITTEN) AND THE NOTE ON A CUT VALUE, UNDER THE BAR",
+            "ERROR BAND (EC1): POSTGRES, HINT AND POSITION; POSTGRES, DETAIL AND NO POSITION; MYSQL, THE MESSAGE ONLY; SQLITE, A POSITION; STATEMENT 2 FAILED",
+            "NOT ON THE PAGE YET: UNTIL THE QUERY TAB SCREEN, A CANCELLED RUN IN NEUTRAL COLOURS AND TODAY'S NOTE UNDER A FAILED TRANSACTION (NO ROLLBACK BUTTON YET); THE TABLE TAB'S HEADINGS AND NOTES",
+            "EDITOR: THE ERROR'S LINE NUMBER IN DANGER, THE TOKEN UNDERLINED IN DANGER; THE CURRENT LINE'S NUMBER IN TEXT",
         ];
         for caption in captions {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");

@@ -522,6 +522,11 @@ fn a_bad_filter_value_shows_the_error_over_the_old_rows() {
     ui.frame();
     let card = ui.value("table-error");
     assert!(card.as_str().is_some_and(|e| e.contains("invalid input syntax")), "{card}");
+    // The band says it: its heading, the message as the server wrote it, today's note.
+    let band = ui.rect("table-error").unwrap();
+    for words in ["The page did not load", card.as_str().unwrap_or_default(), "The rows below are the ones from before."] {
+        assert!(ui.text_in(band, words).is_some(), "`{words}` in the band");
+    }
     assert_eq!(ui.value("grid-cell-0-0")["text"], "1", "the rows from before stay");
     assert!(ui.tag("notice").is_none(), "the card says it, not a notice too");
     // A good filter clears it.

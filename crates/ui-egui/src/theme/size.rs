@@ -233,6 +233,22 @@ pub const VALUE_KIND_PAD_X: f32 = 6.0;
 pub const VALUE_KIND_GAP: f32 = 2.0;
 pub const VALUE_NOTE_GAP: f32 = 6.0;
 
+/// The error band (`error band`): its edge down the left this wide; what it holds this far in from
+/// its sides, past the edge; its parts this far apart, with this much more above a field (HINT,
+/// DETAIL) and above the note; a field's name this far over its text; the heading and the
+/// position at least this far apart.
+pub const ERROR_BAND_EDGE: f32 = 2.0;
+pub const ERROR_BAND_PAD: f32 = 12.0;
+pub const ERROR_BAND_GAP: f32 = 4.0;
+pub const ERROR_BAND_FIELD_GAP: f32 = 8.0;
+pub const ERROR_BAND_NAME_GAP: f32 = 2.0;
+pub const ERROR_BAND_HEAD_GAP: f32 = 12.0;
+/// The editor (`editor/line number`, `editor/error token`): a line number's box is this wide, the
+/// number flush with its right; an error's underline is this thick, this far down its line.
+pub const LINE_NUMBER_W: f32 = 36.0;
+pub const ERROR_UNDERLINE_H: f32 = 1.5;
+pub const ERROR_UNDERLINE_Y: f32 = 17.0;
+
 pub const KEYCAP_H: f32 = 18.0;
 /// Between the keycap's edge and its key, and between the keys of one shortcut.
 pub const KEYCAP_PAD_X: f32 = 4.0;

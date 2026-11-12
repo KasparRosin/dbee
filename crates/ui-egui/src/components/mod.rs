@@ -7,6 +7,8 @@ pub mod checkbox;
 pub mod chip;
 pub mod dialog;
 pub mod dropdown;
+pub mod editor;
+pub mod error_band;
 pub mod focus;
 pub mod grid_cell;
 pub mod icon;

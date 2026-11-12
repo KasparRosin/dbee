@@ -1,6 +1,8 @@
 //! The query tab's body ([`show`]), from top to bottom:
 //!
-//! - the SQL editor ([`editor`]), with line numbers in a gutter at its left;
+//! - the SQL editor ([`editor`]), with line numbers in a gutter at its left
+//!   ([`crate::components::editor::LineNumber`]: the cursor's line in `text`, the line the last
+//!   run's error points at in `danger`);
 //! - the split: dragged, it moves the line between the editor and the results. Where it is lasts
 //!   for the window's run, in memory, and is the same for every query tab (`View::query_split`);
 //! - the toolbar: on an engine with `USE` (`Dialect::has_use_database`), first the database chip:
@@ -14,7 +16,7 @@
 //!   (`query.showResult`; with more than fit, those around the shown one and a `…` that lists
 //!   every result, its label only where it fits whole, [`selector_fit`]); at its right, what the
 //!   shown result holds: `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
-//! - the last run's error card, when it stopped early ([`card`]);
+//! - the last run's error band, when it stopped early ([`band`], [`crate::components::error_band`]);
 //! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
 //!   selecting and copying work, and the value panel follows the selected cell), or for a
 //!   statement without rows how many it affected ([`affected_text`]). With no result yet, a line
@@ -46,13 +48,14 @@
 //! one it is the start. A tab's editor takes the keyboard when the tab becomes the active one (a
 //! new tab too), unless a dialog or the quick search is open.
 //!
-//! **Errors.** The card shows the server's message (with its code), detail and hint, and
-//! where the server points, as a line and column of the text (as it is now: the position is a
-//! byte offset into the text the run started with, kept within the text). A click on it puts the
-//! cursor there, with the keyboard; an error without a position offers no click. A cancelled run shows
-//! the same card in neutral colours. The results of the statements before the failing one stay,
-//! and can be picked in the selector. The card says the error, so it shows as no notice too
-//! (`DbeeApp::start`).
+//! **Errors.** The band shows the server's message (with its code), hint and detail, and where
+//! the server points, as a line and column of the text (as it is now: the position is a byte
+//! offset into the text the run started with, kept within the text), whose number turns `danger`
+//! in the gutter too. A click on the band, or Enter or Space with the keyboard on it, puts the
+//! cursor there, with the keyboard; an error without a position offers no click, and its words can
+//! be selected. A cancelled run shows the band in neutral colours. The results of the statements
+//! before the failing one stay, and can be picked in the selector. The band says the error, so it
+//! shows as no notice too (`DbeeApp::start`).
 //!
 //! **Run buttons** follow the engine's own enabled check for `query.run` (`cmd::query::can_run`:
 //! connected, the connection not lost), with its reason on hover. What the run itself refuses (a
@@ -72,7 +75,7 @@
 //! `result-list-<n>` (value as `result-<n>`; only those in view),
 //! `query-rows` (value: what the shown result holds, e.g. `First 10,000 of 25,000 rows`),
 //! `query-affected` (value: `2 rows affected`), `query-error` (value `{code, heading, message,
-//! detail, hint, note, position, statement, line, column, jump}`, `note` the card's line that a
+//! detail, hint, note, position, statement, line, column, jump}`, `note` the band's line that a
 //! ROLLBACK ends a failed transaction (an error whose meaning is `TransactionAborted`, Postgres's
 //! 25P02) or null, `jump` saying whether a click moves the cursor) and `query-hint`.
 
@@ -99,6 +102,8 @@ use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::button::{BoxButton, TextButton};
+use crate::components::editor::LineNumber;
+use crate::components::error_band::Band;
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
 use crate::components::spinner::Spinner;
@@ -137,7 +142,7 @@ const INDENT: &str = "    ";
 /// The editor's share of the tab's height until the split is dragged.
 pub(crate) const DEFAULT_SPLIT: f32 = 0.45;
 
-/// The run command, whose job errors the card shows.
+/// The run command, whose job errors the band shows.
 const QUERY_RUN: &str = "query.run";
 /// The editor's height at least (three lines), and the room kept for the results.
 const MIN_EDITOR_H: f32 = 3.0 * LINE_H + 10.0;
@@ -533,7 +538,7 @@ pub struct EditorState {
     lines: usize,
     /// The lines in view in the last frame, around which the text is coloured.
     view: Range<usize>,
-    /// The line and column of a byte offset (the error card's), for text `version`.
+    /// The line and column of a byte offset (the error band's), for text `version`.
     place: Option<(u64, usize, (usize, usize))>,
 }
 
@@ -637,20 +642,18 @@ fn take_tabs(ui: &egui::Ui) {
 
 /// The width of the gutter for `lines` lines.
 fn gutter_width(ui: &egui::Ui, lines: usize) -> f32 {
-    let digits = lines.max(1).ilog10().saturating_add(1).max(2);
-    let digit = ui.fonts_mut(|f| f.glyph_width(&Text::Data.font(), '0'));
-    digits as f32 * digit + 2.0 * GUTTER_PAD
+    LineNumber::room(ui, lines) + 2.0 * GUTTER_PAD
 }
 
 /// Draws editor `id` over the rest of `ui`: the gutter with the line numbers, then the text in a
-/// scroll area both ways.
-pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
+/// scroll area both ways. `error_line` (1-based) is the line the last run's error points at.
+pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Option<usize>) -> EditorOutput {
     let t = theme::tokens(ui.ctx());
     let rect = ui.available_rect_before_wrap();
     if ui.memory(|m| m.has_focus(id)) {
         take_tabs(ui);
     }
-    // The card's jump, or the tab just became the active one: the keyboard, and the cursor.
+    // The band's jump, or the tab just became the active one: the keyboard, and the cursor.
     let mut scroll_to = None;
     if ed.focus || ed.jump.is_some() {
         ui.memory_mut(|m| m.request_focus(id));
@@ -713,7 +716,7 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
     let chars = out.state.cursor.char_range().map_or(0, |r| r.primary.index.0);
     let cursor = ed.cursor_bytes(chars);
     let focused = ui.memory(|m| m.has_focus(id));
-    // The line numbers of the rows in view, the cursor's in the text colour.
+    // The line numbers of the rows in view: the cursor's and the error's marked.
     let cursor_row = out.cursor_range.filter(|_| focused).map(|r| galley.layout_from_cursor(r.primary).row);
     let gutter_p = ui.painter_at(Rect::from_min_max(pos2(gutter.left(), view.top()), pos2(gutter.right(), view.bottom())));
     let origin = out.galley_pos;
@@ -723,10 +726,9 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState) -> EditorOutput {
         if top > view.bottom() {
             break;
         }
-        let colour = if cursor_row == Some(i) { t.text } else { t.text_muted };
-        let number = gutter_p.layout_job(Text::Data.job(&i.saturating_add(1).to_string(), colour));
-        let at = pos2(gutter.right() - GUTTER_PAD - number.size().x, top + (row.row.size.y - number.size().y) / 2.0);
-        gutter_p.galley(at, number, colour);
+        let n = i.saturating_add(1);
+        let slot = Rect::from_min_max(pos2(gutter.left(), top), pos2(gutter.right() - GUTTER_PAD, top + row.row.size.y));
+        LineNumber { n, current: cursor_row == Some(i), error: error_line == Some(n) }.paint(&gutter_p, slot);
     }
     EditorOutput { response: out.response.response, changed, cursor, focused, lines: ed.lines }
 }
@@ -864,63 +866,36 @@ fn capitalized(word: &str) -> String {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// The card's line under an error that means the transaction failed earlier.
+/// The band's note under an error that means the transaction failed earlier.
 pub const ROLLBACK_NOTE: &str = "The transaction this connection is in failed earlier: run ROLLBACK to end it. Until then every statement fails.";
 
-/// The error card's heading for `e` of a run that kept `kept` results.
+/// The error band's heading for `e` of a run that kept `kept` results.
 fn heading(e: &QueryError, kept: usize) -> String {
     if e.code == "cancelled" {
         "The run was cancelled".into()
     } else if kept > 0 || e.statement > 0 {
         format!("Statement {} failed", e.statement.saturating_add(1))
     } else {
-        "The query failed".into()
+        "Query failed".into()
     }
 }
 
-/// The error card of `e`, a run that kept `kept` results; `at` is the line and column of its
+/// The error band of `e`, a run that kept `kept` results; `at` is the line and column of its
 /// position in the editor's text. True when a click on it asks to go to the error's position.
-fn card(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: usize, at: Option<(usize, usize)>) -> bool {
-    let t = theme::tokens(ui.ctx());
-    let cancelled = e.code == "cancelled";
-    let (stroke, ink) = if cancelled { (t.line, t.text) } else { (t.danger, t.danger) };
-    let jump = at.is_some();
+pub(crate) fn band(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: usize, at: Option<(usize, usize)>) -> bool {
     let title = heading(e, kept);
     let note = (e.meaning == Some(Meaning::TransactionAborted)).then_some(ROLLBACK_NOTE);
-    let frame = Frame::new()
-        .fill(t.card)
-        .stroke(Stroke::new(1.0, stroke))
-        .corner_radius(CornerRadius::same(RADIUS_CONTROL))
-        .inner_margin(Margin::symmetric(12, 8));
-    let label = |ui: &mut egui::Ui, text: RichText| ui.add(Label::new(text).wrap().selectable(!jump));
-    let r = frame
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.add(Label::new(Text::Subtitle.rich(title.as_str()).color(ink)).selectable(false));
-                if let Some((line, column)) = at {
-                    ui.add(Label::new(Text::Small.rich(format!("line {line}, column {column}")).color(t.text_muted)).selectable(false));
-                }
-            });
-            label(ui, RichText::new(e.message.as_str()).color(if cancelled { t.text_muted } else { t.danger }));
-            if let Some(detail) = &e.detail {
-                label(ui, Text::Small.rich(format!("Detail: {detail}")).color(t.text));
-            }
-            if let Some(hint) = &e.hint {
-                label(ui, Text::Small.rich(format!("Hint: {hint}")).color(t.text));
-            }
-            if note.is_some() {
-                label(ui, Text::Small.rich(ROLLBACK_NOTE).color(t.text));
-            }
-            if jump {
-                ui.add(Label::new(Text::Small.rich("Click to put the cursor there.").color(t.text_muted)).selectable(false));
-            }
-        })
-        .response;
-    let r = ui.interact(r.rect, Id::new(("dbee-query-error", tab.0)), if jump { Sense::click() } else { Sense::hover() });
-    if jump && r.hovered() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-    }
+    let band = Band {
+        heading: &title,
+        position: at,
+        message: &e.message,
+        hint: e.hint.as_deref(),
+        detail: e.detail.as_deref(),
+        note,
+        cancelled: e.code == "cancelled",
+    };
+    let r = band.show(ui, Id::new(("dbee-query-error", tab.0)));
+    let jump = at.is_some();
     let (line, column) = at.unzip();
     let value = json!({
         "code": e.code,
@@ -1078,7 +1053,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let editor_rect = Rect::from_min_size(pos2(full.left(), full.top() + TOP_PAD), vec2(full.width(), editor_h));
         let mut editor_ui =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-editor", id.0)).max_rect(editor_rect).layout(Layout::top_down(Align::Min)));
-        let out = editor(&mut editor_ui, editor_id(id), &mut state.editor);
+        let error_line = q.error.as_ref().and_then(|e| e.position).map(|p| state.editor.line_column_of(p).0);
+        let out = editor(&mut editor_ui, editor_id(id), &mut state.editor, error_line);
         let value = json!({
             "cursor": out.cursor,
             "focused": out.focused,
@@ -1164,12 +1140,12 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             }
         }
         ui.painter().line_segment([bar_rect.left_bottom(), bar_rect.right_bottom()], Stroke::new(1.0, t.line));
-        // The card, then the results.
+        // The band, then the results.
         let rest = Rect::from_min_max(pos2(full.left(), bar_rect.bottom() + 6.0), full.max);
         let mut rest_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-results", id.0)).max_rect(rest).layout(Layout::top_down(Align::Min)));
         if let Some(e) = &q.error {
             let at = e.position.map(|p| state.editor.line_column_of(p));
-            if card(&mut rest_ui, tags, id, e, q.results.len(), at)
+            if band(&mut rest_ui, tags, id, e, q.results.len(), at)
                 && let Some(at) = e.position
             {
                 state.editor.jump_to(at);
@@ -1238,7 +1214,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     }
 }
 
-/// A query run's error that the tab's card shows (`QueryTab::error`), so no notice repeats it:
+/// A query run's error that the tab's band shows (`QueryTab::error`), so no notice repeats it:
 /// the engine adds the failing statement to the data of each error it records on the tab.
 pub(crate) fn in_card(command: &str, result: &Result<Json, dbee_engine::EngineError>) -> bool {
     command == QUERY_RUN && matches!(result, Err(dbee_engine::EngineError::Db { data, .. }) if data.get("statement").is_some())
@@ -1299,6 +1275,51 @@ mod tests {
         ed.set_text("-- note\nselect 1;\nselect nope".into());
         assert_eq!(ed.line_column_of(3), (1, 4));
         assert_eq!(ed.line_column_of(25), (3, 8), "another text");
+    }
+
+    #[test]
+    fn the_gutter_draws_the_pages_line_numbers() {
+        // `components::editor::LineNumber` in today's gutter: the cursor's line (1) in `text`, the
+        // error's line (2) in `danger`, the rest `text_muted`, in `code`, 8 in from the gutter's
+        // line; the gutter as wide as two `code` digits and 8 each side.
+        for (theme, t) in crate::components::both() {
+            let mut ed = EditorState::new("select 1;\nselect nope;\nselect 3".into());
+            ed.jump_to(3);
+            let mut h = crate::components::harness_in(egui::vec2(500.0, 200.0), theme, (ed, Rect::NOTHING), |ui, (ed, at)| {
+                *at = ui.available_rect_before_wrap();
+                editor(ui, Id::new("gutter-test"), ed, Some(2));
+            });
+            h.run_steps(3);
+            let shapes = h.output().shapes.clone();
+            let line = crate::components::flat(&shapes).into_iter().find_map(|s| match s {
+                egui::Shape::LineSegment { points, stroke } if points[0].x == points[1].x && stroke.color == t.line => Some(points[0].x),
+                _ => None,
+            });
+            let line = line.unwrap_or_else(|| panic!("{theme:?}: the gutter's line"));
+            // The numbers, left of the gutter's line (the text has a `1` of its own).
+            let seen: Vec<_> = crate::components::texts(&shapes).into_iter().filter(|(_, r, _)| r.right() <= line).collect();
+            let mut rights = Vec::new();
+            for (words, colour) in [("1", t.text), ("2", t.danger), ("3", t.text_muted)] {
+                let (_, r, c) = seen.iter().find(|(w, _, _)| w == words).unwrap_or_else(|| panic!("{theme:?}: line {words}: {seen:?}"));
+                assert_eq!(*c, colour, "{theme:?}: line {words}");
+                assert!((r.height() - Text::Code.line()).abs() < 0.5, "{theme:?}: line {words} in `code`'s 20: {r:?}");
+                rights.push(r.right());
+            }
+            let fonts: Vec<_> = crate::components::flat(&shapes)
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(g) if g.pos.x < line && ["1", "2", "3"].contains(&g.galley.text()) => {
+                        g.galley.job.sections.first().map(|s| s.format.font_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(fonts, vec![Text::Code.font(); 3], "{theme:?}: the numbers in `code`");
+            assert!(rights.iter().all(|r| (r - (line - GUTTER_PAD)).abs() < 0.5), "{theme:?}: flush right, 8 from the line at {line}: {rights:?}");
+            let digit = h.ctx.fonts_mut(|f| f.glyph_width(&Text::Code.font(), '0'));
+            let width = line - (h.state().1.left() + 1.0);
+            assert!((width - (2.0 * digit + 2.0 * GUTTER_PAD)).abs() < 0.01, "{theme:?}: the gutter's width {width}, a digit {digit}");
+        }
     }
 
     #[test]

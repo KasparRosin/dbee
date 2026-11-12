@@ -4,9 +4,9 @@
 //!   a read-only connection, or the table's own reason as the driver writes it), on one line: a
 //!   longer one is cut short, and reads whole on hover;
 //! - the filter bar ([`crate::filter_bar`]);
-//! - an inline card (`table-error`) when the last Apply failed, with the server's message (the
-//!   staged changes stay, and the grid marks the row it failed on), or else when the last page
-//!   load failed, with the rows from before kept underneath;
+//! - the error band (`table-error`, [`crate::components::error_band`]) when the last Apply failed,
+//!   with the server's message (the staged changes stay, and the grid marks the row it failed on),
+//!   or else when the last page load failed, with the rows from before kept underneath;
 //! - the grid ([`crate::grid`]) on the loaded page and its staged edits, sortable by a header
 //!   click, with foreign key links on the selected row, and the cell editor over it while one is
 //!   open ([`crate::editors`]; a double-click opens one);
@@ -14,7 +14,7 @@
 //!
 //! It reads the tab from the engine each frame and acts only through commands, started with
 //! [`DbeeApp::start`] after drawing (so a `needs…` answer opens its dialog and an error shows as a
-//! notice, except a page load's or an Apply's database error, which the card shows). Whether the
+//! notice, except a page load's or an Apply's database error, which the band shows). Whether the
 //! rows take edits is the engine's rule (`cmd::edit::can_edit`). The window keeps one
 //! [`GridState`] per tab (the column widths), dropped with the tab.
 
@@ -27,21 +27,22 @@ use dbee_engine::cmd::table::{STAGED, quick_estimate};
 use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab, Which};
 use dbee_sql::Dialect;
 use dbee_sql::select::PAGE_SIZE;
-use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, RichText, Stroke, UiBuilder, pos2};
+use egui::{Align, Layout, Rect, RichText, UiBuilder, pos2};
 use serde_json::json;
 
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::error_band::Band;
 use crate::components::spinner::Spinner;
 use crate::components::toast::Kind;
 use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{self, BAR_H, Paging};
-use crate::theme::{self, Text, size::RADIUS_CONTROL};
+use crate::theme::{self, Text};
 
-/// The commands that load a page, whose database errors the tab's card shows.
+/// The commands that load a page, whose database errors the tab's band shows.
 const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "table.refresh"];
 
 /// The grids' states, by tab.
@@ -167,15 +168,18 @@ fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str, own: Option<&str>) {
     tags.tag_value("table-note", &r, text.as_str());
 }
 
-/// The card's note under a failed Apply.
-const FAILED_NOTE: &str = "The changes are still staged, and the row the Apply failed on is marked: fix it and apply again, or reset.";
+/// The band's note under a failed Apply.
+pub(crate) const FAILED_NOTE: &str = "The changes are still staged, and the row the Apply failed on is marked: fix it and apply again, or reset.";
 
-/// The card's note under an Apply cancelled before its commit.
-const CANCELLED_NOTE: &str = "Cancelled before the commit: nothing was written, and the changes are still staged.";
+/// The band's note under an Apply cancelled before its commit.
+pub(crate) const CANCELLED_NOTE: &str = "Cancelled before the commit: nothing was written, and the changes are still staged.";
 
-/// What the tab's card says: a failed (or cancelled) Apply's heading, message and note, else a
-/// failed page load's; `None` when neither failed.
-fn card_text(t: &TableTab) -> Option<(&'static str, &str, &'static str)> {
+/// The band's note under a page that did not load.
+pub(crate) const PAGE_NOTE: &str = "The rows below are the ones from before.";
+
+/// What the tab's error band says: a failed (or cancelled) Apply's heading, message and note,
+/// else a failed page load's; `None` when neither failed. An empty note is none.
+pub(crate) fn card_text(t: &TableTab) -> Option<(&'static str, &str, &'static str)> {
     if let Some(failed) = &t.edits.failed {
         let message = failed.message.as_str();
         return Some(if t.edits.outcome_unknown() {
@@ -186,27 +190,14 @@ fn card_text(t: &TableTab) -> Option<(&'static str, &str, &'static str)> {
             ("The changes were not applied", message, FAILED_NOTE)
         });
     }
-    t.error.as_deref().map(|e| ("The page did not load", e, "The rows below are the ones from before."))
+    t.error.as_deref().map(|e| ("The page did not load", e, PAGE_NOTE))
 }
 
-/// The tab's card: something failed (see [`card_text`]).
-fn error_card(ui: &mut egui::Ui, tags: &mut Tags, (heading, error, note): (&str, &str, &str)) {
-    let t = theme::tokens(ui.ctx());
-    let frame = Frame::new()
-        .fill(t.card)
-        .stroke(Stroke::new(1.0, t.danger))
-        .corner_radius(CornerRadius::same(RADIUS_CONTROL))
-        .inner_margin(Margin::symmetric(12, 8));
-    let r = frame
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(Text::Subtitle.rich(heading).color(t.danger));
-            ui.add(egui::Label::new(RichText::new(error).color(t.danger)).wrap());
-            if !note.is_empty() {
-                ui.add(egui::Label::new(Text::Small.rich(note).color(t.text_muted)).wrap());
-            }
-        })
-        .response;
+/// Tab `tab`'s error band: something failed (see [`card_text`]). Tagged `table-error`, its value
+/// the message.
+pub(crate) fn band(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, (heading, error, note): (&str, &str, &str)) {
+    let band = Band { heading, message: error, note: (!note.is_empty()).then_some(note), ..Band::default() };
+    let r = band.show(ui, egui::Id::new(("dbee-table-error", tab.0)));
     tags.tag_value("table-error", &r, error);
 }
 
@@ -271,7 +262,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         runs.extend(filter_bar::show(&mut top, &bar, tags));
         top.add_space(6.0);
         if let Some(text) = card_text(tab) {
-            error_card(&mut top, tags, text);
+            band(&mut top, tags, id, text);
             top.add_space(6.0);
         }
         match tab.data.as_deref() {
@@ -336,7 +327,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             add_row(app);
             continue;
         }
-        // A page that fails to load says so in the card above the grid.
+        // A page that fails to load says so in the band above the grid.
         let origin = if PAGE_LOADS.contains(&command) { Origin::Page } else { Origin::Menu };
         app.start(command, params, origin);
     }

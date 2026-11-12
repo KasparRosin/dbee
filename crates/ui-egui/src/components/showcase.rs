@@ -5,7 +5,7 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align, Align2, Color32, CornerRadius, Label, Layout, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use dbee_config::ConnectionColor;
 use dbee_core::RelKind;
@@ -16,6 +16,8 @@ use super::checkbox::Checkbox;
 use super::chip::Chip;
 use super::dialog::{Button, Dialog};
 use super::dropdown::Dropdown;
+use super::editor::{ErrorToken, LineNumber};
+use super::error_band::Band;
 use super::grid_cell::{self, Align as CellAlign, Cell, CellText, Header, Key, Mark, RowNumber, Sort};
 use super::icon::Icon;
 use super::input::{Field, Input};
@@ -33,8 +35,8 @@ use super::toast::Toast;
 use super::tooltip;
 use super::value::{self, Facts as ValueFacts, Panel, State as ValueState};
 use crate::theme::size::{
-    BAR_H, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32,
-    TAB_H, TREE_ROW_H,
+    BAR_H, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16,
+    SPACE_24, SPACE_32, TAB_H, TREE_ROW_H,
 };
 use crate::theme::{Text, Tokens, Words, connection_color, tokens};
 
@@ -168,6 +170,8 @@ pub fn show(ui: &mut Ui) {
         grid(ui);
         sidebar_rows(ui);
         value_panels(ui);
+        error_bands(ui);
+        editor_sample(ui);
     });
 }
 
@@ -449,6 +453,128 @@ fn value_panels(ui: &mut Ui) {
         SPACE_8,
         |ui| panels(ui, apps.len(), |ui, i, at| _ = value_panel(ui, &apps[i], at)),
     );
+}
+
+/// The Error band frame's bands: 840 wide, 12 apart.
+const BAND_W: f32 = 840.0;
+const BANDS_APART: f32 = 12.0;
+const NO_BAND: Band<'static> = Band { heading: "", position: None, message: "", hint: None, detail: None, note: None, cancelled: false };
+const BAND_TOTL: &str = "column o.totl does not exist";
+const BAND_HINT: &str = "Perhaps you meant to reference the column \"o.total\".";
+
+/// The Error band frame's five bands, as the page draws them.
+pub(crate) const PAGE_BANDS: [Band<'static>; 5] = [
+    Band { heading: "Query failed", position: Some((1, 14)), message: BAND_TOTL, hint: Some(BAND_HINT), ..NO_BAND },
+    Band {
+        heading: "Query failed",
+        message: "insert or update on table \"orders\" violates foreign key constraint \"orders_customer_id_fkey\"",
+        detail: Some("Failing row contains (691, 42, null)."),
+        ..NO_BAND
+    },
+    Band { heading: "Query failed", message: "Unknown column 'o.totl' in 'field list'", ..NO_BAND },
+    Band { heading: "Query failed", position: Some((1, 14)), message: "no such column: o.totl", ..NO_BAND },
+    Band { heading: "Statement 2 failed", position: Some((1, 14)), message: BAND_TOTL, hint: Some(BAND_HINT), ..NO_BAND },
+];
+
+/// The bands the app draws until the query tab and table tab screens, which the page doesn't: a
+/// cancelled run, today's note under a failed transaction, the table tab's headings and notes.
+pub(crate) const APP_BANDS: [Band<'static>; 6] = [
+    Band { heading: "The run was cancelled", message: "the statement was cancelled", cancelled: true, ..NO_BAND },
+    Band {
+        heading: "Query failed",
+        message: "current transaction is aborted, commands ignored until end of transaction block (SQLSTATE 25P02)",
+        note: Some(crate::query_tab::ROLLBACK_NOTE),
+        ..NO_BAND
+    },
+    Band {
+        heading: "The changes were not applied",
+        message: "invalid input syntax for type date: \"not a date\"; nothing was written",
+        note: Some(crate::table_tab::FAILED_NOTE),
+        ..NO_BAND
+    },
+    Band {
+        heading: "The changes were not applied",
+        message: "the Apply was cancelled at change 1, so nothing was written",
+        note: Some(crate::table_tab::CANCELLED_NOTE),
+        ..NO_BAND
+    },
+    Band { heading: "The connection was lost during Apply", message: "the connection to the server was lost", ..NO_BAND },
+    Band {
+        heading: "The page did not load",
+        message: "invalid input syntax for type integer: \"not a number\"",
+        note: Some(crate::table_tab::PAGE_NOTE),
+        ..NO_BAND
+    },
+];
+
+/// The error bands as the page's Error band frame shows them; then the app's until its screens.
+fn error_bands(ui: &mut Ui) {
+    section(
+        ui,
+        "error band (EC1): Postgres, hint and position; Postgres, DETAIL and no position; MySQL, the message only; SQLite, a position; statement 2 failed",
+        SPACE_8,
+        |ui| bands(ui, "page", &PAGE_BANDS),
+    );
+    section(
+        ui,
+        "not on the page yet: until the query tab screen, a cancelled run in neutral colours and today's note under a failed transaction (no ROLLBACK button yet); the table tab's headings and notes",
+        SPACE_8,
+        |ui| bands(ui, "app", &APP_BANDS),
+    );
+}
+
+fn bands(ui: &mut Ui, salt: &str, bands: &[Band<'_>]) {
+    ui.vertical(|ui| {
+        ui.set_max_width(BAND_W);
+        ui.spacing_mut().item_spacing.y = BANDS_APART;
+        for (i, band) in bands.iter().enumerate() {
+            band.show(ui, egui::Id::new(("showcase-band", salt, i)));
+        }
+    });
+}
+
+/// The Error band frame's editor: 600 wide on `card`, its lines 12 down; the line numbers in their
+/// boxes at its left, the code 12 after them.
+const EDITOR_W: f32 = 600.0;
+const EDITOR_PAD: f32 = 12.0;
+
+/// The editor as the page draws it: the error on line 1, its token underlined; the cursor on line 3.
+fn editor_sample(ui: &mut Ui) {
+    section(ui, "editor: the error's line number in danger, the token underlined in danger; the current line's number in text", SPACE_8, |ui| {
+        let t = tokens(ui.ctx());
+        let line_h = Text::Code.line();
+        let (frame, _) = ui.allocate_exact_size(vec2(EDITOR_W, 2.0 * EDITOR_PAD + 3.0 * line_h), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(frame, CornerRadius::ZERO, t.card);
+        let lines: [(&[(&str, Color32)], Option<&str>, &[(&str, Color32)]); 3] = [
+            (&[("SELECT", t.syn_keyword), (" o.id, ", t.text)], Some("o.totl"), &[(", c.email", t.text)]),
+            (&[("FROM", t.syn_keyword), (" shop.orders o", t.text)], None, &[]),
+            (&[("WHERE", t.syn_keyword), (" o.total > ", t.text), ("100", t.syn_number)], None, &[]),
+        ];
+        for (i, (before, token, after)) in lines.into_iter().enumerate() {
+            let top = frame.top() + EDITOR_PAD + line_h * i as f32;
+            let slot = Rect::from_min_size(pos2(frame.left(), top), vec2(LINE_NUMBER_W, line_h));
+            LineNumber { n: i + 1, current: i == 2, error: i == 0 }.paint(p, slot);
+            let mut x = code(p, pos2(slot.right() + EDITOR_PAD, top), before);
+            if let Some(token) = token {
+                x = ErrorToken { token }.paint(p, pos2(x, top)).right();
+            }
+            code(p, pos2(x, top), after);
+        }
+    });
+}
+
+/// `parts` in `code` from `at`, each in its colour; where the text ends.
+fn code(p: &egui::Painter, at: Pos2, parts: &[(&str, Color32)]) -> f32 {
+    let mut job = egui::text::LayoutJob::default();
+    for (words, colour) in parts {
+        job.append(words, 0.0, Text::Code.format(*colour));
+    }
+    let chars = job.text.chars().count();
+    let galley = p.layout_job(job);
+    let end = galley.pos_from_cursor(egui::text::CCursor::new(chars)).min.x;
+    p.galley(at, galley, Color32::PLACEHOLDER);
+    at.x + end
 }
 
 /// `n` value panels, three to a row, drawn by `panel`.
