@@ -166,11 +166,10 @@ Significant decisions, newest last. Add an entry for every significant dependenc
   - `PRAGMA temp_store_directory` and `data_store_directory` move SQLite's own files to another folder, process-wide; the authorizer sees them as pragmas with their value.
 - **Why:** `rowid` counts as a real key within an edit session (Kaspar's call, 2026-10-28). The isolation rule must hold on every path into a file, and parsing paths is where it would leak, so the driver refuses the statements, not paths.
 
-## 2026-11-05: The connection screen picks the database type first; no engine logos for now
+## 2026-11-05: The connection screen picks the database type first
 
 - **Decision:** A new connection starts with one card per database type (`DbKind::ALL`), then the form for the chosen type, with the type and Change engine on its title row (the redesign of 2026-10-31, in the app's present look, its engine row joined to the title row so the form fits the app's first window). A type this build has no driver for shows "Upcoming" and cannot be chosen. The form's rows come from the type's settings and options in `KindInfo`, so the UI names no type. A URL's scheme picks the type. A connection opened from the saved list or Recent keeps its type, and its Fill from URL takes that type's URLs only; one saved during the edit, or a Duplicate, can still change type. A config holds only what its type's settings use. After New file…, every `connection.test` and `connection.open` sends `createFile: true` until a connect succeeds; the engine refuses it for a read-only connection.
-- **Logos:** AGENTS.md allows each engine's own logo where its owner's guidelines do, and the redesign shows one on each card. Read on 2026-11-05, none of the owners' pages grants this use. PostgreSQL's fair use covers the names only; it asks that the elephant not be changed or shown with other logos, and other uses need the board's approval. Oracle's allows two badges, "Powered by MySQL" and "Includes MySQL", as links to mysql.com on websites; every other MySQL logo needs a signed agreement. MariaDB's pages limit the Foundation's logo to referring to the Foundation, and grant no other use. SQLite publishes no guideline; asked on its forum, its author said the logo is a registered trademark and that its use depends on how it is used. SQLite's card shows its name too, so the four cards match. A logo can follow once its owner allows it.
-- **Why:** The type decides which fields make sense, so it comes first; a connection opened from the list keeps its own (the redesign's E2), while one still being made can be corrected. A logo used against its owner's guidelines is a trademark problem dbee doesn't need, and the name says the same.
+- **Why:** The type decides which fields make sense, so it comes first; a connection opened from the list keeps its own (the redesign's E2), while one still being made can be corrected.
 
 ## 2026-11-06: MySQL values with a backslash or a NUL are written as hex
 
@@ -329,3 +328,8 @@ Significant decisions, newest last. Add an entry for every significant dependenc
 
 - **Decision:** on Linux and FreeBSD dbee asks `org.freedesktop.portal.Settings` for `org.freedesktop.appearance` `color-scheme` once, before the window opens (`ReadOne`, then `Read` for older portals): 1 is dark, 2 is light, anything else or no answer is "the desktop doesn't say". The read runs on its own thread and the app waits at most 500 ms, so a missing or slow bus can't hold the window; a thread left behind ends with the process. `zbus` (blocking, `async-io`, no default features) is a direct dependency of `dbee-ui-egui` on those two systems only; it was already in the tree through accesskit and the keyring store. Elsewhere, and wherever the portal says nothing, egui's own `system_theme` is used.
 - **Why:** winit reports nothing on X11 and only an override on Wayland, so System would otherwise always draw light there.
+
+## 2026-11-12: kurbo and vello_cpu draw the engine logos
+
+- **Decision:** `dbee-ui-egui` takes `kurbo` 0.13 and `vello_cpu` 0.1 (default features off; `std`, `u8_pipeline`), both MIT OR Apache-2.0, as direct dependencies. They fill the engine logos' SVG paths (`assets/logos/`, Simple Icons 13.21.0, CC0) into a texture once per size, which the app tints.
+- **Why:** egui's painter fills convex shapes only, and the logos have holes. Both crates were already in the tree through `epaint`.
