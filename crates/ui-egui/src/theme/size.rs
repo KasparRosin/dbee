@@ -119,8 +119,10 @@ pub const TAB_TITLE_MAX: f32 = 200.0;
 pub const TAB_DOT: f32 = 8.0;
 pub const TAB_CLOSE: f32 = 18.0;
 pub const TAB_ACTIVE_LINE: f32 = 2.0;
-/// The new tab button (`tab/new`): this wide, as tall as a tab.
+/// The new tab button (`tab/new`): this wide, as tall as a tab; the list button (`tab/list`) the
+/// same. The list button's menu opens this far under it.
 pub const NEW_TAB_W: f32 = 32.0;
+pub const TAB_LIST_GAP: f32 = 2.0;
 
 /// The menu bar (`menu bar`): a slim bar, its titles this far in from its ends.
 pub const MENU_BAR_PAD_X: f32 = 4.0;

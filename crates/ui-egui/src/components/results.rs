@@ -18,14 +18,18 @@ use super::button::{BarButton, BoxButton, TextButton};
 use super::icon::Icon;
 use super::spinner::Spinner;
 use super::status::{Piece, piece, timer};
+use super::tab::{Placed, list_button, row};
 use super::tooltip::Hint;
 use super::{Look, focus, painter};
 use crate::theme::size::{
-    BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, RESULT_FACT_GAP, RESULT_TAB_PAD_X, RESULT_TAB_TITLE_MAX, ROW_COUNT_COUNTING_GAP, ROW_COUNT_GAP,
+    BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, NEW_TAB_W, RESULT_FACT_GAP, RESULT_TAB_PAD_X, RESULT_TAB_TITLE_MAX, ROW_COUNT_COUNTING_GAP, ROW_COUNT_GAP,
     RUN_ROW_GAP, RUN_ROW_PAD_X, SPINNER, TAB_ACTIVE_LINE,
 };
 use crate::theme::{Text, Tokens, tokens};
 use crate::tree::thousands;
+
+/// What the result bar's list button is read out as.
+const ALL_RESULTS: &str = "All results";
 
 /// Why EXPORT is off, on its hover.
 pub const EXPORT_LATER: &str = "Export this result: not now, export comes in a later version of dbee.";
@@ -190,8 +194,8 @@ pub enum RunState {
 /// What a click in the result bar asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResultAsked {
-    /// Show the result of this tab (0-based): a click on a tab that isn't the shown one, or Enter
-    /// or Space on it.
+    /// Show the result of this tab (0-based): a click on a tab that isn't the shown one, Enter or
+    /// Space on it, or choosing it from the list.
     Show(usize),
     /// Open or close the value panel.
     Value,
@@ -211,13 +215,16 @@ pub struct ResultBar<'a> {
     pub value_on: bool,
 }
 
-/// The result bar as drawn: its tabs, its facts' words, EXPORT and the toggle, and what a click
-/// asked for.
+/// The result bar as drawn: its tabs, its facts' words, EXPORT and the toggle, the list button
+/// while its tabs don't fit and its list's items in view while it is open (each with the index of
+/// the result it lists), and what a click asked for.
 pub struct ResultShown {
     pub tabs: Vec<Response>,
     pub facts: Response,
     pub export: Option<Response>,
     pub value: Response,
+    pub list: Option<Response>,
+    pub listed: Vec<(usize, Response)>,
     pub asked: Option<ResultAsked>,
 }
 
@@ -291,7 +298,9 @@ impl ResultBar<'_> {
         }
     }
 
-    /// Draws it as wide as `ui`, [`BAR_H`] tall.
+    /// Draws it as wide as `ui`, [`BAR_H`] tall. While its tabs don't fit in what the facts
+    /// leave them, they scroll as the workspace's tabs do (`row`), and the list button stands
+    /// right after them and right before the facts, listing every result.
     pub fn show(self, ui: &mut Ui) -> ResultShown {
         let t = tokens(ui.ctx());
         let (bar, cell) = bar_ground(ui);
@@ -307,9 +316,15 @@ impl ResultBar<'_> {
         let (says, colour, mut time) = self.facts(&ui, t);
         let mut job = Text::Label.job(&says, colour);
         let laid = Piece::new(&ui, job.clone(), says.clone());
-        // Short of room the time goes, then the words are cut.
         let facts_end = export_rect.unwrap_or(value_rect).left() - RESULT_FACT_GAP;
-        let facts_room = (facts_end - cell.left()).max(0.0);
+        // The tabs fit if they and the whole facts do, 12 apart; else the list button takes its
+        // room before the facts.
+        let widths: Vec<f32> = self.tabs.iter().map(|tab| tab.parts(&ui).1).collect();
+        let whole = laid.width() + time.as_ref().map_or(0.0, |time| RESULT_FACT_GAP + time.width());
+        let fits = widths.iter().sum::<f32>() + RESULT_FACT_GAP + whole <= facts_end - cell.left();
+        let list_w = if fits { 0.0 } else { NEW_TAB_W };
+        // Short of room the time goes, then the words are cut.
+        let facts_room = (facts_end - cell.left() - list_w).max(0.0);
         if time.as_ref().is_some_and(|time| laid.width() + RESULT_FACT_GAP + time.width() > facts_room) {
             time = None;
         }
@@ -323,24 +338,31 @@ impl ResultBar<'_> {
         let facts_left = facts_end - facts_w;
 
         // Left to right, so Tab reaches them as they read: the tabs, kept left of the facts.
-        let tabs_room = Rect::from_min_max(cell.min, pos2((facts_left - RESULT_FACT_GAP).max(cell.left()), cell.bottom()));
+        let tabs_end = if fits { facts_left - RESULT_FACT_GAP } else { facts_left - NEW_TAB_W };
+        let view = Rect::from_min_max(cell.min, pos2(tabs_end.max(cell.left()), cell.bottom()));
+        let titles: Vec<&str> = self.tabs.iter().map(|tab| tab.title).collect();
+        let shown = self.tabs.iter().position(|tab| tab.active);
+        let tabs_id = id.with("tabs");
         let mut asked = None;
-        let tabs = ui
-            .scope_builder(UiBuilder::new().max_rect(tabs_room).layout(Layout::left_to_right(Align::Min)), |ui| {
-                ui.set_clip_rect(tabs_room.intersect(ui.clip_rect()));
-                ui.spacing_mut().item_spacing.x = 0.0;
-                let mut drawn = Vec::with_capacity(self.tabs.len());
-                for (i, tab) in self.tabs.into_iter().enumerate() {
-                    let active = tab.active;
-                    let r = ui.add(tab);
-                    if r.clicked() && !active {
-                        asked = Some(ResultAsked::Show(i));
-                    }
-                    drawn.push(r);
-                }
-                drawn
-            })
-            .inner;
+        let tabs = row(&mut ui, tabs_id, view, self.tabs, &widths, shown.map(|i| (i, tabs_id.with(i))), |ui, i, tab| {
+            let active = tab.active;
+            let r = ui.add(tab);
+            if r.clicked() && !active {
+                asked = Some(ResultAsked::Show(i));
+            }
+            Placed { focused: r.gained_focus(), item: r }
+        })
+        .tabs;
+        let (list, listed) = if fits {
+            (None, Vec::new())
+        } else {
+            let rect = Rect::from_min_size(pos2(view.right(), bar.rect.top()), vec2(NEW_TAB_W, BAR_H));
+            let listed = list_button(&mut ui, id.with("list"), rect, ALL_RESULTS, &titles, shown, None);
+            if let Some(i) = listed.chosen {
+                asked = Some(ResultAsked::Show(i));
+            }
+            (Some(listed.button), listed.items)
+        };
         let facts = piece(&ui, id.with("facts"), &words, pos2(facts_left, mid), colour);
         if let Some(time) = time {
             time.show(&ui, id.with("time"), facts_left + words.width() + RESULT_FACT_GAP, mid, t);
@@ -350,7 +372,7 @@ impl ResultBar<'_> {
         if value.clicked() {
             asked = Some(ResultAsked::Value);
         }
-        ResultShown { tabs, facts, export, value, asked }
+        ResultShown { tabs, facts, export, value, list, listed, asked }
     }
 }
 
@@ -475,7 +497,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
-    use crate::components::{Edge, Look, ROOM, both, edges_in, fills_in, harness, icon_in, painted, sections, texts};
+    use crate::components::{Edge, Look, ROOM, both, edges_in, fills_in, harness, harness_in, icon_in, painted, sections, texts};
     use crate::theme::Text;
     use crate::theme::size::{BAR_H, SPINNER};
 
@@ -933,6 +955,125 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The page's many results (174564), the first one shown.
+    const MANY: [&str; 6] =
+        ["select ... orders", "select ... series", "select ... customers", "update ... dealers", "select ... line_items", "select ... totals"];
+    const PAGE_W: f32 = 840.0;
+
+    /// What a harness's result bar drew in its last frame, and the result its caller shows.
+    struct Many {
+        shown: usize,
+        bar: Rect,
+        tabs: Vec<Rect>,
+        list: Option<Rect>,
+        export: Rect,
+        items: Vec<(usize, Rect)>,
+        asked: Vec<ResultAsked>,
+    }
+
+    /// A result bar `width` wide with the first `n` of the page's results, done; room under it for
+    /// its list. The caller shows the result it is asked to.
+    fn many(theme: Theme, width: f32, n: usize) -> egui_kittest::Harness<'static, Many> {
+        let state = Many { shown: 0, bar: Rect::NOTHING, tabs: Vec::new(), list: None, export: Rect::NOTHING, items: Vec::new(), asked: Vec::new() };
+        let mut h = harness_in(vec2(width + 2.0 * ROOM, 400.0), theme, state, move |ui, s| {
+            ui.add_space(ROOM);
+            ui.allocate_ui(vec2(width, BAR_H), |ui| {
+                s.bar = Rect::from_min_size(ui.cursor().min, vec2(width, BAR_H));
+                let tabs = MANY.iter().take(n).enumerate().map(|(i, title)| ResultTab::new(title).active(i == s.shown)).collect();
+                let shown =
+                    ResultBar { tabs, state: RunState::Done { rows: 10, ms: Some(24) }, first_of: None, export: true, value_on: false }.show(ui);
+                s.tabs = shown.tabs.iter().map(|r| r.rect).collect();
+                s.list = shown.list.map(|r| r.rect);
+                s.export = shown.export.map_or(Rect::NOTHING, |r| r.rect);
+                s.items = shown.listed.iter().map(|(i, r)| (*i, r.rect)).collect();
+                if let Some(asked) = shown.asked {
+                    s.asked.push(asked);
+                    if let ResultAsked::Show(i) = asked {
+                        s.shown = i;
+                    }
+                }
+            });
+        });
+        h.run();
+        h
+    }
+
+    /// A click of the primary button at `pos`.
+    fn click_at<S>(h: &mut egui_kittest::Harness<'_, S>, pos: egui::Pos2) {
+        h.input_mut().events.push(egui::Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+            h.run();
+        }
+    }
+
+    #[test]
+    fn many_results_scroll_with_the_list_after_them() {
+        // Node 174564 (`state=many results`), 840 wide: the result tabs scroll from the bar's left
+        // end in what the facts leave, resting at a tab's edge and cut at the list button
+        // (`tab/list`, 32 by 36 on the bar's line), which stands right after them and right before
+        // the facts' words; the facts end 12 before EXPORT as ever. The list shows every result in
+        // order, the shown one checked; choosing one asks to show it, and its tab comes into view.
+        for (theme, t) in both() {
+            let mut h = many(theme, PAGE_W, 6);
+            let s = h.state();
+            let list = s.list.unwrap_or_else(|| panic!("{theme:?}: the list button with more results than fit"));
+            let shapes = &h.output().shapes;
+            let (words, time) = (word(shapes, "10 ROWS").0, word(shapes, "24 MS").0);
+            assert_eq!(list, Rect::from_min_size(pos2(list.left(), s.bar.top()), vec2(32.0, 36.0)), "{theme:?}: 32 by 36 on the bar's line");
+            assert!(close(list.right(), words.left()), "{theme:?}: the list right before the facts' words: {list:?} {words:?}");
+            assert!(close(s.export.left() - (time.right() - Text::Label.spacing()), 12.0), "{theme:?}: the facts end 12 before EXPORT");
+            assert_eq!(s.tabs[0].left(), s.bar.left(), "{theme:?}: the tabs from the bar's left end");
+            for pair in s.tabs.windows(2) {
+                assert_eq!(pair[0].right(), pair[1].left(), "{theme:?}: side by side: {:?}", s.tabs);
+            }
+            assert!(s.tabs[5].right() > list.left(), "{theme:?}: the last ones out of view: {:?}", s.tabs);
+            for c in shapes {
+                if let egui::Shape::Text(text) = &c.shape
+                    && MANY.contains(&text.galley.text())
+                {
+                    assert!(c.clip_rect.right() <= list.left() + 0.5, "{theme:?}: `{}` cut at the list: {:?}", text.galley.text(), c.clip_rect);
+                }
+            }
+            let line = (Rect::from_min_max(pos2(list.left(), list.bottom() - 1.0), list.max), t.line);
+            assert!(fills_in(shapes, list).contains(&line), "{theme:?}: its line on the bar's");
+            assert_eq!(icon_in(shapes, list).0, [t.text_muted], "{theme:?}: ⌄");
+            // Its list: every result in order, the shown one checked.
+            h.get_by_label("All results").click();
+            h.run();
+            h.run();
+            let s = h.state();
+            assert_eq!(s.items.iter().map(|(i, _)| *i).collect::<Vec<_>>(), (0..6).collect::<Vec<_>>(), "{theme:?}: every result in order");
+            let drawn = texts(&h.output().shapes);
+            for (i, item) in &s.items {
+                let title = MANY[*i];
+                assert!(
+                    drawn.iter().any(|(w, r, c)| w == title && item.contains_rect(*r) && *c == t.text),
+                    "{theme:?}: `{title}` in item {i}: {drawn:?}"
+                );
+                let mark = Rect::from_min_size(pos2(item.left() + 8.0, item.top() + 7.0), vec2(14.0, 14.0));
+                let want: Vec<Color32> = if *i == 0 { vec![t.text] } else { vec![] };
+                assert_eq!(icon_in(&h.output().shapes, mark).0, want, "{theme:?}: item {i}'s mark");
+            }
+            // Choosing the last asks to show it, and its tab comes into view.
+            let last = s.items.iter().find(|(i, _)| *i == 5).map(|(_, r)| r.center());
+            click_at(&mut h, last.unwrap_or_else(|| panic!("{theme:?}: the last result listed")));
+            h.run();
+            let s = h.state();
+            assert_eq!(s.asked, [ResultAsked::Show(5)], "{theme:?}: choosing a result asks to show it");
+            let list = s.list.unwrap_or(Rect::NOTHING);
+            assert!(s.tabs[5].left() >= s.bar.left() - 0.5 && s.tabs[5].right() <= list.left() + 0.5, "{theme:?}: its tab in view: {:?}", s.tabs);
+        }
+        // Results that fit: no list button.
+        let h = many(Theme::Light, PAGE_W, 2);
+        assert!(h.state().list.is_none(), "no list button while the results fit");
     }
 
     /// What a harness of the three bars saw clicked.

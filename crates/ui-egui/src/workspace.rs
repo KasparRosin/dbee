@@ -19,8 +19,10 @@
 //! A tab shows its kind's icon, its title (a table tab its table's name, with the number of
 //! applied filters as `orders [2]`), a dot when closing it would lose something (query text,
 //! staged edits), a spinner while one of its jobs runs, and × to close it; a middle click closes
-//! it too, and `+` opens a query tab. More tabs than fit scroll sideways. Closing goes through
-//! `tab.close`, so a tab that would lose something asks first.
+//! it too, and `+` opens a query tab. More tabs than fit scroll sideways, with `+` and the list
+//! button (⌄) at the strip's right end; the list shows every tab, and choosing one makes it the
+//! active tab. The active tab is always brought into view. Closing goes through `tab.close`, so a
+//! tab that would lose something asks first.
 //!
 //! **Running jobs.** The status bar and the tabs show only live jobs: those a tab's markers name
 //! (a page load, a count, an Apply, a query run) and a reconnect. A tab that closed, or whose
@@ -30,7 +32,9 @@
 //! results ([`crate::query_tab`]).
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
-//! `tab-new`; `status-connection` (value: the name), `status-address` (value: the address, whole),
+//! `tab-new`, `tab-list` (while the tabs don't fit; value: the number of tabs) and, while its list
+//! is open, `tab-list-<n>` (`n` from 1 in strip order; value `{tab, title, active}`);
+//! `status-connection` (value: the name), `status-address` (value: the address, whole),
 //! `status-server`, `status-tls` (value: what
 //! protects the link, while it is weaker than fully checked), `status-read-only`, `status-save`,
 //! `status-job` (value: what runs, or `Reconnecting…`), `status-cancel`, `status-lost`,
@@ -47,7 +51,7 @@ use serde_json::json;
 
 use crate::app::Origin;
 use crate::components::status::{self, Activity, Address};
-use crate::components::tab::{self, Asked, NewTab};
+use crate::components::tab::{self, Asked};
 use crate::components::tooltip::Hint;
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
@@ -73,9 +77,6 @@ pub(crate) struct Workspace {
     /// The query tab whose editor was given the keyboard when it became the active one; `None`
     /// while no query tab is active.
     pub focused_query: Option<TabId>,
-    /// The tab the strip last showed as the active one: another one (a tab just opened, say) is
-    /// scrolled into view when the strip is wider than the window.
-    strip_active: Option<TabId>,
     /// The connection this state belongs to; another one starts afresh.
     connection: Option<String>,
 }
@@ -376,7 +377,7 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The tabs strip ([`tab::strip`]).
+/// The tabs strip ([`tab::Strip`]).
 fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     let st: &State = app.session.state();
     let tabs: Vec<TabView> = st
@@ -392,33 +393,42 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             busy: busy(tab),
         })
         .collect();
-    // A newly active tab (one just opened, or chosen elsewhere) is scrolled into view.
-    let reveal = app.view.work.strip_active != st.active;
-    app.view.work.strip_active = st.active;
     let tags = &mut app.tags;
-    tab::strip(ui, |ui| {
-        for view in &tabs {
-            let one = if view.query { tab::Tab::query(&view.title) } else { tab::Tab::table(&view.title) };
-            let shown = one.id_salt(view.id.0).active(view.active).unsaved(view.dirty).busy(view.busy).reveal(view.active && reveal).show(ui);
-            let r = shown.tab.hint(view.hover.as_str());
-            tags.tag_value(&format!("tab-{}", view.id.0), &r, view.title.as_str());
-            if let Some(dot) = &shown.unsaved {
-                tags.tag(&format!("tab-dirty-{}", view.id.0), dot);
-            }
-            let close = shown.close.hint("Close (Ctrl+W)");
-            tags.tag(&format!("tab-close-{}", view.id.0), &close);
-            match shown.asked {
-                Some(Asked::Close) => acts.push(Act::Close(view.id)),
-                Some(Asked::Activate) => acts.push(Act::Activate(view.id)),
-                None => {}
-            }
-        }
-        let r = ui.add(NewTab::new()).hint("New query tab (Ctrl+T)");
-        tags.tag("tab-new", &r);
-        if r.clicked() {
-            acts.push(Act::NewQuery);
-        }
+    let strip = tabs.iter().map(|view| {
+        let one = if view.query { tab::Tab::query(&view.title) } else { tab::Tab::table(&view.title) };
+        one.id_salt(view.id.0).active(view.active).unsaved(view.dirty).busy(view.busy)
     });
+    let shown = tab::Strip::new(strip.collect()).show(ui, |i, shown| {
+        let Some(view) = tabs.get(i) else { return };
+        let r = shown.tab.clone().hint(view.hover.as_str());
+        tags.tag_value(&format!("tab-{}", view.id.0), &r, view.title.as_str());
+        if let Some(dot) = &shown.unsaved {
+            tags.tag(&format!("tab-dirty-{}", view.id.0), dot);
+        }
+        let close = shown.close.clone().hint("Close (Ctrl+W)");
+        tags.tag(&format!("tab-close-{}", view.id.0), &close);
+    });
+    match shown.asked.and_then(|(i, asked)| tabs.get(i).map(|view| (view.id, asked))) {
+        Some((id, Asked::Close)) => acts.push(Act::Close(id)),
+        Some((id, Asked::Activate)) => acts.push(Act::Activate(id)),
+        None => {}
+    }
+    let r = shown.new.hint("New query tab (Ctrl+T)");
+    tags.tag("tab-new", &r);
+    if r.clicked() {
+        acts.push(Act::NewQuery);
+    }
+    if let Some(list) = shown.list {
+        let r = list.hint("All tabs");
+        tags.tag_value("tab-list", &r, tabs.len());
+    }
+    for (i, item) in &shown.listed {
+        if let Some(view) = tabs.get(*i) {
+            // A menu's first frame is a sizing pass, which reads every widget as disabled.
+            let value = json!({ "tab": view.id.0, "title": view.title, "active": view.active });
+            tags.tag_value_as(&format!("tab-list-{}", i.saturating_add(1)), item, value, true);
+        }
+    }
 }
 
 /// The active tab's body (see the module docs), or a hint when no tab is open.

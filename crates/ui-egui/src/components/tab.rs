@@ -1,16 +1,22 @@
-//! The workspace's tabs (`tab`), the new tab button (`tab/new`) and the strip they stand in
-//! (`tab strip`): a band on `card` that scrolls sideways when they don't fit, with a `line` along
-//! its bottom under everything but the active tab, which opens into what is below it.
+//! The workspace's tabs (`tab`), the new tab button (`tab/new`), the list button (`tab/list`)
+//! and the strip they stand in (`tab strip`): a band on `card` with a `line` along its bottom
+//! under everything but the active tab, which opens into what is below it.
 //!
 //! A tab holds, from its left, its kind's icon (the spinner while it is busy), its title as
 //! written, the unsaved dot and the close, and a `line` at its right end. Its close shows while it
 //! is the active tab or under the pointer. The close's room is kept on every tab, so no tab grows
 //! under the pointer and every tab's close can be clicked by its tag.
 //!
-//! A strip that scrolls comes to rest with a tab whole at its left edge (the design agent's rule
-//! until the overflow of tabs is decided): after the wheel or the scroll bar, it goes on to the
-//! next tab's edge the way it moved; after a scroll it didn't do itself, to the nearest one. The
-//! new tab button can always be scrolled to: the strip leaves room after it for that.
+//! While the tabs fit, the new tab button stands after the last one. While they don't, they
+//! scroll sideways in what the strip leaves before the new tab button and the list button, which
+//! stand at its right end; the list button opens a menu of every tab in strip order, the active
+//! one checked, and choosing one asks for it to be made the active tab. The tabs come to rest
+//! with a tab's left edge at the strip's left, or at the end with the last tab against the new
+//! tab button, so no room is left empty after it (`row`, which the result bar's tabs use too):
+//! after the wheel or the scroll bar they go on to the next rest the way they moved; after a
+//! scroll they didn't do themselves, to the nearest one. The active tab is brought into view
+//! whenever another one becomes active (a click, the keyboard, the list, the caller) and when the
+//! strip's room changes, and so is a tab the keyboard's focus reaches.
 
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -18,35 +24,24 @@ use std::sync::Arc;
 
 use egui::text::TextWrapping;
 use egui::{
-    Color32, CornerRadius, Galley, Id, Rect, Response, ScrollArea, Sense, Ui, UiBuilder, UiStackInfo, Vec2, Widget, WidgetInfo, WidgetType, pos2,
-    vec2,
+    Align, Color32, CornerRadius, Galley, Id, Layout, Popup, Rect, RectAlign, Response, ScrollArea, Sense, Ui, UiBuilder, Vec2, Widget, WidgetInfo,
+    WidgetType, pos2, vec2,
 };
 
 use super::icon::Icon;
+use super::menu::{self, Item};
 use super::spinner::Spinner;
 use super::{Look, focus, painter};
-use crate::theme::size::{NEW_TAB_W, RADIUS_CONTROL, TAB_ACTIVE_LINE, TAB_CLOSE, TAB_DOT, TAB_GAP, TAB_H, TAB_PAD_X, TAB_TITLE_MAX};
+use crate::theme::size::{
+    MENU_ITEM_H, MENU_PAD, NEW_TAB_W, RADIUS_CONTROL, TAB_ACTIVE_LINE, TAB_CLOSE, TAB_DOT, TAB_GAP, TAB_H, TAB_LIST_GAP, TAB_PAD_X, TAB_TITLE_MAX,
+};
 use crate::theme::{Text, tokens};
 
 /// The strip's lines: at a tab's right end and along the bottom.
 const LINE_W: f32 = 1.0;
 
-/// The tag a strip puts on its `Ui`: the key under which the tabs in it note their cells.
-const STRIP_TAG: &str = "dbee-tab-strip";
-
-/// What the tabs of a strip noted this frame: where each one is, and the one to bring into view.
-#[derive(Clone, Debug, Default)]
-struct Cells {
-    tabs: Vec<(f32, f32)>,
-    reveal: Option<(f32, f32)>,
-}
-
-/// Where a strip last came to rest, and whether the user has scrolled it since.
-#[derive(Clone, Copy, Debug, Default)]
-struct Rest {
-    offset: f32,
-    by_user: bool,
-}
+/// What the strip's list button is read out as.
+const ALL_TABS: &str = "All tabs";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -70,7 +65,6 @@ pub struct Tab<'a> {
     active: bool,
     unsaved: bool,
     busy: bool,
-    reveal: bool,
     id: Option<Id>,
     look: Option<Look>,
 }
@@ -96,7 +90,7 @@ impl<'a> Tab<'a> {
     }
 
     fn new(kind: Kind, title: &'a str) -> Tab<'a> {
-        Tab { kind, title, active: false, unsaved: false, busy: false, reveal: false, id: None, look: None }
+        Tab { kind, title, active: false, unsaved: false, busy: false, id: None, look: None }
     }
 
     /// The active tab: `card`, the `ink` line along its top, no line under it, its close shown.
@@ -115,12 +109,6 @@ impl<'a> Tab<'a> {
     /// for a tab yet.
     pub fn busy(mut self, busy: bool) -> Tab<'a> {
         self.busy = busy;
-        self
-    }
-
-    /// Scroll the strip it stands in so it shows whole (a tab just made the active one).
-    pub fn reveal(mut self, reveal: bool) -> Tab<'a> {
-        self.reveal = reveal;
         self
     }
 
@@ -157,11 +145,15 @@ impl<'a> Tab<'a> {
         (title, title_w, width)
     }
 
+    /// How wide it draws in `ui`.
+    pub(super) fn width(&self, ui: &Ui) -> f32 {
+        self.parts(ui).2
+    }
+
     /// Draws it where `ui` puts it next, and says what a click on it asked for.
     pub fn show(self, ui: &mut Ui) -> Shown {
         let (title, title_w, width) = self.parts(ui);
         let (auto, rect) = ui.allocate_space(vec2(width, TAB_H));
-        note(ui, rect, self.reveal);
         let id = self.id.unwrap_or(auto);
         let tab = ui.interact(rect, id, Sense::click());
         tab.widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, ui.is_enabled(), self.active, self.title));
@@ -274,86 +266,283 @@ impl Widget for NewTab {
     }
 }
 
-/// The strip: a band [`TAB_H`] tall on `card`, as wide as `ui`, holding what `add` adds side by
-/// side (the tabs, then [`NewTab`]) and scrolling sideways when they don't fit. Each tab but the
-/// active one and the new tab button draw the line along its bottom under them; the strip draws it
-/// on from the last of them to its end. Tabs added straight into the `Ui` `add` gets are the
-/// strip's: it rests at their edges, and brings the one to [`Tab::reveal`] into view.
-pub fn strip<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let t = tokens(ui.ctx());
-    let (band, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
-    ui.painter().rect_filled(band, CornerRadius::ZERO, t.card);
-    let key = ui.id().with(STRIP_TAG);
-    ui.ctx().data_mut(|d| d.insert_temp(key, Cells::default()));
-    // Read before the scroll area takes this frame's wheel.
-    let scrolling = ui.input(|i| {
-        let over = i.pointer.hover_pos().is_some_and(|p| band.contains(p));
-        i.pointer.any_down() || (over && i.smooth_scroll_delta != Vec2::ZERO)
-    });
-    let width = band.width();
-    let info = UiStackInfo::default().with_tag_value(STRIP_TAG, key);
-    let mut inside = ui.new_child(UiBuilder::new().max_rect(band).layout(egui::Layout::left_to_right(egui::Align::Min)).ui_stack_info(info));
-    // Not animated: a scroll to a tab (`scroll_to_me`) lands in the frame it is asked, and the
-    // strip comes to rest in that same frame, so nothing moves under a click aimed at it.
-    let out = ScrollArea::horizontal().id_salt("tab-strip").auto_shrink([false, false]).animated(false).show(&mut inside, |ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        let origin = ui.cursor().left();
-        let inner = add(ui);
-        let end = ui.min_rect().right();
-        let cells = ui.ctx().data_mut(|d| d.remove_temp::<Cells>(key)).unwrap_or_default();
-        let tabs: Vec<(f32, f32)> = cells.tabs.iter().map(|(left, right)| (left - origin, right - origin)).collect();
-        let rests = Rests::new(&tabs, end - origin, width);
-        // Room after the new tab button, so the strip can rest at a tab's edge with it in view.
-        let room = rests.last + width - (end - origin);
-        if room > 0.0 {
-            ui.add_space(room);
-        }
-        (inner, end, rests, cells.reveal.map(|(left, right)| (left - origin, right - origin)))
-    });
-    let (inner, end, rests, reveal) = out.inner;
-    if end < band.right() {
-        let rest = Rect::from_min_max(pos2(end.max(band.left()), band.bottom() - LINE_W), band.max);
-        ui.painter().rect_filled(rest, CornerRadius::ZERO, t.line);
+/// The list button (`tab/list`): ⌄ in a cell [`NEW_TAB_W`] wide and [`TAB_H`] tall, on the line
+/// along the bottom of what it stands in; `fill` while its list is open, as an open menu title. A
+/// strip or a result bar shows it only while their tabs don't fit (`list_button`).
+#[derive(Clone, Copy, Debug)]
+pub struct ListButton<'a> {
+    label: &'a str,
+    open: bool,
+    look: Option<Look>,
+}
+
+impl<'a> ListButton<'a> {
+    /// `label` is what it is read out as: what it lists.
+    pub fn new(label: &'a str) -> ListButton<'a> {
+        ListButton { label, open: false, look: None }
     }
-    let offset = out.state.offset.x;
-    let rest_id = out.id.with("rest");
-    let mut rest: Rest = ui.ctx().data(|d| d.get_temp(rest_id)).unwrap_or_default();
-    let target = match reveal {
-        Some((left, right)) => Some(rests.showing(left, right, offset)),
-        None if scrolling || out.state.velocity() != Vec2::ZERO => {
-            rest.by_user |= offset != rest.offset;
+
+    /// Its list is open.
+    pub fn open(mut self, open: bool) -> ListButton<'a> {
+        self.open = open;
+        self
+    }
+
+    /// Draws it with `look` whatever its response says (the showcase only).
+    pub fn look(mut self, look: Look) -> ListButton<'a> {
+        self.look = Some(look);
+        self
+    }
+}
+
+impl Widget for ListButton<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let (rect, r) = ui.allocate_exact_size(vec2(NEW_TAB_W, TAB_H), Sense::click());
+        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.label));
+        let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
+        paint_list_button(ui, rect, self.open, look);
+        r
+    }
+}
+
+/// Draws the list button at `rect`.
+fn paint_list_button(ui: &Ui, rect: Rect, open: bool, look: Look) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let t = tokens(ui.ctx());
+    let p = painter(ui);
+    if open {
+        p.rect_filled(rect, CornerRadius::ZERO, t.fill);
+    } else if look.hovered {
+        p.rect_filled(rect, CornerRadius::ZERO, t.hover);
+    }
+    p.rect_filled(Rect::from_min_max(pos2(rect.left(), rect.bottom() - LINE_W), rect.max), CornerRadius::ZERO, t.line);
+    Icon::ChevronDown.paint(&p, pos2(rect.center().x, rect.top() + (TAB_H - LINE_W) / 2.0), t.text_muted);
+    if look.focused {
+        focus::box_inside(&p, rect);
+    }
+}
+
+/// A list button as drawn: the button, its list's items in view while the list is open (each with
+/// the index of what it lists), and the index chosen from it.
+pub(super) struct Listed {
+    pub button: Response,
+    pub items: Vec<(usize, Response)>,
+    pub chosen: Option<usize>,
+}
+
+/// The list button at `rect`, read out as `label`. A click opens under it, its right edge at the
+/// button's, a menu (`menu`, `menu/item`) of `titles` as written, in their order, `active`
+/// checked in the mark column; past the window's bottom the menu scrolls. `open` draws the button
+/// open or closed whatever its list does, and shows no list (the showcase only).
+pub(super) fn list_button(ui: &mut Ui, id: Id, rect: Rect, label: &str, titles: &[&str], active: Option<usize>, open: Option<bool>) -> Listed {
+    let button = ui.interact(rect, id, Sense::click());
+    button.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
+    let look = Look::of(ui, &button);
+    let mut items = Vec::new();
+    let mut chosen = None;
+    let open = open.unwrap_or_else(|| {
+        Popup::menu(&button)
+            .align(RectAlign::BOTTOM_END)
+            .gap(TAB_LIST_GAP)
+            .style(menu::style(ui.ctx()))
+            .show(|ui| {
+                let room = ui.ctx().content_rect().bottom() - ui.cursor().top() - f32::from(MENU_PAD) - LINE_W;
+                ScrollArea::vertical().max_height(room.max(MENU_ITEM_H)).show_rows(ui, MENU_ITEM_H, titles.len(), |ui, rows| {
+                    for (i, title) in titles.iter().enumerate().take(rows.end).skip(rows.start) {
+                        let r = ui.add(Item::new(title).choice(Some(active == Some(i))));
+                        if r.clicked() {
+                            chosen = Some(i);
+                        }
+                        items.push((i, r));
+                    }
+                });
+            })
+            .is_some()
+    });
+    paint_list_button(ui, rect, open, look);
+    Listed { button, items, chosen }
+}
+
+/// The strip (`tab strip`): its tabs, the new tab button, and the list button while the tabs
+/// don't fit.
+pub struct Strip<'a> {
+    tabs: Vec<Tab<'a>>,
+    list_open: Option<bool>,
+}
+
+/// The strip as drawn: each tab, the new tab button, the list button while the tabs don't fit and
+/// its list's items in view while it is open (each with the index of the tab it lists), and what
+/// was asked of which tab, by a click on it or its close or by choosing it from the list.
+pub struct StripShown {
+    pub tabs: Vec<Shown>,
+    pub new: Response,
+    pub list: Option<Response>,
+    pub listed: Vec<(usize, Response)>,
+    pub asked: Option<(usize, Asked)>,
+}
+
+impl<'a> Strip<'a> {
+    /// `tabs` in their order, the active one made so with [`Tab::active`].
+    pub fn new(tabs: Vec<Tab<'a>>) -> Strip<'a> {
+        Strip { tabs, list_open: None }
+    }
+
+    /// Draws the list button open, or closed, whatever its list does, and shows no list (the
+    /// showcase only).
+    pub fn list_open(mut self, open: bool) -> Strip<'a> {
+        self.list_open = Some(open);
+        self
+    }
+
+    /// Draws it [`TAB_H`] tall and as wide as `ui`, calling `each` with every tab's index and parts
+    /// as drawn. A screen tags them there: in the strip's scrolled part, so that a tag asking to
+    /// scroll a tab into view reaches it.
+    pub fn show(self, ui: &mut Ui, mut each: impl FnMut(usize, &Shown)) -> StripShown {
+        let t = tokens(ui.ctx());
+        let (band, band_r) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
+        let id = band_r.id;
+        ui.painter().rect_filled(band, CornerRadius::ZERO, t.card);
+        let mut ui = ui.new_child(UiBuilder::new().id_salt(id).max_rect(band).layout(Layout::left_to_right(Align::Min)));
+        let widths: Vec<f32> = self.tabs.iter().map(|tab| tab.width(&ui)).collect();
+        let titles: Vec<&str> = self.tabs.iter().map(|tab| tab.title).collect();
+        let active = self.tabs.iter().enumerate().find(|(_, tab)| tab.active).map(|(i, tab)| (i, tab.id.unwrap_or_else(|| id.with(i))));
+        let fits = widths.iter().sum::<f32>() + NEW_TAB_W <= band.width();
+        let pinned = if fits { 0.0 } else { 2.0 * NEW_TAB_W };
+        let view = Rect::from_min_max(band.min, pos2((band.right() - pinned).max(band.left()), band.bottom()));
+        let mut asked = None;
+        let row = row(&mut ui, id, view, self.tabs, &widths, active, |ui, i, tab| {
+            let shown = tab.show(ui);
+            each(i, &shown);
+            if let Some(a) = shown.asked {
+                asked = Some((i, a));
+            }
+            let focused = shown.tab.gained_focus() || shown.close.gained_focus();
+            Placed { item: shown, focused }
+        });
+        let new_at = if fits { row.end } else { view.right() };
+        let new = ui.put(Rect::from_min_size(pos2(new_at, band.top()), vec2(NEW_TAB_W, TAB_H)), NewTab::new());
+        let (list, listed) = if fits {
+            (None, Vec::new())
+        } else {
+            let rect = Rect::from_min_size(pos2(new.rect.right(), band.top()), vec2(NEW_TAB_W, TAB_H));
+            let listed = list_button(&mut ui, id.with("list"), rect, ALL_TABS, &titles, active.map(|(i, _)| i), self.list_open);
+            if let Some(i) = listed.chosen {
+                asked = Some((i, Asked::Activate));
+            }
+            (Some(listed.button), listed.items)
+        };
+        if new.rect.right() < band.right() {
+            let rest = Rect::from_min_max(pos2(new.rect.right(), band.bottom() - LINE_W), band.max);
+            ui.painter().rect_filled(rest, CornerRadius::ZERO, t.line);
+        }
+        StripShown { tabs: row.tabs, new, list, listed, asked }
+    }
+}
+
+/// A tab of a [`row`] as drawn: what drawing it gave, and whether it took the keyboard's focus.
+pub(super) struct Placed<T> {
+    pub item: T,
+    pub focused: bool,
+}
+
+/// A [`row`] as drawn: what each tab's drawing gave, and where the tabs end on screen (at most at
+/// the row's right end).
+pub(super) struct Row<T> {
+    pub tabs: Vec<T>,
+    pub end: f32,
+}
+
+/// What a row keeps between frames.
+#[derive(Clone, Copy, Debug, Default)]
+struct Memo {
+    /// Where its scroll area left it, and whether it was still moving by itself (a fling).
+    offset: f32,
+    moving: bool,
+    /// Where it last came to rest, and whether the user has scrolled it since.
+    rest: f32,
+    by_user: bool,
+    /// The tab that took the keyboard's focus.
+    focused: Option<usize>,
+    /// The active tab, the number of tabs and the room it last showed them in.
+    seen: Option<(Option<Id>, usize, f32)>,
+}
+
+/// `items`, `widths` wide, side by side from `view`'s left end, each drawn by `draw`, scrolling
+/// sideways in `view` while they don't fit: where they rest, and what they bring into view, is in
+/// the module docs. `active` is the active tab's index and its own id. Where to scroll is worked
+/// out from `widths` before drawing, so the tabs are drawn there in the same frame.
+pub(super) fn row<I, T>(
+    ui: &mut Ui,
+    id: Id,
+    view: Rect,
+    items: Vec<I>,
+    widths: &[f32],
+    active: Option<(usize, Id)>,
+    mut draw: impl FnMut(&mut Ui, usize, I) -> Placed<T>,
+) -> Row<T> {
+    let mut cells = Vec::with_capacity(widths.len());
+    let mut end = 0.0;
+    for w in widths {
+        cells.push((end, end + w));
+        end += w;
+    }
+    let rests = Rests::new(&cells, end, view.width());
+    let key = id.with("rest");
+    let mut memo: Memo = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_default();
+    let live = memo.offset.clamp(0.0, rests.last);
+    let scrolling = memo.moving
+        || ui.input(|i| {
+            let over = i.pointer.hover_pos().is_some_and(|p| view.contains(p));
+            i.pointer.any_down() || (over && i.smooth_scroll_delta != Vec2::ZERO)
+        });
+    let seen = (active.map(|(_, id)| id), widths.len(), view.width());
+    let reveal = memo.focused.take().or_else(|| active.filter(|_| memo.seen != Some(seen)).map(|(i, _)| i));
+    memo.seen = Some(seen);
+    let target = match reveal.and_then(|i| cells.get(i)) {
+        Some(&(left, right)) => Some(rests.showing(left, right, live)),
+        None if scrolling => {
+            memo.by_user |= live != memo.rest;
             None
         }
-        None => Some(rests.after(offset, rest)),
+        None => Some(rests.after(live, memo.rest, memo.by_user)),
     };
     if let Some(target) = target {
-        if target != offset {
-            let mut state = out.state;
-            state.offset.x = target;
-            state.store(ui.ctx(), out.id);
-            ui.ctx().request_repaint();
-        }
-        rest = Rest { offset: target, by_user: false };
+        memo.rest = target;
+        memo.by_user = false;
     }
-    ui.ctx().data_mut(|d| d.insert_temp(rest_id, rest));
-    inner
-}
-
-/// Notes `rect` with the strip `ui` stands in, if it stands in one; `reveal` to bring it into view.
-fn note(ui: &Ui, rect: Rect, reveal: bool) {
-    let Some(key) = ui.stack().iter().find_map(|s| s.info.tags.get_downcast::<Id>(STRIP_TAG).copied()) else { return };
-    ui.ctx().data_mut(|d| {
-        let cells = d.get_temp_mut_or_default::<Cells>(key);
-        cells.tabs.push((rect.left(), rect.right()));
-        if reveal {
-            cells.reveal = Some((rect.left(), rect.right()));
+    let offset = target.unwrap_or(live);
+    let mut inside = ui.new_child(UiBuilder::new().id_salt(id.with("view")).max_rect(view).layout(Layout::left_to_right(Align::Min)));
+    // Not animated, so a scroll to a tab (a tag's `scroll_to_me`) lands in the frame it is asked.
+    let area = ScrollArea::horizontal().id_salt("tabs").auto_shrink([false, false]).min_scrolled_width(0.0).animated(false);
+    let out = area.horizontal_scroll_offset(offset).show(&mut inside, |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let origin = ui.cursor().left();
+        let mut focused = None;
+        let mut tabs = Vec::with_capacity(items.len());
+        for (i, item) in items.into_iter().enumerate() {
+            let placed = draw(ui, i, item);
+            if placed.focused {
+                focused = Some(i);
+            }
+            tabs.push(placed.item);
         }
+        (tabs, origin, focused)
     });
+    let (tabs, origin, focused) = out.inner;
+    memo.offset = out.state.offset.x;
+    memo.moving = out.state.velocity() != Vec2::ZERO;
+    memo.focused = focused;
+    if (memo.offset - offset).abs() > 0.5 || focused.is_some() {
+        ui.ctx().request_repaint();
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(key, memo));
+    Row { tabs, end: (origin + end).min(view.right()) }
 }
 
-/// Where a strip can rest, from its left end: at each tab's start, up to the first one from which
-/// the strip shows the new tab button whole (`last`). A strip too narrow for the last tab and the
-/// button rests last with the button at its left edge.
+/// Where a row can rest, from its left end: at each tab's left edge, up to its end, where the last
+/// tab's right edge is at the row's (`last`).
 #[derive(Clone, Debug)]
 struct Rests {
     at: Vec<f32>,
@@ -362,20 +551,18 @@ struct Rests {
 }
 
 impl Rests {
-    /// The rests of `tabs` (each one's left and right), left to right, in content ending at `end`,
-    /// seen through a strip `width` wide.
+    /// The rests of `tabs` (each one's left and right), left to right, in content `end` wide, seen
+    /// through a row `width` wide.
     fn new(tabs: &[(f32, f32)], end: f32, width: f32) -> Rests {
-        let button = tabs.last().map_or(0.0, |(_, right)| *right);
-        let mut at: Vec<f32> = std::iter::once(0.0).chain(tabs.iter().map(|(left, _)| *left)).chain(std::iter::once(button)).collect();
+        let last = (end - width).max(0.0);
+        let mut at: Vec<f32> = std::iter::once(0.0).chain(tabs.iter().map(|(left, _)| *left)).filter(|s| *s < last).collect();
         at.dedup();
-        let last = at.iter().copied().find(|s| s + width >= end).unwrap_or((end - width).max(0.0));
-        at.retain(|s| *s < last);
         at.push(last);
         Rests { at, last, width }
     }
 
     /// The rest nearest `offset` that shows the tab from `left` to `right` whole; a tab wider than
-    /// the strip, at its start.
+    /// the row, at its start.
     fn showing(&self, left: f32, right: f32, offset: f32) -> f32 {
         self.at
             .iter()
@@ -385,15 +572,15 @@ impl Rests {
             .unwrap_or(left.min(self.last))
     }
 
-    /// Where the strip comes to rest from `offset`: there if it is a rest; after the user scrolled
-    /// it, the next rest the way it moved since `rest`; else the nearest.
-    fn after(&self, offset: f32, rest: Rest) -> f32 {
+    /// Where the row comes to rest from `offset`: there if it is a rest; after the user scrolled
+    /// it (`by_user`), the next rest the way it moved since it rested at `rest`; else the nearest.
+    fn after(&self, offset: f32, rest: f32, by_user: bool) -> f32 {
         if let Some(at) = self.at.iter().copied().find(|s| (s - offset).abs() < 0.5) {
             return at;
         }
         let next = || self.at.iter().copied().find(|s| *s > offset).unwrap_or(self.last);
         let before = || self.at.iter().copied().rev().find(|s| *s < offset).unwrap_or(0.0);
-        match (rest.by_user, offset > rest.offset) {
+        match (by_user, offset > rest) {
             (true, true) => next(),
             (true, false) => before(),
             (false, _) => self.at.iter().copied().min_by(|a, b| (a - offset).abs().total_cmp(&(b - offset).abs())).unwrap_or(0.0),
@@ -407,7 +594,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
-    use crate::components::{Edge, ROOM, both, edges_in, fills_in, harness, icon_in, painted, texts};
+    use crate::components::{Edge, ROOM, both, edges_in, fills_in, harness, harness_in, icon_in, painted, texts};
     use crate::theme::Tokens;
 
     fn close(a: f32, b: f32) -> bool {
@@ -558,12 +745,10 @@ mod tests {
                 ui.add_space(ROOM);
                 ui.allocate_ui(vec2(560.0, 36.0), |ui| {
                     band = ui.max_rect();
-                    strip(ui, |ui| {
-                        at.push(Tab::table("orders [3]").show(ui).tab.rect);
-                        at.push(Tab::table("customers [1]").show(ui).tab.rect);
-                        at.push(Tab::query("Query 1").active(true).unsaved(true).show(ui).tab.rect);
-                        at.push(ui.add(NewTab::new()).rect);
-                    });
+                    let tabs = vec![Tab::table("orders [3]"), Tab::table("customers [1]"), Tab::query("Query 1").active(true).unsaved(true)];
+                    let shown = Strip::new(tabs).show(ui, |_, _| {});
+                    at.extend(shown.tabs.iter().map(|s| s.tab.rect));
+                    at.push(shown.new.rect);
                 });
             });
             let band = Rect::from_min_size(band.min, vec2(560.0, 36.0));
@@ -593,6 +778,283 @@ mod tests {
             assert_eq!(x, band.right(), "{theme:?}: the line runs to the strip's end");
             assert_eq!(gaps, [(at[2].left(), at[2].right())], "{theme:?}: no line under the active tab only");
         }
+    }
+
+    /// The page's tabs that don't fit (174313), in strip order: each title and whether it is a
+    /// query tab. Query 1 has unsaved text.
+    const PAGE: [(&str, bool); 7] = [
+        ("orders [3]", false),
+        ("customers [1]", false),
+        ("Query 1", true),
+        ("line_items", false),
+        ("Query 2", true),
+        ("Odd \"Name\"", false),
+        ("dealers", false),
+    ];
+    /// The page's strip is 840 wide.
+    const STRIP: f32 = 840.0;
+
+    /// The first `n` of the page's tabs, `active` the active one.
+    fn page_tabs(n: usize, active: usize) -> Vec<Tab<'static>> {
+        PAGE.iter()
+            .take(n)
+            .enumerate()
+            .map(|(i, (title, query))| {
+                let tab = if *query { Tab::query(title) } else { Tab::table(title) };
+                tab.id_salt(i).active(i == active).unsaved(i == 2)
+            })
+            .collect()
+    }
+
+    /// What a harness's strip drew in its last frame, and the tab its caller made active.
+    struct Drawn {
+        active: usize,
+        band: Rect,
+        tabs: Vec<Rect>,
+        new: Rect,
+        list: Option<Rect>,
+        items: Vec<(usize, Rect)>,
+        asked: Vec<(usize, Asked)>,
+    }
+
+    /// A strip `width` wide of the page's seven tabs in `theme`, room under it for its list; the
+    /// caller makes a tab active when it is asked to.
+    fn seven(theme: Theme, width: f32, active: usize) -> egui_kittest::Harness<'static, Drawn> {
+        let drawn = Drawn { active, band: Rect::NOTHING, tabs: Vec::new(), new: Rect::NOTHING, list: None, items: Vec::new(), asked: Vec::new() };
+        let mut h = harness_in(vec2(width + 2.0 * ROOM, 400.0), theme, drawn, move |ui, s| {
+            ui.add_space(ROOM);
+            ui.allocate_ui(vec2(width, TAB_H), |ui| {
+                s.band = Rect::from_min_size(ui.cursor().min, vec2(width, TAB_H));
+                let shown = Strip::new(page_tabs(7, s.active)).show(ui, |_, _| {});
+                s.tabs = shown.tabs.iter().map(|t| t.tab.rect).collect();
+                s.new = shown.new.rect;
+                s.list = shown.list.map(|r| r.rect);
+                s.items = shown.listed.iter().map(|(i, r)| (*i, r.rect)).collect();
+                if let Some(asked) = shown.asked {
+                    s.asked.push(asked);
+                    if asked.1 == Asked::Activate {
+                        s.active = asked.0;
+                    }
+                }
+            });
+        });
+        h.run();
+        h
+    }
+
+    /// A click of the primary button at `pos`.
+    fn click_at<S>(h: &mut egui_kittest::Harness<'_, S>, pos: egui::Pos2) {
+        h.input_mut().events.push(Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+            h.run();
+        }
+    }
+
+    /// Tab `i` shows whole between the strip's left end and the new tab button.
+    fn whole_in_view(s: &Drawn, i: usize) -> bool {
+        s.tabs.get(i).is_some_and(|r| r.left() >= s.band.left() - 0.5 && r.right() <= s.new.left() + 0.5)
+    }
+
+    #[test]
+    fn the_list_button_matches_the_page() {
+        // Node 174295: 32 by 36 like `tab/new`, a `line` under it; ⌄ (`icon/chevron-down`, 8 by
+        // 4 at 12, 15.5) in `text_muted`, centred above the line; hover `hover`; focus a 2 px `ink`
+        // box 2 px inside; open `fill`, as an open menu title.
+        for (theme, t) in both() {
+            for state in ["default", "hover", "focus", "open"] {
+                let at_ = format!("{theme:?} {state}");
+                let mut at = Rect::NOTHING;
+                let shapes = painted(theme, |ui| {
+                    ui.add_space(ROOM);
+                    let b = ListButton::new("All tabs");
+                    let b = match state {
+                        "hover" => b.look(Look { hovered: true, ..Look::default() }),
+                        "focus" => b.look(Look { focused: true, ..Look::default() }),
+                        "open" => b.open(true),
+                        _ => b,
+                    };
+                    at = ui.add(b).rect;
+                });
+                assert_eq!(at.size(), vec2(32.0, 36.0), "{at_}");
+                let line = (Rect::from_min_max(pos2(at.left(), at.bottom() - 1.0), at.max), t.line);
+                let want = match state {
+                    "hover" => vec![(at, t.hover), line],
+                    "open" => vec![(at, t.fill), line],
+                    _ => vec![line],
+                };
+                assert_eq!(fills_in(&shapes, at), want, "{at_}: the ground and the line");
+                let focus = Edge { outer: at.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
+                let want: Vec<Edge> = if state == "focus" { vec![focus] } else { vec![] };
+                assert_eq!(edges_in(&shapes, at, 0.0), want, "{at_}: the focus box");
+                let (colours, bounds) = icon_in(&shapes, at);
+                assert_eq!(colours, [t.text_muted], "{at_}: the chevron");
+                assert!((bounds.center() - pos2(at.center().x, at.top() + 17.5)).length() <= 0.6, "{at_}: centred above the line: {bounds:?}");
+                assert!(bounds.width() > bounds.height() && (8.0..=10.0).contains(&bounds.width()), "{at_}: the chevron down, 8 by 4: {bounds:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_strip_that_fits_has_no_list_button() {
+        // Node 163870 (`overflow=no`): the tabs, then the new tab button right after the last
+        // one, the line on to the strip's end; no list button.
+        for (theme, t) in both() {
+            let h = seven(theme, 1000.0, 2);
+            let s = h.state();
+            assert!(s.list.is_none(), "{theme:?}: no list button while the tabs fit");
+            assert_eq!(s.tabs[0].left(), s.band.left(), "{theme:?}: the first tab at the strip's left end");
+            assert_eq!(s.new, Rect::from_min_size(pos2(s.tabs[6].right(), s.band.top()), vec2(32.0, 36.0)), "{theme:?}: + after the last tab");
+            let rest = Rect::from_min_max(pos2(s.new.right(), s.band.bottom() - 1.0), s.band.max);
+            let shapes = &h.output().shapes;
+            assert!(fills_in(shapes, s.band).contains(&(rest, t.line)), "{theme:?}: the line on to the end");
+            let after = Rect::from_min_max(pos2(s.new.right(), s.band.top()), s.band.max);
+            assert_eq!(icon_in(shapes, after).0, [], "{theme:?}: nothing drawn after +");
+        }
+    }
+
+    #[test]
+    fn a_strip_that_overflows_pins_new_and_list_at_its_right_end() {
+        // Node 174313 (`overflow=yes`): the tabs scroll in what the strip leaves before + and the
+        // list button, which stand at its right end, outside the scrolled part, and stay put as
+        // the tabs scroll. The strip rests with a tab's left edge at its left, or at its end with
+        // the last tab against +: no empty room after it.
+        for (theme, t) in both() {
+            let mut h = seven(theme, STRIP, 2);
+            let band = h.state().band;
+            let new = Rect::from_min_size(pos2(band.right() - 64.0, band.top()), vec2(32.0, 36.0));
+            let list = Rect::from_min_size(pos2(band.right() - 32.0, band.top()), vec2(32.0, 36.0));
+            let pinned = |s: &Drawn, at: &str| {
+                assert_eq!((s.new, s.list), (new, Some(list)), "{theme:?} {at}: + and the list button at the strip's right end");
+            };
+            pinned(h.state(), "at the start");
+            assert_eq!(h.state().tabs[0].left(), band.left(), "{theme:?}: from the first tab's edge");
+            let shapes = &h.output().shapes;
+            assert_eq!(icon_in(shapes, new).0, [t.text_muted], "{theme:?}: + drawn");
+            assert_eq!(icon_in(shapes, list).0, [t.text_muted], "{theme:?}: ⌄ drawn");
+            for s in shapes {
+                if let egui::Shape::Text(text) = &s.shape
+                    && PAGE.iter().any(|(title, _)| *title == text.galley.text())
+                {
+                    assert!(s.clip_rect.right() <= new.left() + 0.5, "{theme:?}: `{}` cut at +: {:?}", text.galley.text(), s.clip_rect);
+                }
+            }
+            // The last tab made active: the strip goes to its end, the last tab against +.
+            h.state_mut().active = 6;
+            h.run();
+            pinned(h.state(), "at the end");
+            assert_eq!(h.state().tabs[6].right(), new.left(), "{theme:?}: no empty room after the last tab");
+            // The first again: back to its edge.
+            h.state_mut().active = 0;
+            h.run();
+            pinned(h.state(), "back at the start");
+            assert_eq!(h.state().tabs[0].left(), band.left(), "{theme:?}: the first tab at the strip's left end");
+            // The wheel at 840, where the tabs overflow by 90: the next rest is the end.
+            let notch = |h: &mut egui_kittest::Harness<'_, Drawn>| {
+                h.hover_at(h.state().band.left_center() + vec2(40.0, 0.0));
+                h.event(Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(-40.0, 0.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: Modifiers::NONE,
+                });
+                h.run_steps(30);
+            };
+            notch(&mut h);
+            pinned(h.state(), "after the wheel");
+            assert_eq!(h.state().tabs[6].right(), new.left(), "{theme:?}: a notch rests at the end: {:?}", h.state().tabs);
+            // At 560, a notch at a time: each comes to rest at the next tab's edge, then the end.
+            let mut h = seven(theme, 560.0, 0);
+            let (new, list) = (h.state().new, h.state().list);
+            for k in 1..=2 {
+                notch(&mut h);
+                let s = h.state();
+                assert_eq!((s.new, s.list), (new, list), "{theme:?}: notch {k}: + and the list stay put");
+                assert_eq!(s.tabs[k].left(), s.band.left(), "{theme:?}: notch {k} rests at tab {k}'s edge: {:?}", s.tabs);
+            }
+            notch(&mut h);
+            assert_eq!(h.state().tabs[6].right(), new.left(), "{theme:?}: the last notch rests at the end: {:?}", h.state().tabs);
+        }
+    }
+
+    #[test]
+    fn the_list_shows_every_tab_in_order_with_the_active_checked() {
+        // Its list is a menu (`menu`, `menu/item`) under the list button, its right edge at the
+        // strip's, 2 under the strip: every tab in strip order, its title as written, the active
+        // one checked in the mark column.
+        for (theme, t) in both() {
+            let mut h = seven(theme, STRIP, 2);
+            h.get_by_label("All tabs").click();
+            h.run();
+            h.run();
+            let s = h.state();
+            let order: Vec<usize> = s.items.iter().map(|(i, _)| *i).collect();
+            assert_eq!(order, (0..7).collect::<Vec<_>>(), "{theme:?}: every tab, in strip order");
+            let list = s.list.unwrap_or_else(|| panic!("{theme:?}: the list button"));
+            let drawn = texts(&h.output().shapes);
+            for (k, (i, item)) in s.items.iter().enumerate() {
+                assert_eq!(item.height(), 28.0, "{theme:?}: item {i} 28 tall");
+                assert!(
+                    (item.right() - (list.right() - 5.0)).abs() <= 0.5,
+                    "{theme:?}: item {i} {item:?} ends 4 inside the menu's edge at the strip's end"
+                );
+                assert!(
+                    (item.top() - (s.band.bottom() + 2.0 + 5.0 + 28.0 * k as f32)).abs() <= 0.5,
+                    "{theme:?}: item {i} {item:?} in order, 2 under the strip"
+                );
+                let title = PAGE[*i].0;
+                let words = drawn.iter().find(|(w, r, _)| w == title && item.contains_rect(*r));
+                let (_, _, colour) = words.unwrap_or_else(|| panic!("{theme:?}: `{title}` in item {i}: {drawn:?}"));
+                assert_eq!(*colour, t.text, "{theme:?}: `{title}` as written, in text");
+                let mark = Rect::from_min_size(pos2(item.left() + 8.0, item.top() + 7.0), vec2(14.0, 14.0));
+                let want: Vec<Color32> = if *i == 2 { vec![t.text] } else { vec![] };
+                assert_eq!(icon_in(&h.output().shapes, mark).0, want, "{theme:?}: item {i}'s mark");
+            }
+            assert_eq!(fills_in(&h.output().shapes, list).first(), Some(&(list, t.fill)), "{theme:?}: the button open, on fill");
+        }
+    }
+
+    #[test]
+    fn choosing_from_the_list_activates_and_reveals_the_tab() {
+        let mut h = seven(Theme::Light, STRIP, 0);
+        assert!(!whole_in_view(h.state(), 6), "dealers is cut at +: {:?}", h.state().tabs);
+        h.get_by_label("All tabs").click();
+        h.run();
+        h.run();
+        let items = h.state().items.clone();
+        let dealers = items.iter().find(|(i, _)| *i == 6).map(|(_, r)| r.center());
+        click_at(&mut h, dealers.unwrap_or_else(|| panic!("dealers listed: {items:?}")));
+        h.run();
+        let s = h.state();
+        assert_eq!(s.asked, [(6, Asked::Activate)], "choosing dealers asks to make it active");
+        assert_eq!(s.active, 6);
+        assert!(whole_in_view(s, 6), "and it comes into view whole: {:?}", s.tabs);
+        assert!(s.items.is_empty(), "the list closes");
+    }
+
+    #[test]
+    fn the_active_tab_is_always_brought_into_view() {
+        // By keyboard: Tab goes through the tabs (each tab, then its close); a tab it reaches out
+        // of view comes into view, and Enter makes it active.
+        let mut h = seven(Theme::Light, 560.0, 0);
+        assert!(!whole_in_view(h.state(), 6), "dealers out of view: {:?}", h.state().tabs);
+        for _ in 0..13 {
+            h.key_press(Key::Tab);
+            h.run();
+        }
+        assert!(h.get_by_label("dealers").is_focused(), "Tab reaches dealers");
+        assert!(whole_in_view(h.state(), 6), "the focused tab comes into view: {:?}", h.state().tabs);
+        h.key_press(Key::Enter);
+        h.run();
+        assert_eq!(h.state().active, 6, "Enter makes it active");
+        assert!(whole_in_view(h.state(), 6), "and it stays in view");
+        // Made active elsewhere (the control channel, Ctrl+W on another): it comes into view.
+        h.state_mut().active = 0;
+        h.run();
+        assert!(whole_in_view(h.state(), 0) && h.state().tabs[0].left() == h.state().band.left(), "the first tab back at the edge");
+        h.state_mut().active = 3;
+        h.run();
+        assert!(whole_in_view(h.state(), 3), "line_items in view: {:?}", h.state().tabs);
     }
 
     /// What the harness's tabs asked for, the last time each did.

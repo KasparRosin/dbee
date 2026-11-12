@@ -31,14 +31,14 @@ use super::sidebar::{self, Count};
 use super::status::{self, Activity, Connection, Facts};
 use super::structure::{self, HeaderCell, Heading};
 use super::swatch::{COLOURS, Swatch};
-use super::tab::{self, NewTab, Tab};
+use super::tab::{self, ListButton, NewTab, Tab};
 use super::table_bars::{self, Loading, PagingBar, TableBar, View};
 use super::toast::Toast;
 use super::tooltip;
 use super::value::{self, Facts as ValueFacts, Panel, State as ValueState};
 use crate::theme::size::{
     BAR_H, CONNECTION_LOGO, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8,
-    SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_ROW_H, TAB_H, TREE_ROW_H,
+    SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_ROW_H, TAB_H, TAB_LIST_GAP, TREE_ROW_H,
 };
 use crate::theme::{Text, Tokens, Words, connection_color, tokens};
 
@@ -69,8 +69,11 @@ const THEME_MENU_W: f32 = 130.0;
 const SCENE: Vec2 = vec2(560.0, 190.0);
 const MENU_BAR_W: f32 = 240.0;
 const SUBMENU_OVERLAP: f32 = 4.0;
-/// The Tabs and bars frame's tab strip and menu bars.
+/// The Tabs and bars frame's tab strip and menu bars; its scene of tabs that don't fit, this tall,
+/// and the list's items this wide.
 const STRIP_W: f32 = 840.0;
+const TAB_LIST_SCENE_H: f32 = 250.0;
+const TAB_LIST_W: f32 = 130.0;
 /// The filter bar frame's column, operator and value, as wide as the page draws them.
 const FILTER_COLUMN_W: f32 = 140.0;
 const FILTER_OP_W: f32 = 160.0;
@@ -777,10 +780,15 @@ fn results(ui: &mut Ui) {
         ui.add(ResultTab::new("select ... series").look(focused));
     });
     let two = || vec![ResultTab::new("select ... orders").active(true), ResultTab::new("select ... series")];
+    let many = || {
+        let titles =
+            ["select ... orders", "select ... series", "select ... customers", "update ... dealers", "select ... line_items", "select ... totals"];
+        titles.into_iter().enumerate().map(|(i, title)| ResultTab::new(title).active(i == 0)).collect()
+    };
     let s = Duration::from_millis;
     section(
         ui,
-        "result bar: done, running, failed, cancelled; new facts: 2 rows affected, first 10,000 of 25,000 rows; the value panel open (on)",
+        "result bar: done, running, failed, cancelled; new facts: 2 rows affected, first 10,000 of 25,000 rows; the value panel open (on); many results: they scroll, with the list",
         SPACE_8,
         |ui| {
             let done = RunState::Done { rows: 10, ms: Some(24) };
@@ -798,6 +806,7 @@ fn results(ui: &mut Ui) {
                     value_on: false,
                 },
                 ResultBar { tabs: two(), state: done, first_of: None, export: true, value_on: true },
+                ResultBar { tabs: many(), state: done, first_of: None, export: true, value_on: false },
             ];
             stack(ui, &mut |ui| {
                 for row in &rows {
@@ -991,7 +1000,8 @@ fn sidebar_header(ui: &mut Ui) {
     );
 }
 
-/// The tabs and the strip, as the page's Tabs and bars frame shows them, and a busy tab.
+/// The tabs, the list button and the strip, as the page's Tabs and bars frame shows them, the
+/// strip whose tabs don't fit with its list open, and a busy tab.
 fn tabs(ui: &mut Ui) {
     let hovered = Look { hovered: true, ..Look::default() };
     let focused = Look { focused: true, ..Look::default() };
@@ -1012,21 +1022,70 @@ fn tabs(ui: &mut Ui) {
     section(ui, "tab strip: tabs, then the new tab button (default, hover, focus), on card with the line under the inactive tabs", SPACE_8, |ui| {
         ui.spacing_mut().item_spacing.x = SPACE_16;
         ui.allocate_ui(vec2(STRIP_W, TAB_H), |ui| {
-            tab::strip(ui, |ui| {
-                Tab::table("orders [3]").show(ui);
-                Tab::table("customers [1]").show(ui);
-                Tab::query("Query 1").active(true).unsaved(true).show(ui);
-                ui.add(NewTab::new());
-            });
+            let tabs = vec![Tab::table("orders [3]"), Tab::table("customers [1]"), Tab::query("Query 1").active(true).unsaved(true)];
+            tab::Strip::new(tabs).show(ui, |_, _| {});
         });
         ui.add(NewTab::new().look(hovered));
         ui.add(NewTab::new().look(focused));
     });
+    section(ui, "tab/list: default, hover, focus, open (fill, as an open menu title)", SPACE_8, |ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_16;
+        ui.add(ListButton::new("All tabs"));
+        ui.add(ListButton::new("All tabs").look(hovered));
+        ui.add(ListButton::new("All tabs").look(focused));
+        ui.add(ListButton::new("All tabs").open(true));
+    });
+    section(
+        ui,
+        "tabs that don't fit: the strip scrolls, resting at a tab's edge; + and the list stay at the end; the list shows every tab, the active one marked",
+        SPACE_8,
+        |ui| {
+            let (scene, _) = ui.allocate_exact_size(vec2(STRIP_W, TAB_LIST_SCENE_H), Sense::hover());
+            let at = |rect: Rect| UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min));
+            ui.scope_builder(at(Rect::from_min_size(scene.min, vec2(STRIP_W, TAB_H))), |ui| {
+                tab::Strip::new(too_many_tabs()).list_open(true).show(ui, |_, _| {});
+            });
+            // The list as it opens: its right edge at the strip's, under it.
+            let edge = f32::from(MENU_PAD) + 1.0;
+            let menu = Rect::from_min_max(pos2(scene.right() - TAB_LIST_W - 2.0 * edge, scene.top() + TAB_H + TAB_LIST_GAP), scene.max);
+            ui.scope_builder(at(menu), |ui| {
+                menu::in_place(ui, TAB_LIST_W, |ui| {
+                    for (i, (title, _)) in TOO_MANY_TABS.iter().enumerate() {
+                        ui.add(Item::new(title).choice(Some(i == 2)));
+                    }
+                });
+            });
+        },
+    );
     section(ui, "not on the page yet: a busy tab, the spinner in its icon's place; inactive, active", SPACE_8, |ui| {
         ui.spacing_mut().item_spacing.x = SPACE_16;
         Tab::table("orders").busy(true).show(ui);
         Tab::query("Query 1").busy(true).active(true).show(ui);
     });
+}
+
+/// The page's tabs that don't fit (174394), in strip order: each title and whether it is a query
+/// tab. Query 1 is the active one, with unsaved text.
+const TOO_MANY_TABS: [(&str, bool); 7] = [
+    ("orders [3]", false),
+    ("customers [1]", false),
+    ("Query 1", true),
+    ("line_items", false),
+    ("Query 2", true),
+    ("Odd \"Name\"", false),
+    ("dealers", false),
+];
+
+/// [`TOO_MANY_TABS`] as tabs.
+fn too_many_tabs() -> Vec<Tab<'static>> {
+    TOO_MANY_TABS
+        .iter()
+        .enumerate()
+        .map(|(i, (title, query))| {
+            let tab = if *query { Tab::query(title) } else { Tab::table(title) };
+            tab.active(i == 2).unsaved(i == 2)
+        })
+        .collect()
 }
 
 /// The dialogs and the scrim, as the page's Dialogs frame shows them: two to a row, 24 apart and
