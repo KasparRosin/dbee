@@ -400,6 +400,5 @@ jobs:
       - uses: ./.github/actions/draft-release
         with:
           version: ${{ needs.version.outputs.version }}
-          app-title: dbee
           prerelease: ${{ needs.version.outputs.prerelease }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

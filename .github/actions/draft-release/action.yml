@@ -5,9 +5,6 @@ inputs:
   version:
     description: "Release version string without 'v' prefix"
     required: true
-  app-title:
-    description: "Human-readable application name"
-    required: true
   prerelease:
     description: "Whether release is marked as prerelease"
     required: false
@@ -42,7 +39,7 @@ runs:
         GH_REPO: ${{ github.repository }}
       run: |
         tag="v$VERSION"
-        title="${{ inputs.app-title }} v$VERSION"
+        title="$tag"
         pre=()
         if [ "$PRERELEASE" = "true" ]; then pre=(--prerelease); fi
         if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
