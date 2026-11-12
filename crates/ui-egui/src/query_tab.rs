@@ -889,8 +889,8 @@ pub(crate) fn band(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryErro
         heading: &title,
         position: at,
         message: &e.message,
-        hint: e.hint.as_deref(),
         detail: e.detail.as_deref(),
+        hint: e.hint.as_deref(),
         note,
         cancelled: e.code == "cancelled",
     };

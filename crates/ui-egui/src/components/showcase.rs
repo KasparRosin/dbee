@@ -473,7 +473,7 @@ fn value_panels(ui: &mut Ui) {
 /// The Error band frame's bands: 840 wide, 12 apart.
 const BAND_W: f32 = 840.0;
 const BANDS_APART: f32 = 12.0;
-const NO_BAND: Band<'static> = Band { heading: "", position: None, message: "", hint: None, detail: None, note: None, cancelled: false };
+const NO_BAND: Band<'static> = Band { heading: "", position: None, message: "", detail: None, hint: None, note: None, cancelled: false };
 const BAND_TOTL: &str = "column o.totl does not exist";
 const BAND_HINT: &str = "Perhaps you meant to reference the column \"o.total\".";
 
@@ -491,9 +491,10 @@ pub(crate) const PAGE_BANDS: [Band<'static>; 5] = [
     Band { heading: "Statement 2 failed", position: Some((1, 14)), message: BAND_TOTL, hint: Some(BAND_HINT), ..NO_BAND },
 ];
 
-/// The bands the app draws until the query tab and table tab screens, which the page doesn't: a
-/// cancelled run, today's note under a failed transaction, the table tab's headings and notes.
-pub(crate) const APP_BANDS: [Band<'static>; 6] = [
+/// The bands the app draws which the page doesn't: a server's detail and hint both; until the
+/// query tab and table tab screens, a cancelled run, today's note under a failed transaction, the
+/// table tab's headings and notes.
+pub(crate) const APP_BANDS: [Band<'static>; 7] = [
     Band { heading: "The run was cancelled", message: "the statement was cancelled", cancelled: true, ..NO_BAND },
     Band {
         heading: "Query failed",
@@ -520,6 +521,13 @@ pub(crate) const APP_BANDS: [Band<'static>; 6] = [
         note: Some(crate::table_tab::PAGE_NOTE),
         ..NO_BAND
     },
+    Band {
+        heading: "Query failed",
+        message: "cannot drop table customers because other objects depend on it",
+        detail: Some("constraint orders_customer_id_fkey on table orders depends on table customers"),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too."),
+        ..NO_BAND
+    },
 ];
 
 /// The error bands as the page's Error band frame shows them; then the app's until its screens.
@@ -532,7 +540,7 @@ fn error_bands(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: until the query tab screen, a cancelled run in neutral colours and today's note under a failed transaction (no ROLLBACK button yet); the table tab's headings and notes",
+        "not on the page yet: until the query tab screen, a cancelled run in neutral colours and today's note under a failed transaction (no ROLLBACK button yet); the table tab's headings and notes; a server's DETAIL and HINT both, the detail first",
         SPACE_8,
         |ui| bands(ui, "app", &APP_BANDS),
     );

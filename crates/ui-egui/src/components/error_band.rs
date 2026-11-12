@@ -3,8 +3,9 @@
 //! from its sides past that edge: the heading in `subtitle` `danger` and, at the right end of its
 //! line, where the error is (`Line 1, column 14 →`, `small` `text_muted`); under it the message in
 //! `body` `text`; then each further field the server gives, its name in `label` capitals and
-//! `text_muted` over its text in `body` `text`, the hint before the detail; last dbee's note in
-//! `small` `text_muted`. Its parts are 4 apart, a field and the note 8 more.
+//! `text_muted` over its text in `body` `text`, the detail before the hint (Postgres's and psql's
+//! order); last dbee's note in `small` `text_muted`. Its parts are 4 apart, a field and the note 8
+//! more.
 //!
 //! Not on the page: a cancelled run, which the result bar says there (it comes with the query tab
 //! screen), is drawn neutral until then: on `fill` with a `line_strong` edge, its heading in
@@ -23,15 +24,15 @@ use crate::theme::size::{ERROR_BAND_EDGE, ERROR_BAND_FIELD_GAP, ERROR_BAND_GAP, 
 use crate::theme::{Text, tokens};
 
 /// One band: its heading (dbee's words), where the error is (line and column, 1-based), the
-/// message, hint and detail as the server wrote them, dbee's note under them, and whether the run
+/// message, detail and hint as the server wrote them, dbee's note under them, and whether the run
 /// was cancelled rather than failed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Band<'a> {
     pub heading: &'a str,
     pub position: Option<(usize, usize)>,
     pub message: &'a str,
-    pub hint: Option<&'a str>,
     pub detail: Option<&'a str>,
+    pub hint: Option<&'a str>,
     pub note: Option<&'a str>,
     pub cancelled: bool,
 }
@@ -78,7 +79,7 @@ impl Band<'_> {
         };
         body.add_space(ERROR_BAND_GAP);
         words(&mut body, self.message, Text::Body, message_ink);
-        for (name, text) in [("Hint", self.hint), ("Detail", self.detail)] {
+        for (name, text) in [("Detail", self.detail), ("Hint", self.hint)] {
             let Some(text) = text else { continue };
             body.add_space(ERROR_BAND_GAP + ERROR_BAND_FIELD_GAP);
             let galley = body.painter().layout_job(Text::Label.job(name, t.text_muted));
@@ -166,12 +167,12 @@ mod tests {
     #[test]
     fn the_error_band_matches_the_page() {
         // Node 168920 (its default: hint, detail and a position) and the Error band frame's five
-        // bands (171342 / 173961), then a cancelled run and today's note, which the page doesn't
-        // draw.
+        // bands (171342 / 173961), then a cancelled run, today's note and a server's detail and
+        // hint without a position, which the page doesn't draw.
         let default = Band { detail: Some("Failing row contains (691, 42, null)."), ..PAGE_BANDS[0] };
-        let [cancelled, rollback] = [APP_BANDS[0], APP_BANDS[1]];
+        let [cancelled, rollback, both_fields] = [APP_BANDS[0], APP_BANDS[1], APP_BANDS[6]];
         let mut bands = PAGE_BANDS.to_vec();
-        bands.extend([default, cancelled, rollback]);
+        bands.extend([default, cancelled, rollback, both_fields]);
         for (theme, t) in both() {
             let (shapes, rects) = draw(theme, &bands);
             assert_eq!(rects.len(), bands.len(), "{theme:?}");
@@ -213,9 +214,10 @@ mod tests {
                 assert!(close(m.left(), r.left() + 14.0) && close(m.top(), r.top() + 36.0) && close(m.height(), 18.0), "{theme:?} band {i}: {m:?}");
                 assert_eq!(c, message_ink, "{theme:?} band {i}: the message's colour");
                 assert_eq!(sections(&shapes, band.message).first().map(|s| s.1.clone()), Some(Text::Body.font()), "{theme:?} band {i}");
-                // Each field: its name in `label` capitals 12 under the part before, its text 2 under.
+                // Each field, the detail before the hint: its name in `label` capitals 12 under the
+                // part before, its text 2 under.
                 let mut bottom = m.bottom();
-                for (name, text) in [("HINT", band.hint), ("DETAIL", band.detail)] {
+                for (name, text) in [("DETAIL", band.detail), ("HINT", band.hint)] {
                     let Some(text) = text else { continue };
                     let (n, c) = text_in(&shapes, Rect::from_min_max(pos2(r.left(), bottom), r.max).expand(0.5), name)
                         .unwrap_or_else(|| panic!("{theme:?} band {i}: {name}"));
@@ -327,13 +329,19 @@ mod tests {
             ("Statement 2 failed", t.danger),
             ("Line 1, column 14 →", t.text_muted),
             (message, t.text),
-            ("HINT", t.text_muted),
-            (hint, t.text),
             ("DETAIL", t.text_muted),
             (detail, t.text),
+            ("HINT", t.text_muted),
+            (hint, t.text),
         ] {
             assert!(seen.contains(&(words.to_owned(), colour)), "`{words}` in {colour:?}: {seen:?}");
         }
+        // Postgres's and psql's order: the message, the detail, then the hint.
+        let tops: Vec<f32> = [message, "DETAIL", detail, "HINT", hint]
+            .iter()
+            .map(|w| texts(&h.output().shapes).into_iter().find(|(s, _, _)| s == w).map_or(f32::NAN, |(_, r, _)| r.top()))
+            .collect();
+        assert!(tops.windows(2).all(|p| p[0] < p[1]), "the message, DETAIL, the detail, HINT, the hint, top to bottom: {tops:?}");
         // A click on it asks to go there; so does Enter with the keyboard on it.
         let rect = h.state().tags.rect(crate::query_tab::ERROR).unwrap_or(Rect::NOTHING);
         click(&mut h, rect.center());
