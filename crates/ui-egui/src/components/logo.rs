@@ -15,6 +15,8 @@ use vello_cpu::color::{OpaqueColor, Srgb};
 use vello_cpu::peniko::Fill;
 use vello_cpu::{Pixmap, RenderContext, Resources};
 
+use crate::theme;
+
 /// Simple Icons' box: every logo is drawn in 24 by 24.
 const VIEW_BOX: f64 = 24.0;
 /// The most pixels a logo's side is drawn at.
@@ -94,7 +96,7 @@ fn texture(ctx: &Context, logo: Logo, px: u16) -> Option<TextureId> {
     if let Some(drawn) = ctx.data_mut(|d| d.get_temp_mut_or_default::<Textures>(id).0.get(&key).map(TextureHandle::id)) {
         return Some(drawn);
     }
-    let pixels = logo.coverage(px)?.into_iter().map(Color32::from_white_alpha).collect();
+    let pixels = logo.coverage(px)?.into_iter().map(theme::mask).collect();
     let image = ColorImage::new([usize::from(px); 2], pixels);
     let handle = ctx.load_texture(format!("logo/{} {px}px", logo.name()), image, TextureOptions::LINEAR);
     let drawn = handle.id();

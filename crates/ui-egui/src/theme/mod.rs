@@ -21,6 +21,12 @@ pub fn float_shadow(t: &Tokens) -> Shadow {
     Shadow { offset: [0, 6], blur: 36, spread: 0, color: t.shadow }
 }
 
+/// A mask's texel: white, as opaque as `coverage`. A texture of them has no colour of its own and
+/// takes the tint it is drawn with, a token (the engine logos).
+pub fn mask(coverage: u8) -> Color32 {
+    Color32::from_white_alpha(coverage)
+}
+
 fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     let v = &mut style.visuals;
     v.dark_mode = dark;
