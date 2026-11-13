@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-11 · **Change:** minor (entry 66: names inside the engine's messages are drawn in `body`)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-13 · **Change:** minor (the M3 Phase 2 review: entries 14, 53 and 54 say what is left now that the status bar and the error band are built; entries 67 to 73 are new; entries 24, 56 and 61 gain a line)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -120,11 +120,12 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 14. Query tabs share one session, and its transaction outlives a tab (D)
 
-- **Limit:** every query tab of a connection runs on one query connection, so they share one session: its transaction, its `SET`s and its temporary tables (one session per tab is not planned for M3). A transaction a tab opened (`BEGIN`) stays open when the tab closes, and another tab's `COMMIT` or `ROLLBACK` ends it. On MySQL and MariaDB a statement that commits on its own (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `LOCK TABLES` and others) in any tab commits it, without a word. On Postgres a script that fails inside a transaction leaves the session in that failed transaction: every later run, in any tab, fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead; under a 25P02 error the card adds that a ROLLBACK ends it. MySQL, MariaDB and SQLite keep a transaction going after a failed statement, so there that part does not arise.
+- **Limit:** every query tab of a connection runs on one query connection, so they share one session: its transaction, its `SET`s and its temporary tables (one session per tab is not planned for M3). A transaction a tab opened (`BEGIN`) stays open when the tab closes, and another tab's `COMMIT` or `ROLLBACK` ends it. On MySQL and MariaDB a statement that commits on its own (`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `LOCK TABLES` and others) in any tab commits it, without a word. On Postgres a script that fails inside a transaction leaves the session in that failed transaction: every later run, in any tab, fails with SQLSTATE 25P02 until a `ROLLBACK`. dbee does not end it, since it cannot know whether the user means to roll back to a savepoint instead; under a 25P02 error the band adds that a ROLLBACK ends it. MySQL, MariaDB and SQLite keep a transaction going after a failed statement, so there that part does not arise.
 - **Done (engine):** the connection's `transaction` in `document.inspect` says whether its query session has one open (`open`, Postgres's `failed`, or `unknown`) and which tab's run opened it, as each driver reports after every run: Postgres's ReadyForQuery status (read off the stream, which tokio-postgres keeps to itself), MySQL's and MariaDB's `SERVER_STATUS_IN_TRANS` (a `COM_PING` after an error), SQLite's autocommit flag; never from the SQL. A reconnect or a lost query connection reads none. `query.commit` and `query.rollback` end it from any of the connection's query tabs.
-- **Left:** the footer's mark, and the prompt (COMMIT, ROLLBACK or CANCEL) when the owner tab closes or the connection closes or changes; both go with the Shell screen (M3 Phase 3). Until then closing a tab ends no transaction, and the transaction then has no tab.
-- **Evidence:** the query connection (`Connected::query`, `crates/engine/src/state.rs`) is one per connection; `Connected::transaction` and `Transaction` (`crates/engine/src/state.rs`), `Connection::transaction` (`crates/driver/src/api.rs`), `crates/pg/src/tap.rs`; the tests of `crates/engine/tests/transaction.rs`, `the_transaction_state_is_read_on_every_way_there` (`crates/pg/tests/connect.rs`), `the_transaction_state_follows_the_servers_status` (`crates/mysql/tests/query.rs`) and `the_transaction_state_follows_autocommit` (`crates/sqlite/tests/query.rs`); `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`).
-- **Impact:** until the Shell screen draws the mark and the prompt, the user cannot see that a transaction is open, and an uncommitted change made in a tab that was closed can be committed later by another tab, by its `COMMIT` or, on MySQL and MariaDB, by its DDL. A reconnect ends the session and its transaction (rolled back).
+- **Done (window):** the status bar says IN TRANSACTION while the query session has a transaction open or failed (a running job and a lost connection come before it there).
+- **Left:** the prompt (COMMIT, ROLLBACK or CANCEL) when the owner tab closes or the connection closes or changes; it goes with the Shell screen (M3 Phase 3). Until then closing a tab ends no transaction, and the transaction then has no tab.
+- **Evidence:** the query connection (`Connected::query`, `crates/engine/src/state.rs`) is one per connection; `Connected::transaction` and `Transaction` (`crates/engine/src/state.rs`), `Connection::transaction` (`crates/driver/src/api.rs`), `crates/pg/src/tap.rs`; the tests of `crates/engine/tests/transaction.rs`, `the_transaction_state_is_read_on_every_way_there` (`crates/pg/tests/connect.rs`), `the_transaction_state_follows_the_servers_status` (`crates/mysql/tests/query.rs`) and `the_transaction_state_follows_autocommit` (`crates/sqlite/tests/query.rs`); `a_failed_transaction_says_a_rollback_ends_it` (`crates/ui-egui/tests/query_tab.rs`); `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`); `activity` (`crates/ui-egui/src/workspace.rs`) for IN TRANSACTION.
+- **Impact:** the status bar shows that a transaction is open, but until the Shell screen draws the prompt, closing the tab that opened it says nothing, and an uncommitted change made in a tab that was closed can be committed later by another tab, by its `COMMIT` or, on MySQL and MariaDB, by its DDL. A reconnect ends the session and its transaction (rolled back).
 - **Estimate:** part of the Shell screen (M3 Phase 3); not estimated.
 
 ### 15. A table without a row key pages by OFFSET alone (D)
@@ -192,10 +193,10 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 24. The connection form is cramped at the smallest window (U)
 
-- **Limit:** at the window's minimum size (640×420) the form under the title row is too narrow: the TLS mode buttons and Save, Test and Connect run past the card's edge, Test covers part of Save, and the name field shrinks to about 30 points.
+- **Limit:** at the window's minimum size (640×420) the form under the title row is too narrow: the TLS mode buttons and Save, Test and Connect run past the card's edge, Test covers part of Save, and the colour swatches beside the name field (216 points wide since M3) leave the field about 18 points, narrower than its label, so `NAME` runs into `COLOUR`.
 - **Evidence:** the connection form's layout (`crates/ui-egui/src/conn_form.rs`), seen at 640×420. At the default size (1100×720) and above everything fits (`crates/ui-egui/tests/connections.rs`).
 - **Impact:** small: only in a window made as small as it goes. A wider window shows the form whole.
-- **Estimate:** part of the connection screen's redesign; not estimated.
+- **Estimate:** part of the connection screens (M3 Phase 3); not estimated.
 
 ### 25. MySQL and MariaDB: a `CALL` shows only its last result set (D)
 
@@ -397,17 +398,18 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 ### 53. No ROLLBACK button after a failed transaction (F)
 
 - **Done (engine):** `query.rollback` (and `query.commit`) end the query session's transaction, a Postgres one that failed (25P02) too, and return the new state; with none open they do nothing and say so.
-- **Left:** the ROLLBACK button on the error card that runs it. After a failed statement in a Postgres transaction (25P02), the card only has a note saying a rollback ends it. The maintainer wants this, and the M3 error card draws it; it goes with the Query tab screen (M3 Phase 3).
+- **Left:** a ROLLBACK button that runs it. After a failed statement in a Postgres transaction (25P02), the error band only has a note saying a rollback ends it; the band as drawn has no button, and the Query tab screen (M3 Phase 3) adds ROLLBACK.
 - **Evidence:** `ROLLBACK_NOTE` (`crates/ui-egui/src/query_tab.rs`); `a_failed_postgres_transaction_reads_failed_and_rollback_ends_it` (`crates/engine/tests/transaction.rs`).
-- **Impact:** until the button is drawn, the user types `ROLLBACK` (or calls `query.rollback`) before that session can run anything else.
+- **Impact:** until the button is there, the user types `ROLLBACK` (or calls `query.rollback`) before that session can run anything else; the band's note says so.
 - **Estimate:** part of the Query tab screen (M3 Phase 3); not estimated.
 
-### 54. A cancel dbee didn't send: the engine is done, the error band is not (U)
+### 54. A run dbee cancelled shows a band where the result bar should say CANCELLED (U)
 
-- **Done (engine):** only dbee's own cancel reads as cancelled. The drivers report Postgres's 57014 and MySQL's and MariaDB's 1317 as the server's error with its code and words, marked `interrupted`; the engine makes it `cancelled` only for a statement it sent a cancel for (a run, a page load, a count), or an Apply whose gate it cancelled. A `statement_timeout`, or a `pg_cancel_backend` or `KILL QUERY` from another session, fails as a `server` error, which today's error card shows; a query tab's error says `meaning: "interrupted"`. SQLite's interrupt comes only from dbee and stays cancelled.
-- **Left:** the M3 error band for such an error, which shows no band for a cancel; it goes with the Query tab screen (M3 Phase 3). When a Postgres timeout lands while dbee's own cancel request is on its way, both have the same code and the run reads as cancelled: the user asked for the stop.
+- **Done (engine):** only dbee's own cancel reads as cancelled. The drivers report Postgres's 57014 and MySQL's and MariaDB's 1317 as the server's error with its code and words, marked `interrupted`; the engine makes it `cancelled` only for a statement it sent a cancel for (a run, a page load, a count), or an Apply whose gate it cancelled. A `statement_timeout`, or a `pg_cancel_backend` or `KILL QUERY` from another session, fails as a `server` error, which the error band shows with the server's code and words; a query tab's error says `meaning: "interrupted"`. SQLite's interrupt comes only from dbee and stays cancelled.
+- **Done (window):** the query and table tabs show an error as the M3 error band (M3 Phase 2).
+- **Left:** a run that dbee's own cancel stopped still shows a band, in neutral colours; the design shows no band then, and the result bar says CANCELLED. It goes with the Query tab screen (M3 Phase 3). When a Postgres timeout lands while dbee's own cancel request is on its way, both have the same code and the run reads as cancelled: the user asked for the stop.
 - **Evidence:** `Meaning::Interrupted` (`crates/driver/src/error.rs`), `stoppable` (`crates/engine/src/jobs.rs`); the tests `a_statement_timeout_reads_as_an_error`, `a_cancel_from_another_session_reads_as_an_error` and `a_cancel_after_the_end_changes_nothing` (`crates/engine/tests/query.rs`) and `a_table_read_stopped_by_the_server_reads_as_an_error` (`crates/engine/tests/table.rs`).
-- **Impact:** small until the band is drawn: the error card already shows the server's reason.
+- **Impact:** small: a cancelled run says so in a band, where the design says it in the result bar.
 - **Estimate:** part of the Query tab screen (M3 Phase 3); not estimated.
 
 ### 55. No structure view (F)
@@ -421,7 +423,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 - **Done (engine):** `connection.cancel` stops the attempt of an open, an openFile, a reconnect or a test wherever it is (connecting, the SSH tunnel's handshake or login, the database's login, the catalog's load): the socket it was using closes, then the tunnel, and the attempt ends `cancelled`. A cancelled reconnect leaves the connection as it was, with its tabs. With no attempt running it does nothing and says so.
 - **Left:** the CANCEL button the M3 connection screen draws beside `CONNECTING`, which runs it; it goes with the connection screens (M3 Phase 3). Until then the form only relabels its button `Connecting…`.
-- **Evidence:** `connection.cancel` (`crates/engine/src/cmd/connection.rs`), `Unfinished` (`crates/ssh/src/lib.rs`); the tests `a_connect_to_a_silent_host_can_be_cancelled`, `a_connect_through_the_tunnel_can_be_cancelled`, `a_test_can_be_cancelled`, `a_reconnect_can_be_cancelled`, `cancel_with_nothing_running_is_harmless` and `a_cancelled_attempt_leaves_no_connection` (`crates/engine/tests/connection.rs`) and `a_dropped_open_closes_its_socket` (`crates/ssh/tests/tunnel.rs`); `crates/ui-egui/src/conn_form.rs` for the form.
+- **Evidence:** `connection.cancel` (`crates/engine/src/cmd/connection.rs`), `Unfinished` (`crates/ssh/src/lib.rs`); the tests `a_connect_to_a_silent_host_can_be_cancelled`, `a_connect_through_the_tunnel_can_be_cancelled`, `a_test_can_be_cancelled`, `a_reconnect_can_be_cancelled`, `cancel_with_nothing_running_is_harmless`, `a_cancelled_attempt_leaves_no_connection` and `a_postgres_connect_cancelled_after_the_login_leaves_no_socket` (`crates/engine/tests/connection.rs`) and `a_dropped_open_closes_its_socket` (`crates/ssh/tests/tunnel.rs`); `crates/ui-egui/src/conn_form.rs` for the form.
 - **Impact:** until the button is drawn, a host that doesn't answer keeps the user waiting until the connect limit passes (15 s a step); an agent can call `connection.cancel`.
 - **Estimate:** part of the connection screens (M3 Phase 3); not estimated.
 
@@ -453,12 +455,13 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: a user who selects the message of a passed test, in light, reads it at 4.13:1.
 - **Estimate:** part of the toast or error band component (M3 Phase 2), once the strip is drawn; not estimated.
 
-### 61. At the smallest window, three texts are cut (U)
+### 61. At the smallest window, three texts are cut and the filter's APPLY is out of view (U)
 
 - **Limit:** at 640×420 the paging bar's page label (`PAGE 1`) runs about 29 points past its room, the query toolbar's `RUN CURRENT` is cut and overlaps the row count (`1 ROW`), and the form's title (`New connection`) is cut short at about 101 points. All three were cut before M3's fonts too (`Page 1`, `Run current` over `1 row`); see also entry 24.
-- **Evidence:** reviewer 1's size probe in the M3 Phase 1 review, run on the tree before and after Phase 1; `crates/ui-egui/src/paging.rs`, `crates/ui-egui/src/query_tab.rs` (the toolbar), `crates/ui-egui/src/conn_form.rs` (the title). At 1100×720 nothing is cut.
+- **Limit:** at 640×420 with the value panel closed, the table tab's filter row runs about 97 points past the work area: APPLY is out of view and `+` is cut. It ran about 49 points over before M3; the row's 28-point squares, APPLY's 62 and the 12 inset add the rest. Enter in a value field still applies.
+- **Evidence:** reviewer 1's size probe in the M3 Phase 1 review, run on the tree before and after Phase 1; `crates/ui-egui/src/paging.rs`, `crates/ui-egui/src/query_tab.rs` (the toolbar), `crates/ui-egui/src/conn_form.rs` (the title); for the filter row, `ui.inspect` in the M3 Phase 2 review (`filter-apply` at x 655 in a 640-wide window, `visible: false`) and `crates/ui-egui/src/filter_bar.rs`. At 1100×720 nothing is cut.
 - **Impact:** small: only in a window made as small as it goes.
-- **Estimate:** part of the bars' and the query tab's redesign (M3); not estimated.
+- **Estimate:** part of the bars' and the query and table tab screens (M3 Phase 3); not estimated.
 
 ### 62. View > Theme can't be reached before connecting (U)
 
@@ -495,10 +498,60 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** small: every word is there, but the name doesn't stand out, which matters most in Close anyway, a prompt that loses work.
 - **Estimate:** 2–3 h (estimated): the engine gives a message's names as parts (a confirm naming its tab, a notice its file) and the window marks them; with the wording pass (spec §7).
 
+### 67. Some cut names and types have no hover (U)
+
+- **Limit:** three places older than M3 cut a long name or type with `…` and show it whole nowhere in the window: the value panel's column name and type above the value, a tree column's name and type (`timestamp with time …`; only a foreign key's row has a hover), and the grid header's column name (entry 63 covers its type). Since M3 Phase 2 a cut connection name, a cut file path and a long job in the status bar read whole on hover.
+- **Evidence:** the facts' name and type in `crates/ui-egui/src/components/value.rs`; `TreeRow::paint` (`crates/ui-egui/src/components/rows.rs`) and the column row's hover in `crates/ui-egui/src/tree.rs`; `Header` (`crates/ui-egui/src/components/grid_cell.rs`). Seen in the M3 Phase 2 review; cut without hover before M3 too.
+- **Impact:** small: a long column name or type is read in full only by widening its pane or column, or through `ui.inspect`.
+- **Estimate:** 1 h (estimated); with the screens that hold them in M3 Phase 3: the query and table tab screens (the value panel, the grid) and the sidebar screen (the tree).
+
+### 68. At the smallest window with the value panel open, two controls draw past their own edges (U)
+
+- **Limit:** at 640×420 with the value panel open, as it is by default, the work area is narrow enough that the filter row's column dropdown draws its chevron onto the raw SQL toggle beside it, and the error band's position link (`Line 3, column 8 →`) lands left of the band, over the pane's edge, while the message wraps one or two letters a line. Closing the panel or widening the window shows both whole.
+- **Evidence:** `Dropdown::show` places the chevron from the control's right edge with no floor (`crates/ui-egui/src/components/dropdown.rs`); the band's `link_room` is not limited to its head's width (`crates/ui-egui/src/components/error_band.rs`). Seen in the M3 Phase 2 review at 640×420, in both modes.
+- **Impact:** small: only in a window made as small as it goes, with the panel open.
+- **Estimate:** part of the query and table tab screens (M3 Phase 3), where the panes give way before the work area does; each control keeping within its rect is about 0.5 h (estimated).
+
+### 69. The tokens check misses a token at an opacity, and `theme::mask` (S)
+
+- **Limit:** `cargo xtask tokens` flags a colour literal or a font size outside `theme/`, but a token turned to an opacity there (`gamma_multiply`, `linear_multiply`) passes, and so does `theme::mask`, which is pure white and works anywhere. The colours made so today are the page's own: the form's result strip (entry 60), the 70 % `on_ink` shortcut on buttons and in the result bar, a toast action's edge and the table icon's band.
+- **Evidence:** `xtask/src/tokens.rs`; `gamma_multiply` in `crates/ui-egui/src/conn_form.rs`, `components/button.rs`, `components/results.rs`, `components/toast.rs` and `components/icon.rs`. A probe file in the M3 Phase 2 review held three such lines, and only `Color32::from_rgb` was flagged.
+- **Impact:** none seen today; a colour that is no token could pass the check unnoticed later.
+- **Estimate:** 1 h (estimated): name the opacities in `theme/`, flag `gamma_multiply(` and `linear_multiply(` outside it, and let only the logo's drawing call `theme::mask`. Not tied to a screen.
+
+### 70. Postgres: a server that stops answering after a result holds the run for up to 15 s (D)
+
+- **Limit:** after a run, a COMMIT or a ROLLBACK, dbee reads the session's transaction state from the ReadyForQuery that ends the server's answer. If the server stops answering right after the result, so that ReadyForQuery never comes, the run keeps its spinner and CANCEL up to 15 s longer, and the state then reads `unknown`; Cancel doesn't shorten the wait. tokio-postgres ends every batch with a Sync, so a server that answers normally never gets here.
+- **Evidence:** `SETTLE_LIMIT` and `state` in `crates/pg/src/tap.rs`, awaited outside the run's stop in `crates/engine/src/cmd/query.rs` (the run, and COMMIT and ROLLBACK).
+- **Impact:** small: only with a server or a proxy that hangs in the middle of an answer.
+- **Estimate:** 1 h (estimated), in the engine: race the wait against the run's stop, or read the state without waiting once the run is stopped. Not tied to a screen.
+
+### 71. MySQL and MariaDB: IN TRANSACTION stays after the server dropped the session (D)
+
+- **Limit:** MySQL and MariaDB say whether a transaction is open only in the packets they send, so when the server ends the session (its `wait_timeout`, a restart) the status bar goes on saying IN TRANSACTION, though the server rolled the transaction back. The next run or COMMIT finds out; a COMMIT then fails with the general lost-connection words, not the "nothing was committed" a connection already known to be lost gets. Postgres notices at once, through its connection task.
+- **Evidence:** `SERVER_STATUS_IN_TRANS` read from each packet (`crates/mysql/src/connect.rs`, `crates/mysql/src/result.rs`); `Connected::transaction` (`crates/engine/src/state.rs`) hides the state only once the connection knows it is closed; `COMMIT_SESSION_LOST` (`crates/engine/src/cmd/query.rs`) covers only that case.
+- **Impact:** small but misleading: the footer shows a transaction that is gone, and a COMMIT's error doesn't say that nothing was committed.
+- **Estimate:** 1 h (estimated) for the COMMIT's words, in the engine; whether to ping the server while a transaction is open goes with the Shell screen (M3 Phase 3).
+
+### 72. A toast's close and action can't be reached with the keyboard (U)
+
+- **Limit:** a toast's close (×) and its action button answer the pointer only; Tab never reaches them. Nothing is lost today: a toast goes after 4 s, and before M3 it had no close.
+- **Evidence:** `Sense::CLICK` on both in `crates/ui-egui/src/components/toast.rs`.
+- **Impact:** once toasts carry actions, a keyboard user can't take them.
+- **Estimate:** part of the Shell screen (M3 Phase 3), which uses toast actions: a shortcut, or focus when the toast shows; not estimated.
+
+### 73. The control channel: a click sent right after one that moves things lands in the old place (S)
+
+- **Limit:** `ui.click {id}` clicks the middle of the place the id had in the last frame drawn. Sent right after a click that changes the layout (a tree row opened), before a frame has drawn the new layout, it lands where the widget was: in the M3 Phase 2 review a click on `customers` selected `order_items`.
+- **Evidence:** `click` in `crates/ui-egui/src/control.rs`; `ui.click` in `docs/control-protocol.md`.
+- **Impact:** an agent can act on the wrong row; an `ui.inspect` between the two clicks avoids it.
+- **Estimate:** 1 h (estimated): draw a frame before a click by id when the input before it changed the layout, or find the id again then. Not tied to a screen.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-13 | minor | The M3 Phase 2 review: entries 14, 53 and 54 say what is left now that the status bar shows IN TRANSACTION and the error band is built; new entries 67 (cut names and types without a hover), 68 (two controls past their edges at the smallest window), 69 (the tokens check misses a token at an opacity), 70 (Postgres: a silent server holds a finished run up to 15 s), 71 (MySQL and MariaDB: a stale IN TRANSACTION), 72 (a toast can't be reached with the keyboard) and 73 (a click by id right after a layout change); entry 24's name field, entry 61's filter row, and entry 56's test of a cancelled Postgres connect after the login. |
 | 2026-11-11 | minor | Entry 66: dbee draws the names in its own dialog and toast sentences in `data`; names inside the engine's messages stay in `body` until the engine gives them as parts. |
 | 2026-11-11 | minor | Entry 56: `connection.cancel` stops the attempt of an open, an openFile, a reconnect or a test, closing what it had opened, the SSH tunnel included; the CANCEL button beside `CONNECTING` is left for the connection screens. |
 | 2026-11-10 | minor | Entry 59 decided (the update button's states and where it sits) and entry 65 (no Help menu or About). |
