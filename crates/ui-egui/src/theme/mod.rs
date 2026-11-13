@@ -42,9 +42,6 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     v.selection.bg_fill = t.selection;
     v.selection.stroke = Stroke::new(1.0, t.ink);
     v.text_cursor.stroke = Stroke::new(CARET_W, t.ink);
-    // egui thickens light text on a dark ground; the design's text weighs the same in both modes.
-    v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
-    v.text_options.font_hinting = false;
     v.window_shadow = Shadow::NONE;
     v.window_corner_radius = CornerRadius::same(RADIUS_FLOAT);
     let w = &mut v.widgets;
@@ -132,13 +129,21 @@ mod tests {
     }
 
     #[test]
-    fn text_draws_unthickened_and_unhinted_in_both_modes() {
+    fn text_draws_with_eguis_own_options_in_each_mode() {
+        use egui::epaint::FontColorTransferFunction::{Off, TwoCoverageMinusCoverageSq};
         let ctx = egui::Context::default();
         apply(&ctx);
-        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        for (theme, weight) in [(egui::Theme::Light, Off), (egui::Theme::Dark, TwoCoverageMinusCoverageSq)] {
             let o = ctx.style_of(theme).visuals.text_options;
-            assert_eq!(o.color_transfer_function, egui::epaint::FontColorTransferFunction::Off, "{theme:?}: no thickening");
-            assert!(!o.font_hinting, "{theme:?}: no hinting");
+            assert_eq!(o.color_transfer_function, weight, "{theme:?}: egui's weight for the mode");
+            assert!(o.font_hinting, "{theme:?}: hinted");
+            assert!(o.subpixel_binning, "{theme:?}: sub-pixel binning");
+            assert_eq!(o, theme.default_visuals().text_options, "{theme:?}: egui's own text options");
+        }
+        let fonts = fonts::definitions();
+        for (name, data) in &fonts.font_data {
+            assert_eq!(data.tweak.hinting, None, "{name}: the hinting egui's options say");
+            assert_eq!(data.tweak.hinting_target, egui::epaint::text::HintingTarget::default(), "{name}: egui's hinting target");
         }
     }
 
