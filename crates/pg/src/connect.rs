@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use dbee_config::ConnectionConfig;
 use dbee_driver::{
@@ -16,6 +17,7 @@ use dbee_ssh::Tunnel;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, MutexGuard, watch};
+use tokio::task::AbortHandle;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{CancelToken, Client, Connection};
 
@@ -30,6 +32,9 @@ pub const MIN_VERSION_NUM: u32 = 140000;
 
 /// [`ServerInfo::product`] for every Postgres server.
 const PRODUCT: &str = "PostgreSQL";
+
+/// How long a connection's task may go on once nothing needs it ([`Task`]).
+const CLOSE_GRACE: Duration = Duration::from_millis(250);
 
 /// The warning for a server older than [`MIN_VERSION_NUM`], or `None`.
 pub fn version_warning(version_num: u32) -> Option<String> {
@@ -62,6 +67,8 @@ pub struct PgConnection {
     visible_schemas: Vec<String>,
     /// What the stream's taps saw of the server's ReadyForQuery messages ([`crate::tap`]).
     status: watch::Receiver<Seen>,
+    /// The task that drives the connection, stopped once it is dropped.
+    _task: Task,
 }
 
 impl std::fmt::Debug for PgConnection {
@@ -355,7 +362,7 @@ fn pg_config(cfg: &ConnectionConfig, password: Option<&str>, tls: &Tls) -> tokio
 async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnection, DbError> {
     let cfg = t.config;
     let pg = pg_config(cfg, t.password, tls);
-    let (Login { client, closed, over_tls, status }, way) = match &t.tunnel {
+    let (Login { client, closed, over_tls, status, task }, way) = match &t.tunnel {
         Some(tunnel) => {
             let channel = within(CONNECT_TIMEOUT, "the SSH tunnel's channel", async { Ok(tunnel.connect(&cfg.host, cfg.port).await?) }).await?;
             let login = within(CONNECT_TIMEOUT, "the server", login(channel, &pg, tls, &cfg.host, runtime)).await?;
@@ -372,7 +379,8 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
                 let stream = Tap::plain(stream, shared.clone());
                 let connect = TapConnect::new(tls_connect(tls, &cfg.host, &stream), shared);
                 let (client, connection) = pg.connect_raw(stream, connect).await.map_err(|e| error::map(&e, Phase::Connect))?;
-                Ok(Login { client, closed: drive(runtime, connection), over_tls: false, status })
+                let (closed, task) = drive(runtime, connection);
+                Ok(Login { client, closed, over_tls: false, status, task })
             })
             .await?;
             (login, Way::Socket(socket))
@@ -382,6 +390,8 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
             (login, Way::Tcp(addr))
         }
     };
+    // From here, a stopped or failed connect stops the task too.
+    let task = Task { handle: task, runtime: runtime.clone() };
     let (mut info, visible_schemas) = within(CONNECT_TIMEOUT, "the server", setup(&client, cfg.read_only)).await?;
     info.tls = Some(dbee_driver::tls::state(over_tls, cfg.ssl_mode, cfg.ca_file.as_deref()));
     let reached = if let Way::Tcp(addr) = way { Some(addr) } else { None };
@@ -390,7 +400,18 @@ async fn open(t: &Target<'_>, tls: &Tls, runtime: &Handle) -> Result<PgConnectio
     let route = Route { host: cfg.host.clone(), way };
     let canceller = Canceller { token: client.cancel_token(), tls: tls.clone(), over_tls, route, on_its_way: Arc::default() };
     let check_due = AtomicBool::new(false);
-    Ok(PgConnection { client, lock: Mutex::new(()), info, closed, canceller, read_only: cfg.read_only, check_due, visible_schemas, status })
+    Ok(PgConnection {
+        client,
+        lock: Mutex::new(()),
+        info,
+        closed,
+        canceller,
+        read_only: cfg.read_only,
+        check_due,
+        visible_schemas,
+        status,
+        _task: task,
+    })
 }
 
 /// Connects to the addresses `host` gives, in turn, as tokio-postgres does (TLS still checks
@@ -416,12 +437,34 @@ async fn connect_tcp(pg: &tokio_postgres::Config, tls: &Tls, host: &str, port: u
 }
 
 /// A session that logged in: the client, the flag that tells when its connection ended, whether
-/// the link runs over TLS, and what the stream's taps see of its transaction ([`crate::tap`]).
+/// the link runs over TLS, what the stream's taps see of its transaction ([`crate::tap`]), and the
+/// task that drives it.
 struct Login {
     client: Client,
     closed: Arc<AtomicBool>,
     over_tls: bool,
     status: watch::Receiver<Seen>,
+    task: AbortHandle,
+}
+
+/// The task that drives a session's connection ([`drive`]), from the setup on. Once the client is
+/// dropped, tokio-postgres waits for the answers still due before it says goodbye and closes the
+/// socket, so a server that stopped answering (a connect stopped in its setup, a connection dropped
+/// while its catalog loads) would keep the task and the socket for good. Dropped, this gives the
+/// task [`CLOSE_GRACE`] to end by itself, then stops it.
+struct Task {
+    handle: AbortHandle,
+    runtime: Handle,
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        let handle = self.handle.clone();
+        self.runtime.spawn(async move {
+            tokio::time::sleep(CLOSE_GRACE).await;
+            handle.abort();
+        });
+    }
 }
 
 /// Logs in over `stream`, a direct one or the tunnel's channel, watched ([`Watched`]) and tapped
@@ -436,7 +479,8 @@ where
     let stream = Tap::plain(watched, shared.clone());
     let connect = TapConnect::new(tls_connect(tls, host, &stream), shared);
     let (client, connection) = pg.connect_raw(stream, connect).await.map_err(|e| error::map(&e, Phase::Connect))?;
-    Ok(Login { client, closed: drive(runtime, connection), over_tls: over_tls.load(Ordering::Acquire), status })
+    let (closed, task) = drive(runtime, connection);
+    Ok(Login { client, closed, over_tls: over_tls.load(Ordering::Acquire), status, task })
 }
 
 /// The TLS connector for one stream to `host` (the stream only fixes the type).
@@ -451,16 +495,17 @@ where
     }
 }
 
-/// Drive the connection on the runtime until it ends; the flag tells when it has. Server notices
-/// and notifications are dropped unlogged, as they can quote data.
-fn drive<S, T>(runtime: &Handle, mut connection: Connection<S, T>) -> Arc<AtomicBool>
+/// Drive the connection on the runtime until it ends; the flag tells when it has, and the handle
+/// stops it ([`Task`]). Server notices and notifications are dropped unlogged, as they can quote
+/// data.
+fn drive<S, T>(runtime: &Handle, mut connection: Connection<S, T>) -> (Arc<AtomicBool>, AbortHandle)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let closed = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&closed);
-    runtime.spawn(async move {
+    let task = runtime.spawn(async move {
         loop {
             match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
                 Some(Ok(_)) => {}
@@ -477,7 +522,7 @@ where
         }
         flag.store(true, Ordering::Release);
     });
-    closed
+    (closed, task.abort_handle())
 }
 
 /// The most the setup's read of its settings holds: one short value each, and a search path.

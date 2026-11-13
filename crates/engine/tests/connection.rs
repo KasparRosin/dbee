@@ -1917,6 +1917,10 @@ enum Answer {
     SshFirstLine,
     /// Everything, both ways, to and from this port on 127.0.0.1.
     Forward(u16),
+    /// Postgres that logs the client in and answers the first `answered` queries of dbee's setup
+    /// ([`setup_answers`]), then reads what comes and never answers: a server that hangs after the
+    /// login, or after the setup.
+    Pg { answered: usize },
 }
 
 /// What a [`Host`] saw.
@@ -1928,6 +1932,8 @@ struct Seen {
     closed: usize,
     /// Those that sent more than one line: an SSH client's key exchange, after its first line.
     past_first_line: usize,
+    /// The requests a Postgres client sent after its login (its goodbye left out).
+    requests: usize,
 }
 
 /// What a test saw, and a way to wait until it saw something: no wait is on a timer, and the 30 s
@@ -2010,6 +2016,7 @@ fn serve(mut conn: TcpStream, answer: Answer, seen: &Watch<Seen>) {
             conn.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").unwrap();
             None
         }
+        Answer::Pg { answered } => return serve_pg(conn, answered, seen),
         Answer::Nothing => None,
     };
     let (mut buf, mut first_line_ended, mut past) = ([0u8; 16 * 1024], false, false);
@@ -2033,6 +2040,84 @@ fn serve(mut conn: TcpStream, answer: Answer, seen: &Watch<Seen>) {
     }
     if let Some(up) = upstream {
         let _ = up.shutdown(Shutdown::Write);
+    }
+}
+
+/// One Postgres message: its kind and its body, with the length that counts itself.
+fn message(kind: u8, body: &[u8]) -> Vec<u8> {
+    let len = i32::try_from(body.len() + 4).unwrap();
+    [&[kind][..], &len.to_be_bytes(), body].concat()
+}
+
+/// A query's answer of one text column named `x`: a row with each of `values`, each ended by
+/// `tag`.
+fn rows(values: &[&str], tag: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in values {
+        let field = [
+            &b"x\0"[..],
+            &0i32.to_be_bytes(),
+            &0i16.to_be_bytes(),
+            &25i32.to_be_bytes(),
+            &(-1i16).to_be_bytes(),
+            &(-1i32).to_be_bytes(),
+            &0i16.to_be_bytes(),
+        ]
+        .concat();
+        out.extend(message(b'T', &[&1i16.to_be_bytes()[..], &field].concat()));
+        let len = i32::try_from(value.len()).unwrap();
+        out.extend(message(b'D', &[&1i16.to_be_bytes()[..], &len.to_be_bytes(), value.as_bytes()].concat()));
+        out.extend(message(b'C', format!("{tag}\0").as_bytes()));
+    }
+    out
+}
+
+/// The answers to dbee's setup on a connection that is not read-only, in order: its SET, its six
+/// SHOWs, its search path's schemas; each ends ready for the next.
+fn setup_answers() -> Vec<Vec<u8>> {
+    let ready = message(b'Z', b"I");
+    vec![
+        [message(b'C', b"SET\0"), ready.clone()].concat(),
+        [rows(&["off", "on", "UTF8", "14.0", "140000", "public"], "SHOW"), ready.clone()].concat(),
+        [rows(&["public"], "SELECT 1"), ready].concat(),
+    ]
+}
+
+/// Serves one Postgres client: no TLS, a login with no password, then the first `answered` of
+/// [`setup_answers`]; after that it reads and never answers, until the client closes.
+fn serve_pg(mut conn: TcpStream, answered: usize, seen: &Watch<Seen>) {
+    const SSL_REQUEST: u32 = 80_877_103;
+    let (mut buf, mut have, mut started) = ([0u8; 16 * 1024], Vec::new(), false);
+    let mut answers = setup_answers().into_iter().take(answered);
+    loop {
+        let n = match conn.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        have.extend_from_slice(&buf[..n]);
+        loop {
+            // Before the login a message is its length and its body; after it, a kind first.
+            let head = usize::from(started);
+            let Some(len) = have.get(head..head + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize) else { break };
+            if have.len() < head + len {
+                break;
+            }
+            let msg: Vec<u8> = have.drain(..head + len).collect();
+            if !started {
+                if msg.get(4..8) == Some(&SSL_REQUEST.to_be_bytes()[..]) {
+                    conn.write_all(b"N").unwrap();
+                } else {
+                    started = true;
+                    let login = [message(b'R', &0i32.to_be_bytes()), message(b'K', &[1u8, 0, 0, 0, 2, 0, 0, 0]), message(b'Z', b"I")].concat();
+                    conn.write_all(&login).unwrap();
+                }
+            } else if msg.first() != Some(&b'X') {
+                seen.note(|s| s.requests += 1);
+                if let Some(answer) = answers.next() {
+                    conn.write_all(&answer).unwrap();
+                }
+            }
+        }
     }
 }
 
@@ -2209,6 +2294,46 @@ fn a_connect_through_the_tunnel_can_be_cancelled() {
     open(&mut s, params);
     assert_eq!(s.inspect()["connection"]["ssh"], true);
     s.run_blocking("schema.refresh", json!({}), T).unwrap();
+}
+
+/// Review 2, Minor 1: a direct Postgres connect cancelled after the login leaves nothing open.
+/// The server logs the client in, then stops answering: during the session's setup, or, once the
+/// setup is answered, during the catalog's load. Cancelled there, the attempt ends `cancelled` and
+/// the socket to the server closes. How long each took from the cancel to the close.
+fn pg_cancelled_after_login() -> Vec<(&'static str, Duration)> {
+    let t = pg14_target();
+    let mut took = Vec::new();
+    for (when, answered) in [("in the setup", 0), ("in the catalog's load", setup_answers().len())] {
+        let host = Host::new(Answer::Pg { answered });
+        let mut s = session();
+        let job = started(&mut s, "connection.open", json!({ "config": at(&t, &host), "password": pw() }));
+        host.until(&format!("the request {when} that gets no answer"), |seen| seen.requests > answered);
+        let asked = Instant::now();
+        assert_eq!(cancel(&mut s), json!({ "stopped": true }), "{when}");
+        ends_cancelled(&mut s, job, when);
+        host.until(&format!("the socket to close {when}"), |seen| seen.closed == 1);
+        let closed = asked.elapsed();
+        println!("{when}: the socket closed {closed:?} after the cancel");
+        nothing_open(&s, when);
+        took.push((when, closed));
+    }
+    took
+}
+
+#[test]
+fn a_postgres_connect_cancelled_after_the_login_leaves_no_socket() {
+    let _db = require_testdb!();
+    pg_cancelled_after_login();
+}
+
+/// The socket closes within a second of the cancel.
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn a_postgres_connect_cancelled_after_the_login_closes_its_socket_within_a_second() {
+    let _db = require_testdb!();
+    for (when, took) in pg_cancelled_after_login() {
+        assert!(took < Duration::from_secs(1), "{when}: {took:?}");
+    }
 }
 
 /// A test stops as a connect does, and leaves the screen and the lists as they were.
