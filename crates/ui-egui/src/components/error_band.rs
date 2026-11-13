@@ -342,6 +342,9 @@ mod tests {
             .map(|w| texts(&h.output().shapes).into_iter().find(|(s, _, _)| s == w).map_or(f32::NAN, |(_, r, _)| r.top()))
             .collect();
         assert!(tops.windows(2).all(|p| p[0] < p[1]), "the message, DETAIL, the detail, HINT, the hint, top to bottom: {tops:?}");
+        // It reads out as a link, by its position's words.
+        let link = egui_kittest::kittest::Queryable::query_by_role_and_label(&h, egui::accesskit::Role::Link, "Line 1, column 14 →");
+        assert!(link.is_some(), "the band reads out as a link to the error's position");
         // A click on it asks to go there; so does Enter with the keyboard on it.
         let rect = h.state().tags.rect(crate::query_tab::ERROR).unwrap_or(Rect::NOTHING);
         click(&mut h, rect.center());

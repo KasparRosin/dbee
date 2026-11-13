@@ -810,9 +810,12 @@ mod tests {
             .collect()
     }
 
-    /// What a harness's strip drew in its last frame, and the tab its caller made active.
+    /// What a harness's strip drew in its last frame, the tab its caller made active, and how
+    /// wide the strip is and how many of the page's tabs it holds.
     struct Drawn {
         active: usize,
+        width: f32,
+        count: usize,
         band: Rect,
         tabs: Vec<Rect>,
         new: Rect,
@@ -824,12 +827,22 @@ mod tests {
     /// A strip `width` wide of the page's seven tabs in `theme`, room under it for its list; the
     /// caller makes a tab active when it is asked to.
     fn seven(theme: Theme, width: f32, active: usize) -> egui_kittest::Harness<'static, Drawn> {
-        let drawn = Drawn { active, band: Rect::NOTHING, tabs: Vec::new(), new: Rect::NOTHING, list: None, items: Vec::new(), asked: Vec::new() };
+        let drawn = Drawn {
+            active,
+            width,
+            count: 7,
+            band: Rect::NOTHING,
+            tabs: Vec::new(),
+            new: Rect::NOTHING,
+            list: None,
+            items: Vec::new(),
+            asked: Vec::new(),
+        };
         let mut h = harness_in(vec2(width + 2.0 * ROOM, 400.0), theme, drawn, move |ui, s| {
             ui.add_space(ROOM);
-            ui.allocate_ui(vec2(width, TAB_H), |ui| {
-                s.band = Rect::from_min_size(ui.cursor().min, vec2(width, TAB_H));
-                let shown = Strip::new(page_tabs(7, s.active)).show(ui, |_, _| {});
+            ui.allocate_ui(vec2(s.width, TAB_H), |ui| {
+                s.band = Rect::from_min_size(ui.cursor().min, vec2(s.width, TAB_H));
+                let shown = Strip::new(page_tabs(s.count, s.active)).show(ui, |_, _| {});
                 s.tabs = shown.tabs.iter().map(|t| t.tab.rect).collect();
                 s.new = shown.new.rect;
                 s.list = shown.list.map(|r| r.rect);
@@ -1099,6 +1112,31 @@ mod tests {
         h.state_mut().active = 3;
         h.run();
         assert!(whole_in_view(h.state(), 3), "line_items in view: {:?}", h.state().tabs);
+        // Review 2, Minor 11: wheeled away from the active tab, it comes back into view when the
+        // strip's width changes, and when the number of tabs does.
+        h.state_mut().active = 0;
+        h.run();
+        let away = |h: &mut egui_kittest::Harness<'_, Drawn>| {
+            for _ in 0..6 {
+                h.hover_at(h.state().band.left_center() + vec2(40.0, 0.0));
+                h.event(Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(-40.0, 0.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: Modifiers::NONE,
+                });
+                h.run_steps(30);
+            }
+            assert!(!whole_in_view(h.state(), 0), "wheeled away from orders: {:?}", h.state().tabs);
+        };
+        away(&mut h);
+        h.state_mut().width = 540.0;
+        h.run();
+        assert!(whole_in_view(h.state(), 0), "back in view after the width changed: {:?}", h.state().tabs);
+        away(&mut h);
+        h.state_mut().count = 6;
+        h.run();
+        assert!(whole_in_view(h.state(), 0), "back in view after a tab went: {:?}", h.state().tabs);
     }
 
     /// What the harness's tabs asked for, the last time each did.
