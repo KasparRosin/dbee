@@ -371,13 +371,13 @@ fn own_cancel_reads_as_cancelled() {
 #[test]
 fn a_statement_timeout_reads_as_an_error() {
     let _db = require_testdb!();
-    let mut s = connected();
+    let (mut s, results) = connected_counting(&pg14_target());
     tab(&mut s, "SET statement_timeout = 100; SELECT pg_sleep(2)");
     for cancel_after_the_end in [false, true] {
         let job = start(&mut s, json!({}));
         if cancel_after_the_end {
             // The timeout has ended the statement; the job's result is not applied yet.
-            std::thread::sleep(Duration::from_millis(1500));
+            results.until_in(job);
             assert_eq!(run(&mut s, "query.cancel", json!({}))["sent"], true);
         }
         let e = s.wait(job, T).unwrap_err();
@@ -420,12 +420,15 @@ fn a_cancel_from_another_session_reads_as_an_error() {
 #[test]
 fn a_cancel_after_the_end_changes_nothing() {
     let _db = require_testdb!();
-    for_each_engine(|t, s| {
+    for t in engine_targets() {
+        println!("on {}", t.name());
+        let (mut s, results) = connected_counting(&t);
+        let s = &mut s;
         // The query connection is open: the run goes straight to its statement.
         tab(s, "select 1 as one");
         run(s, "query.run", json!({}));
         let job = start(s, json!({}));
-        std::thread::sleep(Duration::from_secs(1));
+        results.until_in(job);
         assert_eq!(run(s, "query.cancel", json!({}))["sent"], true, "{}: the run counts as running until it is applied", t.name());
         let r = s.wait(job, T).unwrap_or_else(|e| panic!("{}: {e}", t.name()));
         assert_eq!(names(&r["results"][0]), ["one"], "{}", t.name());
@@ -433,7 +436,7 @@ fn a_cancel_after_the_end_changes_nothing() {
         run(s, "query.setText", json!({ "text": "select 2 as two" }));
         assert_eq!(names(&run(s, "query.run", json!({}))["results"][0]), ["two"], "{}", t.name());
         assert_eq!(shown(s)["error"], Json::Null);
-    });
+    }
 }
 
 #[test]

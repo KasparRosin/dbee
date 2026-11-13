@@ -26,11 +26,11 @@
 
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, DbKind, MemoryStore, SecretKind, SecretStore, SshAuth, SshConfig, SslMode, StoredSecret};
-use dbee_engine::{EngineError, Json, Session, SessionOptions};
+use dbee_engine::{EngineError, JobId, Json, Session, SessionOptions};
 use dbee_ssh::{AgentSource, SshEnv};
 use dbee_testkit::{Kind, Server, TempHome, TestDb, TestTarget, temp_home};
 use serde_json::json;
@@ -298,6 +298,41 @@ pub fn connected_to(t: &TestTarget) -> TestSession {
 /// [`connected_to`] in an [`exclusive_session`].
 pub fn connected_exclusive_to(t: &TestTarget) -> TestSession {
     connect_to(exclusive_session(), t)
+}
+
+/// The results of a session's jobs that have come in, counted as they come: a job's worker sends
+/// its result, then calls the session's `notify`. A result counted here waits until the session
+/// next takes its results in, so a test can act between a job's end and its apply.
+#[derive(Clone, Default)]
+pub struct Results(Arc<(Mutex<usize>, Condvar)>);
+
+impl Results {
+    fn note(&self) {
+        let (count, came) = &*self.0;
+        *count.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        came.notify_all();
+    }
+
+    /// Waits until job `job` and every job the session started before it have sent their results
+    /// (jobs are numbered from 1 as they start, and each sends one).
+    pub fn until_in(&self, job: JobId) {
+        let (count, came) = &*self.0;
+        let deadline = std::time::Instant::now() + T;
+        let mut n = count.lock().unwrap_or_else(PoisonError::into_inner);
+        while (*n as u64) < job.0 {
+            let left =
+                deadline.checked_duration_since(std::time::Instant::now()).unwrap_or_else(|| panic!("job {} sent no result: {} came", job.0, *n));
+            n = came.wait_timeout(n, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+}
+
+/// A session connected to `t`, its jobs' results counted ([`Results`]).
+pub fn connected_counting(t: &TestTarget) -> (TestSession, Results) {
+    let results = Results::default();
+    let seen = results.clone();
+    let s = session_adjusted(move |o| o.notify = Some(Arc::new(move || seen.note())));
+    (connect_to(s, t), results)
 }
 
 /// Runs `f` on a session connected to each of [`engine_targets`], one after another.
