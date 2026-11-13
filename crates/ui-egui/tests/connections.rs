@@ -1843,7 +1843,7 @@ fn drawn_as(ui: &Ui, within: egui::Rect, words: &str) -> Option<(egui::Color32, 
     })
 }
 
-/// The status bar's address (the design agent, 2026-11-11): after the name block, in `data`
+/// The status bar's address (as the design draws it): after the name block, in `data`
 /// grey, the connection as typed in its form. Postgres and MySQL, through the SSH tunnel (the
 /// database's address as typed, then ` via ` and the SSH host, never the tunnel's local port),
 /// and a SQLite file with the home folder as `~`. `status-address` holds it.

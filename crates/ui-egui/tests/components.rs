@@ -165,7 +165,7 @@ fn the_showcase_draws_in_both_modes() {
             "TABS THAT DON'T FIT: THE STRIP SCROLLS, RESTING AT A TAB'S EDGE; + AND THE LIST STAY AT THE END; THE LIST SHOWS EVERY TAB, THE ACTIVE ONE MARKED",
             "NOT ON THE PAGE YET: A BUSY TAB, THE SPINNER IN ITS ICON'S PLACE; INACTIVE, ACTIVE",
             "MENU BAR, 30 TALL, FROM MENUBAR/TITLE; THEN WITH VIEW OPEN",
-            "RUN ROW: IDLE; RUNNING (RUN OFF, CANCEL THE INK BUTTON); RUN CURRENT AS AN OPTION, HIDDEN BY DEFAULT: KASPAR HASN'T DECIDED ON IT",
+            "RUN ROW: IDLE; RUNNING (RUN OFF, CANCEL THE INK BUTTON); RUN CURRENT AS AN OPTION, HIDDEN BY DEFAULT: NOT DECIDED YET",
             "RESULT TAB: INACTIVE, HOVER, ACTIVE, FOCUS (INFERRED)",
             "RESULT BAR: DONE, RUNNING, FAILED, CANCELLED; NEW FACTS: 2 ROWS AFFECTED, FIRST 10,000 OF 25,000 ROWS; THE VALUE PANEL OPEN (ON); MANY RESULTS: THEY SCROLL, WITH THE LIST",
             "ROWS/COUNT: EXACT; ESTIMATE WITH COUNT; UNKNOWN WITH COUNT ROWS; COUNTING WITH ITS TIMER (ITS CANCEL IS THE FOOTER JOB)",
@@ -310,7 +310,7 @@ fn body_row(shapes: &[(Rect, Shape)], view: Rect) -> Rect {
 
 #[test]
 fn the_input_body_rows_edges_are_even_at_either_end_of_the_window() {
-    // The design agent's pictures (`target/components-group1`, 1x) showed this row's edges and
+    // Pictures of the components (`target/components-group1`, 1x) showed this row's edges and
     // words faded at the top, where the picture's second piece starts: each input's edge must look
     // the same at its top and at its bottom, with the row at the top or the bottom of the view.
     for (mode, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {

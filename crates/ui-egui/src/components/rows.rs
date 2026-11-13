@@ -502,7 +502,7 @@ mod tests {
                     .collect();
                 assert_eq!(parts, want, "{at_}: the path in `data` `text_muted`");
             }
-            // A file's name longer than the row (the design agent, 2026-11-13): the folders go,
+            // A file's name longer than the row (as the design draws it): the folders go,
             // and the name is cut in its own middle, with one `…`.
             let design = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
             let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File(design.into()), None), CONNECTION_W);
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn a_tables_chevron_shows_focus_and_reads_out_what_it_opens() {
         // Review 2, Minor 2: Tab goes row, chevron, next row. On the chevron the tab close's focus
-        // look shows, a 2 px `ink` box 2 inside its square (the design agent, 2026-11-13), and the
+        // look shows, a 2 px `ink` box 2 inside its square, and the
         // row shows none. It reads out as a button, "Columns of <table>", pressed while open.
         let tables = vec![table("shop", "orders", RelKind::Table, vec![column("id", "int8")]), table("shop", "users", RelKind::Table, vec![])];
         let catalog = Catalog { schemas: vec![schema("shop", false, tables)], default_schema: Some("shop".into()) };

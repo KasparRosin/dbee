@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn a_long_sqlite_path_is_cut_in_the_middle() {
-        // The design agent (2026-11-11): a file's path with `~`, cut in the middle with … when
+        // As the design draws it: a file's path with `~`, cut in the middle with … when
         // short of room, the whole path on hover; READ-ONLY outlasts it.
         const PATH: &str = "~/Projects/clients/northwind-traders/archive/2026/exports/nightly/shop.sqlite";
         let path: &'static Address = Box::leak(Box::new(Address::File(PATH.into())));
@@ -710,7 +710,7 @@ mod tests {
         let all = texts(&h.output().shapes);
         assert!(all.iter().all(|(w, _, _)| !w.contains("sqlite")) && all.iter().any(|(w, _, _)| w == "READ-ONLY"), "{all:?}");
 
-        // A file's name longer than its room (the design agent, 2026-11-13): narrower and
+        // A file's name longer than its room (as the design draws it): narrower and
         // narrower, the path is whole, then its folders are cut with the file's name whole, then
         // the folders go and the name shows alone, then the name is cut in its own middle (no
         // folder, one `…`), then it goes. It reads whole all along.
@@ -758,7 +758,7 @@ mod tests {
         // As many letters from the start as from the end, while the file's name fits in that end;
         // a longer name keeps its whole self, with the mark before it, and the start its 6. Once
         // that doesn't fit, the folders go: the name alone, then the name cut in its own middle,
-        // with no folder and one `…` (the design agent, 2026-11-13).
+        // with no folder and one `…`.
         let fits = |n: usize| move |cut: &str| cut.chars().count() <= n;
         let path = "~/Projects/clients/northwind/archive/shop.sqlite";
         assert_eq!(cut_middle(path, fits(31)).as_deref(), Some("~/Projects/clie…ive/shop.sqlite"));
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(cut_middle(long, fits(25)).as_deref(), Some("northwind-tr…ghtly.sqlite"), "then the name is cut in its middle");
         assert_eq!(cut_middle(long, fits(12)), None, "fewer than 6 at either end");
         let design = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
-        assert_eq!(cut_middle(design, fits(32)).as_deref(), Some("Orders-and-Invoi…s-Backup.sqlite"), "the design agent's example");
+        assert_eq!(cut_middle(design, fits(32)).as_deref(), Some("Orders-and-Invoi…s-Backup.sqlite"), "the design's example");
         assert_eq!(cut_middle("C:\\data\\clients\\a-long-file-name.db", fits(20)).as_deref(), Some("a-long-file-name.db"));
         assert_eq!(cut_middle("a-long-file-name-without-folders.db", fits(20)).as_deref(), Some("a-long-fil…olders.db"), "no folders");
     }

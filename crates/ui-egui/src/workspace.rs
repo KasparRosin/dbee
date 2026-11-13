@@ -170,10 +170,10 @@ pub fn live_job(session: &Session) -> Option<LiveJob> {
     }
 }
 
-/// The connection's address for the status bar, as typed in its form (the design agent,
-/// 2026-11-11): `user@host:port/database`, empty parts left out (an IPv6 host in brackets before
-/// its port), then through a tunnel ` via ` and the SSH host; a file's path with `home` as `~`.
-/// A config never holds a password. `None` when the name block already is the address: a name
+/// The connection's address for the status bar, as typed in its form:
+/// `user@host:port/database`, empty parts left out (an IPv6 host in brackets before its port),
+/// then through a tunnel ` via ` and the SSH host; a file's path with `home` as `~`. A config
+/// never holds a password. `None` when the name block already is the address: a name
 /// dbee made up, or one that reads the same.
 pub(crate) fn address(config: &ConnectionConfig, home: Option<&Path>) -> Option<Address> {
     if config.name.is_empty() {
@@ -285,7 +285,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let address = address(&c.config, dbee_config::home_dir().as_deref());
     let read_only = c.info.read_only;
     let server = dbee_engine::state::server_text(&c.info);
-    // The link is named only while it is weaker than fully checked (the design agent, #9).
+    // The link is named only while it is weaker than fully checked (#9).
     let link = dbee_engine::state::tls_text(&c.info, c.config.ssh.is_some()).filter(|_| c.info.tls != Some(TlsState::Checked));
     let unsaved = !app.session.state().store.is_saved(&c.config.id);
     let activity = activity(&app.session);

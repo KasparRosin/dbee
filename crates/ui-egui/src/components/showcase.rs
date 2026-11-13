@@ -783,7 +783,7 @@ fn results(ui: &mut Ui) {
     };
     section(
         ui,
-        "run row: idle; running (RUN off, CANCEL the ink button); RUN CURRENT as an option, hidden by default: Kaspar hasn't decided on it",
+        "run row: idle; running (RUN off, CANCEL the ink button); RUN CURRENT as an option, hidden by default: not decided yet",
         SPACE_8,
         |ui| {
             stack(ui, &mut |ui| {

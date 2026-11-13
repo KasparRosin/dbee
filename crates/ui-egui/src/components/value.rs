@@ -11,7 +11,7 @@
 //! The bar's COPY and WRAP (CANCEL and SAVE while editing) come with the value panel screen: the
 //! app's panel has none yet, and nothing in the app sets the copied, editing and row states, which
 //! the showcase shows. Today's kind chip (`JSONB`) and the note on a cut value keep today's look,
-//! under the bar and before the value, until Kaspar decides them.
+//! under the bar and before the value, until it is decided.
 
 use std::ops::Range;
 
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn null_and_empty_sit_where_a_value_starts() {
-        // The design agent, 2026-11-11: NULL and `empty` at the top left in `code` `text_muted`;
+        // As the design draws it: NULL and `empty` at the top left in `code` `text_muted`;
         // only "No cell selected" is centred.
         for (theme, t) in both() {
             let h = app(theme, vec2(360.0, 500.0), Some(view("note", "text", Some("plain"))));

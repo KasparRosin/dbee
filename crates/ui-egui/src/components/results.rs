@@ -50,7 +50,7 @@ fn bar_ground(ui: &mut Ui) -> (Response, Rect) {
 pub struct RunRow {
     /// The tab's run goes: RUN and RUN CURRENT are off, CANCEL shows.
     pub running: bool,
-    /// RUN CURRENT shows (as today, while Kaspar hasn't decided on it).
+    /// RUN CURRENT shows (as today, until it is decided).
     pub run_current: bool,
     /// A run can start (the engine's own check): RUN and RUN CURRENT are on while nothing runs.
     pub can_run: bool,

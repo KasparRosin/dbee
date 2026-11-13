@@ -972,7 +972,7 @@ fn the_status_bar_tells_what_was_checked() {
     for (ssl_mode, says) in [
         (SslMode::VerifyCa, Some("Encrypted, certificate checked")),
         (SslMode::Require, Some("Encrypted, certificate checked")),
-        // Fully checked: the bar names the link only while it is weaker (the design agent, #9).
+        // Fully checked: the bar names the link only while it is weaker (#9).
         (SslMode::VerifyFull, None),
     ] {
         let mut ui = connected_to(db, ConnectionConfig { ssl_mode, ca_file: ca_file.clone(), ..pg14(db) }, false);
@@ -1570,7 +1570,7 @@ fn assert_rests(ui: &mut Ui, active: u64, at: &str) {
     assert!(a.whole == a.shown || wider, "{at}: the active tab {active} is whole in view: {a:?}");
 }
 
-/// The design agent's rule until the overflow of tabs is decided (2026-11-11): a strip that
+/// The rule until the overflow of tabs is decided (2026-11-11): a strip that
 /// scrolls rests with the first tab in view whole at its left edge; each tab made active comes
 /// into view whole.
 #[test]
@@ -1581,7 +1581,7 @@ fn the_strip_rests_at_a_tab_edge() {
         let at = format!("{n} tabs, {} wide", size.x);
         let mut ui = Ui::connected_in(db, size);
         if size == APP_SIZE && ui.value("value-toggle") != true {
-            // With the value panel open, as the design agent saw it: four tabs overflow.
+            // With the value panel open, as the design draws it: four tabs overflow.
             ui.click("value-toggle");
             assert_eq!(ui.value("value-toggle"), true, "{at}: the value panel shows");
         }
