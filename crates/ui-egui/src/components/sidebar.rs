@@ -145,20 +145,21 @@ fn refresh_button(ui: &mut Ui, state: Refresh) -> Response {
 }
 
 /// How many tables the tree holds: all of them, the filter's matches of them, or none known yet.
-/// The word (`tables`) is dbee's, written in the plural the count needs.
+/// The word is dbee's, in the singular and the plural (`table`, `tables`): the total picks one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Count<'a> {
-    All(u64, &'a str),
-    Some(u64, u64, &'a str),
+    All(u64, [&'a str; 2]),
+    Some(u64, u64, [&'a str; 2]),
     Loading,
 }
 
 impl Count<'_> {
-    /// The words as written: `516 tables`, `3 of 516 tables`, `Loading`.
+    /// The words as written: `516 tables`, `3 of 516 tables`, `1 table`, `Loading`.
     pub fn words(self) -> String {
+        let word = |n: u64, [one, many]: [&str; 2]| if n == 1 { one.to_owned() } else { many.to_owned() };
         match self {
-            Count::All(n, word) => format!("{} {word}", thousands(n)),
-            Count::Some(m, n, word) => format!("{} of {} {word}", thousands(m), thousands(n)),
+            Count::All(n, words) => format!("{} {}", thousands(n), word(n, words)),
+            Count::Some(m, n, words) => format!("{} of {} {}", thousands(m), thousands(n), word(n, words)),
             Count::Loading => "Loading".to_owned(),
         }
     }
@@ -291,16 +292,22 @@ mod tests {
         }
     }
 
+    const TABLES: [&str; 2] = ["table", "tables"];
+
     #[test]
     fn the_count_matches_the_page() {
         // Node 164511: a row 28 tall, its words 12 in and centred, in `label` capitals,
         // `text_muted`; read out as written.
         let counts = [
-            (Count::All(516, "tables"), "516 TABLES", "516 tables"),
-            (Count::Some(3, 516, "tables"), "3 OF 516 TABLES", "3 of 516 tables"),
-            (Count::All(0, "tables"), "0 TABLES", "0 tables"),
+            (Count::All(516, TABLES), "516 TABLES", "516 tables"),
+            (Count::Some(3, 516, TABLES), "3 OF 516 TABLES", "3 of 516 tables"),
+            (Count::All(0, TABLES), "0 TABLES", "0 tables"),
+            (Count::All(1, TABLES), "1 TABLE", "1 table"),
+            (Count::Some(1, 1, TABLES), "1 OF 1 TABLE", "1 of 1 table"),
+            (Count::Some(0, 1, TABLES), "0 OF 1 TABLE", "0 of 1 table"),
+            (Count::Some(1, 2, TABLES), "1 OF 2 TABLES", "1 of 2 tables"),
             (Count::Loading, "LOADING", "Loading"),
-            (Count::Some(1_234, 12_345, "tables"), "1,234 OF 12,345 TABLES", "1,234 of 12,345 tables"),
+            (Count::Some(1_234, 12_345, TABLES), "1,234 OF 12,345 TABLES", "1,234 of 12,345 tables"),
         ];
         for (theme, t) in both() {
             for (count, drawn, read) in counts {

@@ -990,7 +990,8 @@ fn sidebar_header(ui: &mut Ui) {
                         None => filter.show(ui),
                     };
                 });
-                let counts = [Count::All(516, "tables"), Count::Some(3, 516, "tables"), Count::All(0, "tables"), Count::Loading];
+                let tables = ["table", "tables"];
+                let counts = [Count::All(516, tables), Count::Some(3, 516, tables), Count::All(0, tables), Count::Loading];
                 row(ui, &mut |ui, n| {
                     if let Some(count) = counts.get(n) {
                         count.show(ui);

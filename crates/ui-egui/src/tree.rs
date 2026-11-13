@@ -412,7 +412,8 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         let rows = tree.rows(catalog);
         (rows.matching as u64, rows.total as u64)
     };
-    let count = if filtering { Count::Some(matching, total, "tables") } else { Count::All(total, "tables") };
+    let word = ["table", "tables"];
+    let count = if filtering { Count::Some(matching, total, word) } else { Count::All(total, word) };
     count.show(ui);
     let mut click = Click::None;
     let selected = tree.selected.clone();

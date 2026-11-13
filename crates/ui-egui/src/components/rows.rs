@@ -701,6 +701,28 @@ mod tests {
     }
 
     #[test]
+    fn the_tables_count_says_table_for_one() {
+        // Review 1, M2: the count's word follows the total: `1 TABLE`, also filtered (`1 OF 1
+        // TABLE`); `2 TABLES`, `1 OF 2 TABLES`.
+        use egui_kittest::kittest::Queryable;
+        for (n, all, filtered) in [(1, "1 TABLE", "1 OF 1 TABLE"), (2, "2 TABLES", "1 OF 2 TABLES")] {
+            let tables = (0..n).map(|i| table("shop", &format!("t{i}"), RelKind::Table, vec![])).collect();
+            let catalog = Catalog { schemas: vec![schema("shop", false, tables)], default_schema: Some("shop".into()) };
+            let mut h = tree_harness(vec2(300.0, 400.0), catalog);
+            h.run();
+            let drawn =
+                |h: &egui_kittest::Harness<'static, Shown>| -> Vec<String> { texts(&h.output().shapes).into_iter().map(|(w, _, _)| w).collect() };
+            assert!(drawn(&h).iter().any(|w| w == all), "{n}: `{all}`: {:?}", drawn(&h));
+            h.get_by_role(egui::accesskit::Role::TextInput).click();
+            h.run();
+            h.get_by_role(egui::accesskit::Role::TextInput).type_text("t0");
+            h.run();
+            h.run();
+            assert!(drawn(&h).iter().any(|w| w == filtered), "{n}: `{filtered}`: {:?}", drawn(&h));
+        }
+    }
+
+    #[test]
     fn a_tables_chevron_shows_focus_and_reads_out_what_it_opens() {
         // Review 2, Minor 2: Tab goes row, chevron, next row. On the chevron the tab close's focus
         // look shows, a 2 px `ink` box 2 inside its square (the design agent, 2026-11-13), and the
