@@ -208,24 +208,31 @@ pub struct IconButton {
     icon: Icon,
     style: IconStyle,
     on: Option<bool>,
+    label: Option<String>,
     look: Option<Look>,
 }
 
 impl IconButton {
     /// A `line_strong` edge and no ground of its own: the filter bar's add, remove and raw SQL.
     pub fn boxed(icon: Icon) -> IconButton {
-        IconButton { icon, style: IconStyle::Boxed, on: None, look: None }
+        IconButton { icon, style: IconStyle::Boxed, on: None, label: None, look: None }
     }
 
     /// No edge: the paging arrows.
     pub fn plain(icon: Icon) -> IconButton {
-        IconButton { icon, style: IconStyle::Plain, on: None, look: None }
+        IconButton { icon, style: IconStyle::Plain, on: None, label: None, look: None }
     }
 
     /// A toggle, on or off (the raw SQL toggle). On, a boxed one has a `fill` ground inside its
     /// edge, hovered or not; the page draws no on look for a plain one.
     pub fn on(mut self, on: bool) -> IconButton {
         self.on = Some(on);
+        self
+    }
+
+    /// What it reads out: what it does, where its icon's name alone doesn't say it.
+    pub fn label(mut self, label: impl Into<String>) -> IconButton {
+        self.label = Some(label.into());
         self
     }
 
@@ -239,9 +246,10 @@ impl IconButton {
 impl Widget for IconButton {
     fn ui(self, ui: &mut Ui) -> Response {
         let (rect, r) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON), Sense::click());
+        let label = self.label.as_deref().unwrap_or(self.icon.name());
         r.widget_info(|| match self.on {
-            Some(on) => WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, self.icon.name()),
-            None => WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.icon.name()),
+            Some(on) => WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, label),
+            None => WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label),
         });
         let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
         if !ui.is_rect_visible(rect) {
@@ -641,7 +649,7 @@ mod tests {
                         ui.add_space(ROOM);
                         ui.horizontal(|ui| {
                             ui.add_space(ROOM);
-                            let b = IconButton { icon: Icon::Plus, style, on: None, look: None };
+                            let b = IconButton { icon: Icon::Plus, style, on: None, label: None, look: None };
                             at = match state {
                                 "disabled" => ui.add_enabled(false, b).rect,
                                 "hover" => ui.add(b.look(hovered)).rect,
@@ -816,11 +824,13 @@ mod tests {
             ui.horizontal(|ui| {
                 ui.add(IconButton::boxed(Icon::Code).on(true));
                 ui.add(IconButton::boxed(Icon::Plus));
+                ui.add(IconButton::boxed(Icon::Minus).label("Remove this filter"));
             });
         });
         h.run();
         assert_eq!(h.get_by_label("code").accesskit_node().toggled(), Some(Toggled::True), "on, it says so");
         assert_eq!(h.get_by_label("plus").accesskit_node().toggled(), None, "an icon button that is never on says nothing");
+        assert!(h.query_by_label("Remove this filter").is_some() && h.query_by_label("minus").is_none(), "its label, not its icon's name");
     }
 
     #[test]

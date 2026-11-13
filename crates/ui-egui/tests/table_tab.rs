@@ -79,6 +79,28 @@ fn day_filters_through_the_bar() {
     ui.until("the page with two filters", |ui| ui.table()["applied"]["filters"].as_array().map(Vec::len) == Some(2));
 }
 
+/// Review 2, Minor 8: the filter bar's icon buttons read out by what they do, the hover's words,
+/// not by their icons (`code`, `minus`, `plus`); the raw toggle says whether it is on.
+#[test]
+fn the_filter_bars_icon_buttons_read_out_what_they_do() {
+    use egui::accesskit::{Role, Toggled};
+    use egui_kittest::kittest::{NodeT, Queryable};
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "customers");
+    for words in ["Raw WHERE condition", "Remove this filter", "Add a filter"] {
+        assert!(ui.harness.query_by_role_and_label(Role::Button, words).is_some(), "`{words}` read out");
+    }
+    for icon in ["code", "minus", "plus"] {
+        assert!(ui.harness.query_by_label(icon).is_none(), "not `{icon}`");
+    }
+    let toggled = |ui: &Ui| ui.harness.get_by_role_and_label(Role::Button, "Raw WHERE condition").accesskit_node().toggled();
+    assert_eq!(toggled(&ui), Some(Toggled::False), "off");
+    ui.click("filter-raw-toggle");
+    ui.frame();
+    assert_eq!(toggled(&ui), Some(Toggled::True), "on");
+}
+
 /// Review 2, Minor 3: a filter's dropdown chosen from with the keyboard closes its list, as after
 /// a click: Enter opens it, the arrow takes the keyboard to its first item, Enter chooses it.
 #[test]
