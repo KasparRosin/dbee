@@ -11,7 +11,9 @@
 //!
 //! When the bar is too narrow, the facts give way in this order: the server version, the link's
 //! security, the address (a file's path is first cut in the middle, and reads whole on hover),
-//! READ-ONLY; then the name is cut. SAVE CONNECTION, the activity and its button stay.
+//! READ-ONLY; then the name is cut. SAVE CONNECTION, the activity and its button stay. The
+//! activity takes at most what is left once the block keeps a few letters: a job's name is cut
+//! with `…` past that, and its words read whole on hover.
 //!
 //! A bar is a view: it takes what to show and says what was clicked ([`Shown`]); the screen tags
 //! what it drew and acts.
@@ -42,6 +44,8 @@ const ADDRESS: usize = 0;
 const GIVE_WAY: [usize; 4] = [1, 2, ADDRESS, 3];
 /// A path cut in the middle keeps at least this many letters at either end, or goes.
 const CUT_KEEP: usize = 6;
+/// The connection's name keeps at least this many letters when a long activity takes the room.
+const NAME_KEEP: usize = 4;
 
 /// The connection the bar is about: its name and its colour.
 #[derive(Clone, Copy, Debug)]
@@ -172,29 +176,15 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
     let end = Rect::from_min_max(under.min, pos2(under.right() - STATUS_PAD_X, under.bottom()));
     let drawn = ui.scope_builder(UiBuilder::new().max_rect(end).layout(Layout::right_to_left(Align::Center)), right).response.rect;
     let mut x = if drawn.width() > 0.0 { drawn.left() - STATUS_GAP } else { end.right() };
-    let mut shown_activity = None;
-    let mut button = None;
-    let mut act = None;
-    if let Some(activity) = activity {
-        let (words, b, a, left) = show_activity(ui, t, id, activity, x, mid);
-        shown_activity = Some(words);
-        if let Some(b) = b {
-            if b.clicked() {
-                act = a;
-            }
-            button = Some(b);
-        }
-        x = left - STATUS_GAP;
-    }
 
-    // The left: the block, then the facts that fit.
+    // The left's pieces, laid out first: the activity leaves the block its fewest letters.
     let (text_colour, block_fill) = match colour {
         Some((fill, on)) => (on, Some(fill)),
         None => (t.text, None),
     };
+    let named = |name: &str| if connection.own { Text::Label.job(name, text_colour) } else { Text::Label.job_as_written(name, text_colour) };
     let name_job = |width: f32| {
-        let mut job =
-            if connection.own { Text::Label.job(connection.name, text_colour) } else { Text::Label.job_as_written(connection.name, text_colour) };
+        let mut job = named(connection.name);
         job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
         job
     };
@@ -208,7 +198,6 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
     // Left to right: the address, the server version, the link's security, READ-ONLY.
     let mut pieces = [address, server, link, read_only];
     let mut kept = pieces.each_ref().map(Option::is_some);
-    let room = x - under.left();
     // The block, 20, the facts 12 apart, then 8 and SAVE CONNECTION.
     let used = |pieces: &[Option<Piece>; 4], kept: &[bool; 4], name_w: f32| {
         let facts: Vec<f32> = pieces.iter().zip(kept).filter(|(_, k)| **k).map(|(p, _)| p.as_ref().map_or(0.0, Piece::width)).collect();
@@ -216,6 +205,27 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
         let save_w = if save_w > 0.0 && !facts.is_empty() { STATUS_GAP + save_w } else { save_w };
         name_w + 2.0 * STATUS_BLOCK_PAD_X + STATUS_AFTER_BLOCK + facts_w + save_w
     };
+
+    // The activity, in the room left once the block keeps its fewest letters and SAVE CONNECTION
+    // stays.
+    let mut shown_activity = None;
+    let mut button = None;
+    let mut act = None;
+    if let Some(activity) = activity {
+        let fewest: String = connection.name.chars().take(NAME_KEEP).chain(['…']).collect();
+        let fewest_w = Piece::new(ui, named(&fewest), "").width().min(name.width());
+        let most = x - under.left() - used(&pieces, &[false; 4], fewest_w) - STATUS_GAP;
+        let (words, b, a, left) = show_activity(ui, t, id, activity, x, most, mid);
+        shown_activity = Some(words);
+        if let Some(b) = b {
+            if b.clicked() {
+                act = a;
+            }
+            button = Some(b);
+        }
+        x = left - STATUS_GAP;
+    }
+    let room = x - under.left();
     // The facts give way one by one (a path is cut first), then the name is cut.
     let data = |text: &str| Piece::new(ui, Text::Data.job_as_written(text, t.text_muted), text);
     let mut cut = false;
@@ -320,8 +330,17 @@ pub fn timer(elapsed: Duration) -> String {
 }
 
 /// Draws `activity` ending at `right`, centred on `mid`: its words, its button and what a click on
-/// that asks for, and where it starts.
-fn show_activity(ui: &mut Ui, t: &Tokens, id: Id, activity: &Activity, right: f32, mid: f32) -> (Response, Option<Response>, Option<Act>, f32) {
+/// that asks for, and where it starts. A job wider than `most` has its name cut, and reads whole
+/// on hover.
+fn show_activity(
+    ui: &mut Ui,
+    t: &Tokens,
+    id: Id,
+    activity: &Activity,
+    right: f32,
+    most: f32,
+    mid: f32,
+) -> (Response, Option<Response>, Option<Act>, f32) {
     // Each part, left to right: a mark, words, a timer (or today's spinner), a button; with the gap
     // before each.
     enum Part {
@@ -331,6 +350,20 @@ fn show_activity(ui: &mut Ui, t: &Tokens, id: Id, activity: &Activity, right: f3
         Timer(Option<Piece>),
         Button(&'static str, Act),
     }
+    fn width_of(ui: &Ui, part: &Part) -> f32 {
+        match part {
+            Part::Mark => TRANSACTION_MARK,
+            Part::Icon(icon) => icon.size().x,
+            Part::Words(p, _) => p.width(),
+            Part::Timer(Some(p)) => p.width(),
+            Part::Timer(None) => SPINNER,
+            Part::Button(label, _) => TextButton::new(label).width(ui),
+        }
+    }
+    fn total_of(ui: &Ui, parts: &[(f32, Part)]) -> f32 {
+        parts.iter().map(|(gap, part)| gap + width_of(ui, part)).sum()
+    }
+    let mut cut = false;
     let words = |ui: &Ui, s: &str, c: Color32| Part::Words(Piece::new(ui, Text::Label.job(s, c), s), c);
     let clock = |ui: &Ui, e: &Option<Duration>| Part::Timer(e.map(|e| Piece::new(ui, Text::Data.job_as_written(&timer(e), t.text_muted), timer(e))));
     let parts: Vec<(f32, Part)> = match activity {
@@ -342,23 +375,30 @@ fn show_activity(ui: &mut Ui, t: &Tokens, id: Id, activity: &Activity, right: f3
             vec![(0.0, Part::Icon(icon)), (STATUS_GAP, words(ui, says, t.text)), (STATUS_GAP, clock(ui, elapsed))]
         }
         Activity::Job { text, elapsed, cancel } => {
-            let mut parts = vec![(0.0, Part::Words(Piece::new(ui, text.caps_job(t.text_muted), text.to_string()), t.text_muted))];
-            parts.push((STATUS_FACT_GAP, clock(ui, elapsed)));
-            if *cancel {
-                parts.push((STATUS_FACT_GAP, Part::Button("Cancel", Act::Cancel)));
+            let job = |words: &Words| {
+                let mut parts = vec![(0.0, Part::Words(Piece::new(ui, words.caps_job(t.text_muted), text.to_string()), t.text_muted))];
+                parts.push((STATUS_FACT_GAP, clock(ui, elapsed)));
+                if *cancel {
+                    parts.push((STATUS_FACT_GAP, Part::Button("Cancel", Act::Cancel)));
+                }
+                parts
+            };
+            let parts = job(text);
+            if total_of(ui, &parts) > most && text.name_letters() > 1 {
+                // The most of the name's letters that fit, at least one.
+                let (mut lo, mut hi) = (1, text.name_letters() - 1);
+                while lo < hi {
+                    let mid = (lo + hi).div_ceil(2);
+                    if total_of(ui, &job(&text.cut_name(mid))) <= most { lo = mid } else { hi = mid - 1 }
+                }
+                cut = true;
+                job(&text.cut_name(lo))
+            } else {
+                parts
             }
-            parts
         }
     };
-    let width_of = |ui: &Ui, part: &Part| match part {
-        Part::Mark => TRANSACTION_MARK,
-        Part::Icon(icon) => icon.size().x,
-        Part::Words(p, _) => p.width(),
-        Part::Timer(Some(p)) => p.width(),
-        Part::Timer(None) => SPINNER,
-        Part::Button(label, _) => TextButton::new(label).width(ui),
-    };
-    let total: f32 = parts.iter().map(|(gap, part)| gap + width_of(ui, part)).sum();
+    let total = total_of(ui, &parts);
     let left = right - total;
     let mut x = left;
     let mut said = None;
@@ -386,6 +426,10 @@ fn show_activity(ui: &mut Ui, t: &Tokens, id: Id, activity: &Activity, right: f3
         x += w;
     }
     let said = said.unwrap_or_else(|| ui.interact(Rect::NOTHING, id.with("activity"), Sense::hover()));
+    let said = match activity {
+        Activity::Job { text, .. } if cut => said.hint(text.to_string()),
+        _ => said,
+    };
     (said, button, asked, left)
 }
 
@@ -659,6 +703,60 @@ mod tests {
         assert_eq!(cut_middle(long, fits(25)).as_deref(), Some("~/Proj…ers-nightly.sqlite"));
         assert_eq!(cut_middle(long, fits(12)), None, "fewer than 6 at either end");
         assert_eq!(cut_middle("C:\\data\\a-long-file-name.db", fits(20)).as_deref(), Some("C:\\dat…-file-name.db"));
+    }
+
+    /// What each text in `shapes` shows, as drawn (a cut one ends in `…`), and where.
+    fn shown(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect)> {
+        crate::components::flat(shapes)
+            .into_iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(t) => Some((t.galley.rows.iter().map(|r| r.text()).collect(), t.galley.rect.translate(t.pos.to_vec2()))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_job_leaves_the_connection_its_name() {
+        // Review 1, I1: in a small window a job on a table with a 63-letter name ran over the
+        // block, and the name went. The job's name is cut instead, keeping dbee's words and
+        // CANCEL; its whole words on hover. The block keeps a few letters.
+        const TABLE: &str = "rev1_customer_success_quarterly_revenue_reconciliation_2026_abc";
+        const WIDTH: f32 = 600.0;
+        assert_eq!(TABLE.len(), 63);
+        let words = Words::from("Loading ").name(TABLE).plain("…");
+        let whole = words.to_string();
+        let job = Activity::Job { text: words, elapsed: None, cancel: true };
+        let facts = Facts { unsaved: true, ..Facts::default() };
+        let mut h = crate::components::harness_in(vec2(WIDTH + 100.0, 120.0), Theme::Light, (), move |ui, _| {
+            ui.allocate_ui(vec2(WIDTH, SLIM_BAR_H), |ui| {
+                bar(ui, &Connection { name: "Shop live", colour: ConnectionColor::Red, own: true }, &facts, Some(&job), |_| {});
+            });
+        });
+        h.run_steps(2);
+        let seen = shown(&h.output().shapes);
+        let mut sorted: Vec<Rect> = seen.iter().map(|(_, r)| *r).collect();
+        sorted.sort_by(|a, b| a.left().total_cmp(&b.left()));
+        for pair in sorted.windows(2) {
+            assert!(pair[0].right() <= pair[1].left() + 0.5, "nothing drawn over another: {seen:?}");
+        }
+        for (w, r) in &seen {
+            assert!(r.left() >= -0.5 && r.right() <= WIDTH + 0.5, "`{w}` {r:?} inside the bar");
+        }
+        let text =
+            |start: &str| seen.iter().find(|(w, _)| w.starts_with(start)).map(|(w, _)| w.clone()).unwrap_or_else(|| panic!("`{start}…`: {seen:?}"));
+        let name = text("SHO");
+        assert!(name.trim_end_matches('…').len() >= 3, "the name keeps letters: `{name}`");
+        let cut = text("LOADING ");
+        assert!(cut.ends_with('…') && cut.len() < "LOADING ".len() + TABLE.len() && cut.contains("rev1_"), "the job's name cut: `{cut}`");
+        for w in ["SAVE CONNECTION", "CANCEL"] {
+            assert!(seen.iter().any(|(s, _)| s == w), "`{w}` stays: {seen:?}");
+        }
+        // Read out whole; whole on hover.
+        assert!(h.query_by_label(&whole).is_some(), "read out whole");
+        h.get_by_label(&whole).hover();
+        h.run_steps(2);
+        assert!(shown(&h.output().shapes).iter().any(|(w, _)| *w == whole), "whole on hover");
     }
 
     #[test]

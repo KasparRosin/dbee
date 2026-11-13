@@ -1230,36 +1230,17 @@ fn a_server_version_keeps_its_case() {
 #[test]
 fn the_status_bar_gives_way_at_the_smallest_window() {
     let db = dbee_testkit::require_testdb!();
+    // Review 1, I1: a job on a table with a 63-letter name, the most Postgres takes.
+    let long = Scratch::new(db, "customer_success_quarterly_revenue_reconciliation_2026q4", |t| format!("CREATE TABLE scratch.{t} (id int)"));
+    assert_eq!(long.0.len(), 63);
     for size in [APP_SIZE, egui::vec2(640.0, 420.0)] {
         let at = format!("{} wide", size.x);
         let mut ui = every_fact(db, size, false);
         ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
         ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
         ui.until("the run", |ui| ui.tag("status-job").is_some());
-        let parts = [
-            "status-connection",
-            "status-address",
-            "status-server",
-            "status-tls",
-            "status-read-only",
-            "status-save",
-            "status-job",
-            "status-cancel",
-            "value-toggle",
-        ];
-        let drawn: Vec<(&str, egui::Rect)> = parts.iter().filter_map(|id| shown_rect(&mut ui, id).map(|r| (*id, r))).collect();
-        for (id, r) in &drawn {
-            assert!(r.left() >= 0.0 && r.right() <= size.x, "{at}: `{id}` {r:?} inside the window");
-        }
-        for (k, (a, ra)) in drawn.iter().enumerate() {
-            for (b, rb) in &drawn[k + 1..] {
-                assert!(!ra.intersects(*rb) || ra.intersect(*rb).area() == 0.0, "{at}: `{a}` {ra:?} and `{b}` {rb:?} overlap");
-            }
-        }
+        let drawn = status_gives_way(&mut ui, size, &at);
         let has = |id: &str| drawn.iter().any(|(d, _)| *d == id);
-        for id in ["status-connection", "status-save", "status-job", "status-cancel", "value-toggle"] {
-            assert!(has(id), "{at}: `{id}` stays: {drawn:?}");
-        }
         let facts = ["status-server", "status-tls", "status-address", "status-read-only"];
         for (k, id) in facts.iter().enumerate() {
             if has(id) {
@@ -1273,7 +1254,59 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
         }
         ui.click("status-cancel");
         ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+        if size == APP_SIZE {
+            continue;
+        }
+        // The query session locks the table, so its page load waits.
+        ui.execute("tab.newQuery", json!({ "text": format!("begin; lock table scratch.{} in access exclusive mode", long.0) }));
+        let query = ui.active();
+        ui.execute("query.run", json!({}));
+        ui.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": long.0 }, "wait": false }));
+        ui.until("the load", |ui| ui.tag("status-job").is_some_and(|e| e["value"].as_str().is_some_and(|v| v.starts_with("Loading "))));
+        let at = format!("{at}, loading a table with a 63-letter name");
+        status_gives_way(&mut ui, size, &at);
+        let block = rect_of(&ui.tag("status-connection").unwrap());
+        let name: String = ui
+            .texts()
+            .into_iter()
+            .filter(|(r, _)| block.expand(1.0).contains(r.center()))
+            .flat_map(|(_, g)| g.rows.iter().map(|r| r.text()).collect::<Vec<_>>())
+            .collect();
+        assert!(name.chars().filter(|c| c.is_alphabetic()).count() >= 3, "{at}: the connection's name keeps letters: `{name}`");
+        ui.click("status-cancel");
+        ui.until("the cancelled load", |ui| ui.table()["loading"].is_null());
+        ui.execute("query.rollback", json!({ "tab": query }));
     }
+}
+
+/// The status bar's parts in a window of `size` (`at` says which case): each inside the window,
+/// none over another, and the name, SAVE CONNECTION, the job, its CANCEL and the value toggle
+/// shown. The parts drawn, with their rects.
+fn status_gives_way(ui: &mut Ui, size: egui::Vec2, at: &str) -> Vec<(&'static str, egui::Rect)> {
+    let parts = [
+        "status-connection",
+        "status-address",
+        "status-server",
+        "status-tls",
+        "status-read-only",
+        "status-save",
+        "status-job",
+        "status-cancel",
+        "value-toggle",
+    ];
+    let drawn: Vec<(&str, egui::Rect)> = parts.iter().filter_map(|id| shown_rect(ui, id).map(|r| (*id, r))).collect();
+    for (id, r) in &drawn {
+        assert!(r.left() >= 0.0 && r.right() <= size.x, "{at}: `{id}` {r:?} inside the window");
+    }
+    for (k, (a, ra)) in drawn.iter().enumerate() {
+        for (b, rb) in &drawn[k + 1..] {
+            assert!(!ra.intersects(*rb) || ra.intersect(*rb).area() == 0.0, "{at}: `{a}` {ra:?} and `{b}` {rb:?} overlap");
+        }
+    }
+    for id in ["status-connection", "status-save", "status-job", "status-cancel", "value-toggle"] {
+        assert!(drawn.iter().any(|(d, _)| *d == id), "{at}: `{id}` stays: {drawn:?}");
+    }
+    drawn
 }
 
 /// The menu bar is the page's: 30 tall on `bg` with a `line` along its bottom, its titles 24 tall

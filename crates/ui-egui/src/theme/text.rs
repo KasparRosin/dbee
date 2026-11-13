@@ -113,6 +113,23 @@ impl Words {
         self.push(s.into(), true)
     }
 
+    /// How many letters the last name has; 0 with no name.
+    pub fn name_letters(&self) -> usize {
+        self.parts.iter().rev().find(|(_, name)| *name).map_or(0, |(s, _)| s.chars().count())
+    }
+
+    /// These words with their last name cut to its first `keep` letters and `…`; what came after
+    /// it (a job's closing `…`) goes with it. Unchanged when that name has no more letters.
+    pub fn cut_name(&self, keep: usize) -> Words {
+        let Some(last) = self.parts.iter().rposition(|(_, name)| *name) else { return self.clone() };
+        let mut parts: Vec<(String, bool)> = self.parts.iter().take(last + 1).cloned().collect();
+        match parts.last_mut() {
+            Some((name, _)) if name.chars().count() > keep => *name = name.chars().take(keep).chain(['…']).collect(),
+            _ => return self.clone(),
+        }
+        Words { parts }
+    }
+
     fn push(mut self, s: String, name: bool) -> Words {
         match self.parts.last_mut() {
             _ if s.is_empty() => {}
@@ -232,6 +249,15 @@ mod tests {
             assert_eq!(seen[0], seen[1], "{ppp}: one baseline: {seen:?}");
             assert!((seen[2] - Text::Body.line()).abs() < 0.5, "{ppp}: the words' 18 line: {seen:?}");
         }
+    }
+
+    #[test]
+    fn a_cut_name_keeps_the_words_before_it() {
+        let words = Words::from("Loading ").name("Orders_and_invoices").plain("…");
+        assert_eq!(words.name_letters(), 19);
+        assert_eq!(words.cut_name(6), Words::from("Loading ").name("Orders…"));
+        assert_eq!(words.cut_name(19), words, "nothing to cut");
+        assert_eq!(Words::from("Counting rows").cut_name(1), Words::from("Counting rows"), "no name");
     }
 
     #[test]
