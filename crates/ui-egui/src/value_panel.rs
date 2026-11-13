@@ -67,6 +67,7 @@ use serde_json::{Value as Json, json};
 
 use crate::DbeeApp;
 use crate::automation::Tags;
+use crate::components::focus;
 use crate::components::icon::Icon;
 use crate::components::tooltip::Hint;
 use crate::components::value::{self, Facts, Panel, Shown, State};
@@ -673,7 +674,8 @@ pub(crate) fn fill(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
     contents(&mut child, view.as_ref(), &mut v.panel, tags);
 }
 
-/// The toggle at the right end of the status bar; true when it was clicked.
+/// The toggle at the right end of the status bar; true when it was clicked. Keyboard focus shows
+/// as on an icon button with no edge.
 pub(crate) fn toggle(ui: &mut egui::Ui, open: bool, tags: &mut Tags) -> bool {
     let t = theme::tokens(ui.ctx());
     let (rect, r) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
@@ -682,6 +684,9 @@ pub(crate) fn toggle(ui: &mut egui::Ui, open: bool, tags: &mut Tags) -> bool {
     }
     let colour = if open { t.ink } else { t.text_muted };
     Icon::Panel.paint(ui.painter(), rect.center(), colour);
+    if focus::shown(ui, &r) {
+        focus::box_around(ui.painter(), rect);
+    }
     let r = r.hint(if open { "Hide the value panel" } else { "Show the value panel" });
     tags.tag_value(TOGGLE, &r, open);
     r.clicked()

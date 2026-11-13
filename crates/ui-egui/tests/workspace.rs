@@ -1309,6 +1309,39 @@ fn status_gives_way(ui: &mut Ui, size: egui::Vec2, at: &str) -> Vec<(&'static st
     drawn
 }
 
+/// Review 1: Tab from the last menu title reaches one stop before the tree's filter, the status
+/// bar's value toggle. Reached by the keyboard, it shows the focus look of an icon button with no
+/// edge, a 2 px `ink` box 4 out; a click shows none.
+#[test]
+fn the_value_toggle_shows_keyboard_focus() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = connected(db);
+    let toggle = rect_of(&ui.tag("value-toggle").unwrap());
+    let ring = |ui: &Ui| {
+        ui.shapes()
+            .into_iter()
+            .any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.rect == toggle.expand(4.0) && r.stroke.width == 2.0 && r.stroke.color == t.ink))
+    };
+    ui.click("tree-filter");
+    ui.key_with("Tab", json!({ "shift": true }));
+    ui.frame();
+    use egui_kittest::kittest::{NodeT, Queryable};
+    let focused = ui.harness.query_by(|n| n.is_focused()).map(|n| {
+        let n = n.accesskit_node();
+        (n.role(), n.label(), n.raw_bounds())
+    });
+    assert!(ring(&ui), "the stop before the filter shows its focus look: {focused:?}, the toggle at {toggle:?}");
+    // Enter on it toggles the panel, as a click does.
+    let open = ui.value("value-toggle");
+    ui.key("Enter");
+    ui.frame();
+    assert_ne!(ui.value("value-toggle"), open, "Enter toggles it");
+    ui.click("value-toggle");
+    ui.frame();
+    assert!(!ring(&ui), "a click shows no focus look");
+}
+
 /// The menu bar is the page's: 30 tall on `bg` with a `line` along its bottom, its titles 24 tall
 /// side by side from 4 in, centred above the line; what is under it starts at 30. Its tags stay.
 #[test]
