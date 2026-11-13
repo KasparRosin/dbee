@@ -300,28 +300,47 @@ pub(super) fn piece(ui: &Ui, id: Id, piece: &Piece, at: egui::Pos2, colour: Colo
     r
 }
 
-/// A file's path, `whole`, cut in the middle with `…`: the most letters for which `fits` holds,
-/// as many from its start as from its end, but the end keeps the file's name (with the `/` before
-/// it) whole while the start keeps [`CUT_KEEP`]; `None` when it would keep fewer than that at
-/// either end. The status bar's address and a connection row's line cut a path so.
+/// A file's path, `whole`, cut in the middle with `…`: the most letters for which `fits` holds.
+/// First its folders are cut, as many letters kept from its start as from its end, but the end
+/// keeps the file's name (with the `/` before it) whole while the start keeps [`CUT_KEEP`]. Past
+/// that the folders go: the name alone, then the name cut in its own middle. `None` when that
+/// would keep fewer than [`CUT_KEEP`] at either end. The status bar's address and a connection
+/// row's line cut a path so.
 pub(super) fn cut_middle(whole: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
     let letters: Vec<char> = whole.chars().collect();
-    let name = letters.iter().rev().position(|c| matches!(c, '/' | '\\')).map_or(0, |i| i + 1);
-    let cut = |keep: usize| -> String {
-        let tail = (keep - keep / 2).max(name.min(keep - CUT_KEEP));
-        let head = keep - tail;
-        letters.iter().take(head).chain(['…'].iter()).chain(letters.iter().skip(letters.len().saturating_sub(tail))).collect()
+    // Where the file's name starts, after its folder's mark.
+    let start = letters.iter().rposition(|c| matches!(c, '/' | '\\')).map_or(0, |i| i + 1);
+    let name = letters.get(start..).unwrap_or_default();
+    // `letters` cut to `keep` of them, `tail` from the end, with `…` between.
+    let cut = |letters: &[char], keep: usize, tail: usize| -> String {
+        letters.iter().take(keep.saturating_sub(tail)).chain(['…'].iter()).chain(letters.iter().skip(letters.len().saturating_sub(tail))).collect()
     };
-    // The most letters that fit: a cut is only as wide as the letters it keeps.
-    let (mut lo, mut hi) = (2 * CUT_KEEP, letters.len().checked_sub(1)?);
-    if lo > hi || !fits(&cut(lo)) {
-        return None;
-    }
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        if fits(&cut(mid)) { lo = mid } else { hi = mid - 1 }
-    }
-    Some(cut(lo))
+    // The most letters in `lo..=hi` that `fits` takes, by their cut; a cut is only as wide as the
+    // letters it keeps.
+    let most = |lo: usize, hi: usize, cut: &dyn Fn(usize) -> String| -> Option<String> {
+        if lo > hi || !fits(&cut(lo)) {
+            return None;
+        }
+        let (mut lo, mut hi) = (lo, hi);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if fits(&cut(mid)) { lo = mid } else { hi = mid - 1 }
+        }
+        Some(cut(lo))
+    };
+    // The folders cut, the name whole with its mark.
+    let marked = letters.len() - start.saturating_sub(1);
+    let folders = (start > 0)
+        .then(|| most(CUT_KEEP + marked, letters.len().saturating_sub(1), &|keep| cut(&letters, keep, (keep - keep / 2).max(marked))))
+        .flatten();
+    // The name alone, then cut in its own middle, its start keeping the odd letter.
+    folders.or_else(|| {
+        let alone: String = name.iter().collect();
+        if start > 0 && fits(&alone) {
+            return Some(alone);
+        }
+        most(2 * CUT_KEEP, name.len().checked_sub(1)?, &|keep| cut(name, keep, keep / 2))
+    })
 }
 
 /// The timer's words: minutes, seconds and tenths, `00:04.1`.
@@ -690,20 +709,68 @@ mod tests {
         let h = facts_bar(200.0, facts);
         let all = texts(&h.output().shapes);
         assert!(all.iter().all(|(w, _, _)| !w.contains("sqlite")) && all.iter().any(|(w, _, _)| w == "READ-ONLY"), "{all:?}");
+
+        // A file's name longer than its room (the design agent, 2026-11-13): narrower and
+        // narrower, the path is whole, then its folders are cut with the file's name whole, then
+        // the folders go and the name shows alone, then the name is cut in its own middle (no
+        // folder, one `…`), then it goes. It reads whole all along.
+        const NAME: &str = "Orders-and-Invoices-Backup.sqlite";
+        const LONG: &str = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
+        let path: &'static Address = Box::leak(Box::new(Address::File(LONG.into())));
+        let facts = Facts { address: Some(path), read_only: true, ..Facts::default() };
+        let mut seen = Vec::new();
+        for width in (200..=700).rev().step_by(4) {
+            let h = facts_bar(width as f32, facts);
+            let all = texts(&h.output().shapes);
+            let shown = all.iter().find(|(w, _, _)| w.contains("sqlite") || w.contains("Orders")).map(|(w, _, _)| w.clone());
+            let stage = match shown.as_deref() {
+                Some(LONG) => 0,
+                Some(w) if w.contains('/') => {
+                    let (head, tail) = w.split_once('…').unwrap_or_else(|| panic!("{width}: `{w}`"));
+                    assert!(
+                        LONG.starts_with(head) && head.chars().count() >= 6 && tail.ends_with(&format!("/{NAME}")),
+                        "{width}: the name whole: `{w}`"
+                    );
+                    1
+                }
+                Some(NAME) => 2,
+                Some(w) => {
+                    let (head, tail) = w.split_once('…').unwrap_or_else(|| panic!("{width}: `{w}`"));
+                    assert!(NAME.starts_with(head) && NAME.ends_with(tail) && !tail.contains('…'), "{width}: the name cut in its middle: `{w}`");
+                    assert!(head.chars().count().abs_diff(tail.chars().count()) <= 1 && tail.chars().count() >= 6, "{width}: in its middle: `{w}`");
+                    3
+                }
+                None => 4,
+            };
+            if seen.last() != Some(&stage) {
+                assert!(seen.last().is_none_or(|last| *last < stage), "{width}: `{shown:?}` after stages {seen:?}");
+                seen.push(stage);
+            }
+            if (1..=3).contains(&stage) {
+                assert!(h.query_by_label(LONG).is_some(), "{width}: read out whole");
+            }
+        }
+        assert_eq!(seen, [0, 1, 2, 3, 4], "every stage in order");
     }
 
     #[test]
     fn a_cut_keeps_the_files_name() {
         // As many letters from the start as from the end, while the file's name fits in that end;
-        // a longer name keeps its whole self and the start its 6; shorter room cuts the name too.
+        // a longer name keeps its whole self, with the mark before it, and the start its 6. Once
+        // that doesn't fit, the folders go: the name alone, then the name cut in its own middle,
+        // with no folder and one `…` (the design agent, 2026-11-13).
         let fits = |n: usize| move |cut: &str| cut.chars().count() <= n;
         let path = "~/Projects/clients/northwind/archive/shop.sqlite";
         assert_eq!(cut_middle(path, fits(31)).as_deref(), Some("~/Projects/clie…ive/shop.sqlite"));
         let long = "~/Projects/clients/northwind/archive/northwind-traders-nightly.sqlite";
         assert_eq!(cut_middle(long, fits(40)).as_deref(), Some("~/Proj…/northwind-traders-nightly.sqlite"));
-        assert_eq!(cut_middle(long, fits(25)).as_deref(), Some("~/Proj…ers-nightly.sqlite"));
+        assert_eq!(cut_middle(long, fits(39)).as_deref(), Some("northwind-traders-nightly.sqlite"), "the folders go");
+        assert_eq!(cut_middle(long, fits(25)).as_deref(), Some("northwind-tr…ghtly.sqlite"), "then the name is cut in its middle");
         assert_eq!(cut_middle(long, fits(12)), None, "fewer than 6 at either end");
-        assert_eq!(cut_middle("C:\\data\\a-long-file-name.db", fits(20)).as_deref(), Some("C:\\dat…-file-name.db"));
+        let design = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
+        assert_eq!(cut_middle(design, fits(32)).as_deref(), Some("Orders-and-Invoi…s-Backup.sqlite"), "the design agent's example");
+        assert_eq!(cut_middle("C:\\data\\clients\\a-long-file-name.db", fits(20)).as_deref(), Some("a-long-file-name.db"));
+        assert_eq!(cut_middle("a-long-file-name-without-folders.db", fits(20)).as_deref(), Some("a-long-fil…olders.db"), "no folders");
     }
 
     /// What each text in `shapes` shows, as drawn (a cut one ends in `…`), and where.

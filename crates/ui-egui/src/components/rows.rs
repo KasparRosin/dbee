@@ -491,6 +491,12 @@ mod tests {
                     .collect();
                 assert_eq!(parts, want, "{at_}: the path in `data` `text_muted`");
             }
+            // A file's name longer than the row (the design agent, 2026-11-13): the folders go,
+            // and the name is cut in its own middle, with one `…`.
+            let design = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
+            let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File(design.into()), None), CONNECTION_W);
+            assert_eq!((text.as_str(), elided, cut), ("Orders-and-Invoi…s-Backup.sqlite", false, true), "{theme:?}: the name in its middle");
+            assert!(at.right() <= r.right() - 12.0 + 0.5, "{theme:?}: inside the row's right 12: {at:?}");
             // Too narrow to keep 6 letters at either end (the status bar then drops the path): cut
             // at its end, and still whole on hover.
             let (text, _, elided, _, cut, _) = line_of(theme, &row(Address::File(LONG.into()), None), 120.0);
