@@ -1013,7 +1013,7 @@ fn sidebar_header(ui: &mut Ui) {
                     _ => ("Order_Items", Some(sidebar::Refresh::Idle)),
                 };
                 let mut text = typed.to_owned();
-                let placeholder = if refresh.is_some() { "Filter tables" } else { "Filter" };
+                let placeholder = if refresh.is_some() { "Filter tables" } else { "Filter connections" };
                 let filter = sidebar::Filter::new(&mut text, placeholder);
                 match refresh {
                     Some(refresh) => filter.refresh(refresh).show(ui),

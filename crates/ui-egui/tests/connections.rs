@@ -411,8 +411,8 @@ fn the_filter_finds_what_the_cards_show() {
 
 /// The connection list's filter is the sidebar's filter (`components::sidebar`), without a
 /// refresh: `conn-filter` keeps its id and its value as typed; the field is 35 tall over a 1 px
-/// `line`, its placeholder today's; what is typed is drawn as typed. A click gives it focus without
-/// the ring, Shift+Tab back to it shows the ring.
+/// `line`, its placeholder `Filter connections` as Screens writes it (node 61737); what is typed is
+/// drawn as typed. A click gives it focus without the ring, Shift+Tab back to it shows the ring.
 #[test]
 fn the_connection_filter_is_the_sidebar_filter() {
     let mut ui = cards();
@@ -420,7 +420,7 @@ fn the_connection_filter_is_the_sidebar_filter() {
     assert_eq!((&e["value"], e.get("enabled")), (&json!(""), None), "{e}");
     let f = rect_of(&e);
     assert_eq!(f.height(), 35.0, "the field, 35 above its line: {f:?}");
-    assert!(ui.text_in(f, "Filter").is_some(), "the placeholder");
+    assert!(ui.text_in(f, "Filter connections").is_some(), "the placeholder");
     let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
     let line = ui.shapes().into_iter().any(|(_, s)| {
         matches!(s, egui::Shape::Rect(r) if r.fill == t.line && r.rect.height() == 1.0 && (r.rect.top() - f.bottom()).abs() < 0.5

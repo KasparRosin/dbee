@@ -810,7 +810,7 @@ fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, a
                 acts.push(Act::New);
             }
             ui.add_space(10.0);
-            let filter = sidebar::Filter::new(&mut conn.filter, "Filter").id(egui::Id::new("conn-filter")).show(ui).field;
+            let filter = sidebar::Filter::new(&mut conn.filter, "Filter connections").id(egui::Id::new("conn-filter")).show(ui).field;
             tags.tag_value("conn-filter", &filter, conn.filter.as_str());
             if let Some(w) = &st.store_warning {
                 ui.add_space(8.0);
