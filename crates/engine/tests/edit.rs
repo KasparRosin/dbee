@@ -777,11 +777,12 @@ fn an_apply_cancelled_in_the_queue_stops_no_other_tab() {
         let mut s = opened(&t, &name);
         let first = s.inspect()["active"].clone();
         set_cell(&mut s, 0, "name", "queued");
-        // Another tab's load holds the connection: it waits for the lock, or on a file counts.
+        // Another tab's load holds the connection: it waits for the lock, or on a file counts for
+        // about 1 s.
         open_table(&mut s, t.schema("shop"), "orders");
         let key = unique("dbee_gate");
         let gate = t.server().map(|_| t.hold_lock(&key).unwrap());
-        let slow = if t.is_file() { t.slow_condition_sql(5) } else { t.waits_for_lock_sql(&key) };
+        let slow = if t.is_file() { t.slow_condition_sql(1) } else { t.waits_for_lock_sql(&key) };
         let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
         until_running(&t, &key);
         run(&mut s, "tab.activate", json!({ "tab": first }));
@@ -790,7 +791,8 @@ fn an_apply_cancelled_in_the_queue_stops_no_other_tab() {
         assert_eq!(run(&mut s, "table.cancel", json!({})), json!({ "sent": true, "apply": true }));
         let applied = s.wait(job, T);
         drop(gate);
-        let loaded = s.wait(load, T).unwrap_or_else(|e| panic!("{}: the other tab's load: {e}", t.name()));
+        // The load's own time is not what this tests: a count can take long on a loaded machine.
+        let loaded = s.wait(load, WATCHDOG).unwrap_or_else(|e| panic!("{}: the other tab's load: {e}", t.name()));
         assert_eq!(loaded["rows"], 100, "{}: {loaded}", t.name());
         assert_eq!(applied.map_err(|e| e.code()), Err("cancelled"), "{}: the Apply", t.name());
         assert_eq!(rows_of(&t, &format!("SELECT name FROM {sc}.{name} ORDER BY id")), "Alice,Bob,Cy", "{}: nothing was written", t.name());

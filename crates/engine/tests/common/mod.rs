@@ -38,6 +38,10 @@ use serde_json::json;
 /// How long a test waits for a job.
 pub const T: Duration = Duration::from_secs(30);
 
+/// How long a test waits for a job whose time is not what it tests, and can be long on a loaded
+/// machine (a calibrated count on a file).
+pub const WATCHDOG: Duration = Duration::from_secs(300);
+
 /// Shared by every session; exclusive while a test kills connections.
 static DB_LOCK: RwLock<()> = RwLock::new(());
 

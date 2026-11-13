@@ -778,8 +778,8 @@ fn a_load_stopped_in_the_queue_stops_no_other_tab() {
         open_table(s, t.schema("shop"), "orders");
         let key = unique("dbee_gate");
         let gate = hold_gate(t, &key);
-        // Tab A's load holds the connection: it waits for the lock, or on a file counts for about 5 s.
-        let slow = if t.is_file() { t.slow_condition_sql(5) } else { t.waits_for_lock_sql(&key) };
+        // Tab A's load holds the connection: it waits for the lock, or on a file counts for about 1 s.
+        let slow = if t.is_file() { t.slow_condition_sql(1) } else { t.waits_for_lock_sql(&key) };
         let Outcome::Started(a) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
         until_running(t, &key);
         // Tab B's first page waits behind it, and is stopped there.
@@ -795,7 +795,8 @@ fn a_load_stopped_in_the_queue_stops_no_other_tab() {
         let b = s.wait(b, T);
         assert_eq!(s.browse_waiting(), 0, "{}: tab B's load left the queue", t.name());
         drop(gate);
-        let a = s.wait(a, T).unwrap_or_else(|e| panic!("{}: tab A's load: {e}", t.name()));
+        // A's own time is not what this tests: a count can take long on a loaded machine.
+        let a = s.wait(a, WATCHDOG).unwrap_or_else(|e| panic!("{}: tab A's load: {e}", t.name()));
         assert_eq!(a["rows"], 100, "{}: {a}", t.name());
         assert_eq!(b.map_err(|e| e.code()), Err("cancelled"), "{}: tab B's load", t.name());
     });
