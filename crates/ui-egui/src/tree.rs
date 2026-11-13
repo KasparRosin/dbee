@@ -40,11 +40,11 @@ use egui::{Align, Rect, Response, ScrollArea, Sense, pos2, vec2};
 use serde_json::json;
 
 use crate::automation::Tags;
-use crate::components::Look;
 use crate::components::grid_cell::Key;
 use crate::components::rows::{TreeKind, TreeRow};
 use crate::components::sidebar::{self, Count};
 use crate::components::tooltip::Hint;
+use crate::components::{Look, focus};
 use crate::theme::{self, size::TREE_ROW_H};
 
 /// What the user asked of the tree in a frame.
@@ -522,10 +522,14 @@ fn draw_row(
     };
     let look = Look::of(ui, &r);
     let hovered = look.hovered || expand.as_ref().is_some_and(Response::hovered);
+    let chevron_focused = expand.as_ref().is_some_and(|e| focus::shown(ui, e));
     let draw = |kind: TreeKind, name: &str, right: Option<&str>, open: Option<bool>| {
-        let drawn = TreeRow { level, kind, name, right, open, selected: is_selected, focused: look.focused, hovered };
+        let drawn = TreeRow { level, kind, name, right, open, selected: is_selected, focused: look.focused, chevron_focused, hovered };
         drawn.paint(ui, rect);
         r.widget_info(|| drawn.widget_info());
+        if let Some(e) = &expand {
+            e.widget_info(|| drawn.chevron_info());
+        }
     };
     match row {
         Row::System { open, .. } => {

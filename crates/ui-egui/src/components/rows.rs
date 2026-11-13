@@ -72,6 +72,8 @@ pub struct TreeRow<'a> {
     pub selected: bool,
     /// Showing keyboard focus.
     pub focused: bool,
+    /// Its chevron showing keyboard focus.
+    pub chevron_focused: bool,
     /// Under the pointer.
     pub hovered: bool,
 }
@@ -114,11 +116,20 @@ impl TreeRow<'_> {
         if self.focused {
             focus::box_inside(&p, rect);
         }
+        if self.chevron_focused {
+            focus::box_inside(&p, TreeRow::expander(rect, self.level));
+        }
     }
 
     /// What it reads out: its name as written, and whether it is selected.
     pub fn widget_info(&self) -> WidgetInfo {
         WidgetInfo::selected(WidgetType::SelectableLabel, true, self.selected, self.name)
+    }
+
+    /// What a table's chevron reads out: a button showing the table's columns, pressed while
+    /// open.
+    pub fn chevron_info(&self) -> WidgetInfo {
+        WidgetInfo::selected(WidgetType::Button, true, self.open == Some(true), format!("Columns of {}", self.name))
     }
 
     /// Where the chevron of a row at `level`, drawn in `rect`, answers a click.
@@ -262,7 +273,7 @@ mod tests {
     }
 
     fn tree_row<'a>(level: usize, kind: TreeKind, name: &'a str, right: Option<&'a str>, open: Option<bool>) -> TreeRow<'a> {
-        TreeRow { level, kind, name, right, open, selected: false, focused: false, hovered: false }
+        TreeRow { level, kind, name, right, open, selected: false, focused: false, chevron_focused: false, hovered: false }
     }
 
     /// `row` drawn 259 by 26 matches node 167592: on `ground`, the focus box when `focus`, the
@@ -687,6 +698,43 @@ mod tests {
             assert_eq!(listed, 516, "{at}: every table listed, out of view too");
             assert!(laid <= most, "{at}: {laid} names laid out, at most {most}");
         }
+    }
+
+    #[test]
+    fn a_tables_chevron_shows_focus_and_reads_out_what_it_opens() {
+        // Review 2, Minor 2: Tab goes row, chevron, next row. On the chevron the tab close's focus
+        // look shows, a 2 px `ink` box 2 inside its square (the design agent, 2026-11-13), and the
+        // row shows none. It reads out as a button, "Columns of <table>", pressed while open.
+        let tables = vec![table("shop", "orders", RelKind::Table, vec![column("id", "int8")]), table("shop", "users", RelKind::Table, vec![])];
+        let catalog = Catalog { schemas: vec![schema("shop", false, tables)], default_schema: Some("shop".into()) };
+        let mut h = tree_harness(vec2(300.0, 400.0), catalog);
+        h.run();
+        let t = crate::theme::LIGHT;
+        // From the filter: Tab to the refresh, the schema, the table, then its chevron.
+        let at = rect_of(&h, "tree-filter").center();
+        click(&mut h, at, 1);
+        for _ in 0..4 {
+            h.key_press(Keys::Tab);
+            h.run();
+        }
+        let (row, chevron) = (rect_of(&h, "tree-table-shop.orders"), rect_of(&h, "tree-expand-shop.orders"));
+        let ring = |r: Rect| Edge { outer: r.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
+        let drawn = edges_in(&h.output().shapes, row, 0.0);
+        assert_eq!(drawn, [ring(chevron)], "the chevron's focus box, and none on the row: {chevron:?}");
+        let toggled = |h: &egui_kittest::Harness<'static, Shown>| {
+            use egui_kittest::kittest::{NodeT, Queryable};
+            h.get_by_role_and_label(egui::accesskit::Role::Button, "Columns of orders").accesskit_node().toggled()
+        };
+        assert_eq!(toggled(&h), Some(egui::accesskit::Toggled::False), "closed");
+        h.key_press(Keys::Enter);
+        h.run();
+        assert_eq!(h.state().tags.value("tree-expand-shop.orders"), Some(&json!(true)), "Enter opens it");
+        assert_eq!(toggled(&h), Some(egui::accesskit::Toggled::True), "open");
+        // Tab goes on to the next row.
+        h.key_press(Keys::Tab);
+        h.run();
+        let id = rect_of(&h, "tree-column-shop.orders.id");
+        assert_eq!(edges_in(&h.output().shapes, id, 0.0), [ring(id)], "the next row's focus box");
     }
 
     #[test]

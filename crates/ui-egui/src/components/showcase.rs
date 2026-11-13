@@ -327,7 +327,17 @@ fn grid(ui: &mut Ui) {
 /// each list on `bg` with a 1 px `line` at its right.
 fn sidebar_rows(ui: &mut Ui) {
     let rel = TreeKind::Relation;
-    let row = |level, kind, name, right, open| TreeRow { level, kind, name, right, open, selected: false, focused: false, hovered: false };
+    let row = |level, kind, name, right, open| TreeRow {
+        level,
+        kind,
+        name,
+        right,
+        open,
+        selected: false,
+        focused: false,
+        chevron_focused: false,
+        hovered: false,
+    };
     let table = |name| row(1, rel(RelKind::Table), name, None, Some(false));
     let tree = [
         row(0, TreeKind::Schema, "shop", None, Some(true)),
