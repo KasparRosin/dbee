@@ -13,10 +13,11 @@
 //! one checked, and choosing one asks for it to be made the active tab. The tabs come to rest
 //! with a tab's left edge at the strip's left, or at the end with the last tab against the new
 //! tab button, so no room is left empty after it (`row`, which the result bar's tabs use too):
-//! after the wheel or the scroll bar they go on to the next rest the way they moved; after a
-//! scroll they didn't do themselves, to the nearest one. The active tab is brought into view
-//! whenever another one becomes active (a click, the keyboard, the list, the caller) and when the
-//! strip's room changes, and so is a tab the keyboard's focus reaches.
+//! after the wheel (either way it turns) or the scroll bar they go on to the next rest the way
+//! they moved; after a scroll they didn't do themselves, to the nearest one. The active tab is
+//! brought into view whenever another one becomes active (a click, the keyboard, the list, the
+//! caller) and when the strip's room or its number of tabs changes, and so is a tab the
+//! keyboard's focus reaches.
 
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -516,6 +517,7 @@ pub(super) fn row<I, T>(
     }
     let offset = target.unwrap_or(live);
     let mut inside = ui.new_child(UiBuilder::new().id_salt(id.with("view")).max_rect(view).layout(Layout::left_to_right(Align::Min)));
+    inside.style_mut().always_scroll_the_only_direction = true;
     // Not animated, so a scroll to a tab (a tag's `scroll_to_me`) lands in the frame it is asked.
     let area = ScrollArea::horizontal().id_salt("tabs").auto_shrink([false, false]).min_scrolled_width(0.0).animated(false);
     let out = area.horizontal_scroll_offset(offset).show(&mut inside, |ui| {
@@ -977,6 +979,23 @@ mod tests {
             notch(&mut h);
             assert_eq!(h.state().tabs[6].right(), new.left(), "{theme:?}: the last notch rests at the end: {:?}", h.state().tabs);
         }
+    }
+
+    #[test]
+    fn a_plain_wheel_scrolls_the_strip() {
+        // Review 2, Minor 4: an ordinary mouse's wheel turns up and down; over the strip it moves
+        // the tabs sideways, rest by rest, as a sideways wheel or Shift and the wheel do.
+        let mut h = seven(Theme::Light, 560.0, 0);
+        h.hover_at(h.state().band.left_center() + vec2(40.0, 0.0));
+        h.event(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -40.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        h.run_steps(30);
+        let s = h.state();
+        assert_eq!(s.tabs[1].left(), s.band.left(), "a notch down rests at the next tab's edge: {:?}", s.tabs);
     }
 
     #[test]
