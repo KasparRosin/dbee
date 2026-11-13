@@ -27,12 +27,13 @@
 //! [`DbeeApp::run`]. A command the user started (a shortcut, a button, a dialog) goes through
 //! [`DbeeApp::start`], which gives a new query tab the tree's selected schema and hands its
 //! outcome back to where it came from ([`Origin`]), at once
-//! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; other
-//! errors show as a notice (a command that cannot run now gives its reason alone, as a sentence:
-//! [`notice_text`]), or under the connection form's buttons; the database error of a page load's
-//! job or an Apply's shows only in the table tab's card, and a query run's error that the engine
-//! recorded on its tab only in the query tab's card ([`crate::query_tab`]). Logs name command ids
-//! and error codes only.
+//! or when its job ends: a `needs…` error opens a dialog that runs it again with the answer; a
+//! close that the transaction prompt ran again with `end` says how it went in a toast
+//! ([`dialogs::ended`]); other errors show as a notice (a command that cannot run now gives its
+//! reason alone, as a sentence: [`notice_text`]), or under the connection form's buttons; the
+//! database error of a page load's job or an Apply's shows only in the table tab's card, and a
+//! query run's error that the engine recorded on its tab only in the query tab's card
+//! ([`crate::query_tab`]). Logs name command ids and error codes only.
 //!
 //! The connection screen is [`crate::connections`]; the workspace (menu bar, tree, tabs, status
 //! bar, quick search) is [`crate::workspace`].
@@ -50,7 +51,7 @@ use crate::automation::Tags;
 use crate::components::toast::{self, Act, Kind, Toast};
 use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
-use crate::dialogs::{self, Dialog, Rerun};
+use crate::dialogs::{self, Dialog, Ending, Rerun};
 use crate::quick_search::{self, QuickSearch};
 use crate::theme::{self, Words};
 use crate::workspace::Workspace;
@@ -79,9 +80,14 @@ const REQUESTS_PER_FRAME: usize = 64;
 /// now: no staged changes". Every other error reads as its own text. [`EngineError`]'s `Display`,
 /// which names the command, stays for the control channel and the logs.
 pub(crate) fn notice_text(e: &EngineError) -> String {
+    sentence(&reason(e))
+}
+
+/// Why `e` failed, in the words a notice uses ([`notice_text`]), not yet made a sentence.
+pub(crate) fn reason(e: &EngineError) -> String {
     match e {
-        EngineError::Disabled { why: text, .. } | EngineError::BadParams { msg: text, .. } | EngineError::Busy(text) => sentence(text),
-        other => sentence(&other.to_string()),
+        EngineError::Disabled { why: text, .. } | EngineError::BadParams { msg: text, .. } | EngineError::Busy(text) => text.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -186,12 +192,14 @@ pub(crate) enum Origin {
 }
 
 /// A job [`DbeeApp::start`] started, with the params it ran with (for running it again after a
-/// dialog). The params can hold secrets: `Debug` leaves them out.
+/// dialog), and what it ends when it is a close that ends a transaction. The params can hold
+/// secrets: `Debug` leaves them out.
 struct UiJob {
     job: JobId,
     command: &'static str,
     params: Json,
     origin: Origin,
+    ending: Option<Ending>,
 }
 
 impl std::fmt::Debug for UiJob {
@@ -513,23 +521,46 @@ impl DbeeApp {
     /// its job ends (then the job is returned).
     pub(crate) fn start(&mut self, command: &'static str, params: Json, origin: Origin) -> Option<JobId> {
         let params = self.with_selection(command, params);
+        let ending = dialogs::ending(self, command, &params);
         // The params are kept to run the command again after a dialog.
         match self.run(command, params.clone()) {
             Ok(Outcome::Started(job)) => {
-                self.ui_jobs.push(UiJob { job, command, params, origin });
+                self.ui_jobs.push(UiJob { job, command, params, origin, ending });
                 if let Origin::Form(_) = origin {
                     connections::started(self, job, command);
                 }
                 Some(job)
             }
             Ok(Outcome::Done(v)) => {
-                self.outcome(command, params, origin, None, Ok(v));
+                self.answer(command, params, origin, None, ending, Ok(v));
                 None
             }
             Err(e) => {
-                self.outcome(command, params, origin, None, Err(e));
+                self.answer(command, params, origin, None, ending, Err(e));
                 None
             }
+        }
+    }
+
+    /// The outcome of a command [`DbeeApp::start`] ran: a toast for a close that ends a
+    /// transaction ([`dialogs::ended`]); any other goes back where it came from.
+    fn answer(
+        &mut self,
+        command: &'static str,
+        params: Json,
+        origin: Origin,
+        job: Option<JobId>,
+        ending: Option<Ending>,
+        result: Result<Json, EngineError>,
+    ) {
+        match ending {
+            Some(ending) => {
+                if let Err(e) = &result {
+                    log::debug!("command {command} from the UI: {}", e.code());
+                }
+                dialogs::ended(self, &ending, result);
+            }
+            None => self.outcome(command, params, origin, job, result),
         }
     }
 
@@ -577,8 +608,8 @@ impl DbeeApp {
         let unclaimed = control::answer_deferred(self, &ctx, finished);
         for (job, result) in unclaimed {
             if let Some(i) = self.ui_jobs.iter().position(|j| j.job == job) {
-                let UiJob { job, command, params, origin } = self.ui_jobs.swap_remove(i);
-                self.outcome(command, params, origin, Some(job), result);
+                let UiJob { job, command, params, origin, ending } = self.ui_jobs.swap_remove(i);
+                self.answer(command, params, origin, Some(job), ending, result);
             }
         }
         // 3. Control requests.

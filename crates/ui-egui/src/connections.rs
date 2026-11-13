@@ -85,6 +85,7 @@ pub(crate) const TEST: &str = "connection.test";
 pub(crate) const SAVE: &str = "connection.save";
 pub(crate) const PARSE_URL: &str = "connection.parseUrl";
 pub(crate) const LIST_DATABASES: &str = "connection.listDatabases";
+pub(crate) const CLOSE: &str = "connection.close";
 const SSH_KEY: &str = "connection.sshKey";
 const DELETE: &str = "connection.delete";
 const DUPLICATE: &str = "connection.duplicate";
@@ -212,6 +213,9 @@ pub(crate) struct ConnScreen {
     /// connection chosen in the quick search, or a database file dropped on the window
     /// ([`switch_pending`]).
     pub switch: Option<SwitchTo>,
+    /// The switch has run its own `connection.close`: a connection still open once that is done
+    /// closed nothing (Cancel, an error).
+    pub switch_closed: bool,
 }
 
 /// What a switch opens ([`ConnScreen::switch`]).
@@ -237,6 +241,7 @@ impl ConnScreen {
             databases: DatabaseList::default(),
             has_store,
             switch: None,
+            switch_closed: false,
         }
     }
 
@@ -500,20 +505,25 @@ pub(crate) fn switch_to(app: &mut DbeeApp, to: SwitchTo) {
         return;
     }
     app.view.conn.switch = Some(to);
-    app.start("connection.close", json!({}), Origin::Menu);
+    app.view.conn.switch_closed = false;
     switch_pending(app);
 }
 
-/// Each frame: a switch waits while a dialog (the close's question) shows; then it opens if
-/// the connection closed, and is dropped if it did not (Cancel, an error), so the open connection
-/// and its tabs stay as they were.
+/// Each frame: a switch waits while a dialog shows or a close ends a transaction (its own, or one
+/// already running when it was chosen, which may close the connection for it). Then, with the
+/// connection closed, it opens; with it still open, it runs `connection.close` with its questions
+/// once, and after that is dropped, so the open connection and its tabs stay as they were.
 pub(crate) fn switch_pending(app: &mut DbeeApp) {
-    if app.view.dialog.is_some() {
+    if app.view.dialog.is_some() || app.session.running(CLOSE) || app.session.running(dialogs::TAB_CLOSE) {
         return;
     }
     let Some(to) = app.view.conn.switch.take() else { return };
     if app.session.state().connection(Which::Active).is_none() {
         open_switch(app, &to);
+    } else if !std::mem::replace(&mut app.view.conn.switch_closed, true) {
+        app.view.conn.switch = Some(to);
+        app.start(CLOSE, json!({}), Origin::Menu);
+        switch_pending(app);
     }
 }
 

@@ -8,7 +8,11 @@
 //! - `needsPassphrase`, `needsPassword`, `needsSshPassword` → [`Dialog::Secret`]: a secret field
 //!   (`sshPassphrase`, `password`, `sshPassword`) and, for `connection.open`, "Save in keyring"
 //!   (`savePassword`), which the engine honours for saved connections only;
-//! - `needsConfirm` → [`Dialog::Confirm`]: Close anyway, or Apply again after an unknown outcome (`force`).
+//! - `needsConfirm` → [`Dialog::Confirm`]: Close anyway, or Apply again after an unknown outcome (`force`);
+//! - `needsTransactionEnd` → [`Dialog::EndTransaction`], the transaction prompt: COMMIT (the main
+//!   button, Enter), ROLLBACK or CANCEL, or only ROLLBACK and CANCEL when the transaction failed or
+//!   a run still goes in it (`end`). The close it runs again says how it went in a toast
+//!   ([`ended`]).
 //!
 //! The connection screen also opens [`Dialog::FillFromUrl`] (runs `connection.parseUrl`, and takes
 //! only a URL of the database types it was opened for) and [`Dialog::DeleteConnection`].
@@ -18,21 +22,23 @@
 //! Every dialog is drawn by [`crate::components::dialog`]: a fixed-width card at a fixed place
 //! (centred, near the top) over the scrim, so its widgets are where `ui.inspect` says from its
 //! first frame on. Escape and Cancel close it; a click on the scrim does nothing. Automation ids:
-//! `dialog-ok`, `dialog-cancel`, `dialog-text`, and per dialog `dialog-url`, `dialog-error`,
-//! `dialog-fingerprint`, `dialog-secret`, `dialog-save`. The URL and secret fields are tagged as
-//! secrets: `ui.inspect` says whether they are filled in, never what they hold, and neither
-//! `Debug` nor the logs show them.
+//! `dialog-ok`, `dialog-cancel`, `dialog-text`, and per dialog `dialog-rollback`, `dialog-url`,
+//! `dialog-error`, `dialog-fingerprint`, `dialog-secret`, `dialog-save`. The URL and secret
+//! fields are tagged as secrets: `ui.inspect` says whether they are filled in, never what they
+//! hold, and neither `Debug` nor the logs show them.
 
 use dbee_config::{ConnectionConfig, DbKind};
-use dbee_engine::{EngineError, Json, Need, Outcome};
+use dbee_engine::cmd::query::{FAILED_COMMIT, NO_TRANSACTION};
+use dbee_engine::{ConnectionId, EndAbout, EngineError, Json, Need, Outcome, Running, TabId, TransactionState, Which};
 use egui::Key;
 use serde_json::json;
 
-use crate::app::Origin;
+use crate::app::{Origin, reason, sentence};
 use crate::automation::Tags;
 use crate::components::checkbox::Checkbox;
 use crate::components::dialog::{self, Button};
 use crate::components::input::{Field, Input};
+use crate::components::toast::Kind;
 use crate::connections;
 use crate::theme::{self, Text, Words};
 use crate::{DbeeApp, connections::tilde};
@@ -40,6 +46,9 @@ use crate::{DbeeApp, connections::tilde};
 /// Where a dialog's main button and its Cancel are among its buttons (the first on the right).
 const OK: usize = 0;
 const CANCEL: usize = 1;
+
+/// The command that closes a tab.
+pub(crate) const TAB_CLOSE: &str = "tab.close";
 
 /// A command to run again once the user has answered, with the params it ran with.
 pub(crate) struct Rerun {
@@ -88,6 +97,93 @@ pub(crate) enum Keep {
     No(&'static str),
 }
 
+/// What a [`Dialog::EndTransaction`] asks about: the need's data, and the display name of the
+/// connection whose transaction it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EndAsk {
+    pub state: TransactionState,
+    pub about: EndAbout,
+    /// The tab's title or the connection's name, as `about` says.
+    pub name: String,
+    pub connection: String,
+    /// What the close loses besides, as a sentence.
+    pub lost: Option<String>,
+    pub running: Option<Running>,
+}
+
+impl EndAsk {
+    /// Only a rollback can end it: it failed, or a run still goes in it.
+    fn only_rollback(&self) -> bool {
+        self.running.is_some() || self.state == TransactionState::Failed
+    }
+
+    /// The prompt's title and text: why it asks, then what the close loses besides.
+    fn words(&self) -> (&'static str, Words) {
+        let (name, connection) = (self.name.as_str(), self.connection.as_str());
+        let why = match (&self.running, self.state, self.about) {
+            (Some(run), _, _) => Words::default()
+                .name(run.title.as_str())
+                .plain(" is still running in the transaction on ")
+                .name(connection)
+                .plain(". Closing stops it, so the transaction can only be rolled back."),
+            (None, TransactionState::Failed, _) => {
+                Words::from("The transaction on ").name(connection).plain(" failed, so it can only be rolled back.")
+            }
+            (None, TransactionState::Open, EndAbout::Tab) => Words::default().name(name).plain(" opened a transaction that isn't committed yet."),
+            (None, TransactionState::Open, EndAbout::Connection) => Words::default().name(name).plain(" has a transaction that isn't committed yet."),
+            (None, TransactionState::Unknown | TransactionState::Idle, _) => {
+                Words::from("dbee can't tell whether ").name(name).plain(" still has a transaction open.")
+            }
+        };
+        let text = match &self.lost {
+            Some(lost) => why.plain(" ").plain(lost.as_str()),
+            None => why,
+        };
+        let title = if self.only_rollback() { "Roll back the transaction?" } else { "Commit the transaction?" };
+        (title, text)
+    }
+}
+
+/// A close run again with `end`: whether it commits, and the name of the connection whose
+/// transaction it ends, taken before it runs (the close may take the connection with it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Ending {
+    commit: bool,
+    connection: String,
+}
+
+/// The [`Ending`] of `command` run with `params`, when it is `tab.close` or `connection.close`
+/// with `end`.
+pub(crate) fn ending(app: &DbeeApp, command: &str, params: &Json) -> Option<Ending> {
+    if command != TAB_CLOSE && command != connections::CLOSE {
+        return None;
+    }
+    let commit = match params.get("end").and_then(Json::as_str)? {
+        "commit" => true,
+        "rollback" => false,
+        _ => return None,
+    };
+    Some(Ending { commit, connection: closed_connection(app, command, params)? })
+}
+
+/// Says in a toast how a close that ends a transaction went: `Committed on <connection>` or
+/// `Rolled back on <connection>`, or why it failed (nothing closed then). Nothing when no
+/// transaction was open any more, or the connection went meanwhile.
+pub(crate) fn ended(app: &mut DbeeApp, ending: &Ending, result: Result<Json, EngineError>) {
+    let (done, what) = if ending.commit { ("Committed on ", "commit") } else { ("Rolled back on ", "rollback") };
+    let failed = |why: &str| sentence(&format!("The {what} failed: {why}"));
+    match result {
+        Ok(r) if r.get("ignored") == Some(&Json::Bool(true)) => {}
+        Ok(r) => match r.get("note").and_then(Json::as_str) {
+            Some(NO_TRANSACTION) => {}
+            // The server rolled a failed transaction back: nothing was committed.
+            Some(FAILED_COMMIT) => app.notice_again(Kind::Error, failed(FAILED_COMMIT)),
+            _ => app.notice_again(Kind::Success, Words::from(done).name(ending.connection.as_str())),
+        },
+        Err(e) => app.notice_again(Kind::Error, failed(&reason(&e))),
+    }
+}
+
 /// The dialog on screen.
 pub(crate) enum Dialog {
     /// "Fill from URL…": a URL of one of `kinds` to parse into the connection form.
@@ -98,6 +194,8 @@ pub(crate) enum Dialog {
     Secret { ask: SecretAsk, line: Words, value: String, keep: Keep, save: bool, focused: bool, rerun: Rerun },
     /// Something will be lost.
     Confirm { message: String, what: String, rerun: Rerun },
+    /// Closing would drop a transaction: COMMIT, ROLLBACK or CANCEL.
+    EndTransaction { ask: EndAsk, rerun: Rerun },
     /// Deleting a saved connection (and its secrets).
     DeleteConnection { id: String, name: String },
     /// A dialog a command asked for (`UiRequest::Dialog`) that this window does not draw.
@@ -121,6 +219,7 @@ impl Dialog {
             Dialog::Secret { ask: SecretAsk::Password, .. } => "password",
             Dialog::Secret { ask: SecretAsk::SshPassword, .. } => "sshPassword",
             Dialog::Confirm { .. } => "confirm",
+            Dialog::EndTransaction { .. } => "transactionEnd",
             Dialog::DeleteConnection { .. } => "deleteConnection",
             Dialog::Requested { name } => name,
         }
@@ -162,8 +261,11 @@ pub(crate) fn ask(app: &mut DbeeApp, e: &EngineError, rerun: Rerun) -> bool {
             secret(SecretAsk::SshPassword, keep, rerun, app)
         }
         Need::Confirm { what } => Dialog::Confirm { message: message.clone(), what: what.clone(), rerun },
-        // Until the transaction prompt is drawn: Close anyway closes as before, ending nothing.
-        Need::EndTransaction { .. } => Dialog::Confirm { message: message.clone(), what: "transactionEnd".into(), rerun },
+        Need::EndTransaction { state, about, name, lost, running } => {
+            let connection = closed_connection(app, rerun.command, &rerun.params).unwrap_or_else(|| name.clone());
+            let ask = EndAsk { state: *state, about: *about, name: name.clone(), connection, lost: lost.clone(), running: running.clone() };
+            Dialog::EndTransaction { ask, rerun }
+        }
     };
     app.view.dialog = Some(dialog);
     true
@@ -175,6 +277,17 @@ fn confirm_words(what: &str) -> (&'static str, &'static str) {
         "applyAfterUnknownOutcome" => ("Apply again?", "Apply again"),
         _ => ("Close anyway?", "Close anyway"),
     }
+}
+
+/// The display name of the connection a close acts on: `tab.close`'s tab's, `connection.close`'s
+/// connection's, else the active one's.
+fn closed_connection(app: &DbeeApp, command: &str, params: &Json) -> Option<String> {
+    let which = match command {
+        TAB_CLOSE => params.get("tab").and_then(Json::as_u64).map(|t| Which::Tab(TabId(t))),
+        connections::CLOSE => params.get("connection").and_then(Json::as_u64).map(|c| Which::Id(ConnectionId(c))),
+        _ => None,
+    };
+    app.session.state().connection(which.unwrap_or(Which::Active)).map(|c| c.config.display_name())
 }
 
 /// The connection `rerun`'s command is about: its `config`, or the saved or recent connection
@@ -421,6 +534,22 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 None => Act::None,
             }
         }
+        Dialog::EndTransaction { ask, rerun } => {
+            let (title, text) = ask.words();
+            let only_rollback = ask.only_rollback();
+            let buttons =
+                if only_rollback { vec![ok("Rollback"), cancel] } else { vec![ok("Commit"), Button::outline("Rollback", "dialog-rollback"), cancel] };
+            let last = buttons.len().saturating_sub(1);
+            let shown = dialog::Dialog::new(id, title).text(text.clone()).buttons(buttons).show(ctx);
+            let end = match tagged(tags, &shown, &text).or_else(|| entered(ctx, &shown).then_some(OK)) {
+                None => return Act::None,
+                Some(i) if i == last => return Act::Cancel,
+                Some(OK) if !only_rollback => "commit",
+                Some(_) => "rollback",
+            };
+            let params = with(rerun.params.take(), "end", json!(end));
+            Act::Rerun(Rerun { command: rerun.command, params, origin: rerun.origin })
+        }
         Dialog::DeleteConnection { id: connection, name } => {
             let text = Words::from("Delete “").name(name.as_str()).plain("”? Its saved passwords are deleted with it.");
             let shown =
@@ -449,6 +578,13 @@ fn tagged(tags: &mut Tags, shown: &dialog::Shown, text: impl std::fmt::Display) 
         tags.tag_value_as(button.tag, r, button.label, button.enabled);
     }
     shown.pressed
+}
+
+/// Enter while no widget has the keyboard presses the main button, once the dialog takes input
+/// (egui draws its first frame disabled). On a button the keyboard reached, Enter presses that one.
+fn entered(ctx: &egui::Context, shown: &dialog::Shown) -> bool {
+    let live = shown.buttons.first().is_some_and(|(_, r)| r.enabled());
+    live && ctx.memory(|m| m.focused().is_none()) && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
 }
 
 fn muted(ui: &mut egui::Ui, text: &str) {
@@ -567,7 +703,82 @@ mod tests {
             ("confirm", confirm("closeTab")),
             ("confirm", confirm("applyAfterUnknownOutcome")),
             ("deleteConnection", Dialog::DeleteConnection { id: "c1".into(), name: "Shop live".into() }),
+            ("transactionEnd", end(TransactionState::Open, EndAbout::Tab, false, None)),
+            ("transactionEnd", end(TransactionState::Failed, EndAbout::Connection, false, None)),
             ("export", Dialog::Requested { name: "export" }),
+        ]
+    }
+
+    /// The transaction prompt for closing Query 1 (about the tab) or Shop live (about the
+    /// connection), the transaction in `state` on Shop live; `running` when Query 1's run still
+    /// goes in it.
+    fn end(state: TransactionState, about: EndAbout, running: bool, lost: Option<&str>) -> Dialog {
+        let name = match about {
+            EndAbout::Tab => "Query 1",
+            EndAbout::Connection => "Shop live",
+        };
+        let ask = EndAsk {
+            state,
+            about,
+            name: name.into(),
+            connection: "Shop live".into(),
+            lost: lost.map(Into::into),
+            running: running.then(|| Running { title: "Query 1".into(), count: 1 }),
+        };
+        Dialog::EndTransaction { ask, rerun: Rerun { command: TAB_CLOSE, params: json!({ "tab": 1 }), origin: Origin::Menu } }
+    }
+
+    /// The prompt's cases: the dialog, its title, its text by part, and its buttons' words from
+    /// the right.
+    fn prompts() -> Vec<(Dialog, &'static str, Vec<(&'static str, Text)>, Vec<&'static str>)> {
+        use EndAbout::{Connection, Tab};
+        use Text::{Body, Data};
+        use TransactionState::{Failed, Open, Unknown};
+        let three = || vec!["Commit", "Rollback", "Cancel"];
+        let two = || vec!["Rollback", "Cancel"];
+        vec![
+            (
+                end(Open, Tab, false, None),
+                "Commit the transaction?",
+                vec![("Query 1", Data), (" opened a transaction that isn't committed yet.", Body)],
+                three(),
+            ),
+            (
+                end(Open, Connection, false, None),
+                "Commit the transaction?",
+                vec![("Shop live", Data), (" has a transaction that isn't committed yet.", Body)],
+                three(),
+            ),
+            (
+                end(Failed, Connection, false, None),
+                "Roll back the transaction?",
+                vec![("The transaction on ", Body), ("Shop live", Data), (" failed, so it can only be rolled back.", Body)],
+                two(),
+            ),
+            (
+                end(Open, Tab, true, None),
+                "Roll back the transaction?",
+                vec![
+                    ("Query 1", Data),
+                    (" is still running in the transaction on ", Body),
+                    ("Shop live", Data),
+                    (". Closing stops it, so the transaction can only be rolled back.", Body),
+                ],
+                two(),
+            ),
+            (
+                end(Unknown, Connection, false, None),
+                "Commit the transaction?",
+                vec![("dbee can't tell whether ", Body), ("Shop live", Data), (" still has a transaction open.", Body)],
+                three(),
+            ),
+            // What the close loses besides follows the prompt's own words, after one space.
+            (
+                end(Open, Tab, false, Some("Its query text will be lost.")),
+                "Commit the transaction?",
+                vec![("Query 1", Data), (" opened a transaction that isn't committed yet. Its query text will be lost.", Body)],
+                three(),
+            ),
         ]
     }
 
@@ -865,6 +1076,140 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_transaction_prompt_matches_the_page() {
+        // Nodes 163357 (light) and 163678 (dark), the dialog with three buttons: the title, the
+        // text in `body` with the names in `data` as written, then CANCEL, ROLLBACK and COMMIT
+        // from the left, 8 apart, COMMIT the main button in `ink` and the others outlined. A
+        // failed transaction, or a run still going in it, offers CANCEL and ROLLBACK (main).
+        for (theme, t) in both() {
+            for (dialog, title, text, labels) in prompts() {
+                let whole: String = text.iter().map(|(w, _)| *w).collect();
+                let at = format!("{theme:?} `{whole}`");
+                let h = open(theme, dialog);
+                let shapes = h.output().shapes.clone();
+                assert_eq!(h.state().tags.value("dialog-text"), Some(&json!(whole)), "{at}: dialog-text as plain words");
+                let want: Vec<_> = text.iter().map(|(w, style)| ((*w).to_owned(), style.font(), t.text)).collect();
+                assert_eq!(sections(&shapes, &whole), want, "{at}: the names in data, the rest in body");
+                let drawn = texts(&shapes);
+                assert!(drawn.iter().any(|(w, _, c)| w == title && *c == t.text), "{at}: the title `{title}`: {drawn:?}");
+                assert_eq!(font_of(&shapes, title), Some(Text::Title.font()), "{at}: the title in title");
+                let tags = if labels.len() == 3 { vec!["dialog-ok", "dialog-rollback", "dialog-cancel"] } else { vec!["dialog-ok", "dialog-cancel"] };
+                let mut ids = h.state().tags.ids();
+                ids.sort_unstable();
+                let mut want_ids = tags.clone();
+                want_ids.push("dialog-text");
+                want_ids.sort_unstable();
+                assert_eq!(ids, want_ids, "{at}: its tags");
+                let mut left_of: Option<f32> = None;
+                for (i, (tag, label)) in tags.iter().zip(&labels).enumerate() {
+                    let at = format!("{at} {tag}");
+                    assert_eq!(h.state().tags.value(tag), Some(&json!(label)), "{at}: its words");
+                    let r = rect(&h, tag);
+                    if let Some(x) = left_of {
+                        assert_eq!(r.right(), x - 8.0, "{at}: 8 left of the button before it: {r:?}");
+                    }
+                    left_of = Some(r.left());
+                    let caps = label.to_uppercase();
+                    let words = drawn.iter().find(|(w, on, _)| *w == caps && r.expand(0.5).contains_rect(*on)).map(|(_, _, c)| *c);
+                    if i == OK {
+                        assert_eq!(fills_in(&shapes, r), [(r, t.ink)], "{at}: the main button, on ink");
+                        assert_eq!(words, Some(t.on_ink), "{at}: its words in on_ink");
+                    } else {
+                        assert_eq!(fills_in(&shapes, r), [], "{at}: no ground");
+                        let line = Edge { outer: r, width: 1.0, colour: t.line_strong, radius: egui::CornerRadius::same(2) };
+                        assert_eq!(edges_in(&shapes, r, 0.0), [line], "{at}: outlined");
+                        assert_eq!(words, Some(t.text), "{at}: its words in text");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The font `words` were drawn in.
+    fn font_of(shapes: &[egui::epaint::ClippedShape], words: &str) -> Option<egui::FontId> {
+        crate::components::flat(shapes).into_iter().find_map(|s| match s {
+            egui::Shape::Text(t) if t.galley.text() == words => t.galley.job.sections.first().map(|s| s.format.font_id.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_transaction_prompt_runs_the_close_again_with_the_end() {
+        // COMMIT and Enter run the close again with `end: "commit"`, ROLLBACK with `"rollback"`;
+        // CANCEL and Escape leave everything. Enter on a button the keyboard reached presses that
+        // one. With only a rollback offered, its main button rolls back.
+        use EndAbout::Tab;
+        use Key::{Enter, Escape, Tab as Next};
+        use TransactionState::{Failed, Open};
+        enum Do {
+            Click(&'static str),
+            Keys(&'static [Key]),
+        }
+        let rerun = |end: &str| Done::Rerun(TAB_CLOSE, json!({ "tab": 1, "end": end }));
+        let rows = [
+            (end(Open, Tab, false, None), Do::Click("Commit"), rerun("commit")),
+            (end(Open, Tab, false, None), Do::Keys(&[Enter]), rerun("commit")),
+            (end(Open, Tab, false, None), Do::Click("Rollback"), rerun("rollback")),
+            (end(Open, Tab, false, None), Do::Keys(&[Next, Next, Enter]), rerun("rollback")),
+            (end(Open, Tab, false, None), Do::Click("Cancel"), Done::Cancel),
+            (end(Open, Tab, false, None), Do::Keys(&[Escape]), Done::Cancel),
+            (end(Failed, Tab, false, None), Do::Click("Rollback"), rerun("rollback")),
+            (end(Failed, Tab, false, None), Do::Keys(&[Enter]), rerun("rollback")),
+            (end(Open, Tab, true, None), Do::Keys(&[Enter]), rerun("rollback")),
+            (end(Open, Tab, true, None), Do::Click("Cancel"), Done::Cancel),
+        ];
+        for (n, (dialog, act, want)) in rows.into_iter().enumerate() {
+            let mut h = open(Theme::Light, dialog);
+            match act {
+                Do::Click(label) => h.get_by_label(label).click(),
+                Do::Keys(keys) => {
+                    for key in keys {
+                        h.key_press(*key);
+                        h.run();
+                    }
+                }
+            }
+            h.run();
+            assert_eq!(h.state().done, [want], "row {n}");
+        }
+    }
+
+    #[test]
+    fn a_close_that_ends_a_transaction_says_how_it_went() {
+        // The design's toasts: `Committed on <connection>` or `Rolled back on <connection>`, the
+        // name in `data`; an error toast with the reason when the end failed; none when no
+        // transaction was open any more, or the connection went meanwhile.
+        let home = temp_home(None, None);
+        let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
+        let mut app = DbeeApp::new(session, None);
+        let shown = |app: &mut DbeeApp| app.view.notices.drain(..).map(|n| (n.text, n.kind)).collect::<Vec<_>>();
+        let commit = Ending { commit: true, connection: "Shop live".into() };
+        let rollback = Ending { commit: false, connection: "Shop live".into() };
+        let done = |end: &str, note: Option<&str>| Ok(json!({ "closed": 1, "active": null, "ended": end, "note": note }));
+        ended(&mut app, &commit, done("commit", None));
+        assert_eq!(shown(&mut app), [(Words::from("Committed on ").name("Shop live"), Kind::Success)]);
+        ended(&mut app, &rollback, done("rollback", None));
+        assert_eq!(shown(&mut app), [(Words::from("Rolled back on ").name("Shop live"), Kind::Success)]);
+        // A lost query connection ended it with the session: rolled back all the same.
+        ended(&mut app, &rollback, done("rollback", Some(dbee_engine::cmd::query::ENDED_WITH_SESSION)));
+        assert_eq!(shown(&mut app), [(Words::from("Rolled back on ").name("Shop live"), Kind::Success)]);
+        // Nothing was open any more, or the connection went: no toast.
+        ended(&mut app, &commit, done("commit", Some(NO_TRANSACTION)));
+        ended(&mut app, &commit, Ok(json!({ "ignored": true })));
+        assert_eq!(shown(&mut app), []);
+        // A commit the server turned into a rollback.
+        ended(&mut app, &commit, done("commit", Some(FAILED_COMMIT)));
+        let failed = "The commit failed: the transaction had failed, so the server rolled it back: nothing was committed.";
+        assert_eq!(shown(&mut app), [(Words::from(failed), Kind::Error)]);
+        // The end failed: the reason, and nothing closed.
+        let server = EngineError::Db { code: "server", message: "insert violates foreign key constraint \"fk\"".into(), data: json!({}) };
+        ended(&mut app, &commit, Err(server));
+        assert_eq!(shown(&mut app), [(Words::from("The commit failed: insert violates foreign key constraint \"fk\"."), Kind::Error)]);
+        ended(&mut app, &rollback, Err(EngineError::Busy("a COMMIT is running".into())));
+        assert_eq!(shown(&mut app), [(Words::from("The rollback failed: a COMMIT is running."), Kind::Error)]);
     }
 
     #[test]

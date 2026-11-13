@@ -700,6 +700,194 @@ fn disconnect_with_query_text_asks_first() {
     ui.until("the connection screen", |ui| ui.document()["screen"] == "connections");
 }
 
+/// Opens a query tab running `sql`, which leaves a transaction open; the tab's id.
+fn in_transaction(ui: &mut Ui, sql: &str) -> u64 {
+    ui.execute("tab.newQuery", json!({ "text": sql }));
+    let tab = ui.active();
+    ui.execute("query.run", json!({}));
+    ui.frame();
+    assert_eq!(ui.document()["connection"]["transaction"]["state"], "open", "{sql}");
+    tab
+}
+
+/// The prompt's buttons: `dialog-ok`, `dialog-rollback` and `dialog-cancel` with their words.
+fn assert_three_buttons(ui: &mut Ui) {
+    let words = (ui.value("dialog-ok"), ui.value("dialog-rollback"), ui.value("dialog-cancel"));
+    assert_eq!(words, (json!("Commit"), json!("Rollback"), json!("Cancel")));
+}
+
+/// The notice once one shows.
+fn toast_text(ui: &mut Ui) -> String {
+    ui.until("a toast", |ui| ui.tag("notice").is_some());
+    ui.value("notice").as_str().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn commit_from_the_prompt_closes_the_tab_and_toasts() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "prompt_commit", |n| format!("CREATE TABLE scratch.{n} (id int)"));
+    let mut ui = connected(db);
+    let tab = in_transaction(&mut ui, &format!("BEGIN; INSERT INTO scratch.{} VALUES (1)", table.0));
+    ui.click(&format!("tab-close-{tab}"));
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd", "closing the tab that opened the transaction asks");
+    assert_eq!(ui.value("dialog-text"), "Query 1 opened a transaction that isn't committed yet. Its query text will be lost.");
+    assert_three_buttons(&mut ui);
+    ui.click("dialog-ok");
+    ui.until("the tab to close", |ui| ui.document()["tabs"] == json!([]));
+    assert_eq!(toast_text(&mut ui), "Committed on pg14");
+    let t = dbee_ui_egui::theme::LIGHT;
+    ui.toast().unwrap_or_else(|| panic!("the toast")).assert_in(t.ink, t.on_ink, "a success");
+    assert_eq!(ui.document()["connection"]["transaction"], Json::Null);
+    let seen = dbee_testkit::psql(pg14_server(db), &format!("SELECT count(*) FROM scratch.{}", table.0)).unwrap();
+    assert_eq!(seen.trim(), "1", "another session sees the row");
+}
+
+#[test]
+fn cancel_leaves_everything() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    let tab = in_transaction(&mut ui, "BEGIN");
+    ui.click(&format!("tab-close-{tab}"));
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd");
+    ui.click("dialog-cancel");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let d = ui.document();
+    assert_eq!(d["tabs"].as_array().map(Vec::len), Some(1), "the tab stays: {d}");
+    assert_eq!(d["connection"]["transaction"]["state"], "open", "the transaction stays: {d}");
+    assert_eq!(ui.inspect()["dialog"], Json::Null);
+    assert!(ui.tag("notice").is_none(), "no toast");
+}
+
+#[test]
+fn a_lost_connection_at_commit_toasts_and_keeps_the_tab() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    // The query connection's own backend, which only this window uses.
+    ui.execute("tab.newQuery", json!({ "text": "SELECT pg_backend_pid()" }));
+    let tab = ui.active();
+    ui.execute("query.run", json!({}));
+    ui.frame();
+    let pid = ui.value("grid-cell-0-0")["text"].as_str().unwrap_or_default().to_owned();
+    assert!(pid.parse::<u32>().is_ok(), "the query connection's pid: {pid}");
+    ui.execute("query.setText", json!({ "text": "BEGIN" }));
+    ui.execute("query.run", json!({}));
+    ui.frame();
+    ui.click(&format!("tab-close-{tab}"));
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd");
+    dbee_testkit::psql(pg14_server(db), &format!("SELECT pg_terminate_backend({pid}, 5000)")).unwrap();
+    ui.click("dialog-ok");
+    let text = toast_text(&mut ui);
+    assert!(text.starts_with("The commit failed: "), "{text}");
+    let t = dbee_ui_egui::theme::LIGHT;
+    ui.toast().unwrap_or_else(|| panic!("the toast")).assert_in(t.danger, t.on_danger, "a failure");
+    let d = ui.document();
+    assert_eq!(d["tabs"].as_array().map(Vec::len), Some(1), "the tab stays: {d}");
+    assert_eq!(ui.inspect()["dialog"], Json::Null);
+}
+
+impl Ui {
+    /// Frames on while the gated end runs: still `connection` on the workspace, its close job
+    /// (`label`) running, and no dialog.
+    fn still_ending(&mut self, connection: &str, label: &str) {
+        for _ in 0..20 {
+            self.frame();
+        }
+        let d = self.document();
+        assert_eq!((d["screen"].clone(), d["connection"]["id"].clone()), (json!("workspace"), json!(connection)), "still open: {d}");
+        assert!(d["jobs"].as_array().is_some_and(|j| j.iter().any(|j| j["label"] == label)), "the {label} job runs: {d}");
+        assert_eq!(self.inspect()["dialog"], Json::Null, "no prompt while the end runs");
+    }
+}
+
+#[test]
+fn a_switch_waits_for_the_end_then_switches() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "prompt_switch", |n| format!("CREATE TABLE scratch.{n} (id int); INSERT INTO scratch.{n} VALUES (1)"));
+    let update = format!("BEGIN; UPDATE scratch.{0} SET id = id + 1", table.0);
+    let ids = || dbee_testkit::psql(pg14_server(db), &format!("SELECT id FROM scratch.{}", table.0)).unwrap().trim().to_owned();
+    // The COMMIT waits at the gate until it is let go, so the end runs as long as the test wants.
+    let gate = || dbee_testkit::target(pg14_server(db)).commit_gate(&table.0).unwrap();
+    let mut held = gate();
+    let (mut ui, pgnew) = with_pgnew(db);
+    let pg14 = ui.connection_id().unwrap();
+    let on = |ui: &mut Ui, id: &str| ui.connection_id().as_deref() == Some(id) && ui.document()["screen"] == "workspace";
+    in_transaction(&mut ui, &update);
+    // CANCEL: no switch.
+    ui.quick_choose("pgnew");
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd", "switching asks about the connection's transaction");
+    assert_eq!(ui.value("dialog-text"), "pg14 has a transaction that isn't committed yet. The text of 1 query tab will be lost.");
+    assert_three_buttons(&mut ui);
+    ui.click("dialog-cancel");
+    for _ in 0..5 {
+        ui.frame();
+    }
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"]["id"].clone()), (json!("workspace"), json!(pg14.clone())), "Cancel keeps pg14: {d}");
+    assert_eq!(d["connection"]["transaction"]["state"], "open", "{d}");
+    // COMMIT: the switch waits while the end runs, and choosing again meanwhile asks nothing more.
+    ui.quick_choose("pgnew");
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd");
+    ui.click("dialog-ok");
+    held.until_committing().unwrap();
+    ui.still_ending(&pg14, "connection.close");
+    ui.quick_choose("pgnew");
+    ui.still_ending(&pg14, "connection.close");
+    // Once the COMMIT is through, pg14 closes and pgnew opens. The toast shows as the end
+    // applies, while pgnew connects (it goes after 4 s).
+    drop(held);
+    assert_eq!(toast_text(&mut ui), "Committed on pg14");
+    ui.until("connected to pgnew", |ui| on(ui, &pgnew));
+    assert_eq!(ids(), "2", "committed");
+    // ROLLBACK, back to pg14.
+    in_transaction(&mut ui, "BEGIN");
+    ui.quick_choose("pg14");
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd");
+    ui.click("dialog-rollback");
+    assert_eq!(toast_text(&mut ui), "Rolled back on pgnew");
+    ui.until("connected to pg14", |ui| on(ui, &pg14));
+    // A switch chosen while the owner tab's close ends the transaction waits for it, then
+    // closes pg14 with nothing more to ask.
+    let mut held = gate();
+    let tab = in_transaction(&mut ui, &update);
+    ui.execute("query.setText", json!({ "text": "" }));
+    ui.click(&format!("tab-close-{tab}"));
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd");
+    ui.click("dialog-ok");
+    held.until_committing().unwrap();
+    ui.quick_choose("pgnew");
+    ui.still_ending(&pg14, "tab.close");
+    drop(held);
+    assert_eq!(toast_text(&mut ui), "Committed on pg14");
+    ui.until("connected to pgnew", |ui| on(ui, &pgnew));
+    assert_eq!(ids(), "3", "committed");
+}
+
+#[test]
+fn disconnect_asks_with_the_text_sentence_once() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    in_transaction(&mut ui, "BEGIN");
+    ui.execute("query.setText", json!({ "text": "" }));
+    ui.execute("tab.newQuery", json!({ "text": "select 1" }));
+    ui.frame();
+    ui.ctrl_shift("Q");
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd", "one prompt");
+    let text = ui.value("dialog-text");
+    assert!(text.as_str().is_some_and(|t| t.ends_with(". The text of 1 query tab will be lost.")), "with today's sentence: {text}");
+    ui.click("dialog-ok");
+    ui.until("the connection screen", |ui| {
+        assert_eq!(ui.inspect()["dialog"], Json::Null, "no second dialog");
+        ui.document()["screen"] == "connections"
+    });
+    for _ in 0..3 {
+        ui.frame();
+        assert_eq!(ui.inspect()["dialog"], Json::Null, "no second dialog");
+    }
+    assert_eq!(toast_text(&mut ui), "Committed on pg14");
+}
+
 #[test]
 fn tabs_open_close_and_mark_filters_and_text() {
     let db = dbee_testkit::require_testdb!();
