@@ -295,6 +295,55 @@ fn many_results_fit_the_toolbar() {
     assert!(ui.tag("result-list-1").is_none(), "the list closed");
 }
 
+/// Review 2, Minor 3: the `…` list of every result, chosen from with the keyboard, closes as
+/// after a click.
+#[test]
+fn the_result_list_closes_when_chosen_by_keyboard() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    let sql: String = (1..=40).map(|n| format!("select {n} as n;\n")).collect();
+    ui.text(&sql);
+    ui.ctrl("Enter");
+    ui.ran();
+    ui.focus("result-more");
+    ui.key("Enter");
+    ui.frame();
+    assert!(ui.tag("result-list-1").is_some(), "Enter opens the list");
+    ui.key("ArrowDown");
+    assert!(ui.focused("result-list-1"), "the arrow reaches the first result");
+    ui.key("Enter");
+    ui.frame();
+    assert_eq!(ui.query()["shown"], 0, "the first result chosen");
+    assert!(ui.tag("result-list-1").is_none(), "the list closed");
+}
+
+/// Review 2, Minor 3: the database chip's list, chosen from with the keyboard, closes as after a
+/// click. The arrows take the keyboard down into the list (egui may stop on the list's frame on
+/// the way).
+#[test]
+fn the_database_list_closes_when_chosen_by_keyboard() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    ui.focus("query-database");
+    ui.key("Enter");
+    ui.frame();
+    assert!(ui.tag("query-database-many").is_some(), "Enter opens the list");
+    for _ in 0..3 {
+        if ui.focused("query-database-many") {
+            break;
+        }
+        ui.key("ArrowDown");
+    }
+    assert!(ui.focused("query-database-many"), "the arrows reach the first database");
+    ui.key("Enter");
+    ui.frame();
+    assert_eq!(ui.query()["database"], "many", "the first database chosen");
+    assert!(ui.tag("query-database-many").is_none(), "the list closed");
+}
+
 /// Beside the database chip, at the app's first size with the value panel open, every result can
 /// be chosen, also while a statement runs; the selector's label shows whole or not at all.
 #[test]

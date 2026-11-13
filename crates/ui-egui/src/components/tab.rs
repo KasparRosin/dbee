@@ -354,6 +354,8 @@ pub(super) fn list_button(ui: &mut Ui, id: Id, rect: Rect, label: &str, titles: 
                         let r = ui.add(Item::new(title).choice(Some(active == Some(i))));
                         if r.clicked() {
                             chosen = Some(i);
+                            // A key chooses too, and egui closes the list only on a click.
+                            ui.close();
                         }
                         items.push((i, r));
                     }
@@ -1030,6 +1032,29 @@ mod tests {
         assert_eq!(s.active, 6);
         assert!(whole_in_view(s, 6), "and it comes into view whole: {:?}", s.tabs);
         assert!(s.items.is_empty(), "the list closes");
+    }
+
+    #[test]
+    fn choosing_from_the_list_by_keyboard_closes_it() {
+        // Review 2, Minor 3: Enter on the list button opens the list; the arrows and Enter choose
+        // a tab, which becomes active, and the list closes, as after a click.
+        let mut h = seven(Theme::Light, STRIP, 0);
+        h.get_by_label("All tabs").focus();
+        h.run();
+        h.key_press(Key::Enter);
+        h.run();
+        h.run();
+        assert!(!h.state().items.is_empty(), "Enter opens the list");
+        for _ in 0..2 {
+            h.key_press(Key::ArrowDown);
+            h.run();
+        }
+        h.key_press(Key::Enter);
+        h.run();
+        h.run();
+        let s = h.state();
+        assert!(matches!(s.asked.as_slice(), [(i, Asked::Activate)] if *i == s.active && *i != 0), "a tab chosen: {:?}", s.asked);
+        assert!(s.items.is_empty(), "the list closes: {:?}", s.items);
     }
 
     #[test]

@@ -242,6 +242,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                     tags.tag_value_as(&format!("filter-{n}-column-{name}"), &r, *ty, true);
                     if r.clicked() {
                         column = Some((*name).to_string());
+                        ui.close();
                     }
                 }
             });
@@ -259,6 +260,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                     tags.tag_value_as(&format!("filter-{n}-op-{}", o.id()), &r, o.label(), true);
                     if r.clicked() {
                         op = Some(o);
+                        ui.close();
                     }
                 }
             });

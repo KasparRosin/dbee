@@ -79,6 +79,27 @@ fn day_filters_through_the_bar() {
     ui.until("the page with two filters", |ui| ui.table()["applied"]["filters"].as_array().map(Vec::len) == Some(2));
 }
 
+/// Review 2, Minor 3: a filter's dropdown chosen from with the keyboard closes its list, as after
+/// a click: Enter opens it, the arrow takes the keyboard to its first item, Enter chooses it.
+#[test]
+fn a_filter_dropdown_closes_when_chosen_by_keyboard() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "customers");
+    for (dropdown, first) in [("filter-0-column", "filter-0-column-id"), ("filter-0-op", "filter-0-op-eq")] {
+        let listed = |ui: &mut Ui| ids(&ui.inspect()).into_iter().filter(|id| id.starts_with(&format!("{dropdown}-"))).count();
+        ui.focus(dropdown);
+        ui.key("Enter");
+        ui.frame();
+        assert!(listed(&mut ui) > 0, "`{dropdown}`: Enter opens the list");
+        ui.key("ArrowDown");
+        assert!(ui.focused(first), "`{dropdown}`: the arrow reaches `{first}`");
+        ui.key("Enter");
+        ui.frame();
+        assert_eq!(listed(&mut ui), 0, "`{dropdown}`: the list closes");
+    }
+}
+
 #[test]
 fn raw_where_through_the_toggle() {
     let db = dbee_testkit::require_testdb!();

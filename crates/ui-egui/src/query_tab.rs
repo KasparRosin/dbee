@@ -852,6 +852,7 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
                     tags.tag_value_as(&format!("{DATABASE}-{name}"), &r, *name, true);
                     if r.clicked() {
                         chosen = Some((*name).to_owned());
+                        ui.close();
                     }
                 }
             });
@@ -990,8 +991,11 @@ fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], sh
                     let r = ui.add(Item::new(&format!("Statement {n}: {}", what(o))).choice(Some(i == shown)));
                     // A menu's first frame is a sizing pass, which reads every widget as disabled.
                     tags.tag_value_as(&format!("{RESULT_LIST}{n}"), &r, value(i, o), true);
-                    if r.clicked() && i != shown {
-                        picked = Some(i);
+                    if r.clicked() {
+                        ui.close();
+                        if i != shown {
+                            picked = Some(i);
+                        }
                     }
                 }
             });

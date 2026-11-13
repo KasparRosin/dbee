@@ -318,6 +318,33 @@ impl Ui {
         self.copied.last().cloned()
     }
 
+    /// Gives the keyboard to the widget tagged `id`, as Tab would (through AccessKit's focus
+    /// action), and draws a frame.
+    pub fn focus(&mut self, id: &str) {
+        use egui_kittest::kittest::Queryable;
+        let tag = self.tag(id).unwrap_or_else(|| panic!("no widget `{id}`"));
+        let f = |i: usize| tag["rect"][i].as_f64().unwrap();
+        let (x, y, w, h) = (f(0), f(1), f(2), f(3));
+        let near = |a: f64, b: f64| (a - b).abs() < 0.5;
+        let node = self.harness.query_all_by(move |n| {
+            n.data().supports_action(egui::accesskit::Action::Focus)
+                && n.raw_bounds().is_some_and(|b| near(b.x0, x) && near(b.y0, y) && near(b.x1, x + w) && near(b.y1, y + h))
+        });
+        node.into_iter().next().unwrap_or_else(|| panic!("`{id}` takes no focus")).focus();
+        self.frame();
+        assert!(self.focused(id), "`{id}` has the keyboard");
+    }
+
+    /// The widget tagged `id` has the keyboard (AccessKit's focused node lies on its rect).
+    pub fn focused(&mut self, id: &str) -> bool {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let Some(tag) = self.tag(id) else { return false };
+        let f = |i: usize| tag["rect"][i].as_f64().unwrap_or(f64::NAN);
+        let (x, y) = (f(0), f(1));
+        let near = |a: f64, b: f64| (a - b).abs() < 0.5;
+        self.harness.query_by(|n| n.is_focused()).is_some_and(|n| n.accesskit_node().raw_bounds().is_some_and(|b| near(b.x0, x) && near(b.y0, y)))
+    }
+
     /// The pointer moves to `at` and stays there for a frame.
     pub fn hover(&mut self, at: Pos2) {
         self.frame_with(vec![Event::PointerMoved(at)]);

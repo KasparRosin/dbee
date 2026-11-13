@@ -56,7 +56,8 @@ impl<'a> Dropdown<'a> {
     }
 
     /// Draws it; while it is open, `list` draws the list under it. A click or Space opens and
-    /// closes it, as egui's combo box does.
+    /// closes it, as egui's combo box does. A click on a row closes it; a row chosen with the
+    /// keyboard closes it when `list` calls `ui.close()`, as in a menu.
     pub fn show<R>(self, ui: &mut Ui, list: impl FnOnce(&mut Ui) -> R) -> InnerResponse<Option<R>> {
         let id = ui.make_persistent_id(self.id_salt);
         let width = self.width.min(ui.available_width()).max(0.0);
