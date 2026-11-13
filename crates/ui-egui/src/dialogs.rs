@@ -162,6 +162,8 @@ pub(crate) fn ask(app: &mut DbeeApp, e: &EngineError, rerun: Rerun) -> bool {
             secret(SecretAsk::SshPassword, keep, rerun, app)
         }
         Need::Confirm { what } => Dialog::Confirm { message: message.clone(), what: what.clone(), rerun },
+        // Until the transaction prompt is drawn: Close anyway closes as before, ending nothing.
+        Need::EndTransaction { .. } => Dialog::Confirm { message: message.clone(), what: "transactionEnd".into(), rerun },
     };
     app.view.dialog = Some(dialog);
     true

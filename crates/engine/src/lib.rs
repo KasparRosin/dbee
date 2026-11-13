@@ -81,6 +81,28 @@ pub enum Need {
     SshPassword,
     /// Something will be lost (`what`, e.g. `queryText`); run again with `force` to go ahead.
     Confirm { what: String },
+    /// Closing would drop the query session's transaction, in `state` (never `Idle`): run again
+    /// with `end` (`"commit"` or `"rollback"`) to end it first, or with `force` to close without.
+    /// `name` is the tab's title or the connection's display name, as `about` says. `lost` is what
+    /// the close loses besides, as the `needsConfirm` it comes before words it after its question
+    /// ("Its query text will be lost."). `running` is the connection's query runs still going.
+    EndTransaction { state: TransactionState, about: EndAbout, name: String, lost: Option<String>, running: Option<Running> },
+}
+
+/// What a [`Need::EndTransaction`] asks about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndAbout {
+    /// The query tab whose run opened the transaction.
+    Tab,
+    /// The connection whose query session holds it.
+    Connection,
+}
+
+/// The query runs still going on a connection: the first one's tab title, and how many.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Running {
+    pub title: String,
+    pub count: usize,
 }
 
 /// Why a command or a job failed. [`EngineError::code`] is the stable id the UI and the control
@@ -113,7 +135,7 @@ pub enum EngineError {
 
 impl EngineError {
     /// A stable id: `unknownCommand`, `disabled`, `badParams`, `needsHostKey`, `needsPassphrase`,
-    /// `needsPassword`, `needsSshPassword`, `needsConfirm`, a database code (`server`,
+    /// `needsPassword`, `needsSshPassword`, `needsConfirm`, `needsTransactionEnd`, a database code (`server`,
     /// `connectionLost`, …), `busy`, `timeout`, `internal` or `config`.
     pub fn code(&self) -> &'static str {
         match self {
@@ -126,6 +148,7 @@ impl EngineError {
                 Need::Password => "needsPassword",
                 Need::SshPassword => "needsSshPassword",
                 Need::Confirm { .. } => "needsConfirm",
+                Need::EndTransaction { .. } => "needsTransactionEnd",
             },
             EngineError::Db { code, .. } => code,
             EngineError::Busy(_) => "busy",
@@ -146,6 +169,16 @@ impl EngineError {
                 Need::HostKey { host, key_type, fingerprint } => json!({ "host": host, "keyType": key_type, "fingerprint": fingerprint }),
                 Need::Passphrase { key } => json!({ "key": key }),
                 Need::Confirm { what } => json!({ "what": what }),
+                Need::EndTransaction { state, about, name, lost, running } => json!({
+                    "state": crate::state::transaction_state(*state),
+                    "about": match about {
+                        EndAbout::Tab => "tab",
+                        EndAbout::Connection => "connection",
+                    },
+                    "name": name,
+                    "lost": lost,
+                    "running": running.as_ref().map(|r| json!({ "title": r.title, "count": r.count })),
+                }),
                 Need::Password | Need::SshPassword => json!({}),
             },
             EngineError::Db { data, .. } => data.clone(),

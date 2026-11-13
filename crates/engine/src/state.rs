@@ -209,14 +209,19 @@ impl Transaction {
         }
     }
 
-    /// `{state, tab}`: `state` is `open`, `failed` or `unknown`.
+    /// `{state, tab}`: `state` is `open`, `failed` or `unknown` ([`transaction_state`]).
     pub fn summary(&self) -> Json {
-        let state = match self.state {
-            TransactionState::Open => "open",
-            TransactionState::Failed => "failed",
-            TransactionState::Idle | TransactionState::Unknown => "unknown",
-        };
-        json!({ "state": state, "tab": self.tab })
+        json!({ "state": transaction_state(self.state), "tab": self.tab })
+    }
+}
+
+/// A transaction's state as the engine names it: `open`, `failed` or `unknown` (`Idle` is no
+/// transaction, so it never names one).
+pub fn transaction_state(state: TransactionState) -> &'static str {
+    match state {
+        TransactionState::Open => "open",
+        TransactionState::Failed => "failed",
+        TransactionState::Idle | TransactionState::Unknown => "unknown",
     }
 }
 

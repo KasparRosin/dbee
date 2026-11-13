@@ -74,12 +74,13 @@ use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
 use serde_json::json;
 
+use super::query::{self, End};
 use super::{CommandSpec, LOST, MAX_OPEN, NOT_CONNECTED, always, bad, connected, disabled, ignored, needed_connection, needs_db, not_connected, p};
 use crate::allowed;
 use crate::jobs::{Stop, unless_stopped};
 use crate::state::{Connected, Credentials, CurrentDatabase, server_text};
 use crate::turns::{self, InTurn};
-use crate::{Apply, ConnectionId, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest, Which};
+use crate::{Apply, ConnectionId, EndAbout, EngineError, Json, Need, Outcome, Screen, Session, Tab, UiRequest, Which};
 
 const LIST: &str = "connection.list";
 const SAVE: &str = "connection.save";
@@ -267,7 +268,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Disconnect",
         menu: &["File"],
         shortcut: Some("Ctrl+Shift+Q"),
-        params: "{connection?, force?}",
+        params: "{connection?, force?, end?: \"commit\" or \"rollback\"}",
         enabled: connected,
         run: close,
         journal: true,
@@ -1556,37 +1557,66 @@ fn refresh(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Started(job))
 }
 
-/// `{connection?, force?}` → `{closed, connection}` (`closed` being the saved connection's id):
-/// back to the connection screen. Its query tabs with text and table tabs with staged edits ask
-/// first (`Needs::Confirm { what: "queryText" }`, or `"stagedEdits"` when only edits would be
-/// lost) unless `force`. Its tabs close, which is every tab; statements still running are
-/// cancelled through their connections' cancellers (an Apply then rolls back, and a query run
-/// stops), and the connections are let go (they close once the jobs using them end; those jobs'
-/// results are dropped). The saved and recent lists are read again from the file, which another
-/// dbee may have changed meanwhile.
+/// `{connection?, force?, end?}` → `{closed, connection}` (`closed` being the saved connection's
+/// id): back to the connection screen. Unless `force` or `end`, it asks first:
+/// - when its query session has a transaction, open, failed or unknown: `Needs::EndTransaction`
+///   ([`query::end_question`]), which comes before the question below and carries its sentence in
+///   `lost`;
+/// - when its query tabs have text or its table tabs staged edits: `Needs::Confirm`, `what` being
+///   `queryText`, or `stagedEdits` when only edits would be lost.
+///
+/// With `end` (`"commit"` or `"rollback"`) it is a job that ends the transaction first, and closes
+/// unless that fails ([`query::end_then_close`]). Its tabs close, which is every tab; statements
+/// still running are cancelled through their connections' cancellers (an Apply then rolls back,
+/// and a query run stops), and the connections are let go (they close once the jobs using them
+/// end; those jobs' results are dropped). The saved and recent lists are read again from the file,
+/// which another dbee may have changed meanwhile.
 fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let force = p::bool_or(params, "force", false)?;
+    let end = End::param(params)?;
     let id = needed_connection(s, params)?;
     let c = s.state.connection(Which::Id(id)).ok_or_else(|| disabled(NOT_CONNECTED))?;
+    if let Some(end) = end {
+        return query::end_then_close(s, Some(id), end, CLOSE, move |s| close_now(s, id));
+    }
+    if !force {
+        let name = c.config.display_name();
+        let question = format!("Disconnect from {name}?");
+        let lost = lost(s, id);
+        if let Some(t) = c.transaction() {
+            return Err(query::end_question(s, id, t.state, EndAbout::Connection, name, &question, lost.map(|(_, l)| l)));
+        }
+        if let Some((what, lost)) = lost {
+            return Err(EngineError::Needs { need: Need::Confirm { what: what.into() }, message: format!("{question} {lost}") });
+        }
+    }
+    close_now(s, id).map(Outcome::Done).ok_or_else(|| disabled(NOT_CONNECTED))
+}
+
+/// What closing connection `id` loses: the `what` of its `Needs::Confirm`, and the sentence its
+/// question says it in after asking ("The text of 1 query tab will be lost.").
+fn lost(s: &Session, id: ConnectionId) -> Option<(&'static str, String)> {
     let its = || s.state.tabs.iter().filter(|t| t.connection() == Some(id));
     let with_text = its().filter(|t| matches!(t, Tab::Query(q) if !q.text.trim().is_empty())).count();
     let with_edits = its().filter(|t| matches!(t, Tab::Table(t) if t.has_staged_edits())).count();
-    if (with_text > 0 || with_edits > 0) && !force {
-        let tabs = |n: usize, what: &str| if n == 1 { format!("1 {what} tab") } else { format!("{n} {what} tabs") };
-        let mut lost = Vec::new();
-        if with_text > 0 {
-            lost.push(format!("text of {}", tabs(with_text, "query")));
-        }
-        if with_edits > 0 {
-            lost.push(format!("staged changes of {}", tabs(with_edits, "table")));
-        }
-        let what = if with_text > 0 { "queryText" } else { "stagedEdits" };
-        return Err(EngineError::Needs {
-            need: Need::Confirm { what: what.into() },
-            message: format!("Disconnect from {}? The {} will be lost.", c.config.display_name(), lost.join(" and the ")),
-        });
+    if with_text == 0 && with_edits == 0 {
+        return None;
     }
-    let Some(at) = s.state.connections.iter().position(|c| c.id == id) else { return Err(disabled(NOT_CONNECTED)) };
+    let tabs = |n: usize, what: &str| if n == 1 { format!("1 {what} tab") } else { format!("{n} {what} tabs") };
+    let mut lost = Vec::new();
+    if with_text > 0 {
+        lost.push(format!("text of {}", tabs(with_text, "query")));
+    }
+    if with_edits > 0 {
+        lost.push(format!("staged changes of {}", tabs(with_edits, "table")));
+    }
+    let what = if with_text > 0 { "queryText" } else { "stagedEdits" };
+    Some((what, format!("The {} will be lost.", lost.join(" and the "))))
+}
+
+/// Closes connection `id` when it is still open (see [`close`]): `{closed, connection}`.
+fn close_now(s: &mut Session, id: ConnectionId) -> Option<Json> {
+    let at = s.state.connections.iter().position(|c| c.id == id)?;
     let c = s.state.connections.remove(at);
     if s.state.connections.is_empty() {
         s.state.screen = Screen::Connections;
@@ -1600,7 +1630,7 @@ fn close(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         s.state.active = s.state.tabs.last().map(Tab::id);
     }
     stop_statements(s, c.browse);
-    Ok(Outcome::Done(json!({ "closed": c.config.id, "connection": id })))
+    Some(json!({ "closed": c.config.id, "connection": id }))
 }
 
 #[cfg(test)]

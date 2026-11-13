@@ -385,7 +385,7 @@ fn errors_carry_codes_and_data() {
 
 #[test]
 fn needs_codes_and_data() {
-    use crate::Need;
+    use crate::{EndAbout, Need, Running, TransactionState};
     let cases = [
         (Need::HostKey { host: "h".into(), key_type: "ssh-ed25519".into(), fingerprint: "SHA256:x".into() }, "needsHostKey"),
         (Need::Passphrase { key: "/k".into() }, "needsPassphrase"),
@@ -396,6 +396,23 @@ fn needs_codes_and_data() {
     for (need, code) in cases {
         assert_eq!(EngineError::Needs { need, message: "m".into() }.code(), code);
     }
+    let end = |state, about, lost: Option<&str>, running| EngineError::Needs {
+        need: Need::EndTransaction { state, about, name: "Query 1".into(), lost: lost.map(str::to_owned), running },
+        message: "m".into(),
+    };
+    let e = end(TransactionState::Open, EndAbout::Tab, None, None);
+    assert_eq!(
+        (e.code(), e.data()),
+        ("needsTransactionEnd", json!({"state": "open", "about": "tab", "name": "Query 1", "lost": null, "running": null}))
+    );
+    let running = Some(Running { title: "Query 2".into(), count: 1 });
+    let e = end(TransactionState::Unknown, EndAbout::Connection, Some("The text of 1 query tab will be lost."), running);
+    let data = json!({
+        "state": "unknown", "about": "connection", "name": "Query 1",
+        "lost": "The text of 1 query tab will be lost.", "running": {"title": "Query 2", "count": 1},
+    });
+    assert_eq!(e.data(), data);
+    assert_eq!(end(TransactionState::Failed, EndAbout::Tab, None, None).data()["state"], "failed");
     let e = EngineError::Needs {
         need: Need::HostKey { host: "h".into(), key_type: "ssh-ed25519".into(), fingerprint: "SHA256:x".into() },
         message: "m".into(),

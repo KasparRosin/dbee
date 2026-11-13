@@ -65,6 +65,23 @@ impl std::fmt::Debug for Stop {
     }
 }
 
+/// Set once a job's result is on its way to the session ([`Jobs::sent`]). A job that waits for it
+/// before it ends sends its own result after that one, so the session applies the two in that
+/// order.
+#[derive(Clone, Default)]
+pub(crate) struct Sent(Arc<Stop>);
+
+impl Sent {
+    /// Returns once the result was sent, also when that was before.
+    pub(crate) async fn wait(&self) {
+        self.0.stopped().await;
+    }
+
+    fn set(&self) {
+        self.0.stop();
+    }
+}
+
 /// How long a stopped statement's first cancel request has to stop it before the request is sent
 /// again, and then how often it is sent while the statement has not ended.
 const CANCEL_AGAIN_AFTER: Duration = Duration::from_secs(1);
@@ -194,6 +211,8 @@ pub(crate) struct Jobs {
     /// How to stop the running connection attempts ([`Jobs::spawn_attempt`]); kept apart from
     /// `stops`, as closing or reconnecting a connection stops what runs on it, never an attempt.
     attempts: BTreeMap<JobId, Arc<Stop>>,
+    /// Each running job's [`Sent`].
+    sent: BTreeMap<JobId, Sent>,
     last: u64,
     applying: Option<JobId>,
     notify: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -219,6 +238,7 @@ impl Jobs {
             delivered: VecDeque::new(),
             stops: BTreeMap::new(),
             attempts: BTreeMap::new(),
+            sent: BTreeMap::new(),
             last: 0,
             applying: None,
             notify,
@@ -229,6 +249,8 @@ impl Jobs {
         self.last = self.last.saturating_add(1);
         let job = JobId(self.last);
         self.running.insert(job, label);
+        let sent = Sent::default();
+        self.sent.insert(job, sent.clone());
         let tx = self.tx.clone();
         let notify = self.notify.clone();
         log::debug!("job {} ({label}): started", job.0);
@@ -240,6 +262,7 @@ impl Jobs {
             });
             // Fails only when the session is gone, and then nobody wants the result.
             let _ = tx.send(Finished { job, label, outcome, took: start.elapsed() });
+            sent.set();
             if let Some(notify) = notify {
                 notify();
             }
@@ -254,6 +277,12 @@ impl Jobs {
         let job = self.spawn(label, fut);
         self.stops.insert(job, stop);
         job
+    }
+
+    /// The [`Sent`] of job `job`, while its result was not applied; `None` once it was, when
+    /// there is nothing to wait for.
+    pub fn sent(&self, job: JobId) -> Option<Sent> {
+        self.sent.get(&job).cloned()
     }
 
     /// Stops the running job `job`: `Some(true)` when this stopped it, `Some(false)` when it was
@@ -338,6 +367,7 @@ impl Jobs {
         self.running.remove(&job);
         self.stops.remove(&job);
         self.attempts.remove(&job);
+        self.sent.remove(&job);
         self.orphaned.remove(&job)
     }
 
@@ -421,6 +451,33 @@ mod tests {
         assert!(stop.is_set());
         tokio::time::timeout(Duration::from_secs(5), stop.stopped()).await.unwrap();
         assert!(!stop.stop(), "set already");
+    }
+
+    /// A job that waits for another's [`Sent`] before it ends comes in after it, also when it
+    /// would finish first; waiting for a job whose result is already in returns at once.
+    #[test]
+    fn a_job_waiting_for_anothers_result_comes_in_after_it() {
+        let mut jobs = Jobs::new(None).unwrap();
+        let release = Arc::new(Stop::default());
+        let held = Arc::clone(&release);
+        let first = jobs.spawn("first", async move {
+            held.stopped().await;
+            let apply: Apply = Box::new(|_| Ok(Json::Null));
+            apply
+        });
+        let sent = jobs.sent(first).unwrap();
+        let second = jobs.spawn("second", async move {
+            sent.wait().await;
+            let apply: Apply = Box::new(|_| Ok(Json::Null));
+            apply
+        });
+        release.stop();
+        let deadline = Deadline::after(Duration::from_secs(10));
+        let order: Vec<JobId> = (0..2).filter_map(|_| jobs.next_before(&deadline).map(|done| done.job)).collect();
+        assert_eq!(order, [first, second]);
+        assert!(jobs.sent(first).is_some(), "until its result is applied");
+        jobs.finish(first);
+        assert!(jobs.sent(first).is_none(), "nothing to wait for once applied");
     }
 
     /// A statement that ends only once a cancel request reaches it, and a canceller whose first
