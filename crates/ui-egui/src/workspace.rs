@@ -128,7 +128,7 @@ pub fn tab_title(tab: &Tab) -> String {
 }
 
 /// Closing `tab` would lose something.
-fn dirty(tab: &Tab) -> bool {
+pub(crate) fn dirty(tab: &Tab) -> bool {
     match tab {
         Tab::Table(t) => t.has_staged_edits(),
         Tab::Query(q) => !q.text.trim().is_empty(),

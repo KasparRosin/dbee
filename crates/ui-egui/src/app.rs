@@ -6,7 +6,9 @@
 //! frame runs in this order ([`DbeeApp::ui`]):
 //! 1. `session.pump()`: the results of finished jobs are applied;
 //! 2. the control replies that waited (for a job, idleness, input or a picture) are answered;
-//! 3. the control requests that arrived are handled ([`crate::control`]); then the file the
+//! 3. the control requests that arrived are handled ([`crate::control`]); then the window's
+//!    close request, which starts a quit when something would be lost or left unfinished
+//!    ([`DbeeApp::close_requested`]); then the file the
 //!    command line named ([`DbeeApp::with_file`]), in the first frame that draws, or else the
 //!    first file dropped on the window opens (`connection.openFile`; a file of no type dbee opens shows the
 //!    refusal as a notice; while a connection is open, it closes first, through its questions,
@@ -15,7 +17,8 @@
 //!    selection opens one ([`crate::editors`]); then the keyboard shortcuts run
 //!    ([`crate::shortcuts`]; the value panel's copy first), before any widget sees the keys (not
 //!    while a dialog or the quick search is open: the quick search handles its own keys);
-//! 5. a connection chosen in the quick search connects once the one open has closed
+//! 5. a quit closes the next connection, or the window ([`DbeeApp::quit_pending`]); a connection
+//!    chosen in the quick search connects once the one open has closed
 //!    ([`connections::switch_pending`]); the screen is drawn, tagging its widgets
 //!    ([`crate::automation`]), then the quick search over it while it is open
 //!    ([`crate::quick_search`]), then the dialog, if any ([`crate::dialogs`]); then the cell
@@ -41,10 +44,10 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dbee_engine::cmd::connection::{OPEN, OPEN_FILE, RECONNECT};
-use dbee_engine::{CommandInfo, EngineError, JobId, Json, Outcome, Screen, Session, Which};
+use dbee_engine::{CommandInfo, ConnectionId, EngineError, JobId, Json, Outcome, Screen, Session, Which};
 use serde_json::json;
 
 use crate::automation::Tags;
@@ -74,6 +77,10 @@ const NOTICE_SECS: f64 = 4.0;
 
 /// Most control requests handled in one frame; the rest wait for the next.
 const REQUESTS_PER_FRAME: usize = 64;
+
+/// How long a quit waits, once it has closed every connection, for the work those closes stopped
+/// to end, so the servers get the cancel requests before the window goes.
+const QUIT_WAIT: Duration = Duration::from_secs(3);
 
 /// What a notice says for `e`, as a sentence. A command that cannot run now (`Disabled`), is busy
 /// or got bad params gives its reason alone: `No staged changes.`, not "`edit.apply` cannot run
@@ -139,6 +146,11 @@ pub struct DbeeApp {
     /// `app.quit` was answered when this many frames were drawn: close the window at a later
     /// frame, from this instant on.
     pub(crate) quit: Option<(u64, std::time::Instant)>,
+    /// The window's close request is being answered ([`DbeeApp::quit_pending`]).
+    quitting: Option<Quitting>,
+    /// The window closes itself ([`DbeeApp::close_window`]): the close request that brings goes
+    /// through.
+    closing: bool,
     frames: u64,
     /// Jobs started by the user's own actions ([`DbeeApp::start`]), whose outcome goes back to
     /// where they came from.
@@ -189,6 +201,18 @@ pub(crate) enum Origin {
     Form(u64),
     /// The connection form's SSH login line (`connection.sshKey`).
     KeyLine,
+    /// A quit's close of a connection ([`DbeeApp::quit_pending`]): as [`Origin::Menu`], with its
+    /// questions worded for quitting.
+    Quit,
+}
+
+/// A quit under way: the connections it still closes, in the order they opened, and the one it
+/// asked about last; once none is left, until when it waits for the work the closes stopped.
+#[derive(Debug)]
+struct Quitting {
+    left: VecDeque<ConnectionId>,
+    asked: Option<ConnectionId>,
+    until: Option<Instant>,
 }
 
 /// A job [`DbeeApp::start`] started, with the params it ran with (for running it again after a
@@ -287,6 +311,8 @@ impl DbeeApp {
             shots: 0,
             screenshot_dir: None,
             quit: None,
+            quitting: None,
+            closing: false,
             frames: 0,
             ui_jobs: Vec::new(),
             clipboard: Vec::new(),
@@ -572,7 +598,7 @@ impl DbeeApp {
         match origin {
             Origin::KeyLine => connections::key_line_done(self, job, result),
             Origin::Form(generation) => connections::form_done(self, command, params, generation, job, result),
-            Origin::Menu | Origin::Page => {
+            Origin::Menu | Origin::Page | Origin::Quit => {
                 // The card above the grid shows a page load's job error (`TableTab::error`), and
                 // an Apply's however it was started (`Edits::failed`).
                 let carded = origin == Origin::Page || command == APPLY;
@@ -586,6 +612,65 @@ impl DbeeApp {
                 }
             }
         }
+    }
+
+    /// Closes the window. The close request that brings goes through without asking.
+    pub(crate) fn close_window(&mut self, ctx: &egui::Context) {
+        self.closing = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// The desktop asks the window to close (its close button, Alt+F4, logging out). With nothing
+    /// to lose or leave unfinished ([`dialogs::quit_asks`]) it closes at once. Else the close waits
+    /// and a quit starts ([`DbeeApp::quit_pending`]); a dialog that was showing goes unanswered,
+    /// and a switch waiting for its close is dropped. Asked again during the quit, the close waits
+    /// again.
+    fn close_requested(&mut self, ctx: &egui::Context) {
+        if self.closing || self.quit.is_some() || !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if self.quitting.is_none() && !dialogs::quit_asks(self.session.state()) {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.request_repaint();
+        if self.quitting.is_none() {
+            let left = self.session.state().connections.iter().map(|c| c.id).collect();
+            self.quitting = Some(Quitting { left, asked: None, until: None });
+            self.view.dialog = None;
+            self.view.conn.switch = None;
+        }
+    }
+
+    /// Each frame of a quit, once no dialog shows and no close is ending a transaction: the
+    /// connection asked about last still open (CANCEL, an end that failed) stops the quit, and the
+    /// window stays. Else the next connection closes with its questions ([`dialogs::quit_close`]).
+    /// With none left the window closes, once the work the closes stopped has ended, or after
+    /// [`QUIT_WAIT`].
+    fn quit_pending(&mut self, ctx: &egui::Context) {
+        let waiting = self.view.dialog.is_some() || self.session.running(connections::CLOSE) || self.session.running(dialogs::TAB_CLOSE);
+        let state = self.session.state();
+        let Some(quitting) = self.quitting.as_mut().filter(|_| !waiting) else { return };
+        if quitting.asked.take().is_some_and(|id| state.connection(Which::Id(id)).is_some()) {
+            self.quitting = None;
+            return;
+        }
+        while let Some(id) = quitting.left.pop_front() {
+            if state.connection(Which::Id(id)).is_some() {
+                quitting.asked = Some(id);
+                dialogs::quit_close(self, id);
+                // A close with nothing to ask is done already: the next frame goes on.
+                ctx.request_repaint();
+                return;
+            }
+        }
+        let now = Instant::now();
+        let until = *quitting.until.get_or_insert(now.checked_add(QUIT_WAIT).unwrap_or(now));
+        if self.session.busy() && now < until {
+            return;
+        }
+        self.quitting = None;
+        self.close_window(ctx);
     }
 
     /// One frame (see the module docs). Usable from a test harness: call [`DbeeApp::feed_input`]
@@ -620,6 +705,7 @@ impl DbeeApp {
             }
             self.control = Some(rx);
         }
+        self.close_requested(&ctx);
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         let busy = self.view.dialog.is_some() || CONNECTING.iter().any(|c| self.session.running(c));
         if let Some(path) = self.file.take() {
@@ -661,6 +747,7 @@ impl DbeeApp {
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
+        self.quit_pending(ui.ctx());
         connections::switch_pending(self);
         match self.session.state().screen {
             Screen::Connections => {
@@ -716,6 +803,12 @@ impl DbeeApp {
 }
 
 impl eframe::App for DbeeApp {
+    /// While the window is hidden (minimized) eframe runs only this: a close asked for then asks
+    /// first too.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.close_requested(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         DbeeApp::ui(self, ui);
     }

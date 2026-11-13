@@ -689,7 +689,7 @@ pub(crate) fn answer_deferred(
         && now >= at
     {
         app.quit = None;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        app.close_window(ctx);
     }
     let mut waiting = Vec::new();
     for mut d in std::mem::take(&mut app.deferred) {

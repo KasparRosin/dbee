@@ -780,6 +780,7 @@ fn a_lost_connection_at_commit_toasts_and_keeps_the_tab() {
     ui.click("dialog-ok");
     let text = toast_text(&mut ui);
     assert!(text.starts_with("The commit failed: "), "{text}");
+    assert!(!text.contains("Run again"), "a close's toast has no run's advice: {text}");
     let t = dbee_ui_egui::theme::LIGHT;
     ui.toast().unwrap_or_else(|| panic!("the toast")).assert_in(t.danger, t.on_danger, "a failure");
     let d = ui.document();
@@ -886,6 +887,177 @@ fn disconnect_asks_with_the_text_sentence_once() {
         assert_eq!(ui.inspect()["dialog"], Json::Null, "no second dialog");
     }
     assert_eq!(toast_text(&mut ui), "Committed on pg14");
+}
+
+impl Ui {
+    /// One frame in which the desktop asks the window to close (its close button, Alt+F4), with
+    /// [`Ui::sent`] emptied first, so it holds what the window answers.
+    fn close_request(&mut self) {
+        self.sent.clear();
+        self.harness.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        self.frame();
+    }
+
+    /// The window cancelled the close the desktop asked for.
+    fn kept_open(&self) -> bool {
+        self.sent.contains(&egui::ViewportCommand::CancelClose)
+    }
+
+    /// The window closed itself.
+    fn closed(&self) -> bool {
+        self.sent.contains(&egui::ViewportCommand::Close)
+    }
+
+    /// Frames until the window closes itself.
+    fn until_closed(&mut self) {
+        self.until("the window to close", |ui| ui.closed());
+    }
+
+    /// A few frames, then: the window stays, with no dialog.
+    fn assert_stays(&mut self, at: &str) {
+        for _ in 0..5 {
+            self.frame();
+        }
+        assert!(!self.closed(), "{at}: the window stays");
+        assert_eq!(self.inspect()["dialog"], Json::Null, "{at}: nothing more is asked");
+    }
+}
+
+#[test]
+fn quitting_with_a_transaction_asks() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "quit_commit", |n| format!("CREATE TABLE scratch.{n} (id int)"));
+    let mut ui = connected(db);
+    in_transaction(&mut ui, &format!("BEGIN; INSERT INTO scratch.{} VALUES (1)", table.0));
+    ui.close_request();
+    assert!(ui.kept_open(), "the window stays to ask");
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd", "the transaction prompt, about the connection");
+    assert_eq!(ui.value("dialog-text"), "pg14 has a transaction that isn't committed yet. The text of 1 query tab will be lost.");
+    assert_three_buttons(&mut ui);
+    assert!(!ui.closed());
+    ui.click("dialog-ok");
+    ui.until_closed();
+    assert_eq!(toast_text(&mut ui), "Committed on pg14");
+    assert_eq!(ui.document()["screen"], "connections", "pg14 closed before the window");
+    let seen = dbee_testkit::psql(pg14_server(db), &format!("SELECT count(*) FROM scratch.{}", table.0)).unwrap();
+    assert_eq!(seen.trim(), "1", "committed");
+}
+
+#[test]
+fn quitting_with_only_text_says_quit_anyway() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.ctrl("T");
+    ui.execute("query.setText", json!({ "text": "select 1" }));
+    ui.close_request();
+    assert!(ui.kept_open(), "the window stays to ask");
+    assert_eq!(ui.inspect()["dialog"], "confirm");
+    assert_eq!(ui.value("dialog-text"), "The text of 1 query tab will be lost.");
+    assert_eq!((ui.value("dialog-ok"), ui.value("dialog-cancel")), (json!("Quit anyway"), json!("Cancel")));
+    let drawn: Vec<String> = ui.texts().iter().map(|(_, g)| g.text().to_owned()).collect();
+    assert!(drawn.iter().any(|w| w == "Quit anyway?") && drawn.iter().any(|w| w == "QUIT ANYWAY"), "the title and the button: {drawn:?}");
+    let ok = rect_of(&ui.tag("dialog-ok").unwrap_or_default());
+    let danger = dbee_ui_egui::theme::LIGHT.danger;
+    assert!(ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.rect == ok && r.fill == danger)), "QUIT ANYWAY is a danger button");
+    ui.click("dialog-ok");
+    ui.until_closed();
+    assert_eq!(ui.document()["screen"], "connections", "pg14 closed before the window");
+}
+
+/// Review Focus 3, as far as a window reaches it: a window holds one connection (gap 6), so a
+/// quit asks about that one. CANCEL, or an end that fails, stops the quit: the window stays and the
+/// connection is as the answer left it, and the next close asks afresh.
+#[test]
+fn quit_stops_at_the_first_cancel() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "quit_stop", |n| format!("CREATE TABLE scratch.{n} (id int UNIQUE DEFERRABLE INITIALLY DEFERRED)"));
+    let insert = format!("INSERT INTO scratch.{} VALUES (1)", table.0);
+    let mut ui = connected(db);
+    in_transaction(&mut ui, &format!("BEGIN; {insert}"));
+    // CANCEL: nothing ends, nothing closes.
+    ui.close_request();
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd");
+    ui.click("dialog-cancel");
+    ui.assert_stays("cancel");
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["connection"]["transaction"]["state"].clone()), (json!("workspace"), json!("open")), "{d}");
+    assert!(ui.tag("notice").is_none(), "no toast");
+    // A COMMIT the server refuses (the deferred key): the error toast, and the window stays.
+    ui.execute("query.setText", json!({ "text": insert }));
+    ui.execute("query.run", json!({}));
+    ui.close_request();
+    assert_eq!(ui.inspect()["dialog"], "transactionEnd", "the next close asks afresh");
+    ui.click("dialog-ok");
+    let text = toast_text(&mut ui);
+    assert!(text.starts_with("The commit failed: ") && text.contains("duplicate key"), "{text}");
+    ui.assert_stays("a failed commit");
+    let d = ui.document();
+    assert_eq!((d["screen"].clone(), d["tabs"].as_array().map(Vec::len)), (json!("workspace"), Some(1)), "{d}");
+    let seen = dbee_testkit::psql(pg14_server(db), &format!("SELECT count(*) FROM scratch.{}", table.0)).unwrap();
+    assert_eq!(seen.trim(), "0", "nothing committed");
+    // `Quit anyway?`: CANCEL keeps the text.
+    ui.close_request();
+    assert_eq!(ui.inspect()["dialog"], "confirm", "no transaction now, the text still");
+    ui.click("dialog-cancel");
+    ui.assert_stays("quit anyway");
+    assert_eq!(ui.document()["query"]["text"], json!(insert));
+}
+
+#[test]
+fn quitting_with_a_running_query_asks() {
+    let db = dbee_testkit::require_testdb!();
+    let marker = dbee_testkit::unique("quit_run");
+    let running = || {
+        let sql = format!("SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND query LIKE '%{marker}%' AND pid <> pg_backend_pid()");
+        dbee_testkit::psql(pg14_server(db), &sql).unwrap().trim().to_owned()
+    };
+    let mut ui = connected(db);
+    ui.execute("tab.newQuery", json!({ "text": format!("SELECT pg_sleep(60), '{marker}'") }));
+    ui.ok("engine.execute", json!({ "command": "query.run", "params": {}, "wait": false }));
+    ui.until("the statement to run on the server", |_| running() == "1");
+    ui.close_request();
+    assert!(ui.kept_open(), "the window stays to ask");
+    assert_eq!(ui.inspect()["dialog"], "confirm");
+    assert_eq!(ui.value("dialog-text"), "Query 1 is still running. Quitting stops it. The text of 1 query tab will be lost.");
+    assert_eq!(ui.value("dialog-ok"), "Quit anyway");
+    ui.click("dialog-ok");
+    ui.until_closed();
+    // As the frame that closed the window left it: no frame has applied a job's end since.
+    assert!(!ui.harness.state().session().busy(), "the stopped run had ended when the window closed");
+    assert_eq!(running(), "0", "the statement was stopped before the window closed");
+    assert_eq!(ui.document()["jobs"], json!([]), "nothing runs");
+}
+
+#[test]
+fn quitting_with_nothing_to_lose_closes_at_once() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    ui.ctrl("T");
+    ui.execute("query.setText", json!({ "text": " \n" }));
+    ui.open("shop", "orders");
+    ui.close_request();
+    assert!(!ui.kept_open(), "nothing would be lost: the close goes ahead");
+    assert!(!ui.closed(), "the desktop closes the window, dbee sends nothing");
+    assert_eq!(ui.inspect()["dialog"], Json::Null);
+    // With no connection open too.
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.close_request();
+    assert!(!ui.kept_open() && !ui.closed());
+    assert_eq!(ui.inspect()["dialog"], Json::Null);
+}
+
+/// `app.quit` closes the window without asking, whatever would be lost, and the close request the
+/// window's own Close brings goes through.
+#[test]
+fn the_control_quit_is_unchanged() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = connected(db);
+    in_transaction(&mut ui, "BEGIN");
+    assert_eq!(ui.call("app.quit", json!({}))["ok"], true);
+    ui.until_closed();
+    assert_eq!(ui.inspect()["dialog"], Json::Null, "it asks nothing");
+    ui.close_request();
+    assert!(!ui.kept_open(), "the close goes ahead");
 }
 
 #[test]

@@ -14,6 +14,12 @@
 //!   a run still goes in it (`end`). The close it runs again says how it went in a toast
 //!   ([`ended`]).
 //!
+//! Quitting ([`Origin::Quit`]) closes each connection in turn through these questions
+//! ([`quit_close`]), worded for quitting: `Quit anyway?` and QUIT ANYWAY for `needsConfirm`, and
+//! "Quitting stops it" for a run in the transaction. Both say first what still runs and quitting
+//! stops ([`Stops`]); a connection whose only loss is a run still going asks `Quit anyway?` before
+//! its close, which would not ask.
+//!
 //! The connection screen also opens [`Dialog::FillFromUrl`] (runs `connection.parseUrl`, and takes
 //! only a URL of the database types it was opened for) and [`Dialog::DeleteConnection`].
 //! Programmatic calls (the control channel's `engine.execute`) never come here: they get the
@@ -28,8 +34,8 @@
 //! hold, and neither `Debug` nor the logs show them.
 
 use dbee_config::{ConnectionConfig, DbKind};
-use dbee_engine::cmd::query::{FAILED_COMMIT, NO_TRANSACTION};
-use dbee_engine::{ConnectionId, EndAbout, EngineError, Json, Need, Outcome, Running, TabId, TransactionState, Which};
+use dbee_engine::cmd::query::{COMMIT_SESSION_LOST, FAILED_COMMIT, NO_TRANSACTION};
+use dbee_engine::{ConnectionId, EndAbout, EngineError, Json, Need, Outcome, Running, State, Tab, TabId, TransactionState, Which};
 use egui::Key;
 use serde_json::json;
 
@@ -39,9 +45,9 @@ use crate::components::checkbox::Checkbox;
 use crate::components::dialog::{self, Button};
 use crate::components::input::{Field, Input};
 use crate::components::toast::Kind;
-use crate::connections;
 use crate::theme::{self, Text, Words};
 use crate::{DbeeApp, connections::tilde};
+use crate::{connections, workspace};
 
 /// Where a dialog's main button and its Cancel are among its buttons (the first on the right).
 const OK: usize = 0;
@@ -97,6 +103,54 @@ pub(crate) enum Keep {
     No(&'static str),
 }
 
+/// What still runs on a connection, which quitting stops: the titles of the query tabs whose run
+/// goes on, and the tables whose Apply goes on, in tab order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Stops {
+    queries: Vec<String>,
+    applies: Vec<String>,
+}
+
+impl Stops {
+    /// What runs on connection `id`, by its tabs' markers.
+    fn on(state: &State, id: ConnectionId) -> Stops {
+        let mut stops = Stops::default();
+        for tab in state.tabs.iter().filter(|t| t.connection() == Some(id)) {
+            match tab {
+                Tab::Query(q) if q.running.is_some() => stops.queries.push(q.title.clone()),
+                Tab::Table(t) if t.applying.is_some() => stops.applies.push(t.table.name.clone()),
+                _ => {}
+            }
+        }
+        stops
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queries.is_empty() && self.applies.is_empty()
+    }
+
+    /// `words`, then what quitting stops, the queries first: "`Query 1` is still running.
+    /// Quitting stops it." or "2 queries are still running. Quitting stops them.", then "The Apply
+    /// on `orders` is still running. Quitting stops it, and nothing is written."
+    fn said_after(&self, words: Words) -> Words {
+        let words = match self.queries.as_slice() {
+            [] => words,
+            [one] => then(words).name(one.as_str()).plain(" is still running. Quitting stops it."),
+            many => then(words).plain(format!("{} queries are still running. Quitting stops them.", many.len())),
+        };
+        match self.applies.as_slice() {
+            [] => words,
+            [one] => then(words).plain("The Apply on ").name(one.as_str()).plain(" is still running. Quitting stops it, and nothing is written."),
+            many => then(words).plain(format!("{} Applies are still running. Quitting stops them, and nothing is written.", many.len())),
+        }
+    }
+}
+
+/// `words` ready for the next sentence: a space after them, unless there are none.
+fn then(words: Words) -> Words {
+    if words.to_string().is_empty() { words } else { words.plain(" ") }
+}
+
 /// What a [`Dialog::EndTransaction`] asks about: the need's data, and the display name of the
 /// connection whose transaction it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +163,10 @@ pub(crate) struct EndAsk {
     /// What the close loses besides, as a sentence.
     pub lost: Option<String>,
     pub running: Option<Running>,
+    /// Quitting asks, not a close.
+    pub quit: bool,
+    /// What else quitting stops: the Applies (the query runs are the transaction's, `running`).
+    pub stops: Stops,
 }
 
 impl EndAsk {
@@ -117,15 +175,17 @@ impl EndAsk {
         self.running.is_some() || self.state == TransactionState::Failed
     }
 
-    /// The prompt's title and text: why it asks, then what the close loses besides.
+    /// The prompt's title and text: why it asks, then what else quitting stops, then what the
+    /// close loses besides.
     fn words(&self) -> (&'static str, Words) {
         let (name, connection) = (self.name.as_str(), self.connection.as_str());
+        let closing = if self.quit { "Quitting" } else { "Closing" };
         let why = match (&self.running, self.state, self.about) {
             (Some(run), _, _) => Words::default()
                 .name(run.title.as_str())
                 .plain(" is still running in the transaction on ")
                 .name(connection)
-                .plain(". Closing stops it, so the transaction can only be rolled back."),
+                .plain(format!(". {closing} stops it, so the transaction can only be rolled back.")),
             (None, TransactionState::Failed, _) => {
                 Words::from("The transaction on ").name(connection).plain(" failed, so it can only be rolled back.")
             }
@@ -135,8 +195,9 @@ impl EndAsk {
                 Words::from("dbee can't tell whether ").name(name).plain(" still has a transaction open.")
             }
         };
+        let why = self.stops.said_after(why);
         let text = match &self.lost {
-            Some(lost) => why.plain(" ").plain(lost.as_str()),
+            Some(lost) => then(why).plain(lost.as_str()),
             None => why,
         };
         let title = if self.only_rollback() { "Roll back the transaction?" } else { "Commit the transaction?" };
@@ -168,11 +229,16 @@ pub(crate) fn ending(app: &DbeeApp, command: &str, params: &Json) -> Option<Endi
 
 /// Says in a toast how a close that ends a transaction went: `Committed on <connection>` or
 /// `Rolled back on <connection>`, or why it failed (nothing closed then). Nothing when no
-/// transaction was open any more, or the connection went meanwhile.
+/// transaction was open any more, or the connection went meanwhile. A commit that found the query
+/// connection lost says so without the engine's advice to run again, which fits a run, not a close.
 pub(crate) fn ended(app: &mut DbeeApp, ending: &Ending, result: Result<Json, EngineError>) {
     let (done, what) = if ending.commit { ("Committed on ", "commit") } else { ("Rolled back on ", "rollback") };
     let failed = |why: &str| sentence(&format!("The {what} failed: {why}"));
     match result {
+        Err(EngineError::Db { message, .. }) if message == COMMIT_SESSION_LOST => {
+            let what_happened = COMMIT_SESSION_LOST.split_once(". ").map_or(COMMIT_SESSION_LOST, |(first, _)| first);
+            app.notice_again(Kind::Error, failed(what_happened));
+        }
         Ok(r) if r.get("ignored") == Some(&Json::Bool(true)) => {}
         Ok(r) => match r.get("note").and_then(Json::as_str) {
             Some(NO_TRANSACTION) => {}
@@ -192,8 +258,9 @@ pub(crate) enum Dialog {
     HostKey { host: String, key_type: String, fingerprint: String, rerun: Rerun },
     /// A password or passphrase; `line` says whose.
     Secret { ask: SecretAsk, line: Words, value: String, keep: Keep, save: bool, focused: bool, rerun: Rerun },
-    /// Something will be lost.
-    Confirm { message: String, what: String, rerun: Rerun },
+    /// Something will be lost: the engine's message, or for a quit what still runs and what is
+    /// lost.
+    Confirm { text: Words, what: String, rerun: Rerun },
     /// Closing would drop a transaction: COMMIT, ROLLBACK or CANCEL.
     EndTransaction { ask: EndAsk, rerun: Rerun },
     /// Deleting a saved connection (and its secrets).
@@ -260,10 +327,20 @@ pub(crate) fn ask(app: &mut DbeeApp, e: &EngineError, rerun: Rerun) -> bool {
             let keep = keep_of(app, &rerun);
             secret(SecretAsk::SshPassword, keep, rerun, app)
         }
-        Need::Confirm { what } => Dialog::Confirm { message: message.clone(), what: what.clone(), rerun },
+        Need::Confirm { what } => {
+            let text = match rerun.origin {
+                Origin::Quit => quit_text(app, &rerun, message),
+                Origin::Menu | Origin::Page | Origin::Form(_) | Origin::KeyLine => Words::from(message.as_str()),
+            };
+            Dialog::Confirm { text, what: what.clone(), rerun }
+        }
         Need::EndTransaction { state, about, name, lost, running } => {
             let connection = closed_connection(app, rerun.command, &rerun.params).unwrap_or_else(|| name.clone());
-            let ask = EndAsk { state: *state, about: *about, name: name.clone(), connection, lost: lost.clone(), running: running.clone() };
+            let quit = rerun.origin == Origin::Quit;
+            let mut stops = closed_id(&rerun).filter(|_| quit).map(|id| Stops::on(app.session.state(), id)).unwrap_or_default();
+            stops.queries.clear();
+            let ask =
+                EndAsk { state: *state, about: *about, name: name.clone(), connection, lost: lost.clone(), running: running.clone(), quit, stops };
             Dialog::EndTransaction { ask, rerun }
         }
     };
@@ -272,11 +349,56 @@ pub(crate) fn ask(app: &mut DbeeApp, e: &EngineError, rerun: Rerun) -> bool {
 }
 
 /// The title and button of a confirm dialog; both re-run the command with `force`.
-fn confirm_words(what: &str) -> (&'static str, &'static str) {
-    match what {
-        "applyAfterUnknownOutcome" => ("Apply again?", "Apply again"),
+fn confirm_words(what: &str, origin: Origin) -> (&'static str, &'static str) {
+    match (origin, what) {
+        (Origin::Quit, _) => ("Quit anyway?", "Quit anyway"),
+        (_, "applyAfterUnknownOutcome") => ("Apply again?", "Apply again"),
         _ => ("Close anyway?", "Close anyway"),
     }
+}
+
+/// The text of `Quit anyway?` for `connection.close`'s `needsConfirm`: what still runs on the
+/// connection, then the `message`'s sentence of what is lost, without its question
+/// (`Disconnect from <connection>? `).
+fn quit_text(app: &DbeeApp, rerun: &Rerun, message: &str) -> Words {
+    let question = closed_connection(app, rerun.command, &rerun.params).map(|name| format!("Disconnect from {name}? "));
+    let lost = question.and_then(|q| message.strip_prefix(q.as_str())).unwrap_or(message);
+    let stops = closed_id(rerun).map(|id| Stops::on(app.session.state(), id)).unwrap_or_default();
+    then(stops.said_after(Words::default())).plain(lost)
+}
+
+/// The connection `connection.close` names in `rerun`'s params.
+fn closed_id(rerun: &Rerun) -> Option<ConnectionId> {
+    if rerun.command != connections::CLOSE {
+        return None;
+    }
+    rerun.params.get("connection").and_then(Json::as_u64).map(ConnectionId)
+}
+
+/// Quitting would lose something or leave it unfinished, so it asks first: a connection has a
+/// transaction (open, failed or unknown), a query or an Apply running, query text or staged edits.
+pub(crate) fn quit_asks(state: &State) -> bool {
+    state.connections.iter().any(|c| c.transaction().is_some() || loses(state, c.id) || !Stops::on(state, c.id).is_empty())
+}
+
+/// Closing connection `id` loses query text or staged edits: what its `needsConfirm` asks about.
+fn loses(state: &State, id: ConnectionId) -> bool {
+    state.tabs.iter().any(|t| t.connection() == Some(id) && workspace::dirty(t))
+}
+
+/// Quitting's turn for connection `id`: `connection.close` with its questions, worded for quitting.
+/// A connection that loses only a run still going would close without asking, so `Quit anyway?`
+/// asks first here.
+pub(crate) fn quit_close(app: &mut DbeeApp, id: ConnectionId) {
+    let state = app.session.state();
+    let Some(c) = state.connection(Which::Id(id)) else { return };
+    let stops = Stops::on(state, id);
+    let rerun = Rerun { command: connections::CLOSE, params: json!({ "connection": id.0 }), origin: Origin::Quit };
+    if c.transaction().is_none() && !loses(state, id) && !stops.is_empty() {
+        app.view.dialog = Some(Dialog::Confirm { text: stops.said_after(Words::default()), what: String::new(), rerun });
+        return;
+    }
+    app.start(rerun.command, rerun.params, rerun.origin);
 }
 
 /// The display name of the connection a close acts on: `tab.close`'s tab's, `connection.close`'s
@@ -332,7 +454,7 @@ fn keep_of(app: &DbeeApp, rerun: &Rerun) -> Keep {
     let id = rerun.params.get("config").and_then(|c| c.get("id")).or_else(|| rerun.params.get("id")).and_then(Json::as_str).unwrap_or_default();
     let form_says = match rerun.origin {
         Origin::Form(_) => rerun.params.get("config").and_then(|c| c.get("saveSecrets")).and_then(Json::as_bool),
-        Origin::Menu | Origin::Page | Origin::KeyLine => None,
+        Origin::Menu | Origin::Page | Origin::KeyLine | Origin::Quit => None,
     };
     match app.session.state().store.saved.iter().find(|c| !id.is_empty() && c.id == id) {
         Some(saved) => Keep::Yes { checked: form_says.unwrap_or(saved.save_secrets) },
@@ -522,10 +644,10 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 Act::None
             }
         }
-        Dialog::Confirm { message, what, rerun } => {
-            let (heading, button) = confirm_words(what);
-            let shown = dialog::Dialog::new(id, heading).text(message.as_str()).buttons([Button::danger(button, "dialog-ok"), cancel]).show(ctx);
-            match tagged(tags, &shown, message) {
+        Dialog::Confirm { text, what, rerun } => {
+            let (heading, button) = confirm_words(what, rerun.origin);
+            let shown = dialog::Dialog::new(id, heading).text(text.clone()).buttons([Button::danger(button, "dialog-ok"), cancel]).show(ctx);
+            match tagged(tags, &shown, &*text) {
                 Some(OK) => {
                     let params = with(rerun.params.take(), "force", json!(true));
                     Act::Rerun(Rerun { command: rerun.command, params, origin: rerun.origin })
@@ -683,7 +805,22 @@ mod tests {
     }
 
     fn confirm(what: &str) -> Dialog {
-        Dialog::Confirm { message: "Close Query 1? Its query text will be lost.".into(), what: what.into(), rerun: rerun() }
+        Dialog::Confirm { text: "Close Query 1? Its query text will be lost.".into(), what: what.into(), rerun: rerun() }
+    }
+
+    /// `Quit anyway?` for quitting with Query 1 running and its text.
+    fn quit_anyway() -> Dialog {
+        Dialog::Confirm {
+            text: Words::default().name("Query 1").plain(" is still running. Quitting stops it. The text of 1 query tab will be lost."),
+            what: "queryText".into(),
+            rerun: Rerun { command: connections::CLOSE, params: json!({ "connection": 1 }), origin: Origin::Quit },
+        }
+    }
+
+    /// What quitting stops: these queries running, and these tables' Applies.
+    fn stops(queries: &[&str], applies: &[&str]) -> Stops {
+        let own = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect();
+        Stops { queries: own(queries), applies: own(applies) }
     }
 
     /// Every dialog, by what `ui.inspect` names it.
@@ -702,6 +839,7 @@ mod tests {
             ("sshPassword", secret(SecretAsk::SshPassword, Keep::NotOffered)),
             ("confirm", confirm("closeTab")),
             ("confirm", confirm("applyAfterUnknownOutcome")),
+            ("confirm", quit_anyway()),
             ("deleteConnection", Dialog::DeleteConnection { id: "c1".into(), name: "Shop live".into() }),
             ("transactionEnd", end(TransactionState::Open, EndAbout::Tab, false, None)),
             ("transactionEnd", end(TransactionState::Failed, EndAbout::Connection, false, None)),
@@ -724,6 +862,8 @@ mod tests {
             connection: "Shop live".into(),
             lost: lost.map(Into::into),
             running: running.then(|| Running { title: "Query 1".into(), count: 1 }),
+            quit: false,
+            stops: Stops::default(),
         };
         Dialog::EndTransaction { ask, rerun: Rerun { command: TAB_CLOSE, params: json!({ "tab": 1 }), origin: Origin::Menu } }
     }
@@ -993,6 +1133,14 @@ mod tests {
                 Done::Rerun(connections::OPEN, json!({ "id": "c1", "force": true })),
             ),
             (
+                quit_anyway(),
+                Some("Query 1 is still running. Quitting stops it. The text of 1 query tab will be lost."),
+                vec!["dialog-text", "dialog-ok", "dialog-cancel"],
+                "Quit anyway",
+                None,
+                Done::Rerun(connections::CLOSE, json!({ "connection": 1, "force": true })),
+            ),
+            (
                 Dialog::DeleteConnection { id: "c1".into(), name: "Shop live".into() },
                 Some("Delete “Shop live”? Its saved passwords are deleted with it."),
                 vec!["dialog-text", "dialog-ok", "dialog-cancel"],
@@ -1049,7 +1197,7 @@ mod tests {
 
     #[test]
     fn close_anyway_apply_again_and_delete_are_danger_buttons() {
-        // The design: Close anyway, Apply again and Delete are `danger` with `on_danger` words;
+        // The design: Close anyway, Apply again, Quit anyway and Delete are `danger` with `on_danger` words;
         // Fill, Trust and connect, Connect and Close are the `ink` main button; Cancel an outline.
         for (theme, t) in both() {
             for (name, dialog) in every() {
@@ -1058,7 +1206,7 @@ mod tests {
                 let ok = rect(&h, "dialog-ok");
                 let label = h.state().tags.value("dialog-ok").and_then(Json::as_str).unwrap_or_default().to_owned();
                 let at = format!("{theme:?} {name} {label}");
-                let danger = ["Close anyway", "Apply again", "Delete"].contains(&label.as_str());
+                let danger = ["Close anyway", "Apply again", "Quit anyway", "Delete"].contains(&label.as_str());
                 let enabled = entry(&h, "dialog-ok").is_some_and(|e| e.get("enabled").is_none());
                 let (ground, words) = match (danger, enabled) {
                     (true, _) => (t.danger, t.on_danger),
@@ -1210,6 +1358,71 @@ mod tests {
         assert_eq!(shown(&mut app), [(Words::from("The commit failed: insert violates foreign key constraint \"fk\"."), Kind::Error)]);
         ended(&mut app, &rollback, Err(EngineError::Busy("a COMMIT is running".into())));
         assert_eq!(shown(&mut app), [(Words::from("The rollback failed: a COMMIT is running."), Kind::Error)]);
+        // The query connection was found lost: what happened and that nothing was committed, not
+        // the advice to run again that a run's error gives.
+        let lost = EngineError::Db { code: "connectionLost", message: COMMIT_SESSION_LOST.into(), data: json!({}) };
+        ended(&mut app, &commit, Err(lost));
+        let said = "The commit failed: the query connection was lost, and the server rolled its transaction back: nothing was committed.";
+        assert_eq!(shown(&mut app), [(Words::from(said), Kind::Error)]);
+    }
+
+    #[test]
+    fn the_quit_words_say_what_still_runs_first() {
+        // The design's words for quitting: what still runs and quitting stops comes first, the
+        // names in `data`, then the sentence of what is lost. In the transaction prompt the
+        // transaction's own sentence comes first, and a run in it says that quitting stops it.
+        let said = |s: Stops| s.said_after(Words::default());
+        let ran = " is still running. Quitting stops it.";
+        let wrote = " is still running. Quitting stops it, and nothing is written.";
+        assert_eq!(said(stops(&["Query 1"], &[])), Words::default().name("Query 1").plain(ran));
+        assert_eq!(said(stops(&["Query 1", "Query 3"], &[])), Words::from("2 queries are still running. Quitting stops them."));
+        assert_eq!(said(stops(&[], &["orders"])), Words::from("The Apply on ").name("orders").plain(wrote));
+        assert_eq!(said(stops(&[], &["orders", "items"])), Words::from("2 Applies are still running. Quitting stops them, and nothing is written."));
+        assert_eq!(
+            said(stops(&["Query 2"], &["orders"])),
+            Words::default().name("Query 2").plain(ran).plain(" The Apply on ").name("orders").plain(wrote),
+            "the queries, then the Apply"
+        );
+        assert_eq!(said(Stops::default()), Words::default());
+        let quitting = |running: bool, applies: &[&str], lost: Option<&str>| EndAsk {
+            state: TransactionState::Open,
+            about: EndAbout::Connection,
+            name: "Shop live".into(),
+            connection: "Shop live".into(),
+            lost: lost.map(Into::into),
+            running: running.then(|| Running { title: "Query 1".into(), count: 1 }),
+            quit: true,
+            stops: stops(&[], applies),
+        };
+        let (title, text) = quitting(true, &[], Some("Its query text will be lost.")).words();
+        assert_eq!(title, "Roll back the transaction?");
+        let rollback_only = ". Quitting stops it, so the transaction can only be rolled back. Its query text will be lost.";
+        assert_eq!(text, Words::default().name("Query 1").plain(" is still running in the transaction on ").name("Shop live").plain(rollback_only));
+        let (title, text) = quitting(false, &["orders"], Some("The text of 1 query tab will be lost.")).words();
+        assert_eq!(title, "Commit the transaction?");
+        let want = Words::default()
+            .name("Shop live")
+            .plain(" has a transaction that isn't committed yet. The Apply on ")
+            .name("orders")
+            .plain(wrote)
+            .plain(" The text of 1 query tab will be lost.");
+        assert_eq!(text, want);
+        // `Quit anyway?` as drawn: its title, the text with the name in data, QUIT ANYWAY.
+        assert_eq!(confirm_words("queryText", Origin::Quit), ("Quit anyway?", "Quit anyway"));
+        assert_eq!(confirm_words("queryText", Origin::Menu), ("Close anyway?", "Close anyway"), "a close keeps its words");
+        for (theme, t) in both() {
+            let h = open(theme, quit_anyway());
+            let shapes = h.output().shapes.clone();
+            let whole = "Query 1 is still running. Quitting stops it. The text of 1 query tab will be lost.";
+            assert_eq!(h.state().tags.value("dialog-text"), Some(&json!(whole)), "{theme:?}");
+            let want = vec![
+                ("Query 1".to_owned(), Text::Data.font(), t.text),
+                (" is still running. Quitting stops it. The text of 1 query tab will be lost.".to_owned(), Text::Body.font(), t.text),
+            ];
+            assert_eq!(sections(&shapes, whole), want, "{theme:?}: the name in data, the rest in body");
+            assert_eq!(font_of(&shapes, "Quit anyway?"), Some(Text::Title.font()), "{theme:?}: the title");
+            assert_eq!(h.state().tags.value("dialog-ok"), Some(&json!("Quit anyway")), "{theme:?}");
+        }
     }
 
     #[test]

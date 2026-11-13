@@ -81,6 +81,8 @@ pub struct Ui {
     pub tx: mpsc::Sender<ControlRequest>,
     /// Every text a frame put on the clipboard (egui's `CopyText`), oldest first.
     pub copied: Vec<String>,
+    /// Every command a frame sent the window (`Close`, `CancelClose`, …), oldest first.
+    pub sent: Vec<egui::ViewportCommand>,
     /// The slowest frame since [`Ui::time_frames`].
     pub slowest: Duration,
     /// The window's secret store, when it has one.
@@ -120,7 +122,7 @@ impl Ui {
             builder = builder.with_step_dt(step);
         }
         let harness = builder.build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-        let mut ui = Ui { harness, tx, copied: Vec::new(), slowest: Duration::ZERO, secrets, home, hold };
+        let mut ui = Ui { harness, tx, copied: Vec::new(), sent: Vec::new(), slowest: Duration::ZERO, secrets, home, hold };
         ui.frame();
         ui
     }
@@ -154,7 +156,8 @@ impl Ui {
     }
 
     /// One frame, with the app's synthetic input fed in first. Keeps the frame's time in
-    /// [`Ui::slowest`] and what it copied in [`Ui::copied`].
+    /// [`Ui::slowest`], what it copied in [`Ui::copied`] and what it sent the window in
+    /// [`Ui::sent`].
     pub fn frame(&mut self) {
         let start = Instant::now();
         let mut raw = self.harness.input().clone();
@@ -168,6 +171,7 @@ impl Ui {
                 self.copied.push(t.clone());
             }
         }
+        self.sent.extend(self.harness.output().viewport_output.values().flat_map(|v| v.commands.iter().cloned()));
     }
 
     /// One frame with `events` in its input.
