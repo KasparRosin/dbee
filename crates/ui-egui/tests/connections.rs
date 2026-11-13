@@ -336,7 +336,7 @@ fn cards_name_the_type() {
 
 /// A SQLite file on a row follows the status bar's path rule: in the home folder (the process's
 /// `HOME`; the file is never opened), its path starts with `~`; short of room it is cut in the
-/// middle with `…`, the file's name kept; hovered, the row shows it whole.
+/// middle with `…`, the file's name kept; hovered, the row shows it whole under the name.
 #[test]
 fn a_sqlite_path_on_a_row_is_cut_in_the_middle_and_whole_on_hover() {
     let Some(home) = dbee_config::home_dir().filter(|h| h.to_str().is_some_and(|h| !h.is_empty())) else {
@@ -358,7 +358,35 @@ fn a_sqlite_path_on_a_row_is_cut_in_the_middle_and_whole_on_hover() {
     assert!(ui.texts().iter().all(|(_, g)| g.text() != whole), "not whole before the hover");
     let at = ui.centre(&card);
     ui.rest(at);
-    assert!(ui.texts().iter().any(|(_, g)| g.text() == whole), "whole on hover: {:?}", ui.texts().iter().map(|(_, g)| g.text()).collect::<Vec<_>>());
+    let hover = format!("Notes\n{whole}");
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == hover), "whole on hover: {:?}", ui.texts().iter().map(|(_, g)| g.text()).collect::<Vec<_>>());
+}
+
+/// Review 1, M1: a row whose name or line is cut shows both whole on hover, the name over the
+/// line; a row with nothing cut shows no hover.
+#[test]
+fn a_cut_name_on_a_row_reads_whole_on_hover() {
+    const LONG: &str = "Reporting replica for the Customer Success team (read-only, EU)";
+    let mut ui = cards();
+    for (name, cut) in [(LONG, true), ("Shop", false)] {
+        let card = ui.save(&server_of(DbKind::Postgres, name), None);
+        let row = rect_of(&ui.tag(&card).unwrap());
+        let drawn: Vec<(String, bool)> =
+            ui.texts().into_iter().filter(|(r, _)| row.contains_rect(*r)).map(|(_, g)| (g.text().to_owned(), g.elided)).collect();
+        let [(drawn_name, elided), (line, _)] = drawn.as_slice() else { panic!("the name and the line: {drawn:?}") };
+        assert_eq!((drawn_name.as_str(), *elided), (name, cut), "`{name}` cut: {drawn:?}");
+        let whole = format!("{name}\n{line}");
+        let at = ui.centre(&card);
+        ui.rest(at);
+        let hover = ui.texts().iter().any(|(_, g)| g.text() == whole);
+        assert_eq!(
+            hover,
+            cut,
+            "`{name}`: name and line whole on hover only when cut: {:?}",
+            ui.texts().iter().map(|(_, g)| g.text()).collect::<Vec<_>>()
+        );
+        ui.hover(egui::pos2(1.0, 1.0));
+    }
 }
 
 #[test]

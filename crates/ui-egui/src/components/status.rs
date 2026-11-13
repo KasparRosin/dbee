@@ -11,9 +11,9 @@
 //!
 //! When the bar is too narrow, the facts give way in this order: the server version, the link's
 //! security, the address (a file's path is first cut in the middle, and reads whole on hover),
-//! READ-ONLY; then the name is cut. SAVE CONNECTION, the activity and its button stay. The
-//! activity takes at most what is left once the block keeps a few letters: a job's name is cut
-//! with `…` past that, and its words read whole on hover.
+//! READ-ONLY; then the name is cut (whole on hover). SAVE CONNECTION, the activity and its button
+//! stay. The activity takes at most what is left once the block keeps a few letters: a job's name
+//! is cut with `…` past that, and its words read whole on hover.
 //!
 //! A bar is a view: it takes what to show and says what was clicked ([`Shown`]); the screen tags
 //! what it drew and acts.
@@ -253,6 +253,7 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
         ui.painter().rect_filled(block, CornerRadius::ZERO, fill);
     }
     let shown_connection = piece(ui, id.with("connection"), &name, pos2(block.left() + STATUS_BLOCK_PAD_X, mid), text_colour);
+    let shown_connection = if name.galley.elided { shown_connection.hint(connection.name) } else { shown_connection };
     let mut x = block.right() + STATUS_AFTER_BLOCK;
     let mut any = false;
     let mut fact = |f: Option<Piece>, keep: bool, salt: &str| {
@@ -757,6 +758,28 @@ mod tests {
         h.get_by_label(&whole).hover();
         h.run_steps(2);
         assert!(shown(&h.output().shapes).iter().any(|(w, _)| *w == whole), "whole on hover");
+    }
+
+    #[test]
+    fn a_cut_name_reads_whole_on_hover() {
+        // Review 1, M1: a name cut at its most, or short of room, reads whole on hover, as
+        // written; a name drawn whole has no hover.
+        const LONG: &str = "Reporting replica for the Customer Success team (read-only, EU)";
+        for (name, cut) in [(LONG, true), ("Shop live", false)] {
+            let mut h = crate::components::harness_in(vec2(1200.0, 120.0), Theme::Light, (), move |ui, _| {
+                ui.allocate_ui(vec2(1100.0, SLIM_BAR_H), |ui| {
+                    bar(ui, &Connection { name, colour: ConnectionColor::Red, own: true }, &Facts::default(), None, |_| {});
+                });
+            });
+            h.run();
+            let drawn = shown(&h.output().shapes);
+            assert_eq!(drawn.iter().any(|(w, _)| w.ends_with('…')), cut, "`{name}` cut: {drawn:?}");
+            h.get_by_label(name).hover();
+            h.run();
+            h.run();
+            let hover = shown(&h.output().shapes).iter().any(|(w, _)| w == name);
+            assert_eq!(hover, cut, "`{name}` whole on hover only when cut");
+        }
     }
 
     #[test]

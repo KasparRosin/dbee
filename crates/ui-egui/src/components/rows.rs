@@ -155,8 +155,9 @@ pub struct ConnectionRow<'a> {
 }
 
 impl ConnectionRow<'_> {
-    /// Draws it into `rect`; true when its path was cut, for the list to show it whole on hover.
-    pub fn paint(&self, ui: &Ui, rect: Rect) -> bool {
+    /// Draws it into `rect`. When its name or its line was cut: the two whole, the name over the
+    /// line, for the list to show on hover.
+    pub fn paint(&self, ui: &Ui, rect: Rect) -> Option<String> {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         p.rect_filled(rect, CornerRadius::ZERO, ground(t, self.selected, self.hovered));
@@ -171,8 +172,11 @@ impl ConnectionRow<'_> {
         let left = logo.right() + CONNECTION_LOGO_GAP;
         let width = (rect.right() - CONNECTION_PAD_X - left).max(0.0);
         let top = rect.center().y - (name_h + line_h) / 2.0;
-        p.galley(pos2(left, top), one_line(ui, self.name, Text::Body, t.text, width), t.text);
-        let words = |address: &str| Words::default().plain(self.used.as_deref().unwrap_or_default()).name(address).job(t.text_muted);
+        let name = one_line(ui, self.name, Text::Body, t.text, width);
+        let name_cut = name.elided;
+        p.galley(pos2(left, top), name, t.text);
+        let used = self.used.as_deref().unwrap_or_default();
+        let words = |address: &str| Words::default().plain(used).name(address).job(t.text_muted);
         let fits = |address: &str| ui.painter().layout_job(words(address)).size().x <= width;
         let (mut job, cut) = match &self.address {
             Address::File(path) if !fits(path) => (words(&cut_middle(path, fits).unwrap_or_else(|| path.clone())), true),
@@ -180,13 +184,14 @@ impl ConnectionRow<'_> {
         };
         job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
         let line = ui.painter().layout_job(job);
+        let cut = name_cut || cut || line.elided;
         let mid = top + name_h + line_h / 2.0;
         let height = line.size().y;
         p.galley(pos2(left, mid - height / 2.0), line, t.text_muted);
         if self.focused {
             focus::own_edge(&p, rect.shrink(CONNECTION_FOCUS_INSET), RADIUS_CONTROL);
         }
-        cut
+        cut.then(|| format!("{}\n{used}{}", self.name, self.address.text()))
     }
 
     /// What it reads out: its name as written, then its engine, which only its logo shows.
@@ -426,10 +431,10 @@ mod tests {
     }
 
     /// The line `row` draws in a row `width` wide: its words, where, whether egui cut its end, the
-    /// fonts of its parts, and whether `paint` said its path was cut.
+    /// fonts of its parts, and whether `paint` said something was cut.
     fn line_of(theme: Theme, row: &ConnectionRow<'_>, width: f32) -> (String, Rect, bool, Vec<(String, egui::FontId, Color32)>, bool, Rect) {
         let mut cut = false;
-        let (shapes, r) = drawn(theme, vec2(width, 40.0), |ui, rect| cut = row.paint(ui, rect));
+        let (shapes, r) = drawn(theme, vec2(width, 40.0), |ui, rect| cut = row.paint(ui, rect).is_some());
         let line = flat(&shapes)
             .into_iter()
             .find_map(|s| match s {
@@ -490,14 +495,40 @@ mod tests {
             // at its end, and still whole on hover.
             let (text, _, elided, _, cut, _) = line_of(theme, &row(Address::File(LONG.into()), None), 120.0);
             assert!(elided && cut && !text.contains('…'), "{theme:?}: a row with no room for the cut: `{text}`");
-            // A server's address too long for its row is cut at its end, as before.
+            // A server's address too long for its row is cut at its end, as before; whole on hover.
             let server = ConnectionRow {
                 engine: DbKind::Postgres,
                 ..row(Address::Server("postgres@analytics-replica.internal.example.com:5432/analytics".into()), None)
             };
             let (text, _, elided, _, cut, _) = line_of(theme, &server, 200.0);
-            assert!(elided && !cut && !text.contains('…'), "{theme:?}: a server's address cut at its end: `{text}`");
+            assert!(elided && cut && !text.contains('…'), "{theme:?}: a server's address cut at its end: `{text}`");
         }
+    }
+
+    #[test]
+    fn a_cut_name_or_line_reads_whole_on_hover() {
+        // Review 1, M1: when the name or the line is cut, the list shows both whole on hover, the
+        // name over the line (a recent one's words with it); with nothing cut, no hover.
+        const FAR: &str = "postgres@analytics-replica.internal.example.com:5432/analytics";
+        let row = |name: &'static str, address: &str, used: Option<&str>| ConnectionRow {
+            name,
+            engine: DbKind::Postgres,
+            address: Address::Server(address.into()),
+            used: used.map(str::to_owned),
+            colour: None,
+            selected: false,
+            focused: false,
+            hovered: false,
+        };
+        let hover = |row: &ConnectionRow<'_>| {
+            let mut said = None;
+            drawn(Theme::Light, vec2(CONNECTION_W, 40.0), |ui, rect| said = row.paint(ui, rect));
+            said
+        };
+        assert_eq!(hover(&row("Shop live", "postgres@pg14:5432/dbee", None)), None, "nothing cut");
+        let long = "Reporting replica for the Customer Success team";
+        assert_eq!(hover(&row(long, "postgres@pg14:5432/dbee", None)), Some(format!("{long}\npostgres@pg14:5432/dbee")), "the name cut");
+        assert_eq!(hover(&row("Analytics", FAR, Some("just now · "))), Some(format!("Analytics\njust now · {FAR}")), "the line cut");
     }
 
     fn column(name: &str, label: &str) -> ColumnInfo {

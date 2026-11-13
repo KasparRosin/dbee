@@ -870,7 +870,10 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
         focused: look.focused,
         hovered: look.hovered,
     };
-    let r = if row.paint(ui, rect) { r.hint(row.address.text()) } else { r };
+    let r = match row.paint(ui, rect) {
+        Some(whole) => r.hint(whole),
+        None => r,
+    };
     r.widget_info(|| row.widget_info());
     tags.tag_value(id, &r, name.as_str());
     tags.tag_value(&format!("{id}-kind"), &r, c.kind.label());
