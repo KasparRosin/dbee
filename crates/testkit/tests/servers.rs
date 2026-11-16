@@ -178,7 +178,11 @@ fn targets_cover_every_engine() {
         match t.kind().id() {
             "postgres" => assert_eq!(sleep, "SELECT pg_sleep(30)"),
             "mysql" | "mariadb" => assert_eq!(sleep, "SELECT SLEEP(30)"),
-            _ => assert!(sleep.starts_with("SELECT (SELECT count(*) FROM (WITH RECURSIVE") && sleep.contains("75000000"), "{sleep}"),
+            _ => {
+                // A count sized by this machine's rate: any machine counts a million rows a second.
+                let rows = sleep.split("WHERE i < ").nth(1).and_then(|r| r.split(')').next()).and_then(|r| r.parse::<u64>().ok());
+                assert!(sleep.starts_with("SELECT (SELECT count(*) FROM (WITH RECURSIVE") && rows >= Some(30_000_000), "{sleep}");
+            }
         }
         let full = !t.server().is_some_and(|s| !s.full_seed);
         assert_eq!(t.big_rows(), if full { 1_000_000 } else { 30_000 }, "{}", t.name());
