@@ -501,6 +501,122 @@ pub fn outlines_in(ui: &Ui, within: egui::Rect, colour: egui::Color32) -> Vec<(e
         .collect()
 }
 
+/// The last frame's pixels in a region, as the renderer puts them ([`Ui::pixels`]).
+pub struct Pixels {
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    /// Premultiplied RGBA, 0 to 1, row by row.
+    rgba: Vec<[f32; 4]>,
+}
+
+impl Pixels {
+    /// The pixel whose top left corner is at `(x, y)` (whole points, ppp 1); outside the region,
+    /// transparent.
+    pub fn at(&self, x: i32, y: i32) -> egui::Color32 {
+        let (dx, dy) = (x - self.x0, y - self.y0);
+        if dx < 0 || dy < 0 || dx as usize >= self.w || dy as usize >= self.h {
+            return egui::Color32::TRANSPARENT;
+        }
+        let [r, g, b, a] = self.rgba[dy as usize * self.w + dx as usize].map(|c| (c * 255.0).round().clamp(0.0, 255.0) as u8);
+        egui::Color32::from_rgba_premultiplied(r, g, b, a)
+    }
+
+    /// The runs of pixels in `colour` along row `y`, from `x0` to `x1` (not included): where each
+    /// starts and how many pixels it is wide.
+    pub fn runs(&self, y: i32, (x0, x1): (i32, i32), colour: egui::Color32) -> Vec<(i32, i32)> {
+        let mut runs: Vec<(i32, i32)> = Vec::new();
+        for x in x0..x1 {
+            if self.at(x, y) != colour {
+                continue;
+            }
+            match runs.last_mut() {
+                Some((start, n)) if *start + *n == x => *n += 1,
+                _ => runs.push((x, 1)),
+            }
+        }
+        runs
+    }
+}
+
+/// Where `p` lies against the edge from `a` to `b`: twice the signed area of the triangle.
+fn edge(a: Pos2, b: Pos2, p: Pos2) -> f32 {
+    (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+}
+
+/// A point on the edge from `a` to `b` belongs to the one of the two triangles sharing the edge
+/// that runs it this way round, so no pixel is blended twice.
+fn owns(a: Pos2, b: Pos2) -> bool {
+    let d = b - a;
+    d.y > 0.0 || (d.y == 0.0 && d.x < 0.0)
+}
+
+impl Ui {
+    /// The last frame's pixels in `region` (ppp 1) as egui-wgpu draws them: the shapes tessellated
+    /// as egui does (thin rects and lines snapped to whole pixels, edges feathered), each mesh cut to
+    /// its clip rect rounded to whole pixels, blended in paint order over transparent black. Only
+    /// plain fills count: text and images are left out.
+    pub fn pixels(&self, region: egui::Rect) -> Pixels {
+        let ppp = self.harness.ctx.pixels_per_point();
+        assert_eq!(ppp, 1.0, "pixels are points");
+        let (x0, y0) = (region.min.x.floor() as i32, region.min.y.floor() as i32);
+        let (x1, y1) = (region.max.x.ceil() as i32, region.max.y.ceil() as i32);
+        let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+        let mut rgba = vec![[0.0f32; 4]; w * h];
+        for prim in self.harness.ctx.tessellate(self.harness.output().shapes.clone(), ppp) {
+            let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive else { continue };
+            if mesh.texture_id != egui::TextureId::default() {
+                continue;
+            }
+            let clip = prim.clip_rect;
+            let (cx0, cy0) = ((clip.min.x.round() as i32).max(x0), (clip.min.y.round() as i32).max(y0));
+            let (cx1, cy1) = ((clip.max.x.round() as i32).min(x1), (clip.max.y.round() as i32).min(y1));
+            for tri in mesh.indices.as_chunks::<3>().0 {
+                let mut v = tri.map(|i| mesh.vertices[i as usize]);
+                if v.iter().any(|v| v.uv != egui::epaint::WHITE_UV) {
+                    continue;
+                }
+                let mut area = edge(v[0].pos, v[1].pos, v[2].pos);
+                if area == 0.0 {
+                    continue;
+                }
+                if area < 0.0 {
+                    v.swap(1, 2);
+                    area = -area;
+                }
+                let [a, b, c] = v.map(|v| v.pos);
+                let left = (a.x.min(b.x).min(c.x).floor() as i32).max(cx0);
+                let right = (a.x.max(b.x).max(c.x).ceil() as i32).min(cx1);
+                let top = (a.y.min(b.y).min(c.y).floor() as i32).max(cy0);
+                let bottom = (a.y.max(b.y).max(c.y).ceil() as i32).min(cy1);
+                for py in top..bottom {
+                    for px in left..right {
+                        let p = egui::pos2(px as f32 + 0.5, py as f32 + 0.5);
+                        let wts = [(edge(b, c, p), (b, c)), (edge(c, a, p), (c, a)), (edge(a, b, p), (a, b))];
+                        if !wts.iter().all(|&(e, (s, t))| e > 0.0 || (e == 0.0 && owns(s, t))) {
+                            continue;
+                        }
+                        let mut src = [0.0f32; 4];
+                        for (k, (e, _)) in wts.iter().enumerate() {
+                            let col = v[k].color.to_array();
+                            for (s, ch) in src.iter_mut().zip(col) {
+                                *s += e / area * f32::from(ch) / 255.0;
+                            }
+                        }
+                        let dst = &mut rgba[(py - y0) as usize * w + (px - x0) as usize];
+                        let keep = 1.0 - src[3];
+                        for (d, s) in dst.iter_mut().zip(src) {
+                            *d = s + *d * keep;
+                        }
+                    }
+                }
+            }
+        }
+        Pixels { x0, y0, w, h, rgba }
+    }
+}
+
 /// The notice's toast as drawn ([`Ui::toast`]): where, its ground, the colours of the words and of
 /// the marks (its icon, its close) drawn on it, and whether a shadow falls round it.
 #[derive(Debug, Clone)]

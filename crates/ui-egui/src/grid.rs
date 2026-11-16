@@ -86,7 +86,7 @@ pub use crate::components::grid_cell::{Key, Mark};
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
 use crate::components::tooltip::Hint;
-use crate::theme::{self, size};
+use crate::theme::size;
 
 /// A row's height.
 pub const ROW_H: f32 = size::ROW_H;
@@ -359,8 +359,9 @@ impl Grid<'_> {
             content_left = ui.max_rect().left();
             view_x = ui.clip_rect().x_range();
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-            ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::new(1.0, theme::tokens(ui.ctx()).line);
-            // As tall as its rows, so the resize lines stop at the last one.
+            // The cells draw the column lines; egui_extras' own shows only on a hovered or dragged boundary.
+            ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::NONE;
+            // As tall as its rows, so a boundary's resize line and handle stop at the last one.
             let mut table = TableBuilder::new(ui)
                 .id_salt("dbee-grid")
                 .resizable(true)

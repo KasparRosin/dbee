@@ -1534,3 +1534,73 @@ fn a_row_selection_survives_a_refresh_and_fits_a_shorter_page() {
     assert_eq!(ui.document()["selection"], json!({ "anchor": [2, 0], "focus": [2, 4], "whole": true }));
     assert_eq!(ui.value("grid-row-2"), json!({ "number": 103, "selected": true }));
 }
+
+/// The scenes of the checkpoint pictures where the grid's lines show, each in light and dark: the
+/// table tab on `shop.orders`, a query's result and an empty result, at the app's first size.
+/// `check` gets the window, where it is, and the mode's tokens.
+fn line_scenes(db: &TestDb, mut check: impl FnMut(&mut Ui, &str, &dbee_ui_egui::theme::Tokens)) {
+    let modes = [("light", "ui.themeLight", dbee_ui_egui::theme::LIGHT), ("dark", "ui.themeDark", dbee_ui_egui::theme::DARK)];
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("shop", "orders");
+    ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+    let queries = [
+        ("a query's result", "select id, customer_id, dealer_id, status, total, shipped_at, billing from shop.orders order by id limit 100"),
+        ("an empty result", "select id, customer_id, status, total, shipped_at from shop.orders where false"),
+    ];
+    for (n, scene) in ["the table tab", queries[0].0, queries[1].0].into_iter().enumerate() {
+        if let Some((_, sql)) = n.checked_sub(1).and_then(|i| queries.get(i)) {
+            ui.execute("tab.newQuery", json!({ "text": sql }));
+            ui.execute("query.run", json!({}));
+            ui.frame();
+        }
+        for (mode, command, t) in &modes {
+            ui.execute(command, json!({}));
+            ui.hover_away();
+            check(&mut ui, &format!("{scene}, {mode}"), t);
+        }
+    }
+}
+
+/// The header's 1 px `ink` line runs the grid's area unbroken, from the body's left edge to the
+/// value panel: no column line crosses it.
+#[test]
+fn the_headers_ink_line_runs_unbroken() {
+    let db = dbee_testkit::require_testdb!();
+    line_scenes(db, |ui, at, t| {
+        let (x, head) = (ui.body_x(), ui.drawn("grid-header-0"));
+        let y = (head.bottom() - 0.5).floor() as i32;
+        let pixels = ui.pixels(egui::Rect::from_x_y_ranges(x, head.y_range()));
+        // The body's last pixel is where the value panel's line may fall.
+        let (from, to) = (x.min.ceil() as i32, x.max.floor() as i32 - 1);
+        let broken: Vec<(i32, egui::Color32)> = (from..to).map(|x| (x, pixels.at(x, y))).filter(|(_, c)| *c != t.ink).collect();
+        assert_eq!(broken, [], "{at}: the header's ink line along y {y}, x {from} to {to}");
+    });
+}
+
+/// Every column line is a 1 px `line`, in the header and in the rows. The handle that resizes a
+/// column still answers on its boundary.
+#[test]
+fn column_lines_are_one_pixel_wide() {
+    let db = dbee_testkit::require_testdb!();
+    line_scenes(db, |ui, at, t| {
+        let (x, head) = (ui.body_x(), ui.drawn("grid-header-0"));
+        let range = (x.min.ceil() as i32, x.max.floor() as i32 - 1);
+        let mut bands = vec![("the header", head)];
+        bands.extend(ui.harness.state().tags().rect("grid-cell-0-0").map(|r| ("row 0", r)));
+        for (what, band) in bands {
+            // Above the band's words.
+            let y = (band.top() + 3.0).floor() as i32;
+            let runs = ui.pixels(egui::Rect::from_x_y_ranges(x, band.y_range())).runs(y, range, t.line);
+            assert!(runs.len() >= 3, "{at}, {what}: the column lines along y {y}: {runs:?}");
+            assert!(runs.iter().all(|&(_, n)| n == 1), "{at}, {what}: each column line 1 px wide along y {y} (start, width): {runs:?}");
+        }
+    });
+    // Resizing: on a boundary the pointer is the column-resize one.
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("shop", "orders");
+    ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+    let (head, cell) = (ui.drawn("grid-header-1"), ui.drawn("grid-cell-3-1"));
+    ui.hover(egui::pos2(head.right(), cell.center().y));
+    ui.frame();
+    assert_eq!(ui.harness.output().platform_output.cursor_icon, egui::CursorIcon::ResizeColumn, "the boundary resizes the column");
+}
