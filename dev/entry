@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# The container's start: Claude Code goes into the kept ~/.local on first start (so its updates
+# stay too), then the command runs.
+set -euo pipefail
+
+if ! command -v claude >/dev/null 2>&1; then
+    echo "Installing Claude Code into ~/.local (first start only)..." >&2
+    curl -fsSL https://claude.ai/install.sh | bash >&2 || echo "Claude Code was not installed; the next start tries again." >&2
+fi
+
+exec "$@"
