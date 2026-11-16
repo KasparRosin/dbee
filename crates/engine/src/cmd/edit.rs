@@ -16,7 +16,9 @@
 //! build are `BadParams` and change nothing), then runs one job on the browse connection: its
 //! `apply` writes them all or none in one transaction, and on success the page loads
 //! again in the same job. Then the edits and their history go (writes are not undone), the page
-//! shows what was written, and an exact total that the writes may have changed is forgotten. When
+//! shows what was written, the cells written are the tab's `saved` (found on it by their rows'
+//! keys, `Edits::written`), and an exact total that the writes may have changed is forgotten. An
+//! Apply that starts takes the last one's `saved` away. When
 //! the Apply fails nothing was written: every edit stays, and `failed` names the grid row of the
 //! change that failed (its column when that change wrote one), the message and the error's code
 //! (`inspect()` shows `{row, column, message, code}`). When the
@@ -353,8 +355,11 @@ fn stage(s: &mut Session, params: &Json, what: Staging) -> Result<Outcome, Engin
     };
     let e = edits_mut(s, tab)?;
     e.stage(&data, row, col, value, info).map_err(bad)?;
-    let staged = e.shown(&data, row, col).is_some();
-    Ok(Outcome::Done(json!({ "tab": tab, "row": row, "column": col, "staged": staged, "count": e.count() })))
+    let (staged, count) = (e.shown(&data, row, col).is_some(), e.count());
+    if let Some(t) = table_tab_mut(s, tab) {
+        t.saved.retain(|&cell| cell != (row, col));
+    }
+    Ok(Outcome::Done(json!({ "tab": tab, "row": row, "column": col, "staged": staged, "count": count })))
 }
 
 fn edit(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
@@ -391,9 +396,13 @@ fn delete_rows(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Done(json!({ "tab": tab, "count": e.count() })))
 }
 
-/// `{}` → `{tab, count, canUndo, canRedo}` after `f` changed the edits.
+/// `{}` → `{tab, count, canUndo, canRedo}` after `f` changed the edits. The saved cells lose
+/// their mark.
 fn history(s: &mut Session, f: fn(&mut Edits) -> bool) -> Result<Outcome, EngineError> {
     let (tab, _) = target(s)?;
+    if let Some(t) = table_tab_mut(s, tab) {
+        t.saved.clear();
+    }
     let e = edits_mut(s, tab)?;
     f(e);
     Ok(Outcome::Done(json!({ "tab": tab, "count": e.count(), "canUndo": e.can_undo(), "canRedo": e.can_redo() })))
@@ -472,6 +481,7 @@ fn apply(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     });
     if let Some(t) = table_tab_mut(s, tab) {
         t.applying = Some(job);
+        t.saved.clear();
     }
     if let Some(c) = s.state.connection_mut(Which::Id(id)) {
         c.apply_gate = Some((job, gate, stop));
@@ -505,13 +515,14 @@ fn applied(
     t.applying = None;
     match written {
         Ok(n) => {
+            let cells = t.data.as_deref().map(|data| t.edits.written(reload.info(), data, &t.hidden)).unwrap_or_default();
             // Written: the edits and their history go, and a count the writes may have changed.
             t.edits = Arc::default();
             if matches!(t.total, Total::Exact(_)) && (applying.reshaped || t.applied != Condition::None) {
                 t.total = Total::Unknown;
             }
             let shown = match page {
-                Some(page) => reload.finish(s, id, conn, tab, page),
+                Some(page) => reload.finish(s, id, conn, tab, page, &cells),
                 None => Err(bad("the page was not loaded again")),
             };
             Ok(match shown {

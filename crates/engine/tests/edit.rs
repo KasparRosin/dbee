@@ -912,6 +912,151 @@ fn a_page_that_does_not_load_after_the_write_says_the_changes_were_written() {
         assert!(error.starts_with("The changes were written (1 row), but the page did not load again: "), "{table}");
         assert!(error.ends_with(r["reloadError"].as_str().unwrap_or_default()), "{table}");
         assert_eq!((count(s), &table["failed"]), (0, &Json::Null), "the edits went with the write: {table}");
+        assert_eq!(table["saved"], json!([]), "the rows shown are from before the write: {table}");
+    });
+}
+
+/// `scratch.<u> (id int PK DEFAULT 99, name text, total numeric(12,2))` with 6 rows: ids 1 to 6,
+/// named Ann, Bob, Cy, Dee, Eve and Fay. Made before the session connects, so the catalog has it.
+fn make_six(t: &TestTarget) -> (String, Scratch<'_>) {
+    let name = unique("t_saved");
+    let guard = scratch_table(
+        t,
+        &name,
+        "CREATE TABLE {t} (id int PRIMARY KEY DEFAULT 99, name text, total numeric(12,2));
+         INSERT INTO {t} VALUES (1, 'Ann', 1.00), (2, 'Bob', 2.00), (3, 'Cy', 3.00), (4, 'Dee', 4.00), (5, 'Eve', 5.00), (6, 'Fay', 6.00);",
+    );
+    (name, guard)
+}
+
+/// Runs `test` on every engine with the six-row table made and open.
+fn on_each_six(mut test: impl FnMut(&TestTarget, &mut TestSession)) {
+    for t in engine_targets() {
+        println!("on {}", t.name());
+        let (name, _drop) = make_six(&t);
+        let mut s = opened_rows(&t, &name, 6);
+        test(&t, &mut s);
+    }
+}
+
+/// The cells the last Apply wrote, as `inspect()` lists them: `[[row, column], ..]`.
+fn saved(s: &Session) -> Json {
+    s.inspect()["table"]["saved"].clone()
+}
+
+/// Stages `value` in `column` of loaded row `row`, applies it, and checks the cell is marked saved.
+fn apply_one(s: &mut Session, row: usize, column: &str, value: &str) {
+    set_cell(s, row, column, value);
+    apply(s);
+    let col = col(&read(s), column);
+    assert_eq!(saved(s), json!([[row, col]]), "{column} {value}");
+}
+
+#[test]
+fn a_successful_apply_marks_the_written_cells() {
+    let _db = require_testdb!();
+    on_each_six(|t, s| {
+        assert_eq!(saved(s), json!([]), "{}: nothing before an Apply", t.name());
+        set_cell(s, 1, "name", "Bobby");
+        set_cell(s, 1, "total", "2.50");
+        set_cell(s, 4, "name", "Eva");
+        apply(s);
+        assert_eq!(saved(s), json!([[1, 1], [1, 2], [4, 1]]), "{}", t.name());
+        // A new row whose key was given is marked where it lands, in the columns given; one whose
+        // key the database chose is not, and a deleted row has none.
+        run(s, "row.delete", json!({ "rows": [0] }));
+        let ten = run(s, "row.add", json!({}))["row"].as_u64().unwrap() as usize;
+        set_cell(s, ten, "id", "10");
+        set_cell(s, ten, "name", "Ten");
+        let keyless = run(s, "row.add", json!({}))["row"].as_u64().unwrap() as usize;
+        set_cell(s, keyless, "name", "Keyless");
+        apply(s);
+        let d = read(s);
+        let ids: Vec<Option<&str>> = (0..rows(&d)).map(|r| cell(&d, r, "id")).collect();
+        assert_eq!(ids, ["2", "3", "4", "5", "6", "10", "99"].map(Some), "{}", t.name());
+        assert_eq!(saved(s), json!([[5, 0], [5, 1]]), "{}: only the new row with its key", t.name());
+    });
+}
+
+#[test]
+fn a_saved_mark_follows_the_row_key_not_its_position() {
+    let _db = require_testdb!();
+    on_each_six(|t, s| {
+        // Sorted by name, Ann is row 0; renamed Zed, she sorts last.
+        run(s, "table.sort", json!({ "column": "name", "dir": "asc" }));
+        set_cell(s, 0, "name", "Zed");
+        apply(s);
+        let d = read(s);
+        assert_eq!((cell(&d, 0, "name"), cell(&d, 5, "name")), (Some("Bob"), Some("Zed")), "{}", t.name());
+        assert_eq!(saved(s), json!([[5, 1]]), "{}: where the row went, not row 0", t.name());
+        // A key that was edited is the row's key after the write.
+        run(s, "table.sort", json!({ "column": "name", "dir": "none" }));
+        assert_eq!(cell(&read(s), 0, "id"), Some("1"));
+        set_cell(s, 0, "id", "50");
+        apply(s);
+        assert_eq!(cell(&read(s), 5, "id"), Some("50"), "{}", t.name());
+        assert_eq!(saved(s), json!([[5, 0]]), "{}", t.name());
+        // A row the write moved off the page has no mark, and the row now in its place takes none.
+        run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "lt", "value": "4" }] }));
+        assert_eq!(cell(&read(s), 0, "id"), Some("2"));
+        set_cell(s, 0, "id", "40");
+        apply(s);
+        let d = read(s);
+        assert_eq!((rows(&d), cell(&d, 0, "id")), (1, Some("3")), "{}", t.name());
+        assert_eq!(saved(s), json!([]), "{}", t.name());
+    });
+}
+
+#[test]
+fn a_failed_apply_marks_nothing_saved() {
+    let _db = require_testdb!();
+    on_each_table(|t, _, s| {
+        apply_one(s, 0, "name", "Ann");
+        set_cell(s, 2, "name", "Cyd");
+        set_cell(s, 1, "shipped_at", "not a date");
+        let e = run_err(s, "edit.apply", json!({}));
+        assert_eq!(e.code(), "server", "{}: {e}", t.name());
+        let table = summary(s);
+        assert_eq!(table["saved"], json!([]), "{}: not this Apply's cells, nor the last one's: {table}", t.name());
+        assert_eq!((table["failed"]["row"].as_u64(), table["failed"]["column"].as_u64()), (Some(1), Some(3)), "the failed cell keeps its mark");
+        assert_eq!(count(s), 2, "every edit stays");
+    });
+}
+
+#[test]
+fn any_reload_clears_saved() {
+    let _db = require_testdb!();
+    on_each_six(|t, s| {
+        // An edit on a saved cell clears that cell only.
+        set_cell(s, 0, "name", "Ann 2");
+        set_cell(s, 0, "total", "1.50");
+        set_cell(s, 1, "name", "Bob 2");
+        apply(s);
+        assert_eq!(saved(s), json!([[0, 1], [0, 2], [1, 1]]), "{}", t.name());
+        set_cell(s, 0, "name", "Ann 3");
+        assert_eq!(saved(s), json!([[0, 2], [1, 1]]), "{}", t.name());
+        run(s, "cell.setNull", json!({ "row": 1, "column": "name" }));
+        assert_eq!(saved(s), json!([[0, 2]]), "{}", t.name());
+        // Undo and reset clear it all.
+        run(s, "edit.undo", json!({}));
+        assert_eq!((saved(s), count(s)), (json!([]), 1), "{}: undo", t.name());
+        apply_one(s, 0, "name", "Ann 4");
+        set_cell(s, 2, "name", "Cy 2");
+        run(s, "edit.reset", json!({}));
+        assert_eq!((saved(s), count(s)), (json!([]), 0), "{}: reset", t.name());
+        // So does every page load, and a reconnect.
+        let loads = [
+            ("table.refresh", json!({})),
+            ("table.page", json!({ "to": "next" })),
+            ("table.setFilters", json!({ "filters": [{ "column": "id", "op": "gt", "value": "0" }] })),
+            ("table.sort", json!({ "column": "name", "dir": "desc" })),
+            ("connection.reconnect", json!({})),
+        ];
+        for (i, (id, params)) in loads.into_iter().enumerate() {
+            apply_one(s, 0, "total", &format!("{}.25", 10 + i));
+            run(s, id, params);
+            assert_eq!(saved(s), json!([]), "{}: {id}", t.name());
+        }
     });
 }
 

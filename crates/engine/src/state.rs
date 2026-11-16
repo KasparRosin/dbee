@@ -482,6 +482,11 @@ pub struct PageView {
 /// `edits` holds the staged edits, on the rows of `data`: while any are staged, the tab loads no
 /// other page ([`TableTab::has_staged_edits`]), and they are not changed while a page loads or
 /// an Apply runs. A new page starts a new undo history.
+///
+/// `saved` lists the cells of `data` the last successful Apply wrote, found on the page it loaded
+/// by their rows' keys (`Edits::written`). Only that page sets it. An Apply starting, any other
+/// page load, a reconnect, and a reset, undo or redo empty it; staging an edit on a cell takes
+/// that cell out.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableTab {
     pub id: TabId,
@@ -527,6 +532,8 @@ pub struct TableTab {
     pub edits: Arc<Edits>,
     /// The job writing the edits (`edit.apply`).
     pub applying: Option<JobId>,
+    /// The cells the last successful Apply wrote, `(row, column)` of `data`, in order (see above).
+    pub saved: Vec<(usize, usize)>,
 }
 
 impl TableTab {
@@ -555,6 +562,7 @@ impl TableTab {
             shown: view,
             edits: Arc::default(),
             applying: None,
+            saved: Vec::new(),
         }
     }
 
@@ -566,8 +574,10 @@ impl TableTab {
     /// The connection the tab's jobs ran on was replaced (a reconnect): they are dead, and their
     /// results will be ignored. A load in flight counts as failed without a message (the view
     /// goes back to `shown`), a count in flight leaves the estimate it showed, and an Apply in
-    /// flight ends with an unknown outcome (the edits stay, `failed` says so).
+    /// flight ends with an unknown outcome (the edits stay, `failed` says so). The saved cells
+    /// lose their mark.
     pub(crate) fn drop_dead_jobs(&mut self) {
+        self.saved.clear();
         if self.loading.take().is_some() {
             self.back_to_shown();
         }

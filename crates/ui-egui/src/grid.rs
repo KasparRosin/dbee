@@ -49,21 +49,28 @@
 //!
 //! **Marks.** A staged cell, a new row, a row to delete and the row whose change the last Apply
 //! failed on each have their own ground, kept when selected ([`Mark`]); a row to delete is also
-//! struck through, failed or not.
+//! struck through, failed or not. A cell the last Apply wrote shows the saved mark at full for a
+//! second from the frame that first shows it, then fades out over half a second ([`Grid::saved`]),
+//! timed by the window's clock once per page, so once per Apply ([`GridState::saved_strength`]);
+//! after that it is drawn and named as if unmarked. Only while it shows does it ask for frames.
 //!
 //! **Foreign keys.** With [`Grid::links`], each non-NULL foreign key cell of the selected row
 //! (the focus cell's) shows a link that follows it.
 //!
 //! Automation ids: `grid-header-<col>` (value `{name, type, key, sort}`), `grid-cell-<row>-<col>`
 //! (value `{text, null, state?, deleted?}`: the text as shown, `NULL` for NULL, `state` one of
-//! `staged`, `new`, `deleted`, `failed`, `saved`, and `deleted: true` on a row to delete, also
-//! when it is the failed one), `grid-row-<row>` (a row's number, value `{number, selected}`:
-//! the number shown, and whether the row is selected whole), `fk-link-<row>-<col>`, and while the
-//! menu is open `grid-menu-null`, `grid-menu-copy`, `grid-menu-copy-header`, `grid-menu-copy-csv`,
-//! `grid-menu-copy-json`, `grid-menu-copy-markdown`, `grid-menu-delete` (value `{label, shortcut,
-//! why?}`, `why` saying why a disabled entry cannot run now). Cells of rows out of view are listed
-//! with `visible: false` ([`CellBlock`]); a click on one scrolls its row into view first. Row
-//! numbers are tagged only while in view.
+//! `staged`, `new`, `deleted`, `failed`, `saved` (while its mark shows), and `deleted: true` on a
+//! row to delete, also when it is the failed one), `grid-row-<row>` (a row's number, value
+//! `{number, selected}`: the number shown, and whether the row is selected whole),
+//! `fk-link-<row>-<col>`, and while the menu is open `grid-menu-null`, `grid-menu-copy`,
+//! `grid-menu-copy-header`, `grid-menu-copy-csv`, `grid-menu-copy-json`,
+//! `grid-menu-copy-markdown`, `grid-menu-delete` (value `{label, shortcut, why?}`, `why` saying
+//! why a disabled entry cannot run now). Cells of rows out of view are listed with
+//! `visible: false` ([`CellBlock`]); a click on one scrolls its row into view first. Row numbers
+//! are tagged only while in view.
+
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use dbee_core::display::grid_text;
 use dbee_core::{ResultSet, TypeClass};
@@ -189,6 +196,9 @@ pub struct GridState {
     /// of the grid in view.
     edit_cell: Option<Rect>,
     rows_view: Option<Rect>,
+    /// The page whose saved cells' mark is timed, by identity (a weak reference keeps its address
+    /// from being reused by another page), and when, on the window's clock, it first showed.
+    saved: Option<(Weak<ResultSet>, f64)>,
 }
 
 impl GridState {
@@ -196,6 +206,29 @@ impl GridState {
     /// the window rect of the rows in view; `None` when that cell was out of view.
     pub fn editing_rect(&self) -> Option<(Rect, Rect)> {
         self.edit_cell.zip(self.rows_view)
+    }
+
+    /// How strongly the saved mark of the cells of `page` shows in this frame, for
+    /// [`Grid::saved`] ([`grid_cell::saved_strength`]). Its clock starts at the first frame that
+    /// asks for `page`, and every Apply loads a new page. While the mark shows, asks for the
+    /// frame that changes it.
+    pub fn saved_strength(&mut self, ctx: &egui::Context, page: &Arc<ResultSet>) -> f32 {
+        let now = ctx.input(|i| i.time);
+        let since = match &self.saved {
+            Some((of, since)) if std::ptr::eq(of.as_ptr(), Arc::as_ptr(page)) => *since,
+            _ => {
+                self.saved = Some((Arc::downgrade(page), now));
+                now
+            }
+        };
+        let elapsed = now - since;
+        let strength = grid_cell::saved_strength(elapsed);
+        if strength >= 1.0 {
+            ctx.request_repaint_after(Duration::try_from_secs_f64(grid_cell::SAVED_HOLD - elapsed).unwrap_or(Duration::ZERO));
+        } else if strength > 0.0 {
+            ctx.request_repaint();
+        }
+        strength
     }
 }
 
@@ -231,6 +264,9 @@ pub struct Grid<'a> {
     pub first_number: u64,
     /// The cell an editor is open on, if any.
     pub editing: Option<(usize, usize)>,
+    /// How strongly the cells the source marks [`Mark::Saved`] show it, from 1 at full to 0, when
+    /// they are drawn and named as if unmarked ([`GridState::saved_strength`]).
+    pub saved: f32,
 }
 
 /// The inclusive rows and columns `sel` covers: `(rows, columns)`.
@@ -407,7 +443,7 @@ impl Grid<'_> {
                         let mut value = Map::new();
                         value.insert("text".into(), json!(drawn.text));
                         value.insert("null".into(), json!(drawn.null));
-                        if let Some(mark) = src.mark(r, c) {
+                        if let Some(mark) = self.mark(r, c) {
                             value.insert("state".into(), json!(mark.id()));
                         }
                         if src.deleted(r) {
@@ -499,6 +535,11 @@ impl Grid<'_> {
         self.selection.filter(|sel| sel.whole).map(bounds).is_some_and(|((r0, r1), _)| (r0..=r1).contains(&row))
     }
 
+    /// Cell `(row, col)`'s mark as drawn: a saved one only while it shows.
+    fn mark(&self, row: usize, col: usize) -> Option<Mark> {
+        self.source.mark(row, col).filter(|&m| m != Mark::Saved || self.saved > 0.0)
+    }
+
     fn key(&self, col: usize) -> Option<Key> {
         self.keys.get(col).copied().flatten()
     }
@@ -563,7 +604,7 @@ impl Grid<'_> {
             None => ("NULL".to_string(), true),
             Some(v) => (grid_text(v).into_owned(), false),
         };
-        let mark = self.source.mark(row, col);
+        let mark = self.mark(row, col);
         let focus = self.selection.map(|s| s.focus);
         let cell = Cell {
             text: if null { CellText::Null } else { CellText::Text(&text) },
@@ -577,6 +618,7 @@ impl Grid<'_> {
             link: self.links && self.key(col) == Some(Key::Foreign),
             row_selected: focus.is_some_and(|f| f.0 == row),
             hovered,
+            strength: if mark == Some(Mark::Saved) { self.saved } else { 1.0 },
         };
         let link = cell.show(ui, rect, ui.id().with(("dbee-fk-link", row, col)));
         Drawn { text, null, resp, link }
@@ -681,6 +723,48 @@ mod tests {
         assert_eq!((src.cell(0, 0), src.cell(0, 1), src.cell(5, 5)), (Some("1"), None, None));
         assert!(src.right_aligned(0) && !src.right_aligned(1) && !src.right_aligned(9));
         assert_eq!((src.column_name(9), src.mark(0, 0)), ("", None));
+    }
+
+    #[test]
+    fn the_saved_mark_is_timed_once_per_page_and_asks_for_frames_only_while_it_shows() {
+        let ctx = egui::Context::default();
+        let mut state = GridState::default();
+        // A frame at `time` (seconds on the window's clock) asking how strongly `page`'s mark
+        // shows: that, and how soon the frame asked for the next one.
+        let frame = |state: &mut GridState, page: &Arc<ResultSet>, time: f64| {
+            let mut strength = f32::NAN;
+            let out = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |ui| strength = state.saved_strength(ui.ctx(), page));
+            let next = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
+            out.drop_without_applying_deltas();
+            (strength, next)
+        };
+        // egui takes a frame's time off a delay asked for, to have that frame ready by then.
+        let near = |d: Duration, secs: f64| (0.0..=0.05).contains(&(secs - d.as_secs_f64()));
+        // egui asks for frames of its own at the start: from the first one that asks for none, a
+        // frame is only asked for by the mark.
+        let idle = |time: f64| {
+            let out = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |_| {});
+            let next = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |v| v.repaint_delay);
+            out.drop_without_applying_deltas();
+            next
+        };
+        assert!((1..=5).any(|n| idle(f64::from(n)) == Duration::MAX), "egui settles");
+        let page = Arc::new(result(vec![]));
+        // Its clock starts at the first frame that asks, here 10 s into the window's life.
+        let (s, next) = frame(&mut state, &page, 10.0);
+        assert!(s == 1.0 && near(next, 1.0), "at full, the next frame when it starts to fade: {s} {next:?}");
+        let (s, next) = frame(&mut state, &page, 10.6);
+        assert!(s == 1.0 && near(next, 0.4), "{s} {next:?}");
+        let (s, next) = frame(&mut state, &page, 11.25);
+        assert!(s > 0.0 && s < 1.0 && next == Duration::ZERO, "fading, frame after frame: {s} {next:?}");
+        // egui gives an immediate repaint one more frame of its own.
+        assert_eq!(frame(&mut state, &page, 11.5).0, 0.0, "gone");
+        assert_eq!(frame(&mut state, &page, 11.6), (0.0, Duration::MAX), "gone: no frame asked for");
+        assert_eq!(frame(&mut state, &page, 30.0), (0.0, Duration::MAX), "and it does not come back");
+        // The next Apply's page has a clock of its own.
+        let after = Arc::new(result(vec![]));
+        assert_eq!(frame(&mut state, &after, 40.0).0, 1.0);
+        assert_eq!(frame(&mut state, &after, 41.5).0, 0.0);
     }
 
     #[test]

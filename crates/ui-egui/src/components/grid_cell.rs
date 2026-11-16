@@ -6,7 +6,8 @@
 //! One ground at a time (foundations): a marked cell (staged, new, deleted, failed, saved) keeps
 //! its mark when selected or hovered, with nothing under it, and when selected takes an outline,
 //! `staged_strong` on a staged cell and `ink` on the others. A selected cell doesn't change on
-//! hover; the others light up with their whole row.
+//! hover; the others light up with their whole row. The saved mark fades out: its ground thins
+//! to nothing ([`Cell::strength`]), and the grid then draws the cell without it.
 //!
 //! Data keeps its case and its kind: a cell's text and a column's name and type are drawn as
 //! written, and NULL ([`CellText::Null`]) is the word in `text_muted`, never the text `NULL`.
@@ -43,8 +44,25 @@ pub enum Mark {
     Deleted,
     /// The row the last Apply failed on.
     Failed,
-    /// Just saved by Apply (gap 58: nothing sets it yet).
+    /// Just written by Apply: at full for [`SAVED_HOLD`], then fading out over [`SAVED_FADE`]
+    /// ([`saved_strength`]).
     Saved,
+}
+
+/// How long, in seconds, a saved mark shows at full from the frame that first shows it.
+pub const SAVED_HOLD: f64 = 1.0;
+
+/// How long, in seconds, it then takes to fade out.
+pub const SAVED_FADE: f64 = 0.5;
+
+/// How strongly a saved mark shows `elapsed` seconds after it first showed: 1 for [`SAVED_HOLD`],
+/// then down to 0 over [`SAVED_FADE`], and 0 from then on (also for a time that is no number).
+pub fn saved_strength(elapsed: f64) -> f32 {
+    match elapsed {
+        e if e < SAVED_HOLD => 1.0,
+        e if e < SAVED_HOLD + SAVED_FADE => (1.0 - (e - SAVED_HOLD) / SAVED_FADE) as f32,
+        _ => 0.0,
+    }
 }
 
 impl Mark {
@@ -213,6 +231,17 @@ fn edges(p: &Painter, rect: Rect, colour: Color32) {
     p.rect_filled(Rect::from_min_max(pos2(rect.left(), rect.bottom() - 1.0), rect.max), CornerRadius::ZERO, colour);
 }
 
+/// `colour` at `strength` of its opacity: whole from 1 (and for no number), nothing from 0 down.
+fn faded(colour: Color32, strength: f32) -> Color32 {
+    if strength >= 1.0 || strength.is_nan() {
+        colour
+    } else if strength > 0.0 {
+        colour.gamma_multiply(strength)
+    } else {
+        Color32::TRANSPARENT
+    }
+}
+
 /// The 1 px `colour` line across `rect`'s middle: a row to delete.
 fn strike(p: &Painter, rect: Rect, colour: Color32) {
     let y = rect.center().y;
@@ -237,6 +266,9 @@ pub struct Cell<'a> {
     pub row_selected: bool,
     /// Its row is under the pointer.
     pub hovered: bool,
+    /// How strongly its mark's ground shows, 1 at full: a saved mark fades out
+    /// ([`saved_strength`]). Its outline, when selected, stays whole.
+    pub strength: f32,
 }
 
 impl Cell<'_> {
@@ -245,7 +277,7 @@ impl Cell<'_> {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         let ground = match self.mark {
-            Some(mark) => mark.ground(t),
+            Some(mark) => faded(mark.ground(t), self.strength),
             None if self.selected || self.focused => t.selection,
             None if self.hovered => t.hover,
             None => t.card,
@@ -442,6 +474,39 @@ mod tests {
             link: false,
             row_selected: false,
             hovered: false,
+            strength: 1.0,
+        }
+    }
+
+    #[test]
+    fn the_saved_fade_is_full_for_one_second_then_gone_after_one_and_a_half() {
+        assert_eq!((saved_strength(0.0), saved_strength(0.99)), (1.0, 1.0), "full for a second");
+        let between = saved_strength(1.25);
+        assert!(between > 0.0 && between < 1.0, "fading: {between}");
+        assert_eq!(saved_strength(1.5), 0.0, "gone after a second and a half");
+        assert!(saved_strength(1.1) > saved_strength(1.25) && saved_strength(1.25) > saved_strength(1.4), "fading out evenly");
+        // A clock that went back shows it whole; long after, or on a time that is no number, none.
+        assert_eq!((saved_strength(-3.0), saved_strength(60.0), saved_strength(f64::NAN)), (1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_fading_saved_cell_thins_its_ground_and_keeps_its_outline() {
+        // Its ground alone, thinner as it fades; selected, the whole `ink` outline. At 0 nothing.
+        for (theme, t) in both() {
+            for strength in [0.75, 0.25, 0.0] {
+                for selected in [false, true] {
+                    let at_ = format!("{theme:?} {strength} selected {selected}");
+                    let cell = Cell { mark: Some(Mark::Saved), selected, strength, ..plain(CellText::Text("7.25")) };
+                    let (shapes, r, _) = cell_drawn(theme, cell);
+                    let s = seen(&shapes, r);
+                    let grounds: Vec<(Rect, Color32)> = s.fills.iter().filter(|(at, _)| *at == r).copied().collect();
+                    let want: Vec<(Rect, Color32)> = if strength > 0.0 { vec![(r, t.saved.gamma_multiply(strength))] } else { vec![] };
+                    assert_eq!(grounds, want, "{at_}: its ground, alone");
+                    assert!(want.iter().all(|(_, c)| c.a() > 0 && c.a() < t.saved.a()), "{at_}: thinner than at full: {want:?}");
+                    let outline = Edge { outer: r, width: 2.0, colour: t.ink, radius: CornerRadius::ZERO };
+                    assert_eq!(s.edges, if selected { vec![outline] } else { vec![] }, "{at_}: the outline");
+                }
+            }
         }
     }
 
@@ -815,10 +880,12 @@ mod tests {
         tags: Tags,
         selection: Option<Selection>,
         acts: Vec<GridAct>,
+        /// [`Grid::saved`].
+        saved: f32,
     }
 
     fn grid_harness(theme: Theme, rows: Rows, selection: Option<Selection>) -> egui_kittest::Harness<'static, Shown> {
-        let shown = Shown { rows, state: GridState::default(), tags: Tags::default(), selection, acts: Vec::new() };
+        let shown = Shown { rows, state: GridState::default(), tags: Tags::default(), selection, acts: Vec::new(), saved: 1.0 };
         harness_in(vec2(900.0, 400.0), theme, shown, |ui, s: &mut Shown| {
             s.tags.begin_frame();
             let keys = [Some(Key::Primary), None, Some(Key::Foreign)];
@@ -834,10 +901,34 @@ mod tests {
                 links: true,
                 first_number: 1,
                 editing: None,
+                saved: s.saved,
             };
             let acts = grid.show(ui, &mut s.state, &mut s.tags);
             s.acts.extend(acts);
         })
+    }
+
+    #[test]
+    fn a_saved_cell_is_marked_only_while_its_mark_shows() {
+        // The grid draws a saved cell's mark at the strength it is given, and names it `saved`; at
+        // 0 the cell is drawn and named as if unmarked. Other marks never fade.
+        let some = |s: &str| Some(s.to_owned());
+        let rows = Rows {
+            cells: vec![vec![some("1"), some("a"), some("7")], vec![some("2"), some("b"), some("8")]],
+            marks: vec![((0, 1), Mark::Saved), ((1, 1), Mark::Staged)],
+            deleted: vec![],
+        };
+        let t = crate::theme::LIGHT;
+        let mut h = grid_harness(Theme::Light, rows, None);
+        for (strength, state, ground) in [(1.0, Some("saved"), t.saved), (0.5, Some("saved"), t.saved.gamma_multiply(0.5)), (0.0, None, t.card)] {
+            h.state_mut().saved = strength;
+            h.run();
+            let tags = &h.state().tags;
+            let state_of = |id: &str| tags.value(id).and_then(|v| v.get("state")).and_then(|s| s.as_str().map(str::to_owned));
+            let ground_of = |id: &str| tags.rect(id).and_then(|r| fills_in(&h.output().shapes, r).first().map(|f| f.1));
+            assert_eq!((state_of("grid-cell-0-1").as_deref(), ground_of("grid-cell-0-1")), (state, Some(ground)), "at {strength}");
+            assert_eq!((state_of("grid-cell-1-1").as_deref(), ground_of("grid-cell-1-1")), (Some("staged"), Some(t.staged)), "at {strength}");
+        }
     }
 
     fn click(h: &mut egui_kittest::Harness<'static, Shown>, at: Pos2) {
@@ -980,6 +1071,7 @@ mod tests {
                     links: false,
                     first_number: 1,
                     editing: None,
+                    saved: 0.0,
                 };
                 let _ = grid.show(ui, &mut s.state, &mut s.tags);
             });

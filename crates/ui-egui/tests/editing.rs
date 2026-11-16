@@ -283,6 +283,66 @@ fn ctrl_s_applies_all_or_nothing() {
 }
 
 #[test]
+fn saved_cells_show_their_mark_then_fade() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    // Frames a sixtieth of a second apart on egui's clock, so the mark's second and a half spans
+    // many of them.
+    let mut ui = connected_at(db, 1.0 / 60.0, 1400.0);
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    let tokens = *dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let state = |ui: &mut Ui, id: &str| ui.value(id).get("state").cloned();
+    let now = |ui: &Ui| ui.harness.ctx.input(|i| i.time);
+    // A point of the cell's ground: inside its outline, left of its right-aligned number.
+    let ground = |ui: &Ui, id: &str| {
+        let r = ui.drawn(id);
+        colour_at(ui, egui::pos2(r.left() + 4.0, r.center().y))
+    };
+
+    ui.double_click("grid-cell-1-2");
+    ui.text("7.25");
+    ui.ctrl("S");
+    ui.until("the saved mark", |ui| state(ui, "grid-cell-1-2") == Some(json!("saved")));
+    let shown = now(&ui);
+    assert_eq!(ui.table()["saved"], json!([[1, 2]]));
+    assert_eq!(ground(&ui, "grid-cell-1-2"), Some(tokens.saved), "at full");
+    assert_eq!(state(&mut ui, "grid-cell-1-1"), None, "only the cell written");
+    // A refresh takes it off at once.
+    ui.click("table-refresh");
+    ui.frame();
+    assert_eq!(state(&mut ui, "grid-cell-1-2"), None);
+    assert!(now(&ui) - shown < 1.0, "before it would have faded");
+    ui.until("the page again", |ui| ui.table()["loading"].is_null());
+
+    // Left alone, it shows at full for a second, then fades out over half a second, while the
+    // cell stays selected.
+    ui.double_click("grid-cell-0-2");
+    ui.text("9.75");
+    ui.ctrl("S");
+    ui.until("the saved mark", |ui| state(ui, "grid-cell-0-2") == Some(json!("saved")));
+    let shown = now(&ui);
+    ui.hover_away();
+    let mut fading = Vec::new();
+    ui.until("the mark to go", |ui| {
+        let gone = state(ui, "grid-cell-0-2").is_none();
+        let (at, colour) = (now(ui) - shown, ground(ui, "grid-cell-0-2"));
+        if !gone && at < 0.9 {
+            assert_eq!(colour, Some(tokens.saved), "at full at {at:.2} s");
+        }
+        if !gone && (1.1..1.4).contains(&at) {
+            fading.extend(colour);
+        }
+        gone
+    });
+    let gone = now(&ui) - shown;
+    assert!((1.4..=1.6).contains(&gone), "gone {gone:.2} s after it showed");
+    assert!(!fading.is_empty() && fading.iter().all(|c| c.a() > 0 && c.a() < tokens.saved.a()), "it faded: {fading:?}");
+    assert_eq!(ground(&ui, "grid-cell-0-2"), Some(tokens.selection), "then the selected cell's own ground");
+    assert_eq!(ui.table()["saved"], json!([[0, 2]]), "the engine still lists what the Apply wrote");
+}
+
+#[test]
 fn a_value_too_long_for_its_column_fails_the_apply_and_says_why() {
     let db = dbee_testkit::require_testdb!();
     for server in db.servers_of(&[dbee_testkit::Kind::Postgres]) {

@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-13 · **Change:** minor (entry 14 done: closing the window asks too, so every way out of a transaction asks first; what stays is the shared session, a limit; before: entry 14: the window's transaction prompt, its toast and the switch that waits for it; only quit is left; before: entry 14: closing over a transaction asks how to end it in the engine; before: the M3 Phase 2 review: entries 14, 53 and 54 say what is left now that the status bar and the error band are built; entries 67 to 73 are new; entries 24, 56 and 61 gain a line)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-16 · **Change:** minor (entry 58 done and dropped: the cells an Apply wrote show the saved mark, then it fades; before: entry 14 done: closing the window asks too, so every way out of a transaction asks first; what stays is the shared session, a limit; before: entry 14: the window's transaction prompt, its toast and the switch that waits for it; only quit is left; before: entry 14: closing over a transaction asks how to end it in the engine; before: the M3 Phase 2 review: entries 14, 53 and 54 say what is left now that the status bar and the error band are built; entries 67 to 73 are new; entries 24, 56 and 61 gain a line)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -433,13 +433,6 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 - **Impact:** with many saved connections, the one you use most can be far down the list.
 - **Estimate:** 1 h (estimated). Left out of M3 at the start (the maintainer's call, 2026-11-09).
 
-### 58. A saved cell has no mark (U)
-
-- **Missing:** the state the M3 grid draws for a cell just saved by Apply: green, fading after about 1.5 s.
-- **Evidence:** `Mark` (`crates/ui-egui/src/grid.rs`) has no such state.
-- **Impact:** a successful Apply is less visible on the cells it changed.
-- **Estimate:** 1 h (estimated). Planned for M3.
-
 ### 59. No update check or update button (F)
 
 - **Missing:** an update check and a button at the right end of the menu bar. With no update out it shows nothing. When one is out it reads `UPDATE 0.4.0 → 0.5.0`, and a click starts the update; the system asks for the password if it needs root (pkexec). While it runs it reads `UPDATING 42%`, then `RESTART TO UPDATE`, or `UPDATE FAILED` with the reason on hover and RETRY. A copy installed by a package manager or Flatpak shows `DOWNLOAD 0.5.0`, which opens the download page. Decided by the maintainer on 2026-11-10; the design draws it after the M3 component groups.
@@ -550,6 +543,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-16 | minor | Entry 58 done and dropped: the cells a successful Apply wrote show the `saved` mark at full for 1 s, then it fades out over 0.5 s; the engine finds them on the reloaded page by their rows' keys (`saved` in `document.inspect`), and editing the cell, another Apply, another page load, a reconnect, a reset, undo or redo takes the mark off at once. The entries after it keep their numbers. |
 | 2026-11-13 | minor | Entry 14 done: closing the window asks too (the transaction prompt, or `Quit anyway?` for running work, query text or staged edits), each connection in turn, and closes at once with nothing to lose; what stays is the shared session, a limit, since one session per tab is not planned for M3. |
 | 2026-11-13 | minor | Entry 14: the window asks in the transaction prompt (COMMIT, ROLLBACK or CANCEL) when the owner tab closes or the connection closes or changes, toasts the outcome, and a switch waits for the end; only quit is left. |
 | 2026-11-13 | minor | Entry 14: closing the tab that opened a transaction, or its connection, asks how to end it (`needsTransactionEnd`), and `end` on `tab.close` and `connection.close` ends it before closing; the window's prompt is left. |

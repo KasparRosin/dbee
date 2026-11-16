@@ -56,6 +56,7 @@ use serde_json::json;
 
 use super::edit;
 use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needed_connection, needs_db, p};
+use crate::edits::Written;
 use crate::jobs::Stop;
 use crate::state::{PageView, TableTab, Total};
 use crate::turns::{self, InTurn};
@@ -354,6 +355,7 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "failed": t.edits.failed.as_ref().map(|f| json!({ "row": f.row, "column": f.column, "message": f.message, "code": f.code })),
         "outcomeUnknown": t.edits.outcome_unknown(),
         "applying": t.applying,
+        "saved": t.saved,
     })
 }
 
@@ -399,6 +401,7 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     }
     t.applied = view.applied.clone();
     t.sort = view.sort.clone();
+    t.saved.clear();
     if last {
         t.total = Total::Counting { estimate: quick_estimate(dialect, &info, &view.applied) };
     } else {
@@ -413,7 +416,7 @@ fn start(s: &mut Session, label: &'static str, tab: TabId, plan: Plan) -> Result
     let job_stop = Arc::clone(&stop);
     let job = s.spawn_stoppable_job(label, stop, async move {
         let loaded = load(job_conn.as_ref(), dialect, &info, &view, last, &job_stop).await;
-        let apply: Apply = Box::new(move |s: &mut Session| apply_load(s, id, &conn, tab, seq, view, last, columns, loaded));
+        let apply: Apply = Box::new(move |s: &mut Session| apply_load(s, id, &conn, tab, seq, view, last, columns, loaded, None));
         apply
     });
     if let Some(t) = table_tab_mut(s, tab) {
@@ -497,6 +500,8 @@ fn split_hidden(mut rs: ResultSet, visible: usize) -> (ResultSet, ResultSet) {
     (rs, ResultSet { columns, rows, ..ResultSet::default() })
 }
 
+/// Shows a loaded page in tab `tab`. `written` is what the Apply that loaded it wrote: its cells on
+/// the page become the tab's `saved`; any other page has none.
 fn apply_load(
     s: &mut Session,
     id: ConnectionId,
@@ -507,6 +512,7 @@ fn apply_load(
     last: bool,
     columns: PageColumns,
     loaded: Loaded,
+    written: Option<&Written>,
 ) -> Result<Json, EngineError> {
     if !s.is_current_browse(id, conn) {
         return Ok(ignored());
@@ -549,6 +555,7 @@ fn apply_load(
             let (data, hidden) = if data.columns.len() == typed { split_hidden(data, columns.visible) } else { (data, ResultSet::default()) };
             let rows = data.rows.len();
             t.selection = t.selection.and_then(|sel| sel.kept(rows, data.columns.len()));
+            t.saved = written.map(|w| w.cells(&data, &hidden)).unwrap_or_default();
             t.data = Some(Arc::new(data));
             t.hidden = Arc::new(hidden);
             t.has_next = has_next;
@@ -570,7 +577,8 @@ fn apply_load(
 
 /// Loading the page a tab shows again, inside another job: `edit.apply` reloads in its own job
 /// after it writes. [`Reload::prepare`] runs on the caller's thread and moves the tab's `seq` on;
-/// [`Reload::run`] loads in the job; [`Reload::finish`] applies the page like any other load.
+/// [`Reload::run`] loads in the job; [`Reload::finish`] applies the page like any other load, and
+/// marks the cells written on it.
 pub(crate) struct Reload {
     dialect: Dialect,
     info: TableInfo,
@@ -593,6 +601,11 @@ impl Reload {
         load(conn, self.dialect, &self.info, &self.view, false, &Stop::default()).await
     }
 
+    /// The table as the Apply's statements were built for.
+    pub(crate) fn info(&self) -> &TableInfo {
+        &self.info
+    }
+
     pub(crate) fn finish(
         self,
         s: &mut Session,
@@ -600,8 +613,9 @@ impl Reload {
         conn: &Arc<dyn Connection>,
         tab: TabId,
         loaded: Loaded,
+        written: &Written,
     ) -> Result<Json, EngineError> {
-        apply_load(s, id, conn, tab, self.seq, self.view, false, self.columns, loaded)
+        apply_load(s, id, conn, tab, self.seq, self.view, false, self.columns, loaded, Some(written))
     }
 }
 

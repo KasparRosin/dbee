@@ -1177,6 +1177,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     links: false,
                     first_number: 1,
                     editing: None,
+                    saved: 0.0,
                 };
                 let below = rest_ui.available_rect_before_wrap().top().min(rest.bottom());
                 let area = Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), rest.bottom()));

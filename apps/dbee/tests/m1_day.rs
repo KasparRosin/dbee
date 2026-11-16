@@ -339,6 +339,8 @@ fn m1_day_end_to_end() {
         "psql shows shipped_at NULL, the rest of the row as it was"
     );
     assert_eq!(day.q(&format!("SELECT name FROM shop.customers WHERE id = {}", day.customer)), day.fixed, "and the name");
+    // The cell written shows the saved mark for a moment, then nothing.
+    app.until("the saved mark to fade", |app| app.cell(r, 7).get("state").is_none());
     let cell = app.cell(r, 7);
     assert_eq!((cell["null"].clone(), cell.get("state")), (json!(true), None), "written: {cell}");
     app.shot(&root, "6c-applied");

@@ -55,6 +55,8 @@ pub(crate) type Grids = HashMap<TabId, GridState>;
 struct Source<'a> {
     data: &'a ResultSet,
     edits: &'a Edits,
+    /// The cells the last Apply wrote, in order (`TableTab::saved`).
+    saved: &'a [(usize, usize)],
 }
 
 impl GridSource for Source<'_> {
@@ -86,6 +88,8 @@ impl GridSource for Source<'_> {
             Some(Mark::Deleted)
         } else if self.edits.cells.contains_key(&(row, col)) {
             Some(Mark::Staged)
+        } else if self.saved.binary_search(&(row, col)).is_ok() {
+            Some(Mark::Saved)
         } else {
             None
         }
@@ -269,9 +273,12 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             band(&mut top, tags, id, text);
             top.add_space(6.0);
         }
-        match tab.data.as_deref() {
-            Some(data) => {
-                let source = Source { data, edits: &tab.edits };
+        match tab.data.as_ref() {
+            Some(page) => {
+                let data = page.as_ref();
+                let source = Source { data, edits: &tab.edits, saved: &tab.saved };
+                let state = view.work.grids.entry(id).or_default();
+                let saved = if tab.saved.is_empty() { 0.0 } else { state.saved_strength(ui.ctx(), page) };
                 let keys = keys(data, info);
                 let sort = tab.sort.as_ref().and_then(|s| data.columns.iter().position(|c| c.name == s.column).map(|col| (col, s.dir)));
                 let grid = Grid {
@@ -289,8 +296,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     links: !lost,
                     first_number: tab.shown.page.saturating_mul(PAGE_SIZE).saturating_add(1),
                     editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),
+                    saved,
                 };
-                let state = view.work.grids.entry(id).or_default();
                 // The body's width, even when a row above it is wider (the filter bar in a narrow
                 // window), so every column can be scrolled into view.
                 let below = top.available_rect_before_wrap().top().min(split);
@@ -374,7 +381,7 @@ mod tests {
         edits.new_rows = vec![BTreeMap::from([(1, NewValue::Text("new".into()))])];
         edits.deleted = BTreeSet::from([2]);
         edits.failed = Some(dbee_engine::Failed { row: 1, column: None, message: "bad".into(), code: "server" });
-        let s = Source { data: &data, edits: &edits };
+        let s = Source { data: &data, edits: &edits, saved: &[] };
         assert_eq!(s.rows(), 4, "three loaded, one new");
         assert_eq!((s.cell(0, 1), s.cell(1, 1), s.cell(3, 1), s.cell(3, 0)), (None, None, Some("new"), None));
         assert_eq!(
@@ -385,8 +392,11 @@ mod tests {
         assert!(s.deleted(2) && !s.deleted(1) && !s.deleted(3));
         // A row to delete whose delete failed shows as failed, and stays struck through.
         edits.failed = Some(dbee_engine::Failed { row: 2, column: None, message: "still referenced".into(), code: "server" });
-        let s = Source { data: &data, edits: &edits };
+        let s = Source { data: &data, edits: &edits, saved: &[] };
         assert_eq!((s.mark(2, 0), s.deleted(2)), (Some(Mark::Failed), true));
+        // A saved cell is marked saved, unless another mark is on it.
+        let s = Source { data: &data, edits: &edits, saved: &[(0, 0), (0, 1), (2, 1)] };
+        assert_eq!([s.mark(0, 0), s.mark(0, 1), s.mark(2, 1), s.mark(1, 1)], [Some(Mark::Saved), Some(Mark::Staged), Some(Mark::Failed), None]);
     }
 
     #[test]
