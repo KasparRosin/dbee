@@ -32,11 +32,13 @@
 //! markers a reconnect cleared, shows none, even while the engine lets its job run to its end.
 //!
 //! **Tab bodies.** A table tab shows its page ([`crate::table_tab`]), a query tab its editor and
-//! results ([`crate::query_tab`]).
+//! results ([`crate::query_tab`]). With no tab open, the work area says so and offers New query
+//! (Ctrl+T) and Quick search (Ctrl+P), each running its command as its keys do.
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
 //! `tab-new`, `tab-list` (while the tabs don't fit; value: the number of tabs) and, while its list
-//! is open, `tab-list-<n>` (`n` from 1 in strip order; value `{tab, title, active}`);
+//! is open, `tab-list-<n>` (`n` from 1 in strip order; value `{tab, title, active}`); with no tab
+//! open, `start-tab.newQuery` and `start-ui.quickSearch` (value: the words);
 //! `status-connection` (value: the name), `status-address` (value: the address, whole),
 //! `status-server`, `status-tls` (value: what
 //! protects the link, while it is weaker than fully checked), `status-read-only`, `status-save`,
@@ -49,17 +51,19 @@ use std::sync::Arc;
 use dbee_config::ConnectionConfig;
 use dbee_engine::{Session, State, Tab, TabId, TlsState, TransactionState, Which};
 use dbee_sql::filter::Condition;
-use egui::{Align, Frame, Layout, Rect, RichText, UiBuilder};
+use egui::{Align, Frame, Layout, Rect, Sense, UiBuilder, WidgetInfo, WidgetType, pos2, vec2};
 use serde_json::json;
 
 use crate::app::Origin;
+use crate::components::keycap::Keycap;
 use crate::components::status::{self, Activity, Address};
 use crate::components::tab::{self, Asked};
 use crate::components::tooltip::Hint;
+use crate::components::{self, Look, focus};
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
 use crate::table_tab::{self, Grids};
-use crate::theme::size::{SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_W, SLIM_BAR_H};
+use crate::theme::size::{KEYCAP_GAP, KEYCAP_H, NO_TAB_GAP, NO_TAB_ROW_GAP, NO_TAB_W, SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_W, SLIM_BAR_H, TAB_H};
 use crate::theme::{self, Text, Words};
 use crate::tree::{self, Refresh, Tree, TreeAct};
 use crate::{DbeeApp, menu, value_panel};
@@ -220,6 +224,8 @@ enum Act {
     Activate(TabId),
     Close(TabId),
     NewQuery,
+    /// A way to start, chosen with no tab open: the command, and its shortcut.
+    Start(&'static str, Option<&'static str>),
     Cancel(&'static str),
     Reconnect,
     SaveOpen,
@@ -249,7 +255,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
     egui::CentralPanel::default().frame(Frame::new().fill(t.bg)).show(ui, |ui| {
         strip(app, ui, &mut acts);
-        body(app, ui);
+        body(app, ui, &mut acts);
     });
     // After the tab's body, so a cell selected in this frame shows its value now.
     if let Some(rect) = panel {
@@ -271,6 +277,9 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
             }
             Act::NewQuery => {
                 app.start("tab.newQuery", json!({}), Origin::Menu);
+            }
+            Act::Start(command, shortcut) => {
+                app.start(command, menu::params_for(shortcut), Origin::Menu);
             }
             Act::Cancel(command) => {
                 app.start(command, json!({}), Origin::Menu);
@@ -441,9 +450,8 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     }
 }
 
-/// The active tab's body (see the module docs), or a hint when no tab is open.
-fn body(app: &mut DbeeApp, ui: &mut egui::Ui) {
-    let t = theme::tokens(ui.ctx());
+/// The active tab's body (see the module docs), or the ways to start when no tab is open.
+fn body(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     let active = app.session.state().active_tab().map(|tab| (tab.id(), matches!(tab, Tab::Query(_))));
     if active.is_none_or(|(_, query)| !query) {
         // The next query tab to become the active one takes the keyboard.
@@ -451,14 +459,7 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui) {
         app.view.query_cursor = None;
     }
     let Some((id, query)) = active else {
-        let content = ui.available_rect_before_wrap().shrink(16.0);
-        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
-        ui.add_space(content.height() * 0.3);
-        ui.vertical_centered(|ui| {
-            ui.label(Text::Body.rich("No tab is open").color(t.text_muted));
-            ui.add_space(6.0);
-            ui.label(RichText::new("Double-click a table in the tree, find one with Ctrl+P, or start a query with Ctrl+T.").color(t.text_muted));
-        });
+        no_tab(app, ui, acts);
         return;
     };
     let content = ui.available_rect_before_wrap().shrink2(egui::vec2(8.0, 0.0));
@@ -467,6 +468,75 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui) {
         query_tab::show(app, &mut ui, id);
     } else {
         table_tab::show(app, &mut ui, id);
+    }
+}
+
+/// The ways to start with no tab open, in order: the words, and the command.
+const STARTS: [(&str, &str); 2] = [("New query", "tab.newQuery"), ("Quick search", "ui.quickSearch")];
+
+/// The work area with no tab open (empty state C1): "No tab open", and under it a row for each of
+/// [`STARTS`] with its shortcut's keys, the block centred in the area.
+fn no_tab(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+    let t = theme::tokens(ui.ctx());
+    let commands = app.commands();
+    // Under the strip, without the space egui leaves after it.
+    let area = Rect::from_min_max(pos2(ui.max_rect().left(), ui.max_rect().top() + TAB_H), ui.max_rect().max);
+    let rows = STARTS.len() as f32;
+    let height = Text::Body.line() + NO_TAB_GAP + rows * KEYCAP_H + (rows - 1.0) * NO_TAB_ROW_GAP;
+    let block = Rect::from_center_size(area.center(), vec2(NO_TAB_W, height));
+    let mut ui = ui.new_child(UiBuilder::new().id_salt("dbee-no-tab").max_rect(block).layout(Layout::top_down(Align::Center)));
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.label(Text::Body.rich("No tab open").color(t.text_muted));
+    ui.add_space(NO_TAB_GAP);
+    for (i, (words, id)) in STARTS.into_iter().enumerate() {
+        if i > 0 {
+            ui.add_space(NO_TAB_ROW_GAP);
+        }
+        let Some(c) = commands.iter().find(|c| c.id == id) else { continue };
+        let r = ui.add_enabled(c.enabled, Start { words, keys: c.shortcut });
+        app.tags.tag_value(&format!("start-{id}"), &r, words);
+        if r.clicked() {
+            acts.push(Act::Start(c.id, c.shortcut));
+        }
+    }
+}
+
+/// A row of the work area with no tab open: its words in `body` `text_muted` (`text` while
+/// hovered) on the left, its shortcut's keycaps on the right.
+struct Start<'a> {
+    words: &'a str,
+    keys: Option<&'a str>,
+}
+
+impl egui::Widget for Start<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), KEYCAP_H), Sense::click());
+        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), self.words));
+        if ui.is_rect_visible(rect) {
+            let t = theme::tokens(ui.ctx());
+            let look = Look::of(ui, &r);
+            let p = components::painter(ui);
+            let colour = if look.disabled {
+                t.text_faint
+            } else if look.hovered {
+                t.text
+            } else {
+                t.text_muted
+            };
+            let words = p.layout_job(Text::Body.job_as_written(self.words, colour));
+            p.galley(pos2(rect.left(), rect.center().y - words.size().y / 2.0), words, colour);
+            let caps: Vec<Keycap<'_>> = self.keys.map(|k| k.split('+').map(Keycap::new).collect()).unwrap_or_default();
+            let widths: Vec<f32> = caps.iter().map(|cap| cap.width(&p)).collect();
+            let mut left = rect.right() - widths.iter().sum::<f32>() - KEYCAP_GAP * (caps.len().saturating_sub(1)) as f32;
+            for (cap, w) in caps.iter().zip(&widths) {
+                cap.paint(&p, pos2(left, rect.center().y), look.disabled);
+                left += w + KEYCAP_GAP;
+            }
+            if look.focused {
+                focus::box_around(&p, rect);
+            }
+        }
+        r
     }
 }
 

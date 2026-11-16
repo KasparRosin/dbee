@@ -1,6 +1,8 @@
 //! The menu bar, built from the commands' `menu` paths ([`DbeeApp::commands`]: the engine's and
 //! the UI-only ones): File, Edit, View and Query in that order, then any other top menu a command
-//! names, each listing its commands in registry order, a deeper path as a submenu.
+//! names, each listing its commands in registry order, a deeper path as a submenu. Edit lists its
+//! commands in the Screens page's groups, a line between each: Undo, Redo | Copy, Select All |
+//! Apply, Reset.
 //!
 //! An entry shows its label and its shortcut's keys, and is enabled as the command is now;
 //! hovering a disabled entry shows why. A menu with a chosen entry (View > Theme) marks it in a
@@ -68,27 +70,70 @@ pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The entries under menu `path`: the commands whose menu is exactly `path`, and a submenu for
-/// each deeper path, in registry order.
-fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], checked: &str, tags: &mut Tags, chosen: &mut Option<&'static str>) {
+/// One line of an open menu.
+enum Row<'a> {
+    Entry(&'a CommandInfo),
+    /// The submenu of this name, holding the commands whose menu goes deeper.
+    Submenu(&'a str),
+    Separator,
+}
+
+/// The menus drawn in groups with a line between them, each group's commands in its order. A
+/// command of such a menu that no group names comes last, in a group of its own.
+const GROUPS: &[(&str, &[&[&str]])] =
+    &[("Edit", &[&["edit.undo", "edit.redo"], &["clipboard.copy", "selection.all"], &["edit.apply", "edit.reset"]])];
+
+/// What menu `path` lists: the commands whose menu is exactly `path`, and a submenu for each
+/// deeper path, in registry order, or in the order of its [`GROUPS`].
+fn rows<'a>(commands: &'a [CommandInfo], path: &[&str]) -> Vec<Row<'a>> {
+    let mut rows = Vec::new();
     let mut subs: Vec<&str> = Vec::new();
-    // A menu holding the chosen entry is a menu of choices: each entry has the mark's column.
-    let choices = commands.iter().any(|c| c.menu == path && c.id == checked);
     for c in commands {
         if c.menu.len() > path.len() && c.menu.starts_with(path) {
             if let Some(sub) = c.menu.get(path.len())
                 && !subs.contains(sub)
             {
                 subs.push(sub);
-                let deeper: Vec<&str> = path.iter().copied().chain(std::iter::once(*sub)).collect();
+                rows.push(Row::Submenu(sub));
+            }
+        } else if c.menu == path {
+            rows.push(Row::Entry(c));
+        }
+    }
+    let Some((_, order)) = GROUPS.iter().find(|(top, _)| path == [*top]) else { return rows };
+    let mut groups: Vec<Vec<Row<'a>>> = order
+        .iter()
+        .map(|ids| ids.iter().filter_map(|id| commands.iter().find(|c| c.id == *id && c.menu == path).map(Row::Entry)).collect())
+        .collect();
+    groups.push(rows.into_iter().filter(|row| !matches!(row, Row::Entry(c) if order.iter().any(|ids| ids.contains(&c.id)))).collect());
+    let mut grouped = Vec::new();
+    for group in groups.into_iter().filter(|g| !g.is_empty()) {
+        if !grouped.is_empty() {
+            grouped.push(Row::Separator);
+        }
+        grouped.extend(group);
+    }
+    grouped
+}
+
+/// The entries under menu `path` ([`rows`]).
+fn entries(ui: &mut egui::Ui, commands: &[CommandInfo], path: &[&str], checked: &str, tags: &mut Tags, chosen: &mut Option<&'static str>) {
+    // A menu holding the chosen entry is a menu of choices: each entry has the mark's column.
+    let choices = commands.iter().any(|c| c.menu == path && c.id == checked);
+    for row in rows(commands, path) {
+        let c = match row {
+            Row::Entry(c) => c,
+            Row::Submenu(sub) => {
+                let deeper: Vec<&str> = path.iter().copied().chain(std::iter::once(sub)).collect();
                 let (r, _) = menu::submenu(ui, sub, |ui| entries(ui, commands, &deeper, checked, tags, chosen));
                 tags.tag(&format!("menu-{}", deeper.join("-")), &r);
+                continue;
             }
-            continue;
-        }
-        if c.menu != path {
-            continue;
-        }
+            Row::Separator => {
+                menu::separator(ui);
+                continue;
+            }
+        };
         let mut item = Item::new(c.label).choice(choices.then_some(c.id == checked));
         if let Some(keys) = c.shortcut {
             item = item.shortcut(keys);
@@ -125,13 +170,23 @@ mod tests {
         assert_eq!(tops(&commands), ["File", "Query", "Tools", "Help"]);
     }
 
+    /// Edit as the Screens page draws it (85237, dark 85754): Undo, Redo | Copy, Select All |
+    /// Apply, Reset.
     #[test]
-    fn the_edit_menu_lists_history_then_changes_then_the_selection() {
+    fn the_edit_menu_has_the_pages_groups() {
         let home = dbee_testkit::temp_home(None, None);
         let options = dbee_engine::SessionOptions { config_dir: Some(home.home.join("config")), ..dbee_engine::SessionOptions::default() };
         let app = DbeeApp::new(dbee_engine::Session::new(options).unwrap(), None);
-        let edit: Vec<&str> = app.commands().iter().filter(|c| c.menu == ["Edit"]).map(|c| c.id).collect();
-        assert_eq!(edit, ["edit.undo", "edit.redo", "edit.apply", "edit.reset", "selection.all", "clipboard.copy"]);
+        let commands = app.commands();
+        let edit: Vec<&str> = rows(&commands, &["Edit"])
+            .iter()
+            .map(|row| match row {
+                Row::Entry(c) => c.id,
+                Row::Submenu(sub) => sub,
+                Row::Separator => "|",
+            })
+            .collect();
+        assert_eq!(edit, ["edit.undo", "edit.redo", "|", "clipboard.copy", "selection.all", "|", "edit.apply", "edit.reset"]);
     }
 
     #[test]

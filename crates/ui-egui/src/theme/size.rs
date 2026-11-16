@@ -124,6 +124,12 @@ pub const TAB_ACTIVE_LINE: f32 = 2.0;
 pub const NEW_TAB_W: f32 = 32.0;
 pub const TAB_LIST_GAP: f32 = 2.0;
 
+/// The work area with no tab open (empty state C1): a block this wide holding the phrase, then
+/// this far under it the ways to start, one a row, this far apart.
+pub const NO_TAB_W: f32 = 220.0;
+pub const NO_TAB_GAP: f32 = 16.0;
+pub const NO_TAB_ROW_GAP: f32 = 8.0;
+
 /// The menu bar (`menu bar`): a slim bar, its titles this far in from its ends.
 pub const MENU_BAR_PAD_X: f32 = 4.0;
 

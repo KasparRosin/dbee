@@ -2534,3 +2534,104 @@ fn the_keyboard_still_works_in_the_menu_bar() {
     ui.rest(at.center());
     assert!(ui.texts().iter().any(|(_, g)| g.text().contains(&why)), "the hover says why: {why}");
 }
+
+// ---- no tab open ------------------------------------------------------------------------------
+
+/// The work area under the strip: from the sidebar's line to the value panel, or to the window's
+/// edge while the panel is shut; from under the strip to the status bar.
+fn work_area(ui: &mut Ui) -> egui::Rect {
+    let new = rect_of(&ui.tag("tab-new").expect("+"));
+    let right = if ui.value("value-toggle") == json!(true) { panel(ui, "dbee-value-panel").left() } else { window(ui).right() };
+    egui::Rect::from_min_max(egui::pos2(panel(ui, "dbee-tree").right(), new.top() + 36.0), egui::pos2(right, panel(ui, "dbee-status").top()))
+}
+
+/// Where `words` are drawn in the last frame, and in what colour.
+fn words_at(ui: &Ui, words: &str) -> (egui::Rect, egui::Color32) {
+    let at = ui.texts().into_iter().find(|(_, g)| g.text() == words).map(|(r, _)| r).unwrap_or_else(|| panic!("`{words}` is drawn"));
+    (at, colour_of(ui, at.expand(0.5), words).expect("its colour"))
+}
+
+/// Empty state C1 (98322, dark 99827): "No tab open" in `body` `text_muted`, centred in the work
+/// area; under it, 16 apart, New query with CTRL T and Quick search with CTRL P, 8 apart, the
+/// words on the left and the keycaps on the right of a 220 wide block. The strip shows only +.
+/// The page draws the value panel shut; while it shows, the block is centred beside it.
+#[test]
+fn no_tab_open_matches_the_page() {
+    let db = dbee_testkit::require_testdb!();
+    for (dark, shut) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mode = format!("{}, the value panel {}", if dark { "dark" } else { "light" }, if shut { "shut" } else { "open" });
+        let mut ui = Ui::connected_in(db, APP_SIZE);
+        if dark {
+            ui.execute("ui.themeDark", json!({}));
+        }
+        ui.frame();
+        if ui.value("value-toggle") != json!(!shut) {
+            ui.click("value-toggle");
+            ui.frame();
+            ui.frame();
+        }
+        assert_eq!(ui.value("value-toggle"), json!(!shut), "{mode}");
+        let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+        let area = work_area(&mut ui);
+        let (phrase, colour) = words_at(&ui, "No tab open");
+        assert_eq!(colour, t.text_muted, "{mode}: the phrase in text_muted");
+        assert_eq!(phrase.height(), 18.0, "{mode}: `body`'s 18 line: {phrase:?}");
+        // The block, 78 tall (18 + 16 + 18 + 8 + 18), is centred in the area.
+        let top = area.center().y - 39.0;
+        assert!((phrase.center().x - area.center().x).abs() <= 1.0, "{mode}: the phrase centred across {area:?}: {phrase:?}");
+        assert!((phrase.top() - top).abs() <= 1.0, "{mode}: the block centred down {area:?}: the phrase at {phrase:?}");
+        let caps: Vec<egui::Rect> = ui
+            .shapes()
+            .into_iter()
+            .filter_map(|(_, s)| match s {
+                egui::Shape::Rect(r)
+                    if area.contains_rect(r.rect) && r.fill == t.raised && r.stroke.color == t.raised_line && r.rect.height() == 18.0 =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        for (row, (words, keys)) in [("New query", ["CTRL", "T"]), ("Quick search", ["CTRL", "P"])].into_iter().enumerate() {
+            let y = top + 34.0 + 26.0 * row as f32;
+            let (at, colour) = words_at(&ui, words);
+            assert_eq!(colour, t.text_muted, "{mode}: `{words}` in text_muted");
+            assert!((at.top() - y).abs() <= 1.0, "{mode}: `{words}` at {y}: {at:?}");
+            assert!((at.left() - (area.center().x - 110.0)).abs() <= 1.0, "{mode}: `{words}` starts the 220 wide block: {at:?} in {area:?}");
+            let line = egui::Rect::from_min_max(egui::pos2(area.left(), y - 1.0), egui::pos2(area.right(), y + 19.0));
+            let row_caps: Vec<egui::Rect> = caps.iter().copied().filter(|c| line.contains_rect(*c)).collect();
+            assert_eq!(row_caps.len(), 2, "{mode}: two keycaps by `{words}`: {caps:?}");
+            for (cap, key) in row_caps.iter().zip(keys) {
+                assert!(ui.text_in(*cap, key).is_some(), "{mode}: {key} in its keycap {cap:?}");
+            }
+            assert!((row_caps[1].left() - row_caps[0].right() - 3.0).abs() <= 0.5, "{mode}: the keycaps 3 apart: {row_caps:?}");
+            assert!((row_caps[1].right() - (area.center().x + 110.0)).abs() <= 1.0, "{mode}: the keys end the block: {row_caps:?} in {area:?}");
+            assert!((row_caps[0].center().y - at.center().y).abs() <= 0.5, "{mode}: the keys beside `{words}`: {row_caps:?} {at:?}");
+        }
+        assert!(ui.texts().iter().all(|(_, g)| !g.text().contains("Double-click")), "{mode}: the old sentence is gone");
+        let i = ui.inspect();
+        let strip: Vec<String> = ids(&i).into_iter().filter(|id| id.starts_with("tab-")).collect();
+        assert_eq!(strip, ["tab-new"], "{mode}: the strip shows only +");
+    }
+}
+
+/// The rows run their commands, as their shortcuts do: New query opens a query tab, Quick search
+/// opens the quick search.
+#[test]
+fn no_tab_open_rows_run_their_commands() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.click("start-tab.newQuery");
+    ui.frame();
+    let doc = ui.document();
+    let tabs = doc["tabs"].as_array().expect("tabs");
+    assert_eq!(tabs.len(), 1, "a tab opened: {doc}");
+    assert_eq!(tabs[0]["kind"], "query", "a query tab: {doc}");
+    assert!(ui.tag("start-tab.newQuery").is_none(), "with a tab open, the rows go");
+    let tab = ui.active();
+    ui.execute("tab.close", json!({ "tab": tab }));
+    ui.frame();
+    ui.click("start-ui.quickSearch");
+    ui.frame();
+    assert!(visible(&ui.tag("qs-input")), "Quick search opens the quick search");
+}

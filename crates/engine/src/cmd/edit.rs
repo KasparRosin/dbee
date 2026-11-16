@@ -140,7 +140,6 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         journal: false,
         undoable: true,
     },
-    // The Edit menu lists them in this order: Undo, Redo, then Apply, Reset.
     CommandSpec {
         id: UNDO,
         label: "Undo",
