@@ -187,6 +187,11 @@ pub const CHANGES_GAP: f32 = 12.0;
 pub const SIDEBAR_PAD_X: f32 = 12.0;
 pub const SIDEBAR_PAD_RIGHT: f32 = 4.0;
 pub const SIDEBAR_COUNT_H: f32 = 28.0;
+/// The sidebar (`sidebar`): this wide when a window opens, its 1 px `line` down the right edge
+/// included, with no margin round what it holds; a drag keeps it within these widths.
+pub const SIDEBAR_W: f32 = 260.0;
+pub const SIDEBAR_MIN_W: f32 = 200.0;
+pub const SIDEBAR_MAX_W: f32 = 600.0;
 
 /// The grid's cells (`grid/header cell`, `grid/cell`, `grid/row number`): what a cell holds is
 /// this far in from its sides; a header's parts are this far apart, the two arrows of its sort

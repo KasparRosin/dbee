@@ -12,6 +12,9 @@
 //!   right end of the status bar;
 //! - the tabs strip, then the active tab.
 //!
+//! Tab reaches them in reading order: the menu bar, the tree, the tabs strip, the tab, the value
+//! panel, then the status bar.
+//!
 //! The quick search (Ctrl+P) is drawn over it by the window ([`crate::quick_search`]).
 //!
 //! **Tabs strip** ([`crate::components::tab`]). The tabs fill a band side by side, the active one
@@ -46,7 +49,7 @@ use std::sync::Arc;
 use dbee_config::ConnectionConfig;
 use dbee_engine::{Session, State, Tab, TabId, TlsState, TransactionState, Which};
 use dbee_sql::filter::Condition;
-use egui::{Align, Frame, Layout, Margin, RichText};
+use egui::{Align, Frame, Layout, Rect, RichText, UiBuilder};
 use serde_json::json;
 
 use crate::app::Origin;
@@ -56,7 +59,7 @@ use crate::components::tooltip::Hint;
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
 use crate::table_tab::{self, Grids};
-use crate::theme::size::SLIM_BAR_H;
+use crate::theme::size::{SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_W, SLIM_BAR_H};
 use crate::theme::{self, Text, Words};
 use crate::tree::{self, Refresh, Tree, TreeAct};
 use crate::{DbeeApp, menu, value_panel};
@@ -235,10 +238,10 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     app.view.work.queries.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     egui::Panel::top("dbee-menubar").exact_size(SLIM_BAR_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();
-    if status_bar(app, ui, &mut acts) {
-        // At once, so the panel goes or comes in this frame.
-        app.start("ui.toggleValuePanel", json!({}), Origin::Menu);
-    }
+    // The status bar's room now and its contents last, so Tab reaches it after the tab's controls.
+    let footer = app.session.state().connection(Which::Active).is_some().then(|| {
+        egui::Panel::bottom("dbee-status").exact_size(STATUS_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| ui.max_rect()).inner
+    });
     side(app, ui);
     let panel = value_panel::reserve(app, ui);
     if panel.is_none() {
@@ -251,6 +254,12 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     // After the tab's body, so a cell selected in this frame shows its value now.
     if let Some(rect) = panel {
         value_panel::fill(app, ui, rect);
+    }
+    if let Some(rect) = footer
+        && status_bar(app, ui, rect, &mut acts)
+    {
+        app.start("ui.toggleValuePanel", json!({}), Origin::Menu);
+        ui.ctx().request_repaint();
     }
     for act in acts {
         match act {
@@ -276,8 +285,8 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The status bar ([`status::bar`]); true when the value panel's toggle was clicked.
-fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool {
+/// The status bar ([`status::bar`]) in `rect`; true when the value panel's toggle was clicked.
+fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect, acts: &mut Vec<Act>) -> bool {
     let Some(c) = app.session.state().connection(Which::Active) else { return false };
     let name = c.config.display_name();
     let own = !c.config.name.is_empty();
@@ -292,54 +301,54 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> bool
     let panel_open = app.view.value_panel;
     let mut toggled = false;
     let tags = &mut app.tags;
-    egui::Panel::bottom("dbee-status").exact_size(STATUS_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| {
-        let connection = status::Connection { name: &name, colour, own };
-        let facts = status::Facts { address: address.as_ref(), server: Some(&server), link, read_only, unsaved };
-        // The value panel's toggle at the right end, as the panel is the window's.
-        let shown = status::bar(ui, &connection, &facts, activity.as_ref().map(|(a, _)| a), |ui| {
-            toggled = value_panel::toggle(ui, panel_open, tags);
-        });
-        tags.tag_value("status-connection", &shown.connection, name.as_str());
-        if let (Some(r), Some(a)) = (&shown.address, &address) {
-            tags.tag_value("status-address", r, a.text());
-        }
-        if let Some(r) = &shown.server {
-            tags.tag_value("status-server", r, server.as_str());
-        }
-        if let (Some(r), Some((words, _))) = (&shown.link, link) {
-            tags.tag_value("status-tls", r, words);
-        }
-        if let Some(r) = &shown.read_only {
-            tags.tag_value("status-read-only", r, "Read-only");
-        }
-        if let Some(r) = shown.save {
-            let r = r.hint("Add this connection to the saved ones");
-            tags.tag_value("status-save", &r, "Save connection");
-        }
-        let words = shown.activity.as_ref();
-        match (activity.as_ref(), words) {
-            (Some((Activity::Disconnected, _)), Some(r)) => tags.tag_value("status-lost", r, "Connection lost"),
-            (Some((Activity::Reconnecting { .. }, _)), Some(r)) => tags.tag_value("status-job", r, "Reconnecting…"),
-            (Some((Activity::Job { text, .. }, _)), Some(r)) => tags.tag_value("status-job", r, text.to_string()),
-            (Some((Activity::InTransaction, _)), Some(r)) => tags.tag_value("status-transaction", r, "In transaction"),
-            _ => {}
-        }
-        match (activity.as_ref(), &shown.button) {
-            (Some((Activity::Disconnected, _)), Some(r)) => tags.tag_value("status-reconnect", r, "Reconnect"),
-            (Some((Activity::Job { .. }, Some(_))), Some(r)) => tags.tag_value("status-cancel", r, "Cancel"),
-            _ => {}
-        }
-        match shown.act {
-            Some(status::Act::SaveConnection) => acts.push(Act::SaveOpen),
-            Some(status::Act::Reconnect) => acts.push(Act::Reconnect),
-            Some(status::Act::Cancel) => {
-                if let Some((_, Some(command))) = &activity {
-                    acts.push(Act::Cancel(command));
-                }
-            }
-            None => {}
-        }
+    let mut bar = ui.new_child(UiBuilder::new().id_salt("dbee-status").max_rect(rect).layout(Layout::top_down(Align::Min)));
+    bar.set_clip_rect(rect);
+    let connection = status::Connection { name: &name, colour, own };
+    let facts = status::Facts { address: address.as_ref(), server: Some(&server), link, read_only, unsaved };
+    // The value panel's toggle at the right end, as the panel is the window's.
+    let shown = status::bar(&mut bar, &connection, &facts, activity.as_ref().map(|(a, _)| a), |ui| {
+        toggled = value_panel::toggle(ui, panel_open, tags);
     });
+    tags.tag_value("status-connection", &shown.connection, name.as_str());
+    if let (Some(r), Some(a)) = (&shown.address, &address) {
+        tags.tag_value("status-address", r, a.text());
+    }
+    if let Some(r) = &shown.server {
+        tags.tag_value("status-server", r, server.as_str());
+    }
+    if let (Some(r), Some((words, _))) = (&shown.link, link) {
+        tags.tag_value("status-tls", r, words);
+    }
+    if let Some(r) = &shown.read_only {
+        tags.tag_value("status-read-only", r, "Read-only");
+    }
+    if let Some(r) = shown.save {
+        let r = r.hint("Add this connection to the saved ones");
+        tags.tag_value("status-save", &r, "Save connection");
+    }
+    let words = shown.activity.as_ref();
+    match (activity.as_ref(), words) {
+        (Some((Activity::Disconnected, _)), Some(r)) => tags.tag_value("status-lost", r, "Connection lost"),
+        (Some((Activity::Reconnecting { .. }, _)), Some(r)) => tags.tag_value("status-job", r, "Reconnecting…"),
+        (Some((Activity::Job { text, .. }, _)), Some(r)) => tags.tag_value("status-job", r, text.to_string()),
+        (Some((Activity::InTransaction, _)), Some(r)) => tags.tag_value("status-transaction", r, "In transaction"),
+        _ => {}
+    }
+    match (activity.as_ref(), &shown.button) {
+        (Some((Activity::Disconnected, _)), Some(r)) => tags.tag_value("status-reconnect", r, "Reconnect"),
+        (Some((Activity::Job { .. }, Some(_))), Some(r)) => tags.tag_value("status-cancel", r, "Cancel"),
+        _ => {}
+    }
+    match shown.act {
+        Some(status::Act::SaveConnection) => acts.push(Act::SaveOpen),
+        Some(status::Act::Reconnect) => acts.push(Act::Reconnect),
+        Some(status::Act::Cancel) => {
+            if let Some((_, Some(command))) = &activity {
+                acts.push(Act::Cancel(command));
+            }
+        }
+        None => {}
+    }
     toggled
 }
 
@@ -360,8 +369,9 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let mut acts = Vec::new();
     {
         let DbeeApp { view, tags, .. } = app;
-        let frame = Frame::new().fill(t.bg).inner_margin(Margin::same(8));
-        egui::Panel::left("dbee-tree").resizable(true).default_size(280.0).size_range(200.0..=600.0).frame(frame).show(ui, |ui| {
+        let frame = Frame::new().fill(t.bg);
+        let panel = egui::Panel::left("dbee-tree").resizable(true).default_size(SIDEBAR_W).size_range(SIDEBAR_MIN_W..=SIDEBAR_MAX_W);
+        panel.frame(frame).show(ui, |ui| {
             acts = tree::show(ui, &catalog, dialect, &mut view.work.tree, tags);
         });
     }

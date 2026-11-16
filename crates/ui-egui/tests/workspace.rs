@@ -1669,9 +1669,9 @@ fn status_gives_way(ui: &mut Ui, size: egui::Vec2, at: &str) -> Vec<(&'static st
     drawn
 }
 
-/// Review 1: Tab from the last menu title reaches one stop before the tree's filter, the status
-/// bar's value toggle. Reached by the keyboard, it shows the focus look of an icon button with no
-/// edge, a 2 px `ink` box 4 out; a click shows none.
+/// Review 1: Tab from the tree's filter reaches the status bar's value toggle, past the tree and
+/// the tab strip. Reached by the keyboard, it shows the focus look of an icon button with no edge,
+/// a 2 px `ink` box 4 out; a click shows none.
 #[test]
 fn the_value_toggle_shows_keyboard_focus() {
     let db = dbee_testkit::require_testdb!();
@@ -1684,14 +1684,19 @@ fn the_value_toggle_shows_keyboard_focus() {
             .any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.rect == toggle.expand(4.0) && r.stroke.width == 2.0 && r.stroke.color == t.ink))
     };
     ui.click("tree-filter");
-    ui.key_with("Tab", json!({ "shift": true }));
-    ui.frame();
+    for _ in 0..40 {
+        if ui.focused("value-toggle") {
+            break;
+        }
+        ui.key("Tab");
+        ui.frame();
+    }
     use egui_kittest::kittest::{NodeT, Queryable};
     let focused = ui.harness.query_by(|n| n.is_focused()).map(|n| {
         let n = n.accesskit_node();
         (n.role(), n.label(), n.raw_bounds())
     });
-    assert!(ring(&ui), "the stop before the filter shows its focus look: {focused:?}, the toggle at {toggle:?}");
+    assert!(ui.focused("value-toggle") && ring(&ui), "Tab reaches the toggle, with its focus look: {focused:?}, the toggle at {toggle:?}");
     // Enter on it toggles the panel, as a click does.
     let open = ui.value("value-toggle");
     ui.key("Enter");
@@ -1742,6 +1747,218 @@ fn the_menu_bar_is_30_tall_and_keeps_its_tags() {
     // A click opens its menu, which lists its entries as before.
     ui.click("menu-File");
     assert!(ui.tag("menu-tab.newQuery").is_some(), "File's entries");
+}
+
+// ---- the shell: the sidebar's frame, where the strip starts, the keyboard's order -------------
+
+/// The rect egui keeps for the panel `id` (its outer rect, as last drawn).
+fn panel(ui: &Ui, id: &str) -> egui::Rect {
+    egui::PanelState::load(&ui.harness.ctx, egui::Id::new(id)).unwrap_or_else(|| panic!("the panel `{id}` is drawn")).outer_rect
+}
+
+/// The window's rect: the menu bar's width, from its top to the status bar's bottom (the harness
+/// holds the window 8 in).
+fn window(ui: &Ui) -> egui::Rect {
+    egui::Rect::from_min_max(panel(ui, "dbee-menubar").min, panel(ui, "dbee-status").max)
+}
+
+/// The 1 px `line` fills of the last frame.
+fn lines(ui: &Ui, line: egui::Color32) -> Vec<egui::Rect> {
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.fill == line && r.rect.height() == 1.0 => Some(r.rect),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Shell screen (query tab 43147, table tab 84237, dark beside each): the sidebar is 260 wide with
+/// no margin and a `line` down its right edge; what it holds starts 12 from the window's edge; its
+/// filter row is 36 tall, so the row's line and the tab strip's meet; the first tab starts at the
+/// sidebar's line.
+#[test]
+fn the_shell_frame_matches_the_page() {
+    let db = dbee_testkit::require_testdb!();
+    for dark in [false, true] {
+        let mode = if dark { "dark" } else { "light" };
+        let mut ui = Ui::connected_in(db, APP_SIZE);
+        if dark {
+            ui.execute("ui.themeDark", json!({}));
+        }
+        ui.open("shop", "orders");
+        ui.ok("engine.wait", json!({}));
+        ui.frame();
+        let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+        let window = window(&ui);
+        let side = panel(&ui, "dbee-tree");
+        assert_eq!((side.left(), side.width()), (window.left(), 260.0), "{mode}: the sidebar at the window's edge, 260 wide: {side:?}");
+        // Its line: the last point of its width, top to bottom.
+        let hairline = ui.shapes().into_iter().find_map(|(_, s)| match s {
+            egui::Shape::LineSegment { points: [a, b], stroke }
+                if a.x == b.x && stroke.color == t.line && (a.x - (side.right() - 0.5)).abs() <= 0.25 =>
+            {
+                Some((a.y.min(b.y), a.y.max(b.y)))
+            }
+            _ => None,
+        });
+        assert_eq!(hairline, Some((side.top(), side.bottom())), "{mode}: a `line` down the sidebar's right edge");
+        // The filter: no margin round it, its words 12 from the window's edge.
+        let field = rect_of(&ui.tag("tree-filter").expect("the filter"));
+        assert_eq!(field.min, side.min, "{mode}: the filter at the sidebar's corner: {field:?}");
+        let (words, _) = ui.text_in(field, "Filter tables").expect("the placeholder");
+        assert!((words.left() - (window.left() + 12.0)).abs() <= 0.5, "{mode}: the words 12 from the window's edge: {words:?}");
+        // The filter row's line and the strip's, at the same height.
+        let new = rect_of(&ui.tag("tab-new").expect("+"));
+        let lines = lines(&ui, t.line);
+        let row = lines.iter().find(|r| r.left() == side.left() && r.top() >= field.top() && r.bottom() <= field.bottom() + 1.0);
+        let row = row.unwrap_or_else(|| panic!("{mode}: the filter row's line in {lines:?}"));
+        assert_eq!(row.right(), side.right() - 1.0, "{mode}: the row's line runs to the sidebar's: {row:?}");
+        let strip = lines.iter().find(|r| r.left() == new.right()).unwrap_or_else(|| panic!("{mode}: the strip's line after + in {lines:?}"));
+        assert!((row.top() - strip.top()).abs() <= 0.5, "{mode}: the lines meet: the filter's {row:?}, the strip's {strip:?}");
+        assert_eq!(row.bottom() - window.top(), 30.0 + 36.0, "{mode}: the row 36 tall under the menu bar: {row:?}");
+        // The first tab at the sidebar's line, with no inset.
+        let tab = ui.active();
+        let first = rect_of(&ui.tag(&format!("tab-{tab}")).expect("the tab"));
+        assert!((first.left() - side.right()).abs() <= 0.5, "{mode}: the first tab {first:?} starts at the sidebar's line, {}", side.right());
+    }
+}
+
+/// Where a widget stands, in reading order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Region {
+    Menu,
+    Sidebar,
+    Strip,
+    /// Under the strip: the tab, and the value panel beside it.
+    Tab,
+    Footer,
+}
+
+/// The region `r`'s centre falls in. A grid cell scrolled out of view, behind the value panel or
+/// past the window's edge, still counts as the tab's.
+fn region(ui: &Ui, r: egui::Rect) -> Region {
+    let at = r.center();
+    if panel(ui, "dbee-menubar").contains(at) {
+        Region::Menu
+    } else if panel(ui, "dbee-status").contains(at) {
+        Region::Footer
+    } else if panel(ui, "dbee-tree").contains(at) {
+        Region::Sidebar
+    } else if at.y < panel(ui, "dbee-menubar").bottom() + 36.0 {
+        Region::Strip
+    } else {
+        Region::Tab
+    }
+}
+
+/// The tagged widget that has the keyboard and its rect: the `ui.inspect` entry AccessKit's
+/// focused node lies on (as [`Ui::focused`] reads it). `None` while no tagged widget has it.
+fn focused_tag(ui: &mut Ui) -> Option<(String, egui::Rect)> {
+    use egui_kittest::kittest::{NodeT, Queryable};
+    let b = ui.harness.query_by(|n| n.is_focused()).and_then(|n| n.accesskit_node().raw_bounds())?;
+    let near = |a: f32, b: f64| (f64::from(a) - b).abs() < 0.5;
+    let i = ui.inspect();
+    i["automation"]
+        .as_array()?
+        .iter()
+        .map(|e| (e["id"].as_str().unwrap_or_default().to_string(), rect_of(e)))
+        .find(|(_, r)| near(r.left(), b.x0) && near(r.top(), b.y0))
+}
+
+/// Tab moves in reading order: from the tree's filter to the tree's rows, the tab strip (the tab,
+/// then +), the tab's own controls and the value panel's, then the status bar's buttons, never back.
+/// After the status bar it goes round to the menu bar, the window's first stop, and from there on
+/// to the filter.
+#[test]
+fn tab_moves_in_reading_order() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("shop", "orders");
+    ui.ok("engine.wait", json!({}));
+    ui.frame();
+    let tab = ui.active();
+    ui.focus("tree-filter");
+    let mut trail = vec![("tree-filter".to_string(), Region::Sidebar)];
+    for _ in 0..400 {
+        ui.key("Tab");
+        let Some((id, r)) = focused_tag(&mut ui) else { continue };
+        if trail.last().is_some_and(|(last, _)| *last == id) {
+            continue;
+        }
+        let at = region(&ui, r);
+        trail.push((id, at));
+        if at == Region::Footer || at == Region::Menu {
+            break;
+        }
+    }
+    assert!(trail.windows(2).all(|w| w[0].1 <= w[1].1), "never back: {trail:?}");
+    let first = |want: &dyn Fn(&str, Region) -> bool, what: &str| {
+        trail.iter().position(|(id, at)| want(id, *at)).unwrap_or_else(|| panic!("Tab reaches {what}: {trail:?}"))
+    };
+    let order = [
+        first(&|id, _| id.starts_with("tree-") && id != "tree-filter" && id != "tree-refresh", "a tree row"),
+        first(&|id, _| id == format!("tab-{tab}"), "the tab"),
+        first(&|id, _| id == "tab-new", "+"),
+        first(&|_, at| at == Region::Tab, "a control in the tab"),
+        first(
+            &|id, at| at == Region::Footer && ["value-toggle", "status-save", "status-cancel", "status-reconnect"].contains(&id),
+            "a status bar button",
+        ),
+    ];
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "in reading order: {order:?} in {trail:?}");
+    let mut round = Vec::new();
+    for _ in 0..40 {
+        ui.key("Tab");
+        let Some((id, r)) = focused_tag(&mut ui) else { continue };
+        if id == "tree-filter" {
+            break;
+        }
+        if round.last().is_none_or(|(last, _)| *last != id) {
+            let at = region(&ui, r);
+            round.push((id, at));
+        }
+    }
+    assert!(ui.focused("tree-filter"), "round to the filter again: {round:?}");
+    let menu = round.iter().position(|(_, at)| *at == Region::Menu).unwrap_or_else(|| panic!("the menu bar after the status bar: {round:?}"));
+    assert_eq!(round[menu].0, "menu-File", "the menu bar from its first title: {round:?}");
+    assert!(round[..menu].iter().all(|(_, at)| *at == Region::Footer), "only the status bar before it: {round:?}");
+    assert!(round[menu..].iter().all(|(_, at)| *at == Region::Menu), "only the menu bar after it: {round:?}");
+}
+
+/// The sidebar starts 260 wide, and a drag on its line still makes it wider or narrower within
+/// 200 and 600, as before; the width it was dragged to stays, and the strip starts after it.
+#[test]
+fn a_resized_sidebar_keeps_its_width() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    let start = panel(&ui, "dbee-tree");
+    assert_eq!(start.width(), 260.0, "a new window's sidebar: {start:?}");
+    let press = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    let drag = |ui: &mut Ui, to: f32| {
+        let edge = panel(ui, "dbee-tree");
+        let (from, to) = (egui::pos2(edge.right(), edge.center().y), egui::pos2(to, edge.center().y));
+        ui.frame_with(vec![egui::Event::PointerMoved(from)]);
+        ui.frame_with(vec![press(from, true)]);
+        for i in 1..=8 {
+            ui.frame_with(vec![egui::Event::PointerMoved(from + (to - from) * (i as f32 / 8.0))]);
+        }
+        ui.frame_with(vec![press(to, false)]);
+        ui.frame();
+    };
+    drag(&mut ui, start.left() + 360.0);
+    assert_eq!(panel(&ui, "dbee-tree").width(), 360.0, "dragged wider");
+    ui.execute("tab.newQuery", json!({}));
+    ui.frame();
+    ui.frame();
+    let side = panel(&ui, "dbee-tree");
+    assert_eq!(side.width(), 360.0, "it keeps the width");
+    let tab = ui.active();
+    assert_eq!(rect_of(&ui.tag(&format!("tab-{tab}")).expect("the tab")).left(), side.right(), "the strip starts after it");
+    drag(&mut ui, start.left() + 100.0);
+    assert_eq!(panel(&ui, "dbee-tree").width(), 200.0, "no narrower than 200");
+    drag(&mut ui, start.left() + 900.0);
+    assert_eq!(panel(&ui, "dbee-tree").width(), 600.0, "no wider than 600");
 }
 
 /// The machine and its load average, which a timing test prints with its numbers

@@ -15,8 +15,8 @@ use std::sync::Arc;
 use egui::containers::menu::{MenuConfig, MenuState, SubMenu};
 use egui::style::StyleModifier;
 use egui::{
-    Align, Color32, Context, CornerRadius, Frame, Galley, InnerResponse, Layout, Margin, Popup, Rect, Response, Sense, Stroke, Ui, UiBuilder, UiKind,
-    UiStackInfo, Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Color32, Context, CornerRadius, FocusDirection, Frame, Galley, InnerResponse, Key, Layout, Margin, Popup, Rect, Response, Sense, Stroke,
+    Ui, UiBuilder, UiKind, UiStackInfo, Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2,
 };
 
 use super::icon::Icon;
@@ -314,18 +314,30 @@ pub fn bar<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 
 /// A menu bar's title, its word as written in `body`, opening the menu `content` under the bar
 /// as egui's menu button does (a click, or Enter or Space on it; Escape or a click closes it).
+/// Down on a title whose menu is open moves into the menu, to its first item that takes focus.
 pub fn bar_title<R>(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui) -> R) -> (Response, Option<InnerResponse<R>>) {
     let (words, size) = title_parts(ui, label);
     let (rect, r) = ui.allocate_exact_size(size, Sense::click());
     r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), label));
     let look = Look::of(ui, &r);
+    let down = ui.input(|i| i.modifiers.is_none() && i.key_pressed(Key::ArrowDown));
+    let enter = down && r.has_focus() && Popup::is_id_open(ui.ctx(), Popup::default_response_id(&r));
     let config = MenuConfig::new().style(style(ui.ctx()));
     let inner = Popup::menu(&r)
         .gap(UNDER_THE_BAR)
         .close_behavior(config.close_behavior)
         .style(config.style.clone())
         .info(UiStackInfo::new(UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, config))
-        .show(content);
+        .show(|ui| {
+            if enter {
+                // egui's Down picks the nearest widget below, which can be one under the menu.
+                ui.memory_mut(|m| {
+                    m.surrender_focus(r.id);
+                    m.move_focus(FocusDirection::Next);
+                });
+            }
+            content(ui)
+        });
     paint_title(ui, rect, words, inner.is_some(), look);
     (r, inner)
 }

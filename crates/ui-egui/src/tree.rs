@@ -45,7 +45,8 @@ use crate::components::rows::{TreeKind, TreeRow};
 use crate::components::sidebar::{self, Count};
 use crate::components::tooltip::Hint;
 use crate::components::{Look, focus};
-use crate::theme::{self, size::TREE_ROW_H};
+use crate::theme;
+use crate::theme::size::{SIDEBAR_PAD_X, TREE_ROW_H};
 
 /// What the user asked of the tree in a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -422,7 +423,8 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     let rows = tree.rows(catalog);
     if rows.list.is_empty() {
         let text = if filtering { "No table matches the filter.".to_owned() } else { format!("This connection has no {many} dbee can show.") };
-        ui.label(egui::RichText::new(text).color(t.text_muted));
+        let inset = egui::Margin::symmetric(SIDEBAR_PAD_X as i8, 0);
+        egui::Frame::NONE.inner_margin(inset).show(ui, |ui| ui.label(egui::RichText::new(text).color(t.text_muted)));
         return acts;
     }
     let system_label = format!("System {many}");
