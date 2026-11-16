@@ -7,9 +7,10 @@
 //! - the error band (`table-error`, [`crate::components::error_band`]) when the last Apply failed,
 //!   with the server's message (the staged changes stay, and the grid marks the row it failed on),
 //!   or else when the last page load failed, with the rows from before kept underneath;
-//! - the grid ([`crate::grid`]) on the loaded page and its staged edits, sortable by a header
-//!   click, with foreign key links on the selected row, and the cell editor over it while one is
-//!   open ([`crate::editors`]; a double-click opens one);
+//! - the grid ([`crate::grid`]) on the loaded page and its staged edits, across the body's whole
+//!   width (the rest keeps [`TAB_BODY_PAD_X`] in from its sides), sortable by a header click,
+//!   with foreign key links on the selected row, and the cell editor over it while one is open
+//!   ([`crate::editors`]; a double-click opens one);
 //! - the paging bar ([`crate::paging`]), with "+ Row": the new row is selected and scrolled to.
 //!
 //! It reads the tab from the engine each frame and acts only through commands, started with
@@ -27,7 +28,7 @@ use dbee_engine::cmd::table::{STAGED, quick_estimate};
 use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab, Which};
 use dbee_sql::Dialect;
 use dbee_sql::select::PAGE_SIZE;
-use egui::{Align, Layout, Rect, RichText, UiBuilder, pos2};
+use egui::{Align, Layout, Rect, RichText, UiBuilder, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -40,6 +41,7 @@ use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{self, BAR_H, Paging};
+use crate::theme::size::TAB_BODY_PAD_X;
 use crate::theme::{self, Text};
 
 /// The commands that load a page, whose database errors the tab's band shows.
@@ -226,7 +228,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let connected = session.state().connection(Which::Tab(id));
         let info = connected.and_then(|c| c.catalog.table(&tab.table));
         let lost = connected.is_none_or(|c| c.lost);
-        let full = ui.available_rect_before_wrap();
+        let body = ui.available_rect_before_wrap();
+        let full = body.shrink2(vec2(TAB_BODY_PAD_X, 0.0));
         let split = (full.bottom() - BAR_H).max(full.top());
         let mut top = ui.new_child(
             UiBuilder::new()
@@ -287,9 +290,10 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),
                 };
                 let state = view.work.grids.entry(id).or_default();
-                // Within the tab's width, even when a row above it is wider (the filter bar in a
-                // narrow window), so every column can be scrolled into view.
-                let area = top.available_rect_before_wrap().intersect(Rect::from_min_max(full.min, pos2(full.right(), split)));
+                // The body's width, even when a row above it is wider (the filter bar in a narrow
+                // window), so every column can be scrolled into view.
+                let below = top.available_rect_before_wrap().top().min(split);
+                let area = Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), split));
                 let mut grid_ui = top.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
                 for act in grid.show(&mut grid_ui, state, tags) {
                     if let GridAct::Edit { row, col } = act {

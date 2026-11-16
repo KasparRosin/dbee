@@ -8,7 +8,14 @@
 //! the cells and the row numbers are the components' ([`crate::components::grid_cell`]): a cell
 //! shows `display::grid_text` of its value (one line, cut at 200 characters), so a 20 MB value
 //! lays out as 200 characters; NULL is the word in `text_muted`, an empty string an empty cell.
-//! Numbers sit right. The row under the pointer lights up, but for its selected and marked cells.
+//! Numbers sit right. The row under the pointer, wherever it is on the row, lights up, but for its
+//! selected and marked cells.
+//!
+//! **Edge to edge.** The grid fills its area from the left edge, row numbers first. Past the last
+//! column a filler takes the rest of the width ([`grid_cell::Filler`], [`grid_cell::header_filler`];
+//! none once the columns are wider than the area), so the header's `ink` line, each row's line and
+//! its hover or selection ground reach the area's right edge. The table is as tall as its rows:
+//! the column lines stop at the last row, and under it the area shows the tab's own ground.
 //!
 //! **Column widths** start from a bounded guess per column (its header, and the cut text of the
 //! first rows, clamped to [`MIN_WIDTH`]..=[`MAX_WIDTH`]) worked out once; after that egui keeps
@@ -16,7 +23,11 @@
 //!
 //! **Selection** is the engine's (`selection.set`, `selection.all`): a click selects a cell,
 //! shift-click extends from the anchor, a drag selects from where it started to the cell under
-//! the pointer. A right-click selects the cell unless it is already selected, and opens the menu:
+//! the pointer. One selected cell lights its whole row in `selection` (its number and the filler
+//! too) and takes the `ink` outline; a selection over every column lights each of its rows the
+//! same way, with no outline; any other rectangle lights its own cells only. A marked cell keeps
+//! its mark, and takes its outline where it is in the selection (the component's rule). A
+//! right-click selects the cell unless it is already selected, and opens the menu:
 //! Set as NULL, Copy, Copy with header, Copy as CSV / JSON / Markdown, Delete row(s). Set as NULL
 //! and Delete row are left out where rows are never edited (a query's results, [`RowEdits::None`]),
 //! and listed disabled, with the reason on hover, where they cannot be now ([`RowEdits::Blocked`]).
@@ -51,12 +62,12 @@ use dbee_core::display::grid_text;
 use dbee_core::{ResultSet, TypeClass};
 use dbee_engine::Selection;
 use dbee_sql::filter::SortDir;
-use egui::{Align, Layout, Rect, Response, ScrollArea, Sense, Stroke, UiBuilder, pos2};
+use egui::{Align, Layout, Rangef, Rect, Response, ScrollArea, Sense, Stroke, UiBuilder, pos2};
 use egui_extras::{Column, TableBuilder};
 use serde_json::{Map, json};
 
 use crate::automation::{CellBlock, Tags};
-use crate::components::grid_cell::{self, Cell, CellText, DATA_CHAR_W, Header, RowNumber};
+use crate::components::grid_cell::{self, Cell, CellText, DATA_CHAR_W, Filler, Header, RowNumber};
 pub use crate::components::grid_cell::{Key, Mark};
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
@@ -284,7 +295,6 @@ impl Grid<'_> {
         if !primary_down {
             state.drag = None;
         }
-        let focus = self.selection.map(|s| s.focus);
         let mut acts = Vec::new();
         let mut heads = vec![(0.0, 0.0); cols];
         let mut first_drawn: Option<(usize, f32)> = None;
@@ -298,16 +308,18 @@ impl Grid<'_> {
             sideways = sideways.horizontal_scroll_offset(x);
         }
         let mut content_left = 0.0;
+        let mut view_x = Rangef::NOTHING;
         let out = sideways.show(&mut grid_ui, |ui| {
             content_left = ui.max_rect().left();
+            view_x = ui.clip_rect().x_range();
             ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-            // The resize lines run down the whole table: keep them faint.
             ui.visuals_mut().widgets.noninteractive.bg_stroke = Stroke::new(1.0, theme::tokens(ui.ctx()).line);
+            // As tall as its rows, so the resize lines stop at the last one.
             let mut table = TableBuilder::new(ui)
                 .id_salt("dbee-grid")
                 .resizable(true)
                 .striped(false)
-                .auto_shrink([false, false])
+                .auto_shrink([false, true])
                 .animate_scrolling(false)
                 .min_scrolled_height(0.0)
                 .cell_layout(Layout::left_to_right(Align::Center))
@@ -315,6 +327,7 @@ impl Grid<'_> {
             for w in &widths {
                 table = table.column(Column::initial(*w).at_least(MIN_WIDTH).clip(true).resizable(true));
             }
+            table = table.column(Column::remainder().clip(true).resizable(false));
             if let Some(row) = scroll_row {
                 table = table.scroll_to_row(row, Some(Align::Center));
             }
@@ -335,20 +348,22 @@ impl Grid<'_> {
                         acts.push(GridAct::Sort(col));
                     }
                 }
+                header.col(|ui| grid_cell::header_filler(ui, ui.max_rect()));
             });
             table.body(|body| {
                 body.rows(ROW_H, rows, |mut row| {
                     let r = row.index();
-                    // The row lights up under the pointer, across the rows in view.
+                    let lit = self.lit(r);
                     let mut hovered = false;
                     row.col(|ui| {
-                        let at = ui.max_rect();
-                        hovered = ui.rect_contains_pointer(Rect::from_x_y_ranges(ui.clip_rect().x_range(), at.y_range()));
+                        // Across the view: the number cell's own clip is the number cell.
+                        let at = Rect::from_x_y_ranges(view_x, ui.clip_rect().y_range());
+                        hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), at);
                         self.draw_gutter(ui, r, hovered);
                     });
                     for c in 0..cols {
                         let mut drawn = None;
-                        row.col(|ui| drawn = Some(self.draw_cell(ui, r, c, focus, hovered)));
+                        row.col(|ui| drawn = Some(self.draw_cell(ui, r, c, lit, hovered)));
                         let Some(drawn) = drawn else { continue };
                         let resp = &drawn.resp;
                         if first_drawn.is_none() {
@@ -403,6 +418,7 @@ impl Grid<'_> {
                         }
                         egui::Popup::context_menu(resp).style(menu::style(&resp.ctx)).show(|ui| self.menu(ui, here, tags, &mut acts));
                     }
+                    row.col(|ui| Filler { selected: lit, hovered }.paint(ui, ui.max_rect()));
                 });
             });
         });
@@ -432,6 +448,16 @@ impl Grid<'_> {
             tags.tag_cells_out_of_view(CellBlock { prefix: CELL.into(), rows, top, row_height: ROW_H, columns: heads });
         }
         acts
+    }
+
+    /// Row `row` lights as selected across the grid: it holds the one selected cell, or the
+    /// selection takes in every column of it.
+    fn lit(&self, row: usize) -> bool {
+        let cols = self.source.columns();
+        self.selection.is_some_and(|sel| {
+            let ((r0, r1), (c0, c1)) = bounds(sel);
+            (r0..=r1).contains(&row) && (sel.anchor == sel.focus || (c0 == 0 && c1.saturating_add(1) >= cols))
+        })
     }
 
     fn key(&self, col: usize) -> Option<Key> {
@@ -485,21 +511,25 @@ impl Grid<'_> {
         number.paint(ui, ui.max_rect());
     }
 
-    /// Draws cell `(row, col)` into its `ui`; `focus` is the selection's focus cell, `hovered`
-    /// whether its row is under the pointer.
-    fn draw_cell(&self, ui: &mut egui::Ui, row: usize, col: usize, focus: Option<(usize, usize)>, hovered: bool) -> Drawn {
+    /// Draws cell `(row, col)` into its `ui`; `lit` when its row lights as selected
+    /// ([`Grid::lit`]), `hovered` when it is under the pointer.
+    fn draw_cell(&self, ui: &mut egui::Ui, row: usize, col: usize, lit: bool, hovered: bool) -> Drawn {
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.id().with("dbee-cell"), Sense::click_and_drag());
         let (text, null) = match self.source.cell(row, col) {
             None => ("NULL".to_string(), true),
             Some(v) => (grid_text(v).into_owned(), false),
         };
+        let mark = self.source.mark(row, col);
+        let focus = self.selection.map(|s| s.focus);
         let cell = Cell {
             text: if null { CellText::Null } else { CellText::Text(&text) },
             align: self.align(col),
-            mark: self.source.mark(row, col),
-            selected: covers(self.selection, (row, col)),
-            focused: focus == Some((row, col)),
+            mark,
+            // A lit row's unmarked cells take its ground; a marked one keeps its mark, and its
+            // outline only where it is in the selection.
+            selected: covers(self.selection, (row, col)) || (lit && mark.is_none()),
+            focused: self.selection.is_some_and(|s| s.anchor == s.focus) && focus == Some((row, col)),
             deleted: self.source.deleted(row),
             link: self.links && self.key(col) == Some(Key::Foreign),
             row_selected: focus.is_some_and(|f| f.0 == row),

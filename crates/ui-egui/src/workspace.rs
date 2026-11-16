@@ -32,8 +32,9 @@
 //! markers a reconnect cleared, shows none, even while the engine lets its job run to its end.
 //!
 //! **Tab bodies.** A table tab shows its page ([`crate::table_tab`]), a query tab its editor and
-//! results ([`crate::query_tab`]). With no tab open, the work area says so and offers New query
-//! (Ctrl+T) and Quick search (Ctrl+P), each running its command as its keys do.
+//! results ([`crate::query_tab`]), across the whole width under the strip: the grid runs edge to
+//! edge, and the bars round it keep their own inset. With no tab open, the work area says so and
+//! offers New query (Ctrl+T) and Quick search (Ctrl+P), each running its command as its keys do.
 //!
 //! Automation ids: `tab-<id>` (value: the title as shown), `tab-close-<id>`, `tab-dirty-<id>`,
 //! `tab-new`, `tab-list` (while the tabs don't fit; value: the number of tabs) and, while its list
@@ -462,7 +463,7 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         no_tab(app, ui, acts);
         return;
     };
-    let content = ui.available_rect_before_wrap().shrink2(egui::vec2(8.0, 0.0));
+    let content = ui.available_rect_before_wrap();
     let mut ui = ui.new_child(egui::UiBuilder::new().id_salt("dbee-tab-body").max_rect(content).layout(Layout::top_down(Align::Min)));
     if query {
         query_tab::show(app, &mut ui, id);

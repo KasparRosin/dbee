@@ -419,6 +419,88 @@ impl Ui {
     }
 }
 
+impl Ui {
+    /// Where `id` was drawn in the last frame (its part in view); it must have been.
+    pub fn drawn(&self, id: &str) -> egui::Rect {
+        self.harness.state().tags().rect(id).unwrap_or_else(|| panic!("`{id}` was drawn"))
+    }
+
+    /// The x range of the tab's body: from the sidebar to the value panel, or to the window's edge
+    /// while the panel is shut.
+    pub fn body_x(&mut self) -> egui::Rangef {
+        let panel =
+            |ui: &Ui, id: &str| egui::PanelState::load(&ui.harness.ctx, egui::Id::new(id)).unwrap_or_else(|| panic!("`{id}` is drawn")).outer_rect;
+        let left = panel(self, "dbee-tree").right();
+        let right =
+            if self.value("value-toggle") == json!(true) { panel(self, "dbee-value-panel").left() } else { panel(self, "dbee-menubar").right() };
+        egui::Rangef::new(left, right)
+    }
+
+    /// The pointer moves off the grid, to the empty right end of the menu bar, for a frame.
+    pub fn hover_away(&mut self) {
+        let bar = egui::PanelState::load(&self.harness.ctx, egui::Id::new("dbee-menubar")).expect("the menu bar").outer_rect;
+        self.hover(egui::pos2(bar.right() - 20.0, bar.center().y));
+        self.frame();
+    }
+}
+
+/// What a pixel at `at` shows in the last frame: the colour and rect of the last fill, inside
+/// stroke or line drawn over it (within its clip). Text, icons, shadows and fully transparent
+/// shapes don't count.
+pub fn painted_at(ui: &Ui, at: Pos2) -> Option<(egui::Color32, egui::Rect)> {
+    let mut top = None;
+    for (clip, shape) in ui.shapes() {
+        if !clip.contains(at) {
+            continue;
+        }
+        match shape {
+            egui::Shape::Rect(r) if r.blur_width == 0.0 => {
+                if r.fill.a() > 0 && r.rect.contains(at) {
+                    top = Some((r.fill, r.rect.intersect(clip)));
+                }
+                let w = r.stroke.width;
+                if w > 0.0 && r.stroke.color.a() > 0 {
+                    let (outer, inner) = match r.stroke_kind {
+                        egui::StrokeKind::Inside => (r.rect, r.rect.shrink(w)),
+                        egui::StrokeKind::Middle => (r.rect.expand(w / 2.0), r.rect.shrink(w / 2.0)),
+                        egui::StrokeKind::Outside => (r.rect.expand(w), r.rect),
+                    };
+                    if outer.contains(at) && !inner.contains(at) {
+                        top = Some((r.stroke.color, outer.intersect(clip)));
+                    }
+                }
+            }
+            egui::Shape::LineSegment { points: [a, b], stroke } if stroke.width > 0.0 && stroke.color.a() > 0 => {
+                let line = egui::Rect::from_two_pos(a, b).expand(stroke.width / 2.0);
+                if line.contains(at) {
+                    top = Some((stroke.color, line.intersect(clip)));
+                }
+            }
+            _ => {}
+        }
+    }
+    top
+}
+
+/// The colour a pixel at `at` shows in the last frame ([`painted_at`]).
+pub fn colour_at(ui: &Ui, at: Pos2) -> Option<egui::Color32> {
+    painted_at(ui, at).map(|(c, _)| c)
+}
+
+/// The rects of the last frame's outlines (inside strokes of rects) in `colour` that lie in `within`,
+/// with their widths.
+pub fn outlines_in(ui: &Ui, within: egui::Rect, colour: egui::Color32) -> Vec<(egui::Rect, f32)> {
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.stroke.color == colour && within.contains_rect(r.rect) => {
+                Some((r.rect, r.stroke.width))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The notice's toast as drawn ([`Ui::toast`]): where, its ground, the colours of the words and of
 /// the marks (its icon, its close) drawn on it, and whether a shadow falls round it.
 #[derive(Debug, Clone)]

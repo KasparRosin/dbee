@@ -1,6 +1,7 @@
-//! The data grid's cells (`grid/header cell`, `grid/cell`, `grid/row number`). Each is a view
-//! over plain data that draws into the rect the grid gives it; the grid ([`crate::grid`]) keeps
-//! its layout, scrolling and input, and a cell's follow link is the one part that answers a click.
+//! The data grid's cells (`grid/header cell`, `grid/cell`, `grid/row number`), and what fills a
+//! row and the header past the last column ([`Filler`], [`header_filler`]). Each is a view over
+//! plain data that draws into the rect the grid gives it; the grid ([`crate::grid`]) keeps its
+//! layout, scrolling and input, and a cell's follow link is the one part that answers a click.
 //!
 //! One ground at a time (foundations): a marked cell (staged, new, deleted, failed, saved) keeps
 //! its mark when selected or hovered, with nothing under it, and when selected takes an outline,
@@ -177,12 +178,26 @@ pub fn corner(ui: &Ui, rect: Rect) {
     head_ground(&painter(ui), rect, tokens(ui.ctx()));
 }
 
+/// The header past the last column, to the grid's right edge: `card` and the 1 px `ink` line
+/// along its bottom, with no line at its right.
+pub fn header_filler(ui: &Ui, rect: Rect) {
+    let t = tokens(ui.ctx());
+    let p = painter(ui);
+    p.rect_filled(rect, CornerRadius::ZERO, t.card);
+    p.rect_filled(bottom_line(rect), CornerRadius::ZERO, t.ink);
+}
+
 /// A header cell's ground: `card`, a 1 px `line` at its right and a 1 px `ink` line along its
 /// bottom.
 fn head_ground(p: &Painter, rect: Rect, t: &Tokens) {
     p.rect_filled(rect, CornerRadius::ZERO, t.card);
     p.rect_filled(Rect::from_min_max(pos2(rect.right() - 1.0, rect.top()), rect.max), CornerRadius::ZERO, t.line);
-    p.rect_filled(Rect::from_min_max(pos2(rect.left(), rect.bottom() - 1.0), rect.max), CornerRadius::ZERO, t.ink);
+    p.rect_filled(bottom_line(rect), CornerRadius::ZERO, t.ink);
+}
+
+/// The 1 px along `rect`'s bottom.
+fn bottom_line(rect: Rect) -> Rect {
+    Rect::from_min_max(pos2(rect.left(), rect.bottom() - 1.0), rect.max)
 }
 
 /// Draws `g` from `x`, centred on `y`; returns its width.
@@ -279,6 +294,33 @@ impl Cell<'_> {
             edges(&p, rect, t.line);
         }
         link
+    }
+}
+
+/// A row past its last column, to the grid's right edge: the row's ground, with its 1 px `line`
+/// along the bottom and none at its right.
+#[derive(Clone, Copy, Debug)]
+pub struct Filler {
+    /// The row is lit as selected: `selection`.
+    pub selected: bool,
+    /// The row is under the pointer: `hover`, unless selected.
+    pub hovered: bool,
+}
+
+impl Filler {
+    /// Draws it into `rect`.
+    pub fn paint(&self, ui: &Ui, rect: Rect) {
+        let t = tokens(ui.ctx());
+        let p = painter(ui);
+        let ground = if self.selected {
+            t.selection
+        } else if self.hovered {
+            t.hover
+        } else {
+            t.card
+        };
+        p.rect_filled(rect, CornerRadius::ZERO, ground);
+        p.rect_filled(bottom_line(rect), CornerRadius::ZERO, t.line);
     }
 }
 

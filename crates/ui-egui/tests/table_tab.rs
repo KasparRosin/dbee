@@ -1124,3 +1124,222 @@ fn filter_tags_keep_their_ids_and_values() {
     assert_eq!((ui.value("filter-raw-toggle"), ui.value("filter-raw"), ui.value("filter-apply")), (json!(true), json!(""), json!("Apply")));
     assert_eq!(ui.rect("filter-raw").map(|r| r.height()), Some(28.0));
 }
+
+/// Within half a point.
+fn close(a: f32, b: f32) -> bool {
+    (a - b).abs() <= 0.5
+}
+
+/// The grid's row numbers start at the tab body's left edge: the number cell of row 0 and the
+/// header's corner run from that edge to the first column.
+fn assert_starts_at_the_body(ui: &mut Ui, at: &str) {
+    let left = ui.body_x().min;
+    let (head, cell) = (ui.drawn("grid-header-0"), ui.drawn("grid-cell-0-0"));
+    for (what, y) in [("the header's corner", head.center().y), ("row 0's number", cell.center().y)] {
+        let drawn = painted_at(ui, egui::pos2(left + 1.0, y));
+        let fits = drawn.is_some_and(|(_, r)| close(r.left(), left) && close(r.right(), cell.left()));
+        assert!(fits, "{at}: {what} runs from the body's left edge {left} to the first column at {}: {drawn:?}", cell.left());
+    }
+}
+
+/// The grid sits edge to edge in the tab's body, no margin (Screens 53193, 43147): its row numbers
+/// start at the body's left edge, in the table tab and in a query's results. The bars keep today's
+/// 8 in from the body's sides: the filter bar's first control 20 in (its own 12 inside), the
+/// toolbar's Run 8 in.
+#[test]
+fn the_grid_runs_edge_to_edge() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("shop", "orders");
+    ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+    ui.hover_away();
+    assert_starts_at_the_body(&mut ui, "the table tab");
+    let left = ui.body_x().min;
+    let toggle = ui.drawn("filter-raw-toggle");
+    assert!(close(toggle.left(), left + 20.0), "the filter bar's first control 20 in from {left}: {toggle:?}");
+    ui.execute("tab.newQuery", json!({ "text": "select id, name from shop.customers order by id limit 5" }));
+    ui.execute("query.run", json!({}));
+    ui.frame();
+    ui.hover_away();
+    assert_starts_at_the_body(&mut ui, "a query's results");
+    let run = ui.drawn("query-run");
+    assert!(close(run.left(), left + 8.0), "Run 8 in from {left}: {run:?}");
+}
+
+/// The header shows and nothing is drawn under it, no lines either: at the column boundaries, in
+/// the columns and past the last one the tab's `bg` shows; the header's `ink` line runs past the
+/// last column.
+fn assert_header_only(ui: &mut Ui, at: &str) {
+    let t = dbee_ui_egui::theme::LIGHT;
+    ui.hover_away();
+    assert_eq!(ui.ids_with("grid-cell-"), Vec::<String>::new(), "{at}: no rows");
+    let (h0, h1, right) = (ui.drawn("grid-header-0"), ui.drawn("grid-header-1"), ui.body_x().max);
+    let past = (h1.right() + right) / 2.0;
+    for x in [h0.center().x, past] {
+        assert_eq!(colour_at(ui, egui::pos2(x, h0.bottom() - 0.5)), Some(t.ink), "{at}: the header's ink line at {x}");
+    }
+    for x in [h0.left(), h0.center().x, h0.right(), h1.center().x, h1.right(), past] {
+        for dy in [1.0, 13.0, 60.0] {
+            let p = egui::pos2(x, h0.bottom() + dy);
+            assert_eq!(colour_at(ui, p), Some(t.bg), "{at}: nothing under the header at {p:?}: {:?}", painted_at(ui, p));
+        }
+    }
+}
+
+/// An empty result draws its header only (A3 103221, an empty table 110109): a query with no rows,
+/// an empty table and a filter that matches nothing.
+#[test]
+fn an_empty_result_draws_the_header_only() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "t_empty", |t| format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, note text);"));
+    let mut ui = Ui::connected(db);
+    ui.execute("tab.newQuery", json!({ "text": "select 1 as a, 'x' as b where false" }));
+    ui.execute("query.run", json!({}));
+    ui.frame();
+    assert_header_only(&mut ui, "a query with no rows");
+    ui.open("scratch", &table.0);
+    ui.until("the empty page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"] == 0);
+    ui.frame();
+    assert_header_only(&mut ui, "an empty table");
+    let none = json!([{ "column": "id", "op": "eq", "value": "-1" }]);
+    ui.execute("table.open", json!({ "schema": "shop", "table": "customers", "filters": none }));
+    ui.until("the filtered page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"] == 0);
+    ui.frame();
+    assert_header_only(&mut ui, "a filter that matches nothing");
+}
+
+/// A scratch table `(id int, a text, b text)` with `rows` rows.
+fn three_columns(db: &TestDb, rows: usize) -> Scratch {
+    Scratch::new(db, "t_look", |t| {
+        let values: Vec<String> = (1..=rows).map(|i| format!("({i}, 'a{i}', 'b{i}')")).collect();
+        format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, a text, b text); INSERT INTO scratch.{t} VALUES {};", values.join(", "))
+    })
+}
+
+/// The grounds of row `row` as the last frame drew them, at points clear of text and lines: its
+/// number, each of its `cols` cells, and the room past the last column. Each is a ground (taller
+/// than a line).
+fn row_grounds(ui: &mut Ui, row: usize, cols: usize) -> Vec<(String, Option<egui::Color32>)> {
+    let (left, right) = (ui.body_x().min, ui.body_x().max);
+    let first = ui.drawn(&format!("grid-cell-{row}-0"));
+    let last = ui.drawn(&format!("grid-cell-{row}-{}", cols - 1));
+    let y = first.center().y;
+    let mut points = vec![("number".to_string(), left + 3.0)];
+    points.extend((0..cols).map(|c| (format!("cell {c}"), ui.drawn(&format!("grid-cell-{row}-{c}")).left() + 4.0)));
+    points.push(("past the last column".to_string(), (last.right() + right) / 2.0));
+    points
+        .into_iter()
+        .map(|(what, x)| {
+            let drawn = painted_at(ui, egui::pos2(x, y));
+            assert!(drawn.is_some_and(|(_, r)| r.height() > 20.0), "row {row}, {what}: a ground, not a line: {drawn:?}");
+            (what, drawn.map(|(c, _)| c))
+        })
+        .collect()
+}
+
+/// The rows' part of the grid: from under the header to the bottom of the body.
+fn rows_area(ui: &mut Ui) -> egui::Rect {
+    let x = ui.body_x();
+    let head = ui.drawn("grid-header-0");
+    egui::Rect::from_min_max(egui::pos2(x.min, head.bottom()), egui::pos2(x.max, head.bottom() + 2000.0))
+}
+
+/// One selected cell (65722, row 3): its whole row takes `selection`, the number cell and the
+/// room past the last column included, and the cell an `ink` outline (the component's width). A
+/// marked cell in that row keeps its mark. The other rows stay plain.
+#[test]
+fn one_cell_selected_lights_its_row_and_outlines_the_cell() {
+    let db = dbee_testkit::require_testdb!();
+    let table = three_columns(db, 3);
+    let mut ui = Ui::connected(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.execute("cell.edit", json!({ "row": 1, "column": "b", "value": "staged" }));
+    for (mode, t) in [("ui.themeLight", dbee_ui_egui::theme::LIGHT), ("ui.themeDark", dbee_ui_egui::theme::DARK)] {
+        ui.execute(mode, json!({}));
+        ui.click("grid-cell-1-1");
+        ui.hover_away();
+        assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 1], "focus": [1, 1] }), "{mode}");
+        assert_eq!(ui.value("grid-cell-1-2")["state"], "staged", "{mode}");
+        let s = |c| Some(c);
+        let want: Vec<_> = [("number", s(t.selection)), ("cell 0", s(t.selection)), ("cell 1", s(t.selection)), ("cell 2", s(t.staged))]
+            .into_iter()
+            .chain([("past the last column", s(t.selection))])
+            .map(|(w, c)| (w.to_string(), c))
+            .collect();
+        assert_eq!(row_grounds(&mut ui, 1, 3), want, "{mode}: the selected cell's row");
+        for row in [0, 2] {
+            let plain: Vec<_> = row_grounds(&mut ui, row, 3).into_iter().filter(|(_, c)| *c != Some(t.card)).collect();
+            assert_eq!(plain, [], "{mode}: row {row} stays plain");
+        }
+        let cell = ui.drawn("grid-cell-1-1");
+        let area = rows_area(&mut ui);
+        let width = dbee_ui_egui::theme::size::GRID_OUTLINE_W;
+        assert_eq!(outlines_in(&ui, area, t.ink), [(cell, width)], "{mode}: the one ink outline, on the selected cell");
+    }
+}
+
+/// Several rows selected across every column: each row takes `selection` from its number to the
+/// area's right edge, with no `ink` outline anywhere; a marked cell in them keeps its mark and
+/// takes its strong outline (`staged_strong` on a staged cell). The other rows stay plain.
+#[test]
+fn several_rows_selected_have_no_outline() {
+    let db = dbee_testkit::require_testdb!();
+    let table = three_columns(db, 4);
+    let mut ui = Ui::connected(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 4);
+    ui.execute("cell.edit", json!({ "row": 1, "column": "a", "value": "staged" }));
+    for (mode, t) in [("ui.themeLight", dbee_ui_egui::theme::LIGHT), ("ui.themeDark", dbee_ui_egui::theme::DARK)] {
+        ui.execute(mode, json!({}));
+        ui.execute("selection.set", json!({ "anchor": [1, 0], "focus": [2, 2] }));
+        ui.hover_away();
+        assert_eq!(ui.value("grid-cell-1-1")["state"], "staged", "{mode}");
+        for row in [1, 2] {
+            let marked = if row == 1 { t.staged } else { t.selection };
+            let want: Vec<_> = [("number", t.selection), ("cell 0", t.selection), ("cell 1", marked), ("cell 2", t.selection)]
+                .into_iter()
+                .chain([("past the last column", t.selection)])
+                .map(|(w, c)| (w.to_string(), Some(c)))
+                .collect();
+            assert_eq!(row_grounds(&mut ui, row, 3), want, "{mode}: selected row {row}");
+        }
+        for row in [0, 3] {
+            let plain: Vec<_> = row_grounds(&mut ui, row, 3).into_iter().filter(|(_, c)| *c != Some(t.card)).collect();
+            assert_eq!(plain, [], "{mode}: row {row} stays plain");
+        }
+        let area = rows_area(&mut ui);
+        assert_eq!(outlines_in(&ui, area, t.ink), [], "{mode}: no ink outline");
+        let staged = ui.drawn("grid-cell-1-1");
+        let width = dbee_ui_egui::theme::size::GRID_OUTLINE_W;
+        assert_eq!(outlines_in(&ui, area, t.staged_strong), [(staged, width)], "{mode}: the staged cell's own outline");
+    }
+}
+
+/// A failed cell has no tooltip: the band above the grid says the message; the cell's red, edge
+/// and corner say where. A header of the same grid shows one, so one would show.
+#[test]
+fn a_failed_cell_has_no_tooltip() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "t_failed", |t| {
+        format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, shipped date); INSERT INTO scratch.{t} VALUES (1, '2025-01-02'), (2, '2025-02-03');")
+    });
+    let mut ui = Ui::connected(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 2);
+    ui.execute("cell.edit", json!({ "row": 1, "column": "shipped", "value": "not a date" }));
+    ui.frame();
+    ui.click("edit-apply");
+    ui.until("the failed Apply", |ui| ui.table()["failed"].is_object());
+    ui.frame();
+    assert_eq!(ui.value("grid-cell-1-1")["state"], "failed");
+    let tooltip = |ui: &Ui| ui.harness.ctx.memory(|m| m.areas().visible_layer_ids().iter().any(|l| l.order == egui::Order::Tooltip));
+    let head = ui.drawn("grid-header-1").center();
+    ui.rest(head);
+    assert!(tooltip(&ui), "a header's tooltip shows");
+    for id in ["grid-cell-1-1", "grid-cell-1-0"] {
+        let at = ui.drawn(id).center();
+        ui.rest(at);
+        assert!(!tooltip(&ui), "`{id}`, failed: no tooltip");
+    }
+}

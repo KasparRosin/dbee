@@ -1189,3 +1189,122 @@ fn moved_buttons_keep_their_ids_values_and_flags() {
     ui.click("query-cancel");
     ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
 }
+
+/// Within half a point.
+fn close(a: f32, b: f32) -> bool {
+    (a - b).abs() <= 0.5
+}
+
+/// Light then dark: the command that switches to each, and its tokens.
+const MODES: [(&str, dbee_ui_egui::theme::Tokens); 2] = [("ui.themeLight", dbee_ui_egui::theme::LIGHT), ("ui.themeDark", dbee_ui_egui::theme::DARK)];
+
+/// A query tab showing the rows of `sql`, the pointer off the grid.
+fn results_of(db: &TestDb, sql: &str) -> Ui {
+    let mut ui = Ui::connected(db);
+    ui.execute("tab.newQuery", json!({ "text": sql }));
+    ui.execute("query.run", json!({}));
+    ui.frame();
+    ui.hover_away();
+    ui
+}
+
+/// At `x`: the header's `ink` line, row `lit`'s `selection` ground, and row `plain`'s `card`
+/// ground with its 1 px `line` along the bottom; the line and grounds run to the area's right edge.
+/// Column `col` is in view.
+fn assert_full_width_at(ui: &mut Ui, x: f32, (lit, plain, col): (usize, usize, usize), t: &dbee_ui_egui::theme::Tokens, at: &str) {
+    let right = ui.body_x().max;
+    let head = ui.drawn(&format!("grid-header-{col}"));
+    let (lit, plain) = (ui.drawn(&format!("grid-cell-{lit}-{col}")), ui.drawn(&format!("grid-cell-{plain}-{col}")));
+    let reaches = |d: Option<(egui::Color32, egui::Rect)>| d.is_some_and(|(_, r)| close(r.right(), right));
+    let ink = painted_at(ui, egui::pos2(x, head.bottom() - 0.5));
+    assert!(ink.is_some_and(|(c, _)| c == t.ink) && reaches(ink), "{at}: the header's ink line at {x}, to {right}: {ink:?}");
+    let ground = painted_at(ui, egui::pos2(x, lit.center().y));
+    let selected = ground.is_some_and(|(c, r)| c == t.selection && r.height() > 20.0);
+    assert!(selected && reaches(ground), "{at}: the selected row's ground at {x}, to {right}: {ground:?}");
+    assert_eq!(colour_at(ui, egui::pos2(x, plain.center().y)), Some(t.card), "{at}: a plain row's ground at {x}");
+    let line = painted_at(ui, egui::pos2(x, plain.bottom() - 0.5));
+    let thin = line.is_some_and(|(c, r)| c == t.line && r.height() <= 1.0);
+    assert!(thin && reaches(line), "{at}: a row's line at {x}, to {right}: {line:?}");
+}
+
+/// The header's `ink` line, the rows' lines and their selection and hover grounds run the grid's
+/// area to its right edge, past the last column (Screens 43147): a 2-column result in a wide tab.
+/// A row lights under the pointer wherever it is on the row.
+#[test]
+fn lines_and_grounds_run_the_full_width() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = results_of(db, "select g as id, 'row ' || g as note from generate_series(1, 5) g");
+    for (mode, t) in MODES {
+        ui.execute(mode, json!({}));
+        ui.click("grid-cell-1-0");
+        ui.hover_away();
+        let (left, right) = (ui.body_x().min, ui.body_x().max);
+        let last = ui.drawn("grid-header-1");
+        assert!(last.right() < right - 100.0, "{mode}: room past the last column: {last:?}, the area to {right}");
+        let past = (last.right() + right) / 2.0;
+        for x in [past, right - 2.0] {
+            assert_full_width_at(&mut ui, x, (1, 0, 0), &t, mode);
+        }
+        // Row 3 under the pointer, past the last column, then on a cell: the whole row lights.
+        let (a, b) = (ui.drawn("grid-cell-3-0"), ui.drawn("grid-cell-3-1"));
+        for (what, at) in [("past the last column", egui::pos2(past, a.center().y)), ("on a cell", b.center())] {
+            ui.hover(at);
+            ui.frame();
+            for x in [left + 3.0, a.left() + 4.0, b.left() + 4.0, past, right - 2.0] {
+                let p = egui::pos2(x, a.center().y);
+                assert_eq!(colour_at(&ui, p), Some(t.hover), "{mode}: the pointer {what}, row 3 at {x}: {:?}", painted_at(&ui, p));
+            }
+        }
+    }
+}
+
+/// A result wider than its area, scrolled to its end: the line and grounds reach the area's right
+/// edge there, and every cell of the selected row in view lights, so nothing stops at the width
+/// the area had in view before it scrolled.
+#[test]
+fn lines_and_grounds_run_the_full_width_when_scrolled() {
+    let db = dbee_testkit::require_testdb!();
+    let columns: Vec<String> = (1..=30).map(|i| format!("g * {i} as c{i:02}")).collect();
+    let mut ui = results_of(db, &format!("select {} from generate_series(1, 5) g", columns.join(", ")));
+    // Out of view: the click scrolls the grid to it, the last column.
+    ui.click("grid-cell-1-29");
+    for (mode, t) in MODES {
+        ui.execute(mode, json!({}));
+        ui.hover_away();
+        let (left, right) = (ui.body_x().min, ui.body_x().max);
+        let last = ui.drawn("grid-header-29");
+        assert!(close(last.right(), right), "{mode}: scrolled to its end, the last column ends at the area's edge {right}: {last:?}");
+        assert_full_width_at(&mut ui, right - 4.0, (1, 0, 29), &t, &format!("{mode}, scrolled"));
+        let y = ui.drawn("grid-cell-1-29").center().y;
+        let mut seen = 0;
+        for c in 0..30 {
+            // Cells out of view have no rect.
+            let Some(cell) = ui.harness.state().tags().rect(&format!("grid-cell-1-{c}")) else { continue };
+            let x = cell.left() + 4.0;
+            if x > left && x < right - 4.0 {
+                seen += 1;
+                assert_eq!(colour_at(&ui, egui::pos2(x, y)), Some(t.selection), "{mode}: row 1's cell {c}, in view at {x}");
+            }
+        }
+        assert!(seen > 5, "{mode}: {seen} cells in view");
+    }
+}
+
+/// The column lines stop at the last row: under it, at each column boundary, the tab's `bg`.
+#[test]
+fn column_lines_stop_at_the_last_row() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = results_of(db, "select g as id, 'row ' || g as note from generate_series(1, 3) g");
+    for (mode, t) in MODES {
+        ui.execute(mode, json!({}));
+        ui.hover_away();
+        let (h0, h1, last) = (ui.drawn("grid-header-0"), ui.drawn("grid-header-1"), ui.drawn("grid-cell-2-0"));
+        for x in [h0.right(), h1.right()] {
+            assert_eq!(colour_at(&ui, egui::pos2(x - 0.5, last.center().y)), Some(t.line), "{mode}: the line at {x} in the last row");
+            for dy in [1.0, 10.0, 100.0] {
+                let p = egui::pos2(x, last.bottom() + dy);
+                assert_eq!(colour_at(&ui, p), Some(t.bg), "{mode}: nothing under the last row at {p:?}: {:?}", painted_at(&ui, p));
+            }
+        }
+    }
+}

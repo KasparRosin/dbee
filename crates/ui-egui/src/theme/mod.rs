@@ -73,7 +73,11 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     .into_iter()
     .map(|(style, text)| (style, text.font()))
     .collect();
+    // egui's floating bars: the handle in the widgets' `bg_fill` (`fill`), with no track.
     style.spacing.scroll.foreground_color = false;
+    style.spacing.scroll.dormant_background_opacity = 0.0;
+    style.spacing.scroll.active_background_opacity = 0.0;
+    style.spacing.scroll.interact_background_opacity = 0.0;
     // egui fades the ends of a scroll area that has more to scroll to; the design is flat.
     style.spacing.scroll.fade.strength = 0.0;
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
@@ -154,8 +158,13 @@ mod tests {
         for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
             let style = ctx.style_of(theme);
             assert_eq!(style.visuals.panel_fill, t.bg);
-            assert!(!style.spacing.scroll.foreground_color);
-            assert_eq!(style.spacing.scroll.fade.strength, 0.0, "no fade at a scroll area's ends");
+            let scroll = style.spacing.scroll;
+            assert!(scroll.floating && !scroll.foreground_color, "egui's floating bars");
+            let w = &style.visuals.widgets;
+            assert_eq!([w.inactive.bg_fill, w.hovered.bg_fill, w.active.bg_fill], [t.fill; 3], "the handle in `fill`, hovered and dragged too");
+            let track = [scroll.dormant_background_opacity, scroll.active_background_opacity, scroll.interact_background_opacity];
+            assert_eq!(track, [0.0; 3], "no track");
+            assert_eq!(scroll.fade.strength, 0.0, "no fade at a scroll area's ends");
             assert_eq!(style.visuals.widgets.inactive.bg_fill, t.fill);
             assert_eq!(style.visuals.widgets.inactive.weak_bg_fill, t.card);
         }

@@ -199,6 +199,10 @@ pub const SIDEBAR_W: f32 = 260.0;
 pub const SIDEBAR_MIN_W: f32 = 200.0;
 pub const SIDEBAR_MAX_W: f32 = 600.0;
 
+/// A tab's body: the grid runs edge to edge in it; what stands above and below the grid (the bars,
+/// the notes, the error band) keeps this far in from its sides.
+pub const TAB_BODY_PAD_X: f32 = SPACE_8;
+
 /// The grid's cells (`grid/header cell`, `grid/cell`, `grid/row number`): what a cell holds is
 /// this far in from its sides; a header's parts are this far apart, the two arrows of its sort
 /// hint this far; the row numbers are at least this wide; a selected cell's outline is this thick;

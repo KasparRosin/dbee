@@ -22,6 +22,9 @@
 //!   statement without rows how many it affected ([`affected_text`]). With no result yet, a line
 //!   saying how to run.
 //!
+//! The grid takes the body's whole width; the rest keeps [`size::TAB_BODY_PAD_X`] in from its
+//! sides.
+//!
 //! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` in the open connection's
 //! dialect, Postgres's when none is open ([`Tokens::job`], colours from [`crate::theme::Tokens`]; a
 //! new dialect lexes the text again from scratch), with no soft wrap: a long line scrolls
@@ -1035,7 +1038,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             state.editor.focus();
         }
         state.editor.set_dialect(session.state().dialect(Which::Tab(id)));
-        let full = ui.available_rect_before_wrap();
+        let body = ui.available_rect_before_wrap();
+        let full = body.shrink2(vec2(size::TAB_BODY_PAD_X, 0.0));
         let h = full.height();
         // The split first, so a drag moves the editor in this frame.
         let mut editor_h = editor_height(h, view.query_split);
@@ -1174,7 +1178,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     first_number: 1,
                     editing: None,
                 };
-                let area = rest_ui.available_rect_before_wrap().intersect(rest);
+                let below = rest_ui.available_rect_before_wrap().top().min(rest.bottom());
+                let area = Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), rest.bottom()));
                 let mut grid_ui = rest_ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
                 let mut spare = GridState::default();
                 let gs = state.results.grids.get_mut(q.shown).unwrap_or(&mut spare);
