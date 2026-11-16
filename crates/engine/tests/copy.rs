@@ -53,7 +53,7 @@ fn select_all_copy_tsv_has_no_header() {
         let r = copy(s, "tsv");
         assert_eq!(text(&r), "1\tAnn\t{\"a\": 1, \"b\": 2}\t\n2\t\t\tx");
         assert_eq!((r["rows"].clone(), r["columns"].clone()), (json!(2), json!(4)));
-        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 0], "focus": [1, 3] }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 0], "focus": [1, 3], "whole": false }));
     });
 }
 
@@ -157,6 +157,54 @@ fn value_view_labels() {
         let mut other = connected_to(&t);
         assert_eq!(run(&mut other, "value.show", json!({})), Json::Null);
         assert!(other.value_view().is_none());
+    }
+}
+
+/// The object Copy as JSON writes for grid row `row`, selected across every column: the list's one
+/// object, without the list.
+fn copied_object(s: &mut Session, row: usize) -> String {
+    run(s, "selection.set", json!({ "anchor": [row, 0], "focus": [row, 999] }));
+    let list = text(&copy(s, "json")).to_owned();
+    let object = list.strip_prefix("[\n  ").and_then(|l| l.strip_suffix("\n]"));
+    object.unwrap_or_else(|| panic!("one object: {list}")).to_owned()
+}
+
+/// A whole-row selection's value view is the focus row's object as Copy as JSON writes it,
+/// pretty-printed, titled with the row's number as the grid shows it (the page's offset counted
+/// in), staged values included.
+#[test]
+fn the_value_view_of_a_row_is_its_json() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        println!("on {}", t.name());
+        let mut s = connected_to(&t);
+        open_table(&mut s, t.schema("shop"), "customers");
+        let object = copied_object(&mut s, 2);
+        run(&mut s, "selection.rows", json!({ "first": 2 }));
+        let view = s.value_view().unwrap_or_else(|| panic!("{}: a view of the row", t.name()));
+        assert_eq!(Some(view.text.as_str()), dbee_core::json::pretty(&object).as_deref(), "{}", t.name());
+        assert!(view.text.starts_with("{\n  \"id\": 3,\n  \"name\": \"Customer 3\","), "{}: {}", t.name(), view.text);
+        assert_eq!((view.title(), view.row, view.pretty, view.truncated, view.is_null), ("Row 3".into(), Some(3), true, false, false));
+        assert_eq!((view.byte_len, view.column.as_str(), view.type_label.as_str(), view.kind_label.as_str()), (object.len(), "", "", ""));
+        assert_eq!(s.inspect()["value"]["row"], 3);
+        // Built once, until the row or its values change; a staged value shows.
+        let built = s.value_view_computations();
+        s.value_view();
+        assert_eq!(s.value_view_computations(), built);
+        set_cell(&mut s, 2, "name", "Zed");
+        assert!(s.value_view().unwrap().text.contains("\"name\": \"Zed\""));
+        run(&mut s, "edit.reset", json!({}));
+        // A cell again: its own view.
+        run(&mut s, "selection.set", json!({ "anchor": [2, 1] }));
+        let cell = s.value_view().unwrap();
+        assert_eq!((cell.row, cell.title()), (None, "name".into()));
+        // The second page's third row is the 103rd.
+        run(&mut s, "table.page", json!({ "to": "next" }));
+        let object = copied_object(&mut s, 2);
+        run(&mut s, "selection.rows", json!({ "first": 2 }));
+        let view = s.value_view().unwrap();
+        assert_eq!((view.title(), view.row), ("Row 103".into(), Some(103)), "{}", t.name());
+        assert_eq!(Some(view.text), dbee_core::json::pretty(&object));
     }
 }
 
@@ -287,11 +335,11 @@ fn selection_out_of_range_is_bad_params() {
         assert_eq!(s.inspect()["selection"], Json::Null);
         // A focus past the edge is clamped.
         run(s, "selection.set", json!({ "anchor": [0, 1], "focus": [999, 999] }));
-        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 1], "focus": [1, 3] }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 1], "focus": [1, 3], "whole": false }));
         assert_eq!(copy(s, "tsv")["rows"], 2);
         // A bad call changes nothing.
         assert_eq!(s.execute("selection.set", json!({ "anchor": [5, 5] })).unwrap_err().code(), "badParams");
-        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 1], "focus": [1, 3] }));
+        assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 1], "focus": [1, 3], "whole": false }));
     });
 }
 

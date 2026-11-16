@@ -9,7 +9,7 @@
 //! centred. Names keep their case: the column's name and type are drawn as written.
 //!
 //! The bar's COPY and WRAP (CANCEL and SAVE while editing) come with the value panel screen: the
-//! app's panel has none yet, and nothing in the app sets the copied, editing and row states, which
+//! app's panel has none yet, and nothing in the app sets the copied and editing states, which
 //! the showcase shows. Today's kind chip (`JSONB`) and the note on a cut value keep today's look,
 //! under the bar and before the value, until it is decided.
 
@@ -684,10 +684,10 @@ mod tests {
         let json_view = view("billing", "jsonb", Some(raw));
         let h = app(Theme::Light, size, Some(json_view.clone()));
         let head = h.state().tags.value("value-panel").unwrap().clone();
-        assert_eq!(keys(&head), ["bytes", "column", "label", "note", "null", "truncated", "type"]);
+        assert_eq!(keys(&head), ["bytes", "column", "label", "note", "null", "row", "truncated", "type"]);
         assert_eq!(
             head,
-            json!({ "column": "billing", "type": "jsonb", "label": "jsonb", "null": false, "bytes": raw.len(), "truncated": false, "note": null })
+            json!({ "column": "billing", "row": null, "type": "jsonb", "label": "jsonb", "null": false, "bytes": raw.len(), "truncated": false, "note": null })
         );
         let v = h.state().tags.value("value-text").unwrap().clone();
         assert_eq!(keys(&v), ["cut", "firstRow", "highlighted", "rows", "selection", "text"]);
@@ -718,6 +718,18 @@ mod tests {
         assert_eq!((head["truncated"].clone(), head["note"].clone()), (json!(true), json!("Showing the first 10.0 MiB of 19.1 MiB.")));
         assert_eq!(h.state().tags.value("value-text").unwrap()["cut"], true);
         assert!(drawn(&h.output().shapes, "Showing the first 10.0 MiB of 19.1 MiB.").is_some(), "today's note, drawn");
+        // A whole row: its number, its JSON coloured, `Row <n>` in the bar.
+        let object = r#"{"id": 3, "doc": {"a": 1}}"#.to_string();
+        let len = object.len();
+        let h = app(Theme::Light, size, Some(Arc::new(ValueView::of_row(1_203, object, len))));
+        let head = h.state().tags.value("value-panel").unwrap().clone();
+        assert_eq!(
+            head,
+            json!({ "column": "", "row": 1_203, "type": "", "label": null, "null": false, "bytes": len, "truncated": false, "note": null })
+        );
+        let v = h.state().tags.value("value-text").unwrap();
+        assert_eq!((v["text"].as_str(), v["highlighted"].clone()), (Some("{\n  \"id\": 3,\n  \"doc\": {\n    \"a\": 1\n  }\n}"), json!(true)));
+        assert!(drawn(&h.output().shapes, "Row 1,203").is_some(), "the title: {:?}", texts(&h.output().shapes));
         // The status bar's toggle.
         for open in [true, false] {
             let mut h = harness_in(vec2(200.0, 60.0), Theme::Light, Tags::default(), move |ui, tags| {

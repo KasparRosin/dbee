@@ -21,20 +21,25 @@
 //! first rows, clamped to [`MIN_WIDTH`]..=[`MAX_WIDTH`]) worked out once; after that egui keeps
 //! them, resized ones included, under the grid's id: one per tab, for the session.
 //!
-//! **Selection** is the engine's (`selection.set`, `selection.all`): a click selects a cell,
-//! shift-click extends from the anchor, a drag selects from where it started to the cell under
-//! the pointer. One selected cell lights its whole row in `selection` (its number and the filler
-//! too) and takes the `ink` outline; a selection over every column lights each of its rows the
-//! same way, with no outline; any other rectangle lights its own cells only. A marked cell keeps
-//! its mark, and takes its outline where it is in the selection (the component's rule). A
-//! right-click selects the cell unless it is already selected, and opens the menu:
-//! Set as NULL, Copy, Copy with header, Copy as CSV / JSON / Markdown, Delete row(s). Set as NULL
-//! and Delete row are left out where rows are never edited (a query's results, [`RowEdits::None`]),
-//! and listed disabled, with the reason on hover, where they cannot be now ([`RowEdits::Blocked`]).
+//! **Selection** is the engine's (`selection.set`, `selection.rows`, `selection.all`): a click
+//! selects a cell, shift-click extends from the anchor, a drag selects from where it started to
+//! the cell under the pointer. A click on a row's number selects the whole row (issue #17), and
+//! shift-click on one the rows from the anchor's row to it. One selected cell lights its whole row
+//! in `selection` (its number and the filler too) and takes the `ink` outline; a selection over
+//! every column lights each of its rows the same way, with no outline, and whole rows also draw
+//! their numbers in `text` ([`RowNumber::whole`]); any other rectangle lights its own cells only.
+//! A marked cell keeps its mark, and takes its outline where it is in the selection (the
+//! component's rule). A right-click selects the cell unless it is already selected, and opens the
+//! menu: Set as NULL, Copy, Copy with header, Copy as CSV / JSON / Markdown, Delete row(s). A
+//! right-click on a row's number selects the row unless the selection already takes in all of it,
+//! and opens the same menu without Set as NULL. Set as NULL and Delete row are left out where rows
+//! are never edited (a query's results, [`RowEdits::None`]), and listed disabled, with the reason
+//! on hover, where they cannot be now ([`RowEdits::Blocked`]).
 //!
-//! **The keyboard.** A click, a right-click or a drag on a cell takes the keyboard from any text
-//! field (the query editor, the filter bar's inputs), so Ctrl+A, Ctrl+C and Ctrl+Shift+C act on
-//! the grid from then on ([`crate::shortcuts`]: a focused text field keeps them).
+//! **The keyboard.** A click, a right-click or a drag on a cell, and a click or a right-click on a
+//! row's number, take the keyboard from any text field (the query editor, the filter bar's
+//! inputs), so Ctrl+A, Ctrl+C and Ctrl+Shift+C act on the grid from then on
+//! ([`crate::shortcuts`]: a focused text field keeps them).
 //!
 //! **Editing.** A double-click (or a triple one) asks to edit the cell ([`GridAct::Edit`]); the
 //! caller decides whether it can. While a cell is being edited ([`Grid::editing`]), the grid
@@ -52,11 +57,13 @@
 //! Automation ids: `grid-header-<col>` (value `{name, type, key, sort}`), `grid-cell-<row>-<col>`
 //! (value `{text, null, state?, deleted?}`: the text as shown, `NULL` for NULL, `state` one of
 //! `staged`, `new`, `deleted`, `failed`, `saved`, and `deleted: true` on a row to delete, also
-//! when it is the failed one), `fk-link-<row>-<col>`, and while the menu is open `grid-menu-null`,
-//! `grid-menu-copy`, `grid-menu-copy-header`, `grid-menu-copy-csv`, `grid-menu-copy-json`,
-//! `grid-menu-copy-markdown`, `grid-menu-delete` (value `{label, shortcut, why?}`, `why` saying
-//! why a disabled entry cannot run now). Cells of rows out of view are listed with
-//! `visible: false` ([`CellBlock`]); a click on one scrolls its row into view first.
+//! when it is the failed one), `grid-row-<row>` (a row's number, value `{number, selected}`:
+//! the number shown, and whether the row is selected whole), `fk-link-<row>-<col>`, and while the
+//! menu is open `grid-menu-null`, `grid-menu-copy`, `grid-menu-copy-header`, `grid-menu-copy-csv`,
+//! `grid-menu-copy-json`, `grid-menu-copy-markdown`, `grid-menu-delete` (value `{label, shortcut,
+//! why?}`, `why` saying why a disabled entry cannot run now). Cells of rows out of view are listed
+//! with `visible: false` ([`CellBlock`]); a click on one scrolls its row into view first. Row
+//! numbers are tagged only while in view.
 
 use dbee_core::display::grid_text;
 use dbee_core::{ResultSet, TypeClass};
@@ -83,8 +90,9 @@ pub const MIN_WIDTH: f32 = 56.0;
 pub const MAX_WIDTH: f32 = 320.0;
 /// Rows looked at when guessing widths.
 const SAMPLE_ROWS: usize = 100;
-/// The id prefixes of a cell and of a foreign key link.
+/// The id prefixes of a cell, a row's number and a foreign key link.
 pub const CELL: &str = "grid-cell-";
+pub const ROW: &str = "grid-row-";
 pub const LINK: &str = "fk-link-";
 
 /// The rows a grid shows. Read every frame for the rows in view only, so each call must be
@@ -148,6 +156,8 @@ pub enum RowEdits<'a> {
 pub enum GridAct {
     /// `selection.set`.
     Select { anchor: (usize, usize), focus: (usize, usize) },
+    /// `selection.rows`: whole rows, `first` to `last`.
+    SelectRows { first: usize, last: usize },
     /// A header was clicked: the column's sort moves on (asc, desc, none).
     Sort(usize),
     /// `table.followForeignKey` from this cell.
@@ -355,12 +365,30 @@ impl Grid<'_> {
                     let r = row.index();
                     let lit = self.lit(r);
                     let mut hovered = false;
+                    let mut number = None;
                     row.col(|ui| {
                         // Across the view: the number cell's own clip is the number cell.
                         let at = Rect::from_x_y_ranges(view_x, ui.clip_rect().y_range());
                         hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), at);
-                        self.draw_gutter(ui, r, hovered);
+                        number = Some(self.draw_gutter(ui, r, hovered));
                     });
+                    if let Some(resp) = &number {
+                        let value = json!({ "number": self.first_number.saturating_add(r as u64), "selected": self.whole_row(r) });
+                        tags.tag_value(&format!("{ROW}{r}"), resp, value);
+                        if resp.clicked() {
+                            let first = match self.selection {
+                                Some(sel) if shift => sel.anchor.0,
+                                _ => r,
+                            };
+                            acts.push(GridAct::SelectRows { first, last: r });
+                        } else if resp.secondary_clicked() && !self.spans(r) {
+                            acts.push(GridAct::SelectRows { first: r, last: r });
+                        }
+                        if resp.clicked() || resp.secondary_clicked() {
+                            resp.ctx.memory_mut(|m| m.stop_text_input());
+                        }
+                        egui::Popup::context_menu(resp).style(menu::style(&resp.ctx)).show(|ui| self.menu(ui, (r, None), tags, &mut acts));
+                    }
                     for c in 0..cols {
                         let mut drawn = None;
                         row.col(|ui| drawn = Some(self.draw_cell(ui, r, c, lit, hovered)));
@@ -416,7 +444,7 @@ impl Grid<'_> {
                         if primary_down && pointer.is_some_and(|p| resp.rect.contains(p)) {
                             drag_over = Some(here);
                         }
-                        egui::Popup::context_menu(resp).style(menu::style(&resp.ctx)).show(|ui| self.menu(ui, here, tags, &mut acts));
+                        egui::Popup::context_menu(resp).style(menu::style(&resp.ctx)).show(|ui| self.menu(ui, (r, Some(c)), tags, &mut acts));
                     }
                     row.col(|ui| Filler { selected: lit, hovered }.paint(ui, ui.max_rect()));
                 });
@@ -453,11 +481,22 @@ impl Grid<'_> {
     /// Row `row` lights as selected across the grid: it holds the one selected cell, or the
     /// selection takes in every column of it.
     fn lit(&self, row: usize) -> bool {
+        self.spans(row) || self.selection.is_some_and(|sel| sel.anchor == sel.focus && sel.anchor.0 == row)
+    }
+
+    /// The selection takes in every column of row `row`: whole rows, or a rectangle as wide as
+    /// the grid.
+    fn spans(&self, row: usize) -> bool {
         let cols = self.source.columns();
         self.selection.is_some_and(|sel| {
             let ((r0, r1), (c0, c1)) = bounds(sel);
-            (r0..=r1).contains(&row) && (sel.anchor == sel.focus || (c0 == 0 && c1.saturating_add(1) >= cols))
+            (r0..=r1).contains(&row) && (sel.whole || (c0 == 0 && c1.saturating_add(1) >= cols))
         })
+    }
+
+    /// Row `row` is selected whole, by its number (`selection.rows`).
+    fn whole_row(&self, row: usize) -> bool {
+        self.selection.filter(|sel| sel.whole).map(bounds).is_some_and(|((r0, r1), _)| (r0..=r1).contains(&row))
     }
 
     fn key(&self, col: usize) -> Option<Key> {
@@ -497,18 +536,22 @@ impl Grid<'_> {
         resp
     }
 
-    /// Draws row `row`'s number; `hovered` when the row is under the pointer.
-    fn draw_gutter(&self, ui: &mut egui::Ui, row: usize, hovered: bool) {
+    /// Draws row `row`'s number, `hovered` when the row is under the pointer, and returns its
+    /// response: a click selects the row, a right-click opens the row's menu.
+    fn draw_gutter(&self, ui: &mut egui::Ui, row: usize, hovered: bool) -> Response {
         let src = self.source;
+        let rect = ui.max_rect();
+        let resp = ui.interact(rect, ui.id().with("dbee-row"), Sense::click());
         let number = RowNumber {
             n: self.first_number.saturating_add(row as u64),
             new: src.columns() > 0 && src.mark(row, 0) == Some(Mark::New),
             deleted: src.deleted(row),
             selected: self.selection.map(bounds).is_some_and(|((r0, r1), _)| (r0..=r1).contains(&row)),
-            whole: false,
+            whole: self.whole_row(row),
             hovered,
         };
-        number.paint(ui, ui.max_rect());
+        number.paint(ui, rect);
+        resp
     }
 
     /// Draws cell `(row, col)` into its `ui`; `lit` when its row lights as selected
@@ -539,9 +582,9 @@ impl Grid<'_> {
         Drawn { text, null, resp, link }
     }
 
-    /// The right-click menu of cell `here`.
-    fn menu(&self, ui: &mut egui::Ui, here: (usize, usize), tags: &mut Tags, acts: &mut Vec<GridAct>) {
-        let (row, col) = here;
+    /// The right-click menu of cell `(row, col)`, or of row `row`'s number when `col` is `None`:
+    /// the same without Set as NULL.
+    fn menu(&self, ui: &mut egui::Ui, (row, col): (usize, Option<usize>), tags: &mut Tags, acts: &mut Vec<GridAct>) {
         // `blocked`: why the entry cannot run now, or `Some("")` when it is disabled without one.
         let mut item = |ui: &mut egui::Ui, id: &str, label: &str, keys: Option<&str>, blocked: Option<&str>, act: GridAct| {
             let destructive = matches!(act, GridAct::DeleteRows(_));
@@ -567,7 +610,7 @@ impl Grid<'_> {
             RowEdits::Allowed => Some(None),
             RowEdits::Blocked(why) => Some(Some(why)),
         };
-        if let Some(blocked) = edit {
+        if let (Some(blocked), Some(col)) = (edit, col) {
             // A row to delete takes no new values.
             let null = blocked.or(self.source.deleted(row).then_some(""));
             item(ui, "grid-menu-null", "Set as NULL", None, null, GridAct::SetNull { row, col });
@@ -580,7 +623,15 @@ impl Grid<'_> {
         item(ui, "grid-menu-copy-markdown", "Copy as Markdown", None, None, GridAct::Copy("markdown"));
         if let Some(blocked) = edit {
             menu::separator(ui);
-            let rows: Vec<usize> = match self.selection.filter(|_| covers(self.selection, here)).map(bounds) {
+            // The selected rows, when the cell, or the row, is in the selection.
+            let selected = match col {
+                Some(col) => self.selection.filter(|_| covers(self.selection, (row, col))),
+                None => self.selection.filter(|&sel| {
+                    let ((r0, r1), _) = bounds(sel);
+                    (r0..=r1).contains(&row)
+                }),
+            };
+            let rows: Vec<usize> = match selected.map(bounds) {
                 Some(((r0, r1), _)) => (r0..=r1).collect(),
                 None => vec![row],
             };
@@ -634,7 +685,7 @@ mod tests {
 
     #[test]
     fn selections_cover_their_rectangle_either_way_round() {
-        let sel = Some(Selection { anchor: (5, 3), focus: (2, 1) });
+        let sel = Some(Selection { anchor: (5, 3), focus: (2, 1), whole: false });
         assert!(covers(sel, (2, 1)) && covers(sel, (5, 3)) && covers(sel, (3, 2)));
         assert!(!covers(sel, (6, 2)) && !covers(sel, (3, 0)) && !covers(None, (0, 0)));
     }

@@ -500,7 +500,7 @@ fn the_value_panel_follows_the_result_grid() {
     ui.ctrl("Enter");
     ui.ran();
     ui.click("grid-cell-0-1");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 1], "focus": [0, 1] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 1], "focus": [0, 1], "whole": false }));
     let panel = ui.value("value-panel");
     assert_eq!((panel["column"].clone(), panel["label"].clone(), panel["null"].clone()), (json!("doc"), json!("jsonb"), json!(false)), "{panel}");
     ui.click("grid-cell-1-1");
@@ -1307,4 +1307,35 @@ fn column_lines_stop_at_the_last_row() {
             }
         }
     }
+}
+
+/// Review Focus 3: a query result's row number selects its row, which copies and shows as JSON in
+/// the panel; its menu has the copy items only, never Set as NULL or Delete row.
+#[test]
+fn a_query_result_row_selects_and_copies_but_never_deletes() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text("select id, name from shop.customers order by id limit 5");
+    ui.ctrl("Enter");
+    ui.ran();
+    ui.click("grid-row-1");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 0], "focus": [1, 1], "whole": true }));
+    assert_eq!(ui.value("grid-row-1"), json!({ "number": 2, "selected": true }));
+    assert_eq!(ui.value("grid-row-0"), json!({ "number": 1, "selected": false }));
+    assert_eq!(ui.editor()["focused"], false, "the grid took the keyboard");
+    let panel = ui.value("value-panel");
+    assert_eq!((panel["row"].clone(), panel["column"].clone()), (json!(2), json!("")), "{panel}");
+    assert_eq!(ui.value("value-text")["text"], "{\n  \"id\": 2,\n  \"name\": \"Customer 2\"\n}");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("2\tCustomer 2"));
+    ui.right_click("grid-row-3");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [3, 0], "focus": [3, 1], "whole": true }), "a right-click selects the row");
+    for id in ["grid-menu-copy", "grid-menu-copy-header", "grid-menu-copy-csv", "grid-menu-copy-json", "grid-menu-copy-markdown"] {
+        assert!(ui.tag(id).is_some(), "{id}");
+    }
+    assert!(ui.tag("grid-menu-null").is_none() && ui.tag("grid-menu-delete").is_none(), "nothing that edits");
+    ui.click("grid-menu-copy-json");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("[\n  {\"id\": 4, \"name\": \"Customer 4\"}\n]"));
 }

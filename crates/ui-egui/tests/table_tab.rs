@@ -197,7 +197,7 @@ fn clicking_fk_link_opens_customer() {
     ui.open("shop", "orders");
     assert!(ui.tag("fk-link-0-1").is_none(), "the link shows on the selected row only");
     ui.click("grid-cell-0-1");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 1], "focus": [0, 1] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 1], "focus": [0, 1], "whole": false }));
     let customer = ui.value("grid-cell-0-1")["text"].as_str().unwrap().to_string();
     assert!(ui.tag("fk-link-0-0").is_none(), "id is no foreign key");
     ui.click("fk-link-0-1");
@@ -246,7 +246,7 @@ fn context_menu_set_as_null() {
     let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
     ui.click_with("grid-cell-1-2", json!({ "button": "right" }));
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 2], "focus": [1, 2] }), "a right-click selects the cell");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 2], "focus": [1, 2], "whole": false }), "a right-click selects the cell");
     for id in ["grid-menu-copy", "grid-menu-copy-header", "grid-menu-copy-csv", "grid-menu-copy-json", "grid-menu-copy-markdown", "grid-menu-delete"]
     {
         assert!(ui.tag(id).is_some(), "{id}");
@@ -369,7 +369,7 @@ fn rows_out_of_view_scroll_in_when_clicked() {
     let mut ui = Ui::connected(db);
     ui.open("shop", "big_rows");
     ui.click("grid-cell-90-1");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [90, 1], "focus": [90, 1] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [90, 1], "focus": [90, 1], "whole": false }));
     assert!(visible(&ui.tag("grid-cell-90-1")));
     assert_eq!(ui.value("grid-cell-90-1")["text"], "payload 91");
     // A column out of view to the right scrolls in too.
@@ -377,7 +377,7 @@ fn rows_out_of_view_scroll_in_when_clicked() {
     let i = ui.inspect();
     assert!(!visible(&tag_in(&i, "grid-cell-5-8")), "raw_json_text starts out of view: {:?}", tag_in(&i, "grid-cell-5-8"));
     ui.click("grid-cell-5-8");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [5, 8], "focus": [5, 8] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [5, 8], "focus": [5, 8], "whole": false }));
     assert!(visible(&ui.tag("grid-cell-5-8")));
 }
 
@@ -388,7 +388,7 @@ fn shift_click_drag_and_ctrl_a_select() {
     ui.open("shop", "customers");
     ui.click("grid-cell-1-0");
     ui.click_with("grid-cell-3-2", json!({ "modifiers": { "shift": true } }));
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 0], "focus": [3, 2] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 0], "focus": [3, 2], "whole": false }));
     // A drag from one cell to another.
     let (from, to) = (ui.centre("grid-cell-4-1"), ui.centre("grid-cell-6-3"));
     let press =
@@ -399,7 +399,7 @@ fn shift_click_drag_and_ctrl_a_select() {
         ui.frame_with(vec![Event::PointerMoved(from + (to - from) * (k as f32 / 4.0))]);
     }
     ui.frame_with(vec![press(false)]);
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [4, 1], "focus": [6, 3] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [4, 1], "focus": [6, 3], "whole": false }));
     // Ctrl+A with no text field focused selects every cell.
     ui.ctrl("A");
     let sel = ui.document()["selection"].clone();
@@ -722,7 +722,7 @@ fn grid_frame_within_budget() {
     let mut frames = Vec::new();
     for i in 0..60 {
         // A new selection each frame, as while clicking about.
-        h.state_mut().selection = Some(Selection { anchor: (i % 30, i % 20), focus: (i % 30, i % 20) });
+        h.state_mut().selection = Some(Selection { anchor: (i % 30, i % 20), focus: (i % 30, i % 20), whole: false });
         let start = Instant::now();
         h.step();
         frames.push(start.elapsed());
@@ -1259,7 +1259,7 @@ fn one_cell_selected_lights_its_row_and_outlines_the_cell() {
         ui.execute(mode, json!({}));
         ui.click("grid-cell-1-1");
         ui.hover_away();
-        assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 1], "focus": [1, 1] }), "{mode}");
+        assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 1], "focus": [1, 1], "whole": false }), "{mode}");
         assert_eq!(ui.value("grid-cell-1-2")["state"], "staged", "{mode}");
         let s = |c| Some(c);
         let want: Vec<_> = [("number", s(t.selection)), ("cell 0", s(t.selection)), ("cell 1", s(t.selection)), ("cell 2", s(t.staged))]
@@ -1342,4 +1342,194 @@ fn a_failed_cell_has_no_tooltip() {
         ui.rest(at);
         assert!(!tooltip(&ui), "`{id}`, failed: no tooltip");
     }
+}
+
+/// The colours the number of row `row` is drawn in.
+fn number_colours(ui: &Ui, row: usize) -> Vec<egui::Color32> {
+    let at = ui.drawn(&format!("grid-row-{row}"));
+    let on_it: Vec<_> =
+        ui.shapes().into_iter().filter(|(_, s)| matches!(s, egui::Shape::Text(_)) && at.contains_rect(s.visual_bounding_rect())).collect();
+    text_colours(&on_it)
+}
+
+/// Which of the first `rows` row numbers say their row is selected.
+fn rows_selected(ui: &mut Ui, rows: usize) -> Vec<bool> {
+    (0..rows).map(|r| ui.value(&format!("grid-row-{r}"))["selected"] == true).collect()
+}
+
+/// `ui.click` params with Shift held.
+fn shift() -> Json {
+    json!({ "modifiers": { "shift": true } })
+}
+
+/// A click on a row's number selects the whole row (#17): `selection` across it from its number to
+/// the area's right edge, the number in `text`, no `ink` outline; a marked cell in it keeps its
+/// mark and takes its outline (`staged_strong`). The other rows stay plain.
+#[test]
+fn a_row_number_click_selects_the_row() {
+    let db = dbee_testkit::require_testdb!();
+    let table = three_columns(db, 4);
+    let mut ui = Ui::connected(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 4);
+    ui.execute("cell.edit", json!({ "row": 2, "column": "b", "value": "staged" }));
+    for (mode, t) in [("ui.themeLight", dbee_ui_egui::theme::LIGHT), ("ui.themeDark", dbee_ui_egui::theme::DARK)] {
+        ui.execute(mode, json!({}));
+        ui.execute("selection.set", json!({ "anchor": [0, 1] }));
+        ui.click("grid-row-2");
+        ui.hover_away();
+        assert_eq!(ui.document()["selection"], json!({ "anchor": [2, 0], "focus": [2, 2], "whole": true }), "{mode}");
+        assert_eq!(ui.value("grid-row-2"), json!({ "number": 3, "selected": true }), "{mode}");
+        for row in [0, 1, 3] {
+            assert_eq!(ui.value(&format!("grid-row-{row}")), json!({ "number": row + 1, "selected": false }), "{mode}");
+        }
+        let want: Vec<_> = [("number", t.selection), ("cell 0", t.selection), ("cell 1", t.selection), ("cell 2", t.staged)]
+            .into_iter()
+            .chain([("past the last column", t.selection)])
+            .map(|(w, c)| (w.to_string(), Some(c)))
+            .collect();
+        assert_eq!(row_grounds(&mut ui, 2, 3), want, "{mode}: the selected row");
+        for row in [1, 3] {
+            let plain: Vec<_> = row_grounds(&mut ui, row, 3).into_iter().filter(|(_, c)| *c != Some(t.card)).collect();
+            assert_eq!(plain, [], "{mode}: row {row} stays plain");
+        }
+        let area = rows_area(&mut ui);
+        assert_eq!(outlines_in(&ui, area, t.ink), [], "{mode}: no ink outline");
+        let (staged, width) = (ui.drawn("grid-cell-2-2"), dbee_ui_egui::theme::size::GRID_OUTLINE_W);
+        assert_eq!(outlines_in(&ui, area, t.staged_strong), [(staged, width)], "{mode}: the staged cell's own outline");
+        assert_eq!(number_colours(&ui, 2), [t.text], "{mode}: the selected row's number");
+        assert_eq!(number_colours(&ui, 1), [t.text_muted], "{mode}: another row's number");
+    }
+}
+
+/// Shift-click on a row number selects the rows from the anchor's row to it, either way; a click
+/// on a cell selects that cell again.
+#[test]
+fn shift_click_extends_the_rows() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "customers");
+    ui.until("the page", |ui| ui.table()["rows"] == 100);
+    ui.click("grid-row-1");
+    ui.click_with("grid-row-3", shift());
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 0], "focus": [3, 4], "whole": true }));
+    assert_eq!(rows_selected(&mut ui, 5), [false, true, true, true, false]);
+    ui.click_with("grid-row-0", shift());
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 0], "focus": [0, 4], "whole": true }), "upwards from the anchor's row");
+    assert_eq!(rows_selected(&mut ui, 5), [true, true, false, false, false]);
+    // From a selected cell: from its row.
+    ui.click("grid-cell-4-2");
+    ui.click_with("grid-row-6", shift());
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [4, 0], "focus": [6, 4], "whole": true }));
+    ui.click("grid-cell-5-1");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [5, 1], "focus": [5, 1], "whole": false }));
+    assert_eq!(rows_selected(&mut ui, 7), [false; 7]);
+}
+
+/// A selected row copies through today's paths (Ctrl+C, Ctrl+Shift+C and the menu's formats) what
+/// the same cells selected across the row copy.
+#[test]
+fn a_row_copies_as_today() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "customers");
+    ui.until("the page", |ui| ui.table()["rows"] == 100);
+    let keys = |ui: &mut Ui| {
+        ui.ctrl("C");
+        ui.frame();
+        let values = ui.copied().expect("Ctrl+C copied");
+        ui.ctrl_shift("C");
+        ui.frame();
+        (values, ui.copied().expect("Ctrl+Shift+C copied"))
+    };
+    ui.click("grid-row-2");
+    let rows = keys(&mut ui);
+    ui.execute("selection.set", json!({ "anchor": [2, 0], "focus": [2, 4] }));
+    assert_eq!(keys(&mut ui), rows);
+    assert!(rows.0.starts_with("3\tCustomer 3\tcustomer3@example.com\t"), "{rows:?}");
+    assert!(rows.1.starts_with("id\tname\temail\tcreated_at\tnote\n3\tCustomer 3\t"), "{rows:?}");
+    for (item, format) in [("grid-menu-copy-csv", "csv"), ("grid-menu-copy-json", "json"), ("grid-menu-copy-markdown", "markdown")] {
+        ui.execute("selection.set", json!({ "anchor": [2, 0], "focus": [2, 4] }));
+        let cells = ui.execute("copy.selection", json!({ "format": format }))["text"].clone();
+        ui.click("grid-row-2");
+        ui.right_click("grid-row-2");
+        ui.click(item);
+        ui.frame();
+        assert_eq!(ui.copied().map(Json::from), Some(cells), "{item}");
+        assert_eq!(ui.document()["selection"]["whole"], true, "{item}: the row stays selected");
+    }
+}
+
+/// The row's menu is the cell's without Set as NULL: a right-click selects the row, unless it is
+/// selected already, and Delete row stages it, or every selected row.
+#[test]
+fn delete_row_from_the_row_menu_stages_it() {
+    let db = dbee_testkit::require_testdb!();
+    let table = three_columns(db, 4);
+    let mut ui = Ui::connected(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 4);
+    ui.click("grid-cell-0-1");
+    ui.right_click("grid-row-2");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [2, 0], "focus": [2, 2], "whole": true }), "a right-click selects the row");
+    for id in ["grid-menu-copy", "grid-menu-copy-header", "grid-menu-copy-csv", "grid-menu-copy-json", "grid-menu-copy-markdown"] {
+        assert!(ui.tag(id).is_some(), "{id}");
+    }
+    assert!(ui.tag("grid-menu-null").is_none(), "no Set as NULL on a row");
+    assert_eq!(ui.value("grid-menu-delete")["label"], "Delete row");
+    ui.click("grid-menu-delete");
+    ui.frame();
+    let deleted = |ui: &mut Ui| -> Vec<bool> { (0..4).map(|r| ui.value(&format!("grid-cell-{r}-0"))["deleted"] == true).collect() };
+    assert_eq!(deleted(&mut ui), [false, false, true, false]);
+    assert!((0..3).all(|c| ui.value(&format!("grid-cell-2-{c}"))["deleted"] == true), "the whole row");
+    // Two selected rows: a right-click on one of them keeps both, and deletes both.
+    ui.click("grid-row-0");
+    ui.click_with("grid-row-1", shift());
+    ui.right_click("grid-row-1");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [1, 2], "whole": true }), "kept");
+    assert_eq!(ui.value("grid-menu-delete")["label"], "Delete 2 rows");
+    ui.click("grid-menu-delete");
+    ui.frame();
+    assert_eq!(deleted(&mut ui), [true, true, true, false]);
+}
+
+/// Review Focus 2: a row selection is kept when its page changes (a refresh, a filter, the next
+/// page) while its rows are still there, and stays a row selection; when they are not, it goes,
+/// as a cell selection does.
+#[test]
+fn a_row_selection_survives_a_refresh_and_fits_a_shorter_page() {
+    let db = dbee_testkit::require_testdb!();
+    let table = three_columns(db, 4);
+    let mut ui = Ui::connected(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 4);
+    let row = |r: usize| json!({ "anchor": [r, 0], "focus": [r, 2], "whole": true });
+    ui.click("grid-row-2");
+    ui.execute("table.refresh", json!({}));
+    ui.frame();
+    assert_eq!(ui.document()["selection"], row(2), "after a refresh");
+    assert_eq!(ui.value("grid-row-2"), json!({ "number": 3, "selected": true }));
+    // A filter that leaves three rows: row 2 is still there.
+    ui.execute("table.setFilters", json!({ "filters": [{ "column": "id", "op": "ge", "value": "2" }] }));
+    ui.until("three rows", |ui| ui.table()["rows"] == 3);
+    ui.frame();
+    assert_eq!(ui.document()["selection"], row(2), "on the shorter page");
+    assert_eq!(rows_selected(&mut ui, 3), [false, false, true]);
+    // Rows 1 and 2, and a filter that leaves two: row 2 is gone, so the selection goes.
+    ui.click("grid-row-1");
+    ui.click_with("grid-row-2", shift());
+    ui.execute("table.setFilters", json!({ "filters": [{ "column": "id", "op": "ge", "value": "3" }] }));
+    ui.until("two rows", |ui| ui.table()["rows"] == 2);
+    ui.frame();
+    assert_eq!(ui.document()["selection"], Json::Null);
+    assert_eq!(rows_selected(&mut ui, 2), [false, false]);
+    // The next page of a long table: the same row of the page, numbered on.
+    ui.open("shop", "customers");
+    ui.until("the page", |ui| ui.table()["rows"] == 100);
+    ui.click("grid-row-2");
+    ui.execute("table.page", json!({ "to": "next" }));
+    ui.frame();
+    assert_eq!(ui.table()["page"], 1);
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [2, 0], "focus": [2, 4], "whole": true }));
+    assert_eq!(ui.value("grid-row-2"), json!({ "number": 103, "selected": true }));
 }

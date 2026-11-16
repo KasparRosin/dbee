@@ -303,7 +303,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     // 4. The billing cell's JSON in the value panel; its second line selected and copied.
     app.click(&format!("grid-cell-{r}-5"));
     let d = app.document();
-    assert_eq!(d["selection"], json!({ "anchor": [r, 5], "focus": [r, 5] }));
+    assert_eq!(d["selection"], json!({ "anchor": [r, 5], "focus": [r, 5], "whole": false }));
     let v = &d["value"];
     assert_eq!(
         (v["column"].clone(), v["typeLabel"].clone(), v["kind"].clone(), v["pretty"].clone(), v["isNull"].clone()),

@@ -335,7 +335,7 @@ pub struct RowNumber {
     pub deleted: bool,
     /// Some of its cells are selected.
     pub selected: bool,
-    /// The whole row is selected (issue #17): its number in `text`. Nothing sets it yet.
+    /// The whole row is selected (issue #17): its number in `text`.
     pub whole: bool,
     /// Its row is under the pointer.
     pub hovered: bool,
@@ -865,7 +865,7 @@ mod tests {
             marks: vec![((0, 1), Mark::Staged), ((2, usize::MAX), Mark::Failed), ((3, usize::MAX), Mark::Deleted)],
             deleted: vec![2, 3],
         };
-        let mut h = grid_harness(Theme::Light, rows, Some(Selection { anchor: (0, 0), focus: (0, 0) }));
+        let mut h = grid_harness(Theme::Light, rows, Some(Selection { anchor: (0, 0), focus: (0, 0), whole: false }));
         h.run();
         let tags = &h.state().tags;
         let value = |id: &str| tags.value(id).cloned().unwrap_or_else(|| panic!("`{id}` tagged: {:?}", tags.ids()));
@@ -894,7 +894,7 @@ mod tests {
         click(&mut h, head);
         assert_eq!(h.state().acts, [GridAct::Sort(1)], "a header click sorts");
         // The selection moves to row 1, whose foreign key is NULL: no link anywhere.
-        h.state_mut().selection = Some(Selection { anchor: (1, 2), focus: (1, 2) });
+        h.state_mut().selection = Some(Selection { anchor: (1, 2), focus: (1, 2), whole: false });
         h.run();
         assert!(!h.state().tags.ids().iter().any(|id| id.starts_with("fk-link-")), "NULL has no link: {:?}", h.state().tags.ids());
     }

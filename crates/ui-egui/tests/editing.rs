@@ -215,7 +215,7 @@ fn tab_commits_and_moves_right_escape_cancels() {
     ui.key("Tab");
     assert!(ui.editor().is_none(), "Tab closed the editor");
     assert_eq!(ui.staged(1, 1), Some(json!("Bobby")));
-    assert_eq!(ui.selection(), json!({ "anchor": [1, 2], "focus": [1, 2] }), "and moved right");
+    assert_eq!(ui.selection(), json!({ "anchor": [1, 2], "focus": [1, 2], "whole": false }), "and moved right");
     // Escape cancels.
     ui.key("Enter");
     assert_eq!(ui.editor_text(), "20.00");
@@ -228,7 +228,7 @@ fn tab_commits_and_moves_right_escape_cancels() {
     ui.click("grid-cell-1-5");
     ui.key("Enter");
     ui.key("Tab");
-    assert_eq!(ui.selection(), json!({ "anchor": [2, 0], "focus": [2, 0] }));
+    assert_eq!(ui.selection(), json!({ "anchor": [2, 0], "focus": [2, 0], "whole": false }));
     // On the last cell of the last row it commits and stays.
     ui.click("grid-cell-2-5");
     ui.key("Enter");
@@ -236,7 +236,7 @@ fn tab_commits_and_moves_right_escape_cancels() {
     ui.key("Tab");
     assert!(ui.editor().is_none());
     assert_eq!(ui.staged(2, 5), Some(json!("{\"b\": 2}")));
-    assert_eq!(ui.selection(), json!({ "anchor": [2, 5], "focus": [2, 5] }));
+    assert_eq!(ui.selection(), json!({ "anchor": [2, 5], "focus": [2, 5], "whole": false }));
 }
 
 #[test]
@@ -488,7 +488,7 @@ fn clicking_another_cell_commits() {
     ui.click("grid-cell-0-0");
     assert!(ui.editor().is_none());
     assert_eq!(ui.staged(2, 1), Some(json!("Cyd")));
-    assert_eq!(ui.selection(), json!({ "anchor": [0, 0], "focus": [0, 0] }), "the click selected its cell");
+    assert_eq!(ui.selection(), json!({ "anchor": [0, 0], "focus": [0, 0], "whole": false }), "the click selected its cell");
 }
 
 #[test]
@@ -686,7 +686,7 @@ fn shift_tab_commits_and_moves_left() {
     ui.ok("ui.key", json!({ "key": "Tab", "shift": true }));
     assert!(ui.editor().is_none());
     assert_eq!(ui.staged(1, 0), Some(json!("20")));
-    assert_eq!(ui.selection(), json!({ "anchor": [0, 5], "focus": [0, 5] }), "to the end of the row before");
+    assert_eq!(ui.selection(), json!({ "anchor": [0, 5], "focus": [0, 5], "whole": false }), "to the end of the row before");
 }
 
 #[test]
@@ -783,7 +783,7 @@ fn a_new_row_is_added_selected_and_edited() {
     ui.click("row-add");
     let edits = ui.edits();
     assert_eq!(edits["newRows"], json!([{ "row": 3, "values": [] }]), "{edits}");
-    assert_eq!(ui.selection(), json!({ "anchor": [3, 0], "focus": [3, 0] }), "the new row's first cell is selected");
+    assert_eq!(ui.selection(), json!({ "anchor": [3, 0], "focus": [3, 0], "whole": false }), "the new row's first cell is selected");
     ui.frame();
     assert_eq!(ui.value("grid-cell-3-0")["state"], "new");
     ui.key("Enter");

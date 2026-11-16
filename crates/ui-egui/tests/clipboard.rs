@@ -80,7 +80,7 @@ fn ctrl_c_copies_values_only() {
     let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
     ui.ctrl("A");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [1, 2] }), "Ctrl+A selects every cell");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [1, 2], "whole": false }), "Ctrl+A selects every cell");
     ui.ctrl("C");
     ui.frame();
     let copied = ui.copied().expect("Ctrl+C put text on the clipboard");
@@ -114,7 +114,7 @@ fn ctrl_shift_c_copies_with_header() {
     ui.click("grid-cell-1-1");
     assert_eq!(ui.editor()["focused"], false, "the grid took the keyboard");
     ui.ctrl("A");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [4, 1] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [4, 1], "whole": false }));
     ui.ctrl_shift("C");
     ui.frame();
     let copied = ui.copied().expect("Ctrl+Shift+C put text on the clipboard");
@@ -129,7 +129,7 @@ fn menu_copy_as_markdown() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = ran(db, CUSTOMERS);
     ui.right_click("grid-cell-2-1");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [2, 1], "focus": [2, 1] }), "a right-click selects the cell");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [2, 1], "focus": [2, 1], "whole": false }), "a right-click selects the cell");
     ui.click("grid-menu-copy-markdown");
     ui.frame();
     let copied = ui.copied().expect("Copy as Markdown put text on the clipboard");
@@ -179,10 +179,10 @@ fn a_text_field_with_the_keyboard_keeps_ctrl_c_until_the_grid_is_clicked() {
     ui.frame();
     assert_eq!(ui.copied().as_deref(), Some(CUSTOMERS), "Ctrl+A, Ctrl+C copy the editor's text");
     assert_eq!(ui.notice(), None, "no grid copy ran");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [1, 1] }), "Ctrl+A left the grid's selection alone");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [1, 1], "whole": false }), "Ctrl+A left the grid's selection alone");
     // A drag over the cells takes the keyboard as a click does.
     ui.drag("grid-cell-1-0", "grid-cell-2-1");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 0], "focus": [2, 1] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 0], "focus": [2, 1], "whole": false }));
     assert_eq!(ui.editor()["focused"], false, "the drag took the keyboard from the editor");
     ui.ctrl("C");
     ui.frame();
@@ -200,7 +200,7 @@ fn a_text_field_with_the_keyboard_keeps_ctrl_c_until_the_grid_is_clicked() {
     ui.frame();
     assert_eq!(ui.copied().as_deref(), Some("Ann"), "the input's own copy");
     assert_eq!(ui.notice(), None, "no grid copy ran");
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [0, 0] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 0], "focus": [0, 0], "whole": false }));
     ui.click("grid-cell-2-1");
     ui.ctrl("C");
     ui.frame();

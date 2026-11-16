@@ -6,8 +6,10 @@
 //! `VALUE_VIEW_MAX_BYTES` (10 MiB). The header names the column, its real type and, when one
 //! applies, what JSON it is (`jsonb`, `json`, `text containing JSON`, `JSON string containing
 //! JSON`); a cut value says how much of it shows ([`note`]). With no cell selected it says so.
-//! NULL shows as a dim `NULL`, with no text to select. The look is the component's
-//! ([`crate::components::value`]); this screen keeps the rows, colours, selection and scrolling.
+//! NULL shows as a dim `NULL`, with no text to select. A whole selected row (issue #17) shows as
+//! its JSON object under `Row <n>` and no type ([`State::Row`]); one cut at the cap says so as a
+//! long value does. The look is the component's ([`crate::components::value`]); this screen
+//! keeps the rows, colours, selection and scrolling.
 //!
 //! **The text** is read-only, in a monospace font, wrapped at the panel's width by characters
 //! ([`Rows`]: a row ends at a line break or before the character that would take it past the
@@ -45,7 +47,8 @@
 //! It is drawn after the tab's body ([`reserve`], then [`fill`]), so a click on a cell shows its
 //! value in the same frame.
 //!
-//! Automation ids: `value-panel` (value `{column, type, label, null, bytes, truncated, note}`,
+//! Automation ids: `value-panel` (value `{column, row, type, label, null, bytes, truncated,
+//! note}`, `row` the number of a whole selected row (`column` and `type` then empty) or null,
 //! `label` the JSON label or null, `bytes` the whole value's length, `note` what a cut value
 //! says; `null` when no cell is selected), `value-text` (value `{text, cut, selection,
 //! highlighted, rows, firstRow}`: the text's first [`TAG_BYTES`] bytes and whether there is more,
@@ -741,7 +744,9 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
         tags.tag_value(PANEL, &panel, Json::Null);
         return;
     };
-    let shows = if view.is_null {
+    let shows = if view.row.is_some() {
+        State::Row
+    } else if view.is_null {
         State::Null
     } else if view.text.is_empty() {
         State::Empty
@@ -751,7 +756,7 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
         State::Text
     };
     // The rows before the panel is drawn, for the facts; the value's box is as wide as the panel.
-    let glyph = if matches!(shows, State::Json | State::Text) {
+    let glyph = if matches!(shows, State::Json | State::Text | State::Row) {
         Some(rows(ui, view, state, full.width()))
     } else {
         state.clear();
@@ -759,7 +764,8 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
     };
     let facts = state.doc.as_ref().filter(|_| glyph.is_some()).map(|d| Facts { lines: d.rows.lines(), bytes: view.byte_len });
     let note = note(view);
-    let look = Panel { title: &view.column, ty: &view.type_label, kind: kind(view), note: note.as_deref(), facts, ..shell(shows) };
+    let title = view.title();
+    let look = Panel { title: &title, ty: &view.type_label, kind: kind(view), note: note.as_deref(), facts, ..shell(shows) };
     let shown = look.show(ui, full);
     match glyph {
         Some(glyph) => body(ui, &shown, view, state, tags, glyph),
@@ -772,6 +778,7 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
     let label = (!view.kind_label.is_empty()).then_some(view.kind_label.as_str());
     let head = json!({
         "column": view.column,
+        "row": view.row,
         "type": view.type_label,
         "label": label,
         "null": view.is_null,

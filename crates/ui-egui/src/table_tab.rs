@@ -114,6 +114,7 @@ fn keys(data: &ResultSet, info: Option<&TableInfo>) -> Vec<Option<Key>> {
 fn command(act: GridAct, data: Option<&ResultSet>) -> Option<(&'static str, Json)> {
     Some(match act {
         GridAct::Select { anchor, focus } => ("selection.set", json!({ "anchor": [anchor.0, anchor.1], "focus": [focus.0, focus.1] })),
+        GridAct::SelectRows { first, last } => ("selection.rows", json!({ "first": first, "last": last })),
         GridAct::Sort(col) => ("table.sort", json!({ "column": data?.columns.get(col)?.name })),
         GridAct::Follow { row, col } => ("table.followForeignKey", json!({ "row": row, "column": col })),
         GridAct::SetNull { row, col } => ("cell.setNull", json!({ "row": row, "column": col })),
@@ -407,6 +408,7 @@ mod tests {
         assert_eq!(c(GridAct::Sort(1)), Some(("table.sort", json!({ "column": "note" }))));
         assert_eq!(c(GridAct::Sort(9)), None, "no such column");
         assert_eq!(c(GridAct::Select { anchor: (1, 0), focus: (2, 1) }), Some(("selection.set", json!({ "anchor": [1, 0], "focus": [2, 1] }))));
+        assert_eq!(c(GridAct::SelectRows { first: 3, last: 1 }), Some(("selection.rows", json!({ "first": 3, "last": 1 }))));
         assert_eq!(c(GridAct::Copy("csv")), Some(("clipboard.copy", json!({ "format": "csv" }))));
         assert_eq!(c(GridAct::DeleteRows(vec![0, 2])), Some(("row.delete", json!({ "rows": [0, 2] }))));
         assert_eq!(c(GridAct::SetNull { row: 1, col: 0 }), Some(("cell.setNull", json!({ "row": 1, "column": 0 }))));

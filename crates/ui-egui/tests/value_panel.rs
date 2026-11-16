@@ -176,7 +176,7 @@ fn ctrl_c_copies_the_panel_selection_not_the_grid() {
     assert_eq!(ui.copied.len(), copies + 1, "one copy: {:?}", ui.copied);
     assert_eq!(ui.copied().as_deref(), Some(first_two.as_str()), "the panel's selection, not the grid's");
     // The grid's selection is still the cell, whose copy is the raw jsonb on one line.
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5] }));
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5], "whole": false }));
     // A drag selects too: across the third line, from its start.
     let third = r.top() + LINE_H * 2.5;
     ui.drag(pos2(r.left() + 1.0, third), pos2(r.right() - PAD, third));
@@ -186,7 +186,7 @@ fn ctrl_c_copies_the_panel_selection_not_the_grid() {
     // Ctrl+A in the panel selects all of its text, not the grid's cells.
     ui.ctrl("A");
     assert_eq!(ui.value("value-text")["selection"], json!([0, text.len()]));
-    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5] }), "the grid's selection stays");
+    assert_eq!(ui.document()["selection"], json!({ "anchor": [0, 5], "focus": [0, 5], "whole": false }), "the grid's selection stays");
     ui.ctrl("C");
     assert_eq!(ui.copied().as_deref(), Some(text.as_str()));
     assert!(ui.tag("notice").is_none(), "the panel's copy is a text field's: no notice");
@@ -521,4 +521,43 @@ fn value_panel_frames_within_budget() {
         assert!(steady < Duration::from_millis(16) && scroll < Duration::from_millis(16), "{name}: {steady:?} {scroll:?}");
     }
     println!("value panel on {}:\n  {}", machine(), report.join("\n  "));
+}
+
+/// A selected row (#17) shows in the panel as JSON: the object Copy as JSON writes for it,
+/// pretty-printed and coloured, read-only, under the title `Row <n>` (the number its row shows,
+/// the page's offset counted in) with no type.
+#[test]
+fn the_panel_shows_a_selected_row_as_json() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open_rows("shop", "orders", 100);
+    ui.execute("selection.set", json!({ "anchor": [0, 0], "focus": [0, 99] }));
+    let list = ui.execute("copy.selection", json!({ "format": "json" }))["text"].as_str().unwrap().to_string();
+    let object = list.strip_prefix("[\n  ").and_then(|l| l.strip_suffix("\n]")).unwrap();
+    let pretty = dbee_core::json::pretty(object).unwrap();
+    ui.click("grid-row-0");
+    let head = ui.value("value-panel");
+    assert_eq!(head["row"], 1, "{head}");
+    assert_eq!((head["column"].clone(), head["type"].clone(), head["label"].clone()), (json!(""), json!(""), Json::Null), "{head}");
+    assert_eq!((head["null"].clone(), head["truncated"].clone(), head["note"].clone()), (json!(false), json!(false), Json::Null), "{head}");
+    assert_eq!(head["bytes"], object.len(), "{head}");
+    assert!(pretty.starts_with("{\n  \"id\": 1,\n  \"customer_id\": 1,") && pretty.contains("\"billing\": {\n    \""), "{pretty}");
+    assert_eq!(ui.panel_text(), pretty);
+    assert_eq!(ui.document()["value"]["row"], 1);
+    let v = ui.value("value-text");
+    assert_eq!((v["highlighted"].clone(), v["cut"].clone(), v["selection"].clone()), (json!(true), json!(false), Json::Null), "{v}");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "Row 1").is_some(), "the title");
+    assert!(ui.text_in(panel, "id").is_none() && ui.text_in(panel, "bigint").is_none(), "no column name or type in the bar");
+    // A cell again: its column.
+    ui.click("grid-cell-0-3");
+    let head = ui.value("value-panel");
+    assert_eq!((head["row"].clone(), head["column"].clone()), (Json::Null, json!("status")), "{head}");
+    // The second page's first row is the 101st.
+    ui.execute("table.page", json!({ "to": "next" }));
+    ui.click("grid-row-0");
+    assert_eq!(ui.value("value-panel")["row"], 101);
+    assert!(ui.panel_text().starts_with("{\n  \"id\": 101,"), "{}", ui.panel_text());
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "Row 101").is_some(), "the title counts the page");
 }

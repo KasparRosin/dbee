@@ -1188,6 +1188,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                         GridAct::Select { anchor, focus } => {
                             runs.push(("selection.set", json!({ "anchor": [anchor.0, anchor.1], "focus": [focus.0, focus.1] })));
                         }
+                        GridAct::SelectRows { first, last } => runs.push(("selection.rows", json!({ "first": first, "last": last }))),
                         GridAct::Copy(format) => runs.push(("clipboard.copy", json!({ "format": format }))),
                         // Read-only: no sorting, editing or links.
                         GridAct::Sort(_) | GridAct::Follow { .. } | GridAct::SetNull { .. } | GridAct::DeleteRows(_) | GridAct::Edit { .. } => {}

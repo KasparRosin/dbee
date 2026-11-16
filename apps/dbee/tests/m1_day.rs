@@ -248,7 +248,7 @@ fn m1_day_end_to_end() {
     //    of it selected (a click, then a shift-click) and Ctrl+C copy that line.
     app.click(&format!("grid-cell-{r}-5"));
     let d = app.document();
-    assert_eq!(d["selection"], json!({ "anchor": [r, 5], "focus": [r, 5] }));
+    assert_eq!(d["selection"], json!({ "anchor": [r, 5], "focus": [r, 5], "whole": false }));
     let v = &d["value"];
     assert_eq!(
         (v["column"].clone(), v["typeLabel"].clone(), v["pretty"].clone(), v["isNull"].clone()),
@@ -277,7 +277,7 @@ fn m1_day_end_to_end() {
 
     // 5. The order's row selected, its customer_id link: a new customers tab filtered to the id.
     app.click(&format!("grid-cell-{r}-1"));
-    assert_eq!(app.document()["selection"], json!({ "anchor": [r, 1], "focus": [r, 1] }));
+    assert_eq!(app.document()["selection"], json!({ "anchor": [r, 1], "focus": [r, 1], "whole": false }));
     app.click(&format!("fk-link-{r}-1"));
     app.until("the customers tab", |app| app.table()["name"] == "customers");
     let t = app.settled("the customer's page");
@@ -366,7 +366,7 @@ fn m1_day_end_to_end() {
     app.click("grid-cell-0-0");
     assert_eq!(app.value("query-editor")["focused"], false, "the grid took the keyboard");
     app.ctrl("A");
-    assert_eq!(app.document()["selection"], json!({ "anchor": [0, 0], "focus": [n - 1, 3] }));
+    assert_eq!(app.document()["selection"], json!({ "anchor": [0, 0], "focus": [n - 1, 3], "whole": false }));
     app.ctrl_shift("C");
     // The clipboard still holds step 4's line: wait for the new copy.
     let header = "id\tcustomer\ttotal\tshipped_at\n";

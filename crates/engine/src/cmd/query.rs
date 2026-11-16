@@ -485,11 +485,10 @@ pub(crate) fn summary(q: &QueryTab, connected: Option<&Connected>) -> Json {
     })
 }
 
-/// `selection` when it lies in `result`'s grid.
+/// `selection` as far as it is kept on `result`'s grid ([`Selection::kept`]).
 fn fitting(selection: Option<Selection>, result: Option<&ResultSet>) -> Option<Selection> {
     let result = result?;
-    let fits = |(row, column): (usize, usize)| row < result.rows.len() && column < result.columns.len();
-    selection.filter(|sel| fits(sel.anchor) && fits(sel.focus))
+    selection.and_then(|sel| sel.kept(result.rows.len(), result.columns.len()))
 }
 
 /// The error a run ended with, its `position` a byte offset into the tab text and `statement`

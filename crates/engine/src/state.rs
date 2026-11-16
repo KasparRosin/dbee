@@ -317,6 +317,31 @@ impl std::fmt::Debug for Credentials {
 pub struct Selection {
     pub anchor: (usize, usize),
     pub focus: (usize, usize),
+    /// Whole rows, selected by their numbers (`selection.rows`, issue #17): the rectangle spans
+    /// every column the grid has, also when those change.
+    #[serde(default)]
+    pub whole: bool,
+}
+
+impl Selection {
+    /// The selection on a grid of `rows` × `columns` that replaces the one it was made on (a
+    /// refresh, another page or result): kept while its cells are there; whole rows while their
+    /// rows are, across the new grid's columns.
+    pub fn kept(self, rows: usize, columns: usize) -> Option<Selection> {
+        if self.whole {
+            let last = columns.checked_sub(1)?;
+            let (a, f) = (self.anchor.0, self.focus.0);
+            return (a < rows && f < rows).then_some(Selection { anchor: (a, 0), focus: (f, last), whole: true });
+        }
+        let fits = |(row, column): (usize, usize)| row < rows && column < columns;
+        (fits(self.anchor) && fits(self.focus)).then_some(self)
+    }
+
+    /// `{anchor: [row, column], focus: [row, column], whole}`, as the selection commands and
+    /// `inspect()` give it.
+    pub fn to_json(self) -> Json {
+        json!({ "anchor": [self.anchor.0, self.anchor.1], "focus": [self.focus.0, self.focus.1], "whole": self.whole })
+    }
 }
 
 /// A query editor tab.

@@ -547,9 +547,8 @@ fn apply_load(
             let (data, has_next, complete) = page_data(rs, columns.columns);
             // A result of other columns than the statement named is shown as it came.
             let (data, hidden) = if data.columns.len() == typed { split_hidden(data, columns.visible) } else { (data, ResultSet::default()) };
-            let (rows, width) = (data.rows.len(), data.columns.len());
-            let fits = |(r, c): (usize, usize)| r < rows && c < width;
-            t.selection = t.selection.filter(|sel| fits(sel.anchor) && fits(sel.focus));
+            let rows = data.rows.len();
+            t.selection = t.selection.and_then(|sel| sel.kept(rows, data.columns.len()));
             t.data = Some(Arc::new(data));
             t.hidden = Arc::new(hidden);
             t.has_next = has_next;
