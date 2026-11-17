@@ -52,5 +52,15 @@ The container runs as your user, with your uid, gid and home path, on the host's
   rebuild each other's files: `CARGO_TARGET_DIR=target-dev dev/run` (`target-*/` is ignored by git).
 - `nice` on `dev/run` doesn't reach the container, and the host's Cargo settings aren't read inside. To build with fewer
   jobs, set `CARGO_BUILD_JOBS` when starting it.
-- The tests that open a real window (the M1 and M2 workflow tests in `apps/dbee/tests` and the launch time check) need
-  a display, which the container has not. `cargo xtask ci` doesn't run them.
+- The tests that open a real window (the M1 and M2 workflow tests and the control channel test in `apps/dbee/tests`,
+  and the launch time check) need a display. `cargo xtask ci` doesn't run them. The container has Xvfb, a virtual X11
+  screen in memory, to run them on:
+
+  ```sh
+  xvfb-run -a -s "-screen 0 1920x1080x24" cargo test -p dbee --test m1_day --test m2_day --test control_access -- --ignored --nocapture
+  xvfb-run -a -s "-screen 0 1920x1080x24" cargo test -p xtask connection_screen -- --ignored --nocapture   # launch time
+  ```
+
+  The days save their screenshots in `target/m1-day/` and `target/m2-day/`. Xvfb runs no window manager, so winit
+  logs `BadWindow` X11 errors while the app runs; they don't affect it. This is X11, not Wayland: behaviour that only
+  shows on a Wayland compositor (`docs/testing.md` §4) still needs a desktop.

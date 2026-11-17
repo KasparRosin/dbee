@@ -28,6 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxkbcommon-dev \
         libxrandr-dev \
         mesa-vulkan-drivers \
+    # A virtual screen for the tests that open a real window (dev/README.md). winit loads
+    # libxkbcommon-x11 to open a window on X11, and stops without it.
+        libxkbcommon-x11-0 \
+        xauth \
+        xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 
