@@ -35,6 +35,7 @@ overrides:
       - libx11-6
       - libx11-xcb1
       - libxcursor1
+      - libxkbcommon-x11-0
       - libxi6
       - libxrandr2
       - mesa-vulkan-drivers
@@ -48,6 +49,7 @@ overrides:
       - libX11
       - libXcursor
       - libXi
+      - libxkbcommon-x11
       - libXrandr
       - mesa-vulkan-drivers
       - xdg-desktop-portal
