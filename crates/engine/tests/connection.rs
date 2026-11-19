@@ -574,6 +574,73 @@ fn save_password_on_open_of_an_ad_hoc_config_stores_nothing() {
     }
 }
 
+/// `connection.open {save: true}` saves the connection once the open has succeeded, and a failed
+/// open saves nothing.
+#[test]
+fn an_open_with_save_saves_only_when_it_succeeds() {
+    let _db = require_testdb!();
+    let mut s = session();
+    let r = open(&mut s, json!({ "config": pg14_config(), "password": pw(), "save": true }));
+    assert_eq!(r["connection"]["saved"], true, "{r}");
+    let list = run(&mut s, "connection.list", json!({}));
+    let saved = list["saved"].as_array().unwrap();
+    assert_eq!(saved.len(), 1, "{list}");
+    assert_eq!((&saved[0]["id"], &saved[0]["name"]), (&r["connection"]["id"], &json!("pg14")), "{list}");
+    assert_eq!(s.inspect()["connection"]["saved"], true);
+    assert!(r.get("savedNote").is_none(), "{r}");
+    let file: Json = serde_json::from_str(&std::fs::read_to_string(s.home.home.join("config").join(dbee_config::store::FILE)).unwrap()).unwrap();
+    assert_eq!(file["saved"][0]["id"], r["connection"]["id"], "{file}");
+
+    let mut s = session();
+    let e = run_err(&mut s, "connection.open", json!({ "config": pg14_config(), "password": "not-the-password", "save": true }));
+    assert_eq!(e.code(), "auth", "{e}");
+    assert_eq!(run(&mut s, "connection.list", json!({}))["saved"], json!([]));
+}
+
+/// A cancelled open with `save` saves nothing.
+#[test]
+fn a_cancelled_open_with_save_saves_nothing() {
+    let _db = require_testdb!();
+    let host = Host::new(Answer::Nothing);
+    let mut s = session();
+    let job = started(&mut s, "connection.open", json!({ "config": at(&pg14_target(), &host), "password": pw(), "save": true }));
+    host.until("the connect", |seen| seen.taken == 1);
+    assert_eq!(cancel(&mut s), json!({ "stopped": true }));
+    ends_cancelled(&mut s, job, "the open");
+    nothing_open(&s, "the open");
+    assert_eq!(run(&mut s, "connection.list", json!({}))["saved"], json!([]));
+}
+
+/// While another dbee holds the connections file, the open stands and says the connection was not
+/// saved.
+#[test]
+fn a_save_that_cannot_write_leaves_the_open_standing() {
+    let _db = require_testdb!();
+    let t = file_target();
+    let mut s = session();
+    let lock = s.home.home.join("config").join(dbee_config::store::LOCK_FILE);
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let other = std::fs::File::options().create(true).truncate(false).write(true).open(lock).unwrap();
+    other.lock().unwrap();
+    let r = open(&mut s, json!({ "config": config_for(&t), "save": true }));
+    other.unlock().unwrap();
+    assert_eq!(r["savedNote"], "another dbee window was changing the connections file", "{r}");
+    assert_eq!(r["connection"]["saved"], false, "{r}");
+    assert_eq!(s.inspect()["connection"]["saved"], false);
+    assert!(s.state().store.saved.is_empty());
+    let notices = notices(&mut s);
+    assert!(notices.iter().any(|n| n == "The connection was not saved: another dbee window was changing the connections file"), "{notices:?}");
+}
+
+#[test]
+fn open_file_refuses_save() {
+    let mut s = session();
+    let path = s.home.home.join("shop.sqlite");
+    let e = s.execute("connection.openFile", json!({ "path": path, "save": true })).unwrap_err();
+    assert_eq!(e.code(), "badParams", "{e}");
+    assert!(e.to_string().contains("`save`"), "{e}");
+}
+
 /// Closes the connection, then opens `params`, expecting an error.
 fn open_or_err_after_close(s: &mut TestSession, params: Json) -> EngineError {
     s.run_blocking("connection.close", json!({}), T).unwrap();

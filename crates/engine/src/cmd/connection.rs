@@ -202,7 +202,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Connect",
         menu: &["File"],
         shortcut: None,
-        params: "{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?, createFile?}",
+        params: "{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?, save?, createFile?}",
         enabled: not_connected,
         run: open,
         journal: true,
@@ -955,13 +955,13 @@ fn list(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 fn save(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let config = connect_config(params)?.ok_or_else(|| bad("`config` is required (a connection object)"))?;
     let secrets = given(params)?;
-    let id = save_with_secrets(s, config, &secrets)?;
+    let id = save_with_secrets(s, config, &secrets).map_err(|e| EngineError::Config(e.to_string()))?;
     Ok(Outcome::Done(json!({ "id": id })))
 }
 
 /// What [`save`] does once it has its config and secrets: the saved list and the file, then the
 /// secret store as `saveSecrets` says. The config's id, a new one when it had none.
-fn save_with_secrets(s: &mut Session, mut config: ConnectionConfig, secrets: &Credentials) -> Result<String, EngineError> {
+fn save_with_secrets(s: &mut Session, mut config: ConnectionConfig, secrets: &Credentials) -> Result<String, ConfigError> {
     if config.id.is_empty() {
         config.id = new_id();
     }
@@ -969,8 +969,7 @@ fn save_with_secrets(s: &mut Session, mut config: ConnectionConfig, secrets: &Cr
         let before = store.saved.iter().find(|c| c.id == config.id).cloned();
         store.upsert(config.clone());
         before
-    })
-    .map_err(|e| EngineError::Config(e.to_string()))?;
+    })?;
     if let Some(secret_store) = s.secrets.clone() {
         let ok = if config.save_secrets {
             let now = SavedFor::of(&config);
@@ -1147,7 +1146,7 @@ fn list_databases(s: &mut Session, params: &Json) -> Result<Outcome, EngineError
     Ok(Outcome::Started(job))
 }
 
-/// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?,
+/// `{id | config, password?, sshPassword?, sshPassphrase?, trustHostKey?, savePassword?, save?,
 /// createFile?}` → a job returning `{connection, server, tables, warnings}`: the tunnel, the
 /// browse connection and the catalog. On success the workspace shows, the connection goes to the
 /// top of the recent list (an unsaved config gets an id for it) and the file is written. One open
@@ -1157,6 +1156,11 @@ fn list_databases(s: &mut Session, params: &Json) -> Result<Outcome, EngineError
 /// `secretsSaved`, and `secretsNote` when they were not kept. They are kept only for a saved
 /// connection whose settings match the saved ones ([`reuse`]); that turns its `saveSecrets` on
 /// (in the file) and stores them. For an unsaved config nothing is stored.
+///
+/// `save: true` saves the connection once the open has succeeded, as `connection.save` would with
+/// the secrets given in the params ([`save_with_secrets`]), so the result's `connection.saved` is
+/// true; a failed or cancelled open saves nothing. When the file cannot be written the open
+/// stands: the result has `savedNote`, the reason, and a notice says the connection was not saved.
 fn open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     not_opening(s)?;
     let config = target_config(s, params)?;
@@ -1172,12 +1176,14 @@ fn not_opening(s: &Session) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// The open job of [`open`] for `config`, with the secrets and `savePassword` that `params` give.
+/// The open job of [`open`] for `config`, with the secrets, `savePassword` and `save` that `params`
+/// give.
 fn start_open(s: &mut Session, mut config: ConnectionConfig, create_file: bool, params: &Json) -> Result<Outcome, EngineError> {
     let allowed_dirs = may_reach(s, &config)?;
     let driver = driver_for(&s.drivers, config.kind)?;
     let typed = given(params)?;
     let keep = p::bool_or(params, "savePassword", false)?;
+    let save = p::bool_or(params, "save", false)?;
     if config.id.is_empty() {
         config.id = new_id();
     }
@@ -1189,8 +1195,10 @@ fn start_open(s: &mut Session, mut config: ConnectionConfig, create_file: bool, 
             Some(creds) => connect_and_load(driver.as_ref(), &config, allowed_dirs.as_deref(), create_file, &env, creds, &stop).await,
             None => Err(attempt_cancelled()),
         };
+        let to_save = save.then(|| typed.clone());
         let typed = keep.then_some(typed);
-        let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds.unwrap_or_default(), result, typed, &stop));
+        let ask = Asked { keep: typed, save: to_save };
+        let apply: Apply = Box::new(move |s: &mut Session| apply_open(s, config, creds.unwrap_or_default(), result, ask, &stop));
         apply
     });
     Ok(Outcome::Started(job))
@@ -1253,8 +1261,8 @@ fn no_file_type<K>(path: &Path, types: &[FileType<K>]) -> String {
 }
 
 /// The params of `connection.open` that `connection.openFile` does not take: a file has no
-/// tunnel, and an unsaved connection keeps no password.
-const NOT_FOR_A_FILE: [&str; 4] = ["savePassword", "sshPassword", "sshPassphrase", "trustHostKey"];
+/// tunnel, an unsaved connection keeps no password, and a file is saved by `connection.saveOpen`.
+const NOT_FOR_A_FILE: [&str; 5] = ["savePassword", "save", "sshPassword", "sshPassphrase", "trustHostKey"];
 
 /// The database type of the file at `path` among `kinds`: the first whose file extensions hold the
 /// path's ([`first_with_extension`]). `Err` is the sentence that says why it does not open:
@@ -1325,8 +1333,15 @@ fn save_open(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let connection = needed_connection(s, params)?;
     let c = s.state.connection(Which::Id(connection)).ok_or_else(|| disabled(NOT_CONNECTED))?;
     let (config, secrets) = (c.config.clone(), c.credentials.clone());
-    let id = save_with_secrets(s, config, &secrets)?;
+    let id = save_with_secrets(s, config, &secrets).map_err(|e| EngineError::Config(e.to_string()))?;
     Ok(Outcome::Done(json!({ "id": id, "connection": connection })))
+}
+
+/// What an open asked to keep once it succeeds, with the secrets given in its params:
+/// `savePassword`'s and `save`'s.
+struct Asked {
+    keep: Option<Credentials>,
+    save: Option<Credentials>,
 }
 
 fn apply_open(
@@ -1334,7 +1349,7 @@ fn apply_open(
     mut config: ConnectionConfig,
     credentials: Credentials,
     result: Result<(Opened, Catalog), EngineError>,
-    keep: Option<Credentials>,
+    asked: Asked,
     stop: &Stop,
 ) -> Result<Json, EngineError> {
     let (opened, catalog) = unless_cancelled(s, stop, result)?;
@@ -1343,7 +1358,8 @@ fn apply_open(
         // closes as it is dropped.
         return Err(EngineError::Busy("already connected".into()));
     }
-    let kept = keep.map(|typed| keep_secrets(s, &mut config, &typed));
+    let saved = asked.save.map(|typed| save_opened(s, &config, &typed));
+    let kept = asked.keep.map(|typed| keep_secrets(s, &mut config, &typed));
     let Opened { conn, tunnel } = opened;
     let (info, dialect) = (conn.info().clone(), conn.dialect());
     let used = config.clone();
@@ -1364,10 +1380,15 @@ fn apply_open(
         apply_gate: None,
     };
     let mut result = opened_json(&c, s.state.store.is_saved(&c.config.id));
-    if let (Json::Object(map), Some(kept)) = (&mut result, kept) {
-        map.insert("secretsSaved".into(), json!(kept.is_ok()));
-        if let Err(note) = kept {
-            map.insert("secretsNote".into(), json!(note));
+    if let Json::Object(map) = &mut result {
+        if let Some(kept) = kept {
+            map.insert("secretsSaved".into(), json!(kept.is_ok()));
+            if let Err(note) = kept {
+                map.insert("secretsNote".into(), json!(note));
+            }
+        }
+        if let Some(Err(note)) = saved {
+            map.insert("savedNote".into(), json!(note));
         }
     }
     for w in &c.info.warnings {
@@ -1386,6 +1407,22 @@ fn apply_open(
     s.state.screen = Screen::Workspace;
     record_use(s, &used);
     Ok(result)
+}
+
+/// `save` after a successful open: saves `config` with `typed` as [`save_with_secrets`] does.
+/// `Err` says why it was not saved, also in a notice; the open stands.
+fn save_opened(s: &mut Session, config: &ConnectionConfig, typed: &Credentials) -> Result<(), String> {
+    let e = match save_with_secrets(s, config.clone(), typed) {
+        Ok(_) => return Ok(()),
+        Err(e) => e,
+    };
+    let note = match e {
+        ConfigError::Locked => "another dbee window was changing the connections file".to_owned(),
+        e => format!("the connections file could not be written: {e}"),
+    };
+    log::warn!("an opened connection could not be saved");
+    s.ui_requests.push(UiRequest::Notice(format!("The connection was not saved: {note}")));
+    Err(note)
 }
 
 /// `savePassword` after a successful open: keeps `typed` for the saved connection `config.id`
