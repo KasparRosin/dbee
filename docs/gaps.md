@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-19 · **Change:** minor (entry 55: the engine side done: `table.structure` reads a table's indexes and triggers on all four engines; the switch and the page are left; before: entry 58 done and dropped: the cells an Apply wrote show the saved mark, then it fades; before: entry 14 done: closing the window asks too, so every way out of a transaction asks first; what stays is the shared session, a limit; before: entry 14: the window's transaction prompt, its toast and the switch that waits for it; only quit is left; before: entry 14: closing over a transaction asks how to end it in the engine; before: the M3 Phase 2 review: entries 14, 53 and 54 say what is left now that the status bar and the error band are built; entries 67 to 73 are new; entries 24, 56 and 61 gain a line)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-19 · **Change:** minor (entries 61 and 68: the table tab's bars are cut at the work area's edges and give way in order; the panel giving way at 640 is the query tab screen's; before: entry 55: the engine side done: `table.structure` reads a table's indexes and triggers on all four engines; the switch and the page are left; before: entry 58 done and dropped: the cells an Apply wrote show the saved mark, then it fades; before: entry 14 done: closing the window asks too, so every way out of a transaction asks first; what stays is the shared session, a limit; before: entry 14: the window's transaction prompt, its toast and the switch that waits for it; only quit is left; before: entry 14: closing over a transaction asks how to end it in the engine; before: the M3 Phase 2 review: entries 14, 53 and 54 say what is left now that the status bar and the error band are built; entries 67 to 73 are new; entries 24, 56 and 61 gain a line)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -452,10 +452,10 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 ### 61. At the smallest window, three texts are cut and the filter's APPLY is out of view (U)
 
 - **Limit:** at 640×420 the paging bar's page label (`PAGE 1`) runs about 29 points past its room, the query toolbar's `RUN CURRENT` is cut and overlaps the row count (`1 ROW`), and the form's title (`New connection`) is cut short at about 101 points. All three were cut before M3's fonts too (`Page 1`, `Run current` over `1 row`); see also entry 24.
-- **Limit:** at 640×420 with the value panel closed, the table tab's filter row runs about 97 points past the work area: APPLY is out of view and `+` is cut. It ran about 49 points over before M3; the row's 28-point squares, APPLY's 62 and the 12 inset add the rest. Enter in a value field still applies.
+- **Limit:** at 640×420 with the value panel closed, the table tab's filter row is about 97 points wider than the work area: since the table tab screen it is cut at the bar's right edge, never drawn past it, so APPLY is out of view and `+` is cut. It was about 49 points wider before M3; the row's 28-point squares, APPLY's 62 and the 12 inset add the rest. Enter in a value field still applies. The table bar and the paging bar give way in order and keep their buttons at this size.
 - **Evidence:** reviewer 1's size probe in the M3 Phase 1 review, run on the tree before and after Phase 1; `crates/ui-egui/src/paging.rs`, `crates/ui-egui/src/query_tab.rs` (the toolbar), `crates/ui-egui/src/conn_form.rs` (the title); for the filter row, `ui.inspect` in the M3 Phase 2 review (`filter-apply` at x 655 in a 640-wide window, `visible: false`) and `crates/ui-egui/src/filter_bar.rs`. At 1100×720 nothing is cut.
 - **Impact:** small: only in a window made as small as it goes.
-- **Estimate:** part of the bars' and the query and table tab screens (M3 Phase 3); not estimated.
+- **Estimate:** part of the bars' and the query tab screen (M3 Phase 3); not estimated.
 
 ### 62. View > Theme can't be reached before connecting (U)
 
@@ -501,10 +501,10 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 68. At the smallest window with the value panel open, two controls draw past their own edges (U)
 
-- **Limit:** at 640×420 with the value panel open, as it is by default, the work area is narrow enough that the filter row's column dropdown draws its chevron onto the raw SQL toggle beside it, and the error band's position link (`Line 3, column 8 →`) lands left of the band, over the pane's edge, while the message wraps one or two letters a line. Closing the panel or widening the window shows both whole.
+- **Limit:** at 640×420 with the value panel open, as it is by default, the work area is about 130 points wide, narrow enough that the filter row's column dropdown draws its chevron onto the raw SQL toggle beside it, and the error band's position link (`Line 3, column 8 →`) lands left of the band, over the pane's edge, while the message wraps one or two letters a line. Closing the panel or widening the window shows both whole. The table tab's bars are cut at the work area's edges and no control of theirs is drawn over another, but in that width the table bar keeps little more than DATA and STRUCTURE: the panel should give way before the work area does, which is the query tab screen's (it hides the panel at 640).
 - **Evidence:** `Dropdown::show` places the chevron from the control's right edge with no floor (`crates/ui-egui/src/components/dropdown.rs`); the band's `link_room` is not limited to its head's width (`crates/ui-egui/src/components/error_band.rs`). Seen in the M3 Phase 2 review at 640×420, in both modes.
 - **Impact:** small: only in a window made as small as it goes, with the panel open.
-- **Estimate:** part of the query and table tab screens (M3 Phase 3), where the panes give way before the work area does; each control keeping within its rect is about 0.5 h (estimated).
+- **Estimate:** part of the query tab screen (M3 Phase 3), where the panes give way before the work area does; each control keeping within its rect is about 0.5 h (estimated).
 
 ### 69. The tokens check misses a token at an opacity, and `theme::mask` (S)
 

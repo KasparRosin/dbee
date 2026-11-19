@@ -394,10 +394,11 @@ pub enum RowCount {
 }
 
 /// The row count as drawn: its words (none with no rows shown and no count), its COUNT or COUNT
-/// ROWS, and whether that was clicked.
+/// ROWS, COUNTING (with its timer, while counting), and whether COUNT was clicked.
 pub struct CountShown {
     pub words: Option<Response>,
     pub count: Option<Response>,
+    pub counting: Option<Response>,
     pub asked: bool,
 }
 
@@ -432,10 +433,11 @@ impl RowCount {
         }
     }
 
-    /// Its parts: the words, COUNT or COUNT ROWS, COUNTING with its time; and its width.
-    fn parts(self, ui: &Ui, shown: Option<(u64, u64)>) -> CountParts {
+    /// Its parts: the words (unless `bare`), COUNT or COUNT ROWS, COUNTING with its time; and its
+    /// width.
+    fn parts(self, ui: &Ui, shown: Option<(u64, u64)>, bare: bool) -> CountParts {
         let t = tokens(ui.ctx());
-        let says = self.words(shown);
+        let says = if bare { String::new() } else { self.words(shown) };
         let words = (!says.is_empty()).then(|| Piece::new(ui, Text::Label.job(&says, t.text_muted), says));
         let button = match self {
             RowCount::Estimate(n) if n > 0 => Some(TextButton::new("Count")),
@@ -459,14 +461,29 @@ impl RowCount {
 
     /// How wide it draws in `ui` with the rows shown.
     pub fn width(self, ui: &Ui, shown: Option<(u64, u64)>) -> f32 {
-        self.parts(ui, shown).width
+        self.parts(ui, shown, false).width
+    }
+
+    /// How wide it draws in `ui` without its words: COUNT, COUNT ROWS or COUNTING alone, as a
+    /// narrow bar keeps it; 0 when that leaves nothing.
+    pub fn bare_width(self, ui: &Ui) -> f32 {
+        self.parts(ui, None, true).width
     }
 
     /// Draws it where `ui` puts it next, as wide as what it holds and as tall as its button, with
     /// the rows shown (`1–100`), if any.
     pub fn show(self, ui: &mut Ui, shown: Option<(u64, u64)>) -> CountShown {
+        self.show_parts(ui, shown, false)
+    }
+
+    /// [`RowCount::show`] without its words ([`RowCount::bare_width`]).
+    pub fn show_bare(self, ui: &mut Ui) -> CountShown {
+        self.show_parts(ui, None, true)
+    }
+
+    fn show_parts(self, ui: &mut Ui, shown: Option<(u64, u64)>, bare: bool) -> CountShown {
         let t = tokens(ui.ctx());
-        let CountParts { words, button, counting, width } = self.parts(ui, shown);
+        let CountParts { words, button, counting, width } = self.parts(ui, shown, bare);
         let words_w = words.as_ref().map_or(0.0, Piece::width);
         let any = words.is_some();
         let gap = |w: f32| if any { w } else { 0.0 };
@@ -480,13 +497,14 @@ impl RowCount {
             let w = b.width(ui);
             ui.put(Rect::from_min_size(pos2(x, rect.top()), vec2(w, BUTTON_H)), b)
         });
-        if let Some((c, time)) = counting {
+        let counting = counting.map(|(c, time)| {
             x += gap(ROW_COUNT_COUNTING_GAP);
-            piece(ui, id.with("counting"), &c, pos2(x, mid), t.text_muted);
+            let r = piece(ui, id.with("counting"), &c, pos2(x, mid), t.text_muted);
             time.show(ui, id.with("timer"), x + c.width() + ROW_COUNT_COUNTING_GAP, mid, t);
-        }
+            r
+        });
         let asked = count.as_ref().is_some_and(Response::clicked);
-        CountShown { words, count, asked }
+        CountShown { words, count, counting, asked }
     }
 }
 

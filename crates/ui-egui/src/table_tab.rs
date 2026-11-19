@@ -20,6 +20,10 @@
 //! - the paging bar ([`PagingBar`], its words and rules [`crate::paging`]): the arrows with the
 //!   page's words, a cut page's note, and the staged changes with RESET and APPLY.
 //!
+//! Every bar is cut at the body's edges. Short of room the table bar gives way in order
+//! ([`TableBar::fit`]), the paging bar in its own, and a filter row wider than the bar is cut at
+//! its right edge: no control is drawn over another or past the body at any width.
+//!
 //! It reads the tab from the engine each frame and acts only through commands, started with
 //! [`DbeeApp::start`] after drawing (so a `needs…` answer opens its dialog and an error shows as a
 //! notice, except a page load's or an Apply's database error, which the band shows). Whether the
@@ -230,10 +234,13 @@ fn table_bar_tags(
         let structure = structure.clone().hint_disabled(STRUCTURE_LATER);
         tags.tag_value_as("table-view-structure", &structure, false, false);
     }
+    // Without its words (a narrow bar) REFRESH's hover names it; + ROW's always does.
+    let words = shown.fit.words;
     if let Some(r) = shown.refresh {
         let r = match refresh_blocked {
             Some(why) => r.hint_disabled(format!("Refresh: not now, {why}")),
-            None => r.hint("Load the page again"),
+            None if words => r.hint("Load the page again"),
+            None => r.hint("Refresh: load the page again"),
         };
         tags.tag_value_as("table-refresh", &r, "Refresh", refresh_blocked.is_none());
     }
@@ -252,7 +259,7 @@ fn table_bar_tags(
         if let Some(r) = &c.words {
             tags.tag_value("table-rows", r, rows);
         }
-        match (c.count, c.words) {
+        match (c.count, c.words.or(c.counting)) {
             (Some(r), _) => {
                 let r = match count_blocked {
                     Some(why) => r.hint_disabled(format!("Can't count now: {why}.")),
@@ -441,12 +448,15 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let lost = connected.is_none_or(|c| c.lost);
         let body = ui.available_rect_before_wrap();
         let split = (body.bottom() - BAR_H).max(body.top());
+        // Every bar is cut at the body's edges: nothing is drawn past them at any width.
+        let clip = ui.clip_rect().intersect(body);
         let mut top = ui.new_child(
             UiBuilder::new()
                 .id_salt("dbee-table-tab")
                 .max_rect(Rect::from_min_max(body.min, pos2(body.right(), split)))
                 .layout(Layout::top_down(Align::Min)),
         );
+        top.set_clip_rect(clip);
         top.spacing_mut().item_spacing.y = 0.0;
         let read_only = dbee_engine::cmd::table::not_editable(session, tab);
         // As the engine's edit commands allow: rows that can be edited, a connection that is not
@@ -565,6 +575,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             }
         }
         let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(body.left(), split), body.max)));
+        bottom.set_clip_rect(clip);
         if tab.data.is_some() {
             runs.extend(paging_bar(&mut bottom, &paging(tab, lost), tags));
         }

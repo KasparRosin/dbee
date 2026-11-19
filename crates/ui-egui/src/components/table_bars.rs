@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Response, Sense, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2};
+use egui::{Align, CornerRadius, Frame, Layout, Margin, Rangef, Rect, Response, Sense, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2};
 
 use super::button::{BarButton, BoxButton, IconButton, TextButton};
 use super::icon::Icon;
@@ -80,7 +80,8 @@ pub enum TableAsked {
     Value,
 }
 
-/// The table bar as drawn: each part shown, and what a click asked for.
+/// The table bar as drawn: each part shown, the form it took for its room, and what a click
+/// asked for.
 pub struct TableShown {
     /// The view switch's segments: DATA, STRUCTURE.
     pub view: Vec<Response>,
@@ -93,7 +94,34 @@ pub struct TableShown {
     pub import: Option<Response>,
     pub export: Option<Response>,
     pub value: Option<Response>,
+    pub fit: TableFit,
     pub asked: Option<TableAsked>,
+}
+
+/// Which of the table bar's parts show, short of room. They give way in this order (the first
+/// first): the count's range (`1–100 of`), IMPORT and EXPORT, REFRESH's and + ROW's words (their
+/// icons stay), the count's words (COUNT, COUNT ROWS or COUNTING stay), then the facts. Past that
+/// the left group is cut at the bar's end; DATA and STRUCTURE never go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableFit {
+    pub range: bool,
+    pub import_export: bool,
+    pub words: bool,
+    pub count_words: bool,
+    pub count: bool,
+}
+
+impl TableFit {
+    /// Every form, from the widest to the narrowest: each gives way one step more than the one
+    /// before it.
+    pub const FORMS: [TableFit; 6] = [
+        TableFit { range: true, import_export: true, words: true, count_words: true, count: true },
+        TableFit { range: false, import_export: true, words: true, count_words: true, count: true },
+        TableFit { range: false, import_export: false, words: true, count_words: true, count: true },
+        TableFit { range: false, import_export: false, words: false, count_words: true, count: true },
+        TableFit { range: false, import_export: false, words: false, count_words: false, count: true },
+        TableFit { range: false, import_export: false, words: false, count_words: false, count: false },
+    ];
 }
 
 /// What stands between the table bar's cells and its right end: the count, LOADING, or the
@@ -114,64 +142,129 @@ impl TableBar {
         }
     }
 
-    /// Draws it as wide as `ui`, 36 tall. Short of room the count's range goes first (`1–100
-    /// of`), then IMPORT and EXPORT, then the count; the cells at the ends stay, the right ones cut
-    /// at the bar's end.
+    /// The view switch as drawn, `view` being the one chosen.
+    fn switch<'a>(&self, view: &'a mut View, choices: &'a [(View, &'a str)]) -> Segmented<'a, View> {
+        Segmented::caps(view, choices).off((!self.structure).then_some(View::Structure))
+    }
+
+    /// REFRESH and + ROW, with their words or without.
+    fn refresh_button(words: bool) -> BarButton<'static> {
+        BarButton::label(Icon::Refresh, "Refresh").over_line().words(words)
+    }
+
+    fn add_button(words: bool) -> BarButton<'static> {
+        BarButton::label(Icon::Plus, "Row").over_line().words(words)
+    }
+
+    /// The facts between the cells: the count, LOADING with its time, or the structure's.
+    fn facts(&self, ui: &Ui) -> Facts {
+        let t = tokens(ui.ctx());
+        match self.loading {
+            Some(l) => Facts::Loading(
+                Piece::new(ui, Text::Label.job("Loading", t.text_muted), "Loading"),
+                l.elapsed.map_or(Time::Spinner, |e| Time::timer(ui, t, e)),
+            ),
+            None if self.view == View::Data => Facts::Count,
+            None => {
+                let words = self.structure_words();
+                Facts::Structure(Piece::new(ui, Text::Label.job(&words, t.text_muted), words))
+            }
+        }
+    }
+
+    /// The rows shown (`1–100`) in the count, when `fit` keeps them.
+    fn range(&self, fit: TableFit) -> Option<(u64, u64)> {
+        self.shown.filter(|_| fit.range)
+    }
+
+    /// How wide `facts` draws in form `fit`; 0 when it draws nothing.
+    fn facts_width(&self, ui: &Ui, facts: &Facts, fit: TableFit) -> f32 {
+        if !fit.count {
+            return 0.0;
+        }
+        match facts {
+            Facts::Count if fit.count_words => self.count.width(ui, self.range(fit)),
+            Facts::Count => self.count.bare_width(ui),
+            Facts::Loading(words, time) => words.width() + TABLE_LOADING_GAP + time.width(),
+            Facts::Structure(words) => words.width(),
+        }
+    }
+
+    /// IMPORT, EXPORT and the toggle at the bar's right end (the data view's only).
+    fn right_buttons(&self) -> (BarButton<'static>, BarButton<'static>, Option<BarButton<'static>>) {
+        let import = BarButton::label(Icon::Import, "Import").over_line();
+        let export = BarButton::label(Icon::Export, "Export").over_line().divider(false);
+        (import, export, self.value.map(|on| BarButton::icon(Icon::Panel).on(on).over_line()))
+    }
+
+    /// The first form ([`TableFit::FORMS`]) that fits a bar `room` wide, each form taking room
+    /// only from the steps before it; the narrowest when none does (its left group then cut at
+    /// the bar's end).
+    pub fn fit(&self, ui: &Ui, room: f32) -> TableFit {
+        let mut view = self.view;
+        let choices = [(View::Data, "Data"), (View::Structure, "Structure")];
+        let switch_w = self.switch(&mut view, &choices).drawn_width(ui);
+        let facts = self.facts(ui);
+        let data = self.view == View::Data;
+        let (import, export, toggle) = self.right_buttons();
+        let toggle_w = toggle.as_ref().map_or(0.0, |b| b.width(ui));
+        let io_w = import.width(ui) + export.width(ui);
+        let needs = |fit: TableFit| {
+            let first = match self.loading {
+                Some(_) => cancel_width(ui),
+                None => Self::refresh_button(fit.words).width(ui),
+            };
+            let add = if data { Self::add_button(fit.words).width(ui) } else { 0.0 };
+            let right = if data { toggle_w + if fit.import_export { io_w } else { 0.0 } } else { 0.0 };
+            let facts = match self.facts_width(ui, &facts, fit) {
+                w if w > 0.0 => w + 2.0 * TABLE_BAR_GAP,
+                _ => 0.0,
+            };
+            TABLE_BAR_PAD_X + switch_w + TABLE_BAR_GAP + first + add + facts + right
+        };
+        TableFit::FORMS.into_iter().find(|&fit| needs(fit) <= room).unwrap_or(TableFit::FORMS[5])
+    }
+
+    /// Draws it as wide as `ui`, 36 tall, in the first form that fits ([`TableBar::fit`]); short
+    /// of all room the left group is cut at the bar's end. Nothing is drawn past the bar.
     pub fn show(self, ui: &mut Ui) -> TableShown {
         let t = tokens(ui.ctx());
         let (bar, cell) = bar_ground(ui, Line::Bottom);
+        let clip = ui.clip_rect().intersect(cell);
         let mid = cell.center().y;
         let data = self.view == View::Data;
+        let fit = self.fit(ui, cell.width());
         let mut asked = None;
         // The left: the view switch, then REFRESH (or CANCEL's cell) and + ROW.
         let mut left = ui.new_child(UiBuilder::new().id_salt(bar.id.with("left")).max_rect(cell).layout(Layout::left_to_right(Align::Center)));
+        left.set_clip_rect(clip);
         left.spacing_mut().item_spacing.x = 0.0;
         left.add_space(TABLE_BAR_PAD_X);
         let mut view = self.view;
         let choices = [(View::Data, "Data"), (View::Structure, "Structure")];
-        let off = (!self.structure).then_some(View::Structure);
-        let switch = Segmented::caps(&mut view, &choices).off(off).show(&mut left);
+        let switch = self.switch(&mut view, &choices).show(&mut left);
         if switch.row.changed() {
             asked = Some(TableAsked::View(view));
         }
         left.add_space(TABLE_BAR_GAP);
         let (refresh, cancel) = match self.loading {
             Some(_) => (None, Some(cancel_cell(&mut left))),
-            None => (Some(left.add_enabled(self.can_refresh, BarButton::label(Icon::Refresh, "Refresh").over_line())), None),
+            None => (Some(left.add_enabled(self.can_refresh, Self::refresh_button(fit.words))), None),
         };
-        let add = data.then(|| left.add_enabled(self.can_add, BarButton::label(Icon::Plus, "Row").over_line()));
+        let add = data.then(|| left.add_enabled(self.can_add, Self::add_button(fit.words)));
         let left_end = left.min_rect().right();
         // The right end: IMPORT, EXPORT and the toggle (when there is one), off in the structure
         // view.
-        let import = BarButton::label(Icon::Import, "Import").over_line();
-        let export = BarButton::label(Icon::Export, "Export").over_line().divider(false);
-        let toggle = self.value.map(|on| BarButton::icon(Icon::Panel).on(on).over_line());
+        let (import, export, toggle) = self.right_buttons();
         let toggle_w = toggle.as_ref().map_or(0.0, |b| b.width(ui));
-        let io_w = import.width(ui) + export.width(ui);
-        // The count's room with IMPORT and EXPORT (`io_w`) or without them.
-        let room_for = |io: f32| cell.right() - io - toggle_w - TABLE_BAR_GAP - left_end - TABLE_BAR_GAP;
-        // The first form of the count that fits: with its range and IMPORT and EXPORT; without
-        // the range; without IMPORT and EXPORT too. When none does, the count goes and IMPORT and
-        // EXPORT stay.
-        let (range, io) = if data && self.loading.is_none() {
-            let bare = self.count.width(ui, None);
-            if self.count.width(ui, self.shown) <= room_for(io_w) {
-                (self.shown, true)
-            } else if bare <= room_for(io_w) {
-                (None, true)
-            } else {
-                (None, bare > room_for(0.0))
-            }
-        } else {
-            (self.shown, true)
-        };
-        let right_w: f32 = if data { toggle_w + if io { io_w } else { 0.0 } } else { 0.0 };
+        let io = fit.import_export;
+        let right_w: f32 = if data { toggle_w + if io { import.width(ui) + export.width(ui) } else { 0.0 } } else { 0.0 };
         let right_x = (cell.right() - right_w).max(left_end);
         let (import, export, value) = if data {
             let lane = Rect::from_min_max(pos2(right_x, cell.top()), cell.max);
             let mut right = ui.new_child(UiBuilder::new().id_salt(bar.id.with("right")).max_rect(lane).layout(Layout::left_to_right(Align::Center)));
             right.spacing_mut().item_spacing.x = 0.0;
-            right.set_clip_rect(right.clip_rect().intersect(cell));
+            right.set_clip_rect(clip);
             let (import, export) = if io {
                 (
                     Some(right.add_enabled(false, import).hint_disabled(IMPORT_LATER)),
@@ -185,50 +278,41 @@ impl TableBar {
             (None, None, None)
         };
         // Between them, ending 12 before IMPORT (or the bar's end): the count, LOADING, or the
-        // structure's facts; none when there is no room for it.
-        let facts = match self.loading {
-            Some(l) => Facts::Loading(
-                Piece::new(ui, Text::Label.job("Loading", t.text_muted), "Loading"),
-                l.elapsed.map_or(Time::Spinner, |e| Time::timer(ui, t, e)),
-            ),
-            None if data => Facts::Count,
-            None => {
-                let words = self.structure_words();
-                Facts::Structure(Piece::new(ui, Text::Label.job(&words, t.text_muted), words))
-            }
-        };
+        // structure's facts; none when the form leaves it out or there is no room for it.
+        let facts = self.facts(ui);
+        let needed = self.facts_width(ui, &facts, fit);
         let end = if data { right_x } else { cell.right() } - TABLE_BAR_GAP;
         let room = end - left_end - TABLE_BAR_GAP;
         let mut count = None;
         let mut shown_facts = None;
-        match facts {
-            Facts::Count => {
-                let needed = self.count.width(ui, range);
-                if needed <= room {
-                    let at = Rect::from_min_max(pos2(end - needed, cell.top()), pos2(end, cell.bottom()));
-                    let mut c =
-                        ui.new_child(UiBuilder::new().id_salt(bar.id.with("count")).max_rect(at).layout(Layout::left_to_right(Align::Center)));
+        if needed > 0.0 && needed <= room {
+            let lane = |ui: &mut Ui, salt: &str, at: Rect| {
+                let mut c = ui.new_child(UiBuilder::new().id_salt(bar.id.with(salt)).max_rect(at).layout(Layout::left_to_right(Align::Center)));
+                c.set_clip_rect(clip);
+                c
+            };
+            let at = Rect::from_min_max(pos2(end - needed, cell.top()), pos2(end, cell.bottom()));
+            match facts {
+                Facts::Count => {
+                    let mut c = lane(ui, "count", at);
                     if !self.can_count {
                         c.disable();
                     }
-                    let shown = self.count.show(&mut c, range);
+                    let shown = if fit.count_words { self.count.show(&mut c, self.range(fit)) } else { self.count.show_bare(&mut c) };
                     if shown.asked {
                         asked = Some(TableAsked::Count);
                     }
                     count = Some(shown);
                 }
-            }
-            Facts::Loading(words, time) => {
-                let w = words.width() + TABLE_LOADING_GAP + time.width();
-                if w <= room {
-                    let x = end - w;
-                    shown_facts = Some(piece(ui, bar.id.with("loading"), &words, pos2(x, mid), t.text_muted));
-                    time.show(ui, bar.id.with("timer"), x + words.width() + TABLE_LOADING_GAP, mid, t);
+                Facts::Loading(words, time) => {
+                    let c = lane(ui, "loading-lane", at);
+                    let x = at.left();
+                    shown_facts = Some(piece(&c, bar.id.with("loading"), &words, pos2(x, mid), t.text_muted));
+                    time.show(&c, bar.id.with("timer"), x + words.width() + TABLE_LOADING_GAP, mid, t);
                 }
-            }
-            Facts::Structure(words) => {
-                if words.width() <= room {
-                    shown_facts = Some(piece(ui, bar.id.with("facts"), &words, pos2(end - words.width(), mid), t.text_muted));
+                Facts::Structure(words) => {
+                    let c = lane(ui, "facts-lane", at);
+                    shown_facts = Some(piece(&c, bar.id.with("facts"), &words, pos2(at.left(), mid), t.text_muted));
                 }
             }
         }
@@ -242,8 +326,13 @@ impl TableBar {
         } else if clicked(&value) {
             asked = Some(TableAsked::Value);
         }
-        TableShown { view: switch.segments, refresh, cancel, add, count, facts: shown_facts, import, export, value, asked }
+        TableShown { view: switch.segments, refresh, cancel, add, count, facts: shown_facts, import, export, value, fit, asked }
     }
+}
+
+/// How wide CANCEL's cell draws in `ui`.
+fn cancel_width(ui: &Ui) -> f32 {
+    BAR_LINE_W + 2.0 * TABLE_CANCEL_PAD_X + BoxButton::primary("Cancel").width(ui)
 }
 
 /// CANCEL in its cell, in REFRESH's place while a page loads: a divider, then `button/box`
@@ -251,7 +340,7 @@ impl TableBar {
 fn cancel_cell(ui: &mut Ui) -> Response {
     let t = tokens(ui.ctx());
     let button = BoxButton::primary("Cancel");
-    let size = vec2(BAR_LINE_W + 2.0 * TABLE_CANCEL_PAD_X + button.width(ui), BAR_CELL_H);
+    let size = vec2(cancel_width(ui), BAR_CELL_H);
     ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
         ui.set_min_size(size);
         let cell = ui.max_rect();
@@ -431,12 +520,16 @@ impl PagingBar<'_> {
 
 /// The filter bar's frame: `card` as wide as `ui`, its rows [`FILTER_BAR_PAD_Y`] from its top and
 /// bottom and [`FILTER_BAR_PAD_X`] from either side, a 1 px `line` under it; `add` draws the rows
-/// top-down ([`filter_row`]).
+/// top-down ([`filter_row`]). A row wider than the bar (a narrow tab) is cut at the bar's right
+/// edge: nothing is drawn past it, and the bar takes only its own width in `ui`.
 pub fn filter_bar<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     let t = tokens(ui.ctx());
     let (x, y) = (FILTER_BAR_PAD_X as i8, FILTER_BAR_PAD_Y as i8);
     let margin = Margin { left: x, right: x, top: y, bottom: y + BAR_LINE as i8 };
-    let shown = Frame::NONE.fill(t.card).inner_margin(margin).show(ui, |ui| {
+    let room = ui.available_rect_before_wrap();
+    let mut inside = ui.new_child(UiBuilder::new().id_salt("filter-bar").max_rect(room).layout(Layout::top_down(Align::Min)));
+    inside.set_clip_rect(ui.clip_rect().intersect(Rect::from_x_y_ranges(room.x_range(), Rangef::EVERYTHING)));
+    let shown = Frame::NONE.fill(t.card).inner_margin(margin).show(&mut inside, |ui| {
         ui.set_width(ui.available_width());
         ui.with_layout(Layout::top_down(Align::Min), |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -444,8 +537,8 @@ pub fn filter_bar<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
         })
         .inner
     });
-    let rect = shown.response.rect;
-    ui.painter().rect_filled(Rect::from_min_max(pos2(rect.left(), rect.bottom() - BAR_LINE), rect.max), CornerRadius::ZERO, t.line);
+    let (rect, _) = ui.allocate_exact_size(vec2(room.width(), shown.response.rect.height()), Sense::hover());
+    inside.painter().rect_filled(Rect::from_min_max(pos2(rect.left(), rect.bottom() - BAR_LINE), rect.max), CornerRadius::ZERO, t.line);
     shown.inner
 }
 
@@ -743,45 +836,82 @@ mod tests {
         }
     }
 
+    /// What a narrow table bar drew: each part's rect as seen (cut to what shows), with its name.
+    type Parts = Vec<(&'static str, Option<Rect>)>;
+
     #[test]
-    fn short_of_room_the_range_then_import_and_export_give_way() {
-        // From wide to narrow: everything; the count without its range; IMPORT and EXPORT gone
-        // too; the count gone, IMPORT and EXPORT back. Never two parts over each other.
-        let mut seen: Vec<u8> = Vec::new();
-        for width in (340..=900).rev().step_by(10) {
+    fn the_table_bar_gives_way_in_its_order() {
+        // From wide to narrow (the brief §7): everything; the count without its range; IMPORT and
+        // EXPORT gone too; REFRESH and + ROW without their words; the count without its words,
+        // COUNT kept; the count gone; then the left group cut at the bar's end. DATA and STRUCTURE
+        // are always drawn; no two parts overlap and nothing is drawn past the bar.
+        let seen_rect = |r: &Response| Some(r.interact_rect).filter(|r| r.is_positive());
+        let mut seen: Vec<(u32, usize)> = Vec::new();
+        for width in (160..=900u32).rev().step_by(10) {
             let mut h = crate::components::harness_in(
-                vec2(width as f32 + 20.0, 100.0),
+                vec2(width as f32 + 40.0, 100.0),
                 Theme::Light,
-                None,
-                move |ui, out: &mut Option<(Option<Rect>, Option<Rect>, Option<Rect>, Rect)>| {
+                (Parts::new(), Rect::NOTHING, 0usize),
+                move |ui, out: &mut (Parts, Rect, usize)| {
                     ui.allocate_ui(vec2(width as f32, 36.0), |ui| {
+                        let top = ui.cursor().min;
                         let s = screen_bar(RowCount::Estimate(100_000)).show(ui);
-                        let words = s.count.as_ref().and_then(|c| c.words.as_ref().map(|r| r.rect));
-                        let count = s.count.as_ref().and_then(|c| c.count.as_ref().map(|r| r.rect));
-                        let add = s.add.map_or(Rect::NOTHING, |r| r.rect);
-                        *out = Some((words, count, s.import.map(|r| r.rect), add));
+                        out.1 = Rect::from_min_size(top, vec2(width as f32, 36.0));
+                        out.2 = s.view.len();
+                        let words = s.count.as_ref().and_then(|c| c.words.as_ref().and_then(seen_rect));
+                        let count = s.count.as_ref().and_then(|c| c.count.as_ref().and_then(seen_rect));
+                        let mut parts: Parts = s.view.iter().zip(["data", "structure"]).map(|(r, n)| (n, seen_rect(r))).collect();
+                        parts.extend([
+                            ("refresh", s.refresh.as_ref().and_then(seen_rect)),
+                            ("add", s.add.as_ref().and_then(seen_rect)),
+                            ("words", words),
+                            ("count", count),
+                            ("import", s.import.as_ref().and_then(seen_rect)),
+                            ("export", s.export.as_ref().and_then(seen_rect)),
+                        ]);
+                        out.0 = parts;
                     });
                 },
             );
             h.run();
-            let Some((words, count, import, add)) = *h.state() else { panic!("{width}: drawn") };
+            let (parts, bar, segments) = h.state().clone();
+            let at = format!("{width} wide");
+            let part = |name: &str| parts.iter().find(|(n, _)| *n == name).and_then(|(_, r)| *r);
             let shapes = &h.output().shapes;
-            let range = texts(shapes).iter().any(|(w, _, _)| w.starts_with("1–100"));
-            let form = match (count.is_some(), range, import.is_some()) {
-                (true, true, true) => 0,
-                (true, false, true) => 1,
-                (true, false, false) => 2,
-                (false, _, true) => 3,
-                other => panic!("{width}: no such form {other:?}"),
-            };
-            if let (Some(w), Some(i)) = (words.or(count), import) {
-                assert!(w.right() <= i.left() && w.left() >= add.right(), "{width}: the count {w:?} between + ROW {add:?} and IMPORT {i:?}");
+            let all = texts(shapes);
+            let range = all.iter().any(|(w, _, _)| w.starts_with("1–100"));
+            let words = all.iter().any(|(w, _, _)| w == "REFRESH");
+            // Each step of the ladder, in its order: shown or given way.
+            let steps = [range, part("import").is_some(), words, part("words").is_some(), part("count").is_some()];
+            let form = steps.iter().take_while(|s| !**s).count();
+            assert!(steps[form..].iter().all(|s| *s), "{at}: a later step gave way before an earlier one: {steps:?}");
+            assert!(seen.last().is_none_or(|&(_, last)| form >= last), "{at}: room taken back: {seen:?} then {form}");
+            seen.push((width, form));
+            assert_eq!(segments, 2, "{at}: DATA and STRUCTURE drawn");
+            assert!(part("data").is_some(), "{at}: DATA shows");
+            for (i, (a, ra)) in parts.iter().enumerate() {
+                let Some(ra) = ra else { continue };
+                assert!(bar.expand(0.5).contains_rect(*ra), "{at}: `{a}` {ra:?} inside the bar {bar:?}");
+                for (b, rb) in &parts[i + 1..] {
+                    let Some(rb) = rb else { continue };
+                    let o = ra.intersect(*rb);
+                    assert!(!o.is_positive() || o.area() <= 0.5, "{at}: `{a}` {ra:?} over `{b}` {rb:?}");
+                }
             }
-            assert!(seen.last().is_none_or(|&last| form >= last), "{width}: room taken back: {seen:?} then {form}");
-            seen.push(form);
+            for s in shapes {
+                let r = s.shape.visual_bounding_rect().intersect(s.clip_rect);
+                assert!(!r.is_positive() || bar.expand(0.5).contains_rect(r), "{at}: drawn past the bar {bar:?}: {r:?}");
+            }
+            if form >= 2 {
+                // A word that left its button still names it.
+                use egui_kittest::kittest::Queryable;
+                assert!(h.query_by_label("Refresh").is_some(), "{at}: REFRESH still named");
+            }
         }
-        for form in 0..=3 {
-            assert!(seen.contains(&form), "the sweep passes through form {form}: {seen:?}");
+        assert_eq!(seen.first().map(|s| s.1), Some(0), "at 900 everything shows: {seen:?}");
+        println!("the table bar's form by width (0 all … 5 the count gone): {seen:?}");
+        for form in 0..=5 {
+            assert!(seen.iter().any(|&(_, f)| f == form), "the sweep passes through form {form}: {seen:?}");
         }
     }
 

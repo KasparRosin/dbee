@@ -217,6 +217,8 @@ fn m1_day_end_to_end() {
     assert_eq!(app.value(&format!("tab-{orders_tab}")), "orders");
     assert_eq!(t["rows"], 100, "the first page");
     app.shot(&root, "2b-orders");
+    // The table bar's controls stand apart, inside the window.
+    app.assert_apart(&["table-view-data", "table-refresh", "row-add", "page-count", "table-import", "table-export"], "2b");
     // The table bar between the filter bar and the rows: DATA chosen, STRUCTURE off, EXPORT off
     // (when it has room), the planner's estimate; COUNT counts the rows exactly.
     assert_eq!(app.value("table-view-data"), true);

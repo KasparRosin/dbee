@@ -2068,3 +2068,114 @@ fn no_rows_are_loaded_is_restyled() {
     };
     assert!((at.top() - (top + 12.0)).abs() <= 1.0, "12 down from the grid area's top {top}: {at:?}");
 }
+
+/// The value panel open or shut.
+fn panel(ui: &mut Ui, on: bool) {
+    if ui.value("value-toggle") != json!(on) {
+        ui.click("value-toggle");
+        ui.frame();
+    }
+    assert_eq!(ui.value("value-toggle"), on);
+}
+
+/// The window widths Review Focus 5 sweeps, from wide to narrow.
+const SWEEP: [f32; 10] = [1400.0, 1100.0, 900.0, 760.0, 640.0, 520.0, 420.0, 300.0, 200.0, 120.0];
+
+/// Two tagged controls that are one widget: `page-count` is the facts when no COUNT shows; a row
+/// left out tags its value field twice.
+fn one_widget(a: &str, b: &str) -> bool {
+    let pair = |x: &str, y: &str| (a == x && b == y) || (a == y && b == x);
+    pair("page-count", "table-rows")
+        || (a.ends_with("-value") && b == a.replace("-value", "-unapplied"))
+        || (b.ends_with("-value") && a == b.replace("-value", "-unapplied"))
+}
+
+/// Every tagged control of the table tab's bars lies inside the tab's body, and no two overlap.
+fn assert_nothing_over_anything(ui: &mut Ui, at: &str) {
+    let body = ui.body_x();
+    let height = ui.harness.ctx.content_rect().height();
+    let ids: Vec<String> = ["table-", "filter-", "page-", "row-add", "edit-", "edits-"].iter().flat_map(|p| ui.ids_with(p)).collect();
+    let drawn: Vec<(String, egui::Rect)> = ui.rects(&ids).into_iter().filter_map(|(id, r)| r.map(|r| (id, r))).collect();
+    for (id, r) in &drawn {
+        assert!(
+            r.left() >= body.min - 0.5 && r.right() <= body.max + 0.5 && r.top() >= 0.0 && r.bottom() <= height + 0.5,
+            "{at}: `{id}` {r:?} inside the body {body:?}"
+        );
+    }
+    for (i, (a, ra)) in drawn.iter().enumerate() {
+        for (b, rb) in &drawn[i + 1..] {
+            let o = ra.intersect(*rb);
+            assert!(one_widget(a, b) || !o.is_positive() || o.area() <= 0.5, "{at}: `{a}` {ra:?} over `{b}` {rb:?}");
+        }
+    }
+}
+
+/// [`assert_nothing_over_anything`] at each width of [`SWEEP`], with the value panel shut and then
+/// open; the window back at 1400 × 720 with the panel shut after.
+fn sweep_widths(ui: &mut Ui, state: &str) {
+    for on in [false, true] {
+        ui.harness.set_size(egui::vec2(1400.0, 720.0));
+        ui.frame();
+        panel(ui, on);
+        for width in SWEEP {
+            ui.harness.set_size(egui::vec2(width, 720.0));
+            ui.frame();
+            ui.frame();
+            assert_nothing_over_anything(ui, &format!("{state}, {width} wide, the panel {}", if on { "open" } else { "shut" }));
+        }
+    }
+    ui.harness.set_size(egui::vec2(1400.0, 720.0));
+    ui.frame();
+    panel(ui, false);
+}
+
+/// Review Focus 5: at every width, with a change staged, while a page loads (after 300 ms) and
+/// while the rows are counted, no control of the bars is drawn over another or past the body.
+#[test]
+fn no_bar_draws_one_control_over_another() {
+    let db = dbee_testkit::require_testdb!();
+    let staged = null_and_empty(db);
+    let (held, mut ui) = held_table(db);
+    ui.open("scratch", &staged.0);
+    ui.until("the page", loaded);
+    one_change_staged(&mut ui);
+    sweep_widths(&mut ui, "a change staged");
+    ui.click("edit-reset");
+    ui.open("scratch", &held.0);
+    ui.until("the page", loaded);
+    ui.frame();
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", held.0)).unwrap();
+    ui.ok("engine.execute", json!({ "command": "table.count", "params": {}, "wait": false }));
+    frames_while_running(&mut ui, true, 0.4, |_, _| {});
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == "COUNTING"), "the counting state shows");
+    sweep_widths(&mut ui, "counting");
+    ui.click("status-cancel");
+    ui.until("the cancelled count", |ui| ui.table()["counting"].is_null());
+    ui.ok("engine.execute", json!({ "command": "table.refresh", "params": {}, "wait": false }));
+    frames_while_running(&mut ui, false, 0.4, |_, _| {});
+    assert!(ui.rect("table-loading").is_some(), "the loading state shows");
+    sweep_widths(&mut ui, "loading");
+    ui.ok("engine.execute", json!({ "command": "table.cancel", "params": {} }));
+    ui.until("the load's end", |ui| ui.table()["loading"].is_null());
+    drop(lock);
+}
+
+/// At 640 × 420 with the value panel shut the table bar keeps its controls: the view switch,
+/// REFRESH, + ROW and COUNT are drawn whole (REFRESH and + ROW may lose their words).
+#[test]
+fn at_640_without_the_panel_the_table_bar_keeps_its_buttons() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, egui::vec2(640.0, 420.0));
+    ui.open("shop", "orders");
+    ui.until("the page", loaded);
+    without_the_panel(&mut ui);
+    ui.frame();
+    let body = ui.body_x();
+    for id in ["table-view-data", "table-refresh", "row-add", "page-count"] {
+        let r = ui.rect(id).unwrap_or_else(|| panic!("`{id}` drawn"));
+        assert!(r.left() >= body.min && r.right() < body.max - 1.0, "`{id}` {r:?} whole inside the body {body:?}");
+        assert!(r.height() >= 26.0 && r.width() >= 26.0, "`{id}` whole: {r:?}");
+    }
+    let count = ui.drawn("page-count");
+    assert!(ui.text_in(count, "COUNT").is_some_and(|(_, cut)| !cut), "`page-count` is COUNT, whole: {count:?}");
+}

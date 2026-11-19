@@ -194,6 +194,34 @@ impl App {
         self.ok("ui.click", json!({ "id": id }));
     }
 
+    /// The widgets of `ids` that were drawn lie inside the window, and no two overlap (by more
+    /// than half a point).
+    pub fn assert_apart(&mut self, ids: &[&str], at: &str) {
+        let i = self.inspect();
+        let window: Vec<f64> = i["window"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        let drawn: Vec<(&str, [f64; 4])> = ids
+            .iter()
+            .filter_map(|id| {
+                let tag = i["automation"].as_array().unwrap().iter().find(|a| a["id"] == *id && a["visible"] != false)?;
+                let r: Vec<f64> = tag["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+                Some((*id, [r[0], r[1], r[2], r[3]]))
+            })
+            .collect();
+        for (id, [x, y, w, h]) in &drawn {
+            assert!(
+                *x >= -0.5 && *y >= -0.5 && x + w <= window[0] + 0.5 && y + h <= window[1] + 0.5,
+                "{at}: `{id}` {:?} inside the window {window:?}",
+                [x, y, w, h]
+            );
+        }
+        for (n, (a, [ax, ay, aw, ah])) in drawn.iter().enumerate() {
+            for (b, [bx, by, bw, bh]) in &drawn[n + 1..] {
+                let (w, h) = ((ax + aw).min(bx + bw) - ax.max(*bx), (ay + ah).min(by + bh) - ay.max(*by));
+                assert!(w <= 0.0 || h <= 0.0 || w * h <= 0.5, "{at}: `{a}` over `{b}`");
+            }
+        }
+    }
+
     pub fn double_click(&mut self, id: &str) {
         self.ok("ui.click", json!({ "id": id, "count": 2 }));
     }

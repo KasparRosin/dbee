@@ -165,11 +165,9 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
         self
     }
 
-    /// Draws it; the box's response (changed when a click or Space chose another) and each
-    /// segment's.
-    pub fn show(self, ui: &mut Ui) -> Shown {
-        let Segmented { selected, choices, style, width, off } = self;
-        let n = choices.len();
+    /// Its segments as `ui` draws them.
+    fn segments(&self, ui: &Ui) -> Vec<Segment<'a>> {
+        let (style, width, n) = (self.style, self.width, self.choices.len());
         let segment = |words, on, i: usize| {
             let s = Segment { words, style, selected: on, divider: i + 1 < n && !on, width: None, look: None };
             match style {
@@ -178,7 +176,20 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
                 Style::Small => s.width((width.min(ui.available_width()) - 2.0).max(0.0) / n.max(1) as f32),
             }
         };
-        let segments: Vec<Segment<'_>> = choices.iter().enumerate().map(|(i, (value, words))| segment(*words, *value == *selected, i)).collect();
+        self.choices.iter().enumerate().map(|(i, (value, words))| segment(*words, *value == *self.selected, i)).collect()
+    }
+
+    /// How wide it draws in `ui`: its segments and its edge.
+    pub fn drawn_width(&self, ui: &Ui) -> f32 {
+        self.segments(ui).iter().map(|s| s.parts(ui).2).sum::<f32>() + 2.0
+    }
+
+    /// Draws it; the box's response (changed when a click or Space chose another) and each
+    /// segment's.
+    pub fn show(self, ui: &mut Ui) -> Shown {
+        let segments = self.segments(ui);
+        let Segmented { selected, choices, off, .. } = self;
+        let n = choices.len();
         let widths: Vec<f32> = segments.iter().map(|s| s.parts(ui).2).collect();
         let (rect, mut row) = ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 2.0, SEGMENTED_H), Sense::hover());
         if ui.is_rect_visible(rect) {

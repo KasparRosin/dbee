@@ -284,6 +284,8 @@ pub struct BarButton<'a> {
     on: bool,
     done: bool,
     divider: bool,
+    /// Its words drawn; without them the icon alone, the words still naming it.
+    words: bool,
     height: f32,
     min_width: f32,
     look: Option<Look>,
@@ -292,12 +294,12 @@ pub struct BarButton<'a> {
 impl<'a> BarButton<'a> {
     /// `icon` and `label`, as REFRESH and + ROW in the table bar.
     pub fn label(icon: Icon, label: &'a str) -> BarButton<'a> {
-        BarButton { icon, label: Some(label), on: false, done: false, divider: true, height: BAR_BUTTON_H, min_width: 0.0, look: None }
+        BarButton { icon, label: Some(label), on: false, done: false, divider: true, words: true, height: BAR_BUTTON_H, min_width: 0.0, look: None }
     }
 
     /// `icon` alone, as the value panel's toggle.
     pub fn icon(icon: Icon) -> BarButton<'a> {
-        BarButton { icon, label: None, on: false, done: false, divider: true, height: BAR_BUTTON_H, min_width: 0.0, look: None }
+        BarButton { icon, label: None, on: false, done: false, divider: true, words: true, height: BAR_BUTTON_H, min_width: 0.0, look: None }
     }
 
     /// In a bar with a line along its bottom: as tall as the room above the line.
@@ -331,6 +333,13 @@ impl<'a> BarButton<'a> {
         self
     }
 
+    /// Its words drawn (the default); without them the icon alone in a 36 square, as a narrow
+    /// bar draws it, the words still its name for screen readers and automation.
+    pub fn words(mut self, words: bool) -> BarButton<'a> {
+        self.words = words;
+        self
+    }
+
     /// Draws it with `look` whatever its response says (the showcase only).
     pub fn look(mut self, look: Look) -> BarButton<'a> {
         self.look = Some(look);
@@ -344,7 +353,7 @@ impl<'a> BarButton<'a> {
 
     /// The words, if any, and the width.
     fn parts(&self, ui: &Ui) -> (Option<Arc<Galley>>, f32) {
-        let Some(label) = self.label else {
+        let Some(label) = self.label.filter(|_| self.words) else {
             return (None, BAR_BUTTON_H);
         };
         let words = ui.painter().layout_job(Text::Label.job(label, Color32::PLACEHOLDER));

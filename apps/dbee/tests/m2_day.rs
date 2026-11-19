@@ -273,6 +273,8 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let orders_tab = app.document()["active"].as_u64().unwrap();
     assert_eq!(app.value(&format!("tab-{orders_tab}")), "orders");
     app.shot(root, &format!("{p}-2b-orders"));
+    // The table bar's controls stand apart, inside the window.
+    app.assert_apart(&["table-view-data", "table-refresh", "row-add", "page-count", "table-import", "table-export"], &format!("{name}: 2b"));
     // The table bar between the filter bar and the rows: DATA chosen, STRUCTURE off, EXPORT off
     // (when it has room), the estimate (none on SQLite: COUNT ROWS); a click counts exactly.
     assert_eq!(app.value("table-view-data"), true, "{name}");
