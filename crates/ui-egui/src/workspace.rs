@@ -78,6 +78,9 @@ pub(crate) struct Workspace {
     pub tree: Tree,
     /// Each table tab's grid (its column widths), dropped with the tab.
     pub grids: Grids,
+    /// When the window first saw each table tab's page load or count running, on egui's clock
+    /// ([`table_tab::Since`]): the table bar's timers count from it. Dropped with the tab.
+    pub since: table_tab::Since,
     /// The cell editor, while one is open ([`crate::editors`]).
     pub editor: Option<CellEditor>,
     /// Each query tab's editor text and result grids, dropped with the tab.
@@ -243,6 +246,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let tabs = &app.session.state().tabs;
     app.view.work.grids.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     app.view.work.queries.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
+    app.view.work.since.retain(|(id, _), _| tabs.iter().any(|t| t.id() == *id));
     egui::Panel::top("dbee-menubar").exact_size(SLIM_BAR_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();
     // The status bar's room now and its contents last, so Tab reaches it after the tab's controls.

@@ -1,10 +1,10 @@
-//! The table tab's bars: the table bar over the rows (`table bar`), the filter bar under it
+//! The table tab's bars: the table bar over the rows (`table bar`), the filter bar over it
 //! (`filter row`), and the paging bar under the rows (`paging bar`).
 //!
 //! The table bar and the paging bar are views: they take what to show and say what was clicked;
 //! the screen tags what they drew, says on hover why something is off, and acts. The table tab
-//! screen places them in Phase 3, where REFRESH and + ROW move from the paging bar to the table
-//! bar; until then only the showcase draws them. The filter bar is a frame the screen's filter
+//! ([`crate::table_tab`]) draws the table bar with STRUCTURE off and no Value cell until the
+//! structure view and the query tab screen. The filter bar is a frame the screen's filter
 //! rows stand in ([`filter_bar`], [`filter_row`], [`and_mark`]): [`crate::filter_bar`] draws its
 //! controls there, from the shared controls.
 
@@ -47,6 +47,8 @@ pub struct Loading {
 #[derive(Clone, Copy, Debug)]
 pub struct TableBar {
     pub view: View,
+    /// STRUCTURE is on; off, it is drawn faint and a click on it asks nothing.
+    pub structure: bool,
     /// A page loads: CANCEL in REFRESH's place, LOADING and its timer in the count's.
     pub loading: Option<Loading>,
     /// The rows' count, with the rows shown (`1–100`).
@@ -58,8 +60,11 @@ pub struct TableBar {
     pub can_refresh: bool,
     /// + ROW is on (the rows take edits now).
     pub can_add: bool,
-    /// The value panel shows: its toggle is on.
-    pub value_on: bool,
+    /// COUNT and COUNT ROWS are on.
+    pub can_count: bool,
+    /// The value panel's toggle, on while the panel shows; `None` draws no Value cell, and the bar
+    /// ends at EXPORT.
+    pub value: Option<bool>,
 }
 
 /// What a click in the table bar asked for.
@@ -107,8 +112,9 @@ impl TableBar {
         }
     }
 
-    /// Draws it as wide as `ui`, 36 tall. Short of room the count goes first; the cells at the
-    /// ends stay, the right ones cut at the bar's end.
+    /// Draws it as wide as `ui`, 36 tall. Short of room the count's range goes first (`1–100
+    /// of`), then IMPORT and EXPORT, then the count; the cells at the ends stay, the right ones cut
+    /// at the bar's end.
     pub fn show(self, ui: &mut Ui) -> TableShown {
         let t = tokens(ui.ctx());
         let (bar, cell) = bar_ground(ui, Line::Bottom);
@@ -121,7 +127,8 @@ impl TableBar {
         left.add_space(TABLE_BAR_PAD_X);
         let mut view = self.view;
         let choices = [(View::Data, "Data"), (View::Structure, "Structure")];
-        let switch = Segmented::caps(&mut view, &choices).show(&mut left);
+        let off = (!self.structure).then_some(View::Structure);
+        let switch = Segmented::caps(&mut view, &choices).off(off).show(&mut left);
         if switch.row.changed() {
             asked = Some(TableAsked::View(view));
         }
@@ -132,23 +139,46 @@ impl TableBar {
         };
         let add = data.then(|| left.add_enabled(self.can_add, BarButton::label(Icon::Plus, "Row").over_line()));
         let left_end = left.min_rect().right();
-        // The right end: IMPORT, EXPORT and the toggle, off in the structure view.
-        let parts = [
-            BarButton::label(Icon::Import, "Import").over_line(),
-            BarButton::label(Icon::Export, "Export").over_line().divider(false),
-            BarButton::icon(Icon::Panel).on(self.value_on).over_line(),
-        ];
-        let right_w: f32 = if data { parts.iter().map(|b| b.width(ui)).sum() } else { 0.0 };
+        // The right end: IMPORT, EXPORT and the toggle (when there is one), off in the structure
+        // view.
+        let import = BarButton::label(Icon::Import, "Import").over_line();
+        let export = BarButton::label(Icon::Export, "Export").over_line().divider(false);
+        let toggle = self.value.map(|on| BarButton::icon(Icon::Panel).on(on).over_line());
+        let toggle_w = toggle.as_ref().map_or(0.0, |b| b.width(ui));
+        let io_w = import.width(ui) + export.width(ui);
+        // The count's room with IMPORT and EXPORT (`io_w`) or without them.
+        let room_for = |io: f32| cell.right() - io - toggle_w - TABLE_BAR_GAP - left_end - TABLE_BAR_GAP;
+        // The first form of the count that fits: with its range and IMPORT and EXPORT; without
+        // the range; without IMPORT and EXPORT too. When none does, the count goes and IMPORT and
+        // EXPORT stay.
+        let (range, io) = if data && self.loading.is_none() {
+            let bare = self.count.width(ui, None);
+            if self.count.width(ui, self.shown) <= room_for(io_w) {
+                (self.shown, true)
+            } else if bare <= room_for(io_w) {
+                (None, true)
+            } else {
+                (None, bare > room_for(0.0))
+            }
+        } else {
+            (self.shown, true)
+        };
+        let right_w: f32 = if data { toggle_w + if io { io_w } else { 0.0 } } else { 0.0 };
         let right_x = (cell.right() - right_w).max(left_end);
         let (import, export, value) = if data {
             let lane = Rect::from_min_max(pos2(right_x, cell.top()), cell.max);
             let mut right = ui.new_child(UiBuilder::new().id_salt(bar.id.with("right")).max_rect(lane).layout(Layout::left_to_right(Align::Center)));
             right.spacing_mut().item_spacing.x = 0.0;
             right.set_clip_rect(right.clip_rect().intersect(cell));
-            let [import, export, toggle] = parts;
-            let import = right.add_enabled(false, import).hint_disabled(IMPORT_LATER);
-            let export = right.add_enabled(false, export).hint_disabled(EXPORT_LATER);
-            (Some(import), Some(export), Some(right.add(toggle)))
+            let (import, export) = if io {
+                (
+                    Some(right.add_enabled(false, import).hint_disabled(IMPORT_LATER)),
+                    Some(right.add_enabled(false, export).hint_disabled(EXPORT_LATER)),
+                )
+            } else {
+                (None, None)
+            };
+            (import, export, toggle.map(|toggle| right.add(toggle)))
         } else {
             (None, None, None)
         };
@@ -171,12 +201,15 @@ impl TableBar {
         let mut shown_facts = None;
         match facts {
             Facts::Count => {
-                let needed = self.count.width(ui, self.shown);
+                let needed = self.count.width(ui, range);
                 if needed <= room {
                     let at = Rect::from_min_max(pos2(end - needed, cell.top()), pos2(end, cell.bottom()));
                     let mut c =
                         ui.new_child(UiBuilder::new().id_salt(bar.id.with("count")).max_rect(at).layout(Layout::left_to_right(Align::Center)));
-                    let shown = self.count.show(&mut c, self.shown);
+                    if !self.can_count {
+                        c.disable();
+                    }
+                    let shown = self.count.show(&mut c, range);
                     if shown.asked {
                         asked = Some(TableAsked::Count);
                     }
@@ -484,7 +517,9 @@ mod tests {
                 columns: 8,
                 can_refresh: true,
                 can_add: true,
-                value_on: false,
+                can_count: true,
+                value: Some(false),
+                structure: true,
             };
             for (state, b) in [
                 ("data", bar(View::Data, None)),
@@ -583,13 +618,15 @@ mod tests {
         let mut h = crate::components::harness_in(vec2(900.0, 200.0), Theme::Light, Vec::new(), |ui, seen: &mut Vec<TableAsked>| {
             let b = TableBar {
                 view: View::Data,
+                structure: true,
                 loading: None,
                 count: RowCount::Unknown,
                 shown: Some((1, 100)),
                 columns: 3,
                 can_refresh: true,
                 can_add: true,
-                value_on: true,
+                can_count: true,
+                value: Some(true),
             };
             ui.allocate_ui(vec2(840.0, 36.0), |ui| seen.extend(b.show(ui).asked));
         });
@@ -608,6 +645,113 @@ mod tests {
         h.run();
         h.run();
         assert!(texts(&h.output().shapes).iter().any(|(w, _, _)| w == IMPORT_LATER), "IMPORT's hover says why");
+    }
+
+    /// The table bar as the table tab draws it until the structure view and the query tab screen:
+    /// STRUCTURE off, no Value cell.
+    fn screen_bar(count: RowCount) -> TableBar {
+        TableBar {
+            view: View::Data,
+            structure: false,
+            loading: None,
+            count,
+            shown: Some((1, 100)),
+            columns: 3,
+            can_refresh: true,
+            can_add: true,
+            can_count: true,
+            value: None,
+        }
+    }
+
+    #[test]
+    fn structure_off_is_drawn_faint_and_asks_nothing() {
+        for (theme, t) in both() {
+            let at_ = format!("{theme:?}");
+            let (shapes, _) = drawn(theme, |ui| {
+                screen_bar(RowCount::Exact(25_000)).show(ui);
+            });
+            assert_eq!(word(&shapes, "STRUCTURE", &at_).1, t.text_faint, "{at_}: STRUCTURE off");
+            assert_eq!(word(&shapes, "DATA", &at_).1, t.on_ink, "{at_}: DATA chosen");
+        }
+        let mut h = crate::components::harness_in(vec2(900.0, 200.0), Theme::Light, Vec::new(), |ui, seen: &mut Vec<TableAsked>| {
+            ui.allocate_ui(vec2(840.0, 36.0), |ui| seen.extend(screen_bar(RowCount::Exact(3)).show(ui).asked));
+        });
+        h.run();
+        use egui_kittest::kittest::Queryable;
+        for label in ["Structure", "Data"] {
+            h.get_by_label(label).click();
+            h.run();
+        }
+        assert_eq!(*h.state(), [], "neither STRUCTURE off nor DATA chosen asks anything");
+    }
+
+    #[test]
+    fn no_value_cell_ends_at_export() {
+        for (theme, _) in both() {
+            let at_ = format!("{theme:?}");
+            for value in [None, Some(false)] {
+                let mut export = Rect::NOTHING;
+                let (shapes, at) = drawn(theme, |ui| {
+                    let b = TableBar { value, ..screen_bar(RowCount::Exact(25_000)) };
+                    export = b.show(ui).export.map_or(Rect::NOTHING, |r| r.rect);
+                });
+                let end = Rect::from_min_max(pos2(at.right() - 36.0, at.top()), at.max);
+                let icons = icon_in(&shapes, end).0;
+                match value {
+                    None => {
+                        assert!((export.right() - at.right()).abs() <= 0.5, "{at_}: EXPORT {export:?} ends the bar {at:?}");
+                        assert!(icons.is_empty(), "{at_}: no panel icon: {icons:?}");
+                    }
+                    Some(_) => {
+                        assert!(export.right() < at.right() - 30.0, "{at_}: the toggle after EXPORT {export:?}");
+                        assert!(!icons.is_empty(), "{at_}: the panel icon");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn short_of_room_the_range_then_import_and_export_give_way() {
+        // From wide to narrow: everything; the count without its range; IMPORT and EXPORT gone
+        // too; the count gone, IMPORT and EXPORT back. Never two parts over each other.
+        let mut seen: Vec<u8> = Vec::new();
+        for width in (340..=900).rev().step_by(10) {
+            let mut h = crate::components::harness_in(
+                vec2(width as f32 + 20.0, 100.0),
+                Theme::Light,
+                None,
+                move |ui, out: &mut Option<(Option<Rect>, Option<Rect>, Option<Rect>, Rect)>| {
+                    ui.allocate_ui(vec2(width as f32, 36.0), |ui| {
+                        let s = screen_bar(RowCount::Estimate(100_000)).show(ui);
+                        let words = s.count.as_ref().and_then(|c| c.words.as_ref().map(|r| r.rect));
+                        let count = s.count.as_ref().and_then(|c| c.count.as_ref().map(|r| r.rect));
+                        let add = s.add.map_or(Rect::NOTHING, |r| r.rect);
+                        *out = Some((words, count, s.import.map(|r| r.rect), add));
+                    });
+                },
+            );
+            h.run();
+            let Some((words, count, import, add)) = *h.state() else { panic!("{width}: drawn") };
+            let shapes = &h.output().shapes;
+            let range = texts(shapes).iter().any(|(w, _, _)| w.starts_with("1–100"));
+            let form = match (count.is_some(), range, import.is_some()) {
+                (true, true, true) => 0,
+                (true, false, true) => 1,
+                (true, false, false) => 2,
+                (false, _, true) => 3,
+                other => panic!("{width}: no such form {other:?}"),
+            };
+            if let (Some(w), Some(i)) = (words.or(count), import) {
+                assert!(w.right() <= i.left() && w.left() >= add.right(), "{width}: the count {w:?} between + ROW {add:?} and IMPORT {i:?}");
+            }
+            assert!(seen.last().is_none_or(|&last| form >= last), "{width}: room taken back: {seen:?} then {form}");
+            seen.push(form);
+        }
+        for form in 0..=3 {
+            assert!(seen.contains(&form), "the sweep passes through form {form}: {seen:?}");
+        }
     }
 
     #[test]

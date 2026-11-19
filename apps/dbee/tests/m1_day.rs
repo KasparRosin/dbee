@@ -81,6 +81,19 @@ fn sweep(server: &Server) {
 }
 
 /// `<customers> <orders>`: the row counts of the tables the day writes to.
+/// `n` with a comma between thousands, as the app writes counts.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn counts(server: &Server) -> String {
     psql(server, "SELECT (SELECT count(*) FROM shop.customers) || ' ' || (SELECT count(*) FROM shop.orders)").unwrap().trim().to_string()
 }
@@ -204,6 +217,20 @@ fn m1_day_end_to_end() {
     assert_eq!(app.value(&format!("tab-{orders_tab}")), "orders");
     assert_eq!(t["rows"], 100, "the first page");
     app.shot(&root, "2b-orders");
+    // The table bar between the filter bar and the rows: DATA chosen, STRUCTURE off, EXPORT off
+    // (when it has room), the planner's estimate; COUNT counts the rows exactly.
+    assert_eq!(app.value("table-view-data"), true);
+    assert_eq!(app.tag("table-view-structure").map(|e| e["enabled"].clone()), Some(json!(false)), "STRUCTURE off");
+    assert!(app.tag("table-export").is_none_or(|e| e["enabled"] == false), "EXPORT off");
+    let (filter, refresh, header) = (app.rect("filter-0-column"), app.rect("table-refresh"), app.rect("grid-header-0"));
+    assert!(filter[1] < refresh[1] && refresh[1] < header[1], "the table bar under the filters, over the rows: {filter:?} {refresh:?} {header:?}");
+    assert!(app.value("page-count").as_str().is_some_and(|v| v.starts_with('~')), "the estimate");
+    app.click("page-count");
+    app.until("the count", |app| app.table()["total"]["exact"].is_u64());
+    let n = app.table()["total"]["exact"].as_u64().unwrap();
+    assert_eq!(n.to_string(), psql(pg14(db), "SELECT count(*) FROM shop.orders").unwrap().trim(), "psql's count");
+    assert_eq!(app.value("table-rows"), format!("1–100 of {} rows", thousands(n)));
+    app.shot(&root, "2c-counted");
 
     // 3. The three filters through the bar (dealer_id = 42, + status = completed, + total > 100),
     //    then Enter in the last value field.

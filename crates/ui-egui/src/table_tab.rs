@@ -1,17 +1,21 @@
-//! The table tab's body ([`show`]), from top to bottom:
+//! The table tab's body ([`show`]), from top to bottom, each area the body's full width (TA):
 //!
 //! - a small note when the rows cannot be edited, saying why (`table-note`: a view, no row key,
 //!   a read-only connection, or the table's own reason as the driver writes it), on one line: a
 //!   longer one is cut short, and reads whole on hover;
 //! - the filter bar ([`crate::filter_bar`]);
+//! - the table bar ([`TableBar`]): DATA / STRUCTURE (STRUCTURE off until the structure view),
+//!   REFRESH, "+ Row" (the new row is selected and scrolled to), the rows' count with COUNT or
+//!   COUNT ROWS, IMPORT and EXPORT (off until M4). A page load that has run 300 ms shows CANCEL in
+//!   REFRESH's place and LOADING with its timer in the count's; a count that has run 300 ms shows
+//!   COUNTING with its timer. The timers count from the frame that first saw the job ([`Since`]);
 //! - the error band (`table-error`, [`crate::components::error_band`]) when the last Apply failed,
 //!   with the server's message (the staged changes stay, and the grid marks the row it failed on),
 //!   or else when the last page load failed, with the rows from before kept underneath;
-//! - the grid ([`crate::grid`]) on the loaded page and its staged edits, across the body's whole
-//!   width (the rest keeps [`TAB_BODY_PAD_X`] in from its sides), sortable by a header click,
-//!   with foreign key links on the selected row, and the cell editor over it while one is open
-//!   ([`crate::editors`]; a double-click opens one);
-//! - the paging bar ([`crate::paging`]), with "+ Row": the new row is selected and scrolled to.
+//! - the grid ([`crate::grid`]) on the loaded page and its staged edits, sortable by a header
+//!   click, with foreign key links on the selected row, and the cell editor over it while one is
+//!   open ([`crate::editors`]; a double-click opens one);
+//! - the paging bar ([`crate::paging`]).
 //!
 //! It reads the tab from the engine each frame and acts only through commands, started with
 //! [`DbeeApp::start`] after drawing (so a `needs…` answer opens its dialog and an error shows as a
@@ -20,27 +24,30 @@
 //! [`GridState`] per tab (the column widths), dropped with the tab.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use dbee_core::{ResultSet, TableInfo};
 use dbee_engine::cmd::LOST;
 use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
-use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab, Which};
-use dbee_sql::Dialect;
+use dbee_engine::{Edits, JobId, Json, Outcome, Tab, TabId, TableTab, Total, Which};
 use dbee_sql::select::PAGE_SIZE;
-use egui::{Align, Layout, Rect, RichText, UiBuilder, pos2, vec2};
+use egui::{Align, Layout, Rect, RichText, UiBuilder, pos2};
 use serde_json::json;
 
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::error_band::Band;
+use crate::components::results::RowCount;
 use crate::components::spinner::Spinner;
+use crate::components::table_bars::{Loading, TableAsked, TableBar, TableShown, View};
 use crate::components::toast::Kind;
+use crate::components::tooltip::Hint;
 use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
-use crate::paging::{self, BAR_H, Paging};
+use crate::paging::{self, BAR_H, Paging, count_text};
 use crate::theme::size::TAB_BODY_PAD_X;
 use crate::theme::{self, Text};
 
@@ -49,6 +56,20 @@ const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "t
 
 /// The grids' states, by tab.
 pub(crate) type Grids = HashMap<TabId, GridState>;
+
+/// When the window first saw each table tab's page load or count running, by tab and job, in
+/// seconds on egui's clock.
+pub(crate) type Since = HashMap<(TabId, JobId), f64>;
+
+/// The table bar's loading and counting states show once their job has run this long, so a fast
+/// one never flickers.
+const QUIET: f64 = 0.3;
+
+/// How often the window draws again while a job runs, so its timer moves.
+const TICK: Duration = Duration::from_millis(100);
+
+/// Why STRUCTURE is off, on its hover.
+pub(crate) const STRUCTURE_LATER: &str = "Structure: not now, the structure view comes in a later step.";
 
 /// A table tab's page and staged edits as the grid reads them: the loaded rows, then the new
 /// ones; staged values over loaded ones.
@@ -141,20 +162,16 @@ fn blocked(t: &TableTab, lost: bool) -> Option<&'static str> {
     }
 }
 
-/// What the paging bar shows for `t` on a connection in `dialect`; `edit_blocked` is why it takes
-/// no edits now.
-fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, edit_blocked: Option<String>) -> Paging {
+/// What the paging bar shows for `t`.
+fn paging(t: &TableTab, lost: bool) -> Paging {
     Paging {
         page: t.shown.page,
         at_end: t.view() == t.shown && !t.has_next,
         total: t.total,
-        estimate: info.and_then(|i| quick_estimate(dialect, i, &t.applied)),
         rows: t.data.as_ref().map_or(0, |d| d.rows.len()),
         complete: t.page_complete,
-        loading: t.loading.is_some(),
         edits: t.edits.count(),
         blocked: blocked(t, lost),
-        count_blocked: lost.then_some(LOST),
         apply_blocked: if lost {
             Some(LOST)
         } else if t.applying.is_some() {
@@ -162,8 +179,105 @@ fn paging(t: &TableTab, dialect: Dialect, info: Option<&TableInfo>, lost: bool, 
         } else {
             None
         },
-        add_blocked: edit_blocked,
     }
+}
+
+/// The table bar's row count for `total`, `estimate` being the catalog's for the table (when its
+/// rows are not filtered), as [`count_text`] reads them: an estimate of 0 is none; a count shows
+/// the estimate meanwhile, with its timer once it has run 300 ms (`counting`).
+fn row_count(total: Total, estimate: Option<u64>, counting: Option<Duration>) -> RowCount {
+    let estimate = estimate.filter(|n| *n > 0);
+    match total {
+        Total::Exact(n) => RowCount::Exact(n),
+        Total::Estimate(n) if n > 0 => RowCount::Estimate(n),
+        Total::Estimate(_) => RowCount::Unknown,
+        Total::Unknown => estimate.map_or(RowCount::Unknown, RowCount::Estimate),
+        Total::Counting { estimate: e } => RowCount::Counting { estimate: e.filter(|n| *n > 0).or(estimate), elapsed: counting },
+    }
+}
+
+/// The rows a page shows, counted from 1 across pages: `(101, 200)` for page 2 of 100 rows; none
+/// for an empty page.
+fn shown_rows(page: u64, rows: usize) -> Option<(u64, u64)> {
+    let before = page.saturating_mul(PAGE_SIZE);
+    (rows > 0).then(|| (before.saturating_add(1), before.saturating_add(rows as u64)))
+}
+
+/// How long `job` of tab `tab` has run as the window saw it, from the first frame that saw it
+/// (`now` on egui's clock), once that is [`QUIET`] or more.
+fn after_quiet(since: &mut Since, tab: TabId, job: Option<JobId>, now: f64) -> Option<Duration> {
+    let job = job?;
+    let first = *since.entry((tab, job)).or_insert(now);
+    let ran = now - first;
+    (ran >= QUIET).then(|| Duration::try_from_secs_f64(ran).unwrap_or_default())
+}
+
+/// Tags what the table bar drew, says on hover why something is off, and gives the command its
+/// click asked for.
+fn table_bar_tags(
+    shown: TableShown,
+    tags: &mut Tags,
+    words: (&str, &str),
+    why: (Option<&str>, Option<&str>, Option<&str>),
+) -> Option<(&'static str, Json)> {
+    let (rows, count) = words;
+    let (refresh_blocked, add_blocked, count_blocked) = why;
+    if let [data, structure] = shown.view.as_slice() {
+        tags.tag_value("table-view-data", data, true);
+        let structure = structure.clone().hint_disabled(STRUCTURE_LATER);
+        tags.tag_value_as("table-view-structure", &structure, false, false);
+    }
+    if let Some(r) = shown.refresh {
+        let r = match refresh_blocked {
+            Some(why) => r.hint_disabled(format!("Refresh: not now, {why}")),
+            None => r.hint("Load the page again"),
+        };
+        tags.tag_value_as("table-refresh", &r, "Refresh", refresh_blocked.is_none());
+    }
+    if let Some(r) = shown.cancel {
+        let r = r.hint("Stop loading the page");
+        tags.tag_value("table-cancel", &r, "Cancel");
+    }
+    if let Some(r) = shown.add {
+        let r = match add_blocked {
+            Some(why) => r.hint_disabled(format!("Cannot add a row now: {why}")),
+            None => r.hint("Add a row, written with the other changes on Apply"),
+        };
+        tags.tag_value_as("row-add", &r, "+ Row", add_blocked.is_none());
+    }
+    if let Some(c) = shown.count {
+        if let Some(r) = &c.words {
+            tags.tag_value("table-rows", r, rows);
+        }
+        match (c.count, c.words) {
+            (Some(r), _) => {
+                let r = match count_blocked {
+                    Some(why) => r.hint_disabled(format!("Can't count now: {why}.")),
+                    None => r.hint("Count the rows exactly"),
+                };
+                tags.tag_value_as("page-count", &r, count, count_blocked.is_none());
+            }
+            (None, Some(r)) => tags.tag_value("page-count", &r, count),
+            (None, None) => {}
+        }
+    }
+    if let Some(r) = shown.facts {
+        tags.tag_value("table-loading", &r, "Loading");
+    }
+    if let Some(r) = shown.import {
+        tags.tag_value_as("table-import", &r, "Import", false);
+    }
+    if let Some(r) = shown.export {
+        tags.tag_value_as("table-export", &r, "Export", false);
+    }
+    Some(match shown.asked? {
+        TableAsked::Refresh => ("table.refresh", json!({})),
+        TableAsked::Cancel => ("table.cancel", json!({})),
+        TableAsked::AddRow => ("row.add", json!({})),
+        TableAsked::Count => ("table.count", json!({})),
+        // DATA is the only view yet, and the bar draws no Value cell.
+        TableAsked::View(_) | TableAsked::Value => return None,
+    })
 }
 
 /// The note above the grid for rows that cannot be edited, `why` being the engine's reason, on
@@ -234,21 +348,25 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let info = connected.and_then(|c| c.catalog.table(&tab.table));
         let lost = connected.is_none_or(|c| c.lost);
         let body = ui.available_rect_before_wrap();
-        let full = body.shrink2(vec2(TAB_BODY_PAD_X, 0.0));
-        let split = (full.bottom() - BAR_H).max(full.top());
+        let split = (body.bottom() - BAR_H).max(body.top());
         let mut top = ui.new_child(
             UiBuilder::new()
                 .id_salt("dbee-table-tab")
-                .max_rect(Rect::from_min_max(full.min, pos2(full.right(), split)))
+                .max_rect(Rect::from_min_max(body.min, pos2(body.right(), split)))
                 .layout(Layout::top_down(Align::Min)),
         );
-        top.add_space(6.0);
+        top.spacing_mut().item_spacing.y = 0.0;
         let read_only = dbee_engine::cmd::table::not_editable(session, tab);
         // As the engine's edit commands allow: rows that can be edited, a connection that is not
         // lost, no page on its way and no Apply running.
         let edit_blocked = can_edit(session).err();
         if let Some(why) = read_only {
-            note(&mut top, tags, &why, info.and_then(|i| i.no_edit_reason.as_deref()));
+            top.add_space(6.0);
+            top.horizontal(|ui| {
+                ui.add_space(TAB_BODY_PAD_X);
+                ui.set_max_width((ui.available_width() - TAB_BODY_PAD_X).max(0.0));
+                note(ui, tags, &why, info.and_then(|i| i.no_edit_reason.as_deref()));
+            });
             top.add_space(2.0);
         }
         // The filter bar: the table's visible columns from the schema, else the page's.
@@ -268,10 +386,37 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             dialect: session.state().dialect(Which::Tab(id)),
         };
         runs.extend(filter_bar::show(&mut top, &bar, tags));
-        top.add_space(6.0);
+        // The table bar, its loading and counting states 300 ms after their jobs started.
+        let now = top.ctx().input(|i| i.time);
+        let since = &mut view.work.since;
+        since.retain(|(tab_id, job), _| *tab_id != id || Some(*job) == tab.loading || Some(*job) == tab.counting);
+        let loading = after_quiet(since, id, tab.loading, now);
+        let counting = after_quiet(since, id, tab.counting, now);
+        if tab.loading.is_some() || tab.counting.is_some() {
+            top.ctx().request_repaint_after(TICK);
+        }
+        let estimate = info.and_then(|i| quick_estimate(session.state().dialect(Which::Tab(id)), i, &tab.applied));
+        let count = row_count(tab.total, estimate, counting);
+        let shown = shown_rows(tab.shown.page, tab.data.as_ref().map_or(0, |d| d.rows.len()));
+        let refresh_blocked = blocked(tab, lost);
+        let count_blocked = lost.then_some(LOST);
+        let table_bar = TableBar {
+            view: View::Data,
+            structure: false,
+            loading: loading.map(|elapsed| Loading { elapsed: Some(elapsed) }),
+            count,
+            shown,
+            columns: tab.data.as_ref().map_or(0, |d| d.columns()),
+            can_refresh: refresh_blocked.is_none(),
+            can_add: edit_blocked.is_none(),
+            can_count: count_blocked.is_none(),
+            value: None,
+        };
+        let drawn = table_bar.show(&mut top);
+        let words = (count.words(shown), count_text(tab.total, estimate));
+        runs.extend(table_bar_tags(drawn, tags, (&words.0, &words.1), (refresh_blocked, edit_blocked.as_deref(), count_blocked)));
         if let Some(text) = card_text(tab) {
             band(&mut top, tags, id, text);
-            top.add_space(6.0);
         }
         match tab.data.as_ref() {
             Some(page) => {
@@ -320,18 +465,24 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 }
             }
             None if tab.loading.is_some() => {
+                top.add_space(6.0);
                 top.horizontal(|ui| {
+                    ui.add_space(TAB_BODY_PAD_X);
                     ui.add(Spinner::new());
                     ui.label(RichText::new(format!("Loading {}…", tab.table.display())).color(t.text_muted));
                 });
             }
             None => {
-                top.label(RichText::new("No rows are loaded.").color(t.text_muted));
+                top.add_space(6.0);
+                top.horizontal(|ui| {
+                    ui.add_space(TAB_BODY_PAD_X);
+                    ui.label(RichText::new("No rows are loaded.").color(t.text_muted));
+                });
             }
         }
-        let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(full.left(), split), full.max)));
+        let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(body.left(), split), body.max)));
         if tab.data.is_some() {
-            runs.extend(paging::show(&mut bottom, &paging(tab, session.state().dialect(Which::Tab(id)), info, lost, edit_blocked), tags));
+            runs.extend(paging::show(&mut bottom, &paging(tab, lost), tags));
         }
     }
     for (command, params) in runs {

@@ -1,44 +1,34 @@
 //! The table tab's paging bar ([`show`]), along its bottom: first · prev · the page · next · last,
-//! the row count, refresh, a note when the page was cut by the size limit, then at the right
-//! "+ Row" and the staged changes with Reset and Apply.
+//! a note when the page was cut by the size limit, then at the right the staged changes with
+//! Reset and Apply. The row count, refresh and "+ Row" are the table bar's
+//! ([`crate::table_tab`]); [`count_text`] is the count's words there.
 //!
 //! The row count ([`count_text`]) shows the planner's estimate as `~100,000 rows` while that is
 //! all there is: the engine's, or the catalog's for an unfiltered table, materialized view or
 //! partitioned table. Views and foreign tables have none, and neither does a table the planner
-//! puts at 0, so it never reads `~0`. A click counts the rows exactly (`table.count`), and the
-//! count then reads `100,000 rows`. With an exact count the page reads `Page 3 of 10`.
+//! puts at 0, so it never reads `~0`. With an exact count the page reads `Page 3 of 10`.
 //!
-//! Paging and refresh wait while changes are staged (the engine's rule) and while the connection
-//! is lost; the buttons say why when hovered. "+ Row" (`row.add`) is enabled as the engine's
-//! edit commands are, and says why not when hovered.
+//! Paging waits while changes are staged (the engine's rule) and while the connection is lost;
+//! the buttons say why when hovered.
 //!
 //! **Room.** No control is drawn over another, at any width ([`show`], [`fit`]). Short of room,
-//! the row count becomes an icon button first (a number sign, its text on hover), then the
-//! "n changes" text goes (Apply's hover says how many). At the app's default window (1100 × 720)
-//! with the value panel open and a change staged, the arrows, refresh, "+ Row", Reset and Apply
-//! all show whole. Narrower than both groups at their least, the right group follows the left
-//! one and is cut at the bar's edge.
+//! the "n changes" text goes first (Apply's hover says how many). Narrower than both groups at
+//! their least, the right group follows the left one and is cut at the bar's edge.
 //!
 //! Automation ids: `page-first`, `page-prev`, `page-number` (value: `Page 3` or `Page 3 of 10`),
-//! `page-next`, `page-last`, `page-count` (value: the count's text, also while it shows as an
-//! icon), `table-refresh`, `page-cut` (value: the note; not drawn without room for it),
-//! `row-add`, `edits-count` (value: `2 changes`; not drawn while short of room), `edit-reset`,
-//! `edit-apply`.
+//! `page-next`, `page-last`, `page-cut` (value: the note; not drawn without room for it),
+//! `edits-count` (value: `2 changes`; not drawn while short of room), `edit-reset`, `edit-apply`.
 
 use dbee_engine::{Json, Total};
 use dbee_sql::select::PAGE_SIZE;
-use egui::{Align, Button, CornerRadius, Layout, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use egui::{Align, CornerRadius, Layout, Rect, Stroke, pos2, vec2};
 use serde_json::json;
 
 use crate::automation::Tags;
-use crate::components::button::{BarButton, BoxButton, IconButton, TextButton};
+use crate::components::button::{BoxButton, IconButton, TextButton};
 use crate::components::icon::Icon;
-use crate::components::spinner::Spinner;
 use crate::components::tooltip::Hint;
-use crate::theme::{
-    self, Text,
-    size::{ICON_BUTTON, RADIUS_CONTROL, SPINNER},
-};
+use crate::theme::{self, Text, size::ICON_BUTTON};
 use crate::tree::thousands;
 
 /// The bar's height.
@@ -52,22 +42,15 @@ pub(crate) struct Paging {
     /// The page shown is the one asked for and nothing follows it.
     pub at_end: bool,
     pub total: Total,
-    /// The catalog's estimate for the table, when its rows are not filtered.
-    pub estimate: Option<u64>,
     /// Rows the page shows, and whether that is all of them ([`cut_note`]).
     pub rows: usize,
     pub complete: bool,
-    pub loading: bool,
     /// Staged changes.
     pub edits: usize,
-    /// Why paging, sorting and refresh cannot run now (staged changes, a lost connection).
+    /// Why paging cannot run now (staged changes, a lost connection).
     pub blocked: Option<&'static str>,
-    /// Why counting cannot run now.
-    pub count_blocked: Option<&'static str>,
     /// Why Apply cannot run now.
     pub apply_blocked: Option<&'static str>,
-    /// Why no row can be added now (the engine's reason).
-    pub add_blocked: Option<String>,
 }
 
 /// A command the bar asks for.
@@ -122,12 +105,10 @@ fn step_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, step: Icon, why_not
 
 /// Between two controls.
 const SPACING: f32 = 4.0;
-/// Before the row count, and between "+ Row" and the staged changes.
+/// Before a cut page's note.
 const SPACE: f32 = 10.0;
 /// Between the bar's left group and its right one.
 const GAP: f32 = 12.0;
-/// The row count's side when it shows as a square button, and its height as text.
-const SQUARE: f32 = 26.0;
 /// The narrowest a cut page's note is shown in (it truncates, with its whole text on hover).
 const MIN_NOTE: f32 = 24.0;
 
@@ -135,10 +116,9 @@ const MIN_NOTE: f32 = 24.0;
 /// ([`widths`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Widths {
-    /// The left group (paging, the row count, refresh) with the count as text, and as an icon.
-    pub left_text: f32,
-    pub left_icon: f32,
-    /// The right group ("+ Row", and with staged changes their text, Reset and Apply) with the
+    /// The left group: paging.
+    pub left: f32,
+    /// The right group (with staged changes their text, Reset and Apply; else nothing) with the
     /// changes' text, and without it.
     pub right_text: f32,
     pub right_bare: f32,
@@ -147,24 +127,15 @@ pub(crate) struct Widths {
 /// How the bar fits its width ([`fit`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Fit {
-    /// The row count shows as an icon, its text on hover.
-    pub count_icon: bool,
     /// The "n changes" text shows (else Apply's hover says it).
     pub edits_text: bool,
 }
 
-/// The first form of the bar that fits `room`: everything; the count as an icon; that and no
-/// changes' text. When even the last does not fit (or `room` is not a number) it is the last,
-/// and the right group is cut at the bar's edge.
+/// The first form of the bar that fits `room`: everything; no changes' text. When even the last
+/// does not fit (or `room` is not a number) it is the last, and the right group is cut at the
+/// bar's edge.
 pub(crate) fn fit(room: f32, w: Widths) -> Fit {
-    let fits = |left: f32, right: f32| left + GAP + right <= room;
-    if fits(w.left_text, w.right_text) {
-        Fit { count_icon: false, edits_text: true }
-    } else if fits(w.left_icon, w.right_text) {
-        Fit { count_icon: true, edits_text: true }
-    } else {
-        Fit { count_icon: true, edits_text: false }
-    }
+    Fit { edits_text: w.left + GAP + w.right_text <= room }
 }
 
 /// `widths` side by side, [`SPACING`] apart.
@@ -177,103 +148,44 @@ fn text_width(ui: &egui::Ui, text: &str, style: Text) -> f32 {
     ui.painter().layout_job(style.job(text, egui::Color32::PLACEHOLDER)).size().x.ceil()
 }
 
-/// A text button's width: its text with the button's padding on both sides, rounded up. The
-/// bar draws its buttons at least this wide (`min_size`), so its sums are what they take.
-fn button_width(ui: &egui::Ui, text: &str, style: Text) -> f32 {
-    (text_width(ui, text, style) + 2.0 * ui.spacing().button_padding.x + 1.0).ceil()
-}
-
 /// The texts the bar shows, and the widths of its buttons.
 struct Parts {
     page: String,
-    count: String,
-    count_w: f32,
     edits: String,
-    add_w: f32,
     reset_w: f32,
     apply_w: f32,
 }
 
 impl Parts {
     fn of(ui: &egui::Ui, p: &Paging) -> Parts {
-        let count = count_text(p.total, p.estimate);
         Parts {
             page: page_text(p.page, p.total),
-            count_w: button_width(ui, &count, Text::Label),
-            count,
             edits: edits_text(p.edits),
-            add_w: add_row().width(ui),
             reset_w: TextButton::new("Reset").width(ui),
             apply_w: BoxButton::primary("Apply").width(ui),
         }
     }
 }
 
-/// What each group takes, in each form; the same parts, spaces and spinners [`show`] draws.
+/// What each group takes, in each form; the same parts and spaces [`show`] draws.
 fn widths(ui: &egui::Ui, p: &Paging, parts: &Parts) -> Widths {
-    let mut paging = vec![ICON_BUTTON, ICON_BUTTON, text_width(ui, &parts.page, Text::Label)];
-    if p.loading {
-        paging.push(SPINNER);
-    }
-    paging.extend([ICON_BUTTON, ICON_BUTTON]);
-    let counting = matches!(p.total, Total::Counting { .. });
-    let left = |count: f32| {
-        let mut tail = vec![count];
-        if counting {
-            tail.push(SPINNER);
-        }
-        tail.push(ICON_BUTTON);
-        row(&paging) + SPACING + SPACE + row(&tail)
-    };
+    let left = row(&[ICON_BUTTON, ICON_BUTTON, text_width(ui, &parts.page, Text::Label), ICON_BUTTON, ICON_BUTTON]);
     let (right_text, right_bare) = if p.edits > 0 {
         let text = text_width(ui, &parts.edits, Text::Label);
-        let start = parts.add_w + SPACING + SPACE;
-        (start + row(&[text, parts.reset_w, parts.apply_w]), start + row(&[parts.reset_w, parts.apply_w]))
+        (row(&[text, parts.reset_w, parts.apply_w]), row(&[parts.reset_w, parts.apply_w]))
     } else {
-        (parts.add_w, parts.add_w)
+        (0.0, 0.0)
     };
-    Widths { left_text: left(parts.count_w), left_icon: left(SQUARE), right_text, right_bare }
-}
-
-/// A number sign: the row count as an icon. A rect that is empty or not finite draws nothing.
-fn count_icon(p: &egui::Painter, rect: Rect, color: egui::Color32) {
-    if !rect.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return;
-    }
-    let side = rect.width().min(rect.height());
-    let r = Rect::from_center_size(rect.center(), vec2(side, side));
-    let s = Stroke::new((side / 10.0).clamp(1.0, 2.5), color);
-    let at = |x: f32, y: f32| r.min + vec2(r.width() * x, r.height() * y);
-    p.line_segment([at(0.44, 0.16), at(0.34, 0.84)], s);
-    p.line_segment([at(0.68, 0.16), at(0.58, 0.84)], s);
-    p.line_segment([at(0.18, 0.38), at(0.84, 0.38)], s);
-    p.line_segment([at(0.16, 0.62), at(0.82, 0.62)], s);
-}
-
-/// The row count as a framed square with a number sign: the page has no such icon, so it is
-/// drawn here until the row count's own screen.
-fn count_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
-    let t = theme::tokens(ui.ctx());
-    let (rect, r) = ui.allocate_exact_size(vec2(SQUARE, SQUARE), if enabled { Sense::click() } else { Sense::hover() });
-    let fill = if enabled && r.hovered() { t.hover } else { t.card };
-    ui.painter().rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
-    count_icon(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), if enabled { t.text } else { t.text_faint });
-    r
-}
-
-/// "+ Row": the page's bar button with a plus and its words.
-fn add_row() -> BarButton<'static> {
-    BarButton::label(Icon::Plus, "Row")
+    Widths { left, right_text, right_bare }
 }
 
 /// Draws the bar into `ui` and returns the commands it asks for.
 ///
-/// The left group (paging, the row count, refresh) runs from the bar's left end and the right
-/// group ("+ Row", the staged changes, Reset, Apply) ends at its right end, [`GAP`] apart at
-/// least. Short of room ([`fit`]), the row count turns into an icon button first (its text on
-/// hover), then the "n changes" text goes (Apply's hover says it). Narrower still, the right
-/// group starts after the left one and is cut at the bar's edge. So no control is ever drawn over
-/// another, and nothing is drawn past the bar.
+/// The left group (paging) runs from the bar's left end and the right group (the staged changes,
+/// Reset, Apply) ends at its right end, [`GAP`] apart at least. Short of room ([`fit`]), the "n
+/// changes" text goes (Apply's hover says it). Narrower still, the right group starts after the
+/// left one and is cut at the bar's edge. So no control is ever drawn over another, and nothing
+/// is drawn past the bar.
 pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
     let t = theme::tokens(ui.ctx());
     let mut runs: Vec<Run> = Vec::new();
@@ -292,7 +204,7 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
     let parts = Parts::of(&bar, p);
     let w = widths(&bar, p, &parts);
     let fit = fit(inner.width(), w);
-    left_group(&mut bar, p, tags, &parts, fit, &mut runs);
+    left_group(&mut bar, p, tags, &parts, &mut runs);
     let left_end = bar.min_rect().right();
     let right_w = if fit.edits_text { w.right_text } else { w.right_bare };
     let start = (inner.right() - right_w).max(left_end + GAP);
@@ -313,8 +225,8 @@ pub(crate) fn show(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Vec<Run> {
     runs
 }
 
-/// First · prev · the page · next · last, the row count and refresh.
-fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit: Fit, runs: &mut Vec<Run>) {
+/// First · prev · the page · next · last.
+fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, runs: &mut Vec<Run>) {
     let t = theme::tokens(ui.ctx());
     let first = p.page == 0;
     let back = p.blocked.or(if first { Some("this is the first page") } else { None });
@@ -327,69 +239,20 @@ fn left_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit
     }
     let r = ui.add(egui::Label::new(Text::Label.rich(parts.page.as_str()).color(t.text_muted)).selectable(false));
     tags.tag_value("page-number", &r, parts.page.as_str());
-    if p.loading {
-        ui.add(Spinner::new());
-    }
     if step_button(ui, tags, "page-next", Icon::Next, on, "Next page") {
         runs.push(("table.page", json!({ "to": "next" })));
     }
     if step_button(ui, tags, "page-last", Icon::Last, on, "Last page (counts the rows)") {
         runs.push(("table.page", json!({ "to": "last" })));
     }
-    ui.add_space(SPACE);
-    let counting = matches!(p.total, Total::Counting { .. });
-    let count = parts.count.as_str();
-    let enabled = p.count_blocked.is_none() && !counting;
-    let r = if fit.count_icon {
-        let r = count_button(ui, enabled);
-        match (p.count_blocked, counting) {
-            (Some(why), _) => r.hint(format!("{count}. Can't count now: {why}.")),
-            (None, true) => r.hint(format!("{count}: counting the rows")),
-            (None, false) => r.hint(format!("{count}: count the rows exactly")),
-        }
-    } else {
-        let r = ui.add_enabled(enabled, Button::new(Text::Label.rich(count)).min_size(vec2(parts.count_w, SQUARE)));
-        match p.count_blocked {
-            Some(why) => r.hint_disabled(format!("Can't count now: {why}.")),
-            None => r.hint("Count the rows exactly"),
-        }
-    };
-    tags.tag_value_as("page-count", &r, count, enabled);
-    if enabled && r.clicked() {
-        runs.push(("table.count", json!({})));
-    }
-    if counting {
-        ui.add(Spinner::new());
-    }
-    let refresh_enabled = p.blocked.is_none();
-    let r = ui.add_enabled(refresh_enabled, IconButton::plain(Icon::Refresh));
-    let r = match p.blocked {
-        Some(why) => r.hint_disabled(format!("Refresh: not now, {why}")),
-        None => r.hint("Load the page again"),
-    };
-    tags.tag_value_as("table-refresh", &r, "Refresh", refresh_enabled);
-    if refresh_enabled && r.clicked() {
-        runs.push(("table.refresh", json!({})));
-    }
 }
 
-/// "+ Row", then with staged changes their count, Reset and Apply.
+/// With staged changes their count, Reset and Apply.
 fn right_group(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags, parts: &Parts, fit: Fit, runs: &mut Vec<Run>) {
     let t = theme::tokens(ui.ctx());
-    let enabled = p.add_blocked.is_none();
-    let r = ui.add_enabled(enabled, add_row());
-    let r = match &p.add_blocked {
-        Some(why) => r.hint_disabled(format!("Cannot add a row now: {why}")),
-        None => r.hint("Add a row, written with the other changes on Apply"),
-    };
-    tags.tag_value_as("row-add", &r, "+ Row", enabled);
-    if r.clicked() {
-        runs.push(("row.add", json!({})));
-    }
     if p.edits == 0 {
         return;
     }
-    ui.add_space(SPACE);
     if fit.edits_text {
         let r = ui.label(Text::Label.rich(parts.edits.as_str()).color(t.text_muted));
         tags.tag_value("edits-count", &r, parts.edits.as_str());
@@ -441,21 +304,13 @@ mod tests {
     }
 
     #[test]
-    fn short_of_room_the_count_goes_to_an_icon_first_then_the_changes_text() {
-        let w = Widths { left_text: 300.0, left_icon: 230.0, right_text: 260.0, right_bare: 200.0 };
-        let all = Fit { count_icon: false, edits_text: true };
-        let icon = Fit { count_icon: true, edits_text: true };
-        let bare = Fit { count_icon: true, edits_text: false };
-        assert_eq!(fit(300.0 + GAP + 260.0, w), all);
-        assert_eq!(fit(300.0 + GAP + 260.0 - 1.0, w), icon);
-        assert_eq!(fit(230.0 + GAP + 260.0, w), icon);
-        // The count's text and no changes' text would fit here too: the count goes first.
-        assert_eq!(fit(300.0 + GAP + 200.0, w), icon, "{}", 300.0 + GAP + 200.0);
-        assert_eq!(fit(230.0 + GAP + 260.0 - 1.0, w), bare);
-        assert_eq!(fit(230.0 + GAP + 200.0, w), bare);
+    fn short_of_room_the_changes_text_goes() {
+        let w = Widths { left: 230.0, right_text: 260.0, right_bare: 200.0 };
+        assert_eq!(fit(230.0 + GAP + 260.0, w), Fit { edits_text: true });
+        assert_eq!(fit(230.0 + GAP + 260.0 - 1.0, w), Fit { edits_text: false });
         // Below the minimum, the least: the right group is then cut at the bar's edge.
         for room in [0.0, -5.0, f32::NAN] {
-            assert_eq!(fit(room, w), bare, "{room}");
+            assert_eq!(fit(room, w), Fit { edits_text: false }, "{room}");
         }
     }
 
@@ -485,28 +340,16 @@ mod tests {
     }
 
     /// The bar's automation ids, in their order along it.
-    const IDS: [&str; 12] = [
-        "page-first",
-        "page-prev",
-        "page-number",
-        "page-next",
-        "page-last",
-        "page-count",
-        "table-refresh",
-        "page-cut",
-        "row-add",
-        "edits-count",
-        "edit-reset",
-        "edit-apply",
-    ];
+    const IDS: [&str; 9] =
+        ["page-first", "page-prev", "page-number", "page-next", "page-last", "page-cut", "edits-count", "edit-reset", "edit-apply"];
 
     /// Apply whole is 60 wide (12, APPLY, 12); narrower, the bar's edge cut it.
     const APPLY_WHOLE: f32 = 59.5;
 
     #[test]
     fn no_width_draws_one_control_over_another() {
-        // All the bar can show: the longest page label, a cut page's note, three changes; then the
-        // spinners of a page and a count on their way.
+        // All the bar can show: the longest page label, a cut page's note, three changes; then a
+        // short page label and one change.
         let full = || Paging {
             page: 9_999,
             total: Total::Exact(1_000_000),
@@ -516,7 +359,7 @@ mod tests {
             blocked: Some("changes are staged"),
             ..Paging::default()
         };
-        let busy = || Paging { loading: true, total: Total::Counting { estimate: Some(5_000) }, edits: 1, ..Paging::default() };
+        let busy = || Paging { total: Total::Counting { estimate: Some(5_000) }, edits: 1, ..Paging::default() };
         for (what, make) in [("full", &full as &dyn Fn() -> Paging), ("busy", &busy)] {
             let mut seen: Vec<u8> = Vec::new();
             for width in (40..=900).rev().step_by(10) {
@@ -532,25 +375,15 @@ mod tests {
                 }
                 // The order of giving room up, as the bar narrows.
                 let rect = |id: &str| rects.iter().find(|(i, _)| *i == id).and_then(|(_, r)| *r);
-                let icon = rect("page-count").is_some_and(|r| r.width() <= 27.0);
                 let text = rect("edits-count").is_some();
                 let cut = rect("edit-apply").is_none_or(|r| r.width() < APPLY_WHOLE);
-                // Once the right group is cut the left one may be cut too, so the count's form
-                // shows only before.
-                assert!(cut || text || icon, "{at}: the changes' text went before the count's");
                 assert!(!cut || !text, "{at}: cut while the changes' text could give room up");
-                let fit = if cut {
-                    3
-                } else if !text {
-                    2
-                } else {
-                    u8::from(icon)
-                };
+                let fit = if cut { 2 } else { u8::from(!text) };
                 assert!(seen.last().is_none_or(|&last| fit >= last), "{at}: room taken back while narrowing ({seen:?} then {fit})");
                 seen.push(fit);
             }
             assert_eq!(seen.first(), Some(&0), "{what}: 900 points wide, everything shows");
-            for fit in 0..=3 {
+            for fit in 0..=2 {
                 assert!(seen.contains(&fit), "{what}: the sweep passes through form {fit}: {seen:?}");
             }
         }
@@ -572,7 +405,7 @@ mod tests {
         );
         h.run_steps(2);
         let tags = &h.state().1;
-        let rects: Vec<(&'static str, Option<Rect>)> = ["row-add", "edit-reset", "edit-apply"].into_iter().map(|id| (id, tags.rect(id))).collect();
+        let rects: Vec<(&'static str, Option<Rect>)> = ["edit-reset", "edit-apply"].into_iter().map(|id| (id, tags.rect(id))).collect();
         let text = tags.rect("edits-count").is_some();
         let whole = tags.rect("edit-apply").is_some_and(|r| r.width() >= APPLY_WHOLE);
         let ids = h.ctx.viewport(|vp| {

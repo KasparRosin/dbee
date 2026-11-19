@@ -384,8 +384,9 @@ pub enum RowCount {
     /// The planner's estimate; one of 0 counts as unknown, so it never reads `~0`.
     Estimate(u64),
     Unknown,
-    /// Counting, for `elapsed` so far (today's spinner while the app gives no timer), with the
-    /// estimate shown meanwhile, if any. Its cancel is the status bar's job.
+    /// Counting, for `elapsed` so far, with the estimate shown meanwhile, if any. Before its
+    /// timer shows (`None`, the first 300 ms) the words show alone. Its cancel is the status
+    /// bar's job.
     Counting {
         estimate: Option<u64>,
         elapsed: Option<Duration>,
@@ -411,7 +412,7 @@ struct CountParts {
 impl RowCount {
     /// The words: the rows shown (`1–100`) and how many there are (`of 25,000 rows`, `of ~100,000
     /// rows`), either alone when the other isn't there.
-    pub(super) fn words(self, shown: Option<(u64, u64)>) -> String {
+    pub fn words(self, shown: Option<(u64, u64)>) -> String {
         let total = match self {
             RowCount::Exact(n) => Some(thousands(n)),
             RowCount::Estimate(n) | RowCount::Counting { estimate: Some(n), .. } if n > 0 => Some(format!("~{}", thousands(n))),
@@ -442,9 +443,8 @@ impl RowCount {
             RowCount::Exact(_) | RowCount::Counting { .. } => None,
         };
         let counting = match self {
-            RowCount::Counting { elapsed, .. } => {
-                let time = elapsed.map_or(Time::Spinner, |e| Time::timer(ui, t, e));
-                Some((Piece::new(ui, Text::Label.job("Counting", t.text_muted), "Counting"), time))
+            RowCount::Counting { elapsed: Some(e), .. } => {
+                Some((Piece::new(ui, Text::Label.job("Counting", t.text_muted), "Counting"), Time::timer(ui, t, e)))
             }
             _ => None,
         };
@@ -888,9 +888,10 @@ mod tests {
     }
 
     #[test]
-    fn with_no_timer_todays_spinner_stands_in() {
-        // The app gives no timer yet (the group's rule): RUNNING and COUNTING show today's
-        // spinner where the timer goes; an estimate of 0 asks to COUNT ROWS.
+    fn with_no_timer_running_shows_todays_spinner_and_counting_its_words_alone() {
+        // The query tab gives no timer yet: RUNNING shows today's spinner where the timer goes.
+        // A count shows nothing of its own for its first 300 ms (no timer yet): the words alone,
+        // no COUNTING and no spinner. An estimate of 0 asks to COUNT ROWS.
         let (shapes, at) = drawn(Theme::Light, |ui| {
             ResultBar { tabs: Vec::new(), state: RunState::Running { elapsed: None }, first_of: None, export: false, value_on: false }.show(ui);
         });
@@ -900,16 +901,14 @@ mod tests {
         assert_eq!(icon_in(&shapes, slot.expand(1.0)).0, [crate::theme::LIGHT.text_muted], "the spinner 12 after RUNNING: {slot:?}");
         let shapes = painted(Theme::Light, |ui| {
             ui.horizontal(|ui| {
-                RowCount::Counting { estimate: None, elapsed: None }.show(ui, Some((1, 100)));
+                RowCount::Counting { estimate: Some(100_000), elapsed: None }.show(ui, Some((1, 100)));
                 RowCount::Estimate(0).show(ui, Some((1, 100)));
             });
         });
-        let (counting, _) = word(&shapes, "COUNTING");
-        let slot = Rect::from_min_max(
-            pos2(counting.right() - Text::Label.spacing() + 12.0, counting.top() - 6.0),
-            pos2(counting.right() + 12.0 + SPINNER, counting.bottom() + 6.0),
-        );
-        assert_eq!(icon_in(&shapes, slot.expand(1.0)).0, [crate::theme::LIGHT.text_muted], "the spinner 12 after COUNTING: {slot:?}");
+        let (words, _) = whole(&shapes, "1–100 OF ~100,000 ROWS").expect("the words");
+        assert!(whole(&shapes, "COUNTING").is_none(), "no COUNTING before the timer");
+        let after = Rect::from_min_max(pos2(words.right(), words.top() - 6.0), pos2(words.right() + 12.0 + SPINNER + 4.0, words.bottom() + 6.0));
+        assert!(icon_in(&shapes, after).0.is_empty(), "no spinner after the words");
         assert!(whole(&shapes, "COUNT ROWS").is_some() && whole(&shapes, "COUNT").is_none(), "an estimate of 0 is no estimate");
     }
 

@@ -884,21 +884,9 @@ fn ctrl_z_and_ctrl_shift_z_undo_and_redo_outside_the_editor() {
     ui.key("Escape");
 }
 
-/// The paging bar's widgets, in their order along it.
-const BAR: [&str; 12] = [
-    "page-first",
-    "page-prev",
-    "page-number",
-    "page-next",
-    "page-last",
-    "page-count",
-    "table-refresh",
-    "page-cut",
-    "row-add",
-    "edits-count",
-    "edit-reset",
-    "edit-apply",
-];
+/// The paging bar's widgets, in their order along it. The row count, refresh and + Row are the
+/// table bar's.
+const BAR: [&str; 9] = ["page-first", "page-prev", "page-number", "page-next", "page-last", "page-cut", "edits-count", "edit-reset", "edit-apply"];
 
 /// A widget of the paging bar as the last frame drew it: the part a click can reach, or its
 /// whole rect when none can.
@@ -941,26 +929,15 @@ fn assert_apart(bar: &[Drawn], at: &str) {
     }
 }
 
-/// How the bar fits, from what it shows: 0 everything; 1 the row count as an icon; 2 that and
-/// no "n changes" text; 3 the right group cut at the bar's edge (Apply not whole). Checks the
-/// order on the way: the changes' text goes only after the count's, and the cut comes last.
+/// How the bar fits, from what it shows: 0 everything; 1 no "n changes" text; 2 the right group
+/// cut at the bar's edge (Apply not whole). Checks the order on the way: the cut comes last.
 fn fit_of(bar: &[Drawn], at: &str) -> u8 {
     let get = |id: &str| bar.iter().find(|d| d.id == id);
-    let icon = get("page-count").is_some_and(|d| d.rect.width() <= 27.0);
     let text = get("edits-count").is_some_and(|d| d.visible);
     // Apply whole is 60 wide: 12, APPLY, 12.
     let cut = get("edit-apply").is_none_or(|d| !d.visible || d.rect.width() < 59.5);
-    // Once the right group is cut the left one may be cut too, so the count's form shows only
-    // before.
-    assert!(cut || text || icon, "{at}: the changes' text went before the count's: {bar:?}");
     assert!(!cut || !text, "{at}: the right group is cut while the changes' text could give room up: {bar:?}");
-    if cut {
-        3
-    } else if !text {
-        2
-    } else {
-        u8::from(icon)
-    }
+    if cut { 2 } else { u8::from(!text) }
 }
 
 #[test]
@@ -980,19 +957,19 @@ fn the_paging_bar_draws_nothing_over_anything_at_the_default_size() {
     assert_apart(&bar, "1100 × 720");
     let fit = fit_of(&bar, "1100 × 720");
     let at = |id: &str| bar.iter().find(|d| d.id == id).map(|d| d.rect);
-    let between = at("row-add").zip(at("table-refresh")).map(|(add, refresh)| add.left() - refresh.right());
+    let between = at("edits-count").zip(at("page-last")).map(|(changes, last)| changes.left() - last.right());
     println!(
-        "the paging bar at 1100 × 720 with a change staged: form {fit} (0 all, 1 count icon, 2 no changes text), {between:?} points between the groups, the bar {:?} to the value panel at {}",
+        "the paging bar at 1100 × 720 with a change staged: form {fit} (0 all, 1 no changes text), {between:?} points between the groups, the bar {:?} to the value panel at {}",
         at("page-first").map(|r| r.left()),
         ui.panel_left()
     );
-    assert!(fit <= 2, "nothing is cut at the default size: {bar:?}");
+    assert!(fit <= 1, "nothing is cut at the default size: {bar:?}");
     let right = ui.panel_left();
-    for id in ["page-first", "page-prev", "page-next", "page-last", "page-count", "table-refresh", "row-add", "edit-reset", "edit-apply"] {
+    for id in ["page-first", "page-prev", "page-next", "page-last", "edit-reset", "edit-apply"] {
         let d = bar.iter().find(|d| d.id == id).unwrap_or_else(|| panic!("`{id}` is drawn: {bar:?}"));
         assert!(d.visible && d.rect.right() <= right, "`{id}` shows, left of the value panel at {right}: {d:?}");
     }
-    for id in ["page-first", "page-prev", "page-next", "page-last", "table-refresh"] {
+    for id in ["page-first", "page-prev", "page-next", "page-last"] {
         let d = bar.iter().find(|d| d.id == id).unwrap();
         assert_eq!(d.rect.size(), egui::vec2(28.0, 28.0), "`{id}` shows whole");
     }
@@ -1037,7 +1014,7 @@ fn a_narrowing_paging_bar_gives_room_up_in_order_and_never_overlaps() {
         assert_apart(&bar, &at);
         let fit = fit_of(&bar, &at);
         assert!(seen.last().is_none_or(|&(_, last)| fit >= last), "{at}: the bar took room back while narrowing: {seen:?} then {fit}");
-        if fit == 3 {
+        if fit == 2 {
             // Cut at the bar's edge, never over the left group (`assert_apart`).
             let right = ui.panel_left();
             for d in bar.iter().filter(|d| d.visible) {
@@ -1046,8 +1023,8 @@ fn a_narrowing_paging_bar_gives_room_up_in_order_and_never_overlaps() {
         }
         seen.push((width, fit));
     }
-    println!("the paging bar's form by window width (0 all, 1 count icon, 2 no changes text, 3 cut): {seen:?}");
-    for fit in 0..=3 {
+    println!("the paging bar's form by window width (0 all, 1 no changes text, 2 cut): {seen:?}");
+    for fit in 0..=2 {
         assert!(seen.iter().any(|&(_, f)| f == fit), "the sweep shows fit {fit}: {seen:?}");
     }
 }
@@ -1169,9 +1146,9 @@ fn rect_of(ui: &mut Ui, id: &str) -> egui::Rect {
     egui::Rect::from_min_size(egui::pos2(r[0], r[1]), egui::vec2(r[2], r[3]))
 }
 
-/// The paging bar's arrows, refresh and + Row, moved to `components::button`, say in
-/// `ui.inspect` what they said before: ids, values, enabled flags; the arrows and refresh are the
-/// page's plain icon buttons, + Row a bar button.
+/// The paging bar's arrows, and refresh and + Row in the table bar, say in `ui.inspect` what
+/// they said before: ids, values, enabled flags; the arrows are the page's plain icon buttons,
+/// refresh and + Row the table bar's cells.
 #[test]
 fn moved_icon_buttons_keep_their_ids_values_and_flags() {
     let db = dbee_testkit::require_testdb!();
@@ -1186,7 +1163,7 @@ fn moved_icon_buttons_keep_their_ids_values_and_flags() {
             assert_eq!(e["value"], json!(value), "{at}: `{id}`'s value: {e}");
             assert_eq!(e.get("enabled") != Some(&json!(false)), *enabled, "{at}: `{id}` enabled: {e}");
             let size = rect_of(ui, id).size();
-            let page = if *id == "row-add" { size.y == 36.0 } else { size == egui::vec2(28.0, 28.0) };
+            let page = if ["row-add", "table-refresh"].contains(id) { size.y == 35.0 } else { size == egui::vec2(28.0, 28.0) };
             assert!(page, "{at}: `{id}` is the page's size: {size:?}");
         }
     };

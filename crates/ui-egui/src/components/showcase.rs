@@ -856,7 +856,7 @@ fn results(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: before the app gives timers, today's spinner in the timer's place; a result's name keeps its case",
+        "not on the page yet: before the app gives timers, today's spinner in the timer's place; a count's first 300 ms, its words alone; a result's name keeps its case",
         SPACE_8,
         |ui| {
             stack(ui, &mut |ui| {
@@ -888,10 +888,21 @@ fn table_tab_bars(ui: &mut Ui) {
     };
     let s = Duration::from_millis;
     let first = Some((1, 100));
-    let table = |view, loading, count| TableBar { view, loading, count, shown: first, columns: 8, can_refresh: true, can_add: true, value_on: false };
+    let table = |view, loading, count| TableBar {
+        view,
+        structure: true,
+        loading,
+        count,
+        shown: first,
+        columns: 8,
+        can_refresh: true,
+        can_add: true,
+        can_count: true,
+        value: Some(false),
+    };
     section(
         ui,
-        "table bar: data, structure, loading; the row count: estimate with COUNT, unknown with COUNT ROWS, counting (its CANCEL is the footer job)",
+        "table bar: data, structure, loading; the row count: estimate with COUNT, unknown with COUNT ROWS, counting (its CANCEL is the footer job); as the table tab draws it, STRUCTURE off and no Value cell",
         SPACE_8,
         |ui| {
             let rows = [
@@ -901,6 +912,7 @@ fn table_tab_bars(ui: &mut Ui) {
                 table(View::Data, None, RowCount::Estimate(100_000)),
                 table(View::Data, None, RowCount::Unknown),
                 table(View::Data, None, RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }),
+                TableBar { structure: false, value: None, ..table(View::Data, None, RowCount::Estimate(100_000)) },
             ];
             stack(ui, &mut |ui| {
                 for row in rows {

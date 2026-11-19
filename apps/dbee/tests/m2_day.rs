@@ -90,6 +90,19 @@ impl Engine {
     }
 }
 
+/// `n` with a comma between thousands, as the app writes counts.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Removes the day's rows: the orders of the customers marked [`MARK`], then those customers.
 fn sweep_sql(e: &Engine) -> String {
     let shop = e.shop();
@@ -260,6 +273,24 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let orders_tab = app.document()["active"].as_u64().unwrap();
     assert_eq!(app.value(&format!("tab-{orders_tab}")), "orders");
     app.shot(root, &format!("{p}-2b-orders"));
+    // The table bar between the filter bar and the rows: DATA chosen, STRUCTURE off, EXPORT off
+    // (when it has room), the estimate (none on SQLite: COUNT ROWS); a click counts exactly.
+    assert_eq!(app.value("table-view-data"), true, "{name}");
+    assert_eq!(app.tag("table-view-structure").map(|e| e["enabled"].clone()), Some(json!(false)), "{name}: STRUCTURE off");
+    assert!(app.tag("table-export").is_none_or(|e| e["enabled"] == false), "{name}: EXPORT off");
+    let (filter, refresh, header) = (app.rect("filter-0-column"), app.rect("table-refresh"), app.rect("grid-header-0"));
+    assert!(
+        filter[1] < refresh[1] && refresh[1] < header[1],
+        "{name}: the table bar under the filters, over the rows: {filter:?} {refresh:?} {header:?}"
+    );
+    let count = app.value("page-count");
+    assert!(count == "Count rows" || count.as_str().is_some_and(|v| v.starts_with('~')), "{name}: the estimate or COUNT ROWS: {count}");
+    app.click("page-count");
+    app.until("the count", |app| app.table()["total"]["exact"].is_u64());
+    let n = app.table()["total"]["exact"].as_u64().unwrap();
+    assert_eq!(n.to_string(), e.q(&format!("SELECT COUNT(*) FROM {shop}.orders")), "{name}: the server's count");
+    assert_eq!(app.value("table-rows"), format!("1–100 of {} rows", thousands(n)), "{name}");
+    app.shot(root, &format!("{p}-2c-counted"));
 
     // 3. The three filters through the bar, then Enter in the last value field.
     app.click("filter-add");

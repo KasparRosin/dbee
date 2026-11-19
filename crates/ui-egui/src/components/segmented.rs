@@ -131,6 +131,8 @@ pub struct Segmented<'a, T> {
     choices: &'a [(T, &'a str)],
     style: Style,
     width: f32,
+    /// The choice drawn off, which a click can't choose.
+    off: Option<T>,
 }
 
 /// What a [`Segmented`] drew: the box's response, and each segment's.
@@ -142,12 +144,12 @@ pub struct Shown {
 impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
     /// Caps segments, each as wide as its words: the box hugs them.
     pub fn caps(selected: &'a mut T, choices: &'a [(T, &'a str)]) -> Segmented<'a, T> {
-        Segmented { selected, choices, style: Style::Caps, width: f32::INFINITY }
+        Segmented { selected, choices, style: Style::Caps, width: f32::INFINITY, off: None }
     }
 
     /// Small segments sharing the box's width.
     pub fn small(selected: &'a mut T, choices: &'a [(T, &'a str)]) -> Segmented<'a, T> {
-        Segmented { selected, choices, style: Style::Small, width: f32::INFINITY }
+        Segmented { selected, choices, style: Style::Small, width: f32::INFINITY, off: None }
     }
 
     /// The small style's box this wide, or as wide as there is room for (the default fills the
@@ -157,10 +159,16 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
         self
     }
 
+    /// Draws the choice `off` (when there is one) off: faint, and no click chooses it.
+    pub fn off(mut self, off: Option<T>) -> Segmented<'a, T> {
+        self.off = off;
+        self
+    }
+
     /// Draws it; the box's response (changed when a click or Space chose another) and each
     /// segment's.
     pub fn show(self, ui: &mut Ui) -> Shown {
-        let Segmented { selected, choices, style, width } = self;
+        let Segmented { selected, choices, style, width, off } = self;
         let n = choices.len();
         let segment = |words, on, i: usize| {
             let s = Segment { words, style, selected: on, divider: i + 1 < n && !on, width: None, look: None };
@@ -185,7 +193,8 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
         let mut x = rect.left() + 1.0;
         for (((value, _), s), w) in choices.iter().zip(segments).zip(widths) {
             // Each in its own place, so egui's rounding of the widths doesn't add up along the row.
-            let r = inside.put(Rect::from_min_size(pos2(x, rect.top() + 1.0), vec2(w, SEGMENT_H)), s);
+            let at = Rect::from_min_size(pos2(x, rect.top() + 1.0), vec2(w, SEGMENT_H));
+            let r = inside.add_enabled_ui(off != Some(*value), |ui| ui.put(at, s)).inner;
             x += w;
             if r.clicked() && *selected != *value {
                 *selected = *value;

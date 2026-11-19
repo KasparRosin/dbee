@@ -1144,9 +1144,9 @@ fn assert_starts_at_the_body(ui: &mut Ui, at: &str) {
 }
 
 /// The grid sits edge to edge in the tab's body, no margin (Screens 53193, 43147): its row numbers
-/// start at the body's left edge, in the table tab and in a query's results. The bars keep today's
-/// 8 in from the body's sides: the filter bar's first control 20 in (its own 12 inside), the
-/// toolbar's Run 8 in.
+/// start at the body's left edge, in the table tab and in a query's results. The table tab's bars
+/// run the body's full width too, the filter bar's first control 12 in (TA); the query toolbar
+/// keeps today's 8 in.
 #[test]
 fn the_grid_runs_edge_to_edge() {
     let db = dbee_testkit::require_testdb!();
@@ -1157,7 +1157,7 @@ fn the_grid_runs_edge_to_edge() {
     assert_starts_at_the_body(&mut ui, "the table tab");
     let left = ui.body_x().min;
     let toggle = ui.drawn("filter-raw-toggle");
-    assert!(close(toggle.left(), left + 20.0), "the filter bar's first control 20 in from {left}: {toggle:?}");
+    assert!(close(toggle.left(), left + 12.0), "the filter bar's first control 12 in from {left}: {toggle:?}");
     ui.execute("tab.newQuery", json!({ "text": "select id, name from shop.customers order by id limit 5" }));
     ui.execute("query.run", json!({}));
     ui.frame();
@@ -1603,4 +1603,253 @@ fn column_lines_are_one_pixel_wide() {
     ui.hover(egui::pos2(head.right(), cell.center().y));
     ui.frame();
     assert_eq!(ui.harness.output().platform_output.cursor_icon, egui::CursorIcon::ResizeColumn, "the boundary resizes the column");
+}
+
+/// `n` with a comma between thousands, as the app writes counts.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The tab's page has loaded, with rows.
+fn loaded(ui: &mut Ui) -> bool {
+    let t = ui.table();
+    t["loading"].is_null() && t["rows"].as_u64().is_some_and(|n| n > 0)
+}
+
+/// Whether `id` was drawn enabled in the last frame.
+fn enabled(ui: &mut Ui, id: &str) -> bool {
+    let e = ui.tag(id).unwrap_or_else(|| panic!("`{id}` is drawn"));
+    e.get("enabled") != Some(&json!(false))
+}
+
+/// The value panel closed, so the table bar has the room of TA's picture at 1100 wide (with the
+/// panel open its count's range gives way first).
+fn without_the_panel(ui: &mut Ui) {
+    if ui.value("value-toggle") == json!(true) {
+        ui.click("value-toggle");
+        ui.frame();
+    }
+    assert_eq!(ui.value("value-toggle"), false);
+}
+
+/// The pointer rests on `id`: whether its hover says `words`.
+fn hover_says(ui: &mut Ui, id: &str, words: &str) -> bool {
+    let at = ui.drawn(id).center();
+    ui.rest(at);
+    ui.texts().iter().any(|(_, g)| g.text() == words)
+}
+
+/// The tab's body from top to bottom in TA's order: the filter bar, the table bar, the grid, the
+/// paging bar; the bars' grounds run the body's full width, and the table bar's view switch
+/// starts 12 in.
+#[test]
+fn the_table_tab_runs_in_tas_order_edge_to_edge() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("shop", "orders");
+    ui.until("the page", loaded);
+    ui.hover_away();
+    let body = ui.body_x();
+    let order = ["filter-0-column", "table-view-data", "grid-header-0", "page-first"];
+    let tops: Vec<f32> = order.iter().map(|id| ui.drawn(id).top()).collect();
+    assert!(tops.windows(2).all(|w| w[0] < w[1]), "{order:?} top to bottom: {tops:?}");
+    for id in ["filter-0-column", "table-view-data", "page-first"] {
+        let y = ui.drawn(id).center().y;
+        let ground = painted_at(&ui, egui::pos2(body.min + 2.0, y)).map(|(_, r)| r);
+        assert!(
+            ground.is_some_and(|r| close(r.left(), body.min) && close(r.right(), body.max)),
+            "`{id}`'s bar runs from the body's left {} to its right {}: {ground:?}",
+            body.min,
+            body.max
+        );
+    }
+    let data = ui.drawn("table-view-data");
+    assert!((data.left() - (body.min + 12.0)).abs() <= 1.0, "DATA 12 in from {}: {data:?}", body.min);
+}
+
+/// The table bar as TA draws it: DATA chosen, STRUCTURE off, IMPORT and EXPORT off, REFRESH and
+/// "+ Row" on, the facts with the estimate and COUNT; a click on COUNT counts, and the facts then
+/// read the exact count with no button.
+#[test]
+fn the_table_bar_matches_ta() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("shop", "orders");
+    ui.until("the page", loaded);
+    without_the_panel(&mut ui);
+    assert_eq!(ui.value("table-view-data"), true);
+    assert_eq!(ui.value("table-view-structure"), false);
+    assert!(!enabled(&mut ui, "table-view-structure"), "STRUCTURE off");
+    for id in ["table-import", "table-export"] {
+        assert!(!enabled(&mut ui, id), "`{id}` off until M4");
+    }
+    for id in ["table-refresh", "row-add", "table-view-data"] {
+        assert!(enabled(&mut ui, id), "`{id}` on");
+    }
+    let estimate = ui.value("page-count").as_str().unwrap_or_default().to_string();
+    assert!(estimate.starts_with('~') && estimate.ends_with(" rows"), "the estimate: {estimate}");
+    assert_eq!(ui.value("table-rows"), format!("1–100 of {estimate}"));
+    assert!(
+        hover_says(&mut ui, "table-view-structure", "Structure: not now, the structure view comes in a later step."),
+        "STRUCTURE says why it is off"
+    );
+    assert!(hover_says(&mut ui, "table-export", dbee_ui_egui::components::table_bars::EXPORT_LATER), "EXPORT says why");
+    ui.click("page-count");
+    ui.until("the count", |ui| ui.table()["total"]["exact"].is_u64());
+    ui.frame();
+    let n = ui.table()["total"]["exact"].as_u64().unwrap();
+    let rows = format!("{} rows", thousands(n));
+    assert_eq!(ui.value("table-rows"), format!("1–100 of {rows}"));
+    assert_eq!(ui.value("page-count"), rows.as_str(), "the count's words");
+    assert_eq!(ui.rect("page-count"), ui.rect("table-rows"), "no COUNT: `page-count` is the facts");
+}
+
+/// A view has no estimate: the facts read the range and COUNT ROWS; + ROW is off and says why.
+#[test]
+fn the_table_bar_on_a_view() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("shop", "order_totals");
+    ui.until("the page", loaded);
+    without_the_panel(&mut ui);
+    assert_eq!(ui.value("table-rows"), "1–100");
+    assert_eq!(ui.value("page-count"), "Count rows");
+    assert!(!enabled(&mut ui, "row-add"), "+ ROW off on a view");
+    assert!(hover_says(&mut ui, "row-add", "Cannot add a row now: views are read-only"), "+ ROW says why");
+}
+
+/// An empty table: its one page tells the count, `0 rows`, and there is nothing to count.
+#[test]
+fn an_empty_table_reads_0_rows() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "t_none", |t| format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, note text);"));
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("scratch", &table.0);
+    ui.until("the empty page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"] == 0);
+    ui.frame();
+    assert_eq!(ui.value("table-rows"), "0 rows");
+    assert_eq!(ui.value("page-count"), "0 rows");
+    assert_eq!(ui.rect("page-count"), ui.rect("table-rows"), "no COUNT ROWS");
+}
+
+/// Egui's clock in the last frame, in seconds.
+fn clock(ui: &Ui) -> f64 {
+    ui.harness.ctx.input(|i| i.time)
+}
+
+/// Whether the active table tab's page load (or else its count) runs.
+fn running(ui: &Ui, count: bool) -> bool {
+    let s = ui.harness.state().session().state();
+    match s.active_tab() {
+        Some(dbee_engine::Tab::Table(t)) => {
+            if count {
+                t.counting.is_some()
+            } else {
+                t.loading.is_some()
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Runs frames until the active tab's load (or count) runs, then on until the window's clock
+/// has gone `secs` past the frame that first showed it; checks `check` on each frame on the way
+/// with the time gone so far.
+fn frames_while_running(ui: &mut Ui, count: bool, secs: f64, mut check: impl FnMut(&mut Ui, f64)) {
+    let start = Instant::now();
+    while !running(ui, count) {
+        assert!(start.elapsed() < WAIT, "it runs");
+        ui.frame();
+    }
+    let first = clock(ui);
+    loop {
+        ui.frame();
+        let gone = clock(ui) - first;
+        assert!(running(ui, count), "still running at {gone:.2} s");
+        check(ui, gone);
+        if gone >= secs {
+            return;
+        }
+    }
+}
+
+/// A scratch table of 150 rows, more than a page, so its first page doesn't tell the count; and a
+/// window whose frames are 50 ms apart on egui's clock, the value panel closed.
+fn held_table(db: &TestDb) -> (Scratch, Ui) {
+    let table = three_columns(db, 150);
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, step: Some(0.05), ..Setup::default() });
+    without_the_panel(&mut ui);
+    (table, ui)
+}
+
+/// Review Focus 3: the table bar shows CANCEL and LOADING only once a load has run 300 ms, and
+/// each load's 300 ms count from its own start.
+#[test]
+fn the_loading_state_waits_300_ms_and_restarts_per_load() {
+    let db = dbee_testkit::require_testdb!();
+    let (table, mut ui) = held_table(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", loaded);
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", table.0)).unwrap();
+    for load in ["first", "second"] {
+        let rx = ui.send("engine.execute", json!({ "command": "table.refresh", "params": {} }));
+        let mut shown = None;
+        frames_while_running(&mut ui, false, 0.45, |ui, gone| {
+            let (cancel, refresh, loading) = (ui.rect("table-cancel").is_some(), ui.rect("table-refresh").is_some(), ui.rect("table-loading"));
+            if gone <= 0.25 {
+                assert!(!cancel && refresh && loading.is_none(), "{load} load at {gone:.2} s: REFRESH, no CANCEL or LOADING yet");
+            }
+            if gone >= 0.4 {
+                assert!(cancel && !refresh && loading.is_some(), "{load} load at {gone:.2} s: CANCEL and LOADING in place of REFRESH");
+                shown = Some(gone);
+            }
+        });
+        assert!(shown.is_some(), "{load} load: the loading state showed");
+        assert_eq!(ui.value("table-loading"), "Loading");
+        assert!(ui.texts().iter().any(|(_, g)| g.text().starts_with("00:00.")), "{load} load: the timer shows");
+        ui.click("table-cancel");
+        let r = ui.reply(&rx, "the refresh");
+        assert_eq!(r["code"], "cancelled", "{load} load: CANCEL ended it cancelled: {r}");
+        ui.until("the load's end", |ui| ui.table()["loading"].is_null());
+        ui.frame();
+        assert!(ui.rect("table-cancel").is_none() && ui.rect("table-refresh").is_some(), "{load} load: REFRESH back");
+    }
+    drop(lock);
+}
+
+/// A count shows COUNTING and its timer in the facts once it has run 300 ms; the footer's job
+/// cancels it.
+#[test]
+fn counting_shows_its_timer_after_300_ms() {
+    let db = dbee_testkit::require_testdb!();
+    let (table, mut ui) = held_table(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", loaded);
+    ui.frame();
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", table.0)).unwrap();
+    ui.ok("engine.execute", json!({ "command": "table.count", "params": {}, "wait": false }));
+    let counting = |ui: &Ui| ui.texts().iter().any(|(_, g)| g.text() == "COUNTING");
+    let timer = |ui: &Ui| ui.texts().iter().any(|(_, g)| g.text().starts_with("00:00."));
+    let mut seen = false;
+    frames_while_running(&mut ui, true, 0.45, |ui, gone| {
+        if gone <= 0.25 {
+            assert!(!counting(ui) && !timer(ui), "at {gone:.2} s: no COUNTING yet");
+        }
+        if gone >= 0.4 {
+            assert!(counting(ui) && timer(ui), "at {gone:.2} s: COUNTING and its timer");
+            seen = true;
+        }
+    });
+    assert!(seen);
+    ui.click("status-cancel");
+    ui.until("the cancelled count", |ui| ui.table()["counting"].is_null());
+    drop(lock);
 }
