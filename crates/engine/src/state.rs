@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use dbee_config::{ConnectionConfig, ConnectionStore};
-use dbee_core::{Catalog, DatabaseAfter, ResultSet, TableRef};
+use dbee_core::{Catalog, DatabaseAfter, ForeignKey, ResultSet, TableInfo, TableRef, TableStructure};
 use dbee_driver::{ApplyGate, Connection, DbError, Meaning, ServerInfo, TlsState, TransactionState};
 use dbee_sql::Dialect;
 use dbee_sql::filter::{Condition, Filter, Sort};
@@ -472,6 +472,36 @@ pub struct PageView {
     pub page: u64,
 }
 
+/// What a table tab shows: its rows (DATA) or its structure (STRUCTURE). A tab opens in DATA.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Showing {
+    #[default]
+    Data,
+    Structure,
+}
+
+/// A table's structure as a tab read it: the catalog's table (columns and keys) as it was when
+/// the read started, the foreign keys of every table that reference it, and what the read
+/// brought (indexes, triggers, defaults, the foreign keys' actions).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructureRead {
+    pub info: TableInfo,
+    /// Each with the table it belongs to.
+    pub referenced_by: Vec<(TableRef, ForeignKey)>,
+    pub structure: TableStructure,
+}
+
+/// A table tab's STRUCTURE view: the read running (`loading`), the last one that landed
+/// (`shown`), and why the last read failed (`error`; `shown` stays). Only the read `loading`
+/// names lands: a newer read, a cancel or a reconnect leaves an older one ignored.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TabStructure {
+    pub loading: Option<JobId>,
+    pub shown: Option<Arc<StructureRead>>,
+    pub error: Option<String>,
+}
+
 /// A table data tab.
 ///
 /// `applied`, `sort` and `page` are what the tab asks for: what the rows were loaded with, or are
@@ -540,6 +570,10 @@ pub struct TableTab {
     pub applying: Option<JobId>,
     /// The cells the last successful Apply wrote, `(row, column)` of `data`, in order (see above).
     pub saved: Vec<(usize, usize)>,
+    /// What the tab shows (`table.view`); DATA's state above is kept while STRUCTURE shows.
+    pub showing: Showing,
+    /// The STRUCTURE view's read.
+    pub structure: TabStructure,
 }
 
 impl TableTab {
@@ -569,6 +603,8 @@ impl TableTab {
             edits: Arc::default(),
             applying: None,
             saved: Vec::new(),
+            showing: Showing::Data,
+            structure: TabStructure::default(),
         }
     }
 
@@ -581,9 +617,10 @@ impl TableTab {
     /// results will be ignored. A load in flight counts as failed without a message (the view
     /// goes back to `shown`), a count in flight leaves the estimate it showed, and an Apply in
     /// flight ends with an unknown outcome (the edits stay, `failed` says so). The saved cells
-    /// lose their mark.
+    /// lose their mark, and a structure read in flight is forgotten (STRUCTURE keeps what it showed).
     pub(crate) fn drop_dead_jobs(&mut self) {
         self.saved.clear();
+        self.structure.loading = None;
         if self.loading.take().is_some() {
             self.back_to_shown();
         }
@@ -598,6 +635,9 @@ impl TableTab {
     /// that still names it is cleared as [`TableTab::drop_dead_jobs`] would clear it, so no
     /// marker outlives its job.
     pub(crate) fn job_ended(&mut self, job: JobId) {
+        if self.structure.loading == Some(job) {
+            self.structure.loading = None;
+        }
         if self.loading == Some(job) {
             self.loading = None;
             self.back_to_shown();

@@ -293,6 +293,13 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     assert_eq!(n.to_string(), e.q(&format!("SELECT COUNT(*) FROM {shop}.orders")), "{name}: the server's count");
     assert_eq!(app.value("table-rows"), format!("1–100 of {} rows", thousands(n)), "{name}");
     app.shot(root, &format!("{p}-2c-counted"));
+    // 2d. STRUCTURE (through the control channel until the window draws it): the tab reads the
+    //     structure, and DATA comes back with its rows.
+    app.execute("table.view", json!({ "view": "structure" }));
+    app.until("the structure read", |app| app.table()["structure"]["shown"].is_object());
+    assert_eq!(app.table()["structure"]["shown"]["columns"], 9, "{name}: the orders' columns");
+    app.execute("table.view", json!({ "view": "data" }));
+    assert_eq!((app.table()["view"].clone(), app.table()["rows"].clone()), (json!("data"), json!(100)));
 
     // 3. The three filters through the bar, then Enter in the last value field.
     app.click("filter-add");
@@ -355,6 +362,11 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.ctrl("C");
     let d = app.document();
     assert_eq!((d["clipboard"].as_str(), d["clipboardBytes"].as_u64()), (Some(line), Some(line.len() as u64)), "{name}: the line was copied");
+    // `value.copy` gives the whole value as stored: the same JSON as the panel's pretty text.
+    let copied = app.execute("value.copy", json!({}));
+    assert_eq!((copied["bytes"].clone(), copied["row"].clone()), (d["value"]["bytes"].clone(), json!(false)), "{name}: {copied}");
+    let parsed: Json = serde_json::from_str(copied["text"].as_str().unwrap()).unwrap();
+    assert_eq!(parsed, serde_json::from_str::<Json>(&text).unwrap(), "{name}: the stored text is the shown JSON");
     app.shot(root, &format!("{p}-4-json"));
 
     // 5. The order's row selected, its customer_id link: a new customers tab filtered to the id.

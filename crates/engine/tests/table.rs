@@ -1141,3 +1141,170 @@ fn structure_of_a_table() {
         assert_eq!(s.execute("table.structure", json!({})).unwrap_err().code(), "badParams", "a query tab is active");
     });
 }
+
+// ---- the tab's view: DATA or STRUCTURE ---------------------------------------------------------
+
+/// Waits until a job waits for its turn on the browse connection.
+fn until_queued(t: &TestTarget, s: &Session) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while s.browse_waiting() == 0 {
+        assert!(Instant::now() < deadline, "{}: nothing waited for its turn", t.name());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Holds the browse connection with a page load of the active tab that cannot end before the
+/// gate is dropped (a file's takes about 3 s), and waits until it runs.
+fn hold_the_queue(t: &TestTarget, s: &mut Session) -> (Option<Held>, dbee_engine::JobId) {
+    let key = unique("dbee_gate");
+    let gate = hold_gate(t, &key);
+    let slow = if t.is_file() { t.slow_condition_sql(3) } else { t.waits_for_lock_sql(&key) };
+    let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": slow, "rawMode": true })).unwrap() else { panic!("a job") };
+    until_running(t, &key);
+    (gate, load)
+}
+
+/// `table.view {view: "structure"}` reads the structure into the tab without loading a page;
+/// `table.view {view: "data"}` shows the rows as they were, loading nothing.
+#[test]
+fn switching_to_structure_reads_it() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let before = read(s);
+        assert_eq!(summary(s)["view"], "data", "a tab opens in DATA");
+        assert_eq!(summary(s)["structure"], json!({ "loading": null, "error": null, "shown": null }));
+        let Outcome::Started(job) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        assert_eq!((&summary(s)["view"], &summary(s)["structure"]["loading"]), (&json!("structure"), &json!(job)));
+        assert_eq!(summary(s)["loading"], Json::Null, "{}: no page load", t.name());
+        let r = s.wait(job, T).unwrap_or_else(|e| panic!("{}: {e}", t.name()));
+        assert_eq!((&r["tab"], &r["view"], &r["table"]["name"]), (&summary(s)["tab"], &json!("structure"), &json!("orders")), "{r}");
+        assert_eq!(r["columns"][1]["name"], "customer_id");
+        let st = summary(s)["structure"].clone();
+        assert_eq!((&st["loading"], &st["error"]), (&Json::Null, &Json::Null), "{}: {st}", t.name());
+        assert_eq!(st["shown"], json!({ "columns": 9, "indexes": st["shown"]["indexes"], "foreignKeys": 1, "referencedBy": 1, "triggers": 0 }));
+        assert!(st["shown"]["indexes"].as_u64().is_some(), "{st}");
+        assert_eq!(read(s), before, "{}: the rows stay", t.name());
+        let tab = summary(s)["tab"].clone();
+        assert_eq!(run(s, "table.view", json!({ "view": "data" })), json!({ "tab": tab, "view": "data", "job": null }));
+        assert_eq!((&summary(s)["view"], &summary(s)["loading"]), (&json!("data"), &Json::Null));
+        assert_eq!(read(s), before, "{}: DATA loads nothing", t.name());
+        assert_eq!(summary(s)["structure"], st, "the structure read stays with the tab");
+    });
+}
+
+/// REFRESH in STRUCTURE reads the structure again, staged changes or not; in DATA it is still
+/// refused while changes are staged.
+#[test]
+fn refresh_in_structure_rereads_it_even_with_staged_changes() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        set_cell(s, 0, "dealer_id", "7");
+        let edits = summary(s)["edits"].clone();
+        run(s, "table.view", json!({ "view": "structure" }));
+        let Outcome::Started(job) = s.execute("table.refresh", json!({})).unwrap() else { panic!("a job") };
+        assert_eq!((&summary(s)["structure"]["loading"], &summary(s)["loading"]), (&json!(job), &Json::Null), "{}: not a page load", t.name());
+        assert_eq!(s.wait(job, T).unwrap()["view"], "structure");
+        assert_eq!(summary(s)["structure"]["shown"]["columns"], 9);
+        run(s, "table.view", json!({ "view": "data" }));
+        assert_eq!(summary(s)["edits"], edits, "{}: the change is still staged", t.name());
+        let e = s.execute("table.refresh", json!({})).unwrap_err();
+        assert_eq!((e.code(), e.data()["why"].as_str()), ("disabled", Some("apply or reset your changes first")));
+    });
+}
+
+/// Only the newest structure read lands: one that a newer read replaced, or whose tab closed,
+/// is ignored.
+#[test]
+fn only_the_newest_structure_read_lands() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let (gate, load) = hold_the_queue(t, s);
+        let Outcome::Started(first) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        until_queued(t, s);
+        let Outcome::Started(second) = s.execute("table.refresh", json!({})).unwrap() else { panic!("a job") };
+        assert_eq!(summary(s)["structure"]["loading"], json!(second));
+        assert_eq!(summary(s)["structure"]["shown"], Json::Null);
+        drop(gate);
+        s.wait(load, WATCHDOG).unwrap_or_else(|e| panic!("{}: the page load: {e}", t.name()));
+        assert_eq!(s.wait(first, T).unwrap(), json!({ "ignored": true }), "{}", t.name());
+        assert_eq!(summary(s)["structure"]["loading"], json!(second), "{}: the older read leaves the newer's mark", t.name());
+        assert_eq!(s.wait(second, T).unwrap()["view"], "structure");
+        let st = &summary(s)["structure"];
+        assert_eq!((&st["loading"], &st["shown"]["columns"]), (&Json::Null, &json!(9)), "{}: {st}", t.name());
+
+        // A tab closed while its read waits ignores the read.
+        run(s, "table.view", json!({ "view": "data" }));
+        let (gate, load) = hold_the_queue(t, s);
+        let Outcome::Started(orphan) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        until_queued(t, s);
+        run(s, "tab.close", json!({}));
+        drop(gate);
+        let _ = s.wait(load, WATCHDOG);
+        assert_eq!(s.wait(orphan, T).unwrap(), json!({ "ignored": true }), "{}", t.name());
+        assert!(s.state().tabs.is_empty());
+    });
+}
+
+/// CANCEL in STRUCTURE stops the structure read: it leaves the queue, nothing reads as an error,
+/// and nothing lands.
+#[test]
+fn cancelling_a_structure_read() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let (gate, load) = hold_the_queue(t, s);
+        let Outcome::Started(job) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        until_queued(t, s);
+        assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": true }));
+        assert_eq!(s.wait(job, T).map_err(|e| e.code()), Err("cancelled"), "{}", t.name());
+        assert_eq!(summary(s)["structure"], json!({ "loading": null, "error": null, "shown": null }), "{}", t.name());
+        assert_eq!(summary(s)["loading"], json!(load), "{}: the page load goes on", t.name());
+        drop(gate);
+        s.wait(load, WATCHDOG).unwrap_or_else(|e| panic!("{}: the page load: {e}", t.name()));
+        assert_eq!(summary(s)["structure"]["shown"], Json::Null, "{}: nothing landed", t.name());
+        // Nothing runs: nothing to cancel.
+        assert_eq!(run(s, "table.cancel", json!({})), json!({ "sent": false }));
+    });
+}
+
+/// On a lost connection STRUCTURE shows why it has nothing, and DATA is still reachable.
+#[test]
+fn structure_on_a_lost_connection() {
+    let _db = require_testdb!();
+    for_each_engine_exclusive(|t, s| {
+        // A file cannot lose its connection.
+        if t.is_file() {
+            return;
+        }
+        open_table(s, t.schema("shop"), "orders");
+        kill_dbee_connections(t, s);
+        assert_eq!(run_err(s, "table.page", json!({ "to": "next" })).code(), "connectionLost");
+        let tab = summary(s)["tab"].clone();
+        assert_eq!(run(s, "table.view", json!({ "view": "structure" })), json!({ "tab": tab, "view": "structure", "job": null }));
+        assert_eq!(summary(s)["structure"], json!({ "loading": null, "error": "connection lost — reconnect", "shown": null }));
+        assert_eq!(s.execute("table.refresh", json!({})).unwrap_err().code(), "disabled");
+        assert_eq!(run(s, "table.view", json!({ "view": "data" }))["view"], "data");
+        assert_eq!((&summary(s)["view"], &summary(s)["rows"]), (&json!("data"), &json!(100)), "{}: the rows stay", t.name());
+        run(s, "connection.reconnect", json!({}));
+        assert_eq!(run(s, "table.view", json!({ "view": "structure" }))["view"], "structure");
+        assert_eq!(summary(s)["structure"]["error"], Json::Null, "{}: a read that lands clears the error", t.name());
+    });
+}
+
+#[test]
+fn table_view_refuses_garbage() {
+    let _db = require_testdb!();
+    let mut s = connected();
+    assert_eq!(s.execute("table.view", json!({ "view": "data" })).unwrap_err().code(), "disabled", "no tab");
+    open_table(&mut s, "shop", "orders");
+    for bad in [json!({ "view": "rows" }), json!({ "view": 1 }), json!({}), json!({ "view": "STRUCTURE" })] {
+        assert_eq!(s.execute("table.view", bad.clone()).unwrap_err().code(), "badParams", "{bad}");
+    }
+    assert_eq!(summary(&s)["view"], "data");
+    run(&mut s, "tab.newQuery", json!({}));
+    let e = s.execute("table.view", json!({ "view": "structure" })).unwrap_err();
+    assert_eq!((e.code(), e.data()["why"].as_str()), ("disabled", Some("no table tab is active")));
+}

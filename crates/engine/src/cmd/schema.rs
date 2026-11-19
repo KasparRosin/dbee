@@ -35,7 +35,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         label: "Quick Search",
         menu: &[],
         shortcut: None,
-        params: "{query, limit?, connection?}",
+        params: "{query, limit?, connection?, grouped?}",
         enabled: always,
         run: quick_find,
         journal: false,
@@ -66,16 +66,20 @@ fn inspect(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     value.map(Outcome::Done).map_err(|e| bad(format!("cannot serialize: {e}")))
 }
 
-/// `{query, limit?}` → the hits, best first: `{hit: "table", schema, table, kind}` for the open
+/// `{query, limit?, grouped?}` → the hits, best first: `{hit: "table", schema, table, kind}` for the open
 /// connection's tables (none while not connected or lost), `kind` being the relation's, and
 /// `{hit: "connection", id, name, dbKind, kindLabel, color}` for the saved connections but the
-/// open one, `name` being the display name.
+/// open one, `name` being the display name. With `grouped: true` the tables come first, best
+/// first, at most `limit`, then the connections, best first, at most `limit`.
 fn quick_find(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let query = p::str(params, "query")?;
     let limit = p::opt_usize(params, "limit")?.unwrap_or(DEFAULT_LIMIT);
+    let grouped = p::bool_or(params, "grouped", false)?;
     let open = connection_param(s, params)?.and_then(|id| s.state.connection(Which::Id(id)));
     let catalog = open.filter(|c| !c.lost).map(|c| &*c.catalog);
-    let hits: Vec<Json> = fuzzy::search(catalog, &s.state.store.saved, open.map(|c| c.config.id.as_str()), query, limit)
+    let (saved, open) = (&s.state.store.saved, open.map(|c| c.config.id.as_str()));
+    let found = if grouped { fuzzy::search_grouped(catalog, saved, open, query, limit) } else { fuzzy::search(catalog, saved, open, query, limit) };
+    let hits: Vec<Json> = found
         .into_iter()
         .map(|found| match found {
             Found::Table(h) => json!({ "hit": "table", "schema": h.table.schema, "table": h.table.name, "kind": h.kind }),

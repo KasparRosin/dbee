@@ -38,7 +38,8 @@ pub use dbee_driver::{Meaning, TlsState, TransactionState, allowed_file};
 pub use edits::{Edits, Failed};
 pub(crate) use jobs::Apply;
 pub use state::{
-    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, State, StatementOutcome, Tab, TableTab, Total, Transaction, Which,
+    Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, Showing, State, StatementOutcome, StructureRead, Tab,
+    TabStructure, TableTab, Total, Transaction, Which,
 };
 pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};
 
@@ -467,6 +468,16 @@ impl Session {
     /// [`cmd`]); a tab's own jobs are named by the tab's markers instead.
     pub fn running(&self, command: &str) -> bool {
         self.jobs.is_running_label(command)
+    }
+
+    /// Whether command `id` can run now, or why not: its `enabled` check alone, for a window that
+    /// draws one button every frame. An unknown id, or a panicking check, is a reason.
+    pub fn enabled(&self, id: &str) -> Result<(), String> {
+        let spec = cmd::find(id).ok_or_else(|| format!("no command `{id}`"))?;
+        catch_unwind(AssertUnwindSafe(|| (spec.enabled)(self))).unwrap_or_else(|_| {
+            log::error!("command {}: its enabled check panicked", spec.id);
+            Err("internal error in its enabled check".into())
+        })
     }
 
     /// Every registered command with whether it can run now. A panicking `enabled` check shows

@@ -570,3 +570,25 @@ fn a_save_forgets_a_value_it_cannot_read_when_the_settings_change() {
     save(&mut w, &config(2002), None);
     assert_eq!(rig.store.get(ID, SecretKind::DbPassword).unwrap(), None);
 }
+
+/// `connection.open {save: true}` stores the typed password for the connection it saves only when
+/// its `saveSecrets` says so, and the connections file never holds it.
+#[test]
+fn an_open_with_save_keeps_the_password_only_when_asked() {
+    for keep in [true, false] {
+        let mut rig = Rig::new();
+        rig.accepts = Some("typed-pw");
+        let mut window = rig.window();
+        let given = ConnectionConfig { save_secrets: keep, ..config(2001) };
+        assert_eq!(rig.open(&mut window, json!({ "config": given, "password": "typed-pw", "save": true })), tried(2001, Some("typed-pw"), "ok"));
+        let file = std::fs::read_to_string(rig.file()).unwrap();
+        let body: Json = serde_json::from_str(&file).unwrap();
+        assert_eq!((&body["saved"][0]["id"], &body["saved"][0]["saveSecrets"]), (&json!(ID), &json!(keep)), "{file}");
+        assert!(!file.contains("typed-pw"), "{file}");
+        if keep {
+            assert_eq!(rig.stored()["secret"], "typed-pw");
+        } else {
+            assert_eq!(rig.store.get(ID, SecretKind::DbPassword).unwrap(), None);
+        }
+    }
+}

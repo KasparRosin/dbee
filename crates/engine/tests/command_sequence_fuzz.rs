@@ -71,7 +71,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("connection.cancel", &[]),
     ("schema.refresh", &[("connection", CONNECTION)]),
     ("schema.inspect", &[("connection", CONNECTION), ("schema", Hint::Text), ("table", Hint::Text)]),
-    ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count), ("connection", CONNECTION)]),
+    ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count), ("connection", CONNECTION), ("grouped", Hint::Bool)]),
     ("connection.close", &[("connection", CONNECTION), ("force", Hint::Bool)]),
     ("table.open", &[("schema", SCHEMA), ("table", TABLE), ("filters", FILTERS), ("connection", CONNECTION)]),
     ("table.setFilters", &[("filters", FILTERS), ("raw", Hint::Text), ("rawMode", Hint::Bool), ("apply", Hint::Bool)]),
@@ -83,6 +83,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("table.read", &[("offset", Hint::Count), ("limit", Hint::Count)]),
     ("table.followForeignKey", &[("row", Hint::Count), ("column", COLUMN)]),
     ("table.structure", &[("schema", SCHEMA), ("table", TABLE), ("connection", CONNECTION)]),
+    ("table.view", &[("view", Hint::OneOf(&["structure", "data"]))]),
     ("cell.edit", &[("row", GRID_ROW), ("column", EDIT_COLUMN), ("value", VALUE)]),
     ("cell.setNull", &[("row", GRID_ROW), ("column", EDIT_COLUMN)]),
     ("cell.clear", &[("row", GRID_ROW), ("column", EDIT_COLUMN)]),
@@ -97,6 +98,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("selection.all", &[]),
     ("copy.selection", &[("format", Hint::OneOf(&["tsv", "tsvHeader", "csv", "json", "markdown", "xml", ""]))]),
     ("value.show", &[]),
+    ("value.copy", &[]),
 ];
 
 /// Table commands: names from the seed data, odd ones and ones that do not exist.
