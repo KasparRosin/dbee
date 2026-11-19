@@ -1,5 +1,5 @@
 //! Table tabs: open, the filter bar, paging, sort, the row count, cancel, refresh, read,
-//! following a foreign key, and a table's structure.
+//! following a foreign key, a table's structure, and the tab's view (DATA or STRUCTURE).
 //!
 //! Every command needs a connected session that is not lost. `table.open` opens a new tab; the
 //! others act on the active tab, which must be a table tab. Applying filters, paging, sort and
@@ -44,13 +44,19 @@
 //! condition then sets the same number, unless the table changed meanwhile. A new condition
 //! forgets the total.
 //!
+//! **The view.** A tab shows DATA or STRUCTURE (`TableTab::showing`, `table.view`); DATA's state
+//! is kept whole while STRUCTURE shows. STRUCTURE reads the table's structure into the tab each
+//! time it is chosen, and `table.refresh` there reads it again (staged changes are no reason to
+//! refuse it), as a stoppable job on the browse connection: `table.cancel` stops it. Only the
+//! read `structure.loading` names lands ([`apply_structure`]).
+//!
 //! Logs carry the command ids and job labels only (the job runtime times them), never SQL,
 //! filter values or cells.
 
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use dbee_core::{Catalog, Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef, TableStructure};
+use dbee_core::{Catalog, Column, ColumnInfo, ForeignKey, RelKind, ResultSet, TableInfo, TableRef, TableStructure};
 use dbee_driver::{Connection, DbError, PAGE_LIMITS};
 use dbee_sql::Dialect;
 use dbee_sql::SqlError;
@@ -58,11 +64,12 @@ use dbee_sql::filter::{Condition, Filter, Op, Sort, SortDir, where_sql};
 use dbee_sql::select::{PAGE_SIZE, count_sql, page_sql};
 use serde_json::json;
 
+use super::connection::{self, CatalogReadError};
 use super::edit;
-use super::{CommandSpec, NOT_CONNECTED, bad, disabled, ignored, needed_connection, needs_db, p};
+use super::{CommandSpec, LOST, NOT_CONNECTED, bad, disabled, ignored, needed_connection, needs_db, p};
 use crate::edits::Written;
 use crate::jobs::Stop;
-use crate::state::{PageView, TableTab, Total};
+use crate::state::{PageView, Showing, StructureRead, TableTab, Total};
 use crate::turns::{self, InTurn};
 use crate::{Apply, ConnectionId, EngineError, JobId, Json, Outcome, Session, Tab, TabId, Which};
 
@@ -76,6 +83,7 @@ const REFRESH: &str = "table.refresh";
 const READ: &str = "table.read";
 const FOLLOW: &str = "table.followForeignKey";
 const STRUCTURE: &str = "table.structure";
+const VIEW: &str = "table.view";
 
 /// Why filters, paging, sort and refresh cannot run while edits are staged.
 pub const STAGED: &str = "apply or reset your changes first";
@@ -166,7 +174,7 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         menu: &[],
         shortcut: None,
         params: "{}",
-        enabled: table_view,
+        enabled: refreshable,
         run: refresh,
         journal: true,
         undoable: false,
@@ -204,6 +212,17 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         journal: false,
         undoable: false,
     },
+    CommandSpec {
+        id: VIEW,
+        label: "Show Table Data or Structure",
+        menu: &[],
+        shortcut: None,
+        params: "{view: \"data\" | \"structure\"}",
+        enabled: table_tab_active,
+        run: view,
+        journal: true,
+        undoable: false,
+    },
 ];
 
 // ---- enabled checks --------------------------------------------------------------------------
@@ -223,6 +242,24 @@ pub fn table_view(s: &Session) -> Result<(), String> {
     match s.state.active_tab() {
         Some(Tab::Table(t)) if t.has_staged_edits() => Err(STAGED.into()),
         _ => Ok(()),
+    }
+}
+
+/// [`table_view`] in DATA; in STRUCTURE, [`active_table`]: a refresh there reads the structure,
+/// not the rows, so staged changes are no reason to refuse it.
+pub fn refreshable(s: &Session) -> Result<(), String> {
+    match s.state.active_tab() {
+        Some(Tab::Table(t)) if t.showing == Showing::Structure => active_table(s),
+        _ => table_view(s),
+    }
+}
+
+/// The active tab is a table tab, whatever its connection: `table.view` switches to DATA also
+/// while the connection is lost.
+pub fn table_tab_active(s: &Session) -> Result<(), String> {
+    match s.state.active_tab() {
+        Some(Tab::Table(_)) => Ok(()),
+        _ => Err(NO_TABLE_TAB.into()),
     }
 }
 
@@ -372,6 +409,18 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "outcomeUnknown": t.edits.outcome_unknown(),
         "applying": t.applying,
         "saved": t.saved,
+        "view": t.showing,
+        "structure": {
+            "loading": t.structure.loading,
+            "error": t.structure.error,
+            "shown": t.structure.shown.as_ref().map(|r| json!({
+                "columns": r.info.visible_columns().count(),
+                "indexes": r.structure.indexes.len(),
+                "foreignKeys": r.info.foreign_keys.len(),
+                "referencedBy": r.referenced_by.len(),
+                "triggers": r.structure.triggers.len(),
+            })),
+        },
     })
 }
 
@@ -895,6 +944,16 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     let t = active(s)?;
     let which = Which::Tab(t.id);
     let alive = |job: Option<JobId>| job.is_some_and(|job| s.jobs.is_running(job));
+    if t.showing == Showing::Structure
+        && let Some(job) = t.structure.loading.filter(|&job| s.jobs.is_running(job))
+    {
+        s.browse(which)?;
+        return Ok(Outcome::Done(match s.jobs.stop(job) {
+            Some(true) => json!({ "sent": true }),
+            Some(false) => json!({ "sent": false, "stopping": true }),
+            None => json!({ "sent": false }),
+        }));
+    }
     if let Some(job) = t.applying.filter(|&job| s.jobs.is_running(job)) {
         let gate = s.state.connection(which).and_then(|c| c.apply_gate.as_ref()).filter(|(of, _, _)| *of == job);
         let Some((gate, stop)) = gate.map(|(_, gate, stop)| (Arc::clone(gate), Arc::clone(stop))) else {
@@ -924,7 +983,12 @@ fn cancel(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
 /// `{}` → a job returning `{tab, page, rows, hasNext, total}`: loads the page again. The total
 /// stays (count again for a new one).
 fn refresh(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
-    let view = active(s)?.view();
+    let t = active(s)?;
+    if t.showing == Showing::Structure {
+        let tab = t.id;
+        return read_structure(s, REFRESH, tab).map(Outcome::Started);
+    }
+    let view = t.view();
     reload(s, REFRESH, view, false)
 }
 
@@ -1022,14 +1086,51 @@ fn structure(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         },
         _ => return Err(bad("`schema` and `table` go together")),
     };
+    let StructureStart { id, conn: turned, info, referenced_by } = structure_start(s, which, &table)?;
+    let job = s.spawn_job(STRUCTURE, async move {
+        let read = connection::structure_in_turn(&turned, &table).await;
+        let conn: Arc<dyn Connection> = turned;
+        let apply: Apply = Box::new(move |s: &mut Session| {
+            if !s.is_current_browse(id, &conn) {
+                return Ok(ignored());
+            }
+            let structure = read.map_err(|e| s.catalog_read_failed(id, &conn, e))?;
+            Ok(structure_json(id, &StructureRead { info, referenced_by, structure }))
+        });
+        apply
+    });
+    Ok(Outcome::Started(job))
+}
+
+/// What a structure read takes on the caller's thread: the table from the catalog of the
+/// connection, the foreign keys that reference it, and the browse connection to read on.
+struct StructureStart {
+    id: ConnectionId,
+    conn: Arc<InTurn>,
+    info: TableInfo,
+    referenced_by: Vec<(TableRef, ForeignKey)>,
+}
+
+/// Checks that the catalog of the connection `which` names has `table` (`BadParams` when not) and
+/// takes what its structure read needs. Changes nothing but a lost mark.
+fn structure_start(s: &mut Session, which: Which, table: &TableRef) -> Result<StructureStart, EngineError> {
     let cat = catalog(s, which)?;
-    let info = lookup(&cat, &table)?;
-    let referenced_by: Vec<Json> = cat
-        .referenced_by(&table)
-        .into_iter()
+    let info = lookup(&cat, table)?.clone();
+    let referenced_by = cat.referenced_by(table).into_iter().map(|(from, fk)| (from.clone(), fk.clone())).collect();
+    let (id, conn) = s.browse_in_turn(which)?;
+    Ok(StructureStart { id, conn, info, referenced_by })
+}
+
+/// A structure read as `table.structure` gives it.
+fn structure_json(id: ConnectionId, read: &StructureRead) -> Json {
+    let referenced_by: Vec<Json> = read
+        .referenced_by
+        .iter()
         .map(|(from, fk)| json!({ "table": from, "name": fk.name, "columns": fk.columns, "targetColumns": fk.target_columns }))
         .collect();
+    let info = &read.info;
     let mut result = json!({
+        "connection": id,
         "table": info.table,
         "kind": info.kind,
         "columns": info.columns,
@@ -1037,27 +1138,119 @@ fn structure(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
         "uniqueKeys": info.unique_keys,
         "foreignKeys": info.foreign_keys,
         "referencedBy": referenced_by,
+        "indexes": read.structure.indexes,
+        "triggers": read.structure.triggers,
     });
-    let (id, turned) = s.browse_in_turn(which)?;
-    let job = s.spawn_job(STRUCTURE, async move {
-        let read = super::connection::structure_in_turn(&turned, &table).await;
+    with_keys(&mut result, &read.structure);
+    result
+}
+
+// ---- the tab's view --------------------------------------------------------------------------
+
+/// `{view: "data" | "structure"}` → the active table tab shows that view. `structure` starts the
+/// tab's structure read ([`read_structure`]): a job returning `table.structure`'s result with
+/// `tab` and `view`; when it cannot start (the connection is lost), `{tab, view, job: null}` with
+/// the reason in the tab's `structure.error`. `data` shows the rows as they were, loading
+/// nothing: `{tab, view, job: null}`; it forgets the structure's error (the read itself stays).
+fn view(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    let showing = match params.get("view").and_then(Json::as_str) {
+        Some("data") => Showing::Data,
+        Some("structure") => Showing::Structure,
+        _ => return Err(bad("`view` is required: \"data\" or \"structure\"")),
+    };
+    let tab = active(s)?.id;
+    let Some(t) = table_tab_mut(s, tab) else { return Err(disabled(NO_TABLE_TAB)) };
+    t.showing = showing;
+    if showing == Showing::Data {
+        t.structure.error = None;
+        return Ok(Outcome::Done(json!({ "tab": tab, "view": showing, "job": null })));
+    }
+    match read_structure(s, VIEW, tab) {
+        Ok(job) => Ok(Outcome::Started(job)),
+        Err(e) => {
+            let lost = s.state.connection(Which::Tab(tab)).is_none_or(|c| c.lost);
+            let why = match e {
+                _ if lost => LOST.to_string(),
+                EngineError::Disabled { why, .. } => why,
+                EngineError::BadParams { msg, .. } => msg,
+                other => other.to_string(),
+            };
+            if let Some(t) = table_tab_mut(s, tab) {
+                t.structure.error = Some(why);
+            }
+            Ok(Outcome::Done(json!({ "tab": tab, "view": showing, "job": null })))
+        }
+    }
+}
+
+/// Starts tab `tab`'s structure read, labelled `label`, and names it the tab's `structure.loading`
+/// (an older read still running is then ignored when it ends). The read waits for its turn on the
+/// browse connection and is bounded as [`connection::structure_in_turn`]'s; `table.cancel` stops
+/// it as it stops a page load.
+fn read_structure(s: &mut Session, label: &'static str, tab: TabId) -> Result<JobId, EngineError> {
+    let table = match s.state.tab(tab) {
+        Some(Tab::Table(t)) => t.table.clone(),
+        _ => return Err(disabled(NO_TABLE_TAB)),
+    };
+    let StructureStart { id, conn: turned, info, referenced_by } = structure_start(s, Which::Tab(tab), &table)?;
+    let stop = Arc::new(Stop::default());
+    let job_stop = Arc::clone(&stop);
+    let job = s.spawn_stoppable_job(label, stop, async move {
+        let read = connection::stoppable_structure_in_turn(&turned, &table, &job_stop).await;
         let conn: Arc<dyn Connection> = turned;
-        let apply: Apply = Box::new(move |s: &mut Session| {
-            if !s.is_current_browse(id, &conn) {
-                return Ok(ignored());
-            }
-            let structure = read.map_err(|e| s.catalog_read_failed(id, &conn, e))?;
-            if let Some(map) = result.as_object_mut() {
-                map.insert("connection".into(), json!(id));
-                map.insert("indexes".into(), json!(structure.indexes));
-                map.insert("triggers".into(), json!(structure.triggers));
-            }
-            with_keys(&mut result, &structure);
-            Ok(result)
-        });
+        let apply: Apply = Box::new(move |s: &mut Session| apply_structure(s, id, &conn, tab, info, referenced_by, read));
         apply
     });
-    Ok(Outcome::Started(job))
+    if let Some(t) = table_tab_mut(s, tab) {
+        t.structure.loading = Some(job);
+    }
+    Ok(job)
+}
+
+/// A tab's structure read ended. It lands only when its tab is open, its connection is the
+/// current browse connection and it is still the tab's `structure.loading`; else it is ignored.
+/// Read, it becomes the tab's `shown` and clears `error`; stopped by dbee it changes nothing
+/// else (no error); failed, `error` is the message (as `schema.refresh` gives a catalog read's)
+/// and `shown` stays.
+fn apply_structure(
+    s: &mut Session,
+    id: ConnectionId,
+    conn: &Arc<dyn Connection>,
+    tab: TabId,
+    info: TableInfo,
+    referenced_by: Vec<(TableRef, ForeignKey)>,
+    ended: Result<TableStructure, CatalogReadError>,
+) -> Result<Json, EngineError> {
+    if !s.is_current_browse(id, conn) {
+        return Ok(ignored());
+    }
+    let me = s.applying_job();
+    let Some(t) = table_tab_mut(s, tab) else { return Ok(ignored()) };
+    if me.is_none() || t.structure.loading != me {
+        return Ok(ignored());
+    }
+    t.structure.loading = None;
+    match ended {
+        Ok(structure) => {
+            let read = StructureRead { info, referenced_by, structure };
+            let mut result = structure_json(id, &read);
+            t.structure.shown = Some(Arc::new(read));
+            t.structure.error = None;
+            if let Some(map) = result.as_object_mut() {
+                map.insert("tab".into(), json!(tab));
+                map.insert("view".into(), json!(Showing::Structure));
+            }
+            Ok(result)
+        }
+        Err(e) => {
+            let cancelled = e.is_cancelled();
+            let e = s.catalog_read_failed(id, conn, e);
+            if !cancelled && let Some(t) = table_tab_mut(s, tab) {
+                t.structure.error = Some(e.to_string());
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Writes the structure's defaults into `result`'s `columns` (each gains `default`, matched by

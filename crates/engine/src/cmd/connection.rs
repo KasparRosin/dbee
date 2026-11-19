@@ -812,8 +812,39 @@ pub(crate) async fn structure_in_turn(conn: &InTurn, table: &TableRef) -> Result
     turns::in_turn(conn, |c| read_within(c, CATALOG_TIMEOUT, c.table_structure(table))).await.map_err(CatalogReadError)
 }
 
+/// [`structure_in_turn`] that `stop` stops: before its turn it leaves the queue, and with it a
+/// cancel request goes to the statement it runs ([`turns::stoppable_in_turn`]); either way it
+/// ends `Cancelled` ([`CatalogReadError::is_cancelled`]).
+pub(crate) async fn stoppable_structure_in_turn(conn: &InTurn, table: &TableRef, stop: &Stop) -> Result<TableStructure, CatalogReadError> {
+    // The limit's own end stays apart from the statement's error, so a stop is told from it.
+    let read = turns::stoppable_in_turn(
+        conn,
+        |c| async move {
+            match read_within(c, CATALOG_TIMEOUT, c.table_structure(table)).await {
+                Ok(structure) => Ok(Ok(structure)),
+                Err(CatalogLoad::Failed(e)) => Err(e),
+                Err(CatalogLoad::TimedOut) => Ok(Err(CatalogLoad::TimedOut)),
+            }
+        },
+        stop,
+    )
+    .await;
+    match read {
+        Ok(Ok(structure)) => Ok(structure),
+        Ok(Err(timed_out)) => Err(CatalogReadError(timed_out)),
+        Err(e) => Err(CatalogReadError(CatalogLoad::Failed(e))),
+    }
+}
+
 /// A bounded catalog read that gave nothing, for [`Session::catalog_read_failed`].
 pub(crate) struct CatalogReadError(CatalogLoad);
+
+impl CatalogReadError {
+    /// dbee stopped it ([`stoppable_structure_in_turn`]).
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self.0, CatalogLoad::Failed(DbError::Cancelled))
+    }
+}
 
 impl Session {
     /// A bounded catalog read on `conn`, the browse connection of `id`, failed: as any operation's

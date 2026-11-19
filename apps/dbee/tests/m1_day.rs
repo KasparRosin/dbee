@@ -233,6 +233,13 @@ fn m1_day_end_to_end() {
     assert_eq!(n.to_string(), psql(pg14(db), "SELECT count(*) FROM shop.orders").unwrap().trim(), "psql's count");
     assert_eq!(app.value("table-rows"), format!("1–100 of {} rows", thousands(n)));
     app.shot(&root, "2c-counted");
+    // 2d. STRUCTURE (through the control channel until the window draws it): the tab reads the
+    //     structure, and DATA comes back with its rows.
+    app.execute("table.view", json!({ "view": "structure" }));
+    app.until("the structure read", |app| app.table()["structure"]["shown"].is_object());
+    assert_eq!(app.table()["structure"]["shown"]["columns"], 9, "the orders' columns");
+    app.execute("table.view", json!({ "view": "data" }));
+    assert_eq!((app.table()["view"].clone(), app.table()["rows"].clone()), (json!("data"), json!(100)));
 
     // 3. The three filters through the bar (dealer_id = 42, + status = completed, + total > 100),
     //    then Enter in the last value field.
