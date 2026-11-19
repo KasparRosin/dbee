@@ -1,8 +1,8 @@
 //! The table tab's body ([`show`]), from top to bottom, each area the body's full width (TA):
 //!
-//! - a small note when the rows cannot be edited, saying why (`table-note`: a view, no row key,
-//!   a read-only connection, or the table's own reason as the driver writes it), on one line: a
-//!   longer one is cut short, and reads whole on hover;
+//! - when the rows cannot be edited, a note in an area of its own saying why (`table-note`: a
+//!   view, no row key, a read-only connection, or the table's own reason as the driver writes it),
+//!   on one line: a longer one is cut short, and reads whole on hover;
 //! - the filter bar ([`crate::filter_bar`]);
 //! - the table bar ([`TableBar`]): DATA / STRUCTURE (STRUCTURE off until the structure view),
 //!   REFRESH, "+ Row" (the new row is selected and scrolled to), the rows' count with COUNT or
@@ -10,11 +10,13 @@
 //!   REFRESH's place and LOADING with its timer in the count's; a count that has run 300 ms shows
 //!   COUNTING with its timer. The timers count from the frame that first saw the job ([`Since`]);
 //! - the error band (`table-error`, [`crate::components::error_band`]) when the last Apply failed,
-//!   with the server's message (the staged changes stay, and the grid marks the row it failed on),
-//!   or else when the last page load failed, with the rows from before kept underneath;
+//!   with the server's message, detail and hint (the staged changes stay, and the grid marks the
+//!   row it failed on), or else when the last page load failed, with the rows from before kept
+//!   underneath;
 //! - the grid ([`crate::grid`]) on the loaded page and its staged edits, sortable by a header
 //!   click, with foreign key links on the selected row, and the cell editor over it while one is
-//!   open ([`crate::editors`]; a double-click opens one);
+//!   open ([`crate::editors`]; a double-click opens one); before a page has loaded, `Loading …`
+//!   in its place, or `No rows are loaded.` after a first load that failed;
 //! - the paging bar ([`PagingBar`], its words and rules [`crate::paging`]): the arrows with the
 //!   page's words, a cut page's note, and the staged changes with RESET and APPLY.
 //!
@@ -33,7 +35,7 @@ use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
 use dbee_engine::{Edits, JobId, Json, Outcome, Tab, TabId, TableTab, Total, Which};
 use dbee_sql::select::PAGE_SIZE;
-use egui::{Align, Layout, Rect, RichText, UiBuilder, pos2};
+use egui::{Align, CornerRadius, Layout, Rect, Sense, UiBuilder, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -49,7 +51,7 @@ use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
-use crate::theme::size::TAB_BODY_PAD_X;
+use crate::theme::size::{BAR_LINE, NOTE_BAR_H, NOTE_BAR_PAD_X, TABLE_EMPTY_PAD};
 use crate::theme::{self, Text};
 
 /// The commands that load a page, whose database errors the tab's band shows.
@@ -347,12 +349,21 @@ fn paging_tags(
     })
 }
 
-/// The note above the grid for rows that cannot be edited, `why` being the engine's reason, on
-/// one line (cut short, and whole on hover). The table's own reason (`own`, the driver's) is a
-/// sentence and shows as written; dbee's are phrases.
+/// The note for rows that cannot be edited, `why` being the engine's reason: an area of its own
+/// across `ui`'s width, [`NOTE_BAR_H`] tall on `card` with a `line` along its bottom, the sentence
+/// on one line in `small` `text_muted` (cut short, and whole on hover). The table's own reason
+/// (`own`, the driver's) is a sentence and shows as written; dbee's are phrases.
 fn note(ui: &mut egui::Ui, tags: &mut Tags, why: &str, own: Option<&str>) {
+    let t = theme::tokens(ui.ctx());
     let text = if own == Some(why) { why.to_owned() } else { format!("These rows can't be edited: {why}.") };
-    let r = ui.add(egui::Label::new(Text::Small.rich(text.as_str()).color(theme::tokens(ui.ctx()).text_muted)).truncate());
+    let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), NOTE_BAR_H), Sense::hover());
+    let line = Rect::from_min_max(pos2(area.left(), area.bottom() - BAR_LINE), area.max);
+    ui.painter().rect_filled(area, CornerRadius::ZERO, t.card);
+    ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
+    let left = area.left() + NOTE_BAR_PAD_X;
+    let room = Rect::from_min_max(pos2(left, area.top()), pos2((area.right() - NOTE_BAR_PAD_X).max(left), line.top()));
+    let mut inner = ui.new_child(UiBuilder::new().id_salt("dbee-table-note").max_rect(room).layout(Layout::left_to_right(Align::Center)));
+    let r = inner.add(egui::Label::new(Text::Small.rich_as_written(text.as_str()).color(t.text_muted)).truncate());
     tags.tag_value("table-note", &r, text.as_str());
 }
 
@@ -365,28 +376,42 @@ pub(crate) const CANCELLED_NOTE: &str = "Cancelled before the commit: nothing wa
 /// The band's note under a page that did not load.
 pub(crate) const PAGE_NOTE: &str = "The rows below are the ones from before.";
 
-/// What the tab's error band says: a failed (or cancelled) Apply's heading, message and note,
-/// else a failed page load's; `None` when neither failed. An empty note is none.
-pub(crate) fn card_text(t: &TableTab) -> Option<(&'static str, &str, &'static str)> {
+/// What the tab's error band says: a failed (or cancelled) Apply's heading, message, the
+/// server's detail and hint, and note, else a failed page load's; `None` when neither failed.
+/// With it, `table-error`'s value: the message as the engine keeps it, which ends with the detail
+/// and hint the band shows under it as fields.
+pub(crate) fn card_text(t: &TableTab) -> Option<(Band<'_>, &str)> {
     if let Some(failed) = &t.edits.failed {
-        let message = failed.message.as_str();
-        return Some(if t.edits.outcome_unknown() {
-            ("The connection was lost during Apply", message, "")
+        let (heading, note) = if t.edits.outcome_unknown() {
+            ("The connection was lost during Apply", None)
         } else if failed.code == "cancelled" {
-            ("The changes were not applied", message, CANCELLED_NOTE)
+            ("The changes were not applied", Some(CANCELLED_NOTE))
         } else {
-            ("The changes were not applied", message, FAILED_NOTE)
-        });
+            ("The changes were not applied", Some(FAILED_NOTE))
+        };
+        let (detail, hint) = (failed.detail.as_deref(), failed.hint.as_deref());
+        let message = without_fields(&failed.message, detail, hint);
+        return Some((Band { heading, message, detail, hint, note, ..Band::default() }, failed.message.as_str()));
     }
-    t.error.as_deref().map(|e| ("The page did not load", e, PAGE_NOTE))
+    t.error.as_deref().map(|e| (Band { heading: "The page did not load", message: e, note: Some(PAGE_NOTE), ..Band::default() }, e))
 }
 
-/// Tab `tab`'s error band: something failed (see [`card_text`]). Tagged `table-error`, its value
-/// the message.
-pub(crate) fn band(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, (heading, error, note): (&str, &str, &str)) {
-    let band = Band { heading, message: error, note: (!note.is_empty()).then_some(note), ..Band::default() };
+/// `message` without the `Detail: …` and `Hint: …` lines a server error's words end with, when
+/// they are `detail` and `hint` (the band shows those as fields of their own).
+fn without_fields<'a>(message: &'a str, detail: Option<&str>, hint: Option<&str>) -> &'a str {
+    let strip = |m: &'a str, field: Option<&str>, name: &str| -> &'a str {
+        field.and_then(|f| m.strip_suffix(f)).and_then(|m| m.strip_suffix(name)).unwrap_or(m)
+    };
+    strip(strip(message, hint, "\nHint: "), detail, "\nDetail: ")
+}
+
+/// Tab `tab`'s error band across `ui`'s width, a 1 px `line` under it: something failed (see
+/// [`card_text`]). Tagged `table-error`, its value `value`.
+pub(crate) fn band(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, band: &Band<'_>, value: &str) {
     let r = band.show(ui, egui::Id::new(("dbee-table-error", tab.0)));
-    tags.tag_value("table-error", &r, error);
+    tags.tag_value("table-error", &r, value);
+    let (line, _) = ui.allocate_exact_size(vec2(r.rect.width(), BAR_LINE), Sense::hover());
+    ui.painter().rect_filled(line, CornerRadius::ZERO, theme::tokens(ui.ctx()).line);
 }
 
 /// "+ Row": adds a row, then selects its first cell and scrolls to it.
@@ -428,13 +453,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         // lost, no page on its way and no Apply running.
         let edit_blocked = can_edit(session).err();
         if let Some(why) = read_only {
-            top.add_space(6.0);
-            top.horizontal(|ui| {
-                ui.add_space(TAB_BODY_PAD_X);
-                ui.set_max_width((ui.available_width() - TAB_BODY_PAD_X).max(0.0));
-                note(ui, tags, &why, info.and_then(|i| i.no_edit_reason.as_deref()));
-            });
-            top.add_space(2.0);
+            note(&mut top, tags, &why, info.and_then(|i| i.no_edit_reason.as_deref()));
         }
         // The filter bar: the table's visible columns from the schema, else the page's.
         let columns: Vec<(&str, &str)> = match (info, tab.data.as_deref()) {
@@ -482,8 +501,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let drawn = table_bar.show(&mut top);
         let words = (count.words(shown), count_text(tab.total, estimate));
         runs.extend(table_bar_tags(drawn, tags, (&words.0, &words.1), (refresh_blocked, edit_blocked.as_deref(), count_blocked)));
-        if let Some(text) = card_text(tab) {
-            band(&mut top, tags, id, text);
+        if let Some((text, value)) = card_text(tab) {
+            band(&mut top, tags, id, &text, value);
         }
         match tab.data.as_ref() {
             Some(page) => {
@@ -531,19 +550,17 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     }
                 }
             }
-            None if tab.loading.is_some() => {
-                top.add_space(6.0);
-                top.horizontal(|ui| {
-                    ui.add_space(TAB_BODY_PAD_X);
-                    ui.add(Spinner::new());
-                    ui.label(RichText::new(format!("Loading {}…", tab.table.display())).color(t.text_muted));
-                });
-            }
+            // No page yet: the words stand where the grid would, 12 in and 12 down.
             None => {
-                top.add_space(6.0);
+                let loading = tab.loading.is_some();
+                top.add_space(TABLE_EMPTY_PAD);
                 top.horizontal(|ui| {
-                    ui.add_space(TAB_BODY_PAD_X);
-                    ui.label(RichText::new("No rows are loaded.").color(t.text_muted));
+                    ui.add_space(TABLE_EMPTY_PAD);
+                    if loading {
+                        ui.add(Spinner::new());
+                    }
+                    let words = if loading { format!("Loading {}…", tab.table.display()) } else { "No rows are loaded.".to_owned() };
+                    ui.label(Text::Body.rich_as_written(words).color(t.text_muted));
                 });
             }
         }
@@ -623,11 +640,42 @@ mod tests {
         let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
         let mut t = TableTab::new(TabId(1), dbee_engine::ConnectionId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
         let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "m".into(), code, detail: None, hint: None };
+        fn said(t: &TableTab) -> Option<(&str, &str, Option<&str>)> {
+            card_text(t).map(|(b, _)| (b.heading, b.message, b.note))
+        }
         std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("server"));
-        assert_eq!(card_text(&t), Some(("The changes were not applied", "m", FAILED_NOTE)));
+        assert_eq!(said(&t), Some(("The changes were not applied", "m", Some(FAILED_NOTE))));
         std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("cancelled"));
-        assert_eq!(card_text(&t), Some(("The changes were not applied", "m", CANCELLED_NOTE)));
+        assert_eq!(said(&t), Some(("The changes were not applied", "m", Some(CANCELLED_NOTE))));
         assert_eq!(CANCELLED_NOTE, "Cancelled before the commit: nothing was written, and the changes are still staged.");
+    }
+
+    /// A failed Apply's band shows the server's detail and hint; a page that did not load has none.
+    #[test]
+    fn a_failed_apply_carries_its_detail_and_hint() {
+        let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
+        let mut t = TableTab::new(TabId(1), dbee_engine::ConnectionId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
+        // The message the engine keeps ends with the detail and hint; the band shows them as fields,
+        // and `table-error`'s value stays the whole message.
+        let whole = "m (SQLSTATE 23502)\nDetail: d\nHint: h";
+        let failed = |detail: Option<&str>, hint: Option<&str>| dbee_engine::Failed {
+            row: 0,
+            column: None,
+            message: whole.into(),
+            code: "server",
+            detail: detail.map(str::to_owned),
+            hint: hint.map(str::to_owned),
+        };
+        std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed(Some("d"), Some("h")));
+        let band = card_text(&t).map(|(b, value)| (b.message, b.detail, b.hint, value));
+        assert_eq!(band, Some(("m (SQLSTATE 23502)", Some("d"), Some("h"), whole)));
+        // Words that don't end as the fields say stay whole.
+        std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed(Some("other"), None));
+        assert_eq!(card_text(&t).map(|(b, _)| b.message), Some(whole));
+        std::sync::Arc::make_mut(&mut t.edits).failed = None;
+        t.error = Some("e".into());
+        let band = card_text(&t).map(|(b, value)| (b.heading, b.message, b.detail, b.hint, b.note, value));
+        assert_eq!(band, Some(("The page did not load", "e", None, None, Some(PAGE_NOTE), "e")));
     }
 
     #[test]

@@ -191,6 +191,13 @@ pub const CHANGES_GAP: f32 = 12.0;
 /// (cut with `…` to it).
 pub const PAGING_NOTE_GAP: f32 = 12.0;
 pub const PAGING_NOTE_MIN: f32 = 24.0;
+/// The table tab's note on rows that can't be edited: an area this tall (its 1 px line along the
+/// bottom included), its sentence this far in from either side.
+pub const NOTE_BAR_H: f32 = 28.0;
+pub const NOTE_BAR_PAD_X: f32 = 12.0;
+/// The table tab's words where the grid would be (`Loading …`, `No rows are loaded.`): this far in
+/// from the grid area's left and down from its top.
+pub const TABLE_EMPTY_PAD: f32 = 12.0;
 /// The sidebar's header (`sidebar/filter`, `sidebar/count`): the filter is a bar with its line
 /// along the bottom, its words this far in from the left, the refresh this far from its right end;
 /// the count's row is this tall, its words this far in.
@@ -203,8 +210,9 @@ pub const SIDEBAR_W: f32 = 260.0;
 pub const SIDEBAR_MIN_W: f32 = 200.0;
 pub const SIDEBAR_MAX_W: f32 = 600.0;
 
-/// A tab's body: the grid runs edge to edge in it; what stands above and below the grid (the bars,
-/// the notes, the error band) keeps this far in from its sides.
+/// A query tab's body: the grid runs edge to edge in it; what stands above and below the grid
+/// (the bars, the notes, the error band) keeps this far in from its sides. The table tab's areas
+/// run the body's full width.
 pub const TAB_BODY_PAD_X: f32 = SPACE_8;
 
 /// The grid's cells (`grid/header cell`, `grid/cell`, `grid/row number`): what a cell holds is

@@ -278,10 +278,11 @@ mod tests {
         h
     }
 
-    fn table_band(text: (&'static str, String, &'static str)) -> egui_kittest::Harness<'static, Seen> {
+    fn table_band(text: (String, String, String)) -> egui_kittest::Harness<'static, Seen> {
         let mut h = harness_in(vec2(900.0, 400.0), Theme::Light, Seen::default(), move |ui, s| {
             s.tags.begin_frame();
-            crate::table_tab::band(ui, &mut s.tags, TabId(2), (text.0, &text.1, text.2));
+            let band = Band { heading: &text.0, message: &text.1, note: (!text.2.is_empty()).then_some(text.2.as_str()), ..Band::default() };
+            crate::table_tab::band(ui, &mut s.tags, TabId(2), &band, &text.1);
         });
         h.run();
         h
@@ -400,21 +401,27 @@ mod tests {
         let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "bad".into(), code, detail: None, hint: None };
         let mut texts = Vec::new();
         std::sync::Arc::make_mut(&mut tab.edits).failed = Some(failed("server"));
-        texts.extend(crate::table_tab::card_text(&tab).map(|(h, m, n)| (h, m.to_owned(), n)));
+        texts.extend(
+            crate::table_tab::card_text(&tab).map(|(b, _)| (b.heading.to_owned(), b.message.to_owned(), b.note.unwrap_or_default().to_owned())),
+        );
         std::sync::Arc::make_mut(&mut tab.edits).failed = Some(failed("cancelled"));
-        texts.extend(crate::table_tab::card_text(&tab).map(|(h, m, n)| (h, m.to_owned(), n)));
+        texts.extend(
+            crate::table_tab::card_text(&tab).map(|(b, _)| (b.heading.to_owned(), b.message.to_owned(), b.note.unwrap_or_default().to_owned())),
+        );
         std::sync::Arc::make_mut(&mut tab.edits).failed = None;
         tab.error = Some("invalid input syntax for type integer: \"x\"".into());
-        texts.extend(crate::table_tab::card_text(&tab).map(|(h, m, n)| (h, m.to_owned(), n)));
+        texts.extend(
+            crate::table_tab::card_text(&tab).map(|(b, _)| (b.heading.to_owned(), b.message.to_owned(), b.note.unwrap_or_default().to_owned())),
+        );
         // The lost connection's heading has no note (its edits' doubt is the engine's to set).
-        texts.push(("The connection was lost during Apply", "the connection was lost".to_owned(), ""));
-        let headings: Vec<&str> = texts.iter().map(|(h, _, _)| *h).collect();
+        texts.push(("The connection was lost during Apply".to_owned(), "the connection was lost".to_owned(), String::new()));
+        let headings: Vec<&str> = texts.iter().map(|(h, _, _)| h.as_str()).collect();
         assert_eq!(
             headings,
             ["The changes were not applied", "The changes were not applied", "The page did not load", "The connection was lost during Apply"]
         );
         for text in texts {
-            let (heading, message, note) = (text.0, text.1.clone(), text.2);
+            let (heading, message, note) = (text.0.clone(), text.1.clone(), text.2.clone());
             let h = table_band(text);
             assert_eq!(h.state().tags.value("table-error"), Some(&json!(message)), "{heading}");
             let seen = drawn(&h);

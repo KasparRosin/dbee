@@ -375,6 +375,24 @@ fn m1_day_end_to_end() {
     assert_eq!((cell["null"].clone(), cell.get("state")), (json!(true), None), "written: {cell}");
     app.shot(&root, "6c-applied");
 
+    // 6d. Back in the customers tab, NULL into the NOT NULL name: Ctrl+S fails, and the band under
+    //     the table bar says why with the server's detail; RESET drops it, and the name stays.
+    app.click(&format!("tab-{customers_tab}"));
+    assert_eq!(app.document()["active"], customers_tab);
+    app.right_click("grid-cell-0-1");
+    app.click("grid-menu-null");
+    assert_eq!(app.table()["edits"]["count"], 1, "NULL staged in the name");
+    app.ctrl("S");
+    app.until("the failed Apply", |app| app.table()["failed"].is_object());
+    let failed = app.table()["failed"].clone();
+    let band = app.value("table-error");
+    assert!(band.as_str().is_some_and(|m| m.contains("not-null")), "the server's message: {band}");
+    assert!(failed["detail"].as_str().is_some_and(|d| d.starts_with("Failing row contains")), "the server's detail: {failed}");
+    app.shot(&root, "6d-apply-failed");
+    app.click("edit-reset");
+    app.until("the band to go", |app| app.tag("table-error").is_none());
+    assert_eq!(day.q(&format!("SELECT name FROM shop.customers WHERE id = {}", day.customer)), day.fixed, "psql keeps the name");
+
     // 7. Ctrl+T, the join pasted, Ctrl+Enter; a click on a result cell gives the grid the
     //    keyboard (the editor keeps it after a run), Ctrl+A, Ctrl+Shift+C: the copy starts with
     //    the header row.

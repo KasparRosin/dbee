@@ -1912,3 +1912,68 @@ fn staged_changes_hold_paging_and_say_why() {
     }
     assert!(hover_says(&mut ui, "page-next", "Next page: not now, apply or reset your changes first"), "NEXT says why");
 }
+
+/// The words `words` drawn inside `within`: where, and in which colour.
+fn ink_of(ui: &Ui, within: egui::Rect, words: &str) -> Option<(egui::Rect, egui::Color32)> {
+    ui.shapes().into_iter().find_map(|(_, s)| match s {
+        egui::Shape::Text(t) if t.galley.text() == words && within.expand(1.0).contains(t.galley.rect.translate(t.pos.to_vec2()).center()) => {
+            let section = t.galley.job.sections.first()?;
+            let colour = if section.format.color == egui::Color32::PLACEHOLDER { t.fallback_color } else { section.format.color };
+            Some((t.galley.rect.translate(t.pos.to_vec2()), t.override_text_color.unwrap_or(colour)))
+        }
+        _ => None,
+    })
+}
+
+/// The note on rows that can't be edited is an area of its own above the filter bar: 28 tall on
+/// `card` with a `line` under, its sentence 12 in from the body's left.
+#[test]
+fn the_read_only_note_is_its_own_area() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("shop", "order_totals");
+    ui.until("the view's rows", loaded);
+    ui.hover_away();
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    assert_eq!(ui.value("table-note"), "These rows can't be edited: views are read-only.");
+    let body = ui.body_x();
+    let note = ui.drawn("table-note");
+    assert!((note.left() - (body.min + 12.0)).abs() <= 1.0, "the note 12 in from {}: {note:?}", body.min);
+    let (ink, area) = painted_at(&ui, egui::pos2(body.min + 2.0, note.center().y)).expect("the note's area");
+    assert_eq!(ink, t.card, "the area on card");
+    assert!(close(area.height(), 28.0), "28 tall: {area:?}");
+    assert!(close(area.left(), body.min) && close(area.right(), body.max), "full width {body:?}: {area:?}");
+    assert!((note.center().y - area.center().y).abs() <= 1.0, "the sentence centred down {area:?}: {note:?}");
+    let line = painted_at(&ui, egui::pos2(body.min + 2.0, area.bottom() - 0.5)).map(|(c, _)| c);
+    assert_eq!(line, Some(t.line), "a line along the area's bottom");
+    let (_, colour) = ink_of(&ui, note, "These rows can't be edited: views are read-only.").expect("the sentence is drawn");
+    assert_eq!(colour, t.text_muted, "the sentence in text_muted");
+    assert!(area.bottom() <= ui.drawn("filter-0-column").top(), "above the filter bar: {area:?}");
+}
+
+/// A first load that fails leaves `No rows are loaded.` in `body` `text_muted`, 12 in from the
+/// grid area's left and 12 down from its top.
+#[test]
+fn no_rows_are_loaded_is_restyled() {
+    let db = dbee_testkit::require_testdb!();
+    let table = null_and_empty(db);
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    dbee_testkit::psql(pg14_server(db), &format!("DROP TABLE scratch.{}", table.0)).unwrap();
+    let opened = ui.call("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": table.0 } }));
+    assert_eq!(opened["ok"], false, "the first page can't load: {opened}");
+    ui.until("the failed load", |ui| ui.table()["loading"].is_null() && ui.table()["error"].is_string());
+    ui.hover_away();
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let body = ui.body_x();
+    let everywhere = egui::Rect::from_x_y_ranges(body, egui::Rangef::new(0.0, 10_000.0));
+    let (at, colour) = ink_of(&ui, everywhere, "No rows are loaded.").expect("`No rows are loaded.` is drawn");
+    assert_eq!(colour, t.text_muted, "in text_muted");
+    assert!(close(at.height(), dbee_ui_egui::theme::Text::Body.line()), "in `body`: {at:?}");
+    assert!((at.left() - (body.min + 12.0)).abs() <= 1.0, "12 in from {}: {at:?}", body.min);
+    // The grid's area starts under the band's line, or else under the table bar.
+    let top = match ui.tag("table-error") {
+        Some(_) => ui.drawn("table-error").bottom() + 1.0,
+        None => painted_at(&ui, egui::pos2(body.min + 2.0, ui.drawn("table-view-data").center().y)).expect("the table bar").1.bottom(),
+    };
+    assert!((at.top() - (top + 12.0)).abs() <= 1.0, "12 down from the grid area's top {top}: {at:?}");
+}

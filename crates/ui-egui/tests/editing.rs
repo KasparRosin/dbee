@@ -1231,3 +1231,44 @@ fn paging_arrows_that_are_off_still_say_why() {
     ui.frame();
     off(&mut ui, "table-refresh", "Refresh: not now, apply or reset your changes first");
 }
+
+/// A failed Apply shows in the error band under the table bar, the body's full width: its heading,
+/// the server's message, then DETAIL over the server's detail (Postgres's `Failing row contains`).
+/// The failed row stays marked.
+#[test]
+fn a_failed_apply_shows_the_band_with_its_detail() {
+    let db = dbee_testkit::require_testdb!();
+    let name = unique("t_customers");
+    dbee_testkit::psql(
+        pg14_server(db),
+        &format!(
+            "CREATE TABLE scratch.{name} AS SELECT id, name, email FROM shop.customers ORDER BY id LIMIT 3;
+             ALTER TABLE scratch.{name} ADD PRIMARY KEY (id), ALTER COLUMN name SET NOT NULL;"
+        ),
+    )
+    .unwrap();
+    let t = Scratch(name);
+    let mut ui = opened(db, &t);
+    ui.right_click("grid-cell-0-1");
+    ui.click("grid-menu-null");
+    ui.ctrl("S");
+    ui.until("the failed Apply", |ui| ui.table()["failed"].is_object());
+    ui.hover_away();
+    let failed = ui.table()["failed"].clone();
+    let message = failed["message"].as_str().unwrap_or_default().to_owned();
+    let detail = failed["detail"].as_str().unwrap_or_default().to_owned();
+    assert!(detail.starts_with("Failing row contains"), "{failed}");
+    assert_eq!(ui.value("table-error"), message.as_str());
+    let band = ui.drawn("table-error");
+    let body = ui.body_x();
+    assert!((band.left() - body.min).abs() <= 0.5 && (band.right() - body.max).abs() <= 0.5, "full width {body:?}: {band:?}");
+    assert!(band.top() > ui.drawn("table-view-data").bottom(), "under the table bar: {band:?}");
+    assert!(band.bottom() < ui.drawn("grid-header-0").top(), "over the grid, its line between: {band:?}");
+    let top = |words: &str| ui.texts().into_iter().find(|(r, g)| g.text() == words && band.contains(r.center())).map_or(f32::NAN, |(r, _)| r.top());
+    // The message as the band draws it: without its `Detail: …` line, which shows as a field.
+    let shown = message.strip_suffix(&format!("\nDetail: {detail}")).unwrap_or_else(|| panic!("the detail ends the message: {message}"));
+    let tops = ["The changes were not applied", shown, "DETAIL", detail.as_str()].map(top);
+    assert!(tops.windows(2).all(|w| w[0] < w[1]), "the heading, the message, DETAIL, the detail, top to bottom: {tops:?}");
+    assert!(ui.texts().iter().all(|(_, g)| !g.text().contains("Detail: ")), "the detail shows once, as a field");
+    assert_eq!(ui.value("grid-cell-0-0")["state"], "failed", "the failed row stays marked");
+}
