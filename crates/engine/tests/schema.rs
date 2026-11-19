@@ -10,7 +10,7 @@ use common::*;
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind};
 use dbee_core::{Catalog, ColumnInfo, RelKind, SchemaInfo, TableInfo, TableRef, TypeClass};
 use dbee_engine::Json;
-use dbee_engine::fuzzy::{Found, find, find_connections, score, search};
+use dbee_engine::fuzzy::{Found, find, find_connections, score, search, search_grouped};
 use dbee_testkit::{require_testdb, unique};
 use serde_json::json;
 
@@ -183,6 +183,89 @@ fn quick_search_while_lost_lists_connections_only() {
     });
 }
 
+/// The `id`s (connections) or `table`s of `hits`, in their order.
+fn names_of(hits: &[Json]) -> Vec<Json> {
+    hits.iter().map(|h| if h["hit"] == "table" { h["table"].clone() } else { h["id"].clone() }).collect()
+}
+
+#[test]
+fn grouped_hits_come_tables_first_each_best_first() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let replica = save(s, saved("", "Orders replica"), None);
+        let staging = save(s, saved("", "Orders staging"), None);
+        // An exact name outscores every table, so the mixed list starts with a connection.
+        let exact = save(s, saved("", "ord"), None);
+        let mixed = s.run_blocking("quickSearch.find", json!({ "query": "ord", "limit": 1000 }), T).unwrap();
+        assert_eq!(mixed[0]["id"], exact.as_str(), "{}: {mixed}", t.name());
+        let r = s.run_blocking("quickSearch.find", json!({ "query": "ord", "limit": 1000, "grouped": true }), T).unwrap();
+        let hits = r.as_array().unwrap();
+        let tables = hits_of(&mixed, "table");
+        let connections = hits_of(&mixed, "connection");
+        assert!(!tables.is_empty(), "{}: {mixed}", t.name());
+        assert_eq!(names_of(&connections), [json!(exact), json!(replica), json!(staging)], "{}: {mixed}", t.name());
+        assert_eq!(hits[..tables.len()], tables[..], "{}: the tables first, in their order: {r}", t.name());
+        assert_eq!(hits[tables.len()..], connections[..], "{}: then the connections, in their order: {r}", t.name());
+    });
+}
+
+#[test]
+fn grouped_keeps_connections_a_long_table_list_would_hide() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        // `o` after a space scores less than the tables starting with `o`.
+        let conn = save(s, saved("", "the o conn"), None);
+        let r = s.run_blocking("quickSearch.find", json!({ "query": "o", "limit": 3 }), T).unwrap();
+        assert_eq!(r.as_array().map(Vec::len), Some(3), "{r}");
+        assert!(hits_of(&r, "connection").is_empty(), "{}: the cut hides the connection: {r}", t.name());
+        let g = s.run_blocking("quickSearch.find", json!({ "query": "o", "limit": 3, "grouped": true }), T).unwrap();
+        let hits = g.as_array().unwrap();
+        assert_eq!(hits.len(), 4, "{}: {g}", t.name());
+        assert!(hits[..3].iter().all(|h| h["hit"] == "table"), "{}: {g}", t.name());
+        assert_eq!(hits[..3], r.as_array().unwrap()[..], "{}: the same tables: {g}", t.name());
+        assert_eq!(hits[3]["id"], conn.as_str(), "{}: {g}", t.name());
+    });
+}
+
+#[test]
+fn grouped_without_tables_lists_connections_only() {
+    let mut s = session();
+    save(&mut s, saved("", "pg staging"), None);
+    save(&mut s, saved("", "mysql box"), None);
+    save(&mut s, saved("", "pg14"), None);
+    for q in ["pg", "s", ""] {
+        let plain = s.run_blocking("quickSearch.find", json!({ "query": q }), T).unwrap();
+        let grouped = s.run_blocking("quickSearch.find", json!({ "query": q, "grouped": true }), T).unwrap();
+        assert_eq!(grouped, plain, "{q:?}");
+    }
+    let e = s.run_blocking("quickSearch.find", json!({ "query": "pg", "grouped": "yes" }), T).unwrap_err();
+    assert_eq!(e.code(), "badParams", "{e}");
+    let plain = s.run_blocking("quickSearch.find", json!({ "query": "pg", "grouped": null }), T).unwrap();
+    let off = s.run_blocking("quickSearch.find", json!({ "query": "pg", "grouped": false }), T).unwrap();
+    assert_eq!(off, plain);
+}
+
+#[test]
+fn grouped_while_lost_lists_connections_only() {
+    let _db = require_testdb!();
+    for_each_engine_exclusive(|t, s| {
+        // A file cannot lose its connection.
+        if t.is_file() {
+            return;
+        }
+        let other = save(s, saved("", "orders replica"), None);
+        let before = s.run_blocking("quickSearch.find", json!({ "query": "orders", "grouped": true }), T).unwrap();
+        assert!(!hits_of(&before, "table").is_empty(), "{}: {before}", t.name());
+        kill_dbee_connections(t, s);
+        let e = run_err(s, "table.open", json!({ "schema": t.schema("shop"), "table": "orders" }));
+        assert_eq!(e.code(), "connectionLost", "{}: {e}", t.name());
+        let plain = s.run_blocking("quickSearch.find", json!({ "query": "orders" }), T).unwrap();
+        let r = s.run_blocking("quickSearch.find", json!({ "query": "orders", "grouped": true }), T).unwrap();
+        assert_eq!(r, plain, "{}", t.name());
+        assert_eq!(names_of(r.as_array().unwrap()), [json!(other)], "{}: {r}", t.name());
+    });
+}
+
 #[test]
 fn connections_are_scored_by_their_display_names() {
     let file = ConnectionConfig { id: "f".into(), kind: DbKind::Sqlite, file: Some("/data/inventory.db".into()), ..ConnectionConfig::default() };
@@ -259,6 +342,20 @@ fn search_mixes_tables_and_connections_by_score() {
 }
 
 #[test]
+fn search_grouped_lists_tables_then_connections() {
+    let c = Catalog { schemas: vec![schema("shop", false, &["orders", "shop_orders"])], default_schema: None };
+    let list = [saved("a", "orders"), saved("b", "Orders archive")];
+    assert_eq!(
+        labels(search_grouped(Some(&c), &list, None, "orders", 20)),
+        ["table orders", "table shop_orders", "connection orders", "connection Orders archive"]
+    );
+    // Each group is cut at `limit` on its own.
+    assert_eq!(labels(search_grouped(Some(&c), &list, None, "orders", 1)), ["table orders", "connection orders"]);
+    assert_eq!(labels(search_grouped(None, &list, Some("a"), "orders", 20)), ["connection Orders archive"], "no catalog: connections only");
+    assert!(search_grouped(Some(&c), &list, None, "orders", 0).is_empty());
+}
+
+#[test]
 fn inspect_catalog_and_table() {
     let _db = require_testdb!();
     for_each_engine(|t, s| {
@@ -317,6 +414,10 @@ fn quick_search_1000_tables_within_a_frame() {
             let hits = find(&c, q, 20);
             times.push(t.elapsed());
             std::hint::black_box(hits);
+            let t = Instant::now();
+            let hits = search_grouped(Some(&c), &[], None, q, 20);
+            times.push(t.elapsed());
+            std::hint::black_box(hits);
         }
     }
     times.sort();
@@ -347,6 +448,10 @@ fn quick_search_with_connections_within_budget() {
         for _ in 0..20 {
             let t = Instant::now();
             let hits = search(Some(&c), &list, Some("c0"), q, 20);
+            times.push(t.elapsed());
+            std::hint::black_box(hits);
+            let t = Instant::now();
+            let hits = search_grouped(Some(&c), &list, Some("c0"), q, 20);
             times.push(t.elapsed());
             std::hint::black_box(hits);
         }

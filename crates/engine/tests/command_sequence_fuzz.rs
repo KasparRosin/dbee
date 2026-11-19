@@ -71,7 +71,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("connection.cancel", &[]),
     ("schema.refresh", &[("connection", CONNECTION)]),
     ("schema.inspect", &[("connection", CONNECTION), ("schema", Hint::Text), ("table", Hint::Text)]),
-    ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count), ("connection", CONNECTION)]),
+    ("quickSearch.find", &[("query", Hint::Text), ("limit", Hint::Count), ("connection", CONNECTION), ("grouped", Hint::Bool)]),
     ("connection.close", &[("connection", CONNECTION), ("force", Hint::Bool)]),
     ("table.open", &[("schema", SCHEMA), ("table", TABLE), ("filters", FILTERS), ("connection", CONNECTION)]),
     ("table.setFilters", &[("filters", FILTERS), ("raw", Hint::Text), ("rawMode", Hint::Bool), ("apply", Hint::Bool)]),
