@@ -55,6 +55,8 @@ const CANCEL: usize = 1;
 
 /// The command that closes a tab.
 pub(crate) const TAB_CLOSE: &str = "tab.close";
+/// The error band's ROLLBACK runs it; its outcome is a toast, as a close's end is.
+const QUERY_ROLLBACK: &str = "query.rollback";
 
 /// A command to run again once the user has answered, with the params it ran with.
 pub(crate) struct Rerun {
@@ -214,8 +216,11 @@ pub(crate) struct Ending {
 }
 
 /// The [`Ending`] of `command` run with `params`, when it is `tab.close` or `connection.close`
-/// with `end`.
+/// with `end`, or `query.rollback` (the error band's ROLLBACK), whose outcome is toasted alike.
 pub(crate) fn ending(app: &DbeeApp, command: &str, params: &Json) -> Option<Ending> {
+    if command == QUERY_ROLLBACK {
+        return Some(Ending { commit: false, connection: closed_connection(app, command, params)? });
+    }
     if command != TAB_CLOSE && command != connections::CLOSE {
         return None;
     }
@@ -227,7 +232,7 @@ pub(crate) fn ending(app: &DbeeApp, command: &str, params: &Json) -> Option<Endi
     Some(Ending { commit, connection: closed_connection(app, command, params)? })
 }
 
-/// Says in a toast how a close that ends a transaction went: `Committed on <connection>` or
+/// Says in a toast how a close that ends a transaction (or the error band's ROLLBACK) went: `Committed on <connection>` or
 /// `Rolled back on <connection>`, or why it failed (nothing closed then). Nothing when no
 /// transaction was open any more, or the connection went meanwhile. A commit that found the query
 /// connection lost says so without the engine's advice to run again, which fits a run, not a close.
@@ -405,7 +410,7 @@ pub(crate) fn quit_close(app: &mut DbeeApp, id: ConnectionId) {
 /// connection's, else the active one's.
 fn closed_connection(app: &DbeeApp, command: &str, params: &Json) -> Option<String> {
     let which = match command {
-        TAB_CLOSE => params.get("tab").and_then(Json::as_u64).map(|t| Which::Tab(TabId(t))),
+        TAB_CLOSE | QUERY_ROLLBACK => params.get("tab").and_then(Json::as_u64).map(|t| Which::Tab(TabId(t))),
         connections::CLOSE => params.get("connection").and_then(Json::as_u64).map(|c| Which::Id(ConnectionId(c))),
         _ => None,
     };

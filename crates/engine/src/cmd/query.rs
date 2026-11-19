@@ -236,6 +236,15 @@ pub fn can_set_database(s: &Session) -> Result<(), String> {
     if c.dialect.has_use_database() { Ok(()) } else { Err(NO_DATABASE_SWITCH.into()) }
 }
 
+/// Whether `query.commit` or `query.rollback` from query tab `tab` would run now: its connection
+/// open, and no run, commit or rollback going on it (else why, as the command's `busy` says it).
+/// The error band's ROLLBACK follows it.
+pub fn can_end(s: &Session, tab: TabId) -> Result<(), String> {
+    needs_db(s)?;
+    let id = s.state.connection(Which::Tab(tab)).map(|c| c.id).ok_or(NOT_CONNECTED)?;
+    busy(s, id).map_or(Ok(()), Err)
+}
+
 // ---- stopping a run --------------------------------------------------------------------------
 
 /// Stops the query run of connection `connection` when it is `job`.

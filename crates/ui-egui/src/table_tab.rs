@@ -415,7 +415,7 @@ fn without_fields<'a>(message: &'a str, detail: Option<&str>, hint: Option<&str>
 /// Tab `tab`'s error band across `ui`'s width, a 1 px `line` under it: something failed (see
 /// [`card_text`]). Tagged `table-error`, its value `value`.
 pub(crate) fn band(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, band: &Band<'_>, value: &str) {
-    let r = band.show(ui, egui::Id::new(("dbee-table-error", tab.0)));
+    let r = band.show(ui, egui::Id::new(("dbee-table-error", tab.0))).response;
     tags.tag_value("table-error", &r, value);
     let (line, _) = ui.allocate_exact_size(vec2(r.rect.width(), BAR_LINE), Sense::hover());
     ui.painter().rect_filled(line, CornerRadius::ZERO, theme::tokens(ui.ctx()).line);

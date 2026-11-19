@@ -464,6 +464,37 @@ fn m1_day_end_to_end() {
     assert_eq!(app.value("notice"), format!("Copied {n} rows"));
     app.shot(&root, "7b-copied");
 
+    // 7c. A failed query: the band under the result bar, FAILED in the bar, the error's line
+    //     number red and its token underlined.
+    let run = |app: &mut App, sql: &str, says: &str| {
+        app.click("query-editor");
+        app.ctrl("A");
+        app.text(sql);
+        assert_eq!(app.document()["query"]["text"], sql);
+        app.ctrl("Enter");
+        app.until("the run's error", |app| {
+            let q = app.document()["query"].clone();
+            q["running"].is_null() && q["error"]["message"].as_str().is_some_and(|m| m.contains(says))
+        });
+        app.until("the band", |app| app.tag("query-error").is_some_and(|t| t["value"]["message"].as_str().is_some_and(|m| m.contains(says))));
+    };
+    run(&mut app, "SELECT o.totl FROM shop.orders o", "totl");
+    let card = app.value("query-error");
+    assert_eq!((card["heading"].clone(), card["line"].clone()), (json!("Query failed"), json!(1)), "{card}");
+    let ed = app.value("query-editor");
+    assert!(ed["errorLine"] == 1 && !ed["underline"].is_null(), "the red number and the underline: {ed}");
+    assert!(app.value("query-facts").as_str().is_some_and(|f| f.starts_with("Failed")), "the bar says it failed");
+    app.shot(&root, "7c-failed");
+    //     A failed transaction: ROLLBACK in the band ends it.
+    run(&mut app, "BEGIN; SELECT nope;", "nope");
+    app.until("ROLLBACK", |app| app.tag("query-rollback").is_some());
+    assert_eq!(app.document()["connection"]["transaction"]["state"], "failed");
+    app.shot(&root, "7d-rollback");
+    app.click("query-rollback");
+    app.until("the rollback", |app| app.document()["connection"]["transaction"].is_null());
+    app.until("its toast", |app| app.tag("notice").is_some_and(|t| t["value"].as_str().is_some_and(|v| v.starts_with("Rolled back on"))));
+    app.until("ROLLBACK gone", |app| app.tag("query-rollback").is_none());
+
     // No seed row changed, and once the app and the day's rows are gone the counts are as before.
     assert_eq!(day.seed_digest(), seed, "the seed's customers and orders are unchanged");
     drop(app);

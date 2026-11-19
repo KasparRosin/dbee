@@ -296,6 +296,11 @@ pub const ERROR_BAND_GAP: f32 = 4.0;
 pub const ERROR_BAND_FIELD_GAP: f32 = 8.0;
 pub const ERROR_BAND_NAME_GAP: f32 = 2.0;
 pub const ERROR_BAND_HEAD_GAP: f32 = 12.0;
+/// The band's actions row (R2): this far under its last text, its buttons this far apart; the
+/// position is drawn only while the heading keeps at least this much room (gap 68).
+pub const ERROR_BAND_ACTIONS_GAP: f32 = 12.0;
+pub const ERROR_BAND_ACTION_GAP: f32 = 8.0;
+pub const ERROR_BAND_HEADING_MIN: f32 = 120.0;
 /// The editor (`editor/line number`, `editor/error token`): a line number's box is this wide, the
 /// number flush with its right; an error's underline is this thick, this far down its line.
 pub const LINE_NUMBER_W: f32 = 36.0;

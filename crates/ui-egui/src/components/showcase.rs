@@ -17,7 +17,7 @@ use super::chip::Chip;
 use super::dialog::{Button, Dialog};
 use super::dropdown::Dropdown;
 use super::editor::{ErrorToken, LineNumber};
-use super::error_band::Band;
+use super::error_band::{Action, Band};
 use super::grid_cell::{self, Align as CellAlign, Cell, CellText, Header, Key, Mark, RowNumber, Sort};
 use super::icon::Icon;
 use super::input::{Field, Input};
@@ -489,7 +489,9 @@ fn value_panels(ui: &mut Ui) {
 /// The Error band frame's bands: 840 wide, 12 apart.
 const BAND_W: f32 = 840.0;
 const BANDS_APART: f32 = 12.0;
-const NO_BAND: Band<'static> = Band { heading: "", position: None, message: "", detail: None, hint: None, note: None, cancelled: false };
+const NO_BAND: Band<'static> = Band { heading: "", position: None, message: "", detail: None, hint: None, note: None, actions: &[] };
+/// ROLLBACK, under a failed transaction's band (R2).
+const ROLLBACK_ACTION: [Action<'static>; 1] = [Action { label: "Rollback", enabled: true, hover: crate::query_tab::ROLLBACK_HOVER }];
 const BAND_TOTL: &str = "column o.totl does not exist";
 const BAND_HINT: &str = "Perhaps you meant to reference the column \"o.total\".";
 
@@ -507,15 +509,14 @@ pub(crate) const PAGE_BANDS: [Band<'static>; 5] = [
     Band { heading: "Statement 2 failed", position: Some((1, 14)), message: BAND_TOTL, hint: Some(BAND_HINT), ..NO_BAND },
 ];
 
-/// The bands the app draws which the page doesn't: a server's detail and hint both; until the
-/// query tab and table tab screens, a cancelled run, today's note under a failed transaction, the
-/// table tab's headings and notes.
-pub(crate) const APP_BANDS: [Band<'static>; 7] = [
-    Band { heading: "The run was cancelled", message: "the statement was cancelled", cancelled: true, ..NO_BAND },
+/// The bands the app draws which the page's Error band frame doesn't: ROLLBACK under a failed
+/// transaction (R2, `rollback.png`), the table tab's headings and notes, a server's detail and
+/// hint both.
+pub(crate) const APP_BANDS: [Band<'static>; 6] = [
     Band {
         heading: "Query failed",
         message: "current transaction is aborted, commands ignored until end of transaction block (SQLSTATE 25P02)",
-        note: Some(crate::query_tab::ROLLBACK_NOTE),
+        actions: &ROLLBACK_ACTION,
         ..NO_BAND
     },
     Band {
@@ -556,7 +557,7 @@ fn error_bands(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: until the query tab screen, a cancelled run in neutral colours and today's note under a failed transaction (no ROLLBACK button yet); the table tab's headings and notes; a server's DETAIL and HINT both, the detail first",
+        "not in the Error band frame: ROLLBACK under a failed transaction (R2); the table tab's headings and notes; a server's DETAIL and HINT both, the detail first",
         SPACE_8,
         |ui| bands(ui, "app", &APP_BANDS),
     );

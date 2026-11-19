@@ -4,28 +4,43 @@
 //! line, where the error is (`Line 1, column 14 →`, `small` `text_muted`); under it the message in
 //! `body` `text`; then each further field the server gives, its name in `label` capitals and
 //! `text_muted` over its text in `body` `text`, the detail before the hint (Postgres's and psql's
-//! order); last dbee's note in `small` `text_muted`. Its parts are 4 apart, a field and the note 8
-//! more.
+//! order); then dbee's note in `small` `text_muted`. Its parts are 4 apart, a field and the note 8
+//! more. Last, its actions (R2): a left-aligned row of outline `button/box` buttons 12 under the
+//! last text, 8 apart (ROLLBACK on a failed transaction).
 //!
-//! Not on the page: a cancelled run, which the result bar says there (it comes with the query tab
-//! screen), is drawn neutral until then: on `fill` with a `line_strong` edge, its heading in
-//! `text` and its message in `text_muted`.
+//! The position takes room from the heading only while the heading keeps at least
+//! [`ERROR_BAND_HEADING_MIN`]; with less it isn't drawn, and the band still jumps on a click. A
+//! cancel dbee sent has no band (the result bar says it), so the band has no neutral state.
 //!
-//! A band with a position is a link to it: a click anywhere on it, or Enter or Space with the
-//! keyboard on it, asks to jump there, and its words can't be selected. Without one, they can.
+//! A band with a position is a link to it: a click anywhere on it (but its actions), or Enter or
+//! Space with the keyboard on it, asks to jump there, and its words can't be selected. Without
+//! one, they can.
 
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
     Align, CornerRadius, CursorIcon, Id, Label, Layout, Rect, Response, Sense, Shape, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 
+use super::button::BoxButton;
+use super::tooltip::Hint;
 use super::{focus, painter};
-use crate::theme::size::{ERROR_BAND_EDGE, ERROR_BAND_FIELD_GAP, ERROR_BAND_GAP, ERROR_BAND_HEAD_GAP, ERROR_BAND_NAME_GAP, ERROR_BAND_PAD};
+use crate::theme::size::{
+    BUTTON_H, ERROR_BAND_ACTION_GAP, ERROR_BAND_ACTIONS_GAP, ERROR_BAND_EDGE, ERROR_BAND_FIELD_GAP, ERROR_BAND_GAP, ERROR_BAND_HEAD_GAP,
+    ERROR_BAND_HEADING_MIN, ERROR_BAND_NAME_GAP, ERROR_BAND_PAD,
+};
 use crate::theme::{Text, tokens};
 
+/// One button of a band's actions row: its words (drawn in capitals), whether it is on, and its
+/// hover (why it is off, when it is).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Action<'a> {
+    pub label: &'a str,
+    pub enabled: bool,
+    pub hover: &'a str,
+}
+
 /// One band: its heading (dbee's words), where the error is (line and column, 1-based), the
-/// message, detail and hint as the server wrote them, dbee's note under them, and whether the run
-/// was cancelled rather than failed.
+/// message, detail and hint as the server wrote them, dbee's note under them, and its actions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Band<'a> {
     pub heading: &'a str,
@@ -34,7 +49,22 @@ pub struct Band<'a> {
     pub detail: Option<&'a str>,
     pub hint: Option<&'a str>,
     pub note: Option<&'a str>,
-    pub cancelled: bool,
+    pub actions: &'a [Action<'a>],
+}
+
+/// What a band drew: the band (clicked when it asks to jump to the position), and each action's
+/// button, in order.
+#[derive(Debug)]
+pub struct Shown {
+    pub response: Response,
+    pub actions: Vec<Response>,
+}
+
+impl Shown {
+    /// The index of the action clicked in this frame.
+    pub fn clicked(&self) -> Option<usize> {
+        self.actions.iter().position(Response::clicked)
+    }
 }
 
 /// The position's words: `Line 1, column 14 →`.
@@ -45,10 +75,9 @@ pub fn position_words(line: usize, column: usize) -> String {
 impl Band<'_> {
     /// Draws the band across what is left of `ui`'s width, as tall as what it holds. Its response
     /// is clicked when it asks to jump to the position (only a band with one).
-    pub fn show(&self, ui: &mut Ui, id: Id) -> Response {
+    pub fn show(&self, ui: &mut Ui, id: Id) -> Shown {
         let t = tokens(ui.ctx());
-        let (ground, edge, heading_ink, message_ink) =
-            if self.cancelled { (t.fill, t.line_strong, t.text, t.text_muted) } else { (t.deleted, t.danger, t.danger, t.text) };
+        let (ground, edge, heading_ink, message_ink) = (t.deleted, t.danger, t.danger, t.text);
         let jump = self.position.is_some();
         let outer = ui.available_rect_before_wrap();
         let left = outer.left() + ERROR_BAND_EDGE + ERROR_BAND_PAD;
@@ -64,13 +93,16 @@ impl Band<'_> {
             let galley = body.painter().layout_job(Text::Small.job_as_written(&words, t.text_muted));
             (words, galley)
         });
+        // The position only while the heading keeps its least room (gap 68).
         let link_room = link.as_ref().map_or(0.0, |(_, g)| g.size().x + ERROR_BAND_HEAD_GAP);
+        let link_drawn = link.is_some() && head.width() - link_room >= ERROR_BAND_HEADING_MIN;
+        let link_room = if link_drawn { link_room } else { 0.0 };
         let heading = cut(Text::Subtitle.job_as_written(self.heading, heading_ink), head.width() - link_room);
         let heading = body.painter().layout_job(heading);
         let heading_at = Rect::from_min_size(head.min, heading.size());
         p.galley(heading_at.min, heading, heading_ink);
         body.interact(heading_at, id.with("heading"), Sense::hover()).widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, self.heading));
-        if let Some((_, galley)) = &link {
+        if let Some((_, galley)) = link.as_ref().filter(|_| link_drawn) {
             p.galley(pos2(head.right() - galley.size().x, head.center().y - galley.size().y / 2.0), std::sync::Arc::clone(galley), t.text_muted);
         }
         // The message, the fields and the note: selectable words, unless a click jumps.
@@ -93,6 +125,15 @@ impl Band<'_> {
             body.add_space(ERROR_BAND_GAP + ERROR_BAND_FIELD_GAP);
             words(&mut body, note, Text::Small, t.text_muted);
         }
+        // The actions' row: its room now, its buttons once the band's own click is placed under
+        // them.
+        let row = (!self.actions.is_empty()).then(|| {
+            body.add_space(ERROR_BAND_ACTIONS_GAP);
+            let widths: Vec<f32> = self.actions.iter().map(|a| BoxButton::outline(a.label).width(&body)).collect();
+            let gaps = ERROR_BAND_ACTION_GAP * widths.len().saturating_sub(1) as f32;
+            let (row, _) = body.allocate_exact_size(vec2(widths.iter().sum::<f32>() + gaps, BUTTON_H), Sense::hover());
+            (row, widths)
+        });
         let rect = Rect::from_min_max(outer.min, pos2(outer.right(), body.min_rect().bottom() + ERROR_BAND_PAD));
         ui.advance_cursor_after_rect(rect);
         let edge_rect = Rect::from_min_max(rect.min, pos2(rect.left() + ERROR_BAND_EDGE, rect.bottom()));
@@ -101,6 +142,18 @@ impl Band<'_> {
             Shape::Vec(vec![Shape::rect_filled(rect, CornerRadius::ZERO, ground), Shape::rect_filled(edge_rect, CornerRadius::ZERO, edge)]),
         );
         let r = ui.interact(rect, id, if jump { Sense::click() } else { Sense::hover() });
+        let mut actions = Vec::new();
+        if let Some((row, widths)) = row {
+            let mut x = row.left();
+            for (action, w) in self.actions.iter().zip(widths) {
+                let at = Rect::from_min_size(pos2(x, row.top()), vec2(w, BUTTON_H));
+                let mut child =
+                    ui.new_child(UiBuilder::new().id_salt(id.with(("action", action.label))).max_rect(at).layout(Layout::left_to_right(Align::Min)));
+                let b = child.add_enabled(action.enabled, BoxButton::outline(action.label));
+                actions.push(if action.enabled { b.hint(action.hover) } else { b.hint_disabled(action.hover) });
+                x += w + ERROR_BAND_ACTION_GAP;
+            }
+        }
         if let Some((words, _)) = link {
             r.widget_info(|| WidgetInfo::labeled(WidgetType::Link, ui.is_enabled(), &words));
             if r.hovered() {
@@ -110,7 +163,7 @@ impl Band<'_> {
                 focus::own_edge(&p, rect, 0);
             }
         }
-        r
+        Shown { response: r, actions }
     }
 }
 
@@ -147,7 +200,7 @@ mod tests {
             ui.scope_builder(UiBuilder::new().max_rect(room), |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, band) in bands.iter().enumerate() {
-                    rects.push(band.show(ui, Id::new(("band", i))).rect);
+                    rects.push(band.show(ui, Id::new(("band", i))).response.rect);
                     ui.add_space(APART);
                 }
             });
@@ -167,21 +220,21 @@ mod tests {
     #[test]
     fn the_error_band_matches_the_page() {
         // Node 168920 (its default: hint, detail and a position) and the Error band frame's five
-        // bands (171342 / 173961), then a cancelled run, today's note and a server's detail and
-        // hint without a position, which the page doesn't draw.
+        // bands (171342 / 173961), then a note and a server's detail and hint without a
+        // position, which the page doesn't draw.
         let default = Band { detail: Some("Failing row contains (691, 42, null)."), ..PAGE_BANDS[0] };
-        let [cancelled, rollback, both_fields] = [APP_BANDS[0], APP_BANDS[1], APP_BANDS[6]];
+        let [noted, both_fields] = [APP_BANDS[1], APP_BANDS[5]];
         let mut bands = PAGE_BANDS.to_vec();
-        bands.extend([default, cancelled, rollback, both_fields]);
+        bands.extend([default, noted, both_fields]);
         for (theme, t) in both() {
             let (shapes, rects) = draw(theme, &bands);
             assert_eq!(rects.len(), bands.len(), "{theme:?}");
             let fills = fills(&shapes);
             // The page's heights: the five bands 112, 112, 66, 66, 112; its default 158.
-            for (i, (band, r)) in bands.iter().zip(&rects).enumerate().take(6) {
+            for (i, r) in rects.iter().enumerate().take(6) {
                 let tall = [112.0, 112.0, 66.0, 66.0, 112.0, 158.0][i];
                 assert!(close(r.height(), tall) && close(r.width(), W), "{theme:?} band {i}: {r:?}, the page's {W} by {tall}");
-                let (ground, edge) = if band.cancelled { (t.fill, t.line_strong) } else { (t.deleted, t.danger) };
+                let (ground, edge) = (t.deleted, t.danger);
                 assert!(fills.contains(&(*r, ground)), "{theme:?} band {i}: on `deleted`, square: {fills:?}");
                 let left = Rect::from_min_max(r.min, pos2(r.left() + 2.0, r.bottom()));
                 assert!(fills.contains(&(left, edge)), "{theme:?} band {i}: a 2 px `danger` edge down its left");
@@ -189,7 +242,7 @@ mod tests {
             assert!(edges(&shapes).is_empty(), "{theme:?}: no edge round a band: {:?}", edges(&shapes));
             for (i, (band, r)) in bands.iter().zip(&rects).enumerate() {
                 let within = r.expand(0.5);
-                let (heading_ink, message_ink) = if band.cancelled { (t.text, t.text_muted) } else { (t.danger, t.text) };
+                let (heading_ink, message_ink) = (t.danger, t.text);
                 // The heading, 14 in (past the 2 px edge) and 12 down, `subtitle`.
                 let (h, c) = text_in(&shapes, within, band.heading).unwrap_or_else(|| panic!("{theme:?} band {i}: its heading"));
                 assert!(close(h.left(), r.left() + 14.0) && close(h.top(), r.top() + 12.0) && close(h.height(), 20.0), "{theme:?} band {i}: {h:?}");
@@ -251,7 +304,7 @@ mod tests {
                 }
                 assert!(close(r.bottom(), bottom + 12.0), "{theme:?} band {i}: 12 under its last part, {bottom} in {r:?}");
             }
-            let words = [cancelled.heading, cancelled.message, rollback.message];
+            let words = [noted.heading, noted.message, both_fields.message];
             assert!(
                 words.iter().all(|w| text_in(&shapes, Rect::EVERYTHING, &w.to_uppercase()).is_none()),
                 "{theme:?}: nothing in capitals but the names"
@@ -265,13 +318,27 @@ mod tests {
     struct Seen {
         tags: Tags,
         jumped: usize,
+        rolled: usize,
     }
 
     fn query_band(e: QueryError, kept: usize, at: Option<(usize, usize)>) -> egui_kittest::Harness<'static, Seen> {
+        query_band_with(e, kept, at, None)
+    }
+
+    fn query_band_with(
+        e: QueryError,
+        kept: usize,
+        at: Option<(usize, usize)>,
+        rollback: Option<Action<'static>>,
+    ) -> egui_kittest::Harness<'static, Seen> {
         let mut h = harness_in(vec2(900.0, 400.0), Theme::Light, Seen::default(), move |ui, s| {
             s.tags.begin_frame();
-            if crate::query_tab::band(ui, &mut s.tags, TabId(1), &e, kept, at) {
+            let asked = crate::query_tab::band(ui, &mut s.tags, TabId(1), &e, kept, at, rollback);
+            if asked.jump {
                 s.jumped += 1;
+            }
+            if asked.rollback {
+                s.rolled += 1;
             }
         });
         h.run();
@@ -323,7 +390,7 @@ mod tests {
         let value = h.state().tags.value(crate::query_tab::ERROR).cloned();
         let expected = json!({
             "code": "server", "heading": "Statement 2 failed", "message": message, "detail": detail, "hint": hint,
-            "note": null, "position": 13, "statement": 1, "line": 1, "column": 14, "jump": true,
+            "rollback": false, "position": 13, "statement": 1, "line": 1, "column": 14, "jump": true,
         });
         assert_eq!(value, Some(expected));
         let seen = drawn(&h);
@@ -369,7 +436,7 @@ mod tests {
         click(&mut h, rect.center());
         assert_eq!(h.state().jumped, 0, "a click does nothing");
 
-        // A failed transaction: today's note, in the tag and drawn.
+        // A failed transaction: ROLLBACK, in the tag and drawn; a click on it asks for it.
         let aborted = QueryError {
             message: "current transaction is aborted, commands ignored until end of transaction block (SQLSTATE 25P02)".into(),
             server_code: Some("25P02".into()),
@@ -380,20 +447,15 @@ mod tests {
             statement: 0,
             ..failed.clone()
         };
-        let h = query_band(aborted, 0, None);
+        let rollback = Action { label: "Rollback", enabled: true, hover: "End the failed transaction with ROLLBACK" };
+        let mut h = query_band_with(aborted, 0, None, Some(rollback));
         let value = h.state().tags.value(crate::query_tab::ERROR).cloned().unwrap_or_default();
-        assert_eq!(value["note"], crate::query_tab::ROLLBACK_NOTE);
-        assert!(drawn(&h).contains(&(crate::query_tab::ROLLBACK_NOTE.to_owned(), t.text_muted)), "the note drawn: {:?}", drawn(&h));
-
-        // A cancelled run: its heading, neutral.
-        let stopped =
-            QueryError { code: "cancelled", message: "the statement was cancelled".into(), detail: None, hint: None, position: None, ..failed };
-        let h = query_band(stopped, 1, None);
-        let value = h.state().tags.value(crate::query_tab::ERROR).cloned().unwrap_or_default();
-        assert_eq!((value["code"].clone(), value["heading"].clone()), (json!("cancelled"), json!("The run was cancelled")));
-        let seen = drawn(&h);
-        assert!(seen.contains(&("The run was cancelled".to_owned(), t.text)), "{seen:?}");
-        assert!(seen.contains(&("the statement was cancelled".to_owned(), t.text_muted)), "{seen:?}");
+        assert_eq!((value["rollback"].clone(), value.get("note")), (json!(true), None), "{value}");
+        assert!(drawn(&h).contains(&("ROLLBACK".to_owned(), t.text)), "ROLLBACK drawn: {:?}", drawn(&h));
+        assert_eq!(h.state().tags.value(crate::query_tab::ROLLBACK), Some(&json!("Rollback")));
+        let at = h.state().tags.rect(crate::query_tab::ROLLBACK).unwrap_or(Rect::NOTHING);
+        click(&mut h, at.center());
+        assert_eq!((h.state().rolled, h.state().jumped), (1, 0), "a click on ROLLBACK asks for it");
 
         // The table tab's three headings and their notes; `table-error` is the message.
         let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
@@ -434,5 +496,77 @@ mod tests {
                 assert!(seen.contains(&(note.to_owned(), t.text_muted)), "{heading}: {seen:?}");
             }
         }
+    }
+
+    /// R2: one action is an outline box 12 under the message, at the text's left; a click on it
+    /// reports it, not a jump.
+    #[test]
+    fn an_action_row_sits_12_under_the_message() {
+        let band = APP_BANDS[0];
+        assert_eq!(band.actions.len(), 1, "the showcase's band with ROLLBACK");
+        for (theme, t) in both() {
+            let (shapes, rects) = draw(theme, &[band]);
+            let r = rects[0];
+            let (m, _) = text_in(&shapes, r.expand(0.5), band.message).unwrap_or_else(|| panic!("{theme:?}: the message"));
+            let (words, c) = text_in(&shapes, r.expand(0.5), "ROLLBACK").unwrap_or_else(|| panic!("{theme:?}: ROLLBACK"));
+            assert_eq!(c, t.text, "{theme:?}: its words");
+            let boxed = edges(&shapes).into_iter().find(|e| e.outer.contains_rect(words)).unwrap_or_else(|| panic!("{theme:?}: its box"));
+            assert_eq!((boxed.colour, boxed.width), (t.line_strong, 1.0), "{theme:?}: an outline box: {boxed:?}");
+            let b = boxed.outer;
+            assert!((b.top() - (m.bottom() + 12.0)).abs() <= 1.0, "{theme:?}: 12 under the message: {b:?}, {m:?}");
+            assert!(close(b.left(), m.left()), "{theme:?}: at the text's left: {b:?}, {m:?}");
+            assert!(close(r.bottom(), b.bottom() + 12.0), "{theme:?}: the band ends 12 under it: {r:?}");
+            assert!(!fills(&shapes).iter().any(|(f, _)| b.contains_rect(*f) && f.contains_rect(words)), "{theme:?}: no ground of its own");
+        }
+        // Two actions: 8 apart. A click on one reports it.
+        let actions = [Action { label: "Rollback", enabled: true, hover: "" }, Action { label: "Other", enabled: true, hover: "" }];
+        let mut h = harness_in(vec2(900.0, 300.0), Theme::Light, (None, Vec::new()), move |ui, s: &mut (Option<usize>, Vec<Rect>)| {
+            let band = Band { heading: "Query failed", position: Some((1, 2)), message: "m", actions: &actions, ..Band::default() };
+            let shown = band.show(ui, Id::new("two"));
+            s.1 = shown.actions.iter().map(|r| r.rect).collect();
+            if let Some(i) = shown.clicked() {
+                s.0 = Some(i);
+            }
+            assert!(!shown.response.clicked(), "a click on an action is not a jump");
+        });
+        h.run();
+        let boxes = h.state().1.clone();
+        assert!(boxes.len() == 2 && close(boxes[1].left(), boxes[0].right() + 8.0), "8 apart: {boxes:?}");
+        let at = boxes[1].center();
+        h.event(Event::PointerMoved(at));
+        h.run();
+        let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.input_mut().events.extend([press(true), press(false)]);
+        h.run();
+        assert_eq!(h.state().0, Some(1), "the second action clicked");
+    }
+
+    /// Gap 68: with less than 120 left for the heading the position isn't drawn; a click still jumps.
+    #[test]
+    fn no_link_when_the_heading_would_get_less_than_120() {
+        let mut h = harness_in(vec2(200.0, 300.0), Theme::Light, 0usize, |ui, jumped: &mut usize| {
+            let band = Band { heading: "Statement 2 failed", position: Some((1, 14)), message: "m", ..Band::default() };
+            if band.show(ui, Id::new("narrow")).response.clicked() {
+                *jumped += 1;
+            }
+        });
+        h.run();
+        let shapes = h.output().shapes.clone();
+        assert!(!texts(&shapes).iter().any(|(w, _, _)| w.starts_with("Line ")), "no link: {:?}", texts(&shapes));
+        let link = egui_kittest::kittest::Queryable::query_by_role_and_label(&h, egui::accesskit::Role::Link, "Line 1, column 14 →");
+        assert!(link.is_some(), "it still reads out as a link");
+        let at = pos2(100.0, 30.0);
+        h.event(Event::PointerMoved(at));
+        h.run();
+        let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.input_mut().events.extend([press(true), press(false)]);
+        h.run();
+        assert_eq!(*h.state(), 1, "a click jumps");
+        // At 900 it is drawn.
+        let mut wide = harness_in(vec2(900.0, 300.0), Theme::Light, (), |ui, _| {
+            Band { heading: "Statement 2 failed", position: Some((1, 14)), message: "m", ..Band::default() }.show(ui, Id::new("wide"));
+        });
+        wide.run();
+        assert!(texts(&wide.output().shapes).iter().any(|(w, _, _)| w == "Line 1, column 14 →"), "drawn with room");
     }
 }

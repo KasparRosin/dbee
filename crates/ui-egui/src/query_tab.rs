@@ -24,13 +24,15 @@
 //!   ([`rows_text`], its hover the caps), `2 rows affected 5 ms` ([`affected_text`]), or the time
 //!   alone when the database gave no count; and EXPORT, off until a later version, while the shown
 //!   result has rows or a run goes;
-//! - the last run's error band, when it stopped early ([`band`], [`crate::components::error_band`]);
+//! - the last run's error band, when it failed ([`band`], [`crate::components::error_band`]), a
+//!   hairline under it: none after dbee's own cancel, which the bar says; with ROLLBACK while the
+//!   connection's transaction has failed (`query.rollback`, off while a run, a commit or a
+//!   rollback goes on the connection: [`can_end`]), whose outcome is a toast;
 //! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
 //!   selecting and copying work, and the value panel follows the selected cell). A statement
 //!   without rows draws nothing there: the bar says what it did. With no result yet, nothing.
 //!
-//! The editor, the run row, the result bar and the grid take the body's whole width; the band
-//! keeps [`size::TAB_BODY_PAD_X`] in from its sides.
+//! The editor, the run row, the result bar, the band and the grid take the body's whole width.
 //!
 //! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` in the open connection's
 //! dialect, Postgres's when none is open ([`Tokens::job`], colours from [`crate::theme::Tokens`]; a
@@ -63,7 +65,10 @@
 //! offset into the text the run started with, kept within the text), whose number turns `danger`
 //! in the gutter too. A click on the band, or Enter or Space with the keyboard on it, puts the
 //! cursor there, with the keyboard; an error without a position offers no click, and its words can
-//! be selected. A cancelled run shows the band in neutral colours. The results of the statements
+//! be selected. The token the position falls in ([`error_token`]: a dotted name whole) is
+//! underlined in `danger` while the text is the one the run started with: the first edit takes it
+//! away, and an undo doesn't bring it back; the red line number stays until the next run. A run
+//! dbee cancelled shows no band. The results of the statements
 //! before the failing one stay, and can be picked in the result bar. The band says the error, so it
 //! shows as no notice too (`DbeeApp::start`).
 //!
@@ -76,9 +81,9 @@
 //! The window keeps a [`QueryState`] per tab, dropped with the tab.
 //!
 //! Automation ids: `query-editor` (the editor's whole area; value `{cursor, focused, lines,
-//! length, highlighted, errorLine}`: the cursor as a byte offset, whether the editor has the
-//! keyboard, the lines, the text's length in bytes, whether some token is coloured, and the line
-//! number in `danger` or null), `query-split` (value: the editor's share of the height),
+//! length, highlighted, errorLine, underline}`: the cursor as a byte offset, whether the editor
+//! has the keyboard, the lines, the text's length in bytes, whether some token is coloured, the
+//! line number in `danger` or null, and the bytes `[start, end]` of the underlined token or null), `query-split` (value: the editor's share of the height),
 //! `query-database` (value: the database shown, or null for none; while its list is open the
 //! choices `query-database-<name>`), `query-run`, `query-run-current`, `query-cancel` (only while
 //! the run has gone 300 ms),
@@ -90,9 +95,9 @@
 //! `query-rows` (the facts, while they say what the shown result with rows holds; value e.g.
 //! `First 10,000 of 25,000 rows`), `query-affected` (the facts, while they say what a statement
 //! without rows did; value: `2 rows affected`), `query-export` (EXPORT, off), `query-error` (value `{code, heading, message,
-//! detail, hint, note, position, statement, line, column, jump}`, `note` the band's line that a
-//! ROLLBACK ends a failed transaction (an error whose meaning is `TransactionAborted`, Postgres's
-//! 25P02) or null, `jump` saying whether a click moves the cursor).
+//! detail, hint, rollback, position, statement, line, column, jump}`, `rollback` whether ROLLBACK
+//! shows, `jump` whether a click moves the cursor; not drawn after dbee's own cancel),
+//! `query-rollback` (ROLLBACK in the band; value `Rollback`).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -100,9 +105,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use dbee_core::ResultSet;
-use dbee_engine::cmd::query::{can_run, can_set_database};
+use dbee_engine::cmd::query::{can_end, can_run, can_set_database};
 use dbee_engine::state::NO_CONNECTION_DIALECT;
-use dbee_engine::{CurrentDatabase, Json, Meaning, QueryError, StatementOutcome, Tab, TabId, Which};
+use dbee_engine::{CurrentDatabase, JobId, Json, QueryError, StatementOutcome, Tab, TabId, Which};
 use dbee_sql::Dialect;
 use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
@@ -116,8 +121,8 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
-use crate::components::editor::LineNumber;
-use crate::components::error_band::Band;
+use crate::components::editor::{ErrorToken, LineNumber};
+use crate::components::error_band::{Action, Band};
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
 use crate::components::results::{ResultAsked, ResultBar, ResultTab, RunAsked, RunRow, RunState};
@@ -150,6 +155,11 @@ pub const ROWS: &str = "query-rows";
 pub const AFFECTED: &str = "query-affected";
 pub const EXPORT: &str = "query-export";
 pub const ERROR: &str = "query-error";
+/// ROLLBACK in the error band, while the connection's transaction has failed.
+pub const ROLLBACK: &str = "query-rollback";
+
+/// ROLLBACK's hover; off, `Roll back the transaction: not now, <why>`.
+pub(crate) const ROLLBACK_HOVER: &str = "End the failed transaction with ROLLBACK";
 
 /// The height of an editor line.
 const LINE_H: f32 = Text::Code.line();
@@ -619,6 +629,9 @@ pub struct EditorState {
     view: Range<usize>,
     /// The line and column of a byte offset (the error band's), for text `version`.
     place: Option<(u64, usize, (usize, usize))>,
+    /// The bytes of the token the last run's error points at, underlined in `danger` (set each
+    /// frame by the tab, only while the text is the run's).
+    underline: Option<Range<usize>>,
 }
 
 /// Leaves out the text: query text never reaches the logs.
@@ -809,6 +822,16 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Optio
         let slot = Rect::from_min_max(pos2(gutter.left(), top), pos2(gutter.right(), top + row.row.size.y));
         LineNumber { n, current: cursor_row == Some(i), error: error_line == Some(n) }.paint(&gutter_p, slot);
     }
+    // The error's token, underlined: on its first line, as wide as it is there.
+    if let Some(range) = ed.underline.clone() {
+        let start = CCursor::new(char_index(&ed.text, range.start));
+        let at = galley.pos_from_cursor(start);
+        let end = galley.pos_from_cursor(CCursor::new(char_index(&ed.text, range.end)));
+        let row = galley.layout_from_cursor(start).row;
+        let right = if (end.top() - at.top()).abs() < 0.5 { end.left() } else { galley.rows.get(row).map_or(at.left(), |r| r.pos.x + r.row.size.x) };
+        let token = Rect::from_min_max(pos2(at.left(), at.top()), pos2(right.max(at.left()), at.top() + LINE_H)).translate(origin.to_vec2());
+        ErrorToken::underline(&ui.painter_at(view), token);
+    }
     EditorOutput { response: out.response.response, changed, cursor, focused, lines: ed.lines }
 }
 
@@ -851,6 +874,43 @@ impl ResultGrids {
 pub(crate) struct QueryState {
     pub editor: EditorState,
     results: ResultGrids,
+    /// The tab's last run the window knows of: seen running, or started by its run row.
+    last_run: Option<JobId>,
+    /// The last run's error as the window first saw it: that run, the editor's text version
+    /// then, and the bytes of the token its position falls in ([`error_token`]).
+    seen: Option<SeenError>,
+}
+
+/// See [`QueryState::seen`].
+#[derive(Debug)]
+struct SeenError {
+    run: Option<JobId>,
+    version: u64,
+    token: Option<Range<usize>>,
+}
+
+/// The bytes of the token of `text` (lexed in `dialect`) that byte `at` falls in, a dotted name
+/// whole (`o.totl`); `None` in whitespace, a comment, or past the text.
+fn error_token(dialect: Dialect, text: &str, at: usize) -> Option<Range<usize>> {
+    let tokens = lexer::tokenize(dialect, text);
+    let k = tokens.iter().position(|t| t.range.start <= at && at < t.range.end)?;
+    let token = tokens.get(k)?;
+    let name = |t: &Token| matches!(t.kind, TokenKind::Keyword | TokenKind::Ident | TokenKind::QuotedIdent);
+    let dot = |t: &Token| text.get(t.range.clone()) == Some(".");
+    match token.kind {
+        TokenKind::Whitespace | TokenKind::Comment => None,
+        _ if name(token) => {
+            let (mut first, mut last) = (k, k);
+            while first >= 2 && tokens.get(first - 1).is_some_and(dot) && tokens.get(first - 2).is_some_and(name) {
+                first -= 2;
+            }
+            while tokens.get(last + 1).is_some_and(dot) && tokens.get(last + 2).is_some_and(name) {
+                last += 2;
+            }
+            Some(tokens.get(first)?.range.start..tokens.get(last)?.range.end)
+        }
+        _ => Some(token.range.clone()),
+    }
 }
 
 /// The query tabs' states, by tab.
@@ -947,35 +1007,47 @@ fn capitalized(word: &str) -> String {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// The band's note under an error that means the transaction failed earlier.
-pub const ROLLBACK_NOTE: &str = "The transaction this connection is in failed earlier: run ROLLBACK to end it. Until then every statement fails.";
-
 /// The error band's heading for `e` of a run that kept `kept` results.
 fn heading(e: &QueryError, kept: usize) -> String {
-    if e.code == "cancelled" {
-        "The run was cancelled".into()
-    } else if kept > 0 || e.statement > 0 {
-        format!("Statement {} failed", e.statement.saturating_add(1))
-    } else {
-        "Query failed".into()
-    }
+    if kept > 0 || e.statement > 0 { format!("Statement {} failed", e.statement.saturating_add(1)) } else { "Query failed".into() }
+}
+
+/// What a click on the error band asked for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BandAsked {
+    /// To go to the error's position.
+    pub jump: bool,
+    /// ROLLBACK.
+    pub rollback: bool,
 }
 
 /// The error band of `e`, a run that kept `kept` results; `at` is the line and column of its
-/// position in the editor's text. True when a click on it asks to go to the error's position.
-pub(crate) fn band(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryError, kept: usize, at: Option<(usize, usize)>) -> bool {
+/// position in the editor's text; `rollback` ROLLBACK under it, while the transaction has failed.
+pub(crate) fn band(
+    ui: &mut egui::Ui,
+    tags: &mut Tags,
+    tab: TabId,
+    e: &QueryError,
+    kept: usize,
+    at: Option<(usize, usize)>,
+    rollback: Option<Action<'_>>,
+) -> BandAsked {
     let title = heading(e, kept);
-    let note = (e.meaning == Some(Meaning::TransactionAborted)).then_some(ROLLBACK_NOTE);
+    let actions: Vec<Action<'_>> = rollback.into_iter().collect();
     let band = Band {
         heading: &title,
         position: at,
         message: &e.message,
         detail: e.detail.as_deref(),
         hint: e.hint.as_deref(),
-        note,
-        cancelled: e.code == "cancelled",
+        note: None,
+        actions: &actions,
     };
-    let r = band.show(ui, Id::new(("dbee-query-error", tab.0)));
+    let shown = band.show(ui, Id::new(("dbee-query-error", tab.0)));
+    let r = &shown.response;
+    if let (Some(action), Some(b)) = (rollback, shown.actions.first()) {
+        tags.tag_value_as(ROLLBACK, b, "Rollback", action.enabled);
+    }
     let jump = at.is_some();
     let (line, column) = at.unzip();
     let value = json!({
@@ -984,15 +1056,15 @@ pub(crate) fn band(ui: &mut egui::Ui, tags: &mut Tags, tab: TabId, e: &QueryErro
         "message": e.message,
         "detail": e.detail,
         "hint": e.hint,
-        "note": note,
+        "rollback": rollback.is_some(),
         "position": e.position,
         "statement": e.statement,
         "line": line,
         "column": column,
         "jump": jump,
     });
-    tags.tag_value(ERROR, &r, value);
-    jump && r.clicked()
+    tags.tag_value(ERROR, r, value);
+    BandAsked { jump: jump && r.clicked(), rollback: shown.clicked() == Some(0) }
 }
 
 /// What the result bar says of tab `q`'s run, or `None` when there is nothing to say yet (no
@@ -1109,7 +1181,6 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         }
         state.editor.set_dialect(session.state().dialect(Which::Tab(id)));
         let body = ui.available_rect_before_wrap();
-        let full = body.shrink2(vec2(size::TAB_BODY_PAD_X, 0.0));
         let h = body.height();
         // The run's 300 ms: CANCEL, RUN off and the running words wait as long.
         let now = ui.ctx().input(|i| i.time);
@@ -1139,6 +1210,21 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let mut editor_ui =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-editor", id.0)).max_rect(editor_rect).layout(Layout::top_down(Align::Min)));
         let error_line = q.error.as_ref().and_then(|e| e.position).map(|p| state.editor.line_column_of(p).0);
+        // The error's token is underlined while the text is the one the run started with: the
+        // window notes the text's version when it first sees the run's error.
+        if let Some(job) = q.running {
+            state.last_run = Some(job);
+        }
+        match &q.error {
+            Some(e) if q.running.is_none() => {
+                if state.seen.as_ref().is_none_or(|seen| seen.run != state.last_run) {
+                    let token = e.position.and_then(|at| error_token(session.state().dialect(Which::Tab(id)), &state.editor.text, at));
+                    state.seen = Some(SeenError { run: state.last_run, version: state.editor.version, token });
+                }
+            }
+            _ => state.seen = None,
+        }
+        state.editor.underline = state.seen.as_ref().filter(|seen| seen.version == state.editor.version).and_then(|seen| seen.token.clone());
         let out = editor(&mut editor_ui, editor_id(id), &mut state.editor, error_line);
         let value = json!({
             "cursor": out.cursor,
@@ -1147,6 +1233,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             "length": state.editor.text.len(),
             "highlighted": state.editor.highlighted(),
             "errorLine": error_line,
+            "underline": state.editor.underline.as_ref().map(|r| [r.start, r.end]),
         });
         // The editor is its whole area.
         let mut whole = out.response.clone();
@@ -1214,19 +1301,33 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             }
             results_top = bar_rect.bottom();
         }
-        // The band, then the results.
-        let rest = Rect::from_min_max(pos2(full.left(), results_top), full.max);
+        // The band (none for dbee's own cancel: the bar says it), a hairline under it, then the
+        // results.
+        let rest = Rect::from_min_max(pos2(body.left(), results_top), body.max);
         let mut rest_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-results", id.0)).max_rect(rest).layout(Layout::top_down(Align::Min)));
-        if let Some(e) = &q.error {
-            rest_ui.add_space(6.0);
+        rest_ui.set_clip_rect(rest.intersect(ui.clip_rect()));
+        rest_ui.spacing_mut().item_spacing.y = 0.0;
+        if let Some(e) = q.error.as_ref().filter(|e| e.code != "cancelled") {
             let at = e.position.map(|p| state.editor.line_column_of(p));
-            if band(&mut rest_ui, tags, id, e, q.results.len(), at)
+            let failed = session
+                .state()
+                .connection(Which::Tab(id))
+                .and_then(|c| c.transaction())
+                .is_some_and(|tr| tr.state == dbee_engine::TransactionState::Failed);
+            let why = can_end(session, id).err().map(|why| format!("Roll back the transaction: not now, {why}"));
+            let rollback = failed.then(|| Action { label: "Rollback", enabled: why.is_none(), hover: why.as_deref().unwrap_or(ROLLBACK_HOVER) });
+            let asked = band(&mut rest_ui, tags, id, e, q.results.len(), at, rollback);
+            if asked.jump
                 && let Some(at) = e.position
             {
                 state.editor.jump_to(at);
                 ui.ctx().request_repaint();
             }
-            rest_ui.add_space(6.0);
+            if asked.rollback {
+                runs.push(("query.rollback", json!({ "tab": id })));
+            }
+            let (line, _) = rest_ui.allocate_exact_size(vec2(rest.width(), BAR_LINE), Sense::hover());
+            rest_ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
         }
         match shown {
             Some(o) if !o.result.columns.is_empty() => {
@@ -1273,7 +1374,14 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         app.notice(Kind::Error, crate::app::notice_text(&e));
     }
     for (command, params) in runs {
-        app.start(command, params, Origin::Menu);
+        let job = app.start(command, params, Origin::Menu);
+        // A run that ends before the next frame is still a new run for the underline.
+        if command == QUERY_RUN
+            && job.is_some()
+            && let Some(state) = app.view.work.queries.get_mut(&id)
+        {
+            state.last_run = job;
+        }
     }
 }
 
@@ -1314,6 +1422,20 @@ mod tests {
         assert_eq!(affected_text(Some(0)), "0 rows affected");
         assert_eq!(affected_text(Some(12_000)), "12,000 rows affected");
         assert_eq!(affected_text(None), "The statement ran; the database gave no row count.");
+    }
+
+    #[test]
+    fn the_error_token_is_the_name_the_position_falls_in() {
+        let pg = Dialect::Postgres;
+        let sql = "SELECT o.totl FROM shop.orders o -- note";
+        assert_eq!(error_token(pg, sql, 7), Some(7..13), "a dotted name whole");
+        assert_eq!(error_token(pg, sql, 9), Some(7..13), "from any part of it");
+        assert_eq!(error_token(pg, sql, 0), Some(0..6), "a keyword");
+        assert_eq!(error_token(pg, sql, 6), None, "whitespace");
+        assert_eq!(error_token(pg, sql, 36), None, "a comment");
+        assert_eq!(error_token(pg, sql, 400), None, "past the text");
+        assert_eq!(error_token(pg, "select 1/0", 8), Some(8..9), "an operator alone");
+        assert_eq!(error_token(pg, "", 0), None);
     }
 
     #[test]

@@ -495,7 +495,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     drop(held);
     app.until("no Cancel once the run ended", |app| app.tag("query-cancel").is_none());
     assert_eq!(q["error"]["code"], "cancelled", "{name}: {q}");
-    assert_eq!(app.value("query-error")["code"], "cancelled");
+    assert!(app.tag("query-error").is_none(), "{name}: dbee's own cancel shows no band");
     assert!(app.value("query-facts").as_str().is_some_and(|f| f.starts_with("Cancelled")), "{name}: the bar says the run was cancelled");
     app.shot(root, &format!("{p}-7d-cancelled"));
 

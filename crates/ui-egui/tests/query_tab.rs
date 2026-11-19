@@ -214,10 +214,10 @@ fn cancel_with_the_button(db: &TestDb) -> Duration {
     let took = start.elapsed();
     println!("cancelled in {took:?}");
     ui.frame();
-    let card = ui.value("query-error");
-    assert_eq!(card["code"], "cancelled", "{card}");
+    assert!(ui.tag("query-error").is_none(), "dbee's own cancel: no band");
+    assert!(ui.value("query-facts").as_str().is_some_and(|f| f.starts_with("Cancelled")), "the bar says it");
     assert!(ui.tag("query-cancel").is_none());
-    assert!(ui.tag("notice").is_none(), "the card says it: {:?}", ui.tag("notice"));
+    assert!(ui.tag("notice").is_none(), "the bar says it: {:?}", ui.tag("notice"));
     took
 }
 
@@ -1158,13 +1158,16 @@ fn a_failed_transaction_says_a_rollback_ends_it() {
     };
     run(&mut ui, "BEGIN; SELECT 1 / 0;");
     let card = ui.value("query-error");
-    assert!(card["message"].as_str().is_some_and(|m| m.contains("SQLSTATE 22012")) && card["note"].is_null(), "{card}");
-    // The transaction stays open and failed: the next run says how to end it.
+    assert!(card["message"].as_str().is_some_and(|m| m.contains("SQLSTATE 22012")), "{card}");
+    assert_eq!((card["rollback"].clone(), card.get("note")), (json!(true), None), "the transaction failed: ROLLBACK, no note: {card}");
+    // The transaction stays open and failed: the next run offers ROLLBACK too.
     run(&mut ui, "SELECT 1");
     let card = ui.value("query-error");
     assert!(card["message"].as_str().is_some_and(|m| m.contains("SQLSTATE 25P02")), "{card}");
-    assert_eq!(card["note"], dbee_ui_egui::query_tab::ROLLBACK_NOTE);
+    assert_eq!(card["rollback"], true, "{card}");
+    assert!(ui.tag("query-rollback").is_some());
     run(&mut ui, "ROLLBACK");
+    assert!(ui.tag("query-rollback").is_none(), "a ROLLBACK statement ended it too");
     run(&mut ui, "SELECT 1");
     assert!(ui.tag("query-error").is_none(), "after the ROLLBACK statements run again");
 }
@@ -1592,4 +1595,115 @@ fn the_running_state_waits_300_ms_and_restarts_per_run() {
         let f = ui.value("query-facts");
         assert!(f.as_str().is_some_and(|f| f.starts_with("Cancelled ")), "{run} run: the new facts: {f}");
     }
+}
+
+/// Review Focus 1: dbee's own cancel shows no band, the bar says it; a stop dbee didn't ask for
+/// (a `statement_timeout`) is the red band, `Failed` not in the bar, the results before it kept.
+#[test]
+fn a_cancel_shows_no_band_and_a_timeout_shows_red() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text("select pg_sleep(30)");
+    ui.ctrl("Enter");
+    ui.until("Cancel to show", |ui| ui.tag("query-cancel").is_some());
+    ui.click("query-cancel");
+    ui.until("the cancel", |ui| ui.query()["running"].is_null() && ui.query()["error"]["code"] == "cancelled");
+    ui.frame();
+    assert!(ui.tag("query-error").is_none(), "no band for dbee's own cancel");
+    let facts = ui.value("query-facts");
+    assert!(facts.as_str().is_some_and(|f| f.starts_with("Cancelled")), "{facts}");
+    ui.execute("query.setText", json!({ "text": "SET statement_timeout = 200; SELECT pg_sleep(5)" }));
+    ui.frame();
+    ui.click("query-run");
+    ui.until("the timeout", |ui| ui.query()["running"].is_null() && ui.query()["error"]["code"] == "server");
+    ui.frame();
+    let card = ui.value("query-error");
+    assert_eq!((card["code"].clone(), card["heading"].clone()), (json!("server"), json!("Statement 2 failed")), "{card}");
+    assert_eq!(ui.query()["error"]["meaning"], "interrupted");
+    let band = as_rect(ui.rect("query-error"));
+    let t = dbee_ui_egui::theme::LIGHT;
+    assert_eq!(colour_at(&ui, egui::pos2(band.right() - 4.0, band.bottom() - 4.0)), Some(t.deleted), "the band's red ground");
+    assert!(visible(&ui.tag("result-1")), "the SET's result stays");
+    let facts = ui.value("query-facts");
+    assert!(facts.as_str().is_some_and(|f| !f.starts_with("Cancelled") && !f.starts_with("Failed")), "the SET's facts: {facts}");
+}
+
+/// Review Focus 3: ROLLBACK shows while the connection's transaction has failed, from any of its
+/// query tabs; it ends it, toasts, and leaves the band without the button.
+#[test]
+fn rollback_ends_the_failed_transaction_from_the_band() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text("BEGIN; SELECT nope");
+    ui.ctrl("Enter");
+    ui.ran();
+    assert!(ui.enabled("query-rollback"), "ROLLBACK under the failed transaction's band");
+    assert_eq!(ui.value("query-rollback"), "Rollback");
+    assert_eq!(ui.document()["connection"]["transaction"]["state"], "failed");
+    // A second query tab on the connection: its run fails with 25P02, and it offers ROLLBACK too.
+    ui.ctrl("T");
+    ui.frame();
+    ui.text("SELECT 1");
+    ui.ctrl("Enter");
+    ui.ran();
+    let card = ui.value("query-error");
+    assert!(card["message"].as_str().is_some_and(|m| m.contains("25P02")), "{card}");
+    let band = as_rect(ui.rect("query-error"));
+    let button = as_rect(ui.rect("query-rollback"));
+    assert!(band.contains_rect(button), "in the band: {button:?} {band:?}");
+    ui.click("query-rollback");
+    ui.until("the rollback", |ui| ui.document()["connection"]["transaction"].is_null());
+    ui.until("a toast", |ui| ui.tag("notice").is_some());
+    assert_eq!(ui.value("notice"), "Rolled back on pg14");
+    ui.frame();
+    assert!(ui.tag("query-rollback").is_none(), "ROLLBACK leaves the band");
+    assert!(ui.tag("query-error").is_some(), "the band stays: the last run's error");
+    ui.click("query-run");
+    ui.until("the run", |ui| !ui.query()["results"].as_array().is_none_or(Vec::is_empty));
+    assert!(ui.query()["error"].is_null(), "statements run again");
+}
+
+/// Review Focus 7: the error's token is underlined in `danger` while the text is the run's; the
+/// first edit takes it away for good, the red line number stays until the next run.
+#[test]
+fn the_underline_goes_at_the_first_edit() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    let sql = "SELECT o.totl FROM shop.orders o";
+    ui.text(sql);
+    ui.ctrl("Enter");
+    ui.ran();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let marks = |ui: &Ui| -> Vec<egui::Rect> {
+        ui.shapes()
+            .into_iter()
+            .filter_map(|(_, s)| match s {
+                egui::Shape::Rect(r) if r.fill == t.danger && (r.rect.height() - 1.5).abs() < 0.01 => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    };
+    let ed = ui.editor();
+    assert_eq!((ed["underline"].clone(), ed["errorLine"].clone()), (json!([7, 13]), json!(1)), "{ed}");
+    let editor = as_rect(ui.rect("query-editor"));
+    let digit = ui.harness.ctx.fonts_mut(|f| f.glyph_width(&dbee_ui_egui::theme::Text::Code.font(), '0'));
+    let mark = marks(&ui);
+    assert!(
+        mark.len() == 1 && editor.contains_rect(mark[0]) && (mark[0].width() - 6.0 * digit).abs() <= 1.0,
+        "one mark as wide as `o.totl`: {mark:?}"
+    );
+    ui.ctrl("End");
+    ui.text(" ");
+    ui.frame();
+    let ed = ui.editor();
+    assert_eq!((ed["underline"].clone(), ed["errorLine"].clone()), (Json::Null, json!(1)), "the first edit: {ed}");
+    assert!(marks(&ui).is_empty());
+    ui.ctrl("Z");
+    ui.frame();
+    assert_eq!(ui.query()["text"], sql, "undone");
+    assert_eq!(ui.editor()["underline"], Json::Null, "it doesn't come back on undo");
+    ui.ctrl("Enter");
+    ui.ran();
+    assert_eq!(ui.editor()["underline"], json!([7, 13]), "the next run's error");
+    assert_eq!(marks(&ui).len(), 1);
 }
