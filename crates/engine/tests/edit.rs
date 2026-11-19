@@ -230,6 +230,29 @@ fn failed_apply_writes_nothing_and_marks_the_row() {
     });
 }
 
+/// The Apply's failure keeps the server's detail and hint, as a query's error does: Postgres
+/// gives a detail for a NOT NULL violation, MySQL only the message.
+#[test]
+fn an_apply_failure_keeps_detail_and_hint() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let name = unique("t_not_null");
+        let _drop = scratch_table(&t, &name, "CREATE TABLE {t} (id int PRIMARY KEY, name varchar(40) NOT NULL); INSERT INTO {t} VALUES (1, 'Alice')");
+        let mut s = opened_rows(&t, &name, 1);
+        set_cell(&mut s, 0, "name", Json::Null);
+        let e = run_err(&mut s, "edit.apply", json!({}));
+        assert_eq!(e.code(), "server", "{}: {e}", t.name());
+        let failed = summary(&s)["failed"].clone();
+        assert_eq!((failed["row"].as_u64(), failed["code"].as_str()), (Some(0), Some("server")), "{}: {failed}", t.name());
+        assert_eq!(failed["hint"], Json::Null, "{}: {failed}", t.name());
+        if t.name().starts_with("pg") {
+            assert!(failed["detail"].as_str().is_some_and(|d| d.starts_with("Failing row contains")), "{}: {failed}", t.name());
+        } else {
+            assert_eq!(failed["detail"], Json::Null, "{}: {failed}", t.name());
+        }
+    }
+}
+
 #[test]
 fn add_and_delete_rows() {
     let _db = require_testdb!();

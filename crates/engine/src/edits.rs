@@ -17,7 +17,7 @@
 //!
 //! **`failed`** is how the last Apply failed ([`Failed`]): the grid row of the change that failed,
 //! its column when that change wrote one column, the message and the error's code (`cancelled`
-//! for an Apply cancelled before its commit). It stays while the user fixes things,
+//! for an Apply cancelled before its commit), and the server's detail and hint when it gave them. It stays while the user fixes things,
 //! moves up with the rows when a new row before it is deleted, and goes with Reset, with the next
 //! Apply and when nothing is staged any more.
 //!
@@ -72,6 +72,9 @@ pub struct Failed {
     /// The error's code: `server`, `rowNotFound`, `readOnly`, `cancelled`, `connectionLost` (the
     /// outcome is unknown), ….
     pub code: &'static str,
+    /// The server's detail and hint, when it gave them (a server error only).
+    pub detail: Option<String>,
+    pub hint: Option<String>,
 }
 
 /// The staged edits of one table tab (see the module docs). Undo and redo stacks are private.
@@ -351,7 +354,7 @@ impl Edits {
 
     /// [`Edits::mark_unknown`] at grid row `row`.
     pub(crate) fn unknown_at(&mut self, row: usize) {
-        self.failed = Some(Failed { row, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost" });
+        self.failed = Some(Failed { row, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost", detail: None, hint: None });
         self.unknown = true;
     }
 
@@ -850,7 +853,7 @@ mod tests {
         let mut e = Edits::default();
         e.stage(&d, 0, 1, text("1"), None).unwrap();
         e.stage(&d, 1, 1, text("2"), None).unwrap();
-        e.failed = Some(Failed { row: 1, column: Some(1), message: "bad".into(), code: "server" });
+        e.failed = Some(Failed { row: 1, column: Some(1), message: "bad".into(), code: "server", detail: None, hint: None });
         e.stage(&d, 0, 2, text("3"), None).unwrap();
         assert!(e.failed.is_some(), "fixing another cell keeps the mark");
         e.reset();
@@ -858,7 +861,10 @@ mod tests {
         // The unknown outcome marks the first change.
         e.undo();
         e.mark_unknown(d.rows.len());
-        assert_eq!(e.failed, Some(Failed { row: 0, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost" }));
+        assert_eq!(
+            e.failed,
+            Some(Failed { row: 0, column: None, message: UNKNOWN_OUTCOME.to_owned(), code: "connectionLost", detail: None, hint: None })
+        );
         while e.undo() {}
         assert_eq!(e.failed, None, "nothing staged, nothing failed");
         e.mark_unknown(d.rows.len());
@@ -866,7 +872,7 @@ mod tests {
         // A new row before the failed one moves it up when it goes.
         let mut e = Edits::default();
         let (a, b) = (e.add_row(&d), e.add_row(&d));
-        e.failed = Some(Failed { row: b, column: None, message: "bad".into(), code: "server" });
+        e.failed = Some(Failed { row: b, column: None, message: "bad".into(), code: "server", detail: None, hint: None });
         e.delete_rows(&d, &[a]).unwrap();
         assert_eq!(e.failed.as_ref().map(|f| f.row), Some(a));
         e.delete_rows(&d, &[a]).unwrap();

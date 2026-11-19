@@ -35,9 +35,13 @@
 //! connection, which is what `table.cancel` relies on. A count that fails leaves the estimate it
 //! showed, unless a newer count runs.
 //!
-//! **The total** is counted only when asked. `table.count` shows the planner's estimate at once
-//! for an unfiltered table, materialized view or partitioned table (`reltuples` from the
-//! catalog; views and foreign tables have none) while the exact count runs. A new condition
+//! **The total** is counted only when asked, or told by the page shown. `table.count` shows the
+//! planner's estimate at once for an unfiltered table, materialized view or partitioned table
+//! (`reltuples` from the catalog; views and foreign tables have none) while the exact count runs.
+//! A page that lands (not stale) with nothing after it and every row kept tells the exact total,
+//! the rows before it and its own, when it holds rows or is the first page: an empty page past
+//! the end tells nothing (rows deleted elsewhere since). A count still running for the same
+//! condition then sets the same number, unless the table changed meanwhile. A new condition
 //! forgets the total.
 //!
 //! Logs carry the command ids and job labels only (the job runtime times them), never SQL,
@@ -352,7 +356,7 @@ pub(crate) fn summary(s: &Session, t: &TableTab) -> Json {
         "notEditableReason": reason,
         "noEditReason": no_edit_reason(s, t),
         "edits": super::edit::summary(&t.edits, t.data.as_ref().map_or(0, |d| d.rows.len())),
-        "failed": t.edits.failed.as_ref().map(|f| json!({ "row": f.row, "column": f.column, "message": f.message, "code": f.code })),
+        "failed": t.edits.failed.as_ref().map(|f| json!({ "row": f.row, "column": f.column, "message": f.message, "code": f.code, "detail": f.detail, "hint": f.hint })),
         "outcomeUnknown": t.edits.outcome_unknown(),
         "applying": t.applying,
         "saved": t.saved,
@@ -500,6 +504,16 @@ fn split_hidden(mut rs: ResultSet, visible: usize) -> (ResultSet, ResultSet) {
     (rs, ResultSet { columns, rows, ..ResultSet::default() })
 }
 
+/// The exact count a page tells: when nothing follows it and it is whole, the rows before it and
+/// its own. An empty page tells it only as the first (past the end, the rows could have been
+/// deleted since the page before was shown).
+fn told_total(page: u64, rows: usize, has_next: bool, complete: bool) -> Option<u64> {
+    if has_next || !complete || (rows == 0 && page > 0) {
+        return None;
+    }
+    page.checked_mul(PAGE_SIZE)?.checked_add(u64::try_from(rows).ok()?)
+}
+
 /// Shows a loaded page in tab `tab`. `written` is what the Apply that loaded it wrote: its cells on
 /// the page become the tab's `saved`; any other page has none.
 fn apply_load(
@@ -560,6 +574,9 @@ fn apply_load(
             t.hidden = Arc::new(hidden);
             t.has_next = has_next;
             t.page_complete = complete;
+            if let Some(n) = told_total(page, rows, has_next, complete) {
+                t.total = Total::Exact(n);
+            }
             t.error = None;
             t.applied = view.applied.clone();
             t.sort = view.sort.clone();

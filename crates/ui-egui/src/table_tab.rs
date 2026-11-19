@@ -380,7 +380,7 @@ mod tests {
         edits.cells = BTreeMap::from([((0, 1), NewValue::Null)]);
         edits.new_rows = vec![BTreeMap::from([(1, NewValue::Text("new".into()))])];
         edits.deleted = BTreeSet::from([2]);
-        edits.failed = Some(dbee_engine::Failed { row: 1, column: None, message: "bad".into(), code: "server" });
+        edits.failed = Some(dbee_engine::Failed { row: 1, column: None, message: "bad".into(), code: "server", detail: None, hint: None });
         let s = Source { data: &data, edits: &edits, saved: &[] };
         assert_eq!(s.rows(), 4, "three loaded, one new");
         assert_eq!((s.cell(0, 1), s.cell(1, 1), s.cell(3, 1), s.cell(3, 0)), (None, None, Some("new"), None));
@@ -391,7 +391,8 @@ mod tests {
         assert!(s.right_aligned(0) && !s.right_aligned(1));
         assert!(s.deleted(2) && !s.deleted(1) && !s.deleted(3));
         // A row to delete whose delete failed shows as failed, and stays struck through.
-        edits.failed = Some(dbee_engine::Failed { row: 2, column: None, message: "still referenced".into(), code: "server" });
+        edits.failed =
+            Some(dbee_engine::Failed { row: 2, column: None, message: "still referenced".into(), code: "server", detail: None, hint: None });
         let s = Source { data: &data, edits: &edits, saved: &[] };
         assert_eq!((s.mark(2, 0), s.deleted(2)), (Some(Mark::Failed), true));
         // A saved cell is marked saved, unless another mark is on it.
@@ -403,7 +404,7 @@ mod tests {
     fn a_cancelled_apply_has_a_note_of_its_own() {
         let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
         let mut t = TableTab::new(TabId(1), dbee_engine::ConnectionId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
-        let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "m".into(), code };
+        let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "m".into(), code, detail: None, hint: None };
         std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("server"));
         assert_eq!(card_text(&t), Some(("The changes were not applied", "m", FAILED_NOTE)));
         std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("cancelled"));

@@ -546,7 +546,11 @@ fn applied(
                 UNKNOWN_OUTCOME.to_owned()
             } else {
                 let message = ApplyError { index, error: error.clone() }.to_string();
-                edits.failed = Some(Failed { row, column, message: message.clone(), code: error.code() });
+                let (detail, hint) = match &error {
+                    DbError::Server(e) => (e.detail.clone(), e.hint.clone()),
+                    _ => (None, None),
+                };
+                edits.failed = Some(Failed { row, column, message: message.clone(), code: error.code(), detail, hint });
                 message
             };
             let column = if lost { None } else { column };

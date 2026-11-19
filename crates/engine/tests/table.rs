@@ -363,18 +363,113 @@ fn count_estimate_then_exact() {
         let r = s.wait(job, T).unwrap();
         assert_eq!(r["total"], json!({ "exact": n }));
         assert_eq!(read(s)["total"], json!({ "exact": n }));
-        // Filtered: no estimate, and a new filter forgets the count.
-        run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "le", "value": "10" }] }));
+        // Filtered: no estimate, and a new filter forgets the count (two pages: the first one
+        // shown does not tell it).
+        run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "le", "value": "150" }] }));
         assert_eq!(s.inspect()["table"]["total"], "unknown");
         let Outcome::Started(job) = s.execute("table.count", json!({})).unwrap() else { panic!("table.count starts a job") };
         assert_eq!(s.inspect()["table"]["total"], json!({ "counting": { "estimate": null } }));
-        assert_eq!(s.wait(job, T).unwrap()["total"], json!({ "exact": 10 }));
+        assert_eq!(s.wait(job, T).unwrap()["total"], json!({ "exact": 150 }));
         // A view has no estimate.
         open_table(s, t.schema("shop"), "order_totals");
         let Outcome::Started(job) = s.execute("table.count", json!({})).unwrap() else { panic!("table.count starts a job") };
         assert_eq!(s.inspect()["table"]["total"], json!({ "counting": { "estimate": null } }));
         assert_eq!(s.wait(job, T).unwrap()["total"], json!({ "exact": 500 }));
     });
+}
+
+/// `scratch.<name> (id int PRIMARY KEY)` with ids 1 to `rows`, dropped with the guard.
+fn numbered_table<'a>(t: &'a TestTarget, name: &str, rows: u64) -> Scratch<'a> {
+    let values: Vec<String> = (1..=rows).map(|i| format!("({i})")).collect();
+    let insert = if values.is_empty() { String::new() } else { format!("; INSERT INTO {{t}} VALUES {}", values.join(", ")) };
+    scratch_table(t, name, &format!("CREATE TABLE {{t}} (id int PRIMARY KEY){insert}"))
+}
+
+#[test]
+fn an_empty_table_counts_as_zero() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let name = unique("t_empty");
+        let _drop = numbered_table(&t, &name, 0);
+        let mut s = connected_to(&t);
+        let r = open_table(&mut s, t.schema("scratch"), &name);
+        assert_eq!((r["rows"].as_u64(), &r["total"]), (Some(0), &json!({ "exact": 0 })), "{}: {r}", t.name());
+        assert_eq!(s.inspect()["table"]["total"], json!({ "exact": 0 }), "{}", t.name());
+    }
+}
+
+#[test]
+fn a_one_page_filter_counts_its_rows() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let r = run(s, "table.setFilters", json!({ "filters": [{ "column": "id", "op": "le", "value": "42" }] }));
+        assert_eq!((r["rows"].as_u64(), &r["total"]), (Some(42), &json!({ "exact": 42 })), "{}: {r}", t.name());
+        let tab = s.inspect()["table"].clone();
+        assert_eq!((&tab["total"], &tab["counting"]), (&json!({ "exact": 42 }), &Json::Null), "{}", t.name());
+        assert!(s.journal().iter().all(|(id, _)| id != "table.count"), "{}: nothing counted", t.name());
+    });
+}
+
+/// Review focus: the count is set only from a page that is whole, that holds rows (or is the
+/// first), and that nothing follows.
+#[test]
+fn only_a_whole_last_page_tells_the_count() {
+    let _db = require_testdb!();
+    for t in engine_targets() {
+        let name = unique("t_last_page");
+        let _drop = numbered_table(&t, &name, 150);
+        let mut s = connected_to(&t);
+        let first = open_table(&mut s, t.schema("scratch"), &name);
+        assert!(first["total"].get("exact").is_none(), "{}: more rows follow page 1: {first}", t.name());
+        assert_eq!(page(&mut s, json!("next"))["total"], json!({ "exact": 150 }), "{}", t.name());
+        // Going back keeps it.
+        assert_eq!(page(&mut s, json!("first"))["total"], json!({ "exact": 150 }), "{}", t.name());
+        // Rows deleted elsewhere: page 2 is now empty, and says nothing of the count.
+        q(&t, &format!("DELETE FROM {}.{name} WHERE id > 90", t.schema("scratch")));
+        let r = page(&mut s, json!(2));
+        assert_eq!((r["page"].as_u64(), r["rows"].as_u64()), (Some(1), Some(0)), "{}: {r}", t.name());
+        assert_eq!(r["total"], json!({ "exact": 150 }), "{}: an empty page past the end tells nothing", t.name());
+        // Page 1, now whole and the last, tells it again.
+        assert_eq!(page(&mut s, json!("first"))["total"], json!({ "exact": 90 }), "{}", t.name());
+    }
+}
+
+/// Review focus: a count that runs when a last page lands agrees with it, and a new condition
+/// takes neither.
+#[test]
+fn a_last_page_and_a_running_count_agree() {
+    let _db = require_testdb!();
+    let t = pg14_target();
+    let mut s = connected_to(&t);
+    open_table(&mut s, t.schema("shop"), "orders");
+    let key = unique("dbee_gate");
+    let gate = hold_gate(&t, &key);
+    let condition = format!("({}) AND id <= 42", gated(&t, &key));
+    // The page waits for the gate; the count runs behind it on the browse connection.
+    let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": condition, "rawMode": true })).unwrap() else { panic!("a job") };
+    until_running(&t, &key);
+    let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
+    assert_eq!(s.inspect()["table"]["total"], json!({ "counting": { "estimate": null } }));
+    drop(gate);
+    assert_eq!(s.wait(load, T).unwrap()["total"], json!({ "exact": 42 }));
+    assert_eq!(s.wait(count, T).unwrap()["total"], json!({ "exact": 42 }));
+    let tab = s.inspect()["table"].clone();
+    assert_eq!((&tab["total"], &tab["counting"]), (&json!({ "exact": 42 }), &Json::Null));
+    // A new condition while both run: the stale page and count change nothing.
+    let gate = hold_gate(&t, &key);
+    let Outcome::Started(load) = s.execute("table.setFilters", json!({ "raw": format!("({}) AND id <= 7", gated(&t, &key)) })).unwrap() else {
+        panic!("a job")
+    };
+    until_running(&t, &key);
+    let Outcome::Started(count) = s.execute("table.count", json!({})).unwrap() else { panic!("a job") };
+    let Outcome::Started(wide) = s.execute("table.setFilters", json!({ "raw": "id <= 500" })).unwrap() else { panic!("a job") };
+    assert_eq!(s.inspect()["table"]["total"], "unknown");
+    drop(gate);
+    assert_eq!(s.wait(load, T).unwrap(), json!({ "ignored": true }));
+    assert_eq!(s.wait(count, T).unwrap(), json!({ "ignored": true }));
+    assert_eq!(s.wait(wide, T).unwrap()["total"], "unknown");
+    assert_eq!(s.inspect()["table"]["total"], "unknown");
 }
 
 #[test]
@@ -760,6 +855,8 @@ fn a_page_cut_by_the_byte_cap_says_so() {
         // 13 values fit (260 MB); the 14th is read but not kept.
         assert_eq!(open_table(&mut s, t.schema("scratch"), &name)["rows"], 13, "{}", t.name());
         assert_eq!(s.inspect()["table"]["pageComplete"], false, "the page was cut");
+        // Nothing follows it, but it was cut: it tells no count.
+        assert_eq!(s.inspect()["table"]["total"], "unknown", "{}", t.name());
         let d = run(&mut s, "table.read", json!({ "limit": 0 }));
         assert_eq!((d["pageComplete"].as_bool(), d["hasNext"].as_bool()), (Some(false), Some(false)));
         // A page under the cap is whole, and so is a full page followed by more rows.

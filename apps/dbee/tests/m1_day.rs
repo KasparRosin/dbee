@@ -236,6 +236,8 @@ fn m1_day_end_to_end() {
     let rows = app.grid();
     assert_eq!(rows.len() as u64, t["rows"].as_u64().unwrap(), "every loaded row is listed");
     assert!(rows.len() > 1, "the seed's rows and the day's own: {}", rows.len());
+    // One whole page with nothing after it: it tells the count, without a count.
+    assert_eq!(t["total"], json!({ "exact": rows.len() }), "{t}");
     for (r, row) in rows.iter().enumerate() {
         let total: f64 = row[4]["text"].as_str().unwrap().parse().unwrap();
         assert!(row[2]["text"] == "42" && row[3]["text"] == "completed" && total > 100.0, "row {r} passes the filters: {row:?}");

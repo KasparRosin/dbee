@@ -397,7 +397,7 @@ mod tests {
         let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
         let mut tab =
             TableTab::new(TabId(2), dbee_engine::ConnectionId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
-        let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "bad".into(), code };
+        let failed = |code| dbee_engine::Failed { row: 0, column: None, message: "bad".into(), code, detail: None, hint: None };
         let mut texts = Vec::new();
         std::sync::Arc::make_mut(&mut tab.edits).failed = Some(failed("server"));
         texts.extend(crate::table_tab::card_text(&tab).map(|(h, m, n)| (h, m.to_owned(), n)));
