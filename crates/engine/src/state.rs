@@ -393,6 +393,8 @@ pub struct StatementOutcome {
     pub range: Range<usize>,
     /// Behind `Arc`: up to 10,000 rows or 256 MiB of text, and the state is cloned per command.
     pub result: Arc<ResultSet>,
+    /// How long the statement took, in milliseconds from sending it to its result.
+    pub ms: u64,
 }
 
 /// Why a query run stopped before its last statement.
@@ -418,6 +420,10 @@ pub struct QueryError {
     pub position: Option<usize>,
     /// The 0-based index of the statement that failed, among those the run ran.
     pub statement: usize,
+    /// How long the failing or stopped statement ran, in milliseconds from sending it until it
+    /// failed; `None` when the run stopped before it was sent (connecting, the tab's `USE`, a NUL
+    /// in the text, a stop between statements).
+    pub ms: Option<u64>,
 }
 
 fn meaning_id<S: Serializer>(meaning: &Option<Meaning>, s: S) -> Result<S::Ok, S::Error> {

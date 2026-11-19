@@ -451,6 +451,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let q = query_done(app);
     assert!(q["error"].is_null(), "{name}: {q}");
     assert_eq!((q["results"].as_array().map(Vec::len), q["shown"].as_u64()), (Some(3), Some(2)), "{name}: the last result shows: {q}");
+    assert!(q["results"].as_array().is_some_and(|r| r.iter().all(|o| o["ms"].is_u64())), "{name}: each statement says how long it took: {q}");
     assert_eq!(app.cell(0, 0)["text"], "3");
     show_result(app, root, 1, &format!("{p}-7b-results-list"));
     assert_eq!(app.cell(0, 0)["text"], cell, "{name}: the unqualified statement ran where the chip says");

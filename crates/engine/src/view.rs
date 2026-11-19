@@ -424,7 +424,7 @@ mod tests {
     fn query_tab(columns: Vec<Column>, rows: Vec<Vec<Option<String>>>, selection: Selection) -> Tab {
         let rs = ResultSet { columns, rows_seen: rows.len() as u64, rows, complete: true, rows_affected: None, database_after: Default::default() };
         let mut q = QueryTab::new(TabId(1), "q".into(), String::new());
-        q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs) });
+        q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs), ms: 0 });
         q.selection = Some(selection);
         Tab::Query(q)
     }
@@ -467,7 +467,7 @@ mod tests {
             database_after: Default::default(),
         };
         let mut q = QueryTab::new(TabId(1), "q".into(), String::new());
-        q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs) });
+        q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs), ms: 0 });
         q.selection = Some(Selection { anchor: (0, 0), focus: (50, 50), whole: false });
         let tab = Tab::Query(q);
         let g = Grid::of(&tab).expect("a grid");

@@ -439,6 +439,63 @@ fn a_cancel_after_the_end_changes_nothing() {
     }
 }
 
+/// Each result says how long its own statement took, in milliseconds from sending it to its
+/// result: a quick statement, then one of about a second.
+#[test]
+fn each_statement_says_how_long_it_took() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        tab(s, &format!("select 1 as one; {}", t.sleep_sql(1)));
+        let r = run(s, "query.run", json!({}));
+        let ms: Vec<Option<u64>> = r["results"].as_array().unwrap().iter().map(|o| o["ms"].as_u64()).collect();
+        let [Some(quick), Some(slow)] = ms[..] else { panic!("{}: every result says its time: {r}", t.name()) };
+        assert!(quick < slow && slow >= 200, "{}: {quick} ms, then {slow} ms", t.name());
+        assert_eq!(shown(s)["results"][1]["ms"], json!(slow), "inspect() says the same");
+        let Some(Tab::Query(qt)) = s.state().active_tab() else { panic!("a query tab is active") };
+        assert_eq!(qt.results.iter().map(|o| o.ms).collect::<Vec<_>>(), [quick, slow]);
+    });
+}
+
+/// A statement the server turned down says how long it took; a run refused before anything was
+/// sent says no time.
+#[test]
+fn a_failed_statement_says_how_long_it_took() {
+    let _db = require_testdb!();
+    let mut s = connected_to(&pg14_target());
+    tab(&mut s, "select 1; select nope");
+    run_fails(&mut s, json!({}));
+    let e = &shown(&s)["error"];
+    assert_eq!((&e["code"], &e["statement"]), (&json!("server"), &json!(1)), "{e}");
+    assert!(e["ms"].as_u64().is_some_and(|ms| ms < 30_000), "{e}");
+    // A NUL outside a literal: dbee sends nothing.
+    run(&mut s, "query.setText", json!({ "text": "select 1;\nselect 2\u{0} + 1" }));
+    run_fails(&mut s, json!({}));
+    let e = &shown(&s)["error"];
+    assert_eq!((&e["statement"], &e["ms"]), (&json!(1), &Json::Null), "{e}");
+    assert!(e.as_object().is_some_and(|o| o.contains_key("ms")), "{e}");
+}
+
+/// A statement dbee cancelled says how long it ran until it stopped.
+#[test]
+fn a_cancelled_statement_says_how_long_it_ran() {
+    let _db = require_testdb!();
+    let t = pg14_target();
+    let mut s = connected_to(&t);
+    let m = marker();
+    tab(&mut s, &slow_with(&t, &m));
+    let job = start(&mut s, json!({}));
+    until_running(&t, &m);
+    let seen = Instant::now();
+    std::thread::sleep(Duration::from_millis(300));
+    let before_cancel = u64::try_from(seen.elapsed().as_millis()).unwrap();
+    assert_eq!(run(&mut s, "query.cancel", json!({}))["sent"], true);
+    assert_eq!(s.wait(job, T).unwrap_err().code(), "cancelled");
+    let e = &shown(&s)["error"];
+    assert_eq!(e["code"], json!("cancelled"), "{e}");
+    let ms = e["ms"].as_u64().unwrap_or_else(|| panic!("a time: {e}"));
+    assert!(ms + 50 >= before_cancel && ms < 30_000, "{ms} ms, running at least {before_cancel} ms");
+}
+
 #[test]
 fn second_run_while_running_is_busy() {
     let _db = require_testdb!();

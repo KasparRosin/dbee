@@ -296,7 +296,7 @@ mod tests {
                 rows_affected: None,
                 database_after: Default::default(),
             };
-            q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs) });
+            q.results.push(StatementOutcome { range: 0..0, result: Arc::new(rs), ms: 0 });
         }
         q.shown = results.len().saturating_sub(1);
         s.state.tabs.push(Tab::Query(q));

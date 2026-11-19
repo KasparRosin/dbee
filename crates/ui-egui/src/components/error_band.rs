@@ -315,6 +315,7 @@ mod tests {
             hint: Some(hint.into()),
             position: Some(13),
             statement: 1,
+            ms: Some(12),
         };
         // Statement 2 failed after a result was kept: its heading, position, message, hint and
         // detail, with the tag's value as the card had it.

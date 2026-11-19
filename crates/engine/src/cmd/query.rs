@@ -74,6 +74,11 @@
 //! position the server gives (characters into the statement) becomes a byte offset into the tab
 //! text.
 //!
+//! **Time.** Each result and the error say how long their statement took (`ms`): whole
+//! milliseconds from sending the statement to its result, its failure or its stop, not the run's
+//! time. A run that stopped before its statement was sent (connecting, the tab's `USE`, a NUL in
+//! the text, a stop between statements) gives the error no time (`null`).
+//!
 //! **Stale results** (see [`super`]): a run whose connection was closed or replaced is
 //! `{"ignored": true}` and changes nothing. A run whose tab closed is ignored too, but the engine
 //! keeps where it left the query connection, and the connection the run opened unless it was
@@ -86,6 +91,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 
 use dbee_config::ConnectionConfig;
 use dbee_core::ResultSet;
@@ -288,6 +294,8 @@ struct Failure {
     statement: usize,
     error: DbError,
     position: Option<usize>,
+    /// How long the statement ran before it failed or stopped; `None` when it was not sent.
+    ms: Option<u64>,
 }
 
 /// What a run brings back.
@@ -341,7 +349,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
         past_use: false,
         transaction: None,
     };
-    let stopped = |statement| Some(Failure { statement, error: DbError::Cancelled, position: None });
+    let stopped = |statement| Some(Failure { statement, error: DbError::Cancelled, position: None, ms: None });
     if stop.is_set() {
         ran.failure = stopped(0);
         return ran;
@@ -364,12 +372,12 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                     // took TLS away. The connection closes as it is dropped, unused.
                     Ok(conn) if conn.info().tls < browse_tls => {
                         log::info!("the query connection has less TLS than the browse connection; nothing was sent");
-                        ran.failure = Some(Failure { statement: 0, error: DbError::Other(QUERY_TLS_LOST.into()), position: None });
+                        ran.failure = Some(Failure { statement: 0, error: DbError::Other(QUERY_TLS_LOST.into()), position: None, ms: None });
                         return ran;
                     }
                     Ok(conn) => (conn, true),
                     Err(error) => {
-                        ran.failure = Some(Failure { statement: 0, error, position: None });
+                        ran.failure = Some(Failure { statement: 0, error, position: None, ms: None });
                         return ran;
                     }
                 },
@@ -395,7 +403,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                     }
                     other => other,
                 };
-                ran.failure = Some(Failure { statement: 0, error, position: None });
+                ran.failure = Some(Failure { statement: 0, error, position: None, ms: None });
             }
         }
     }
@@ -408,19 +416,23 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                 break;
             }
             let Some(sql) = text.get(range.clone()) else {
-                ran.failure = Some(Failure { statement: i, error: DbError::Other("the statement is not in the text".into()), position: None });
+                ran.failure =
+                    Some(Failure { statement: i, error: DbError::Other("the statement is not in the text".into()), position: None, ms: None });
                 break;
             };
             if let Some(at) = setup.dialect.misplaced_nul(sql) {
-                ran.failure = Some(Failure { statement: i, error: DbError::Other(NUL.into()), position: range.start.checked_add(at) });
+                ran.failure = Some(Failure { statement: i, error: DbError::Other(NUL.into()), position: range.start.checked_add(at), ms: None });
                 break;
             }
             let limits = Limits { max_rows: if left == 0 { 0 } else { RUN_LIMITS.max_rows }, max_bytes: left };
-            match run_one(conn.as_ref(), sql, limits, &stop).await {
+            let sent = Instant::now();
+            let ran_one = run_one(conn.as_ref(), sql, limits, &stop).await;
+            let ms = ms_since(sent);
+            match ran_one {
                 Ok(result) => {
                     ran.current = ran.current.after(&result.database_after, moves);
                     left = left.saturating_sub(dbee_driver::result_cost(&result));
-                    ran.outcomes.push(StatementOutcome { range, result: Arc::new(result) });
+                    ran.outcomes.push(StatementOutcome { range, result: Arc::new(result), ms });
                 }
                 Err(error) => {
                     ran.current = ran.current.after_failure(&error, moves);
@@ -428,7 +440,7 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
                         DbError::Server(s) => s.position.and_then(|chars| byte_position(&text, &range, chars)),
                         _ => None,
                     };
-                    ran.failure = Some(Failure { statement: i, error, position });
+                    ran.failure = Some(Failure { statement: i, error, position, ms: Some(ms) });
                     break;
                 }
             }
@@ -437,6 +449,11 @@ async fn run_statements(via: Via, text: String, ranges: Vec<Range<usize>>, setup
     ran.transaction = Some(conn.transaction().await);
     ran.conn = Some((conn, opened));
     ran
+}
+
+/// The whole milliseconds since `start`, at most `u64::MAX`.
+fn ms_since(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Runs one statement. When the run is stopped meanwhile, the cancel request goes out until the
@@ -449,7 +466,8 @@ async fn run_one(conn: &dyn Connection, sql: &str, limits: Limits, stop: &Stop) 
 // ---- applying a run --------------------------------------------------------------------------
 
 /// The result as `query.run`, `query.showResult` and `inspect()` show it: `{statement, start,
-/// end, columns, rows, rowsSeen, complete, rowsAffected}`, `rows` being the rows kept.
+/// end, columns, rows, rowsSeen, complete, rowsAffected, ms}`, `rows` being the rows kept and
+/// `ms` how long the statement took.
 fn outcome_json(statement: usize, o: &StatementOutcome) -> Json {
     let r = &o.result;
     json!({
@@ -461,6 +479,7 @@ fn outcome_json(statement: usize, o: &StatementOutcome) -> Json {
         "rowsSeen": r.rows_seen,
         "complete": r.complete,
         "rowsAffected": r.rows_affected,
+        "ms": o.ms,
     })
 }
 
@@ -543,7 +562,7 @@ fn query_error(e: &EngineError, f: &Failure) -> QueryError {
         DbError::Server(s) => (s.message_with_code(), Some(s.code.clone()), s.meaning, s.detail.clone(), s.hint.clone()),
         _ => (e.to_string(), None, None, None, None),
     };
-    QueryError { code: e.code(), message, server_code, meaning, detail, hint, position: f.position, statement: f.statement }
+    QueryError { code: e.code(), message, server_code, meaning, detail, hint, position: f.position, statement: f.statement, ms: f.ms }
 }
 
 /// `conn` is the connection `generation` was taken from.
@@ -656,7 +675,7 @@ fn run(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     if c.query.as_ref().is_some_and(|q| q.is_closed()) {
         log::info!("query: the query connection has closed; this run fails, and the next opens a new one");
         c.query = None;
-        let f = Failure { statement: 0, error: DbError::ConnectionLost, position: None };
+        let f = Failure { statement: 0, error: DbError::ConnectionLost, position: None, ms: None };
         let e = session_lost();
         if let Some(Tab::Query(q)) = s.state.tab_mut(tab) {
             q.results = Vec::new();
