@@ -265,6 +265,7 @@ fn m1_day_end_to_end() {
     assert!(rows.len() > 1, "the seed's rows and the day's own: {}", rows.len());
     // One whole page with nothing after it: it tells the count, without a count.
     assert_eq!(t["total"], json!({ "exact": rows.len() }), "{t}");
+    assert_eq!(app.value("page-number"), "Page 1 of 1", "the paging bar knows the last page");
     for (r, row) in rows.iter().enumerate() {
         let total: f64 = row[4]["text"].as_str().unwrap().parse().unwrap();
         assert!(row[2]["text"] == "42" && row[3]["text"] == "completed" && total > 100.0, "row {r} passes the filters: {row:?}");

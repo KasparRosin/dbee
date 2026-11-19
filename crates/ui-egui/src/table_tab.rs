@@ -15,7 +15,8 @@
 //! - the grid ([`crate::grid`]) on the loaded page and its staged edits, sortable by a header
 //!   click, with foreign key links on the selected row, and the cell editor over it while one is
 //!   open ([`crate::editors`]; a double-click opens one);
-//! - the paging bar ([`crate::paging`]).
+//! - the paging bar ([`PagingBar`], its words and rules [`crate::paging`]): the arrows with the
+//!   page's words, a cut page's note, and the staged changes with RESET and APPLY.
 //!
 //! It reads the tab from the engine each frame and acts only through commands, started with
 //! [`DbeeApp::start`] after drawing (so a `needs…` answer opens its dialog and an error shows as a
@@ -41,13 +42,13 @@ use crate::automation::Tags;
 use crate::components::error_band::Band;
 use crate::components::results::RowCount;
 use crate::components::spinner::Spinner;
-use crate::components::table_bars::{Loading, TableAsked, TableBar, TableShown, View};
+use crate::components::table_bars::{Loading, PagingAsked, PagingBar, PagingShown, TableAsked, TableBar, TableShown, View};
 use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
 use crate::editors;
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
-use crate::paging::{self, BAR_H, Paging, count_text};
+use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
 use crate::theme::size::TAB_BODY_PAD_X;
 use crate::theme::{self, Text};
 
@@ -280,6 +281,72 @@ fn table_bar_tags(
     })
 }
 
+/// Draws the paging bar for `p` into `ui`, tags what it drew, says on hover why something is off,
+/// and gives the command its click asked for.
+fn paging_bar(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Option<(&'static str, Json)> {
+    let page = page_text(p.page, p.total);
+    let note = cut_note(p.rows, p.complete);
+    let (back, forward) = (p.back_blocked(), p.forward_blocked());
+    let bar = PagingBar {
+        page: &page,
+        back: back.is_none(),
+        forward: forward.is_none(),
+        changes: p.edits,
+        can_apply: p.apply_blocked.is_none(),
+        note: note.as_deref(),
+    };
+    let shown = bar.show(ui);
+    paging_tags(shown, tags, p, (&page, note.as_deref()), (back, forward))
+}
+
+/// Tags what the paging bar drew (as [`table_bar_tags`] does the table bar's).
+fn paging_tags(
+    shown: PagingShown,
+    tags: &mut Tags,
+    p: &Paging,
+    (page, note): (&str, Option<&str>),
+    (back, forward): (Option<&str>, Option<&str>),
+) -> Option<(&'static str, Json)> {
+    let mut arrow = |id: &str, r: &egui::Response, why_not: Option<&str>, hover: &str| {
+        let r = match why_not {
+            Some(why) => r.clone().hint_disabled(format!("{hover}: not now, {why}")),
+            None => r.clone().hint(hover),
+        };
+        tags.tag_value_as(id, &r, hover, why_not.is_none());
+    };
+    arrow("page-first", &shown.first, back, "First page");
+    arrow("page-prev", &shown.previous, back, "Previous page");
+    arrow("page-next", &shown.next, forward, "Next page");
+    arrow("page-last", &shown.last, forward, "Last page (counts the rows)");
+    tags.tag_value("page-number", &shown.page, page);
+    if let (Some(r), Some(note)) = (&shown.note, note) {
+        tags.tag_value("page-cut", r, note);
+    }
+    let edits = edits_text(p.edits);
+    if let Some(r) = &shown.changes {
+        tags.tag_value("edits-count", r, edits.as_str());
+    }
+    if let Some(r) = shown.reset {
+        let r = r.hint("Drop the staged changes");
+        tags.tag_value("edit-reset", &r, "Reset");
+    }
+    if let Some(r) = shown.apply {
+        let r = match p.apply_blocked {
+            Some(why) => r.hint_disabled(format!("Cannot apply {edits} now: {why}")),
+            None => r.hint(format!("Write {edits} in one transaction (Ctrl+S)")),
+        };
+        tags.tag_value_as("edit-apply", &r, "Apply", p.apply_blocked.is_none());
+    }
+    Some(match shown.asked? {
+        PagingAsked::First => ("table.page", json!({ "to": "first" })),
+        PagingAsked::Previous => ("table.page", json!({ "to": "prev" })),
+        PagingAsked::Next => ("table.page", json!({ "to": "next" })),
+        PagingAsked::Last => ("table.page", json!({ "to": "last" })),
+        PagingAsked::Reset => ("edit.reset", json!({})),
+        PagingAsked::Apply => ("edit.apply", json!({})),
+    })
+}
+
 /// The note above the grid for rows that cannot be edited, `why` being the engine's reason, on
 /// one line (cut short, and whole on hover). The table's own reason (`own`, the driver's) is a
 /// sentence and shows as written; dbee's are phrases.
@@ -482,7 +549,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         }
         let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(body.left(), split), body.max)));
         if tab.data.is_some() {
-            runs.extend(paging::show(&mut bottom, &paging(tab, lost), tags));
+            runs.extend(paging_bar(&mut bottom, &paging(tab, lost), tags));
         }
     }
     for (command, params) in runs {

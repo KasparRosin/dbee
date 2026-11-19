@@ -963,7 +963,7 @@ fn table_tab_bars(ui: &mut Ui) {
         stack(ui, &mut |ui| {
             for changes in [1, 0] {
                 bar(ui, &mut |ui| {
-                    PagingBar { page: "Page 1 of 250", back: false, forward: true, changes, can_apply: true }.show(ui);
+                    PagingBar { page: "Page 1 of 250", back: false, forward: true, changes, can_apply: true, note: None }.show(ui);
                 });
             }
         });

@@ -651,8 +651,13 @@ fn a_page_cut_by_the_size_limit_says_so() {
     let mut ui = Ui::connected(db);
     ui.open("scratch", &table.0);
     ui.until("the page", |ui| ui.table()["rows"] == 13);
+    ui.frame();
     let note = ui.value("page-cut");
     assert!(note.as_str().is_some_and(|n| n.contains("13")), "{note}");
+    // In the paging bar, after the page's words and the arrows after them.
+    let (cut, page, last) = (ui.drawn("page-cut"), ui.drawn("page-number"), ui.drawn("page-last"));
+    assert!(cut.left() > page.right() && cut.left() >= last.right(), "the note {cut:?} after the page {page:?} and LAST {last:?}");
+    assert!((cut.center().y - page.center().y).abs() <= 2.0, "on the page's line: {cut:?} {page:?}");
     ui.open("shop", "customers");
     assert!(ui.tag("page-cut").is_none());
 }
@@ -1852,4 +1857,58 @@ fn counting_shows_its_timer_after_300_ms() {
     ui.click("status-cancel");
     ui.until("the cancelled count", |ui| ui.table()["counting"].is_null());
     drop(lock);
+}
+
+/// One change staged in `null_and_empty`'s table: its cell (1, 1) set to NULL.
+fn one_change_staged(ui: &mut Ui) {
+    ui.click_with("grid-cell-1-1", json!({ "button": "right" }));
+    ui.click("grid-menu-null");
+    assert_eq!(ui.table()["edits"]["count"], 1);
+    ui.hover_away();
+    ui.frame();
+}
+
+/// The paging bar as `bars.png` draws it: from 8 in, FIRST, PREVIOUS, the page's words, NEXT and
+/// LAST, the arrows 28 square; with a change staged, at the right end `1 change`, RESET and
+/// APPLY, APPLY ending 12 from the body's right.
+#[test]
+fn the_paging_bar_matches_the_page() {
+    let db = dbee_testkit::require_testdb!();
+    let table = null_and_empty(db);
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("scratch", &table.0);
+    ui.until("the page", loaded);
+    one_change_staged(&mut ui);
+    let body = ui.body_x();
+    let left = ["page-first", "page-prev", "page-number", "page-next", "page-last"];
+    let xs: Vec<f32> = left.iter().map(|id| ui.drawn(id).left()).collect();
+    assert!(xs.windows(2).all(|w| w[0] < w[1]), "{left:?} left to right: {xs:?}");
+    let first = ui.drawn("page-first");
+    assert!((first.left() - (body.min + 8.0)).abs() <= 1.0, "FIRST 8 in from {}: {first:?}", body.min);
+    for id in ["page-first", "page-prev", "page-next", "page-last"] {
+        assert_eq!(ui.drawn(id).size(), egui::vec2(28.0, 28.0), "`{id}` 28 square");
+    }
+    assert_eq!(ui.value("page-number"), "Page 1 of 1");
+    assert_eq!(ui.value("edits-count"), "1 change");
+    let right = ["edits-count", "edit-reset", "edit-apply"];
+    let xs: Vec<f32> = right.iter().map(|id| ui.drawn(id).left()).collect();
+    assert!(xs.windows(2).all(|w| w[0] < w[1]), "{right:?} left to right: {xs:?}");
+    assert!(ui.drawn("edits-count").left() > ui.drawn("page-last").right(), "the changes after the paging");
+    let apply = ui.drawn("edit-apply");
+    assert!((body.max - 12.0 - apply.right()).abs() <= 1.0, "APPLY ends 12 from the body's right {}: {apply:?}", body.max);
+}
+
+/// With a change staged, paging waits, and the arrows say why on hover.
+#[test]
+fn staged_changes_hold_paging_and_say_why() {
+    let db = dbee_testkit::require_testdb!();
+    let table = null_and_empty(db);
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("scratch", &table.0);
+    ui.until("the page", loaded);
+    one_change_staged(&mut ui);
+    for id in ["page-first", "page-prev", "page-next", "page-last"] {
+        assert!(!enabled(&mut ui, id), "`{id}` waits for the staged change");
+    }
+    assert!(hover_says(&mut ui, "page-next", "Next page: not now, apply or reset your changes first"), "NEXT says why");
 }

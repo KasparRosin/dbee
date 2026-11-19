@@ -8,9 +8,10 @@
 //! rows stand in ([`filter_bar`], [`filter_row`], [`and_mark`]): [`crate::filter_bar`] draws its
 //! controls there, from the shared controls.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Response, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Response, Sense, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2};
 
 use super::button::{BarButton, BoxButton, IconButton, TextButton};
 use super::icon::Icon;
@@ -19,8 +20,9 @@ use super::segmented::Segmented;
 use super::status::{Piece, piece};
 use super::tooltip::Hint;
 use crate::theme::size::{
-    BAR_CELL_H, BAR_H, BAR_LINE, CHANGES_GAP, FILTER_BAR_PAD_X, FILTER_BAR_PAD_Y, FILTER_GAP, FILTER_ROW_H, ICON_BUTTON, PAGING_GAP, PAGING_PAD_LEFT,
-    PAGING_PAD_RIGHT, STAGED_MARK, STAGED_MARK_GAP, TABLE_BAR_GAP, TABLE_BAR_PAD_X, TABLE_CANCEL_PAD_X, TABLE_LOADING_GAP,
+    BAR_CELL_H, BAR_H, BAR_LINE, CHANGES_GAP, FILTER_BAR_PAD_X, FILTER_BAR_PAD_Y, FILTER_GAP, FILTER_ROW_H, ICON_BUTTON, PAGING_GAP, PAGING_NOTE_GAP,
+    PAGING_NOTE_MIN, PAGING_PAD_LEFT, PAGING_PAD_RIGHT, STAGED_MARK, STAGED_MARK_GAP, TABLE_BAR_GAP, TABLE_BAR_PAD_X, TABLE_CANCEL_PAD_X,
+    TABLE_LOADING_GAP,
 };
 use crate::theme::{Text, tokens};
 
@@ -288,8 +290,9 @@ fn bar_ground(ui: &mut Ui, line: Line) -> (Response, Rect) {
     (r, room)
 }
 
-/// The paging bar: FIRST, PREVIOUS, the page, NEXT, LAST; and with staged changes their count,
-/// RESET and APPLY.
+/// The paging bar: FIRST, PREVIOUS, the page, NEXT, LAST, then a cut page's note; and with staged
+/// changes the staged mark and their count, RESET and APPLY. The page's words and the count are
+/// facts, drawn grey.
 #[derive(Clone, Copy, Debug)]
 pub struct PagingBar<'a> {
     /// The page's words: `Page 3`, `Page 1 of 250`.
@@ -302,6 +305,9 @@ pub struct PagingBar<'a> {
     pub changes: usize,
     /// APPLY is on.
     pub can_apply: bool,
+    /// The note on a page the size limit cut short, after the paging: `small` and grey, cut with
+    /// `…` to the room left and whole on hover.
+    pub note: Option<&'a str>,
 }
 
 /// What a click in the paging bar asked for.
@@ -322,6 +328,7 @@ pub struct PagingShown {
     pub page: Response,
     pub next: Response,
     pub last: Response,
+    pub note: Option<Response>,
     pub changes: Option<Response>,
     pub reset: Option<Response>,
     pub apply: Option<Response>,
@@ -334,50 +341,74 @@ impl PagingBar<'_> {
         if self.changes == 1 { "1 change".into() } else { format!("{} changes", self.changes) }
     }
 
-    /// Draws it as wide as `ui`, 36 tall. Short of room the count of changes goes first; then the
-    /// right group follows the left one, cut at the bar's end.
+    /// Draws it as wide as `ui`, 36 tall. Short of room the note goes first, then the count of
+    /// changes (APPLY's hover says it); then the right group follows the left one, cut at the
+    /// bar's end. No part is drawn over another, and none past the bar.
     pub fn show(self, ui: &mut Ui) -> PagingShown {
         let t = tokens(ui.ctx());
         let (bar, cell) = bar_ground(ui, Line::Top);
         let mid = cell.center().y;
         let inner = Rect::from_min_max(pos2(cell.left() + PAGING_PAD_LEFT, cell.top()), pos2(cell.right() - PAGING_PAD_RIGHT, cell.bottom()));
+        let clip = ui.clip_rect().intersect(inner);
         let mut left = ui.new_child(UiBuilder::new().id_salt(bar.id.with("left")).max_rect(inner).layout(Layout::left_to_right(Align::Center)));
         left.spacing_mut().item_spacing.x = 0.0;
+        left.set_clip_rect(clip);
         let first = left.add_enabled(self.back, IconButton::plain(Icon::First));
         let previous = left.add_enabled(self.back, IconButton::plain(Icon::Previous));
-        let words = Piece::new(&left, Text::Label.job(self.page, t.text), self.page);
+        let words = Piece::new(&left, Text::Label.job(self.page, t.text_muted), self.page);
         let (at, _) = left.allocate_exact_size(vec2(words.width(), ICON_BUTTON), Sense::hover());
-        let page = piece(&left, bar.id.with("page"), &words, pos2(at.left(), mid), t.text);
+        // As `piece` draws it, but only as wide as its letters: the spacing egui puts after the
+        // last one runs into NEXT.
+        let size = words.galley.size();
+        left.painter().galley(pos2(at.left(), mid - size.y / 2.0), Arc::clone(&words.galley), t.text_muted);
+        let page =
+            left.interact(Rect::from_min_size(pos2(at.left(), mid - size.y / 2.0), vec2(words.width(), size.y)), bar.id.with("page"), Sense::hover());
+        let says = self.page.to_owned();
+        page.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, says.clone()));
         let next = left.add_enabled(self.forward, IconButton::plain(Icon::Next));
         let last = left.add_enabled(self.forward, IconButton::plain(Icon::Last));
         let left_end = left.min_rect().right();
         let (mut changes, mut reset, mut apply) = (None, None, None);
+        // Where the right group starts, and whether it has its count of changes.
+        let (mut right_x, mut with_count) = (inner.right(), true);
         if self.changes > 0 {
             let reset_b = TextButton::new("Reset");
             let apply_b = BoxButton::primary("Apply");
             let buttons_w = reset_b.width(ui) + PAGING_GAP + apply_b.width(ui);
             let says = self.changes_words();
-            let count = Piece::new(ui, Text::Label.job(&says, t.text), says);
+            let count = Piece::new(ui, Text::Label.job(&says, t.text_muted), says);
             let count_w = STAGED_MARK + STAGED_MARK_GAP + count.width() + CHANGES_GAP;
-            let with_count = inner.right() - buttons_w - count_w >= left_end + CHANGES_GAP;
+            with_count = inner.right() - buttons_w - count_w >= left_end + CHANGES_GAP;
             let w = buttons_w + if with_count { count_w } else { 0.0 };
-            let x = (inner.right() - w).max(left_end + CHANGES_GAP);
-            let lane = Rect::from_min_max(pos2(x, inner.top()), pos2(x + w, inner.bottom()));
+            right_x = (inner.right() - w).max(left_end + CHANGES_GAP);
+            let lane = Rect::from_min_max(pos2(right_x, inner.top()), pos2(right_x + w, inner.bottom()));
             let mut right = ui.new_child(UiBuilder::new().id_salt(bar.id.with("right")).max_rect(lane).layout(Layout::left_to_right(Align::Center)));
             right.spacing_mut().item_spacing.x = 0.0;
-            right.set_clip_rect(right.clip_rect().intersect(inner));
+            right.set_clip_rect(clip);
             if with_count {
                 let (mark, _) = right.allocate_exact_size(vec2(STAGED_MARK, STAGED_MARK), Sense::hover());
                 right.painter().rect_filled(mark, CornerRadius::ZERO, t.staged_strong);
                 right.add_space(STAGED_MARK_GAP);
                 let (at, _) = right.allocate_exact_size(vec2(count.width(), ICON_BUTTON), Sense::hover());
-                changes = Some(piece(&right, bar.id.with("changes"), &count, pos2(at.left(), mid), t.text));
+                changes = Some(piece(&right, bar.id.with("changes"), &count, pos2(at.left(), mid), t.text_muted));
                 right.add_space(CHANGES_GAP);
+            } else {
+                // The mark's and the count's places, so RESET and APPLY keep their ids.
+                right.skip_ahead_auto_ids(2);
             }
             reset = Some(right.add(reset_b));
             right.add_space(PAGING_GAP);
             apply = Some(right.add_enabled(self.can_apply, apply_b));
         }
+        // The note, between the groups, only while the count of changes has its room.
+        let note = self.note.filter(|_| with_count).and_then(|note| {
+            let room = Rect::from_min_max(pos2(left_end + PAGING_NOTE_GAP, inner.top()), pos2(right_x - CHANGES_GAP, inner.bottom()));
+            (room.width() >= PAGING_NOTE_MIN).then(|| {
+                let mut n = ui.new_child(UiBuilder::new().id_salt(bar.id.with("note")).max_rect(room).layout(Layout::left_to_right(Align::Center)));
+                n.set_clip_rect(clip.intersect(room));
+                n.add(egui::Label::new(Text::Small.rich(note).color(t.text_muted)).truncate())
+            })
+        });
         let clicked = |r: &Option<Response>| r.as_ref().is_some_and(Response::clicked);
         let asked = if first.clicked() {
             Some(PagingAsked::First)
@@ -394,7 +425,7 @@ impl PagingBar<'_> {
         } else {
             None
         };
-        PagingShown { first, previous, page, next, last, changes, reset, apply, asked }
+        PagingShown { first, previous, page, next, last, note, changes, reset, apply, asked }
     }
 }
 
@@ -757,14 +788,14 @@ mod tests {
     #[test]
     fn the_paging_bar_matches_the_page() {
         // Node 164453: 36 tall on `card`, a 1 px `line` along its top; from 8 in, the plain arrows
-        // (28) and `PAGE 1 OF 250` in `label`, `text`, side by side; at the right end, 12 in,
+        // (28) and `PAGE 1 OF 250` in `label`, `text_muted`, side by side; at the right end, 12 in,
         // APPLY (`button/box` primary), 4 before it RESET (`button/text`), 12 before that the
-        // count of changes in `label`, `text`, 8 after an 8 px `staged_strong` square.
+        // count of changes in `label`, `text_muted`, 8 after an 8 px `staged_strong` square.
         for (theme, t) in both() {
             for changes in [1, 0] {
                 let at_ = format!("{theme:?} changes {changes}");
                 let (shapes, at) = drawn(theme, |ui| {
-                    PagingBar { page: "Page 1 of 250", back: false, forward: true, changes, can_apply: true }.show(ui);
+                    PagingBar { page: "Page 1 of 250", back: false, forward: true, changes, can_apply: true, note: None }.show(ui);
                 });
                 assert_eq!(at.height(), 36.0, "{at_}: 36 tall");
                 let fills = fills_in(&shapes, at);
@@ -772,7 +803,7 @@ mod tests {
                 assert!(fills.contains(&(Rect::from_min_size(at.min, vec2(W, 1.0)), t.line)), "{at_}: the line along its top: {fills:?}");
                 let mid = at.top() + 1.0 + 17.5;
                 let (page, c) = word(&shapes, "PAGE 1 OF 250", &at_);
-                assert_eq!(c, t.text, "{at_}: the page in text");
+                assert_eq!(c, t.text_muted, "{at_}: the page grey: a fact");
                 assert!(close(page.left(), at.left() + 8.0 + 56.0) && close(page.center().y, mid), "{at_}: the page {page:?}");
                 // The arrows: first and previous off on the first page, next and last on.
                 for (k, colour) in [(0.0, t.text_faint), (1.0, t.text_faint)] {
@@ -803,7 +834,7 @@ mod tests {
                     "{at_}: RESET 4 before APPLY: {reset:?} {button:?}"
                 );
                 let (count, cc) = word(&shapes, "1 CHANGE", &at_);
-                assert_eq!(cc, t.text, "{at_}: the count in text");
+                assert_eq!(cc, t.text_muted, "{at_}: the count grey: a fact");
                 assert!(
                     (reset.left() - 10.0 - count.right()).abs() <= 12.0 + 1.0 && reset.left() - 10.0 - count.right() >= 11.0 - 1.0,
                     "{at_}: 12 between the count and RESET: {count:?} {reset:?}"
@@ -821,7 +852,7 @@ mod tests {
     fn the_paging_bar_says_what_was_asked() {
         let mut h = crate::components::harness(Theme::Light, Vec::new(), |ui, seen: &mut Vec<PagingAsked>| {
             ui.allocate_ui(vec2(580.0, 36.0), |ui| {
-                seen.extend(PagingBar { page: "Page 2", back: true, forward: true, changes: 3, can_apply: true }.show(ui).asked)
+                seen.extend(PagingBar { page: "Page 2", back: true, forward: true, changes: 3, can_apply: true, note: None }.show(ui).asked)
             });
         });
         h.run();
@@ -832,6 +863,150 @@ mod tests {
         }
         let all = [PagingAsked::First, PagingAsked::Previous, PagingAsked::Next, PagingAsked::Last, PagingAsked::Reset, PagingAsked::Apply];
         assert_eq!(*h.state(), all);
+    }
+
+    /// A cut page's note, as the screen writes it.
+    const NOTE: &str = "Only the first 13 rows of this page are shown: its values passed the size limit.";
+
+    #[test]
+    fn the_paging_bars_facts_are_grey() {
+        // Grey caps are facts, dark caps are buttons: the page's words and the count of changes in
+        // `text_muted`; the staged mark `staged_strong`; APPLY on `ink`.
+        for (theme, t) in both() {
+            let at_ = format!("{theme:?}");
+            let (shapes, at) = drawn(theme, |ui| {
+                PagingBar { page: "Page 1 of 250", back: false, forward: true, changes: 1, can_apply: true, note: None }.show(ui);
+            });
+            assert_eq!(word(&shapes, "PAGE 1 OF 250", &at_).1, t.text_muted, "{at_}: the page's words grey");
+            assert_eq!(word(&shapes, "1 CHANGE", &at_).1, t.text_muted, "{at_}: the count of changes grey");
+            let fills = fills_in(&shapes, at);
+            assert!(fills.iter().any(|(r, c)| *c == t.staged_strong && close(r.width(), 8.0) && close(r.height(), 8.0)), "{at_}: the staged mark");
+            let (apply, c) = word(&shapes, "APPLY", &at_);
+            assert_eq!(c, t.on_ink, "{at_}: APPLY's word");
+            assert!(fills.iter().any(|(r, c)| *c == t.ink && r.contains_rect(apply)), "{at_}: APPLY on ink");
+        }
+    }
+
+    /// The paging bar `width` wide with three changes staged and a cut page's note: where each
+    /// part was drawn (the part a click can reach, `None` when not drawn or wholly cut), in the
+    /// bar's order, and the bar.
+    fn paging_parts(width: f32) -> (Vec<(&'static str, Option<Rect>)>, Rect) {
+        type Out = Option<(Vec<(&'static str, Option<Rect>)>, Rect)>;
+        let mut h = crate::components::harness_in(vec2(width + 20.0, 100.0), Theme::Light, None, move |ui, out: &mut Out| {
+            ui.allocate_ui(vec2(width, 36.0), |ui| {
+                let bar = ui.max_rect();
+                let s =
+                    PagingBar { page: "Page 10,000 of 10,000", back: true, forward: false, changes: 3, can_apply: true, note: Some(NOTE) }.show(ui);
+                let seen = |r: &Response| Some(r.interact_rect).filter(|r| r.width() > 0.0 && r.height() > 0.0);
+                let opt = |r: &Option<Response>| r.as_ref().and_then(seen);
+                let parts = vec![
+                    ("first", seen(&s.first)),
+                    ("previous", seen(&s.previous)),
+                    ("page", seen(&s.page)),
+                    ("next", seen(&s.next)),
+                    ("last", seen(&s.last)),
+                    ("note", opt(&s.note)),
+                    ("changes", opt(&s.changes)),
+                    ("reset", opt(&s.reset)),
+                    ("apply", opt(&s.apply)),
+                ];
+                *out = Some((parts, Rect::from_min_size(bar.min, vec2(width, 36.0))));
+            });
+        });
+        h.run();
+        h.state().clone().unwrap_or_else(|| panic!("{width}: drawn"))
+    }
+
+    #[test]
+    fn the_cut_note_goes_first_then_the_changes_words() {
+        // From wide to narrow: everything; no note; no count of changes either; the right group
+        // cut at the bar's end. Never two parts over each other, nothing past the bar.
+        let mut seen: Vec<u8> = Vec::new();
+        for width in (200..=900).rev().step_by(10) {
+            let (parts, bar) = paging_parts(width as f32);
+            let at = format!("{width} wide");
+            let shown: Vec<(&str, Rect)> = parts.iter().filter_map(|(id, r)| r.map(|r| (*id, r))).collect();
+            for (i, (a, ra)) in shown.iter().enumerate() {
+                assert!(ra.left() >= bar.left() - 0.5 && ra.right() <= bar.right() + 0.5, "{at}: `{a}` {ra:?} leaves the bar {bar:?}");
+                for (b, rb) in shown.iter().skip(i + 1) {
+                    let o = ra.intersect(*rb);
+                    assert!(o.width() <= 0.5 || o.height() <= 0.5, "{at}: `{a}` {ra:?} overlaps `{b}` {rb:?}");
+                }
+            }
+            let get = |id: &str| parts.iter().find(|(i, _)| *i == id).and_then(|(_, r)| *r);
+            let (note, changes) = (get("note").is_some(), get("changes").is_some());
+            // APPLY whole is 60 wide: 12, APPLY, 12.
+            let cut = get("apply").is_none_or(|r| r.width() < 59.5);
+            assert!(!note || changes, "{at}: the note shows while the count of changes is gone");
+            assert!(!changes || !cut, "{at}: the right group is cut while the count of changes could give room up");
+            let form = match (note, changes, cut) {
+                (true, _, _) => 0,
+                (false, true, _) => 1,
+                (false, false, false) => 2,
+                (false, false, true) => 3,
+            };
+            assert!(seen.last().is_none_or(|&last| form >= last), "{at}: room taken back while narrowing: {seen:?} then {form}");
+            seen.push(form);
+        }
+        assert_eq!(seen.first(), Some(&0), "900 wide, everything shows");
+        for form in 0..=3 {
+            assert!(seen.contains(&form), "the sweep passes through form {form}: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn the_cut_note_is_cut_with_an_ellipsis_and_follows_the_page() {
+        for (theme, t) in both() {
+            let at_ = format!("{theme:?}");
+            let (shapes, _) = drawn(theme, |ui| {
+                PagingBar { page: "Page 1", back: false, forward: true, changes: 2, can_apply: true, note: Some(NOTE) }.show(ui);
+            });
+            let all = texts(&shapes);
+            let (note, c) = all
+                .iter()
+                .find(|(w, _, _)| w.starts_with("Only the first 13 rows"))
+                .map(|(w, r, c)| ((w.clone(), *r), *c))
+                .unwrap_or_else(|| panic!("{at_}: the note drawn: {all:?}"));
+            assert_eq!(c, t.text_muted, "{at_}: the note grey");
+            assert_eq!(font_of(&shapes, &note.0), Some(Text::Small.font()), "{at_}: the note in `small`");
+            assert!(note.0 == NOTE || note.0.ends_with('…'), "{at_}: whole or cut with `…`: {}", note.0);
+            let (page, _) = word(&shapes, "PAGE 1", &at_);
+            let (changes, _) = word(&shapes, "2 CHANGES", &at_);
+            assert!(
+                note.1.left() > page.right() + 28.0 * 2.0 && note.1.right() < changes.left(),
+                "{at_}: after the arrows, before the changes: {note:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_and_apply_keep_their_ids_when_the_count_of_changes_goes() {
+        let ids = |width: f32| {
+            let mut h = crate::components::harness_in(
+                vec2(width + 20.0, 100.0),
+                Theme::Light,
+                None,
+                move |ui, out: &mut Option<(bool, egui::Id, egui::Id)>| {
+                    ui.allocate_ui(vec2(width, 36.0), |ui| {
+                        let s = PagingBar { page: "Page 2", back: true, forward: true, changes: 2, can_apply: true, note: None }.show(ui);
+                        if let (Some(reset), Some(apply)) = (s.reset, s.apply) {
+                            *out = Some((s.changes.is_some(), reset.id, apply.id));
+                        }
+                    });
+                },
+            );
+            h.run();
+            (*h.state()).unwrap_or_else(|| panic!("{width}: Reset and Apply drawn"))
+        };
+        let wide = ids(840.0);
+        assert!(wide.0, "840 wide: the count shows");
+        let bare = (300..840)
+            .rev()
+            .step_by(5)
+            .map(|w| ids(w as f32))
+            .find(|(changes, _, _)| !changes)
+            .unwrap_or_else(|| panic!("a width without the count"));
+        assert_eq!((bare.1, bare.2), (wide.1, wide.2), "Reset and Apply keep their ids");
     }
 
     /// The filter bar as the table tab draws it, `W` wide, with `filters` on `columns`: its tags.

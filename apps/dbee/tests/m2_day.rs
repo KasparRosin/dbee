@@ -387,10 +387,16 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     edit_cell(app, 2, 4, MARK);
     assert_eq!(app.table()["edits"]["count"], 3, "{name}: a changed cell, a row to delete and a new row");
     app.click("grid-cell-0-1");
+    // The paging bar counts them; paging and REFRESH wait for them.
+    assert_eq!(app.value("edits-count"), "3 changes", "{name}");
+    for id in ["page-next", "table-refresh"] {
+        assert_eq!(app.tag(id).map(|e| e["enabled"].clone()), Some(json!(false)), "{name}: `{id}` waits for the staged changes");
+    }
     app.shot(root, &format!("{p}-6a-staged"));
     app.ctrl("S");
     app.until("the Apply", |app| app.table()["edits"]["count"] == 0);
     let t = app.settled("the Apply");
+    assert!(app.tag("edits-count").is_none(), "{name}: nothing staged, no count of changes");
     assert!(t["failed"].is_null() && t["error"].is_null(), "{name}: {t}");
     assert_eq!(e.q(&format!("SELECT name FROM {shop}.customers WHERE id = {}", day.customer)), day.fixed, "{name}: the name is fixed");
     assert_eq!(

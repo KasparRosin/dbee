@@ -187,6 +187,10 @@ pub const PAGING_GAP: f32 = 4.0;
 pub const STAGED_MARK: f32 = 8.0;
 pub const STAGED_MARK_GAP: f32 = 8.0;
 pub const CHANGES_GAP: f32 = 12.0;
+/// The paging bar's note on a cut page: this far after LAST, and shown only with this much room
+/// (cut with `…` to it).
+pub const PAGING_NOTE_GAP: f32 = 12.0;
+pub const PAGING_NOTE_MIN: f32 = 24.0;
 /// The sidebar's header (`sidebar/filter`, `sidebar/count`): the filter is a bar with its line
 /// along the bottom, its words this far in from the left, the refresh this far from its right end;
 /// the count's row is this tall, its words this far in.
