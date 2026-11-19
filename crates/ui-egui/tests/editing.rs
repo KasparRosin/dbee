@@ -912,10 +912,9 @@ impl Ui {
             .collect()
     }
 
-    /// Where the value panel starts: the paging bar ends left of it.
-    fn panel_left(&mut self) -> f32 {
-        let panel = self.tag("value-panel").expect("the value panel shows");
-        panel["rect"][0].as_f64().unwrap() as f32
+    /// Where the paging bar ends: the body's right edge (the value panel stands above it).
+    fn bar_right(&mut self) -> f32 {
+        self.tab_x().max
     }
 }
 
@@ -959,15 +958,15 @@ fn the_paging_bar_draws_nothing_over_anything_at_the_default_size() {
     let at = |id: &str| bar.iter().find(|d| d.id == id).map(|d| d.rect);
     let between = at("edits-count").zip(at("page-last")).map(|(changes, last)| changes.left() - last.right());
     println!(
-        "the paging bar at 1100 × 720 with a change staged: form {fit} (0 all, 1 no changes text), {between:?} points between the groups, the bar {:?} to the value panel at {}",
+        "the paging bar at 1100 × 720 with a change staged: form {fit} (0 all, 1 no changes text), {between:?} points between the groups, the bar {:?} to the body's edge at {}",
         at("page-first").map(|r| r.left()),
-        ui.panel_left()
+        ui.bar_right()
     );
     assert!(fit <= 1, "nothing is cut at the default size: {bar:?}");
-    let right = ui.panel_left();
+    let right = ui.bar_right();
     for id in ["page-first", "page-prev", "page-next", "page-last", "edit-reset", "edit-apply"] {
         let d = bar.iter().find(|d| d.id == id).unwrap_or_else(|| panic!("`{id}` is drawn: {bar:?}"));
-        assert!(d.visible && d.rect.right() <= right, "`{id}` shows, left of the value panel at {right}: {d:?}");
+        assert!(d.visible && d.rect.right() <= right, "`{id}` shows, inside the body, to {right}: {d:?}");
     }
     for id in ["page-first", "page-prev", "page-next", "page-last"] {
         let d = bar.iter().find(|d| d.id == id).unwrap();
@@ -1003,9 +1002,9 @@ fn a_narrowing_paging_bar_gives_room_up_in_order_and_never_overlaps() {
     ui.text("Ann");
     ui.ctrl("Enter");
     assert_eq!(ui.edits()["count"], 1);
-    // The window narrows 20 points at a time; the panels keep their widths, so the bar loses it all.
+    // The window narrows 20 points at a time; the tree keeps its width, so the bar loses it all.
     let mut seen = Vec::new();
-    for width in (760..=1400).rev().step_by(20) {
+    for width in (400..=1400).rev().step_by(20) {
         ui.harness.set_size(egui::vec2(width as f32, 720.0));
         ui.frame();
         ui.frame();
@@ -1016,9 +1015,9 @@ fn a_narrowing_paging_bar_gives_room_up_in_order_and_never_overlaps() {
         assert!(seen.last().is_none_or(|&(_, last)| fit >= last), "{at}: the bar took room back while narrowing: {seen:?} then {fit}");
         if fit == 2 {
             // Cut at the bar's edge, never over the left group (`assert_apart`).
-            let right = ui.panel_left();
+            let right = ui.bar_right();
             for d in bar.iter().filter(|d| d.visible) {
-                assert!(d.rect.right() <= right + 0.5, "{at}: `{}` runs past the bar into the value panel at {right}: {:?}", d.id, d.rect);
+                assert!(d.rect.right() <= right + 0.5, "{at}: `{}` runs past the bar's end at {right}: {:?}", d.id, d.rect);
             }
         }
         seen.push((width, fit));

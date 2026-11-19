@@ -318,6 +318,12 @@ fn m1_day_end_to_end() {
         (json!("billing"), json!("jsonb"), json!("jsonb")),
         "{panel}"
     );
+    // The toggle at the table bar's right end, the panel under the table bar.
+    let (toggle, head, filter) = (app.rect("value-toggle"), app.rect("grid-header-0"), app.rect("filter-0-column"));
+    let toggle_y = toggle[1] + toggle[3] / 2.0;
+    assert!(toggle_y < head[1] && toggle_y > filter[1] + filter[3], "the toggle in the table bar: {toggle:?}, {filter:?}, {head:?}");
+    let shown_panel = app.rect("value-panel");
+    assert!((shown_panel[1] - (toggle[1] + toggle[3] + 1.0)).abs() <= 1.0, "the panel from the table bar's bottom: {shown_panel:?}, {toggle:?}");
     let shown = app.value("value-text");
     let text = shown["text"].as_str().unwrap().to_string();
     assert!(text.starts_with("{\n") && text.contains("\"city\": \"Testville\""), "formatted: {text}");
@@ -444,6 +450,10 @@ fn m1_day_end_to_end() {
     let ms = facts.as_str().and_then(|f| f.strip_prefix(&format!("{n} rows "))).and_then(|f| f.strip_suffix(" ms"));
     assert!(ms.is_some_and(|ms| ms.parse::<u64>().is_ok()), "the facts say the rows and the time: {facts}");
     assert!(app.tag("query-export").is_some_and(|t| t["enabled"] == false), "EXPORT off");
+    // The value toggle in the result bar's row, between the run row and the grid.
+    let (toggle, run, head) = (app.rect("value-toggle"), app.rect("query-run"), app.rect("grid-header-0"));
+    let toggle_y = toggle[1] + toggle[3] / 2.0;
+    assert!(toggle_y > run[1] + run[3] && toggle_y < head[1], "the toggle in the result bar: {toggle:?}, {run:?}, {head:?}");
     app.shot(&root, "7a-query");
     app.click("grid-cell-0-0");
     assert_eq!(app.value("query-editor")["focused"], false, "the grid took the keyboard");

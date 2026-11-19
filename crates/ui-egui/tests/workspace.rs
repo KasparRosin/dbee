@@ -1355,7 +1355,7 @@ fn a_dropped_database_file_opens_unsaved_and_save_connection_saves_it() {
     assert_eq!(ui.document()["connection"]["saved"], false);
     assert!(visible(&ui.tag("status-save")), "{:?}", ids(&ui.inspect()));
     assert!(ui.tag("notice").is_none(), "the second file is left alone");
-    let bar = |ui: &mut Ui| ["status-connection", "status-server", "value-toggle"].map(|id| ui.tag(id).map(|t| t["rect"].clone()));
+    let bar = |ui: &mut Ui| ["status-connection", "status-server", "status-address"].map(|id| ui.tag(id).map(|t| t["rect"].clone()));
     let before = bar(&mut ui);
     ui.click("status-save");
     ui.until("the save", |ui| ui.tag("status-save").is_none());
@@ -1640,20 +1640,11 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
 }
 
 /// The status bar's parts in a window of `size` (`at` says which case): each inside the window,
-/// none over another, and the name, SAVE CONNECTION, the job, its CANCEL and the value toggle
-/// shown. The parts drawn, with their rects.
+/// none over another, and the name, SAVE CONNECTION, the job and its CANCEL shown (the value
+/// toggle is the tab's, not the bar's). The parts drawn, with their rects.
 fn status_gives_way(ui: &mut Ui, size: egui::Vec2, at: &str) -> Vec<(&'static str, egui::Rect)> {
-    let parts = [
-        "status-connection",
-        "status-address",
-        "status-server",
-        "status-tls",
-        "status-read-only",
-        "status-save",
-        "status-job",
-        "status-cancel",
-        "value-toggle",
-    ];
+    let parts =
+        ["status-connection", "status-address", "status-server", "status-tls", "status-read-only", "status-save", "status-job", "status-cancel"];
     let drawn: Vec<(&str, egui::Rect)> = parts.iter().filter_map(|id| shown_rect(ui, id).map(|r| (*id, r))).collect();
     for (id, r) in &drawn {
         assert!(r.left() >= 0.0 && r.right() <= size.x, "{at}: `{id}` {r:?} inside the window");
@@ -1663,27 +1654,37 @@ fn status_gives_way(ui: &mut Ui, size: egui::Vec2, at: &str) -> Vec<(&'static st
             assert!(!ra.intersects(*rb) || ra.intersect(*rb).area() == 0.0, "{at}: `{a}` {ra:?} and `{b}` {rb:?} overlap");
         }
     }
-    for id in ["status-connection", "status-save", "status-job", "status-cancel", "value-toggle"] {
+    assert!(
+        ui.tag("value-toggle")
+            .is_none_or(|e| !egui::Rect::from_min_size(egui::pos2(0.0, panel(ui, "dbee-status").top()), egui::vec2(size.x, 100.0))
+                .contains(rect_of(&e).center())),
+        "{at}: no value toggle in the status bar"
+    );
+    for id in ["status-connection", "status-save", "status-job", "status-cancel"] {
         assert!(drawn.iter().any(|(d, _)| *d == id), "{at}: `{id}` stays: {drawn:?}");
     }
     drawn
 }
 
-/// Review 1: Tab from the tree's filter reaches the status bar's value toggle, past the tree and
-/// the tab strip. Reached by the keyboard, it shows the focus look of an icon button with no edge,
-/// a 2 px `ink` box 4 out; a click shows none.
+/// Review 1: Tab reaches the value toggle at the result bar's right end, from the result's tab
+/// (the editor keeps Tab for itself). Reached by the keyboard, it shows the focus look of a bar
+/// button, a 2 px `ink` box 2 inside its cell; a click shows none.
 #[test]
 fn the_value_toggle_shows_keyboard_focus() {
     let db = dbee_testkit::require_testdb!();
     let t = dbee_ui_egui::theme::LIGHT;
     let mut ui = connected(db);
+    ui.execute("tab.newQuery", json!({ "text": "select 1 as a" }));
+    ui.execute("query.run", json!({}));
+    ui.until("the result", |ui| ui.tag("value-toggle").is_some());
+    ui.frame();
     let toggle = rect_of(&ui.tag("value-toggle").unwrap());
     let ring = |ui: &Ui| {
-        ui.shapes()
-            .into_iter()
-            .any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.rect == toggle.expand(4.0) && r.stroke.width == 2.0 && r.stroke.color == t.ink))
+        ui.shapes().into_iter().any(|(_, s)| {
+            matches!(s, egui::Shape::Rect(r) if toggle.expand(4.0).contains_rect(r.rect) && r.rect.width() >= toggle.width() - 5.0 && r.stroke.width == 2.0 && r.stroke.color == t.ink)
+        })
     };
-    ui.click("tree-filter");
+    ui.focus("result-1");
     for _ in 0..40 {
         if ui.focused("value-toggle") {
             break;
@@ -1867,9 +1868,9 @@ fn focused_tag(ui: &mut Ui) -> Option<(String, egui::Rect)> {
 }
 
 /// Tab moves in reading order: from the tree's filter to the tree's rows, the tab strip (the tab,
-/// then +), the tab's own controls and the value panel's, then the status bar's buttons, never back.
-/// After the status bar it goes round to the menu bar, the window's first stop, and from there on
-/// to the filter.
+/// then +), the tab's own controls (the value toggle among them, in the table bar), never back.
+/// The status bar has no button here (a saved connection, nothing running), so after the tab it
+/// goes round to the menu bar, the window's first stop, and from there on to the filter.
 #[test]
 fn tab_moves_in_reading_order() {
     let db = dbee_testkit::require_testdb!();
@@ -1892,7 +1893,9 @@ fn tab_moves_in_reading_order() {
             break;
         }
     }
-    assert!(trail.windows(2).all(|w| w[0].1 <= w[1].1), "never back: {trail:?}");
+    let (end, rest) = trail.split_last().unwrap_or_else(|| panic!("a trail"));
+    assert_eq!(end.0, "menu-File", "round to the menu bar after the tab: {trail:?}");
+    assert!(rest.windows(2).all(|w| w[0].1 <= w[1].1), "never back: {trail:?}");
     let first = |want: &dyn Fn(&str, Region) -> bool, what: &str| {
         trail.iter().position(|(id, at)| want(id, *at)).unwrap_or_else(|| panic!("Tab reaches {what}: {trail:?}"))
     };
@@ -1901,10 +1904,8 @@ fn tab_moves_in_reading_order() {
         first(&|id, _| id == format!("tab-{tab}"), "the tab"),
         first(&|id, _| id == "tab-new", "+"),
         first(&|_, at| at == Region::Tab, "a control in the tab"),
-        first(
-            &|id, at| at == Region::Footer && ["value-toggle", "status-save", "status-cancel", "status-reconnect"].contains(&id),
-            "a status bar button",
-        ),
+        first(&|id, at| at == Region::Tab && id == "value-toggle", "the value toggle, in the tab"),
+        first(&|id, _| id.starts_with("grid-"), "the grid"),
     ];
     assert!(order.windows(2).all(|w| w[0] < w[1]), "in reading order: {order:?} in {trail:?}");
     let mut round = Vec::new();
@@ -1920,10 +1921,7 @@ fn tab_moves_in_reading_order() {
         }
     }
     assert!(ui.focused("tree-filter"), "round to the filter again: {round:?}");
-    let menu = round.iter().position(|(_, at)| *at == Region::Menu).unwrap_or_else(|| panic!("the menu bar after the status bar: {round:?}"));
-    assert_eq!(round[menu].0, "menu-File", "the menu bar from its first title: {round:?}");
-    assert!(round[..menu].iter().all(|(_, at)| *at == Region::Footer), "only the status bar before it: {round:?}");
-    assert!(round[menu..].iter().all(|(_, at)| *at == Region::Menu), "only the menu bar after it: {round:?}");
+    assert!(round.iter().all(|(_, at)| *at == Region::Menu), "only the menu bar after it: {round:?}");
 }
 
 /// The sidebar starts 260 wide, and a drag on its line still makes it wider or narrower within
@@ -2154,14 +2152,10 @@ fn assert_rests(ui: &mut Ui, active: u64, at: &str) {
 fn the_strip_rests_at_a_tab_edge() {
     let db = dbee_testkit::require_testdb!();
     let tables = ["customer_counts", "order_items", "shipments", "all_types", "customers", "orders", "big_rows", "big_cell"];
-    for (size, n) in [(APP_SIZE, 4), (APP_SIZE, 8), (egui::vec2(640.0, 420.0), 4), (egui::vec2(640.0, 420.0), 8)] {
+    // The strip spans the work area: at the app's window it takes eight tabs to overflow.
+    for (size, n) in [(APP_SIZE, 8), (egui::vec2(640.0, 420.0), 4), (egui::vec2(640.0, 420.0), 8)] {
         let at = format!("{n} tabs, {} wide", size.x);
         let mut ui = Ui::connected_in(db, size);
-        if size == APP_SIZE && ui.value("value-toggle") != true {
-            // With the value panel open, as the design draws it: four tabs overflow.
-            ui.click("value-toggle");
-            assert_eq!(ui.value("value-toggle"), true, "{at}: the value panel shows");
-        }
         for table in &tables[..n] {
             ui.execute("table.open", json!({ "schema": "shop", "table": table }));
         }
@@ -2185,7 +2179,8 @@ fn the_strip_rests_at_a_tab_edge() {
 fn new_and_list_stay_at_the_strip_end() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = Ui::connected_in(db, APP_SIZE);
-    for n in 1..=8 {
+    // Enough tabs not to fit the strip, which spans the work area.
+    for n in 1..=14 {
         ui.execute("table.open", json!({ "schema": "many", "table": format!("t_{n:03}") }));
     }
     let tabs: Vec<u64> = ui.document()["tabs"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
@@ -2246,13 +2241,14 @@ fn the_tab_list_lists_every_tab_and_activates_the_chosen_one() {
     ui.ctrl("T");
     ui.frame();
     assert!(ui.tag("tab-list").is_none(), "one tab fits: no list button");
-    for _ in 0..7 {
+    // Enough tabs not to fit the strip, which spans the work area.
+    for _ in 0..13 {
         ui.ctrl("T");
     }
     ui.frame();
     let tabs: Vec<u64> = ui.document()["tabs"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
-    let (first, last) = (tabs[0], tabs[7]);
-    assert_eq!(ui.value("tab-list"), 8, "the list button, with the number of tabs");
+    let (first, last) = (tabs[0], tabs[13]);
+    assert_eq!(ui.value("tab-list"), 14, "the list button, with the number of tabs");
     let (new, list) = (rect_of(&ui.tag("tab-new").unwrap()), rect_of(&ui.tag("tab-list").unwrap()));
     assert!(visible(&ui.tag("tab-new")) && visible(&ui.tag("tab-list")), "both in view");
     assert_eq!(list, egui::Rect::from_min_size(new.right_top(), egui::vec2(32.0, 36.0)), "the list button after +");
@@ -2272,7 +2268,7 @@ fn the_tab_list_lists_every_tab_and_activates_the_chosen_one() {
     ui.until("the first tab in view", |ui| visible(&ui.tag(&format!("tab-{first}"))));
     assert_rests(&mut ui, first, "chosen from the list");
     ui.click("tab-new");
-    assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(9), "+ opens a query tab from the strip's end");
+    assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(15), "+ opens a query tab from the strip's end");
 }
 
 // ---- menus and popup lists (`components::menu`) ------------------------------------------------
@@ -2537,11 +2533,11 @@ fn the_keyboard_still_works_in_the_menu_bar() {
 
 // ---- no tab open ------------------------------------------------------------------------------
 
-/// The work area under the strip: from the sidebar's line to the value panel, or to the window's
-/// edge while the panel is shut; from under the strip to the status bar.
+/// The work area under the strip: from the sidebar's line to the window's edge (the value panel
+/// stands inside a tab), from under the strip to the status bar.
 fn work_area(ui: &mut Ui) -> egui::Rect {
     let new = rect_of(&ui.tag("tab-new").expect("+"));
-    let right = if ui.value("value-toggle") == json!(true) { panel(ui, "dbee-value-panel").left() } else { window(ui).right() };
+    let right = window(ui).right();
     egui::Rect::from_min_max(egui::pos2(panel(ui, "dbee-tree").right(), new.top() + 36.0), egui::pos2(right, panel(ui, "dbee-status").top()))
 }
 
@@ -2554,7 +2550,7 @@ fn words_at(ui: &Ui, words: &str) -> (egui::Rect, egui::Color32) {
 /// Empty state C1 (98322, dark 99827): "No tab open" in `body` `text_muted`, centred in the work
 /// area; under it, 16 apart, New query with CTRL T and Quick search with CTRL P, 8 apart, the
 /// words on the left and the keycaps on the right of a 220 wide block. The strip shows only +.
-/// The page draws the value panel shut; while it shows, the block is centred beside it.
+/// Open or shut, the value panel has no place with no tab: the block is centred in the whole area.
 #[test]
 fn no_tab_open_matches_the_page() {
     let db = dbee_testkit::require_testdb!();
@@ -2565,12 +2561,14 @@ fn no_tab_open_matches_the_page() {
             ui.execute("ui.themeDark", json!({}));
         }
         ui.frame();
-        if ui.value("value-toggle") != json!(!shut) {
-            ui.click("value-toggle");
-            ui.frame();
-            ui.frame();
+        // No toggle with no tab: the View menu's command.
+        assert!(ui.tag("value-toggle").is_none(), "{mode}: no toggle with no tab");
+        if ui.execute("ui.toggleValuePanel", json!({}))["visible"] != json!(!shut) {
+            ui.execute("ui.toggleValuePanel", json!({}));
         }
-        assert_eq!(ui.value("value-toggle"), json!(!shut), "{mode}");
+        ui.frame();
+        ui.frame();
+        assert!(ui.tag("value-panel").is_none(), "{mode}: no panel with no tab");
         let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
         let area = work_area(&mut ui);
         let (phrase, colour) = words_at(&ui, "No tab open");

@@ -425,15 +425,22 @@ impl Ui {
         self.harness.state().tags().rect(id).unwrap_or_else(|| panic!("`{id}` was drawn"))
     }
 
-    /// The x range of the tab's body: from the sidebar to the value panel, or to the window's edge
-    /// while the panel is shut.
+    /// The x range of the tab's results (the grid, the band): from the sidebar to the value panel
+    /// while it is drawn beside them, else to the window's edge.
     pub fn body_x(&mut self) -> egui::Rangef {
         let panel =
             |ui: &Ui, id: &str| egui::PanelState::load(&ui.harness.ctx, egui::Id::new(id)).unwrap_or_else(|| panic!("`{id}` is drawn")).outer_rect;
-        let left = panel(self, "dbee-tree").right();
-        let right =
-            if self.value("value-toggle") == json!(true) { panel(self, "dbee-value-panel").left() } else { panel(self, "dbee-menubar").right() };
-        egui::Rangef::new(left, right)
+        let whole = self.tab_x();
+        let right = if self.tag("value-panel").is_some() { panel(self, "dbee-value-panel").left() } else { whole.max };
+        egui::Rangef::new(whole.min, right)
+    }
+
+    /// The x range of the tab's body: from the sidebar to the window's edge (the strip, the editor,
+    /// the bars).
+    pub fn tab_x(&mut self) -> egui::Rangef {
+        let panel =
+            |ui: &Ui, id: &str| egui::PanelState::load(&ui.harness.ctx, egui::Id::new(id)).unwrap_or_else(|| panic!("`{id}` is drawn")).outer_rect;
+        egui::Rangef::new(panel(self, "dbee-tree").right(), panel(self, "dbee-menubar").right())
     }
 
     /// The pointer moves off the grid, to the empty right end of the menu bar, for a frame.

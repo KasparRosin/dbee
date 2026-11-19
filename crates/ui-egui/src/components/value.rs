@@ -730,14 +730,5 @@ mod tests {
         let v = h.state().tags.value("value-text").unwrap();
         assert_eq!((v["text"].as_str(), v["highlighted"].clone()), (Some("{\n  \"id\": 3,\n  \"doc\": {\n    \"a\": 1\n  }\n}"), json!(true)));
         assert!(drawn(&h.output().shapes, "Row 1,203").is_some(), "the title: {:?}", texts(&h.output().shapes));
-        // The status bar's toggle.
-        for open in [true, false] {
-            let mut h = harness_in(vec2(200.0, 60.0), Theme::Light, Tags::default(), move |ui, tags| {
-                tags.begin_frame();
-                crate::value_panel::toggle(ui, open, tags);
-            });
-            h.run();
-            assert_eq!(h.state().value("value-toggle"), Some(&json!(open)));
-        }
     }
 }

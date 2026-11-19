@@ -8,12 +8,12 @@
 //!   from a file, say), and at the right one activity ([`activity`]): a reconnect, the lost
 //!   connection with RECONNECT, the active tab's running job with CANCEL, or IN TRANSACTION;
 //! - the schema tree on the left ([`crate::tree`]);
-//! - the value panel on the right, while it shows ([`crate::value_panel`]), with its toggle at the
-//!   right end of the status bar;
-//! - the tabs strip, then the active tab.
+//! - the tabs strip, then the active tab, both from the tree's line to the window's right edge;
+//!   the value panel stands inside the tab, beside its results, with its toggle in the tab's
+//!   result bar or table bar ([`crate::value_panel`]).
 //!
-//! Tab reaches them in reading order: the menu bar, the tree, the tabs strip, the tab, the value
-//! panel, then the status bar.
+//! Tab reaches them in reading order: the menu bar, the tree, the tabs strip, the tab (its value
+//! panel last), then the status bar.
 //!
 //! The quick search (Ctrl+P) is drawn over it by the window ([`crate::quick_search`]).
 //!
@@ -44,7 +44,7 @@
 //! `status-server`, `status-tls` (value: what
 //! protects the link, while it is weaker than fully checked), `status-read-only`, `status-save`,
 //! `status-job` (value: what runs, or `Reconnecting…`), `status-cancel`, `status-lost`,
-//! `status-reconnect`, `status-transaction`, `value-toggle`.
+//! `status-reconnect`, `status-transaction`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -67,7 +67,7 @@ use crate::table_tab::{self, Grids};
 use crate::theme::size::{KEYCAP_GAP, KEYCAP_H, NO_TAB_GAP, NO_TAB_ROW_GAP, NO_TAB_W, SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_W, SLIM_BAR_H, TAB_H};
 use crate::theme::{self, Text, Words};
 use crate::tree::{self, Refresh, Tree, TreeAct};
-use crate::{DbeeApp, menu, value_panel};
+use crate::{DbeeApp, menu};
 
 /// The status bar's height.
 pub(crate) const STATUS_H: f32 = SLIM_BAR_H;
@@ -266,23 +266,19 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
         egui::Panel::bottom("dbee-status").exact_size(STATUS_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| ui.max_rect()).inner
     });
     side(app, ui);
-    let panel = value_panel::reserve(app, ui);
-    if panel.is_none() {
+    let panel = egui::CentralPanel::default()
+        .frame(Frame::new().fill(t.bg))
+        .show(ui, |ui| {
+            let top = strip(app, ui, &mut acts);
+            body(app, ui, top, &mut acts)
+        })
+        .inner;
+    // A panel not drawn keeps no selection and no text.
+    if !panel {
         app.view.panel.clear();
     }
-    egui::CentralPanel::default().frame(Frame::new().fill(t.bg)).show(ui, |ui| {
-        let top = strip(app, ui, &mut acts);
-        body(app, ui, top, &mut acts);
-    });
-    // After the tab's body, so a cell selected in this frame shows its value now.
-    if let Some(rect) = panel {
-        value_panel::fill(app, ui, rect);
-    }
-    if let Some(rect) = footer
-        && status_bar(app, ui, rect, &mut acts)
-    {
-        app.start("ui.toggleValuePanel", json!({}), Origin::Menu);
-        ui.ctx().request_repaint();
+    if let Some(rect) = footer {
+        status_bar(app, ui, rect, &mut acts);
     }
     for act in acts {
         match act {
@@ -311,9 +307,9 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The status bar ([`status::bar`]) in `rect`; true when the value panel's toggle was clicked.
-fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect, acts: &mut Vec<Act>) -> bool {
-    let Some(c) = app.session.state().connection(Which::Active) else { return false };
+/// The status bar ([`status::bar`]) in `rect`.
+fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect, acts: &mut Vec<Act>) {
+    let Some(c) = app.session.state().connection(Which::Active) else { return };
     let name = c.config.display_name();
     let own = !c.config.name.is_empty();
     let colour = c.config.color;
@@ -324,17 +320,12 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect, acts: &mut Vec<A
     let link = dbee_engine::state::tls_text(&c.info, c.config.ssh.is_some()).filter(|_| c.info.tls != Some(TlsState::Checked));
     let unsaved = !app.session.state().store.is_saved(&c.config.id);
     let activity = activity(&app.session);
-    let panel_open = app.view.value_panel;
-    let mut toggled = false;
     let tags = &mut app.tags;
     let mut bar = ui.new_child(UiBuilder::new().id_salt("dbee-status").max_rect(rect).layout(Layout::top_down(Align::Min)));
     bar.set_clip_rect(rect);
     let connection = status::Connection { name: &name, colour, own };
     let facts = status::Facts { address: address.as_ref(), server: Some(&server), link, read_only, unsaved };
-    // The value panel's toggle at the right end, as the panel is the window's.
-    let shown = status::bar(&mut bar, &connection, &facts, activity.as_ref().map(|(a, _)| a), |ui| {
-        toggled = value_panel::toggle(ui, panel_open, tags);
-    });
+    let shown = status::bar(&mut bar, &connection, &facts, activity.as_ref().map(|(a, _)| a), |_| {});
     tags.tag_value("status-connection", &shown.connection, name.as_str());
     if let (Some(r), Some(a)) = (&shown.address, &address) {
         tags.tag_value("status-address", r, a.text());
@@ -375,7 +366,6 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect, acts: &mut Vec<A
         }
         None => {}
     }
-    toggled
 }
 
 /// The tree on the left.
@@ -472,8 +462,8 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> f32 {
 }
 
 /// The active tab's body (see the module docs) from `top`, the strip's line, or the ways to start
-/// when no tab is open.
-fn body(app: &mut DbeeApp, ui: &mut egui::Ui, top: f32, acts: &mut Vec<Act>) {
+/// when no tab is open. Whether the tab drew the value panel.
+fn body(app: &mut DbeeApp, ui: &mut egui::Ui, top: f32, acts: &mut Vec<Act>) -> bool {
     let active = app.session.state().active_tab().map(|tab| (tab.id(), matches!(tab, Tab::Query(_))));
     if active.is_none_or(|(_, query)| !query) {
         // The next query tab to become the active one takes the keyboard.
@@ -482,17 +472,13 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui, top: f32, acts: &mut Vec<Act>) {
     }
     let Some((id, query)) = active else {
         no_tab(app, ui, acts);
-        return;
+        return false;
     };
     // From the strip's line, with no spacing after the strip.
     let room = ui.available_rect_before_wrap();
     let content = Rect::from_min_max(egui::pos2(room.left(), top.min(room.top())), room.max);
     let mut ui = ui.new_child(egui::UiBuilder::new().id_salt("dbee-tab-body").max_rect(content).layout(Layout::top_down(Align::Min)));
-    if query {
-        query_tab::show(app, &mut ui, id);
-    } else {
-        table_tab::show(app, &mut ui, id);
-    }
+    if query { query_tab::show(app, &mut ui, id) } else { table_tab::show(app, &mut ui, id) }
 }
 
 /// The ways to start with no tab open, in order: the words, and the command.

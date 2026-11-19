@@ -285,6 +285,8 @@ pub const VALUE_KIND_H: f32 = 18.0;
 pub const VALUE_KIND_PAD_X: f32 = 6.0;
 pub const VALUE_KIND_GAP: f32 = 2.0;
 pub const VALUE_NOTE_GAP: f32 = 6.0;
+/// The value panel's width when it first shows, beside the tab's results.
+pub const VALUE_PANEL_W: f32 = 340.0;
 
 /// The error band (`error band`): its edge down the left this wide; what it holds this far in from
 /// its sides, past the edge; its parts this far apart, with this much more above a field (HINT,

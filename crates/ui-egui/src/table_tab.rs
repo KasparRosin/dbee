@@ -6,7 +6,8 @@
 //! - the filter bar ([`crate::filter_bar`]);
 //! - the table bar ([`TableBar`]): DATA / STRUCTURE (STRUCTURE off until the structure view),
 //!   REFRESH, "+ Row" (the new row is selected and scrolled to), the rows' count with COUNT or
-//!   COUNT ROWS, IMPORT and EXPORT (off until M4). A page load that has run 300 ms shows CANCEL in
+//!   COUNT ROWS, IMPORT and EXPORT (off until M4), and at its right end the value panel's toggle
+//!   (`value-toggle`, `ui.toggleValuePanel`). A page load that has run 300 ms shows CANCEL in
 //!   REFRESH's place and LOADING with its timer in the count's; a count that has run 300 ms shows
 //!   COUNTING with its timer. The timers count from the frame that first saw the job ([`Since`]);
 //! - the error band (`table-error`, [`crate::components::error_band`]) when the last Apply failed,
@@ -19,6 +20,11 @@
 //!   in its place, or `No rows are loaded.` after a first load that failed;
 //! - the paging bar ([`PagingBar`], its words and rules [`crate::paging`]): the arrows with the
 //!   page's words, a cut page's note, and the staged changes with RESET and APPLY.
+//!
+//! While the value panel shows ([`crate::value_panel`]) it stands beside the band and the grid,
+//! from the table bar's bottom to the paging bar's top; the note, the filter bar and the two bars
+//! keep the body's width. It is filled after the grid, so a click on a cell shows its value in the
+//! same frame.
 //!
 //! Every bar is cut at the body's edges. Short of room the table bar gives way in order
 //! ([`TableBar::fit`]), the paging bar in its own, and a filter row wider than the bar is cut at
@@ -42,7 +48,6 @@ use dbee_sql::select::PAGE_SIZE;
 use egui::{Align, CornerRadius, Layout, Rect, Sense, UiBuilder, pos2, vec2};
 use serde_json::json;
 
-use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::error_band::Band;
@@ -57,6 +62,7 @@ use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdit
 use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
 use crate::theme::size::{BAR_LINE, NOTE_BAR_H, NOTE_BAR_PAD_X, TABLE_EMPTY_PAD};
 use crate::theme::{self, Text};
+use crate::{DbeeApp, value_panel};
 
 /// The commands that load a page, whose database errors the tab's band shows.
 const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "table.refresh"];
@@ -226,6 +232,7 @@ fn table_bar_tags(
     tags: &mut Tags,
     words: (&str, &str),
     why: (Option<&str>, Option<&str>, Option<&str>),
+    open: bool,
 ) -> Option<(&'static str, Json)> {
     let (rows, count) = words;
     let (refresh_blocked, add_blocked, count_blocked) = why;
@@ -280,13 +287,18 @@ fn table_bar_tags(
     if let Some(r) = shown.export {
         tags.tag_value_as("table-export", &r, "Export", false);
     }
+    if let Some(r) = shown.value {
+        let r = r.hint(if open { "Hide the value panel" } else { "Show the value panel" });
+        tags.tag_value(value_panel::TOGGLE, &r, open);
+    }
     Some(match shown.asked? {
         TableAsked::Refresh => ("table.refresh", json!({})),
         TableAsked::Cancel => ("table.cancel", json!({})),
         TableAsked::AddRow => ("row.add", json!({})),
         TableAsked::Count => ("table.count", json!({})),
-        // DATA is the only view yet, and the bar draws no Value cell.
-        TableAsked::View(_) | TableAsked::Value => return None,
+        TableAsked::Value => ("ui.toggleValuePanel", json!({})),
+        // DATA is the only view yet.
+        TableAsked::View(_) => return None,
     })
 }
 
@@ -435,14 +447,16 @@ fn add_row(app: &mut DbeeApp) {
     }
 }
 
-/// Draws table tab `id` into `ui` and runs what it asks for.
-pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
+/// Draws table tab `id` into `ui` and runs what it asks for. Whether it drew the value panel.
+pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
     let t = theme::tokens(ui.ctx());
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
     let mut edit: Option<(usize, usize)> = None;
+    let panel;
     {
         let DbeeApp { session, view, tags, .. } = app;
-        let Some(Tab::Table(tab)) = session.state().tab(id) else { return };
+        let Some(Tab::Table(tab)) = session.state().tab(id) else { return false };
+        let open = view.value_panel;
         let connected = session.state().connection(Which::Tab(id));
         let info = connected.and_then(|c| c.catalog.table(&tab.table));
         let lost = connected.is_none_or(|c| c.lost);
@@ -506,11 +520,20 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             can_refresh: refresh_blocked.is_none(),
             can_add: edit_blocked.is_none(),
             can_count: count_blocked.is_none(),
-            value: None,
+            value: Some(open),
         };
         let drawn = table_bar.show(&mut top);
         let words = (count.words(shown), count_text(tab.total, estimate));
-        runs.extend(table_bar_tags(drawn, tags, (&words.0, &words.1), (refresh_blocked, edit_blocked.as_deref(), count_blocked)));
+        runs.extend(table_bar_tags(drawn, tags, (&words.0, &words.1), (refresh_blocked, edit_blocked.as_deref(), count_blocked), open));
+        // Under the table bar down to the paging bar: the band and the grid, with the value panel
+        // at their right while it shows.
+        let below = top.available_rect_before_wrap().top().min(split);
+        panel = value_panel::reserve(open, ui, Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), split)));
+        let right = panel.map_or(body.right(), |p| p.left);
+        let results = Rect::from_min_max(pos2(body.left(), below), pos2(right, split));
+        let mut top = ui.new_child(UiBuilder::new().id_salt("dbee-table-results").max_rect(results).layout(Layout::top_down(Align::Min)));
+        top.set_clip_rect(clip.intersect(results));
+        top.spacing_mut().item_spacing.y = 0.0;
         if let Some((text, value)) = card_text(tab) {
             band(&mut top, tags, id, &text, value);
         }
@@ -542,7 +565,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 // The body's width, even when a row above it is wider (the filter bar in a narrow
                 // window), so every column can be scrolled into view.
                 let below = top.available_rect_before_wrap().top().min(split);
-                let area = Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), split));
+                let area = Rect::from_min_max(pos2(body.left(), below), pos2(right, split));
                 let mut grid_ui = top.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
                 for act in grid.show(&mut grid_ui, state, tags) {
                     if let GridAct::Edit { row, col } = act {
@@ -594,6 +617,11 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let ctx = ui.ctx().clone();
         editors::open(app, &ctx, row, col);
     }
+    // After the grid and what it asked for, so a cell selected in this frame shows its value now.
+    if let Some(placed) = panel {
+        value_panel::fill(app, ui, placed.contents);
+    }
+    panel.is_some()
 }
 
 #[cfg(test)]

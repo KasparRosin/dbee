@@ -6,8 +6,8 @@
 //! in `text`); then the facts in grey: the connection's address as typed, the server's version as
 //! written, the link's security while it is weaker than fully checked, and READ-ONLY; then SAVE
 //! CONNECTION while the saved list doesn't hold the connection. At the right end, what the screen
-//! puts there (the value panel's toggle, until the Phase 3 screens move it), and before it one
-//! activity.
+//! puts there (nothing today: the value panel's toggle moved into the tabs' bars), and before it
+//! one activity.
 //!
 //! When the bar is too narrow, the facts give way in this order: the server version, the link's
 //! security, the address (a file's path is first cut in the middle, and reads whole on hover),

@@ -3,8 +3,8 @@
 //!
 //! The table bar and the paging bar are views: they take what to show and say what was clicked;
 //! the screen tags what they drew, says on hover why something is off, and acts. The table tab
-//! ([`crate::table_tab`]) draws the table bar with STRUCTURE off and no Value cell until the
-//! structure view and the query tab screen. The filter bar is a frame the screen's filter
+//! ([`crate::table_tab`]) draws the table bar with STRUCTURE off until the structure view, and
+//! its Value cell (drawn last, so Tab reaches it after the count). The filter bar is a frame the screen's filter
 //! rows stand in ([`filter_bar`], [`filter_row`], [`and_mark`]): [`crate::filter_bar`] draws its
 //! controls there, from the shared controls.
 
@@ -260,23 +260,6 @@ impl TableBar {
         let io = fit.import_export;
         let right_w: f32 = if data { toggle_w + if io { import.width(ui) + export.width(ui) } else { 0.0 } } else { 0.0 };
         let right_x = (cell.right() - right_w).max(left_end);
-        let (import, export, value) = if data {
-            let lane = Rect::from_min_max(pos2(right_x, cell.top()), cell.max);
-            let mut right = ui.new_child(UiBuilder::new().id_salt(bar.id.with("right")).max_rect(lane).layout(Layout::left_to_right(Align::Center)));
-            right.spacing_mut().item_spacing.x = 0.0;
-            right.set_clip_rect(clip);
-            let (import, export) = if io {
-                (
-                    Some(right.add_enabled(false, import).hint_disabled(IMPORT_LATER)),
-                    Some(right.add_enabled(false, export).hint_disabled(EXPORT_LATER)),
-                )
-            } else {
-                (None, None)
-            };
-            (import, export, toggle.map(|toggle| right.add(toggle)))
-        } else {
-            (None, None, None)
-        };
         // Between them, ending 12 before IMPORT (or the bar's end): the count, LOADING, or the
         // structure's facts; none when the form leaves it out or there is no room for it.
         let facts = self.facts(ui);
@@ -316,6 +299,24 @@ impl TableBar {
                 }
             }
         }
+        // The right end last, so Tab reaches the count before the toggle.
+        let (import, export, value) = if data {
+            let lane = Rect::from_min_max(pos2(right_x, cell.top()), cell.max);
+            let mut right = ui.new_child(UiBuilder::new().id_salt(bar.id.with("right")).max_rect(lane).layout(Layout::left_to_right(Align::Center)));
+            right.spacing_mut().item_spacing.x = 0.0;
+            right.set_clip_rect(clip);
+            let (import, export) = if io {
+                (
+                    Some(right.add_enabled(false, import).hint_disabled(IMPORT_LATER)),
+                    Some(right.add_enabled(false, export).hint_disabled(EXPORT_LATER)),
+                )
+            } else {
+                (None, None)
+            };
+            (import, export, toggle.map(|toggle| right.add(toggle)))
+        } else {
+            (None, None, None)
+        };
         let clicked = |r: &Option<Response>| r.as_ref().is_some_and(Response::clicked);
         if clicked(&refresh) {
             asked = Some(TableAsked::Refresh);

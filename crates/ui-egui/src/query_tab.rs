@@ -22,8 +22,9 @@
 //!   `Failed 12 ms` with no result before the failure, else what the shown result holds with how
 //!   long its statement took: `13 rows 24 ms`, the cap notice `First 10,000 of 25,000 rows 80 ms`
 //!   ([`rows_text`], its hover the caps), `2 rows affected 5 ms` ([`affected_text`]), or the time
-//!   alone when the database gave no count; and EXPORT, off until a later version, while the shown
-//!   result has rows or a run goes;
+//!   alone when the database gave no count; EXPORT, off until a later version, while the shown
+//!   result has rows or a run goes; and at its right end the value panel's toggle
+//!   (`ui.toggleValuePanel`);
 //! - the last run's error band, when it failed ([`band`], [`crate::components::error_band`]), a
 //!   hairline under it: none after dbee's own cancel, which the bar says; with ROLLBACK while the
 //!   connection's transaction has failed (`query.rollback`, off while a run, a commit or a
@@ -32,7 +33,11 @@
 //!   selecting and copying work, and the value panel follows the selected cell). A statement
 //!   without rows draws nothing there: the bar says what it did. With no result yet, nothing.
 //!
-//! The editor, the run row, the result bar, the band and the grid take the body's whole width.
+//! The editor and the run row take the body's whole width. The result bar, the band and the grid
+//! are the results column: they take it too while the value panel is shut, and stand beside it
+//! while it shows ([`crate::value_panel`]: at the column's right, from the result bar's top to the
+//! body's bottom, filled after the grid so a click on a cell shows its value in the same frame).
+//! Before the first result there is no result bar, so no toggle and no panel.
 //!
 //! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` in the open connection's
 //! dialect, Postgres's when none is open ([`Tokens::job`], colours from [`crate::theme::Tokens`]; a
@@ -97,7 +102,8 @@
 //! without rows did; value: `2 rows affected`), `query-export` (EXPORT, off), `query-error` (value `{code, heading, message,
 //! detail, hint, rollback, position, statement, line, column, jump}`, `rollback` whether ROLLBACK
 //! shows, `jump` whether a click moves the cursor; not drawn after dbee's own cancel),
-//! `query-rollback` (ROLLBACK in the band; value `Rollback`).
+//! `query-rollback` (ROLLBACK in the band; value `Rollback`), `value-toggle` (the value panel's
+//! toggle at the result bar's right end; value: whether the panel shows).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -118,7 +124,6 @@ use egui::{
 };
 use serde_json::json;
 
-use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::editor::{ErrorToken, LineNumber};
@@ -136,6 +141,7 @@ use crate::theme::{
     size::{self, BAR_H, BAR_LINE, EDITOR_INSET, RADIUS_CONTROL, SPLIT_ZONE_H},
 };
 use crate::tree::thousands;
+use crate::{DbeeApp, value_panel};
 
 /// The automation ids.
 pub const EDITOR: &str = "query-editor";
@@ -1096,8 +1102,15 @@ fn result_holds(o: &StatementOutcome) -> String {
 }
 
 /// The result bar of tab `q` saying `says` (its tabs named `titles`; `running`: the run has gone
-/// 300 ms, so EXPORT shows); tags what it drew. The index of the result asked for.
-fn result_bar(ui: &mut egui::Ui, tags: &mut Tags, q: &dbee_engine::QueryTab, titles: &[String], says: RunState, running: bool) -> Option<usize> {
+/// 300 ms, so EXPORT shows; `open`: the value panel shows, its toggle at the bar's right end on);
+/// tags what it drew. What its click asked for.
+fn result_bar(
+    ui: &mut egui::Ui,
+    tags: &mut Tags,
+    q: &dbee_engine::QueryTab,
+    titles: &[String],
+    (says, running, open): (RunState, bool, bool),
+) -> Option<ResultAsked> {
     let shown = q.shown_result();
     let cut = shown.filter(|o| !o.result.complete && !o.result.columns.is_empty());
     let first_of = cut.map(|o| (o.result.rows.len() as u64, o.result.rows_seen));
@@ -1108,7 +1121,7 @@ fn result_bar(ui: &mut egui::Ui, tags: &mut Tags, q: &dbee_engine::QueryTab, tit
         state: says,
         first_of: first_of.filter(|_| matches!(says, RunState::Done { .. })),
         export: running || rows,
-        value: None,
+        value: Some(open),
         time_hover: no_count.then_some(NO_COUNT),
     };
     let drawn = bar.show(ui);
@@ -1143,10 +1156,11 @@ fn result_bar(ui: &mut egui::Ui, tags: &mut Tags, q: &dbee_engine::QueryTab, tit
     if let Some(r) = &drawn.export {
         tags.tag_value(EXPORT, r, "Export");
     }
-    match drawn.asked {
-        Some(ResultAsked::Show(i)) => Some(i),
-        Some(ResultAsked::Value) | None => None,
+    if let Some(r) = &drawn.value {
+        let r = r.clone().hint(if open { "Hide the value panel" } else { "Show the value panel" });
+        tags.tag_value(value_panel::TOGGLE, &r, open);
     }
+    drawn.asked
 }
 
 /// The editor's height in a tab body `h` high, for split `split`.
@@ -1156,14 +1170,16 @@ fn editor_height(h: f32, split: f32) -> f32 {
     wanted.max(MIN_EDITOR_H).min(most)
 }
 
-/// Draws query tab `id` into `ui` and runs what it asks for.
-pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
+/// Draws query tab `id` into `ui` and runs what it asks for. Whether it drew the value panel.
+pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
     let t = theme::tokens(ui.ctx());
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
     let mut set_text: Option<String> = None;
+    let mut panel = None;
     {
         let DbeeApp { session, view, tags, .. } = app;
-        let Some(Tab::Query(q)) = session.state().tab(id) else { return };
+        let Some(Tab::Query(q)) = session.state().tab(id) else { return false };
+        let open = view.value_panel;
         // The engine's own rule for the Run buttons; what the run refuses it says when clicked.
         let run_blocked = can_run(session).err();
         let modal = view.dialog.is_some() || view.quick.open;
@@ -1291,19 +1307,26 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let shown = q.shown_result();
         state.results.follow(&q.results, &q.text, session.state().dialect(Which::Tab(id)));
         let mut results_top = row_rect.bottom();
+        // The results column: the result bar, the band and the grid, with the value panel at its
+        // right from the bar's top while there is a bar.
+        let mut right = body.right();
         if let Some(says) = run_state(q, elapsed) {
-            let bar_rect = Rect::from_min_size(pos2(body.left(), row_rect.bottom()), vec2(body.width(), BAR_H));
+            panel = value_panel::reserve(open, ui, Rect::from_min_max(pos2(body.left(), row_rect.bottom()), body.max));
+            right = panel.map_or(right, |p| p.left);
+            let bar_rect = Rect::from_min_max(pos2(body.left(), row_rect.bottom()), pos2(right, row_rect.bottom() + BAR_H));
             let mut bar_ui =
                 ui.new_child(UiBuilder::new().id_salt(("dbee-query-result-bar", id.0)).max_rect(bar_rect).layout(Layout::top_down(Align::Min)));
             bar_ui.set_clip_rect(bar_rect.intersect(ui.clip_rect()));
-            if let Some(index) = result_bar(&mut bar_ui, tags, q, &state.results.titles, says, past) {
-                runs.push(("query.showResult", json!({ "index": index })));
+            match result_bar(&mut bar_ui, tags, q, &state.results.titles, (says, past, open)) {
+                Some(ResultAsked::Show(index)) => runs.push(("query.showResult", json!({ "index": index }))),
+                Some(ResultAsked::Value) => runs.push(("ui.toggleValuePanel", json!({}))),
+                None => {}
             }
             results_top = bar_rect.bottom();
         }
         // The band (none for dbee's own cancel: the bar says it), a hairline under it, then the
         // results.
-        let rest = Rect::from_min_max(pos2(body.left(), results_top), body.max);
+        let rest = Rect::from_min_max(pos2(body.left(), results_top), pos2(right, body.bottom()));
         let mut rest_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-results", id.0)).max_rect(rest).layout(Layout::top_down(Align::Min)));
         rest_ui.set_clip_rect(rest.intersect(ui.clip_rect()));
         rest_ui.spacing_mut().item_spacing.y = 0.0;
@@ -1347,7 +1370,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                     saved: 0.0,
                 };
                 let below = rest_ui.available_rect_before_wrap().top().min(rest.bottom());
-                let area = Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), rest.bottom()));
+                let area = Rect::from_min_max(pos2(body.left(), below), pos2(right, rest.bottom()));
                 let mut grid_ui = rest_ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
                 let mut spare = GridState::default();
                 let gs = state.results.grids.get_mut(q.shown).unwrap_or(&mut spare);
@@ -1383,6 +1406,11 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             state.last_run = job;
         }
     }
+    // After the grid and what it asked for, so a cell selected in this frame shows its value now.
+    if let Some(placed) = panel {
+        value_panel::fill(app, ui, placed.contents);
+    }
+    panel.is_some()
 }
 
 /// A query run's error that the tab's band shows (`QueryTab::error`), so no notice repeats it:

@@ -496,7 +496,8 @@ fn count_rows_on_a_view_and_its_read_only_note() {
 fn myisam_reason_is_shown() {
     let db = dbee_testkit::require_testdb!();
     let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
-    let mut ui = connected_to_target(db, &mysql, None, APP_SIZE);
+    // A narrow window: the note has the tab's whole width, the value panel being beside the grid.
+    let mut ui = connected_to_target(db, &mysql, None, egui::vec2(800.0, 720.0));
     let loaded = |ui: &mut Ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0);
     // dbee's own reasons keep their lead-in.
     ui.open("shop", "order_totals");
@@ -514,7 +515,7 @@ fn myisam_reason_is_shown() {
     assert!((note.height() - short.height()).abs() < 0.5, "one line: {note:?} vs {short:?}");
     assert_eq!(ui.rect("filter-0-column").unwrap().min, bar.min, "the filter bar stays where it was");
     let (_, cut) = ui.text_in(note, &reason).unwrap_or_else(|| panic!("the reason is drawn in {note:?}"));
-    assert!(cut, "cut short in the app's first window, with the value panel open");
+    assert!(cut, "cut short in a narrow window");
     // Hovered, it reads whole.
     ui.rest(note.center());
     let whole = ui.texts().into_iter().any(|(r, g)| g.text() == reason && !g.elided && !note.contains(r.center()));
@@ -845,11 +846,12 @@ fn the_operator_choice_shows_each_label_whole() {
             if !matches!(id, "isNull" | "isNotNull") {
                 row.insert(3, "filter-0-value");
             }
-            let panel = ui.rect("value-panel").map_or(size.x, |r| r.left());
+            // The filter row has the tab's whole width: the value panel stands beside the grid.
+            let panel = ui.tab_x().max;
             let rects: Vec<(&str, egui::Rect)> =
                 row.iter().map(|w| (*w, ui.rect(w).unwrap_or_else(|| panic!("{at}, {label}: `{w}` shows")))).collect();
             for (i, (a, ra)) in rects.iter().enumerate() {
-                assert!(ra.right() <= panel + 0.5, "{at}, {label}: `{a}` {ra:?} runs into the value panel at {panel}");
+                assert!(ra.right() <= panel + 0.5, "{at}, {label}: `{a}` {ra:?} runs past the body at {panel}");
                 for (b, rb) in &rects[i + 1..] {
                     assert!(ra.right() <= rb.left() + 0.5, "{at}, {label}: `{a}` {ra:?} runs over `{b}` {rb:?}");
                 }
@@ -1146,12 +1148,13 @@ fn a_lost_connection_greys_the_filters_with_the_reason_on_hover() {
     }
 }
 
-/// The operator choice at the app's window with the value panel open: closed, a long operator is
-/// cut with `…` and reads whole on hover; open, its item reads whole.
+/// The operator choice in a narrow window (800 wide, the filter row about as wide as at the app's
+/// window when the value panel stood beside the whole tab): closed, a long operator is cut with
+/// `…` and reads whole on hover; open, its item reads whole.
 #[test]
-fn the_operator_reads_whole_when_open_at_1100_with_the_panel() {
+fn the_operator_reads_whole_when_open_in_a_narrow_window() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = Ui::connected_in(db, egui::vec2(1100.0, 720.0));
+    let mut ui = Ui::connected_in(db, egui::vec2(800.0, 720.0));
     ui.open("shop", "orders");
     ui.until("the page", |ui| ui.table()["loading"].is_null());
     assert_eq!(ui.value("value-toggle"), true, "the value panel is open");
@@ -1729,11 +1732,7 @@ fn enabled(ui: &mut Ui, id: &str) -> bool {
 /// The value panel closed, so the table bar has the room of TA's picture at 1100 wide (with the
 /// panel open its count's range gives way first).
 fn without_the_panel(ui: &mut Ui) {
-    if ui.value("value-toggle") == json!(true) {
-        ui.click("value-toggle");
-        ui.frame();
-    }
-    assert_eq!(ui.value("value-toggle"), false);
+    panel(ui, false);
 }
 
 /// The pointer rests on `id`: whether its hover says `words`.
@@ -1753,7 +1752,7 @@ fn the_table_tab_runs_in_tas_order_edge_to_edge() {
     ui.open("shop", "orders");
     ui.until("the page", loaded);
     ui.hover_away();
-    let body = ui.body_x();
+    let body = ui.tab_x();
     let order = ["filter-0-column", "table-view-data", "grid-header-0", "page-first"];
     let tops: Vec<f32> = order.iter().map(|id| ui.drawn(id).top()).collect();
     assert!(tops.windows(2).all(|w| w[0] < w[1]), "{order:?} top to bottom: {tops:?}");
@@ -1970,7 +1969,7 @@ fn the_paging_bar_matches_the_page() {
     ui.open("scratch", &table.0);
     ui.until("the page", loaded);
     one_change_staged(&mut ui);
-    let body = ui.body_x();
+    let body = ui.tab_x();
     let left = ["page-first", "page-prev", "page-number", "page-next", "page-last"];
     let xs: Vec<f32> = left.iter().map(|id| ui.drawn(id).left()).collect();
     assert!(xs.windows(2).all(|w| w[0] < w[1]), "{left:?} left to right: {xs:?}");
@@ -2027,7 +2026,7 @@ fn the_read_only_note_is_its_own_area() {
     ui.hover_away();
     let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
     assert_eq!(ui.value("table-note"), "These rows can't be edited: views are read-only.");
-    let body = ui.body_x();
+    let body = ui.tab_x();
     let note = ui.drawn("table-note");
     assert!((note.left() - (body.min + 12.0)).abs() <= 1.0, "the note 12 in from {}: {note:?}", body.min);
     let (ink, area) = painted_at(&ui, egui::pos2(body.min + 2.0, note.center().y)).expect("the note's area");
@@ -2069,13 +2068,14 @@ fn no_rows_are_loaded_is_restyled() {
     assert!((at.top() - (top + 12.0)).abs() <= 1.0, "12 down from the grid area's top {top}: {at:?}");
 }
 
-/// The value panel open or shut.
+/// The value panel open or shut (through the View menu's command: a narrow bar may leave its
+/// toggle out).
 fn panel(ui: &mut Ui, on: bool) {
-    if ui.value("value-toggle") != json!(on) {
-        ui.click("value-toggle");
-        ui.frame();
+    if ui.execute("ui.toggleValuePanel", json!({}))["visible"] != json!(on) {
+        ui.execute("ui.toggleValuePanel", json!({}));
     }
-    assert_eq!(ui.value("value-toggle"), on);
+    ui.frame();
+    assert!(on || ui.tag("value-panel").is_none(), "the value panel shut");
 }
 
 /// The window widths Review Focus 5 sweeps, from wide to narrow.
@@ -2092,7 +2092,7 @@ fn one_widget(a: &str, b: &str) -> bool {
 
 /// Every tagged control of the table tab's bars lies inside the tab's body, and no two overlap.
 fn assert_nothing_over_anything(ui: &mut Ui, at: &str) {
-    let body = ui.body_x();
+    let body = ui.tab_x();
     let height = ui.harness.ctx.content_rect().height();
     let ids: Vec<String> = ["table-", "filter-", "page-", "row-add", "edit-", "edits-"].iter().flat_map(|p| ui.ids_with(p)).collect();
     let drawn: Vec<(String, egui::Rect)> = ui.rects(&ids).into_iter().filter_map(|(id, r)| r.map(|r| (id, r))).collect();
@@ -2170,7 +2170,7 @@ fn at_640_without_the_panel_the_table_bar_keeps_its_buttons() {
     ui.until("the page", loaded);
     without_the_panel(&mut ui);
     ui.frame();
-    let body = ui.body_x();
+    let body = ui.tab_x();
     for id in ["table-view-data", "table-refresh", "row-add", "page-count"] {
         let r = ui.rect(id).unwrap_or_else(|| panic!("`{id}` drawn"));
         assert!(r.left() >= body.min && r.right() < body.max - 1.0, "`{id}` {r:?} whole inside the body {body:?}");

@@ -40,12 +40,16 @@
 //! selects all of its text. A press outside the text, another text, or hiding the panel ends the
 //! selection. A hidden panel asks the session for no value view.
 //!
-//! **The panel** starts [`DEFAULT_WIDTH`] wide, less in a narrow window ([`start_width`]), is
-//! resizable from its left edge, and is hidden or shown with `ui.toggleValuePanel` (the View
-//! menu, and `value-toggle` at the right end of the status bar). Its width (egui's
-//! panel state) and whether it shows (`View::value_panel`) last for the session, in memory only.
-//! It is drawn after the tab's body ([`reserve`], then [`fill`]), so a click on a cell shows its
-//! value in the same frame.
+//! **The panel** stands inside the tab, beside its results: in a query tab beside the result bar,
+//! the band and the grid (the editor and the run row keep the body's width), in a table tab
+//! between the table bar and the paging bar, beside the band and the grid (the filter bar and the
+//! two bars keep the body's width). The tab gives it its area ([`reserve`]), and draws its toggle,
+//! `value-toggle`, at the right end of the result bar or the table bar: a query tab before its
+//! first result has neither. It starts [`VALUE_PANEL_W`] wide, is resizable from its left edge
+//! (a 1 px `line` down it), and is hidden or shown with `ui.toggleValuePanel` (the View menu, and
+//! the toggle). Its width (egui's panel state) and whether it shows (`View::value_panel`) last for
+//! the session, in memory only, one for every tab. It is drawn after the tab's grid ([`reserve`],
+//! then [`fill`]), so a click on a cell shows its value in the same frame.
 //!
 //! Automation ids: `value-panel` (value `{column, row, type, label, null, bytes, truncated,
 //! note}`, `row` the number of a whole selected row (`column` and `type` then empty) or null,
@@ -53,7 +57,8 @@
 //! says; `null` when no cell is selected), `value-text` (value `{text, cut, selection,
 //! highlighted, rows, firstRow}`: the text's first [`TAG_BYTES`] bytes and whether there is more,
 //! the selection as `[start, end]` byte offsets or null, whether the JSON colours show, the
-//! number of rows and the first row in view) and `value-toggle` (value: whether the panel shows).
+//! number of rows and the first row in view) and `value-toggle` (the toggle the result bar and the
+//! table bar draw; value: whether the panel shows).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -70,21 +75,17 @@ use serde_json::{Value as Json, json};
 
 use crate::DbeeApp;
 use crate::automation::Tags;
-use crate::components::focus;
-use crate::components::icon::Icon;
-use crate::components::tooltip::Hint;
 use crate::components::value::{self, Facts, Panel, Shown, State};
 use crate::editors::size_text;
 use crate::shortcuts;
-use crate::theme::{self, Text, Words, size::RADIUS_CONTROL};
+use crate::theme::{self, Text, Words, size::VALUE_PANEL_W};
 
 /// The automation ids.
 pub const PANEL: &str = "value-panel";
 pub const TEXT: &str = "value-text";
 pub const TOGGLE: &str = "value-toggle";
 
-/// The width the panel starts at, and how narrow and wide it can be made.
-pub const DEFAULT_WIDTH: f32 = 360.0;
+/// How narrow and wide the panel can be made; it starts [`VALUE_PANEL_W`] wide.
 pub const MIN_WIDTH: f32 = 240.0;
 pub const MAX_WIDTH: f32 = 960.0;
 /// The height of a row of text, and the text's inset from the sides of its box.
@@ -636,29 +637,34 @@ impl PanelState {
 
 // ---- the panel ----------------------------------------------------------------------------------
 
-/// The width the panel starts at in a window `window` wide: [`DEFAULT_WIDTH`], less in a narrow
-/// window (about a quarter of it), so the table tab keeps room for its filter row.
-pub fn start_width(window: f32) -> f32 {
-    if window.is_finite() { (window * 0.27).clamp(MIN_WIDTH, DEFAULT_WIDTH) } else { DEFAULT_WIDTH }
+/// Where the panel stands this frame ([`reserve`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Placed {
+    /// The panel's left edge, its line included: the results end there.
+    pub left: f32,
+    /// Where its contents go ([`fill`]).
+    pub contents: Rect,
 }
 
-/// Before the tab's body: the panel's place at the right, when it shows. Returns where its
-/// contents go ([`fill`] draws them once the body has run).
-pub(crate) fn reserve(app: &DbeeApp, ui: &mut egui::Ui) -> Option<Rect> {
-    if !app.view.value_panel {
+/// Before the tab's grid: the panel's place at the right of `area` (the tab's results), when it
+/// shows (`open`). [`fill`] draws its contents once the grid has run; the results take the rest
+/// of `area`, left of [`Placed::left`].
+pub(crate) fn reserve(open: bool, ui: &mut egui::Ui, area: Rect) -> Option<Placed> {
+    if !open {
         return None;
     }
+    let mut room = ui.new_child(UiBuilder::new().id_salt("dbee-value-room").max_rect(area).layout(Layout::top_down(Align::Min)));
+    room.set_clip_rect(area.intersect(ui.clip_rect()));
     // The ground is the panel's own ([`fill`]); egui draws the line down its left edge, which
     // lights while it is dragged.
-    let start = start_width(ui.ctx().content_rect().width());
-    let panel = egui::Panel::right(panel_id()).resizable(true).default_size(start).size_range(MIN_WIDTH..=MAX_WIDTH).frame(Frame::NONE);
-    let out = panel.show(ui, |ui| {
+    let panel = egui::Panel::right(panel_id()).resizable(true).default_size(VALUE_PANEL_W).size_range(MIN_WIDTH..=MAX_WIDTH).frame(Frame::NONE);
+    let out = panel.show(&mut room, |ui| {
         // The whole width: the panel keeps the size its contents take.
         let rect = ui.max_rect();
         ui.expand_to_include_rect(rect);
         rect
     });
-    Some(out.inner)
+    Some(Placed { left: out.response.rect.left().max(area.left()), contents: out.inner })
 }
 
 /// The panel's id, egui's for its size.
@@ -675,24 +681,6 @@ pub(crate) fn fill(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
     v.panel.hold_rows(ui.ctx().is_being_dragged(panel_id().with("__resize")));
     let mut child = ui.new_child(UiBuilder::new().id_salt("dbee-value-contents").max_rect(rect).layout(Layout::top_down(Align::Min)));
     contents(&mut child, view.as_ref(), &mut v.panel, tags);
-}
-
-/// The toggle at the right end of the status bar; true when it was clicked. Keyboard focus shows
-/// as on an icon button with no edge.
-pub(crate) fn toggle(ui: &mut egui::Ui, open: bool, tags: &mut Tags) -> bool {
-    let t = theme::tokens(ui.ctx());
-    let (rect, r) = ui.allocate_exact_size(vec2(26.0, 20.0), Sense::click());
-    if r.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), t.hover);
-    }
-    let colour = if open { t.ink } else { t.text_muted };
-    Icon::Panel.paint(ui.painter(), rect.center(), colour);
-    if focus::shown(ui, &r) {
-        focus::box_around(ui.painter(), rect);
-    }
-    let r = r.hint(if open { "Hide the value panel" } else { "Show the value panel" });
-    tags.tag_value(TOGGLE, &r, open);
-    r.clicked()
 }
 
 /// Step 4 of the frame, before the shortcuts, unless a text field or a text editor has the
@@ -1184,14 +1172,6 @@ mod tests {
         let took = rows_of_a_long_line();
         println!("rows of a 10 MiB line: {took:?}");
         assert!(took < Duration::from_secs(2), "{took:?}");
-    }
-
-    #[test]
-    fn the_panel_starts_narrower_in_a_narrow_window() {
-        assert_eq!(start_width(1400.0), DEFAULT_WIDTH);
-        assert!((start_width(1100.0) - 297.0).abs() < 0.5, "the app's first window");
-        assert_eq!(start_width(640.0), MIN_WIDTH);
-        assert_eq!(start_width(f32::NAN), DEFAULT_WIDTH);
     }
 
     #[test]

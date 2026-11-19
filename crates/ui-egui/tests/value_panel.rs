@@ -136,8 +136,9 @@ fn panel_hides_and_comes_back() {
     let before = ui.rect("value-panel");
     // At the window's right edge (the harness keeps 8 points round the app).
     assert_eq!(before.right(), 1400.0 - 8.0, "on the right: {before:?}");
-    // Widen it by its left edge, so the width it comes back at is its own, not the default.
-    ui.drag(pos2(before.left(), before.center().y), pos2(before.left() - 80.0, before.center().y));
+    // Widen it by its left edge, so the width it comes back at is its own, not the default. The
+    // press goes just inside the edge: a grid column's own edge can lie on the panel's.
+    ui.drag(pos2(before.left() + 2.0, before.center().y), pos2(before.left() - 80.0, before.center().y));
     let wide = ui.rect("value-panel");
     assert!((wide.width() - before.width() - 80.0).abs() < 2.0, "dragged 80 points wider: {before:?} → {wide:?}");
     assert_eq!(ui.value("value-toggle"), true);
@@ -560,4 +561,144 @@ fn the_panel_shows_a_selected_row_as_json() {
     assert!(ui.panel_text().starts_with("{\n  \"id\": 101,"), "{}", ui.panel_text());
     let panel = ui.rect("value-panel");
     assert!(ui.text_in(panel, "Row 101").is_some(), "the title counts the page");
+}
+
+// ---- the panel inside the tab ---------------------------------------------------------------------
+
+/// The panel's rect while it is drawn this frame (egui keeps its size after it goes).
+fn panel_rect(ui: &mut Ui) -> Option<Rect> {
+    ui.tag("value-panel")?;
+    egui::PanelState::load(&ui.harness.ctx, egui::Id::new("dbee-value-panel")).map(|p| p.outer_rect)
+}
+
+/// The panel shows, whatever it did before.
+fn panel_open(ui: &mut Ui) {
+    if ui.execute("ui.toggleValuePanel", json!({}))["visible"] == false {
+        ui.execute("ui.toggleValuePanel", json!({}));
+    }
+    ui.frame();
+}
+
+/// The `value-toggle` entries drawn in the last frame.
+fn toggles(ui: &mut Ui) -> Vec<Rect> {
+    let i = ui.inspect();
+    i["automation"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["id"] == "value-toggle")
+        .map(|e| {
+            let f = |k: usize| e["rect"][k].as_f64().unwrap() as f32;
+            Rect::from_min_size(pos2(f(0), f(1)), vec2(f(2), f(3)))
+        })
+        .collect()
+}
+
+fn near(a: f32, b: f32, by: f32) -> bool {
+    (a - b).abs() <= by
+}
+
+/// One toggle at most, the active tab's, never in the status bar; the panel beside the results
+/// only: in a query tab beside the result bar and the grid (the editor and the run row keep the
+/// body's width), in a table tab between the table bar and the paging bar (both keep the body's
+/// width). The tab strip spans the work area. A query tab before its first result has neither.
+#[test]
+fn exactly_one_value_toggle_and_the_panel_beside_the_results() {
+    let db = dbee_testkit::require_testdb!();
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    let right = egui::PanelState::load(&ui.harness.ctx, egui::Id::new("dbee-menubar")).unwrap().outer_rect.right();
+    let status = egui::PanelState::load(&ui.harness.ctx, egui::Id::new("dbee-status")).unwrap().outer_rect;
+    // A query tab with results.
+    ui.execute("tab.newQuery", json!({ "text": "select g as id, 'row ' || g as note from generate_series(1, 5) g" }));
+    ui.execute("query.run", json!({}));
+    ui.until("the rows", |ui| ui.tag("grid-header-0").is_some());
+    ui.frame();
+    let toggle = toggles(&mut ui);
+    assert_eq!(toggle.len(), 1, "one toggle: {toggle:?}");
+    let toggle = toggle[0];
+    let panel = panel_rect(&mut ui).expect("the panel shows");
+    // The result bar is the results column's: its toggle ends where the panel starts.
+    assert!(near(toggle.right(), panel.left(), 1.0), "the toggle at the result bar's right end: {toggle:?}, the panel {panel:?}");
+    let (run, head) = (ui.rect("query-run"), ui.rect("grid-header-0"));
+    assert!(toggle.center().y > run.bottom() && toggle.center().y < head.top(), "in the result bar: {toggle:?}, {run:?}, {head:?}");
+    assert!(near(panel.top(), toggle.top(), 1.0), "the panel's top level with the result bar's: {panel:?}, {toggle:?}");
+    assert!(near(panel.right(), right, 0.5) && near(panel.bottom(), status.top(), 1.0), "down to the tab's bottom: {panel:?}");
+    let ink = painted_at(&ui, pos2(panel.left() - 2.0, head.bottom() - 0.5));
+    assert!(ink.is_some_and(|(c, r)| c == t.ink && near(r.right(), panel.left(), 1.0)), "the grid ends at the panel: {ink:?}, {panel:?}");
+    for id in ["query-editor", "query-split"] {
+        let r = ui.rect(id);
+        assert!(near(r.right(), right, 0.5), "`{id}` keeps the body's width: {r:?}");
+    }
+    let new = ui.rect("tab-new");
+    assert!(panel.top() > new.bottom(), "the panel stands under the strip: {panel:?}, {new:?}");
+    let strip = painted_at(&ui, pos2(right - 2.0, new.bottom() - 0.5));
+    assert!(strip.is_some_and(|(c, r)| c == t.line && near(r.right(), right, 0.5)), "the strip's line to the window's edge: {strip:?}");
+    assert!(!status.intersects(toggle), "no toggle in the status bar");
+    // Shut, the results take the body's width, the toggle at its right end.
+    ui.click("value-toggle");
+    assert!(ui.tag("value-panel").is_none(), "shut");
+    let toggle = toggles(&mut ui);
+    assert!(toggle.len() == 1 && near(toggle[0].right(), right, 0.5), "the toggle at the body's right end: {toggle:?}");
+    ui.click("value-toggle");
+    // A table tab: the toggle at the table bar's right end, the panel between the bars.
+    ui.execute("table.open", json!({ "schema": "shop", "table": "orders" }));
+    ui.until("the page", |ui| ui.table()["rows"] == 100);
+    ui.frame();
+    let toggle = toggles(&mut ui);
+    assert_eq!(toggle.len(), 1, "one toggle: {toggle:?}");
+    let toggle = toggle[0];
+    assert!(near(toggle.right(), right, 0.5), "the toggle at the table bar's right end: {toggle:?}");
+    let head = ui.rect("grid-header-0");
+    assert!(toggle.center().y < head.top() && toggle.center().y > ui.rect("filter-0-column").bottom(), "in the table bar: {toggle:?}");
+    let panel = panel_rect(&mut ui).expect("the panel shows");
+    let paging = status.top() - dbee_ui_egui::theme::size::BAR_H;
+    assert!(near(panel.top(), toggle.bottom() + 1.0, 1.0), "the panel's top the table bar's bottom: {panel:?}, {toggle:?}");
+    assert!(near(panel.bottom(), paging, 1.0), "its bottom the paging bar's top {paging}: {panel:?}");
+    let line = painted_at(&ui, pos2(right - 2.0, paging + 0.5));
+    assert!(line.is_some_and(|(c, r)| c == t.line && near(r.right(), right, 0.5)), "the paging bar to the body's right: {line:?}");
+    assert!(!status.intersects(toggle), "no toggle in the status bar");
+    // A new query tab: no result bar, no toggle, no panel.
+    ui.ctrl("T");
+    ui.frame();
+    assert!(toggles(&mut ui).is_empty(), "no toggle before the first result");
+    assert!(ui.tag("value-panel").is_none(), "no panel before the first result");
+    assert_eq!(ui.execute("ui.toggleValuePanel", json!({})), json!({ "visible": false }), "the View menu's command still flips it");
+}
+
+/// A fresh window's panel starts 340 wide.
+#[test]
+fn the_panel_starts_340_wide() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, vec2(1400.0, 900.0));
+    panel_open(&mut ui);
+    ui.open_rows("shop", "orders", 100);
+    ui.frame();
+    let panel = panel_rect(&mut ui).expect("the panel shows");
+    assert!(near(panel.width(), 340.0, 1.0), "340 wide: {panel:?}");
+}
+
+/// The cell clicked shows in the panel in the frame of the click, in a query tab and a table tab.
+#[test]
+fn a_click_on_a_cell_shows_its_value_in_the_same_frame() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    panel_open(&mut ui);
+    let click = |ui: &mut Ui, id: &str| {
+        let at = ui.centre(id);
+        let press = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        ui.frame_with(vec![Event::PointerMoved(at)]);
+        ui.frame_with(vec![press(true)]);
+        ui.frame_with(vec![press(false)]);
+    };
+    ui.execute("tab.newQuery", json!({ "text": "select 1 as id, 'x' as note" }));
+    ui.execute("query.run", json!({}));
+    ui.until("the rows", |ui| ui.tag("grid-cell-0-1").is_some());
+    click(&mut ui, "grid-cell-0-1");
+    assert_eq!(ui.value("value-panel")["column"], "note", "a query tab");
+    ui.open_rows("shop", "orders", 100);
+    ui.frame();
+    click(&mut ui, "grid-cell-0-3");
+    assert_eq!(ui.value("value-panel")["column"], "status", "a table tab");
 }

@@ -359,10 +359,11 @@ fn every_result_can_be_chosen_beside_the_database_chip() {
     ui.ctrl("T");
     ui.frame();
     assert!(ui.tag("query-database").is_some(), "the chip is drawn");
-    assert_eq!(ui.value("value-toggle"), true, "the value panel shows");
+    assert!(ui.tag("value-toggle").is_none(), "no toggle before the first result");
     ui.execute("query.setText", json!({ "text": "select 1 as a;\nselect 2 as b;\nselect 3 as c" }));
     ui.ctrl("Enter");
     ui.ran();
+    assert_eq!(ui.value("value-toggle"), true, "the value panel shows, beside the results");
     choose_every_result(&mut ui, "after the run");
     let key = unique("dbee_lock");
     let held = mysql.hold_lock(&key).unwrap();
@@ -449,9 +450,10 @@ fn statements_without_rows_show_rows_affected() {
     let bar = as_rect(ui.rect("result-2"));
     let i = ui.inspect();
     let body = body_rect(&mut ui);
+    // The value panel beside it, empty, is not under the bar.
     let under: Vec<String> = ids(&i)
         .into_iter()
-        .filter(|id| !id.starts_with("status-"))
+        .filter(|id| !id.starts_with("status-") && !id.starts_with("value-"))
         .filter(|id| {
             let r = &tag_in(&i, id).unwrap()["rect"];
             let (x, y) = (r[0].as_f64().unwrap() as f32, r[1].as_f64().unwrap() as f32);
@@ -1346,10 +1348,10 @@ fn a_query_result_row_selects_and_copies_but_never_deletes() {
     assert_eq!(ui.copied().as_deref(), Some("[\n  {\"id\": 4, \"name\": \"Customer 4\"}\n]"));
 }
 
-/// The tab body's rect: from the sidebar to the value panel (or the window's edge), from the
-/// strip's line down to about the status bar.
+/// The tab body's rect: from the sidebar to the window's edge, from the strip's line down to
+/// about the status bar.
 fn body_rect(ui: &mut Ui) -> egui::Rect {
-    let x = ui.body_x();
+    let x = ui.tab_x();
     let tab = ui.document()["active"].as_u64().expect("a tab is active");
     let top = ui.rect(&format!("tab-{tab}"));
     let status = ui.rect("status-connection");
