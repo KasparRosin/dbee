@@ -431,6 +431,12 @@ fn m1_day_end_to_end() {
     let n = q["results"][0]["rows"].as_u64().unwrap();
     assert_eq!(n as usize, rows.len(), "the join finds the filtered orders: {q}");
     assert_eq!(app.value("query-rows"), format!("{n} rows"));
+    // The result bar: the result's tab, the facts with the time, EXPORT off.
+    assert!(app.tag("result-1").is_some_and(|t| t["visible"] != false), "the result's tab");
+    let facts = app.value("query-facts");
+    let ms = facts.as_str().and_then(|f| f.strip_prefix(&format!("{n} rows "))).and_then(|f| f.strip_suffix(" ms"));
+    assert!(ms.is_some_and(|ms| ms.parse::<u64>().is_ok()), "the facts say the rows and the time: {facts}");
+    assert!(app.tag("query-export").is_some_and(|t| t["enabled"] == false), "EXPORT off");
     app.shot(&root, "7a-query");
     app.click("grid-cell-0-0");
     assert_eq!(app.value("query-editor")["focused"], false, "the grid took the keyboard");

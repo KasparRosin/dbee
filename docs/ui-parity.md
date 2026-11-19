@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-19 · **Change:** minor (the table tab's bars when narrow; before: the table tab's table bar) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-06 · **Last updated:** 2026-11-19 · **Change:** minor (the query tab's result bar: a tab per result, how long each statement took; before: the table tab's bars when narrow; before: the table tab's table bar) · **Target:** Beekeeper Studio 5.5.7
 
 Graded by behaviour against what was observed in Beekeeper Studio, not by whether a control exists. The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). Status: **done** (does what the observed element does, on every engine dbee has: PostgreSQL, MySQL, MariaDB and SQLite), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `apps/dbee/tests/m2_day.rs`, `crates/ui-egui/tests/`).
 
@@ -24,7 +24,7 @@ Graded by behaviour against what was observed in Beekeeper Studio, not by whethe
 | Value side panel | JSON row viewer (paid) | The selected cell's whole value, JSON pretty-printed and coloured, select and copy; up to 10 MiB shown | partial: the cell, not the row; read-only |
 | Edit in a modal | Text, JSON, HTML; Minify & Apply | None | not started |
 | Query editor | Line numbers, syntax colours, autocomplete, find and replace, Vim keymap, wrap | Line numbers, syntax colours in the engine's own SQL, Ctrl+Enter (all), Ctrl+Shift+Enter (the statement under the cursor), Tab indents, a draggable split; on MySQL and MariaDB the database a tab runs in, opened on the tree's selection and chosen from a list | partial: no autocomplete, find, Vim keymap or wrap |
-| Query results | Result selector, row count, affected rows, timing, error card, download | Result selector, row count with the cap notice, rows affected, error card that jumps to the position, cancel | partial: no timing or download |
+| Query results | Result selector, row count, affected rows, timing, error card, download | A result bar with a tab per result (a ⌄ list when they don't fit), the row count with the cap notice, rows affected, how long each statement took, error card that jumps to the position, cancel; EXPORT drawn, off | partial: no download |
 | Transactions | Auto commit or manual (Begin, Commit, Rollback) | Auto commit only | not started |
 | Saved queries and history | Side panels | None | not started |
 | Structure and new table | Columns, indexes, relations, triggers; table editor | None | not started |
@@ -41,6 +41,7 @@ From [gaps.md](gaps.md): wide results first (5), then the editing limits (9, 10)
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-19 | minor | Query results (partial): a result bar with a tab per result and how long each statement took; only download is missing; grades by count unchanged. |
 | 2026-11-19 | minor | Table bar (partial), a row of its own: the view switch, REFRESH, + ROW and the row count move there from the paging bar, with the 300 ms loading and counting states; STRUCTURE, IMPORT and EXPORT off; 3 of 24 done, 17 partial, 48 % by count; ~45 % stands. |
 | 2026-11-06 | minor | Grid keyboard (partial): no arrow keys, and a cell at the view's edge is not scrolled into view; 3 of 23 done, 16 partial, 48 % by count; ~45 % stands. |
 | 2026-11-05 | minor | Graded on every engine: the M2 day drives the same elements on MySQL, MariaDB and SQLite (`m2_day`); grades unchanged. |

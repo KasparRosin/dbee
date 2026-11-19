@@ -155,6 +155,11 @@ impl Piece {
     pub(super) fn width(&self) -> f32 {
         self.galley.size().x - self.trail
     }
+
+    /// What it reads out as.
+    pub(super) fn says(&self) -> &str {
+        &self.says
+    }
 }
 
 /// The bar, [`SLIM_BAR_H`] tall and as wide as `ui`: `connection`, its `facts`, then `activity` and
@@ -293,7 +298,9 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
 /// Draws `piece` from `left`, centred on `mid`, in `colour`; it answers to hover as a label.
 pub(super) fn piece(ui: &Ui, id: Id, piece: &Piece, at: egui::Pos2, colour: Color32) -> Response {
     let rect = Rect::from_min_size(pos2(at.x, at.y - piece.galley.size().y / 2.0), piece.galley.size());
-    ui.painter().galley(rect.min, Arc::clone(&piece.galley), colour);
+    if !piece.galley.text().is_empty() {
+        ui.painter().galley(rect.min, Arc::clone(&piece.galley), colour);
+    }
     let r = ui.interact(rect, id, Sense::hover());
     let says = piece.says.clone();
     r.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, says.clone()));

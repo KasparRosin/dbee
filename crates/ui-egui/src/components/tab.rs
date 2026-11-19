@@ -349,7 +349,10 @@ pub(super) fn list_button(ui: &mut Ui, id: Id, rect: Rect, label: &str, titles: 
             .gap(TAB_LIST_GAP)
             .style(menu::style(ui.ctx()))
             .show(|ui| {
-                let room = ui.ctx().content_rect().bottom() - ui.cursor().top() - f32::from(MENU_PAD) - LINE_W;
+                // The room under the button, worked out from the button and not from where the
+                // menu is (egui sizes it first somewhere else): a list that fits under it never
+                // flips above it, so the arrows go down into it from the button.
+                let room = ui.ctx().content_rect().bottom() - rect.bottom() - TAB_LIST_GAP - 2.0 * (f32::from(MENU_PAD) + LINE_W);
                 ScrollArea::vertical().max_height(room.max(MENU_ITEM_H)).show_rows(ui, MENU_ITEM_H, titles.len(), |ui, rows| {
                     for (i, title) in titles.iter().enumerate().take(rows.end).skip(rows.start) {
                         let r = ui.add(Item::new(title).choice(Some(active == Some(i))));

@@ -817,20 +817,49 @@ fn results(ui: &mut Ui) {
         |ui| {
             let done = RunState::Done { rows: 10, ms: Some(24) };
             let rows = [
-                ResultBar { tabs: two(), state: done, first_of: None, export: true, value_on: false },
-                ResultBar { tabs: two(), state: RunState::Running { elapsed: Some(s(2400)) }, first_of: None, export: true, value_on: false },
-                ResultBar { tabs: Vec::new(), state: RunState::Failed { ms: Some(12) }, first_of: None, export: false, value_on: false },
-                ResultBar { tabs: Vec::new(), state: RunState::Cancelled { elapsed: Some(s(3200)) }, first_of: None, export: false, value_on: false },
-                ResultBar { tabs: two(), state: RunState::Affected { rows: 2, ms: Some(5) }, first_of: None, export: false, value_on: false },
+                ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(false), time_hover: None },
+                ResultBar {
+                    tabs: two(),
+                    state: RunState::Running { elapsed: Some(s(2400)) },
+                    first_of: None,
+                    export: true,
+                    value: Some(false),
+                    time_hover: None,
+                },
+                ResultBar {
+                    tabs: Vec::new(),
+                    state: RunState::Failed { ms: Some(12) },
+                    first_of: None,
+                    export: false,
+                    value: Some(false),
+                    time_hover: None,
+                },
+                ResultBar {
+                    tabs: Vec::new(),
+                    state: RunState::Cancelled { elapsed: Some(s(3200)) },
+                    first_of: None,
+                    export: false,
+                    value: Some(false),
+                    time_hover: None,
+                },
+                ResultBar {
+                    tabs: two(),
+                    state: RunState::Affected { rows: Some(2), ms: Some(5) },
+                    first_of: None,
+                    export: false,
+                    value: Some(false),
+                    time_hover: None,
+                },
                 ResultBar {
                     tabs: two(),
                     state: RunState::Done { rows: 10_000, ms: Some(80) },
                     first_of: Some((10_000, 25_000)),
                     export: true,
-                    value_on: false,
+                    value: Some(false),
+                    time_hover: None,
                 },
-                ResultBar { tabs: two(), state: done, first_of: None, export: true, value_on: true },
-                ResultBar { tabs: many(), state: done, first_of: None, export: true, value_on: false },
+                ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(true), time_hover: None },
+                ResultBar { tabs: many(), state: done, first_of: None, export: true, value: Some(false), time_hover: None },
             ];
             stack(ui, &mut |ui| {
                 for row in &rows {
@@ -862,7 +891,15 @@ fn results(ui: &mut Ui) {
             stack(ui, &mut |ui| {
                 bar(ui, &mut |ui| {
                     let tabs = vec![ResultTab::new("select … Orders").active(true), ResultTab::new("select … Line_Items")];
-                    ResultBar { tabs, state: RunState::Running { elapsed: None }, first_of: None, export: true, value_on: false }.show(ui);
+                    ResultBar {
+                        tabs,
+                        state: RunState::Running { elapsed: None },
+                        first_of: None,
+                        export: true,
+                        value: Some(false),
+                        time_hover: None,
+                    }
+                    .show(ui);
                 });
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = SPACE_32;

@@ -73,7 +73,7 @@ pub(crate) type Since = HashMap<(TabId, JobId), f64>;
 const QUIET: f64 = 0.3;
 
 /// How often the window draws again while a job runs, so its timer moves.
-const TICK: Duration = Duration::from_millis(100);
+pub(crate) const TICK: Duration = Duration::from_millis(100);
 
 /// Why STRUCTURE is off, on its hover.
 pub(crate) const STRUCTURE_LATER: &str = "Structure: not now, the structure view comes in a later step.";

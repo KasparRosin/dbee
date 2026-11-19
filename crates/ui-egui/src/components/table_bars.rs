@@ -308,7 +308,7 @@ impl TableBar {
                     let c = lane(ui, "loading-lane", at);
                     let x = at.left();
                     shown_facts = Some(piece(&c, bar.id.with("loading"), &words, pos2(x, mid), t.text_muted));
-                    time.show(&c, bar.id.with("timer"), x + words.width() + TABLE_LOADING_GAP, mid, t);
+                    let _ = time.show(&c, bar.id.with("timer"), x + words.width() + TABLE_LOADING_GAP, mid, t);
                 }
                 Facts::Structure(words) => {
                     let c = lane(ui, "facts-lane", at);

@@ -200,9 +200,10 @@ pub enum RunState {
     Cancelled {
         elapsed: Option<Duration>,
     },
-    /// The shown statement changed `rows` rows and returned none.
+    /// The shown statement changed `rows` rows and returned none; `None` when the database gave
+    /// no count (the time alone is drawn).
     Affected {
-        rows: u64,
+        rows: Option<u64>,
         ms: Option<u64>,
     },
 }
@@ -227,18 +228,24 @@ pub struct ResultBar<'a> {
     pub first_of: Option<(u64, u64)>,
     /// EXPORT shows (off until M4, its hover says why).
     pub export: bool,
-    /// The value panel is open.
-    pub value_on: bool,
+    /// The value panel's toggle, on while the panel shows; `None` draws no Value cell, and the
+    /// facts end 12 before EXPORT's divider, or the bar's end.
+    pub value: Option<bool>,
+    /// What hovering the time says (a statement whose count the database didn't give).
+    pub time_hover: Option<&'a str>,
 }
 
-/// The result bar as drawn: its tabs, its facts' words, EXPORT and the toggle, the list button
-/// while its tabs don't fit and its list's items in view while it is open (each with the index of
-/// the result it lists), and what a click asked for.
+/// The result bar as drawn: its tabs, its facts' words and their time, the facts as written
+/// (`13 rows 24 ms`, before capitals), EXPORT and the toggle, the list button while its tabs don't
+/// fit and its list's items in view while it is open (each with the index of the result it
+/// lists), and what a click asked for.
 pub struct ResultShown {
     pub tabs: Vec<Response>,
     pub facts: Response,
+    pub time: Option<Response>,
+    pub says: String,
     pub export: Option<Response>,
-    pub value: Response,
+    pub value: Option<Response>,
     pub list: Option<Response>,
     pub listed: Vec<(usize, Response)>,
     pub asked: Option<ResultAsked>,
@@ -284,13 +291,22 @@ impl Time {
         }
     }
 
-    /// Draws it from `x`, centred on `mid`.
-    pub(super) fn show(self, ui: &Ui, id: Id, x: f32, mid: f32, t: &Tokens) {
+    /// What it reads out as: its words, or nothing for the spinner.
+    fn says(&self) -> Option<&str> {
         match self {
-            Time::Words(p) => {
-                piece(ui, id, &p, pos2(x, mid), t.text_muted);
+            Time::Words(p) => Some(p.says()),
+            Time::Spinner => None,
+        }
+    }
+
+    /// Draws it from `x`, centred on `mid`: its words' response.
+    pub(super) fn show(self, ui: &Ui, id: Id, x: f32, mid: f32, t: &Tokens) -> Option<Response> {
+        match self {
+            Time::Words(p) => Some(piece(ui, id, &p, pos2(x, mid), t.text_muted)),
+            Time::Spinner => {
+                Spinner::new().paint(ui, pos2(x + SPINNER / 2.0, mid));
+                None
             }
-            Time::Spinner => Spinner::new().paint(ui, pos2(x + SPINNER / 2.0, mid)),
         }
     }
 }
@@ -310,7 +326,7 @@ impl ResultBar<'_> {
             RunState::Running { elapsed } => ("Running".to_owned(), t.text_muted, Some(elapsed.map_or(Time::Spinner, |e| Time::timer(ui, t, e)))),
             RunState::Failed { ms: m } => ("Failed".to_owned(), t.danger, ms(m)),
             RunState::Cancelled { elapsed } => ("Cancelled".to_owned(), t.text_muted, elapsed.map(|e| Time::took(ui, t, e))),
-            RunState::Affected { rows, ms: m } => (format!("{} affected", rows_of(rows)), t.text_muted, ms(m)),
+            RunState::Affected { rows, ms: m } => (rows.map(|n| format!("{} affected", rows_of(n))).unwrap_or_default(), t.text_muted, ms(m)),
         }
     }
 
@@ -324,33 +340,40 @@ impl ResultBar<'_> {
         let mid = cell.center().y;
         let mut ui = ui.new_child(UiBuilder::new().id_salt(id).max_rect(cell).layout(Layout::left_to_right(Align::Min)));
         // Measured from the right end: the toggle, EXPORT, then the facts 12 in from them.
-        let value = BarButton::icon(Icon::Panel).on(self.value_on).over_line();
-        let value_rect = Rect::from_min_max(pos2(cell.right() - value.width(&ui), cell.top()), cell.max);
+        let value = self.value.map(|on| BarButton::icon(Icon::Panel).on(on).over_line());
+        let value_rect = value.as_ref().map(|b| Rect::from_min_max(pos2(cell.right() - b.width(&ui), cell.top()), cell.max));
+        let value_left = value_rect.map_or(cell.right(), |r| r.left());
         let export = self.export.then(|| BarButton::label(Icon::Export, "Export").over_line());
-        let export_rect =
-            export.as_ref().map(|b| Rect::from_min_max(pos2(value_rect.left() - b.width(&ui), cell.top()), pos2(value_rect.left(), cell.bottom())));
-        let (says, colour, mut time) = self.facts(&ui, t);
-        let mut job = Text::Label.job(&says, colour);
-        let laid = Piece::new(&ui, job.clone(), says.clone());
-        let facts_end = export_rect.unwrap_or(value_rect).left() - RESULT_FACT_GAP;
+        let export_rect = export.as_ref().map(|b| Rect::from_min_max(pos2(value_left - b.width(&ui), cell.top()), pos2(value_left, cell.bottom())));
+        let (words_say, colour, mut time) = self.facts(&ui, t);
+        let says = match time.as_ref().and_then(Time::says) {
+            Some(time) if words_say.is_empty() => time.to_owned(),
+            Some(time) => format!("{words_say} {time}"),
+            None => words_say.clone(),
+        };
+        let mut job = Text::Label.job(&words_say, colour);
+        let laid = Piece::new(&ui, job.clone(), words_say.clone());
+        let facts_end = export_rect.map_or(value_left, |r| r.left()) - RESULT_FACT_GAP;
+        // The time comes 12 after the words, or alone when there are none.
+        let gap = if words_say.is_empty() { 0.0 } else { RESULT_FACT_GAP };
         // The tabs fit if they and the whole facts do, 12 apart; else the list button takes its
         // room before the facts.
         let widths: Vec<f32> = self.tabs.iter().map(|tab| tab.parts(&ui).1).collect();
-        let whole = laid.width() + time.as_ref().map_or(0.0, |time| RESULT_FACT_GAP + time.width());
+        let whole = laid.width() + time.as_ref().map_or(0.0, |time| gap + time.width());
         let fits = widths.iter().sum::<f32>() + RESULT_FACT_GAP + whole <= facts_end - cell.left();
         let list_w = if fits { 0.0 } else { NEW_TAB_W };
         // Short of room the time goes, then the words are cut.
         let facts_room = (facts_end - cell.left() - list_w).max(0.0);
-        if time.as_ref().is_some_and(|time| laid.width() + RESULT_FACT_GAP + time.width() > facts_room) {
+        if time.as_ref().is_some_and(|time| laid.width() + gap + time.width() > facts_room) {
             time = None;
         }
         let words = if laid.width() > facts_room {
             job.wrap = TextWrapping::truncate_at_width(facts_room.max(1.0));
-            Piece::new(&ui, job, says)
+            Piece::new(&ui, job, words_say)
         } else {
             laid
         };
-        let facts_w = words.width() + time.as_ref().map_or(0.0, |time| RESULT_FACT_GAP + time.width());
+        let facts_w = words.width() + time.as_ref().map_or(0.0, |time| gap + time.width());
         let facts_left = facts_end - facts_w;
 
         // Left to right, so Tab reaches them as they read: the tabs, kept left of the facts.
@@ -380,15 +403,17 @@ impl ResultBar<'_> {
             (Some(listed.button), listed.items)
         };
         let facts = piece(&ui, id.with("facts"), &words, pos2(facts_left, mid), colour);
-        if let Some(time) = time {
-            time.show(&ui, id.with("time"), facts_left + words.width() + RESULT_FACT_GAP, mid, t);
-        }
+        let time = time.and_then(|time| time.show(&ui, id.with("time"), facts_left + words.width() + gap, mid, t));
+        let time = match (time, self.time_hover) {
+            (Some(r), Some(hover)) => Some(r.hint(hover)),
+            (time, _) => time,
+        };
         let export = export.zip(export_rect).map(|(b, rect)| ui.add_enabled_ui(false, |ui| ui.put(rect, b)).inner.hint_disabled(EXPORT_LATER));
-        let value = ui.put(value_rect, value);
-        if value.clicked() {
+        let value = value.zip(value_rect).map(|(b, rect)| ui.put(rect, b));
+        if value.as_ref().is_some_and(Response::clicked) {
             asked = Some(ResultAsked::Value);
         }
-        ResultShown { tabs, facts, export, value, list, listed, asked }
+        ResultShown { tabs, facts, time, says, export, value, list, listed, asked }
     }
 }
 
@@ -731,7 +756,7 @@ mod tests {
     /// A result bar of `state` with the page's two tabs (`select ... orders` shown), or none.
     fn bar(tabs: bool, state: RunState, first_of: Option<(u64, u64)>, export: bool, value_on: bool) -> ResultBar<'static> {
         let tabs = if tabs { vec![ResultTab::new("select ... orders").active(true), ResultTab::new("select ... series")] } else { Vec::new() };
-        ResultBar { tabs, state, first_of, export, value_on }
+        ResultBar { tabs, state, first_of, export, value: Some(value_on), time_hover: None }
     }
 
     #[test]
@@ -758,7 +783,7 @@ mod tests {
                 ),
                 (
                     "affected",
-                    bar(true, RunState::Affected { rows: 2, ms: Some(5) }, None, false, false),
+                    bar(true, RunState::Affected { rows: Some(2), ms: Some(5) }, None, false, false),
                     ("2 ROWS AFFECTED", m),
                     Some(("5 MS", Label)),
                 ),
@@ -772,11 +797,11 @@ mod tests {
             ];
             for (name, result, (want, colour), time) in rows {
                 let at_ = format!("{theme:?} {name}");
-                let (tabs, export, value_on) = (result.tabs.len(), result.export, result.value_on);
+                let (tabs, export, value_on) = (result.tabs.len(), result.export, result.value == Some(true));
                 let mut seen = (Vec::new(), None, Rect::NOTHING);
                 let (shapes, at) = drawn(theme, |ui| {
                     let s = result.clone().show(ui);
-                    seen = (s.tabs.iter().map(|r| r.rect).collect(), s.export.map(|r| r.rect), s.value.rect);
+                    seen = (s.tabs.iter().map(|r| r.rect).collect(), s.export.map(|r| r.rect), s.value.map_or(Rect::NOTHING, |r| r.rect));
                 });
                 assert_ground(&shapes, at, &t, &at_);
                 let (tab_rects, export_rect, value) = seen;
@@ -836,6 +861,48 @@ mod tests {
                     assert!(whole(&shapes, "select ... orders").is_none(), "{at_}: no tabs");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn facts_read_as_drawn() {
+        // The facts in `label` capitals, `text_muted` but FAILED in `danger`; a statement whose
+        // count the database didn't give draws its time alone (its hover says why); a cut result's
+        // words are grey like any fact. With no Value cell EXPORT ends at the bar's end. The facts
+        // read out as written, before capitals.
+        let t = crate::theme::LIGHT;
+        let m = t.text_muted;
+        let rows: Vec<(RunState, Option<(u64, u64)>, Vec<(&str, Color32)>, &str)> = vec![
+            (RunState::Done { rows: 13, ms: Some(24) }, None, vec![("13 ROWS", m), ("24 MS", m)], "13 rows 24 ms"),
+            (RunState::Failed { ms: Some(12) }, None, vec![("FAILED", t.danger), ("12 MS", m)], "Failed 12 ms"),
+            (RunState::Affected { rows: None, ms: Some(5) }, None, vec![("5 MS", m)], "5 ms"),
+            (RunState::Affected { rows: Some(2), ms: Some(5) }, None, vec![("2 ROWS AFFECTED", m), ("5 MS", m)], "2 rows affected 5 ms"),
+            (
+                RunState::Done { rows: 10_000, ms: Some(80) },
+                Some((10_000, 25_000)),
+                vec![("FIRST 10,000 OF 25,000 ROWS", m), ("80 MS", m)],
+                "First 10,000 of 25,000 rows 80 ms",
+            ),
+        ];
+        for (state, first_of, want, says) in rows {
+            let mut seen = None;
+            let (shapes, at) = drawn(Theme::Light, |ui| {
+                let s = ResultBar { tabs: Vec::new(), state, first_of, export: true, value: None, time_hover: Some("why") }.show(ui);
+                seen = Some((s.says.clone(), s.export.map(|r| r.rect), s.value.is_some(), s.time.map(|r| r.rect)));
+            });
+            let (said, export, value, time) = seen.expect("drawn");
+            let drawn: Vec<String> = texts(&shapes).into_iter().map(|(w, _, _)| w).filter(|w| w != "EXPORT").collect();
+            let wanted: Vec<String> = want.iter().map(|(w, _)| (*w).to_owned()).collect();
+            assert_eq!(drawn, wanted, "{state:?}: the facts drawn");
+            for (w, colour) in &want {
+                assert_eq!(word(&shapes, w).1, *colour, "{state:?}: `{w}`'s colour");
+            }
+            assert_eq!(said, says, "{state:?}: read out as written");
+            assert!(!value, "{state:?}: no Value cell");
+            assert!(!icon_in(&shapes, at).0.contains(&t.text), "{state:?}: no panel icon painted");
+            let export = export.unwrap_or_else(|| panic!("{state:?}: EXPORT"));
+            assert!(close(export.right(), at.right()), "{state:?}: EXPORT ends at the bar's end: {export:?} {at:?}");
+            assert!(time.is_some(), "{state:?}: the time's response");
         }
     }
 
@@ -910,7 +977,8 @@ mod tests {
                     state: RunState::Done { rows: 10_000, ms: Some(80) },
                     first_of: Some((10_000, 25_000)),
                     export: true,
-                    value_on: false,
+                    value: Some(false),
+                    time_hover: None,
                 }
                 .show(ui);
             });
@@ -953,7 +1021,7 @@ mod tests {
             (RunState::Running { elapsed: Some(ms(2400)) }, "00:02.4", Text::Data),
         ] {
             let (shapes, _) = drawn(Theme::Light, |ui| {
-                ResultBar { tabs: Vec::new(), state, first_of: None, export: false, value_on: false }.show(ui);
+                ResultBar { tabs: Vec::new(), state, first_of: None, export: false, value: Some(false), time_hover: None }.show(ui);
             });
             assert_eq!(sections(&shapes, caps), [(caps.to_owned(), style.font(), crate::theme::LIGHT.text_muted)], "{state:?}");
         }
@@ -965,7 +1033,15 @@ mod tests {
         // A count shows nothing of its own for its first 300 ms (no timer yet): the words alone,
         // no COUNTING and no spinner. An estimate of 0 asks to COUNT ROWS.
         let (shapes, at) = drawn(Theme::Light, |ui| {
-            ResultBar { tabs: Vec::new(), state: RunState::Running { elapsed: None }, first_of: None, export: false, value_on: false }.show(ui);
+            ResultBar {
+                tabs: Vec::new(),
+                state: RunState::Running { elapsed: None },
+                first_of: None,
+                export: false,
+                value: Some(false),
+                time_hover: None,
+            }
+            .show(ui);
         });
         let (running, _) = word(&shapes, "RUNNING");
         let slot =
@@ -990,15 +1066,27 @@ mod tests {
         // then the words are cut; EXPORT and the toggle stay.
         let tabs: Vec<ResultTab<'static>> =
             (0..6).map(|i| ResultTab::new(["select ... orders", "select ... series"][i % 2]).active(i == 0)).collect();
-        let result =
-            ResultBar { tabs, state: RunState::Done { rows: 10_000, ms: Some(80) }, first_of: Some((10_000, 25_000)), export: true, value_on: false };
+        let result = ResultBar {
+            tabs,
+            state: RunState::Done { rows: 10_000, ms: Some(80) },
+            first_of: Some((10_000, 25_000)),
+            export: true,
+            value: Some(false),
+            time_hover: None,
+        };
         for width in [760.0, 560.0, 420.0, 300.0, 200.0] {
             let mut seen = (Vec::new(), None, Rect::NOTHING, Rect::NOTHING, Rect::NOTHING);
             let shapes = painted(Theme::Light, |ui| {
                 ui.allocate_ui(vec2(width, BAR_H), |ui| {
                     let at = Rect::from_min_size(ui.cursor().min, vec2(width, BAR_H));
                     let s = result.clone().show(ui);
-                    seen = (s.tabs.iter().map(|r| r.interact_rect).collect(), s.export.map(|r| r.rect), s.value.rect, s.facts.rect, at);
+                    seen = (
+                        s.tabs.iter().map(|r| r.interact_rect).collect(),
+                        s.export.map(|r| r.rect),
+                        s.value.map_or(Rect::NOTHING, |r| r.rect),
+                        s.facts.rect,
+                        at,
+                    );
                 });
             });
             let (tabs, export, value, facts, at) = seen;
@@ -1053,8 +1141,15 @@ mod tests {
             ui.allocate_ui(vec2(width, BAR_H), |ui| {
                 s.bar = Rect::from_min_size(ui.cursor().min, vec2(width, BAR_H));
                 let tabs = MANY.iter().take(n).enumerate().map(|(i, title)| ResultTab::new(title).active(i == s.shown)).collect();
-                let shown =
-                    ResultBar { tabs, state: RunState::Done { rows: 10, ms: Some(24) }, first_of: None, export: true, value_on: false }.show(ui);
+                let shown = ResultBar {
+                    tabs,
+                    state: RunState::Done { rows: 10, ms: Some(24) },
+                    first_of: None,
+                    export: true,
+                    value: Some(false),
+                    time_hover: None,
+                }
+                .show(ui);
                 s.tabs = shown.tabs.iter().map(|r| r.rect).collect();
                 s.list = shown.list.map(|r| r.rect);
                 s.export = shown.export.map_or(Rect::NOTHING, |r| r.rect);
@@ -1167,7 +1262,16 @@ mod tests {
             ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
                 let tabs = vec![ResultTab::new("first").active(true), ResultTab::new("second")];
                 seen.result.extend(
-                    ResultBar { tabs, state: RunState::Done { rows: 3, ms: None }, first_of: None, export: true, value_on: false }.show(ui).asked,
+                    ResultBar {
+                        tabs,
+                        state: RunState::Done { rows: 3, ms: None },
+                        first_of: None,
+                        export: true,
+                        value: Some(false),
+                        time_hover: None,
+                    }
+                    .show(ui)
+                    .asked,
                 );
             });
             ui.horizontal(|ui| seen.count += u32::from(RowCount::Unknown.show(ui, None).asked));
@@ -1206,7 +1310,16 @@ mod tests {
             ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
                 let tabs = vec![ResultTab::new("first").active(true), ResultTab::new("second")];
                 seen.extend(
-                    ResultBar { tabs, state: RunState::Cancelled { elapsed: None }, first_of: None, export: false, value_on: false }.show(ui).asked,
+                    ResultBar {
+                        tabs,
+                        state: RunState::Cancelled { elapsed: None },
+                        first_of: None,
+                        export: false,
+                        value: Some(false),
+                        time_hover: None,
+                    }
+                    .show(ui)
+                    .asked,
                 );
             });
         });

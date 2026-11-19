@@ -86,7 +86,7 @@ fn ctrl_enter_runs_and_shows_results() {
     assert!(visible(&ui.tag("grid-cell-0-1")), "the result grid shows its rows");
     assert_eq!(ui.value("grid-header-1")["name"], "name");
     assert_eq!(ui.value("query-rows"), "50 rows");
-    assert!(ui.tag("result-1").is_none(), "one result: no selector");
+    assert!(visible(&ui.tag("result-1")), "one result: one tab");
     assert!(ui.tag("query-error").is_none());
     // The editor keeps the keyboard, and the text is highlighted.
     let ed = ui.editor();
@@ -274,7 +274,7 @@ fn many_results_fit_the_toolbar() {
     ui.ran();
     assert_eq!(ui.query()["results"].as_array().map(Vec::len), Some(1200));
     // Not all fit: those around the shown one (the last) do, clear of the row count.
-    assert!(ui.tag("result-1").is_none());
+    assert!(!visible(&ui.tag("result-1")), "the first tab scrolled out of view");
     let last = ui.rect("result-1200");
     let rows = ui.rect("query-rows");
     assert!(last[0] + last[2] <= rows[0], "the selector stays clear of the row count: {last:?} {rows:?}");
@@ -285,7 +285,7 @@ fn many_results_fit_the_toolbar() {
     assert!(ui.tag("result-1200").is_some(), "the neighbours stay in reach");
     // The `…` lists every result, the first one too.
     let more = ui.rect("result-more");
-    assert!(more[0] + more[2] <= rows[0], "the `…` stays clear of the row count: {more:?} {rows:?}");
+    assert!(more[0] + more[2] <= rows[0], "the ⌄ list stays clear of the row count: {more:?} {rows:?}");
     ui.click("result-more");
     ui.frame();
     ui.click("result-list-1");
@@ -308,8 +308,14 @@ fn the_result_list_closes_when_chosen_by_keyboard() {
     ui.key("Enter");
     ui.frame();
     assert!(ui.tag("result-list-1").is_some(), "Enter opens the list");
-    ui.key("ArrowDown");
-    assert!(ui.focused("result-list-1"), "the arrow reaches the first result");
+    // egui may stop on the list's frame on the way.
+    for _ in 0..3 {
+        if ui.focused("result-list-1") {
+            break;
+        }
+        ui.key("ArrowDown");
+    }
+    assert!(ui.focused("result-list-1"), "the arrows reach the first result");
     ui.key("Enter");
     ui.frame();
     assert_eq!(ui.query()["shown"], 0, "the first result chosen");
@@ -386,29 +392,20 @@ fn choose_every_result(ui: &mut Ui, when: &str) {
     }
 }
 
-/// The selector's buttons lie whole under the run row, before the row count, and its label, when drawn,
-/// whole before them.
+/// The result tabs in view lie whole in the result bar under the run row, before the facts.
 fn selector_whole(ui: &mut Ui, when: &str) {
     let i = ui.inspect();
     let rect = |id: &str| -> [f32; 4] {
         let r = tag_in(&i, id).unwrap_or_else(|| panic!("{when}: no `{id}`"))["rect"].clone();
         [0, 1, 2, 3].map(|k| r[k].as_f64().unwrap() as f32)
     };
-    let (run, rows) = (rect("query-run"), rect("query-rows"));
-    let parts: Vec<String> = ids(&i).into_iter().filter(|id| id.starts_with("result-") && !id.starts_with("result-list-")).collect();
-    assert!(!parts.is_empty(), "{when}: a selector");
-    let mut first = f32::MAX;
+    let (run, facts) = (rect("query-run"), rect("query-facts"));
+    let parts: Vec<String> =
+        ids(&i).into_iter().filter(|id| id.starts_with("result-") && !id.starts_with("result-list-") && visible(&tag_in(&i, id))).collect();
+    assert!(!parts.is_empty(), "{when}: result tabs");
     for id in &parts {
-        let [x, _, w, _] = rect(id);
-        assert!(visible(&tag_in(&i, id)) && w >= 22.0, "{when}: `{id}` is whole: {:?}", tag_in(&i, id));
-        assert!(x + w <= rows[0] && rect(id)[1] >= run[1] + run[3], "{when}: `{id}` lies under the run row, before the row count");
-        first = first.min(x);
-    }
-    let bar = egui::Rect::from_min_max(egui::pos2(run[0], rows[1]), egui::pos2(rows[0] + rows[2], rows[1] + rows[3]));
-    for (r, g) in ui.texts() {
-        if g.text() == "Results" && bar.contains(r.center()) {
-            assert!(r.max.x <= first, "{when}: the label is whole, before the buttons: {r:?} {first}");
-        }
+        let [x, y, w, _] = rect(id);
+        assert!(x + w <= facts[0] && y >= run[1] + run[3], "{when}: `{id}` lies under the run row, before the facts");
     }
 }
 
@@ -444,9 +441,24 @@ fn statements_without_rows_show_rows_affected() {
     assert_eq!(ui.value("query-affected"), "1 row affected");
     assert!(ui.tag("grid-header-0").is_none(), "no rows, no grid");
     assert!(ui.tag("query-rows").is_none(), "no row count for a statement without rows");
+    assert!(ui.value("query-facts").as_str().is_some_and(|f| f.starts_with("1 row affected ") && f.ends_with(" ms")), "the facts");
     ui.click("result-2");
     ui.frame();
     assert_eq!(ui.value("query-affected"), "2 rows affected");
+    // The bar says it: nothing under it.
+    let bar = as_rect(ui.rect("result-2"));
+    let i = ui.inspect();
+    let body = body_rect(&mut ui);
+    let under: Vec<String> = ids(&i)
+        .into_iter()
+        .filter(|id| !id.starts_with("status-"))
+        .filter(|id| {
+            let r = &tag_in(&i, id).unwrap()["rect"];
+            let (x, y) = (r[0].as_f64().unwrap() as f32, r[1].as_f64().unwrap() as f32);
+            y > bar.bottom() + 2.0 && y < body.bottom() && x >= body.left() && x < body.right()
+        })
+        .collect();
+    assert_eq!(under, Vec::<String>::new(), "nothing tagged under the result bar");
 }
 
 #[test]
@@ -1490,5 +1502,94 @@ fn cancel_shows_from_300_ms() {
         ui.until("the cancel", |ui| ui.query()["running"].is_null() && ui.query()["error"]["code"] == "cancelled");
         ui.frame();
         assert!(ui.tag("query-cancel").is_none(), "{run} run: no CANCEL once it ended");
+    }
+}
+
+/// A2+: before the first run there is no result bar.
+#[test]
+fn no_result_bar_before_the_first_run() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    for id in ["query-facts", "result-1", "query-export", "query-rows", "query-affected"] {
+        assert!(ui.tag(id).is_none(), "no `{id}` before the first run");
+    }
+    // The value toggle is the footer's until it moves into the result bar.
+}
+
+/// One result: one tab named for what it works on, the facts with the time, EXPORT off; the bar
+/// right under the run row and the grid under it.
+#[test]
+fn one_result_has_one_tab_and_the_facts() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    ui.text("SELECT * FROM shop.orders LIMIT 50");
+    ui.ctrl("Enter");
+    ui.ran();
+    let tab = as_rect(ui.rect("result-1"));
+    assert!(ui.text_in(tab.expand(1.0), "SELECT … orders").is_some(), "the tab's title as written");
+    assert_eq!(ui.value("result-1")["shown"], true);
+    assert_eq!(ui.value("query-rows"), "50 rows");
+    let facts = ui.value("query-facts");
+    let f = facts.as_str().unwrap_or_default();
+    let ms = f.strip_prefix("50 rows ").and_then(|f| f.strip_suffix(" ms"));
+    assert!(ms.is_some_and(|ms| ms.parse::<u64>().is_ok()), "the facts: {facts}");
+    assert!(!ui.enabled("query-export"), "EXPORT off");
+    let export = ui.drawn("query-export").center();
+    ui.rest(export);
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == dbee_ui_egui::components::results::EXPORT_LATER), "EXPORT says why");
+    let run = as_rect(ui.rect("query-run"));
+    // The run row is 35 tall, its buttons 28 in its middle, then its 1 px line.
+    let row_bottom = run.bottom() + 3.5 + 1.0;
+    assert!((tab.top() - row_bottom).abs() <= 1.0, "the bar right under the run row: {tab:?}, the row to {row_bottom}");
+    let header = as_rect(ui.rect("grid-header-0"));
+    assert!(header.top() >= tab.bottom(), "the grid under the bar: {header:?} {tab:?}");
+}
+
+/// Review Focus 2: the bar says RUNNING with its timer only once a run has gone 300 ms, keeping
+/// the last results' tabs; the timer starts afresh with each run.
+#[test]
+fn the_running_state_waits_300_ms_and_restarts_per_run() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, step: Some(0.05), ..Setup::default() });
+    ui.ctrl("T");
+    ui.frame();
+    ui.text("select 1 as a");
+    ui.ctrl("Enter");
+    ui.ran();
+    let old = ui.value("query-facts");
+    assert!(old.as_str().is_some_and(|f| f.starts_with("1 row ")), "{old}");
+    ui.execute("query.setText", json!({ "text": "select pg_sleep(30)" }));
+    ui.frame();
+    for run in ["first", "second"] {
+        let mut first_shown: Option<String> = None;
+        held_run(&mut ui, 0.5, |ui, gone| {
+            let facts = ui.value("query-facts");
+            let f = facts.as_str().unwrap_or_default().to_owned();
+            // The window saw the run a frame or two before `gone` started counting.
+            if gone <= 0.15 {
+                assert!(!f.starts_with("Running"), "{run} run at {gone:.2} s: not yet running: {f}");
+            }
+            if f.starts_with("Running") && first_shown.is_none() {
+                first_shown = Some(f.clone());
+            }
+            if gone >= 0.35 {
+                assert!(f.starts_with("Running 00:00."), "{run} run at {gone:.2} s: {f}");
+                // The first run keeps the earlier result; the second follows a cancel, which kept none.
+                if run == "first" {
+                    assert!(visible(&ui.tag("result-1")), "{run} run: the last results' tab stays");
+                }
+            }
+        });
+        let first = first_shown.unwrap_or_default();
+        assert!(first.starts_with("Running 00:00.3"), "{run} run: the timer from 00:00.3: {first}");
+        ui.click("query-cancel");
+        ui.until("the cancel", |ui| ui.query()["running"].is_null() && ui.query()["error"]["code"] == "cancelled");
+        ui.frame();
+        let f = ui.value("query-facts");
+        assert!(f.as_str().is_some_and(|f| f.starts_with("Cancelled ")), "{run} run: the new facts: {f}");
     }
 }
