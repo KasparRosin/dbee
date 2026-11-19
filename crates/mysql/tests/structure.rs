@@ -1,8 +1,8 @@
-//! A table's indexes and triggers (`table_structure`) against every MySQL and MariaDB test
+//! A table's indexes, triggers, column defaults and foreign key actions (`table_structure`) against every MySQL and MariaDB test
 //! server. Each test makes its own database and drops it.
 
 use dbee_config::{ConnectionConfig, DbKind, SslMode};
-use dbee_core::{IndexInfo, TableRef, TableStructure, TriggerEvent, TriggerTiming};
+use dbee_core::{FkAction, IndexInfo, TableRef, TableStructure, TriggerEvent, TriggerTiming};
 use dbee_driver::{Purpose, QUERY_LIMITS, Target};
 use dbee_mysql::{MySqlConnection, connect};
 use dbee_testkit::{Kind, Server, TestDb, require_testdb, unique};
@@ -131,6 +131,60 @@ async fn odd_names_survive() {
         assert_eq!(read[0].indexes[0].name, "i'x €é");
         assert_eq!(read[0].indexes[0].parts.iter().map(|p| p.column.as_deref()).collect::<Vec<_>>(), [Some("a'b"), Some("€é")]);
         assert_eq!(read[0].triggers.iter().map(|t| (t.name.as_str(), t.events.clone())).collect::<Vec<_>>(), [("tr'g", vec![TriggerEvent::Delete])]);
+    })
+    .await;
+}
+
+/// Defaults as the structure view writes them on MySQL and MariaDB (`auto_increment`,
+/// `generated always as (…)`, a string quoted as a SQL literal, an expression or a number as the
+/// server gives it); each foreign key's actions by its columns.
+#[tokio::test]
+async fn mysql_defaults_and_actions() {
+    let setup = |conn: &MySqlConnection| {
+        let mut sql = vec![
+            "CREATE TABLE {d}.p (id BIGINT AUTO_INCREMENT PRIMARY KEY, status VARCHAR(10) DEFAULT 'pending', blank VARCHAR(3) DEFAULT '', \
+             at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, n INT DEFAULT 5, g INT AS (n * 2), q VARCHAR(5) DEFAULT 'it''s') ENGINE=InnoDB"
+                .to_string(),
+            "CREATE TABLE {d}.c (id INT, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES {d}.p (id) ON DELETE CASCADE ON UPDATE SET NULL) ENGINE=InnoDB"
+                .into(),
+            "CREATE TABLE {d}.plain (id INT, p_id BIGINT, FOREIGN KEY (p_id) REFERENCES {d}.p (id)) ENGINE=InnoDB".into(),
+        ];
+        if modern_mysql(conn) || conn.info().product != "MySQL" {
+            sql.push("ALTER TABLE {d}.p ADD COLUMN x INT DEFAULT (n + 1)".into());
+        }
+        sql
+    };
+    on_each(setup, &["p", "c", "plain"], |s, conn, read| {
+        let default = |column: &str| {
+            let d =
+                read[0].defaults.iter().find(|d| d.column == column).unwrap_or_else(|| panic!("{}: no {column} in {:?}", s.name, read[0].defaults));
+            d.default.clone().unwrap_or_default()
+        };
+        assert_eq!(default("id"), "auto_increment", "{}", s.name);
+        assert_eq!(default("status"), "'pending'", "{}", s.name);
+        assert_eq!(default("blank"), "''", "{}", s.name);
+        assert!(default("at").to_ascii_uppercase().starts_with("CURRENT_TIMESTAMP"), "{}: {}", s.name, default("at"));
+        assert_eq!(default("n"), "5", "{}", s.name);
+        assert!(default("g").starts_with("generated always as ("), "{}: {}", s.name, default("g"));
+        assert_eq!(default("q"), "'it''s'", "{}", s.name);
+        if modern_mysql(conn) || conn.info().product != "MySQL" {
+            assert_eq!(default("x"), "(`n` + 1)", "{}: the expression as the server writes it", s.name);
+        }
+        let none: Vec<_> = read[1].defaults.iter().filter(|d| d.default.is_some()).collect();
+        assert!(none.is_empty(), "{}: no defaults in c, MariaDB's `NULL` read as none: {none:?}", s.name);
+        let actions = |i: usize| -> Vec<(Vec<&str>, &str, Option<FkAction>, Option<FkAction>)> {
+            read[i]
+                .actions
+                .iter()
+                .map(|a| (a.columns.iter().map(String::as_str).collect(), a.target.name.as_str(), a.on_delete, a.on_update))
+                .collect()
+        };
+        assert_eq!(actions(1), [(vec!["p_id"], "p", Some(FkAction::Cascade), Some(FkAction::SetNull))], "{}", s.name);
+        assert!(read[1].actions.iter().all(|a| a.target.schema.starts_with("st_")), "{}", s.name);
+        // A key that names no action: MySQL 5.7 and MariaDB say RESTRICT (their default, which acts
+        // as NO ACTION does in InnoDB); MySQL 8 says NO ACTION. dbee gives what the server says.
+        let plain = if modern_mysql(conn) { FkAction::NoAction } else { FkAction::Restrict };
+        assert_eq!(actions(2), [(vec!["p_id"], "p", Some(plain), Some(plain))], "{}", s.name);
     })
     .await;
 }
