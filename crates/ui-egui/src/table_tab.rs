@@ -212,7 +212,7 @@ fn shown_rows(page: u64, rows: usize) -> Option<(u64, u64)> {
 
 /// How long `job` of tab `tab` has run as the window saw it, from the first frame that saw it
 /// (`now` on egui's clock), once that is [`QUIET`] or more.
-fn after_quiet(since: &mut Since, tab: TabId, job: Option<JobId>, now: f64) -> Option<Duration> {
+pub(crate) fn after_quiet(since: &mut Since, tab: TabId, job: Option<JobId>, now: f64) -> Option<Duration> {
     let job = job?;
     let first = *since.entry((tab, job)).or_insert(now);
     let ran = now - first;
@@ -485,7 +485,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         // The table bar, its loading and counting states 300 ms after their jobs started.
         let now = top.ctx().input(|i| i.time);
         let since = &mut view.work.since;
-        since.retain(|(tab_id, job), _| *tab_id != id || Some(*job) == tab.loading || Some(*job) == tab.counting);
+        since.retain(|(tab_id, job), _| *tab_id != id || [tab.loading, tab.counting, tab.applying].contains(&Some(*job)));
         let loading = after_quiet(since, id, tab.loading, now);
         let counting = after_quiet(since, id, tab.counting, now);
         if tab.loading.is_some() || tab.counting.is_some() {

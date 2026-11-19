@@ -50,7 +50,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dbee_config::ConnectionConfig;
-use dbee_engine::{Session, State, Tab, TabId, TlsState, TransactionState, Which};
+use dbee_engine::{JobId, Session, State, Tab, TabId, TlsState, TransactionState, Which};
 use dbee_sql::filter::Condition;
 use egui::{Align, Frame, Layout, Rect, Sense, UiBuilder, WidgetInfo, WidgetType, pos2, vec2};
 use serde_json::json;
@@ -146,12 +146,24 @@ pub(crate) fn dirty(tab: &Tab) -> bool {
     }
 }
 
-/// One of `tab`'s jobs runs (by its markers).
-fn busy(tab: &Tab) -> bool {
+/// `tab`'s live jobs (by its markers).
+fn jobs(tab: &Tab) -> Vec<JobId> {
     match tab {
-        Tab::Table(t) => t.loading.is_some() || t.counting.is_some() || t.applying.is_some(),
-        Tab::Query(q) => q.running.is_some(),
+        Tab::Table(t) => [t.loading, t.counting, t.applying].into_iter().flatten().collect(),
+        Tab::Query(q) => q.running.into_iter().collect(),
     }
+}
+
+/// One of `tab`'s jobs has run 300 ms as the window saw it (the job clock, `since`, keyed by tab
+/// and job, as the table bar's timers): the tab's running mark waits as long, so a fast job never
+/// flickers it.
+fn busy(since: &mut table_tab::Since, tab: &Tab, now: f64) -> bool {
+    let jobs = jobs(tab);
+    let id = tab.id();
+    since.retain(|(tab_id, job), _| *tab_id != id || jobs.contains(job));
+    // Every job's start is noted, not only the first's.
+    let past: Vec<bool> = jobs.into_iter().map(|job| table_tab::after_quiet(since, id, Some(job), now).is_some()).collect();
+    past.contains(&true)
 }
 
 /// A live job the status bar shows: what runs, and the command that cancels it.
@@ -259,8 +271,8 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
         app.view.panel.clear();
     }
     egui::CentralPanel::default().frame(Frame::new().fill(t.bg)).show(ui, |ui| {
-        strip(app, ui, &mut acts);
-        body(app, ui, &mut acts);
+        let top = strip(app, ui, &mut acts);
+        body(app, ui, top, &mut acts);
     });
     // After the tab's body, so a cell selected in this frame shows its value now.
     if let Some(rect) = panel {
@@ -401,9 +413,11 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
 }
 
-/// The tabs strip ([`tab::Strip`]).
-fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+/// The tabs strip ([`tab::Strip`]); where it ends below.
+fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> f32 {
     let st: &State = app.session.state();
+    let now = ui.ctx().input(|i| i.time);
+    let since = &mut app.view.work.since;
     let tabs: Vec<TabView> = st
         .tabs
         .iter()
@@ -414,7 +428,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             hover: tab.title(),
             active: st.active == Some(tab.id()),
             dirty: dirty(tab),
-            busy: busy(tab),
+            busy: busy(since, tab, now),
         })
         .collect();
     let tags = &mut app.tags;
@@ -437,6 +451,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         Some((id, Asked::Activate)) => acts.push(Act::Activate(id)),
         None => {}
     }
+    let bottom = shown.new.rect.bottom();
     let r = shown.new.hint("New query tab (Ctrl+T)");
     tags.tag("tab-new", &r);
     if r.clicked() {
@@ -453,10 +468,12 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
             tags.tag_value_as(&format!("tab-list-{}", i.saturating_add(1)), item, value, true);
         }
     }
+    bottom
 }
 
-/// The active tab's body (see the module docs), or the ways to start when no tab is open.
-fn body(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+/// The active tab's body (see the module docs) from `top`, the strip's line, or the ways to start
+/// when no tab is open.
+fn body(app: &mut DbeeApp, ui: &mut egui::Ui, top: f32, acts: &mut Vec<Act>) {
     let active = app.session.state().active_tab().map(|tab| (tab.id(), matches!(tab, Tab::Query(_))));
     if active.is_none_or(|(_, query)| !query) {
         // The next query tab to become the active one takes the keyboard.
@@ -467,7 +484,9 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         no_tab(app, ui, acts);
         return;
     };
-    let content = ui.available_rect_before_wrap();
+    // From the strip's line, with no spacing after the strip.
+    let room = ui.available_rect_before_wrap();
+    let content = Rect::from_min_max(egui::pos2(room.left(), top.min(room.top())), room.max);
     let mut ui = ui.new_child(egui::UiBuilder::new().id_salt("dbee-tab-body").max_rect(content).layout(Layout::top_down(Align::Min)));
     if query {
         query_tab::show(app, &mut ui, id);

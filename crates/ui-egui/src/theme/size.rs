@@ -155,6 +155,14 @@ pub const BAR_CELL_H: f32 = BAR_H - BAR_LINE;
 /// The run row (`run row`): its buttons this far in from its left end and this far apart.
 pub const RUN_ROW_PAD_X: f32 = 12.0;
 pub const RUN_ROW_GAP: f32 = 4.0;
+/// What leads the run row (the database chip) stands this far before RUN.
+pub const CHIP_RUN_GAP: f32 = SPACE_8;
+/// The query editor (`editor`): its line numbers' box this far in from its left, its text this
+/// far after the box and under its top.
+pub const EDITOR_INSET: f32 = 12.0;
+/// The split between the query editor and the run row: a zone this tall centred on the row's top
+/// line takes the drag.
+pub const SPLIT_ZONE_H: f32 = SPACE_8;
 /// A result tab (`result tab`): its title this far in from its ends, cut at this width.
 pub const RESULT_TAB_PAD_X: f32 = 12.0;
 pub const RESULT_TAB_TITLE_MAX: f32 = 200.0;

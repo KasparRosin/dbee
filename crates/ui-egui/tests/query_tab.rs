@@ -88,7 +88,6 @@ fn ctrl_enter_runs_and_shows_results() {
     assert_eq!(ui.value("query-rows"), "50 rows");
     assert!(ui.tag("result-1").is_none(), "one result: no selector");
     assert!(ui.tag("query-error").is_none());
-    assert!(ui.tag("query-hint").is_none(), "the hint goes once there are results");
     // The editor keeps the keyboard, and the text is highlighted.
     let ed = ui.editor();
     assert_eq!((ed["focused"].clone(), ed["lines"].clone(), ed["highlighted"].clone()), (json!(true), json!(5), json!(true)), "{ed}");
@@ -146,7 +145,7 @@ fn error_card_and_cursor_jump() {
     let (link, _) = ui.text_in(band, "Line 1, column 8 →").expect("the position at the band's right");
     assert!((link.right() - (band.right() - 12.0)).abs() < 0.5, "{link:?} in {band:?}");
     assert!(ui.text_in(band, "Click to put the cursor there.").is_none(), "the page drops the old line");
-    let [text_left, ..] = ui.rect("query-editor");
+    let text_left = ui.texts().into_iter().find(|(_, g)| g.text() == "select nope").map(|(r, _)| r.left()).expect("the editor's text");
     let number = ui.texts().into_iter().find(|(r, g)| g.text() == "1" && r.right() < text_left).map(|(_, g)| g.job.sections[0].format.color);
     assert_eq!(number, Some(t.danger), "the error's line number");
     // Elsewhere first: the cursor at the start, and the keyboard taken away.
@@ -203,13 +202,12 @@ fn cancel_with_the_button(db: &TestDb) -> Duration {
     let mut ui = query_tab(db);
     ui.text("select pg_sleep(30)");
     ui.frame();
-    assert!(!ui.enabled("query-cancel"), "nothing runs: Cancel is disabled");
+    assert!(ui.tag("query-cancel").is_none(), "nothing runs: no Cancel");
     assert!(ui.enabled("query-run"));
     ui.click("query-run");
-    ui.until("the run to start", |ui| !ui.query()["running"].is_null());
-    ui.frame();
+    ui.until("Cancel to show", |ui| ui.tag("query-cancel").is_some());
     assert!(ui.enabled("query-cancel"), "Cancel is enabled while the run goes");
-    assert!(ui.enabled("query-run"), "Run follows the engine's enabled check; a run going is its Busy answer");
+    assert!(!ui.enabled("query-run"), "Run is off while the run goes");
     let start = Instant::now();
     ui.click("query-cancel");
     ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
@@ -218,7 +216,7 @@ fn cancel_with_the_button(db: &TestDb) -> Duration {
     ui.frame();
     let card = ui.value("query-error");
     assert_eq!(card["code"], "cancelled", "{card}");
-    assert!(!ui.enabled("query-cancel"));
+    assert!(ui.tag("query-cancel").is_none());
     assert!(ui.tag("notice").is_none(), "the card says it: {:?}", ui.tag("notice"));
     took
 }
@@ -236,6 +234,7 @@ fn ctrl_enter_while_a_run_goes_says_the_engine_is_busy() {
     let notice = ui.value("notice");
     assert_eq!(notice, "A query is running in Query 1.");
     assert_eq!(ui.query()["running"], running, "the run goes on, and no second one started");
+    ui.until("Cancel to show", |ui| ui.tag("query-cancel").is_some());
     ui.click("query-cancel");
     ui.until("the cancel", |ui| ui.query()["error"]["code"] == "cancelled");
 }
@@ -387,7 +386,7 @@ fn choose_every_result(ui: &mut Ui, when: &str) {
     }
 }
 
-/// The selector's buttons lie whole between Cancel and the row count, and its label, when drawn,
+/// The selector's buttons lie whole under the run row, before the row count, and its label, when drawn,
 /// whole before them.
 fn selector_whole(ui: &mut Ui, when: &str) {
     let i = ui.inspect();
@@ -395,17 +394,17 @@ fn selector_whole(ui: &mut Ui, when: &str) {
         let r = tag_in(&i, id).unwrap_or_else(|| panic!("{when}: no `{id}`"))["rect"].clone();
         [0, 1, 2, 3].map(|k| r[k].as_f64().unwrap() as f32)
     };
-    let (cancel, rows) = (rect("query-cancel"), rect("query-rows"));
+    let (run, rows) = (rect("query-run"), rect("query-rows"));
     let parts: Vec<String> = ids(&i).into_iter().filter(|id| id.starts_with("result-") && !id.starts_with("result-list-")).collect();
     assert!(!parts.is_empty(), "{when}: a selector");
     let mut first = f32::MAX;
     for id in &parts {
         let [x, _, w, _] = rect(id);
         assert!(visible(&tag_in(&i, id)) && w >= 22.0, "{when}: `{id}` is whole: {:?}", tag_in(&i, id));
-        assert!(x >= cancel[0] + cancel[2] && x + w <= rows[0], "{when}: `{id}` lies between Cancel and the row count");
+        assert!(x + w <= rows[0] && rect(id)[1] >= run[1] + run[3], "{when}: `{id}` lies under the run row, before the row count");
         first = first.min(x);
     }
-    let bar = egui::Rect::from_min_size(egui::pos2(cancel[0], cancel[1]), egui::vec2(rows[0] + rows[2] - cancel[0], cancel[3]));
+    let bar = egui::Rect::from_min_max(egui::pos2(run[0], rows[1]), egui::pos2(rows[0] + rows[2], rows[1] + rows[3]));
     for (r, g) in ui.texts() {
         if g.text() == "Results" && bar.contains(r.center()) {
             assert!(r.max.x <= first, "{when}: the label is whole, before the buttons: {r:?} {first}");
@@ -564,7 +563,6 @@ fn text_set_elsewhere_reaches_the_editor() {
 fn run_buttons_say_why_they_cannot_run() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = query_tab(db);
-    assert!(ui.tag("query-hint").is_some(), "an empty results area says how to run");
     // The buttons follow the engine's own enabled check for `query.run`: connected, a query tab
     // active. Whatever the run itself refuses (no statement, a run going) it says in a notice.
     assert!(ui.enabled("query-run") && ui.enabled("query-run-current"));
@@ -1167,22 +1165,15 @@ fn moved_buttons_keep_their_ids_values_and_flags() {
     let mut ui = query_tab(db);
     ui.text("select pg_sleep(30)");
     ui.frame();
-    let idle: [Moved<'_>; 3] = [
-        ("query-run", Some(json!("Run")), true, "RUN"),
-        ("query-run-current", Some(json!("Run current")), true, "RUN CURRENT"),
-        ("query-cancel", Some(json!("Cancel")), false, "CANCEL"),
-    ];
+    let idle: [Moved<'_>; 2] =
+        [("query-run", Some(json!("Run")), true, "RUN"), ("query-run-current", Some(json!("Run current")), true, "RUN CURRENT")];
     assert_moved(&mut ui, &idle, "idle");
-    let cancel = ui.centre("query-cancel");
-    ui.rest(cancel);
-    let why = "Stop the running statement: not now, nothing is running";
-    assert!(ui.texts().iter().any(|(_, g)| g.text() == why), "Cancel, off, says why on hover");
+    assert!(ui.tag("query-cancel").is_none(), "idle: no Cancel");
     ui.click("query-run");
-    ui.until("the run to start", |ui| !ui.query()["running"].is_null());
-    ui.frame();
+    ui.until("Cancel to show", |ui| ui.tag("query-cancel").is_some());
     let running: [Moved<'_>; 3] = [
-        ("query-run", Some(json!("Run")), true, "RUN"),
-        ("query-run-current", Some(json!("Run current")), true, "RUN CURRENT"),
+        ("query-run", Some(json!("Run")), false, "RUN"),
+        ("query-run-current", Some(json!("Run current")), false, "RUN CURRENT"),
         ("query-cancel", Some(json!("Cancel")), true, "CANCEL"),
     ];
     assert_moved(&mut ui, &running, "running");
@@ -1338,4 +1329,166 @@ fn a_query_result_row_selects_and_copies_but_never_deletes() {
     ui.click("grid-menu-copy-json");
     ui.frame();
     assert_eq!(ui.copied().as_deref(), Some("[\n  {\"id\": 4, \"name\": \"Customer 4\"}\n]"));
+}
+
+/// The tab body's rect: from the sidebar to the value panel (or the window's edge), from the
+/// strip's line down to about the status bar.
+fn body_rect(ui: &mut Ui) -> egui::Rect {
+    let x = ui.body_x();
+    let tab = ui.document()["active"].as_u64().expect("a tab is active");
+    let top = ui.rect(&format!("tab-{tab}"));
+    let status = ui.rect("status-connection");
+    egui::Rect::from_x_y_ranges(x, egui::Rangef::new(top[1] + top[3], status[1]))
+}
+
+/// `[x, y, w, h]` as a rect.
+fn as_rect(r: [f32; 4]) -> egui::Rect {
+    egui::Rect::from_min_size(egui::pos2(r[0], r[1]), egui::vec2(r[2], r[3]))
+}
+
+/// The editor is the area: from the strip's line, edge to edge, with no box, edge or gutter line;
+/// the line numbers 12 in, the text 12 after them and 12 under the top.
+#[test]
+fn the_editor_runs_edge_to_edge() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    ui.text("select 1");
+    ui.frame();
+    let body = body_rect(&mut ui);
+    let ed = as_rect(ui.rect("query-editor"));
+    assert!(close(ed.left(), body.left()) && close(ed.right(), body.right()), "edge to edge: {ed:?} in {body:?}");
+    assert!((ed.top() - body.top()).abs() <= 1.0, "from the strip's line: {ed:?} in {body:?}");
+    let digit = ui.harness.ctx.fonts_mut(|f| f.glyph_width(&dbee_ui_egui::theme::Text::Code.font(), '0'));
+    let number = ui.text_in(ed, "1").unwrap_or_else(|| panic!("the line number")).0;
+    let text = ui.text_in(ed, "select 1").unwrap_or_else(|| panic!("the text")).0;
+    assert!((number.right() - (body.left() + 12.0 + 2.0 * digit)).abs() <= 1.0, "the number's box 12 in: {number:?}");
+    assert!((text.left() - (number.right() + 12.0)).abs() <= 1.0, "the text 12 after the gutter: {text:?}, {number:?}");
+    assert!((text.top() - (ed.top() + 12.0)).abs() <= 1.0, "the text 12 under the top: {text:?} in {ed:?}");
+    let t = dbee_ui_egui::theme::LIGHT;
+    for (_, shape) in ui.shapes() {
+        match shape {
+            egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.rect.intersects(ed.shrink(2.0)) => {
+                assert!(r.stroke.color != t.line_strong && r.stroke.color != t.ink, "no box round the editor: {r:?}");
+            }
+            egui::Shape::LineSegment { points, stroke } if points[0].x == points[1].x && ed.shrink(2.0).contains(points[0]) => {
+                assert!(stroke.color != t.line, "no line between gutter and text: {points:?}");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The split is the run row's top line: dragged, it moves the run row with it.
+#[test]
+fn the_split_is_the_run_rows_top_line() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    let split = as_rect(ui.rect("query-split"));
+    let run = as_rect(ui.rect("query-run"));
+    // The row is 35 tall above its line, its buttons 28 tall in its middle.
+    let row_top = run.top() - 3.5;
+    assert!((split.center().y - row_top).abs() <= 1.0, "the split on the row's top line: {split:?}, the row from {row_top}");
+    assert!((split.height() - 8.0).abs() <= 0.5, "an 8 tall zone: {split:?}");
+    let from = split.center();
+    let to = from + egui::vec2(0.0, 40.0);
+    let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    ui.frame_with(vec![Event::PointerMoved(from)]);
+    ui.frame_with(vec![button(from, true)]);
+    for k in 1..=4 {
+        ui.frame_with(vec![Event::PointerMoved(from + (to - from) * (k as f32 / 4.0))]);
+    }
+    ui.frame_with(vec![button(to, false)]);
+    ui.frame();
+    let moved = as_rect(ui.rect("query-run"));
+    assert!((moved.top() - run.top() - 40.0).abs() <= 1.0, "RUN moved with it: {run:?} → {moved:?}");
+}
+
+/// Idle: RUN 12 in, RUN CURRENT 4 after it, no CANCEL, no sentence on how to run, and nothing
+/// tagged under the row.
+#[test]
+fn the_run_row_matches_the_page() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    let body = body_rect(&mut ui);
+    let (run, current) = (as_rect(ui.rect("query-run")), as_rect(ui.rect("query-run-current")));
+    assert!((run.left() - (body.left() + 12.0)).abs() <= 1.0, "RUN 12 in: {run:?} in {body:?}");
+    assert!((current.left() - (run.right() + 4.0)).abs() <= 1.0, "RUN CURRENT 4 after: {current:?}");
+    assert!(ui.tag("query-cancel").is_none(), "no CANCEL while idle");
+    assert!(ui.tag("query-hint").is_none(), "no sentence on how to run");
+    let i = ui.inspect();
+    let under: Vec<String> = ids(&i)
+        .into_iter()
+        .filter(|id| !id.starts_with("status-"))
+        .filter(|id| {
+            let r = &tag_in(&i, id).unwrap()["rect"];
+            let y = r[1].as_f64().unwrap() as f32;
+            let x = r[0].as_f64().unwrap() as f32;
+            y > run.bottom() + 4.0 && y < body.bottom() && x >= body.left() && x < body.right()
+        })
+        .collect();
+    assert_eq!(under, Vec::<String>::new(), "nothing tagged under the run row");
+}
+
+/// Egui's clock in the last frame, in seconds.
+fn clock(ui: &Ui) -> f64 {
+    ui.harness.ctx.input(|i| i.time)
+}
+
+/// Runs `select pg_sleep(30)` with Run; frames until the run goes, then on until the window's
+/// clock has gone `secs` past the frame that first showed it, `check` on each frame with the time
+/// gone so far.
+fn held_run(ui: &mut Ui, secs: f64, mut check: impl FnMut(&mut Ui, f64)) {
+    ui.click("query-run");
+    let start = Instant::now();
+    while ui.query()["running"].is_null() {
+        assert!(start.elapsed() < Duration::from_secs(20), "the run starts");
+        ui.frame();
+    }
+    let first = clock(ui);
+    loop {
+        ui.frame();
+        let gone = clock(ui) - first;
+        assert!(!ui.query()["running"].is_null(), "still running at {gone:.2} s");
+        check(ui, gone);
+        if gone >= secs {
+            return;
+        }
+    }
+}
+
+/// Review Focus 2: CANCEL shows, and RUN goes off, only once the run has gone 300 ms, counted
+/// afresh for each run.
+#[test]
+fn cancel_shows_from_300_ms() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, step: Some(0.05), ..Setup::default() });
+    ui.ctrl("T");
+    ui.frame();
+    ui.text("select pg_sleep(30)");
+    ui.frame();
+    for run in ["first", "second"] {
+        let mut shown = false;
+        held_run(&mut ui, 0.45, |ui, gone| {
+            if gone <= 0.25 {
+                assert!(ui.tag("query-cancel").is_none(), "{run} run at {gone:.2} s: no CANCEL yet");
+                assert!(ui.enabled("query-run"), "{run} run at {gone:.2} s: RUN as idle");
+            }
+            if gone >= 0.4 {
+                assert!(ui.tag("query-cancel").is_some() && ui.enabled("query-cancel"), "{run} run at {gone:.2} s: CANCEL");
+                assert!(!ui.enabled("query-run") && !ui.enabled("query-run-current"), "{run} run at {gone:.2} s: RUN off");
+                shown = true;
+            }
+        });
+        assert!(shown, "{run} run: CANCEL showed");
+        ui.click("query-cancel");
+        ui.until("the cancel", |ui| ui.query()["running"].is_null() && ui.query()["error"]["code"] == "cancelled");
+        ui.frame();
+        assert!(ui.tag("query-cancel").is_none(), "{run} run: no CANCEL once it ended");
+    }
 }

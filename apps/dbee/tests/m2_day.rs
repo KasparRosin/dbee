@@ -457,7 +457,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     assert_eq!(app.cell(0, 0)["text"], cell, "{name}: the unqualified statement ran where the chip says");
     app.shot(root, &format!("{p}-7b-results"));
 
-    //    A statement that runs until cancelled; Cancel in the toolbar stops it.
+    //    A statement that runs until cancelled; Cancel in the run row stops it.
     let marker = unique("m2day_run");
     let (slow, held) = held_statement(e, &marker);
     app.click("query-editor");
@@ -469,11 +469,15 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     } else {
         app.until("the run", |app| !app.document()["query"]["running"].is_null());
     }
+    // CANCEL shows once the run has gone 300 ms, and RUN is off while it shows.
+    app.until("CANCEL in the run row", |app| app.tag("query-cancel").is_some());
     assert!(app.tag("query-cancel").is_some_and(|t| t.get("enabled") != Some(&json!(false))), "{name}: Cancel is enabled while it runs");
+    assert!(app.tag("query-run").is_some_and(|t| t.get("enabled") == Some(&json!(false))), "{name}: Run is off while it runs");
     app.shot(root, &format!("{p}-7c-running"));
     app.click("query-cancel");
     let q = query_done(app);
     drop(held);
+    app.until("no Cancel once the run ended", |app| app.tag("query-cancel").is_none());
     assert_eq!(q["error"]["code"], "cancelled", "{name}: {q}");
     assert_eq!(app.value("query-error")["code"], "cancelled");
     app.shot(root, &format!("{p}-7d-cancelled"));

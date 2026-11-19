@@ -790,7 +790,7 @@ fn results(ui: &mut Ui) {
             stack(ui, &mut |ui| {
                 for (running, run_current) in [(false, false), (true, false), (false, true)] {
                     bar(ui, &mut |ui| {
-                        RunRow { running, run_current, can_run: true }.show(ui);
+                        RunRow { running, cancel: running, run_current, can_run: true }.show(ui);
                     });
                 }
             });

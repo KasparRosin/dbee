@@ -2635,3 +2635,43 @@ fn no_tab_open_rows_run_their_commands() {
     ui.frame();
     assert!(visible(&ui.tag("qs-input")), "Quick search opens the quick search");
 }
+
+/// Whether a spinner (an arc 3 wide) is painted inside `within`.
+fn spinner_in(ui: &Ui, within: egui::Rect) -> bool {
+    ui.shapes().into_iter().any(|(_, s)| match s {
+        egui::Shape::Path(p) => p.stroke.width == 3.0 && p.points.iter().all(|q| within.contains(*q)),
+        _ => false,
+    })
+}
+
+/// A tab's running mark (the spinner in its icon slot) shows once its job has gone 300 ms.
+#[test]
+fn the_running_mark_waits_300_ms() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: egui::vec2(1200.0, 800.0), step: Some(0.05), ..Setup::default() });
+    ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
+    ui.frame();
+    let tab = ui.active();
+    let slot = rect_of(&ui.tag(&format!("tab-{tab}")).expect("the tab"));
+    assert!(!spinner_in(&ui, slot), "idle: no mark");
+    ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
+    let start = Instant::now();
+    while ui.document()["query"]["running"].is_null() {
+        assert!(start.elapsed() < Duration::from_secs(20), "the run starts");
+        ui.frame();
+    }
+    let first = ui.harness.ctx.input(|i| i.time);
+    loop {
+        ui.frame();
+        let gone = ui.harness.ctx.input(|i| i.time) - first;
+        if gone <= 0.25 {
+            assert!(!spinner_in(&ui, slot), "at {gone:.2} s: no mark yet");
+        }
+        if gone >= 0.4 {
+            assert!(spinner_in(&ui, slot), "at {gone:.2} s: the mark");
+            break;
+        }
+    }
+    ui.execute("query.cancel", json!({}));
+    ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+}

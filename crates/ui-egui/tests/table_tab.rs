@@ -1241,8 +1241,8 @@ fn assert_starts_at_the_body(ui: &mut Ui, at: &str) {
 
 /// The grid sits edge to edge in the tab's body, no margin (Screens 53193, 43147): its row numbers
 /// start at the body's left edge, in the table tab and in a query's results. The table tab's bars
-/// run the body's full width too, the filter bar's first control 12 in (TA); the query toolbar
-/// keeps today's 8 in.
+/// run the body's full width too, the filter bar's first control 12 in (TA); so does the query
+/// tab's run row.
 #[test]
 fn the_grid_runs_edge_to_edge() {
     let db = dbee_testkit::require_testdb!();
@@ -1260,7 +1260,7 @@ fn the_grid_runs_edge_to_edge() {
     ui.hover_away();
     assert_starts_at_the_body(&mut ui, "a query's results");
     let run = ui.drawn("query-run");
-    assert!(close(run.left(), left + 8.0), "Run 8 in from {left}: {run:?}");
+    assert!(close(run.left(), left + 12.0), "Run 12 in from {left}: {run:?}");
 }
 
 /// The header shows and nothing is drawn under it, no lines either: at the column boundaries, in

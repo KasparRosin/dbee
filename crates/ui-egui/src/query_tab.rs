@@ -1,29 +1,33 @@
 //! The query tab's body ([`show`]), from top to bottom:
 //!
-//! - the SQL editor ([`editor`]), with line numbers in a gutter at its left
-//!   ([`crate::components::editor::LineNumber`]: the cursor's line in `text`, the line the last
-//!   run's error points at in `danger`);
-//! - the split: dragged, it moves the line between the editor and the results. Where it is lasts
-//!   for the window's run, in memory, and is the same for every query tab (`View::query_split`);
-//! - the toolbar: on an engine with `USE` (`Dialect::has_use_database`), first the database chip:
+//! - the SQL editor ([`editor`]), edge to edge from the strip's line, with no frame, with line
+//!   numbers in a gutter at its left ([`crate::components::editor::LineNumber`]: the cursor's line
+//!   in `text`, the line the last run's error points at in `danger`);
+//! - the split, the run row's top line: dragged, it moves the line between the editor and the
+//!   results. Where it is lasts for the window's run, in memory, and is the same for every query
+//!   tab (`View::query_split`);
+//! - the run row ([`RunRow`]): on an engine with `USE` (`Dialect::has_use_database`), first the database chip:
 //!   the database the tab's next run starts in, as the engine knows it (`Connected::starts_in`:
 //!   the tab's own, else where the query connection is), in the engine's word for one
 //!   ([`database_chip`]); a click lists the catalog's databases, the server's own left out, and
 //!   choosing one sends `query.setDatabase`. It waits while the tab runs, and while Run cannot.
-//!   Then Run (`query.run`), Run current (`query.run` with `current` and the cursor) and Cancel
-//!   (`query.cancel`, enabled while the tab's run goes), a spinner while it runs (with its words
-//!   when the selector keeps room), and with several results the selector `1 · 2 · 3`
+//!   Then RUN (`query.run`), CANCEL (`query.cancel`) and RUN CURRENT (`query.run` with `current`
+//!   and the cursor). Once the tab's run has gone 300 ms (the window's job clock,
+//!   [`table_tab::after_quiet`]), RUN and RUN CURRENT are off and CANCEL shows, until it ends;
+//! - under it, once there are results or the run has gone 300 ms, until the result bar: a spinner
+//!   while it runs (with its words when the selector keeps room), and with several results the
+//!   selector `1 · 2 · 3`
 //!   (`query.showResult`; with more than fit, those around the shown one and a `…` that lists
 //!   every result, its label only where it fits whole, [`selector_fit`]); at its right, what the
 //!   shown result holds: `3 rows`, or the cap notice `First 10,000 of 25,000 rows` ([`rows_text`]);
 //! - the last run's error band, when it stopped early ([`band`], [`crate::components::error_band`]);
 //! - the shown result: a read-only grid ([`crate::grid`]: no sorting, no editing, no links;
 //!   selecting and copying work, and the value panel follows the selected cell), or for a
-//!   statement without rows how many it affected ([`affected_text`]). With no result yet, a line
-//!   saying how to run.
+//!   statement without rows how many it affected ([`affected_text`]). With no result yet,
+//!   nothing.
 //!
-//! The grid takes the body's whole width; the rest keeps [`size::TAB_BODY_PAD_X`] in from its
-//! sides.
+//! The editor, the run row and the grid take the body's whole width; the rest keeps
+//! [`size::TAB_BODY_PAD_X`] in from its sides.
 //!
 //! **The editor.** Monospace text coloured by `dbee_sql::lexer::tokenize` in the open connection's
 //! dialect, Postgres's when none is open ([`Tokens::job`], colours from [`crate::theme::Tokens`]; a
@@ -68,11 +72,13 @@
 //! It reads the tab from the engine each frame and acts only through commands, run after drawing.
 //! The window keeps a [`QueryState`] per tab, dropped with the tab.
 //!
-//! Automation ids: `query-editor` (value `{cursor, focused, lines, length, highlighted}`: the
-//! cursor as a byte offset, whether the editor has the keyboard, the lines, the text's length in
-//! bytes, and whether some token is coloured), `query-split` (value: the editor's share of the
-//! height), `query-database` (value: the database shown, or null for none; while its list is open
-//! the choices `query-database-<name>`), `query-run`, `query-run-current`, `query-cancel`,
+//! Automation ids: `query-editor` (the editor's whole area; value `{cursor, focused, lines,
+//! length, highlighted, errorLine}`: the cursor as a byte offset, whether the editor has the
+//! keyboard, the lines, the text's length in bytes, whether some token is coloured, and the line
+//! number in `danger` or null), `query-split` (value: the editor's share of the height),
+//! `query-database` (value: the database shown, or null for none; while its list is open the
+//! choices `query-database-<name>`), `query-run`, `query-run-current`, `query-cancel` (only while
+//! the run has gone 300 ms),
 //! `result-<n>` (1-based, with several results; value `{shown, rows, rowsAffected}`), `result-more`
 //! (the `…` when not all fit; value: the number of results) and, while its list is open,
 //! `result-list-<n>` (value as `result-<n>`; only those in view),
@@ -80,7 +86,7 @@
 //! `query-affected` (value: `2 rows affected`), `query-error` (value `{code, heading, message,
 //! detail, hint, note, position, statement, line, column, jump}`, `note` the band's line that a
 //! ROLLBACK ends a failed transaction (an error whose meaning is `TransactionAborted`, Postgres's
-//! 25P02) or null, `jump` saying whether a click moves the cursor) and `query-hint`.
+//! 25P02) or null, `jump` saying whether a click moves the cursor).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -96,27 +102,28 @@ use dbee_sql::lexer::{self, Token, TokenKind};
 use egui::text::{ByteIndex, CCursor, CCursorRange, LayoutJob, LayoutSection, TextFormat};
 use egui::text_edit::TextEditState;
 use egui::{
-    Align, Button, Color32, CornerRadius, CursorIcon, Event, Frame, Id, Key, Label, Layout, Margin, Popup, Rect, Response, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, TextEdit, UiBuilder, Widget, pos2, vec2,
+    Align, Button, Color32, CornerRadius, CursorIcon, Event, Frame, Id, Key, Label, Layout, Margin, Popup, Rect, Response, ScrollArea, Sense, Stroke,
+    StrokeKind, TextEdit, UiBuilder, pos2, vec2,
 };
 use serde_json::json;
 
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
-use crate::components::button::{BoxButton, TextButton};
 use crate::components::editor::LineNumber;
 use crate::components::error_band::Band;
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
+use crate::components::results::{RunAsked, RunRow};
 use crate::components::spinner::Spinner;
 use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
+use crate::table_tab;
 use crate::theme::{
     self, Text,
-    size::{self, RADIUS_CONTROL},
+    size::{self, BAR_H, BAR_LINE, EDITOR_INSET, RADIUS_CONTROL, SPLIT_ZONE_H},
 };
 use crate::tree::thousands;
 
@@ -136,7 +143,6 @@ pub const RESULT_LIST: &str = "result-list-";
 pub const ROWS: &str = "query-rows";
 pub const AFFECTED: &str = "query-affected";
 pub const ERROR: &str = "query-error";
-pub const HINT: &str = "query-hint";
 
 /// The height of an editor line.
 const LINE_H: f32 = Text::Code.line();
@@ -150,18 +156,10 @@ const QUERY_RUN: &str = "query.run";
 /// The editor's height at least (three lines), and the room kept for the results.
 const MIN_EDITOR_H: f32 = 3.0 * LINE_H + 10.0;
 const MIN_RESULTS_H: f32 = 90.0;
-/// The space above the editor, the split's height and the toolbar's.
-const TOP_PAD: f32 = 6.0;
-const SPLIT_H: f32 = 8.0;
-const TOOLBAR_H: f32 = 36.0;
 /// The database chip's width; it is as tall as the toolbar's buttons.
 const CHIP_W: f32 = 150.0;
 /// How tall the chip's list gets before it scrolls.
 const CHIP_LIST_H: f32 = 320.0;
-/// The gutter's inset at each side of its numbers.
-const GUTTER_PAD: f32 = 8.0;
-/// The text's inset in the editor.
-const TEXT_MARGIN: Margin = Margin { left: 6, right: 6, top: 4, bottom: 4 };
 
 /// The id of tab `tab`'s editor (egui keeps its cursor and undo under it).
 pub fn editor_id(tab: TabId) -> Id {
@@ -643,13 +641,15 @@ fn take_tabs(ui: &egui::Ui) {
     });
 }
 
-/// The width of the gutter for `lines` lines.
+/// The width of the gutter for `lines` lines: the numbers' box and the inset before it.
 fn gutter_width(ui: &egui::Ui, lines: usize) -> f32 {
-    LineNumber::room(ui, lines) + 2.0 * GUTTER_PAD
+    EDITOR_INSET + LineNumber::room(ui, lines)
 }
 
-/// Draws editor `id` over the rest of `ui`: the gutter with the line numbers, then the text in a
-/// scroll area both ways. `error_line` (1-based) is the line the last run's error points at.
+/// Draws editor `id` over the rest of `ui`, on `card` with no frame or edge: the gutter with the
+/// line numbers flush right in their box [`EDITOR_INSET`] in, then the text [`EDITOR_INSET`]
+/// after the box and under the top, in a scroll area both ways. `error_line` (1-based) is the
+/// line the last run's error points at.
 pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Option<usize>) -> EditorOutput {
     let t = theme::tokens(ui.ctx());
     let rect = ui.available_rect_before_wrap();
@@ -669,15 +669,13 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Optio
         TextEdit::store_state(ui.ctx(), id, state);
         scroll_to = Some(chars);
     }
-    let focused = ui.memory(|m| m.has_focus(id));
     let gutter_w = gutter_width(ui, ed.lines);
-    let p = ui.painter().clone();
-    p.rect(rect, CornerRadius::same(RADIUS_CONTROL), t.card, Stroke::new(1.0, if focused { t.ink } else { t.line_strong }), StrokeKind::Inside);
-    let inner = rect.shrink(1.0);
-    let gutter = Rect::from_min_max(inner.min, pos2((inner.left() + gutter_w).min(inner.right()), inner.bottom()));
-    p.rect_filled(gutter, CornerRadius { nw: RADIUS_CONTROL, sw: RADIUS_CONTROL, ne: 0, se: 0 }, t.card);
-    p.line_segment([gutter.right_top(), gutter.right_bottom()], Stroke::new(1.0, t.line));
-    let text_rect = Rect::from_min_max(pos2(gutter.right() + 1.0, inner.top()), inner.max);
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, t.card);
+    let gutter = Rect::from_min_max(
+        pos2((rect.left() + EDITOR_INSET).min(rect.right()), rect.top()),
+        pos2((rect.left() + gutter_w).min(rect.right()), rect.bottom()),
+    );
+    let text_rect = Rect::from_min_max(pos2(gutter.right(), rect.top()), rect.max);
     let mut text_ui = ui.new_child(UiBuilder::new().id_salt(id.with("dbee-editor-area")).max_rect(text_rect).layout(Layout::top_down(Align::Min)));
     let (out, view, offset) = {
         let EditorState { text, highlight, view, .. } = &mut *ed;
@@ -693,7 +691,7 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Optio
                 .id(id)
                 .code_editor()
                 .font(Text::Code.font())
-                .frame(Frame::NONE.inner_margin(TEXT_MARGIN))
+                .frame(Frame::NONE.inner_margin(Margin::same(EDITOR_INSET as i8)))
                 .hint_text("Write or paste SQL here.")
                 .desired_width(f32::INFINITY)
                 .min_size(size)
@@ -730,7 +728,7 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Optio
             break;
         }
         let n = i.saturating_add(1);
-        let slot = Rect::from_min_max(pos2(gutter.left(), top), pos2(gutter.right() - GUTTER_PAD, top + row.row.size.y));
+        let slot = Rect::from_min_max(pos2(gutter.left(), top), pos2(gutter.right(), top + row.row.size.y));
         LineNumber { n, current: cursor_row == Some(i), error: error_line == Some(n) }.paint(&gutter_p, slot);
     }
     EditorOutput { response: out.response.response, changed, cursor, focused, lines: ed.lines }
@@ -775,17 +773,13 @@ pub(crate) struct QueryState {
 /// The query tabs' states, by tab.
 pub(crate) type Queries = HashMap<TabId, QueryState>;
 
-/// `button` in the toolbar, tagged `id` with `label`, its hover `hover` or why it is off; true
-/// when clicked.
-fn tool_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, button: impl Widget, (hover, why_not): (&str, Option<&str>)) -> bool {
-    let enabled = why_not.is_none();
-    let r = ui.add_enabled(enabled, button);
+/// A run row button `r` tagged `id` with `label`, its hover `hover` or why it is off.
+fn tag_run_button(tags: &mut Tags, r: &Response, id: &str, label: &str, (hover, why_not): (&str, Option<&str>)) {
     let r = match why_not {
-        Some(why) => r.hint_disabled(format!("{hover}: not now, {why}")),
-        None => r.hint(hover),
+        Some(why) => r.clone().hint_disabled(format!("{hover}: not now, {why}")),
+        None => r.clone().hint(hover),
     };
-    tags.tag_value_as(id, &r, label, enabled);
-    r.clicked()
+    tags.tag_value_as(id, &r, label, why_not.is_none());
 }
 
 /// What the database chip shows: the database the tab's next run starts in, as the engine knows
@@ -1009,7 +1003,7 @@ fn selector(ui: &mut egui::Ui, tags: &mut Tags, results: &[StatementOutcome], sh
 
 /// The editor's height in a tab body `h` high, for split `split`.
 fn editor_height(h: f32, split: f32) -> f32 {
-    let most = (h - TOP_PAD - SPLIT_H - TOOLBAR_H - MIN_RESULTS_H).max(MIN_EDITOR_H);
+    let most = (h - BAR_LINE - BAR_H - MIN_RESULTS_H).max(MIN_EDITOR_H);
     let wanted = if split.is_finite() { split * h } else { DEFAULT_SPLIT * h };
     wanted.max(MIN_EDITOR_H).min(most)
 }
@@ -1040,10 +1034,15 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         state.editor.set_dialect(session.state().dialect(Which::Tab(id)));
         let body = ui.available_rect_before_wrap();
         let full = body.shrink2(vec2(size::TAB_BODY_PAD_X, 0.0));
-        let h = full.height();
-        // The split first, so a drag moves the editor in this frame.
+        let h = body.height();
+        // The run's 300 ms: CANCEL, RUN off and the running words wait as long.
+        let now = ui.ctx().input(|i| i.time);
+        let past = table_tab::after_quiet(&mut view.work.since, id, q.running, now).is_some();
+        // The split first, so a drag moves the editor in this frame: a zone centred on the run
+        // row's top line.
         let mut editor_h = editor_height(h, view.query_split);
-        let split_at = |editor_h: f32| Rect::from_min_size(pos2(full.left(), full.top() + TOP_PAD + editor_h), vec2(full.width(), SPLIT_H));
+        let split_at =
+            |editor_h: f32| Rect::from_center_size(pos2(body.center().x, body.top() + editor_h + BAR_LINE / 2.0), vec2(body.width(), SPLIT_ZONE_H));
         let split = ui.interact(split_at(editor_h), Id::new("dbee-query-split"), Sense::drag());
         if split.dragged() && h > 0.0 {
             editor_h = editor_height(h, (editor_h + split.drag_delta().y) / h);
@@ -1053,12 +1052,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
         }
         let split_rect = split_at(editor_h);
-        let grip = if split.hovered() || split.dragged() { t.text_muted } else { t.line };
-        let c = split_rect.center();
-        ui.painter().line_segment([pos2(c.x - 18.0, c.y), pos2(c.x + 18.0, c.y)], Stroke::new(2.0, grip));
         tags.tag_value(SPLIT, &split, f64::from(view.query_split));
-        // The editor.
-        let editor_rect = Rect::from_min_size(pos2(full.left(), full.top() + TOP_PAD), vec2(full.width(), editor_h));
+        // The editor, edge to edge from the body's top.
+        let editor_rect = Rect::from_min_size(body.min, vec2(body.width(), editor_h));
         let mut editor_ui =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-editor", id.0)).max_rect(editor_rect).layout(Layout::top_down(Align::Min)));
         let error_line = q.error.as_ref().and_then(|e| e.position).map(|p| state.editor.line_column_of(p).0);
@@ -1069,49 +1065,79 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
             "lines": out.lines,
             "length": state.editor.text.len(),
             "highlighted": state.editor.highlighted(),
+            "errorLine": error_line,
         });
-        tags.tag_value(EDITOR, &out.response, value);
+        // The editor is its whole area.
+        let mut whole = out.response.clone();
+        whole.rect = editor_rect;
+        whole.interact_rect = editor_rect.intersect(ui.clip_rect());
+        tags.tag_value(EDITOR, &whole, value);
         view.query_cursor = Some(out.cursor);
         if out.changed {
             set_text = Some(state.editor.text.clone());
         }
-        // The toolbar.
-        let bar_rect = Rect::from_min_size(pos2(full.left(), split_rect.bottom()), vec2(full.width(), TOOLBAR_H));
+        // The split's line, then the run row under it.
+        let line = Rect::from_min_size(pos2(body.left(), editor_rect.bottom()), vec2(body.width(), BAR_LINE));
+        ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
+        let row_rect = Rect::from_min_size(pos2(body.left(), line.bottom()), vec2(body.width(), BAR_H));
+        let mut row_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-run-row", id.0)).max_rect(row_rect).layout(Layout::top_down(Align::Min)));
+        let running = q.running.is_some();
+        let chip = session.state().connection(Which::Tab(id)).filter(|c| c.dialect.has_use_database()).map(|c| Chip {
+            database: c.starts_in(q),
+            choices: c.catalog.schemas.iter().filter(|s| !s.system).map(|s| s.name.as_str()).collect(),
+            word: c.dialect.schema_word(),
+            why_not: can_set_database(session)
+                .err()
+                .or_else(|| running.then(|| "the tab's query is running".to_owned()))
+                .or_else(|| run_blocked.clone()),
+        });
+        let mut chosen = None;
+        let run_row = RunRow { running: past, cancel: past, run_current: true, can_run: run_blocked.is_none() };
+        let row = run_row.show_with(&mut row_ui, |ui| {
+            if let Some(chip) = &chip {
+                chosen = database_chip(ui, tags, chip);
+            }
+        });
+        if let Some(name) = chosen {
+            runs.push(("query.setDatabase", json!({ "tab": id, "database": name })));
+        }
+        let why_not = run_blocked.as_deref().or(past.then_some("the tab's query is running"));
+        tag_run_button(tags, &row.run, RUN, "Run", ("Run every statement (Ctrl+Enter)", why_not));
+        if let Some(r) = &row.run_current {
+            tag_run_button(tags, r, RUN_CURRENT, "Run current", ("Run the statement under the cursor (Ctrl+Shift+Enter)", why_not));
+        }
+        if let Some(r) = &row.cancel {
+            tag_run_button(tags, r, CANCEL, "Cancel", ("Stop the running statement", None));
+        }
+        match row.asked {
+            Some(RunAsked::Run) => runs.push((QUERY_RUN, json!({}))),
+            Some(RunAsked::RunCurrent) => runs.push((QUERY_RUN, json!({ "current": true, "cursor": out.cursor }))),
+            Some(RunAsked::Cancel) => runs.push(("query.cancel", json!({}))),
+            None => {}
+        }
+        // The grip on the split's line, over what is under it.
+        let grip = if split.hovered() || split.dragged() { t.text_muted } else { t.line };
+        let c = split_rect.center();
+        ui.painter().line_segment([pos2(c.x - 18.0, c.y), pos2(c.x + 18.0, c.y)], Stroke::new(2.0, grip));
+        // Until the result bar: the running words, the selector and what the shown result holds,
+        // in a row under the run row, once there are results or the run has gone 300 ms.
+        let interim = !q.results.is_empty() || past;
+        let bar_h = if interim { BAR_H - BAR_LINE } else { 0.0 };
+        let bar_rect = Rect::from_min_size(pos2(full.left(), row_rect.bottom()), vec2(full.width(), bar_h));
+        if interim {
+            let line = Rect::from_min_size(pos2(body.left(), bar_rect.bottom()), vec2(body.width(), BAR_LINE));
+            ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
+        }
+        let results_top = if interim { bar_rect.bottom() + BAR_LINE } else { row_rect.bottom() };
         let mut bar =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-bar", id.0)).max_rect(bar_rect).layout(Layout::left_to_right(Align::Center)));
+        bar.set_clip_rect(bar_rect.intersect(ui.clip_rect()));
         bar.spacing_mut().item_spacing.x = 6.0;
-        let running = q.running.is_some();
-        if let Some(c) = session.state().connection(Which::Tab(id)).filter(|c| c.dialect.has_use_database()) {
-            let chip = Chip {
-                database: c.starts_in(q),
-                choices: c.catalog.schemas.iter().filter(|s| !s.system).map(|s| s.name.as_str()).collect(),
-                word: c.dialect.schema_word(),
-                why_not: can_set_database(session)
-                    .err()
-                    .or_else(|| running.then(|| "the tab's query is running".to_owned()))
-                    .or_else(|| run_blocked.clone()),
-            };
-            if let Some(name) = database_chip(&mut bar, tags, &chip) {
-                runs.push(("query.setDatabase", json!({ "tab": id, "database": name })));
-            }
-        }
-        let why_not = run_blocked.as_deref();
-        if tool_button(&mut bar, tags, RUN, "Run", BoxButton::primary("Run"), ("Run every statement (Ctrl+Enter)", why_not)) {
-            runs.push((QUERY_RUN, json!({})));
-        }
-        let current = ("Run the statement under the cursor (Ctrl+Shift+Enter)", why_not);
-        if tool_button(&mut bar, tags, RUN_CURRENT, "Run current", BoxButton::outline("Run current"), current) {
-            runs.push((QUERY_RUN, json!({ "current": true, "cursor": out.cursor })));
-        }
-        let stop = ("Stop the running statement", (!running).then_some("nothing is running"));
-        if tool_button(&mut bar, tags, CANCEL, "Cancel", TextButton::new("Cancel"), stop) {
-            runs.push(("query.cancel", json!({})));
-        }
         let shown = q.shown_result();
         let summary = shown.filter(|o| !o.result.columns.is_empty()).map(|o| (rows_text(&o.result), !o.result.complete));
         // The summary's own width at the right, measured as it is drawn.
         let right_room = summary.as_ref().map_or(0.0, |(text, _)| bar.painter().layout_job(Text::Label.job(text, t.text)).size().x + 16.0);
-        if running {
+        if past {
             let spinner = bar.add(Spinner::new());
             let words = Text::Label.rich("Running…").color(t.text_muted);
             let words_w = bar.painter().layout_job(Text::Label.job("Running…", t.text_muted)).size().x;
@@ -1147,9 +1173,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 tags.tag_value(ROWS, &r, text.as_str());
             }
         }
-        ui.painter().line_segment([bar_rect.left_bottom(), bar_rect.right_bottom()], Stroke::new(1.0, t.line));
         // The band, then the results.
-        let rest = Rect::from_min_max(pos2(full.left(), bar_rect.bottom() + 6.0), full.max);
+        let rest = Rect::from_min_max(pos2(full.left(), results_top + 6.0), full.max);
         let mut rest_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-results", id.0)).max_rect(rest).layout(Layout::top_down(Align::Min)));
         if let Some(e) = &q.error {
             let at = e.position.map(|p| state.editor.line_column_of(p));
@@ -1202,16 +1227,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 let r = rest_ui.add(Label::new(Text::Body.rich(text.as_str()).color(t.text)).selectable(false));
                 tags.tag_value(AFFECTED, &r, text.as_str());
             }
-            // The toolbar says it runs.
-            None if running => {}
-            None if q.error.is_none() => {
-                rest_ui.add_space(rest.height() * 0.25);
-                rest_ui.vertical_centered(|ui| {
-                    let text = "Ctrl+Enter runs every statement in the editor; Ctrl+Shift+Enter runs only the one the cursor is in.";
-                    let r = ui.add(Label::new(RichText::new(text).color(t.text_muted)).wrap());
-                    tags.tag_value(HINT, &r, text);
-                });
-            }
+            // Before the first run: nothing (the run row says how).
             None => {}
         }
     }
@@ -1290,9 +1306,9 @@ mod tests {
 
     #[test]
     fn the_gutter_draws_the_pages_line_numbers() {
-        // `components::editor::LineNumber` in today's gutter: the cursor's line (1) in `text`, the
-        // error's line (2) in `danger`, the rest `text_muted`, in `code`, 8 in from the gutter's
-        // line; the gutter as wide as two `code` digits and 8 each side.
+        // `components::editor::LineNumber` in the gutter: the cursor's line (1) in `text`, the
+        // error's line (2) in `danger`, the rest `text_muted`, in `code`, flush right in a box as
+        // wide as two `code` digits, 12 in from the editor's left; no line after the gutter.
         for (theme, t) in crate::components::both() {
             let mut ed = EditorState::new("select 1;\nselect nope;\nselect 3".into());
             ed.jump_to(3);
@@ -1302,13 +1318,15 @@ mod tests {
             });
             h.run_steps(3);
             let shapes = h.output().shapes.clone();
-            let line = crate::components::flat(&shapes).into_iter().find_map(|s| match s {
-                egui::Shape::LineSegment { points, stroke } if points[0].x == points[1].x && stroke.color == t.line => Some(points[0].x),
-                _ => None,
-            });
-            let line = line.unwrap_or_else(|| panic!("{theme:?}: the gutter's line"));
-            // The numbers, left of the gutter's line (the text has a `1` of its own).
-            let seen: Vec<_> = crate::components::texts(&shapes).into_iter().filter(|(_, r, _)| r.right() <= line).collect();
+            let at = h.state().1;
+            let vertical = crate::components::flat(&shapes)
+                .into_iter()
+                .any(|s| matches!(s, egui::Shape::LineSegment { points, stroke } if points[0].x == points[1].x && stroke.color == t.line));
+            assert!(!vertical, "{theme:?}: no line between the gutter and the text");
+            let digit = h.ctx.fonts_mut(|f| f.glyph_width(&Text::Code.font(), '0'));
+            let edge = at.left() + EDITOR_INSET + 2.0 * digit;
+            // The numbers, in the gutter (the text has a `1` of its own).
+            let seen: Vec<_> = crate::components::texts(&shapes).into_iter().filter(|(_, r, _)| r.right() <= edge + 0.5).collect();
             let mut rights = Vec::new();
             for (words, colour) in [("1", t.text), ("2", t.danger), ("3", t.text_muted)] {
                 let (_, r, c) = seen.iter().find(|(w, _, _)| w == words).unwrap_or_else(|| panic!("{theme:?}: line {words}: {seen:?}"));
@@ -1319,17 +1337,14 @@ mod tests {
             let fonts: Vec<_> = crate::components::flat(&shapes)
                 .into_iter()
                 .filter_map(|s| match s {
-                    egui::Shape::Text(g) if g.pos.x < line && ["1", "2", "3"].contains(&g.galley.text()) => {
+                    egui::Shape::Text(g) if g.pos.x < edge && ["1", "2", "3"].contains(&g.galley.text()) => {
                         g.galley.job.sections.first().map(|s| s.format.font_id.clone())
                     }
                     _ => None,
                 })
                 .collect();
             assert_eq!(fonts, vec![Text::Code.font(); 3], "{theme:?}: the numbers in `code`");
-            assert!(rights.iter().all(|r| (r - (line - GUTTER_PAD)).abs() < 0.5), "{theme:?}: flush right, 8 from the line at {line}: {rights:?}");
-            let digit = h.ctx.fonts_mut(|f| f.glyph_width(&Text::Code.font(), '0'));
-            let width = line - (h.state().1.left() + 1.0);
-            assert!((width - (2.0 * digit + 2.0 * GUTTER_PAD)).abs() < 0.01, "{theme:?}: the gutter's width {width}, a digit {digit}");
+            assert!(rights.iter().all(|r| (r - edge).abs() < 0.5), "{theme:?}: flush right in the box ending at {edge}: {rights:?}");
         }
     }
 

@@ -22,8 +22,8 @@ use super::tab::{Placed, list_button, row};
 use super::tooltip::Hint;
 use super::{Look, focus, painter};
 use crate::theme::size::{
-    BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, NEW_TAB_W, RESULT_FACT_GAP, RESULT_TAB_PAD_X, RESULT_TAB_TITLE_MAX, ROW_COUNT_COUNTING_GAP, ROW_COUNT_GAP,
-    RUN_ROW_GAP, RUN_ROW_PAD_X, SPINNER, TAB_ACTIVE_LINE,
+    BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, CHIP_RUN_GAP, NEW_TAB_W, RESULT_FACT_GAP, RESULT_TAB_PAD_X, RESULT_TAB_TITLE_MAX, ROW_COUNT_COUNTING_GAP,
+    ROW_COUNT_GAP, RUN_ROW_GAP, RUN_ROW_PAD_X, SPINNER, TAB_ACTIVE_LINE,
 };
 use crate::theme::{Text, Tokens, tokens};
 use crate::tree::thousands;
@@ -45,11 +45,15 @@ fn bar_ground(ui: &mut Ui) -> (Response, Rect) {
     (r, Rect::from_min_max(bar.min, pos2(bar.right(), bar.bottom() - BAR_LINE)))
 }
 
-/// The row of run buttons: RUN, CANCEL while a run goes, and RUN CURRENT when shown.
+/// The row of run buttons: what leads it (the database chip, from the screen), RUN, CANCEL while
+/// asked, and RUN CURRENT when shown.
 #[derive(Clone, Copy, Debug)]
 pub struct RunRow {
-    /// The tab's run goes: RUN and RUN CURRENT are off, CANCEL shows.
+    /// The tab's run is drawn running (the screen asks once it has gone 300 ms): RUN and RUN
+    /// CURRENT are off.
     pub running: bool,
+    /// CANCEL shows (the screen asks while its run is drawn running).
+    pub cancel: bool,
     /// RUN CURRENT shows (as today, until it is decided).
     pub run_current: bool,
     /// A run can start (the engine's own check): RUN and RUN CURRENT are on while nothing runs.
@@ -75,13 +79,25 @@ pub struct RunShown {
 impl RunRow {
     /// Draws it as wide as `ui`, [`BAR_H`] tall.
     pub fn show(self, ui: &mut Ui) -> RunShown {
+        self.show_with(ui, |_| {})
+    }
+
+    /// Draws it as wide as `ui`, [`BAR_H`] tall, with what `lead` adds first in the row
+    /// ([`RUN_ROW_GAP`] apart, as the buttons are), and RUN [`CHIP_RUN_GAP`] after it when it
+    /// added something.
+    pub fn show_with(self, ui: &mut Ui, lead: impl FnOnce(&mut Ui)) -> RunShown {
         let (bar, cell) = bar_ground(ui);
         let row = Rect::from_min_max(pos2(cell.left() + RUN_ROW_PAD_X, cell.top()), cell.max);
         let mut ui = ui.new_child(UiBuilder::new().id_salt(bar.id).max_rect(row).layout(Layout::left_to_right(Align::Center)));
         ui.spacing_mut().item_spacing.x = RUN_ROW_GAP;
+        let before = ui.cursor().min.x;
+        lead(&mut ui);
+        if ui.cursor().min.x > before {
+            ui.add_space(CHIP_RUN_GAP - RUN_ROW_GAP);
+        }
         let on = self.can_run && !self.running;
         let run = ui.add_enabled(on, BoxButton::primary("Run").shortcut("Ctrl+Enter"));
-        let cancel = self.running.then(|| ui.add(BoxButton::primary("Cancel")));
+        let cancel = self.cancel.then(|| ui.add(BoxButton::primary("Cancel")));
         let run_current = self.run_current.then(|| ui.add_enabled(on, BoxButton::outline("Run current").shortcut("Ctrl+Shift+Enter")));
         let clicked = |r: &Option<Response>| r.as_ref().is_some_and(Response::clicked);
         let asked = if run.clicked() {
@@ -575,7 +591,7 @@ mod tests {
                 let at_ = format!("{theme:?} running {running} run current {run_current}");
                 let mut rects = (Rect::NOTHING, None, None);
                 let (shapes, at) = drawn(theme, |ui| {
-                    let s = RunRow { running, run_current, can_run: true }.show(ui);
+                    let s = RunRow { running, cancel: running, run_current, can_run: true }.show(ui);
                     rects = (s.run.rect, s.cancel.map(|r| r.rect), s.run_current.map(|r| r.rect));
                 });
                 assert_ground(&shapes, at, &t, &at_);
@@ -624,6 +640,44 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn cancel_shows_only_when_asked() {
+        // The screen asks for CANCEL once its run has gone 300 ms; before that RUN looks as idle.
+        for (theme, t) in both() {
+            let mut rects = (Rect::NOTHING, None);
+            let (shapes, _) = drawn(theme, |ui| {
+                let s = RunRow { running: false, cancel: false, run_current: true, can_run: true }.show(ui);
+                rects = (s.run.rect, s.cancel.map(|r| r.rect));
+            });
+            assert!(rects.1.is_none() && whole(&shapes, "CANCEL").is_none(), "{theme:?}: no CANCEL unless asked");
+            assert_eq!(fills_in(&shapes, rects.0), [(rects.0, t.ink)], "{theme:?}: RUN on");
+            let (shapes, _) = drawn(theme, |ui| {
+                let s = RunRow { running: true, cancel: true, run_current: true, can_run: true }.show(ui);
+                rects = (s.run.rect, s.cancel.map(|r| r.rect));
+            });
+            assert_eq!(fills_in(&shapes, rects.0), [(rects.0, t.fill)], "{theme:?}: RUN drawn off while running");
+            assert_eq!(word(&shapes, "RUN").1, t.text_faint, "{theme:?}: RUN's words off");
+            let cancel = rects.1.unwrap_or_else(|| panic!("{theme:?}: CANCEL when asked"));
+            assert_eq!(fills_in(&shapes, cancel), [(cancel, t.ink)], "{theme:?}: CANCEL in ink");
+        }
+    }
+
+    #[test]
+    fn a_lead_comes_first_and_run_8_after_it() {
+        for (theme, _) in both() {
+            let mut rects = (Rect::NOTHING, Rect::NOTHING);
+            let (_, at) = drawn(theme, |ui| {
+                let s = RunRow { running: false, cancel: false, run_current: true, can_run: true }.show_with(ui, |ui| {
+                    rects.0 = ui.allocate_exact_size(vec2(150.0, 28.0), Sense::hover()).0;
+                });
+                rects.1 = s.run.rect;
+            });
+            let (lead, run) = rects;
+            assert!(close(lead.left(), at.left() + 12.0), "{theme:?}: the lead 12 in: {lead:?}");
+            assert!(close(run.left(), lead.right() + 8.0), "{theme:?}: RUN 8 after the lead: {run:?}");
         }
     }
 
@@ -1104,8 +1158,12 @@ mod tests {
     #[test]
     fn the_bars_say_what_was_asked() {
         let mut h = harness(Theme::Light, Asked::default(), |ui, seen| {
-            ui.allocate_ui(vec2(NARROW, BAR_H), |ui| seen.run.extend(RunRow { running: false, run_current: true, can_run: true }.show(ui).asked));
-            ui.allocate_ui(vec2(NARROW, BAR_H), |ui| seen.run.extend(RunRow { running: true, run_current: false, can_run: true }.show(ui).asked));
+            ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
+                seen.run.extend(RunRow { running: false, cancel: false, run_current: true, can_run: true }.show(ui).asked)
+            });
+            ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
+                seen.run.extend(RunRow { running: true, cancel: true, run_current: false, can_run: true }.show(ui).asked)
+            });
             ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
                 let tabs = vec![ResultTab::new("first").active(true), ResultTab::new("second")];
                 seen.result.extend(
