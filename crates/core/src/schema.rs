@@ -205,7 +205,40 @@ pub struct TriggerInfo {
     pub definition: String,
 }
 
-/// What a table's structure adds to the catalog: its indexes and triggers, read when asked.
+/// What a foreign key does when the row it references is deleted or its key updated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FkAction {
+    NoAction,
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+/// A column's default as the structure view writes it: the server's text (`'pending'::text`,
+/// `now()`), or a dbee word where dbee names it (`identity`, `auto_increment`, `generated`, or
+/// `generated always as (…)`). `None` when the column has none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnDefault {
+    pub column: String,
+    pub default: Option<String>,
+}
+
+/// A foreign key's actions, named by its columns (in key order) and the table it references, as
+/// the catalog's [`ForeignKey`] is. `None` when the engine's word was not one dbee knows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyActions {
+    pub columns: Vec<String>,
+    pub target: TableRef,
+    pub on_delete: Option<FkAction>,
+    pub on_update: Option<FkAction>,
+}
+
+/// What a table's structure adds to the catalog: its indexes, triggers, column defaults and
+/// foreign key actions, read when asked.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableStructure {
@@ -213,6 +246,12 @@ pub struct TableStructure {
     pub indexes: Vec<IndexInfo>,
     /// By name.
     pub triggers: Vec<TriggerInfo>,
+    /// In column order; a column without a default may have no entry.
+    #[serde(default)]
+    pub defaults: Vec<ColumnDefault>,
+    /// One per foreign key the engine reports.
+    #[serde(default)]
+    pub actions: Vec<ForeignKeyActions>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -555,9 +594,22 @@ mod tests {
                 for_each_row: Some(false),
                 definition: "CREATE TRIGGER t".into(),
             }],
+            defaults: vec![ColumnDefault { column: "a".into(), default: Some("now()".into()) }],
+            actions: vec![ForeignKeyActions {
+                columns: vec!["a".into()],
+                target: TableRef { schema: "s".into(), name: "p".into() },
+                on_delete: Some(FkAction::SetNull),
+                on_update: None,
+            }],
         };
         let j = serde_json::to_value(&s).unwrap();
         assert_eq!(j["triggers"][0]["timing"], "insteadOf");
+        assert_eq!(j["defaults"][0], serde_json::json!({ "column": "a", "default": "now()" }));
+        assert_eq!(j["actions"][0]["onDelete"], "setNull");
+        assert_eq!(j["actions"][0]["onUpdate"], serde_json::Value::Null);
+        assert_eq!(serde_json::json!(FkAction::NoAction), "noAction");
+        let old: TableStructure = serde_json::from_value(serde_json::json!({ "indexes": [], "triggers": [] })).unwrap();
+        assert!(old.defaults.is_empty() && old.actions.is_empty());
         assert_eq!(j["triggers"][0]["events"], serde_json::json!(["insert", "truncate"]));
         assert_eq!(j["triggers"][0]["forEachRow"], false);
         assert_eq!(j["indexes"][0]["parts"][0]["expression"], "lower(a)");

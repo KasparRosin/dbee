@@ -1,13 +1,14 @@
 //! Building a [`TableStructure`] from a driver's rows: one row per index part, one per trigger
-//! (or per trigger and event), put together the same way for every engine.
+//! (or per trigger and event), put together the same way for every engine ([`build`]); then each
+//! column's default and each foreign key's actions ([`with_keys`]).
 //!
-//! Server text is cut where it is kept: an index expression or predicate to [`MAX_EXPRESSION`]
-//! bytes, a trigger's definition to [`MAX_DEFINITION`] ([`kept_text`]). The queries run within the
+//! Server text is cut where it is kept: an index expression, predicate or column default to
+//! [`MAX_EXPRESSION`] bytes, a trigger's definition to [`MAX_DEFINITION`] ([`kept_text`]). The queries run within the
 //! catalog's budget ([`crate::CatalogBudget`]), and a cut result is an error, never a partial list.
 
 use std::collections::HashMap;
 
-use dbee_core::{IndexInfo, IndexPart, TableStructure, TriggerEvent, TriggerInfo, TriggerTiming};
+use dbee_core::{ColumnDefault, FkAction, ForeignKeyActions, IndexInfo, IndexPart, TableStructure, TriggerEvent, TriggerInfo, TriggerTiming};
 
 use crate::kept_text;
 
@@ -96,7 +97,26 @@ pub fn build(indexes: Vec<IndexRow>, triggers: Vec<TriggerRow>) -> TableStructur
         t.events.dedup();
     }
     merged.sort_by(|a, b| a.name.cmp(&b.name));
-    TableStructure { indexes, triggers: merged }
+    TableStructure { indexes, triggers: merged, defaults: Vec::new(), actions: Vec::new() }
+}
+
+/// `structure` with each column's default, cut to [`MAX_EXPRESSION`], and each foreign key's
+/// actions.
+pub fn with_keys(structure: TableStructure, defaults: Vec<ColumnDefault>, actions: Vec<ForeignKeyActions>) -> TableStructure {
+    let defaults = defaults.into_iter().map(|d| ColumnDefault { default: d.default.map(|t| kept_text(&t, MAX_EXPRESSION)), ..d }).collect();
+    TableStructure { defaults, actions, ..structure }
+}
+
+/// A foreign key action as SQL spells it (`NO ACTION`, `set null`); `None` for another word.
+pub fn fk_action(word: &str) -> Option<FkAction> {
+    match word.trim().to_ascii_uppercase().as_str() {
+        "NO ACTION" => Some(FkAction::NoAction),
+        "RESTRICT" => Some(FkAction::Restrict),
+        "CASCADE" => Some(FkAction::Cascade),
+        "SET NULL" => Some(FkAction::SetNull),
+        "SET DEFAULT" => Some(FkAction::SetDefault),
+        _ => None,
+    }
 }
 
 /// An event as SQL spells it (`INSERT`, `update`); `None` for another word.
@@ -183,6 +203,32 @@ mod tests {
         let e = s.indexes[0].parts[0].expression.as_deref().unwrap();
         assert!(e.len() <= MAX_EXPRESSION + 3 && e.ends_with('…'));
         assert!(s.indexes[0].predicate.as_deref().is_some_and(|p| p.len() <= MAX_EXPRESSION + 3));
+    }
+
+    #[test]
+    fn fk_actions_spell_as_sql() {
+        assert_eq!(fk_action("SET NULL"), Some(FkAction::SetNull));
+        assert_eq!(fk_action("no action"), Some(FkAction::NoAction));
+        assert_eq!(fk_action("Set Default"), Some(FkAction::SetDefault));
+        assert_eq!(fk_action("RESTRICT"), Some(FkAction::Restrict));
+        assert_eq!(fk_action("cascade"), Some(FkAction::Cascade));
+        assert_eq!(fk_action("bogus"), None);
+    }
+
+    #[test]
+    fn defaults_are_cut_and_kept_as_written() {
+        let default = |column: &str, text: &str| ColumnDefault { column: column.into(), default: Some(text.into()) };
+        let long = "x".repeat(9 * 1024);
+        let s = with_keys(
+            TableStructure::default(),
+            vec![default("big", &long), default("status", "'Pending'::text"), ColumnDefault { column: "n".into(), default: None }],
+            Vec::new(),
+        );
+        let big = s.defaults[0].default.as_deref().unwrap();
+        assert!(big.len() <= MAX_EXPRESSION + 3 && big.ends_with('…'), "{}", big.len());
+        assert!(big.len() >= MAX_EXPRESSION - 4);
+        assert_eq!(s.defaults[1].default.as_deref(), Some("'Pending'::text"));
+        assert_eq!(s.defaults[2].default, None);
     }
 
     #[test]

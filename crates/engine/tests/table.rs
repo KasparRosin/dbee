@@ -1094,9 +1094,18 @@ fn structure_of_a_table() {
         assert_eq!(r["table"], json!({ "schema": shop, "name": "orders" }), "{}", t.name());
         assert_eq!(r["kind"], "table");
         assert_eq!(r["columns"][0]["name"], "id");
+        let default = r["columns"][0].get("default").unwrap_or_else(|| panic!("{}: no default in {}", t.name(), r["columns"][0]));
+        assert!(default.is_string() || default.is_null(), "{}: {}", t.name(), r["columns"][0]);
+        if t.is_file() {
+            assert_eq!(*default, Json::Null, "SQLite's rowid key has no default");
+        }
         assert_eq!(r["primaryKey"], json!(["id"]));
         let fk = &r["foreignKeys"][0];
         assert_eq!((&fk["columns"], &fk["target"]["name"]), (&json!(["customer_id"]), &json!("customers")), "{}", t.name());
+        // Tasks 2–3: every engine.
+        if t.is_file() {
+            assert_eq!((&fk["onDelete"], &fk["onUpdate"]), (&json!("noAction"), &json!("noAction")), "{}: {fk}", t.name());
+        }
         let referenced: Vec<&Json> = r["referencedBy"].as_array().unwrap().iter().map(|f| &f["table"]["name"]).collect();
         assert_eq!(referenced, [&json!("order_items")], "{}", t.name());
         assert_eq!(r["referencedBy"][0]["columns"], json!(["order_id"]));

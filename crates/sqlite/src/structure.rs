@@ -1,5 +1,10 @@
-//! A table's indexes and triggers, read when asked: `pragma_index_list` and `pragma_index_xinfo`
-//! for each index, and `sqlite_schema`'s statements for what the pragmas leave out.
+//! A table's indexes, triggers, column defaults and foreign key actions, read when asked:
+//! `pragma_index_list` and `pragma_index_xinfo` for each index, `sqlite_schema`'s statements for
+//! what the pragmas leave out, `pragma_table_xinfo` for the defaults and `pragma_foreign_key_list`
+//! for the actions.
+//!
+//! A default is `dflt_value` as written (`'new'`, `CURRENT_TIMESTAMP`); a generated column's is
+//! `generated`, its expression not read (SQLite keeps it only in the `CREATE TABLE` statement).
 //!
 //! The pragmas give an index's columns, order and uniqueness, and whether it is partial, but not
 //! the text of an expression part or of the condition; SQLite keeps those only in the index's
@@ -13,17 +18,20 @@
 
 use std::ops::Range;
 
-use dbee_core::{IndexPart, TableRef, TableStructure, TriggerEvent, TriggerTiming};
+use dbee_core::{ColumnDefault, ForeignKeyActions, IndexPart, TableRef, TableStructure, TriggerEvent, TriggerTiming};
 use dbee_driver::DbError;
 use dbee_driver::catalog::{number, owned, text};
 use dbee_driver::structure::{self, IndexRow, TriggerRow};
 use dbee_sql::{Dialect, TokenKind, lexer};
+use rusqlite::ffi;
 
 use crate::catalog::{SCHEMA, flag, literal, nullable, query};
 use crate::connect::{Running, Session, SqliteConnection};
+use crate::errors;
 
 impl SqliteConnection {
-    /// The indexes and triggers of `table`; none for a schema other than `main`.
+    /// The indexes, triggers, defaults and foreign key actions of `table`; none for a schema other
+    /// than `main`.
     pub async fn table_structure(&self, table: &TableRef) -> Result<TableStructure, DbError> {
         if table.schema != SCHEMA {
             return Ok(TableStructure::default());
@@ -69,7 +77,55 @@ fn read(s: &mut Session, running: &Running, table: &str) -> Result<TableStructur
         let (timing, events) = trigger_head(&definition).map_or((None, Vec::new()), |(t, e)| (Some(t), e.into_iter().collect()));
         triggers.push(TriggerRow { name: owned(&row, 0, "trigger name")?, timing, events, for_each_row: Some(true), definition });
     }
-    Ok(structure::build(indexes, triggers))
+    let built = structure::build(indexes, triggers);
+    Ok(structure::with_keys(built, defaults(s, running, &quoted)?, actions(s, running, &quoted)?))
+}
+
+/// Each column's default: `generated` for a generated column (`hidden` 2 or 3), else `dflt_value`.
+/// A virtual table's hidden columns (`hidden` 1) are left out.
+fn defaults(s: &mut Session, running: &Running, quoted: &str) -> Result<Vec<ColumnDefault>, DbError> {
+    let rows = match query(s, running, &format!("SELECT name, dflt_value, hidden FROM pragma_table_xinfo({quoted}, 'main') ORDER BY cid")) {
+        Ok(rows) => rows,
+        // A view whose statement no longer reads (a table it names was dropped): no columns, as
+        // the catalog reads it.
+        Err(e) if errors::is_code(&e, ffi::SQLITE_ERROR) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let hidden: u32 = number(&row, 2, "hidden")?;
+        let default = match hidden {
+            1 => continue,
+            2 | 3 => Some("generated".to_owned()),
+            _ => nullable(&row, 1, "column default")?.map(str::to_owned),
+        };
+        out.push(ColumnDefault { column: owned(&row, 0, "column name")?, default });
+    }
+    Ok(out)
+}
+
+/// Each foreign key's actions, by its columns in key order and the table it references (named as
+/// the statement spells it; the engine matches the catalog's key ignoring ASCII case).
+fn actions(s: &mut Session, running: &Running, quoted: &str) -> Result<Vec<ForeignKeyActions>, DbError> {
+    let sql = format!("SELECT id, \"table\", \"from\", on_delete, on_update FROM pragma_foreign_key_list({quoted}, 'main') ORDER BY id, seq");
+    let mut out: Vec<(i64, ForeignKeyActions)> = Vec::new();
+    for row in query(s, running, &sql)? {
+        let id: i64 = number(&row, 0, "foreign key id")?;
+        let column = owned(&row, 2, "foreign key column")?;
+        match out.last_mut() {
+            Some((last, key)) if *last == id => key.columns.push(column),
+            _ => out.push((
+                id,
+                ForeignKeyActions {
+                    columns: vec![column],
+                    target: TableRef { schema: SCHEMA.into(), name: owned(&row, 1, "referenced table")? },
+                    on_delete: nullable(&row, 3, "on delete")?.and_then(structure::fk_action),
+                    on_update: nullable(&row, 4, "on update")?.and_then(structure::fk_action),
+                },
+            )),
+        }
+    }
+    Ok(out.into_iter().map(|(_, key)| key).collect())
 }
 
 /// The tokens of `sql` that are not whitespace or comments, with their text.

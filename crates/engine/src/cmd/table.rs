@@ -50,7 +50,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use dbee_core::{Catalog, Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef};
+use dbee_core::{Catalog, Column, ColumnInfo, RelKind, ResultSet, TableInfo, TableRef, TableStructure};
 use dbee_driver::{Connection, DbError, PAGE_LIMITS};
 use dbee_sql::Dialect;
 use dbee_sql::SqlError;
@@ -1008,6 +1008,9 @@ fn follow(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
 /// the catalog, every foreign key of any table that references this one, as `{table, name, columns,
 /// targetColumns}`; the indexes and triggers are read now, on the browse connection in its turn,
 /// within the catalog's time limit (past it the connection is dropped, as for `schema.refresh`).
+/// Read with them, each `columns[i]` gains `default` (the default's text as the structure view
+/// writes it, or null) and each `foreignKeys[i]` gains `onDelete` and `onUpdate` (`noAction`,
+/// `restrict`, `cascade`, `setNull`, `setDefault`, or null when unknown), see [`with_keys`].
 /// With neither `schema` nor `table`, the active table tab's table on its connection; otherwise
 /// both are needed, and the table must be in the catalog. Opens no tab and changes nothing.
 fn structure(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
@@ -1049,11 +1052,50 @@ fn structure(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
                 map.insert("indexes".into(), json!(structure.indexes));
                 map.insert("triggers".into(), json!(structure.triggers));
             }
+            with_keys(&mut result, &structure);
             Ok(result)
         });
         apply
     });
     Ok(Outcome::Started(job))
+}
+
+/// Writes the structure's defaults into `result`'s `columns` (each gains `default`, matched by
+/// name; null when the read has none for it) and its actions into `foreignKeys` (each gains
+/// `onDelete` and `onUpdate`, from the read's key with the same columns in order and target: the
+/// target's schema as written, its name as written or else ignoring ASCII case, as SQLite names a
+/// key's table as its statement spelled it; null when none matches).
+fn with_keys(result: &mut Json, structure: &TableStructure) {
+    if let Some(columns) = result.get_mut("columns").and_then(Json::as_array_mut) {
+        for column in columns {
+            let name = column.get("name").and_then(Json::as_str).unwrap_or_default();
+            let default = structure.defaults.iter().find(|d| d.column == name).and_then(|d| d.default.clone());
+            if let Some(map) = column.as_object_mut() {
+                map.insert("default".into(), json!(default));
+            }
+        }
+    }
+    if let Some(keys) = result.get_mut("foreignKeys").and_then(Json::as_array_mut) {
+        for key in keys {
+            let columns: Vec<&str> =
+                key.get("columns").and_then(Json::as_array).map(|c| c.iter().filter_map(Json::as_str).collect()).unwrap_or_default();
+            let target = key.get("target");
+            let field = |k: &str| target.and_then(|t| t.get(k)).and_then(Json::as_str).unwrap_or_default();
+            let (schema, name) = (field("schema"), field("name"));
+            let same =
+                |a: &&dbee_core::ForeignKeyActions| a.columns.iter().map(String::as_str).eq(columns.iter().copied()) && a.target.schema == schema;
+            let found = structure
+                .actions
+                .iter()
+                .filter(same)
+                .find(|a| a.target.name == name)
+                .or_else(|| structure.actions.iter().filter(same).find(|a| a.target.name.eq_ignore_ascii_case(name)));
+            if let Some(map) = key.as_object_mut() {
+                map.insert("onDelete".into(), json!(found.and_then(|a| a.on_delete)));
+                map.insert("onUpdate".into(), json!(found.and_then(|a| a.on_update)));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
