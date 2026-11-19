@@ -1102,8 +1102,8 @@ fn structure_of_a_table() {
         assert_eq!(r["primaryKey"], json!(["id"]));
         let fk = &r["foreignKeys"][0];
         assert_eq!((&fk["columns"], &fk["target"]["name"]), (&json!(["customer_id"]), &json!("customers")), "{}", t.name());
-        // Tasks 2–3: every engine.
-        if t.is_file() {
+        // Task 3: every engine.
+        if t.is_file() || t.kind() == dbee_testkit::Kind::Postgres {
             assert_eq!((&fk["onDelete"], &fk["onUpdate"]), (&json!("noAction"), &json!("noAction")), "{}: {fk}", t.name());
         }
         let referenced: Vec<&Json> = r["referencedBy"].as_array().unwrap().iter().map(|f| &f["table"]["name"]).collect();

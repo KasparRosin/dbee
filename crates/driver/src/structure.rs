@@ -107,6 +107,19 @@ pub fn with_keys(structure: TableStructure, defaults: Vec<ColumnDefault>, action
     TableStructure { defaults, actions, ..structure }
 }
 
+/// A foreign key action as Postgres's `pg_constraint` writes it (`confdeltype`, `confupdtype`):
+/// `a` no action, `r` restrict, `c` cascade, `n` set null, `d` set default; `None` for another.
+pub fn pg_action(letter: char) -> Option<FkAction> {
+    match letter {
+        'a' => Some(FkAction::NoAction),
+        'r' => Some(FkAction::Restrict),
+        'c' => Some(FkAction::Cascade),
+        'n' => Some(FkAction::SetNull),
+        'd' => Some(FkAction::SetDefault),
+        _ => None,
+    }
+}
+
 /// A foreign key action as SQL spells it (`NO ACTION`, `set null`); `None` for another word.
 pub fn fk_action(word: &str) -> Option<FkAction> {
     match word.trim().to_ascii_uppercase().as_str() {
@@ -213,6 +226,13 @@ mod tests {
         assert_eq!(fk_action("RESTRICT"), Some(FkAction::Restrict));
         assert_eq!(fk_action("cascade"), Some(FkAction::Cascade));
         assert_eq!(fk_action("bogus"), None);
+    }
+
+    #[test]
+    fn pg_action_letters() {
+        let got: Vec<Option<FkAction>> = ['a', 'r', 'c', 'n', 'd', 'x', ' '].into_iter().map(pg_action).collect();
+        use FkAction::*;
+        assert_eq!(got, [Some(NoAction), Some(Restrict), Some(Cascade), Some(SetNull), Some(SetDefault), None, None]);
     }
 
     #[test]

@@ -1,14 +1,17 @@
-//! A table's indexes and triggers, read when asked: `pg_index` with its access method, each key
+//! A table's indexes, triggers, column defaults and foreign key actions, read when asked: `pg_index` with its access method, each key
 //! part (a column, or the expression `pg_get_indexdef` writes out for it) with its `DESC` bit from
 //! `indoption`, and a partial index's condition from `pg_get_expr`; `pg_trigger` without the
 //! triggers Postgres makes itself (`tgisinternal`: foreign keys' checks), its `tgtype` bits and
-//! `pg_get_triggerdef`'s statement.
+//! `pg_get_triggerdef`'s statement; each column's default from `pg_attribute`, `pg_attrdef`'s
+//! `pg_get_expr` (`identity` for an identity column, `generated always as (…)` for a generated
+//! one); each foreign key's `confdeltype` and `confupdtype` from `pg_constraint`, its columns in
+//! key order.
 //!
 //! The queries read columns that exist in Postgres 14 and every later version, run with the
 //! catalog's `search_path` and budget ([`catalog::run`]), and name the table by literals. An
 //! index's `INCLUDE` columns (past `indnkeyatts`) are not key parts and are left out.
 
-use dbee_core::{IndexPart, TableRef, TableStructure, TriggerEvent, TriggerTiming};
+use dbee_core::{ColumnDefault, ForeignKeyActions, IndexPart, TableRef, TableStructure, TriggerEvent, TriggerTiming};
 use dbee_driver::catalog::{bad, number, owned, text};
 use dbee_driver::structure::{self, IndexRow, TriggerRow};
 use dbee_driver::{CatalogBudget, DbError};
@@ -41,6 +44,30 @@ JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = {schema} AND c.relname = {table} AND NOT t.tgisinternal
 ORDER BY t.tgname";
+
+/// Each column of the table, in order, with its identity and generated letters and its default's
+/// expression.
+const DEFAULTS_SQL: &str = "\
+SELECT a.attname, a.attidentity::text, a.attgenerated::text, pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+WHERE n.nspname = {schema} AND c.relname = {table} AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum";
+
+/// One row per column of each of the table's foreign keys, in key order.
+const ACTIONS_SQL: &str = "\
+SELECT f.oid::text, tn.nspname, t.relname, a.attname, f.confdeltype::text, f.confupdtype::text
+FROM pg_catalog.pg_constraint f
+JOIN pg_catalog.pg_class c ON c.oid = f.conrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_catalog.pg_class t ON t.oid = f.confrelid
+JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace
+CROSS JOIN LATERAL pg_catalog.unnest(f.conkey) WITH ORDINALITY AS k(attnum, ord)
+JOIN pg_catalog.pg_attribute a ON a.attrelid = f.conrelid AND a.attnum = k.attnum
+WHERE n.nspname = {schema} AND c.relname = {table} AND f.contype = 'f'
+ORDER BY f.conname, f.oid, k.ord";
 
 /// `tgtype`'s bits (`pg_trigger.h`).
 const ROW: u16 = 1 << 0;
@@ -76,6 +103,8 @@ pub async fn table_structure(conn: &PgConnection, table: &TableRef) -> Result<Ta
     let budget = &mut CatalogBudget::default();
     let index_rows = catalog::run(conn, budget, &with_table(INDEXES_SQL)).await?;
     let trigger_rows = catalog::run(conn, budget, &with_table(TRIGGERS_SQL)).await?;
+    let default_rows = catalog::run(conn, budget, &with_table(DEFAULTS_SQL)).await?;
+    let action_rows = catalog::run(conn, budget, &with_table(ACTIONS_SQL)).await?;
 
     let mut indexes = Vec::new();
     for row in &index_rows.rows {
@@ -101,7 +130,37 @@ pub async fn table_structure(conn: &PgConnection, table: &TableRef) -> Result<Ta
             definition: text(row, 2, "trigger definition")?.to_owned(),
         });
     }
-    Ok(structure::build(indexes, triggers))
+    let mut defaults = Vec::new();
+    for row in &default_rows.rows {
+        let letter = |i: usize, what: &str| text(row, i, what).map(|t| t.chars().next());
+        let expression = row.get(3).cloned().ok_or_else(|| bad("column default"))?;
+        let default = match (letter(1, "attidentity")?, letter(2, "attgenerated")?) {
+            (Some('a' | 'd'), _) => Some("identity".to_owned()),
+            (_, Some('s' | 'v')) => expression.map(|e| format!("generated always as ({e})")),
+            _ => expression,
+        };
+        defaults.push(ColumnDefault { column: owned(row, 0, "column name")?, default });
+    }
+    let mut actions: Vec<(String, ForeignKeyActions)> = Vec::new();
+    for row in &action_rows.rows {
+        let id = owned(row, 0, "foreign key")?;
+        let column = owned(row, 3, "foreign key column")?;
+        match actions.last_mut() {
+            Some((last, key)) if *last == id => key.columns.push(column),
+            _ => {
+                let action = |i: usize, what: &str| text(row, i, what).map(|t| t.chars().next().and_then(structure::pg_action));
+                let key = ForeignKeyActions {
+                    columns: vec![column],
+                    target: TableRef { schema: owned(row, 1, "referenced schema")?, name: owned(row, 2, "referenced table")? },
+                    on_delete: action(4, "confdeltype")?,
+                    on_update: action(5, "confupdtype")?,
+                };
+                actions.push((id, key));
+            }
+        }
+    }
+    let actions = actions.into_iter().map(|(_, key)| key).collect();
+    Ok(structure::with_keys(structure::build(indexes, triggers), defaults, actions))
 }
 
 #[cfg(test)]
