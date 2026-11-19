@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, DbKind};
-use dbee_core::{Catalog, Cell, Column, ResultSet};
+use dbee_core::{Catalog, Cell, Column, ResultSet, TableRef, TableStructure};
 use dbee_sql::Dialect;
 use dbee_ssh::Tunnel;
 pub use futures_util::future::BoxFuture;
@@ -237,6 +237,11 @@ pub trait Connection: Send + Sync + 'static {
     /// The first cell of the first row as an unsigned integer (a count).
     fn scalar_u64<'a>(&'a self, sql: &'a str) -> DbFuture<'a, u64>;
     fn load_catalog(&self) -> DbFuture<'_, Catalog>;
+    /// The indexes and triggers of `table`, which the catalog does not hold: read when asked, with
+    /// the catalog's budget ([`crate::structure`]). A table that does not exist has none.
+    fn table_structure<'a>(&'a self, _table: &'a TableRef) -> DbFuture<'a, TableStructure> {
+        Box::pin(async { Err(DbError::Other("this connection cannot read a table's indexes and triggers".into())) })
+    }
     /// The databases of the server this connection reached, by name, to choose one from. A
     /// connection that is one database lists none.
     fn list_databases(&self) -> DbFuture<'_, Vec<String>> {

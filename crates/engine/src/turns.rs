@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use dbee_core::{Catalog, ResultSet};
+use dbee_core::{Catalog, ResultSet, TableRef, TableStructure};
 use dbee_driver::{ApplyError, ApplyGate, BoxFuture, Cancel, Connection, DbError, DbFuture, Limits, ServerInfo, TransactionState};
 use dbee_sql::Dialect;
 use tokio::sync::{Mutex, MutexGuard};
@@ -99,6 +99,13 @@ impl Connection for InTurn {
         Box::pin(async move {
             let _turn = self.turn().await;
             self.conn.list_databases().await
+        })
+    }
+
+    fn table_structure<'a>(&'a self, table: &'a TableRef) -> DbFuture<'a, TableStructure> {
+        Box::pin(async move {
+            let _turn = self.turn().await;
+            self.conn.table_structure(table).await
         })
     }
 
