@@ -82,6 +82,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("table.refresh", &[]),
     ("table.read", &[("offset", Hint::Count), ("limit", Hint::Count)]),
     ("table.followForeignKey", &[("row", Hint::Count), ("column", COLUMN)]),
+    ("table.structure", &[("schema", SCHEMA), ("table", TABLE), ("connection", CONNECTION)]),
     ("cell.edit", &[("row", GRID_ROW), ("column", EDIT_COLUMN), ("value", VALUE)]),
     ("cell.setNull", &[("row", GRID_ROW), ("column", EDIT_COLUMN)]),
     ("cell.clear", &[("row", GRID_ROW), ("column", EDIT_COLUMN)]),
