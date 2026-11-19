@@ -1094,9 +1094,23 @@ fn structure_of_a_table() {
         assert_eq!(r["table"], json!({ "schema": shop, "name": "orders" }), "{}", t.name());
         assert_eq!(r["kind"], "table");
         assert_eq!(r["columns"][0]["name"], "id");
+        let default = r["columns"][0].get("default").unwrap_or_else(|| panic!("{}: no default in {}", t.name(), r["columns"][0]));
+        assert!(default.is_string() || default.is_null(), "{}: {}", t.name(), r["columns"][0]);
+        let want = match t.kind() {
+            dbee_testkit::Kind::MySql | dbee_testkit::Kind::MariaDb => json!("auto_increment"),
+            _ if t.is_file() => Json::Null, // SQLite's rowid key has no default
+            _ => {
+                assert!(default.is_string(), "{}: the seed's key has a default: {default}", t.name());
+                default.clone()
+            }
+        };
+        assert_eq!(*default, want, "{}", t.name());
         assert_eq!(r["primaryKey"], json!(["id"]));
         let fk = &r["foreignKeys"][0];
         assert_eq!((&fk["columns"], &fk["target"]["name"]), (&json!(["customer_id"]), &json!("customers")), "{}", t.name());
+        // The seed's key names no action: MySQL 5.7 and MariaDB call that RESTRICT, as they report it.
+        let plain = if t.kind() == dbee_testkit::Kind::MariaDb || t.name() == "mysql57" { "restrict" } else { "noAction" };
+        assert_eq!((&fk["onDelete"], &fk["onUpdate"]), (&json!(plain), &json!(plain)), "{}: {fk}", t.name());
         let referenced: Vec<&Json> = r["referencedBy"].as_array().unwrap().iter().map(|f| &f["table"]["name"]).collect();
         assert_eq!(referenced, [&json!("order_items")], "{}", t.name());
         assert_eq!(r["referencedBy"][0]["columns"], json!(["order_id"]));

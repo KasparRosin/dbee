@@ -1,10 +1,10 @@
-//! A table's indexes and triggers (`table_structure`), on database files the tests make under
+//! A table's indexes, triggers, column defaults and foreign key actions (`table_structure`), on database files the tests make under
 //! `target/`.
 
 use std::path::PathBuf;
 
 use dbee_config::{ConnectionConfig, DbKind};
-use dbee_core::{IndexInfo, TableRef, TableStructure, TriggerEvent, TriggerTiming};
+use dbee_core::{FkAction, IndexInfo, TableRef, TableStructure, TriggerEvent, TriggerTiming};
 use dbee_driver::structure::MAX_DEFINITION;
 use dbee_driver::{Purpose, QUERY_LIMITS, Target};
 use dbee_sqlite::{SqliteConnection, connect};
@@ -130,4 +130,34 @@ async fn a_huge_trigger_is_cut() {
     let d = &s.triggers[0].definition;
     assert!(d.len() <= MAX_DEFINITION + 3 && d.ends_with('…'), "{}", d.len());
     assert_eq!(s.triggers[0].timing, Some(TriggerTiming::After));
+}
+
+/// Defaults as SQLite writes them, `generated` for a generated column; each foreign key's actions,
+/// `NO ACTION` when it names none.
+#[tokio::test]
+async fn sqlite_defaults_and_actions() {
+    let db = Fresh::with(
+        "CREATE TABLE p(id INTEGER PRIMARY KEY, status TEXT DEFAULT 'new', at TEXT DEFAULT CURRENT_TIMESTAMP, n INT, \
+         g INT GENERATED ALWAYS AS (n * 2) VIRTUAL);\
+         CREATE TABLE c(id INT, p_id INT REFERENCES p(id) ON DELETE CASCADE ON UPDATE SET NULL, q INT REFERENCES p);",
+    )
+    .await;
+    let p = db.structure("p").await;
+    let defaults: Vec<(&str, Option<&str>)> = p.defaults.iter().map(|d| (d.column.as_str(), d.default.as_deref())).collect();
+    assert_eq!(defaults, [("id", None), ("status", Some("'new'")), ("at", Some("CURRENT_TIMESTAMP")), ("n", None), ("g", Some("generated"))]);
+    assert!(p.actions.is_empty());
+    let c = db.structure("c").await;
+    let mut actions: Vec<(Vec<&str>, &str, &str, Option<FkAction>, Option<FkAction>)> = c
+        .actions
+        .iter()
+        .map(|a| (a.columns.iter().map(String::as_str).collect(), a.target.schema.as_str(), a.target.name.as_str(), a.on_delete, a.on_update))
+        .collect();
+    actions.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        actions,
+        [
+            (vec!["p_id"], "main", "p", Some(FkAction::Cascade), Some(FkAction::SetNull)),
+            (vec!["q"], "main", "p", Some(FkAction::NoAction), Some(FkAction::NoAction)),
+        ]
+    );
 }
