@@ -15,7 +15,9 @@
 //! operator takes a value and that has none is left out of the condition: its row is muted, its
 //! field's hint and hover say so, and the tab title does not count it. While changes
 //! are staged typing goes on but Apply waits (its hover says why; Enter asks anyway, and the
-//! command says why); while the connection is lost the bar is disabled.
+//! command says why); while the connection is lost the bar is disabled, each control saying why on
+//! hover (`The filters can't change now: …`). The raw field reads as SQL: a grey `WHERE` before
+//! the condition, not part of it.
 //!
 //! The bar is the page's (`filter row`, [`table_bars::filter_bar`]): on `card`, a line under it,
 //! each row 36 tall with its controls level, the shared controls 28 tall and 8 apart: the toggle,
@@ -23,7 +25,8 @@
 //! (`input`, data) and Apply (`button/box` outline); in the raw form the toggle, the field and
 //! Apply. The operator choice is as wide as its longest label, so a chosen operator always reads
 //! whole; in a narrow tab (a small window with the value panel open) the column choice narrows
-//! first, then the operator's, their text cut short with `…` ([`choice_widths`]), so a row's
+//! first, then the operator's, their text cut short with `…` and whole on hover, their open lists
+//! still whole ([`choice_widths`]), so a row's
 //! buttons stay in view. A choice's list draws the menu's items
 //! ([`crate::components::menu::Item`]), the chosen one marked in the column on its left. Tab goes
 //! through a row's controls in that order, then the next row's.
@@ -32,7 +35,8 @@
 //! `filter-<n>-column-<column>`), `filter-<n>-op` (value: the operator's id; its choices
 //! `filter-<n>-op-<id>`), `filter-<n>-value`, `filter-<n>-unapplied` (on the value field of a row
 //! left out; value: its hint), `filter-<n>-remove`, `filter-add`,
-//! `filter-raw-toggle` (value: whether the raw field shows), `filter-raw`, `filter-apply`.
+//! `filter-raw-toggle` (value: whether the raw field shows), `filter-raw` (value: the condition,
+//! without `WHERE`), `filter-raw-where` (the grey `WHERE` before it), `filter-apply`.
 
 use dbee_engine::{Json, TabId};
 use dbee_sql::Dialect;
@@ -66,6 +70,8 @@ const COLUMN_W: (f32, f32) = (77.0, 180.0);
 /// The narrowest the operator choice gets (its labels cut short), in a tab too narrow for its
 /// longest label.
 const OP_MIN_W: f32 = 90.0;
+/// Before the raw condition, not part of it.
+const RAW_PREFIX: &str = "WHERE";
 /// The value field's hint on a row left out of the condition.
 pub const UNAPPLIED_HINT: &str = "No value: left out";
 /// Its hover.
@@ -124,6 +130,14 @@ pub(crate) struct Bar<'a> {
     pub dialect: Dialect,
 }
 
+/// `r`, saying on hover why the bar is off when it is.
+fn off(r: Response, bar: &Bar<'_>) -> Response {
+    match bar.disabled {
+        Some(why) => r.hint_disabled(format!("The filters can't change now: {why}.")),
+        None => r,
+    }
+}
+
 /// A command the bar asks for: its id and params.
 pub(crate) type Run = (&'static str, Json);
 
@@ -147,16 +161,13 @@ pub(crate) fn show(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags) -> Vec<Run
                 filter_rows(ui, bar, tags, &mut runs);
             }
         });
-        if let Some(why) = bar.disabled {
-            ui.label(Text::Small.rich(format!("The filters can't change now: {why}.")).color(theme::tokens(ui.ctx()).text_muted));
-        }
     });
     runs
 }
 
 fn toggle(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
     let hover = if bar.raw_mode { "Back to filter rows" } else { "Write a raw WHERE condition" };
-    let r = ui.add(IconButton::boxed(Icon::Code).on(bar.raw_mode).label("Raw WHERE condition")).hint(hover);
+    let r = off(ui.add(IconButton::boxed(Icon::Code).on(bar.raw_mode).label("Raw WHERE condition")).hint(hover), bar);
     tags.tag_value("filter-raw-toggle", &r, bar.raw_mode);
     if r.clicked() {
         runs.push(("table.setFilters", json!({ "rawMode": !bar.raw_mode, "apply": false })));
@@ -166,9 +177,10 @@ fn toggle(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>
 fn apply_control(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run>) {
     let enabled = bar.blocked.is_none();
     let r = ui.add_enabled(enabled, apply_button());
-    let r = match bar.blocked {
-        Some(why) => r.hint_disabled(format!("Apply the filters: not now, {why}")),
-        None => r.hint("Apply the filters (Enter)"),
+    let r = match (bar.disabled, bar.blocked) {
+        (Some(_), _) => off(r, bar),
+        (None, Some(why)) => r.hint_disabled(format!("Apply the filters: not now, {why}")),
+        (None, None) => r.hint("Apply the filters (Enter)"),
     };
     tags.tag_value("filter-apply", &r, "Apply");
     if r.clicked() {
@@ -196,14 +208,18 @@ fn raw_row(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec<Run
         toggle(ui, bar, tags, runs);
         let mut text = bar.raw.to_string();
         let width = (available - LEAD_W - apply_w - FILTER_GAP).max(VALUE_MIN_W);
-        let r = ui.add(
-            Input::data(&mut text)
-                .id(egui::Id::new(("dbee-filter-raw", bar.tab.0)))
-                .placeholder("A WHERE condition, e.g. total > 100 AND status = 'paid'")
-                .desired_width(width),
-        );
-        let r = r.hint(enter_hover(bar));
+        let drawn = Input::data(&mut text)
+            .id(egui::Id::new(("dbee-filter-raw", bar.tab.0)))
+            .prefix(RAW_PREFIX)
+            .placeholder("total > 100 AND status = 'paid'")
+            .desired_width(width)
+            .show(ui);
+        let r = off(drawn.field.hint(enter_hover(bar)), bar);
         tags.tag_value("filter-raw", &r, text.as_str());
+        if let Some(at) = drawn.prefix {
+            let prefix = ui.interact(at, egui::Id::new(("dbee-filter-raw-where", bar.tab.0)), Sense::hover());
+            tags.tag_value("filter-raw-where", &prefix, RAW_PREFIX);
+        }
         if r.changed() {
             runs.push(("table.setFilters", json!({ "raw": text, "apply": false })));
         }
@@ -246,14 +262,19 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                     }
                 }
             });
-            tags.tag_value(&format!("filter-{n}-column"), &combo.response, row.column.as_str());
+            let r = off(combo.response, bar);
+            tags.tag_value(&format!("filter-{n}-column"), &r, row.column.as_str());
             if let Some(c) = column.filter(|c| *c != row.column) {
                 changed = Some(Filter { column: c, ..row.clone() });
             }
             // The operator.
             let mut op = None;
             let op_words = op_text(row.op);
-            let dropdown = Dropdown::new(("dbee-filter-op", bar.tab.0, n), &op_words).width(op_w).list_height(400.0).muted(unapplied);
+            let dropdown = Dropdown::new(("dbee-filter-op", bar.tab.0, n), &op_words)
+                .width(op_w)
+                .list_height(400.0)
+                .muted(unapplied)
+                .note(bar.dialect.op_note(row.op));
             let combo = dropdown.show(ui, |ui| {
                 for o in Op::ALL {
                     let r = noted(ui.add(Item::new(&op_text(o)).choice(Some(o == row.op))), bar.dialect.op_note(o));
@@ -264,7 +285,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                     }
                 }
             });
-            let r = noted(combo.response, bar.dialect.op_note(row.op));
+            let r = off(combo.response, bar);
             tags.tag_value(&format!("filter-{n}-op"), &r, row.op.id());
             if let Some(o) = op.filter(|o| *o != row.op) {
                 // An operator without a value drops the one typed.
@@ -283,7 +304,7 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
                 };
                 let r =
                     ui.add(Input::data(&mut text).id(egui::Id::new(("dbee-filter-value", bar.tab.0, n))).placeholder(hint).desired_width(value_w));
-                let r = if unapplied { r.hint(UNAPPLIED_HOVER) } else { r.hint(enter_hover(bar)) };
+                let r = off(if unapplied { r.hint(UNAPPLIED_HOVER) } else { r.hint(enter_hover(bar)) }, bar);
                 tags.tag_value(&format!("filter-{n}-value"), &r, text.as_str());
                 if unapplied {
                     tags.tag_value(&format!("filter-{n}-unapplied"), &r, UNAPPLIED_HINT);
@@ -298,11 +319,11 @@ fn filter_rows(ui: &mut egui::Ui, bar: &Bar<'_>, tags: &mut Tags, runs: &mut Vec
             }
             // Remove, then (first row) add and apply.
             // − and + keep the value `false` their tags have always had.
-            let r = ui.add(IconButton::boxed(Icon::Minus).label("Remove this filter")).hint("Remove this filter");
+            let r = off(ui.add(IconButton::boxed(Icon::Minus).label("Remove this filter")).hint("Remove this filter"), bar);
             tags.tag_value(&format!("filter-{n}-remove"), &r, false);
             let removed = r.clicked();
             let added = n == 0 && {
-                let r = ui.add(IconButton::boxed(Icon::Plus).label("Add a filter")).hint("Add a filter (AND)");
+                let r = off(ui.add(IconButton::boxed(Icon::Plus).label("Add a filter")).hint("Add a filter (AND)"), bar);
                 tags.tag_value("filter-add", &r, false);
                 r.clicked()
             };

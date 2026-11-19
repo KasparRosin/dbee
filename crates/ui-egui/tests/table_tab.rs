@@ -1082,6 +1082,97 @@ fn the_raw_toggle_is_drawn_on_in_raw_mode() {
     assert!(!ground(&ui), "back to the rows: off again");
 }
 
+/// 1B: in raw mode the toggle is on and the field reads as SQL: a grey `WHERE` before the
+/// condition, not part of it; Enter applies the condition as typed.
+#[test]
+fn raw_mode_reads_as_sql() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected(db);
+    ui.open("shop", "orders");
+    ui.until("the page", |ui| ui.table()["loading"].is_null());
+    ui.click("filter-raw-toggle");
+    ui.frame();
+    assert_eq!(ui.value("filter-raw-toggle"), true);
+    let fill = dbee_ui_egui::theme::tokens(&ui.harness.ctx).fill;
+    let toggle = ui.drawn("filter-raw-toggle");
+    let ground = ui.shapes().iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == fill && (r.rect.min - toggle.min).length() < 0.5 && (r.rect.max - toggle.max).length() < 0.5));
+    assert!(ground, "the toggle on: its fill ground");
+    ui.click("filter-raw");
+    ui.text("total > 100");
+    ui.frame();
+    assert_eq!(ui.value("filter-raw"), "total > 100", "the value is the condition alone");
+    assert_eq!(ui.value("filter-raw-where"), "WHERE");
+    let (field, prefix) = (ui.drawn("filter-raw"), ui.drawn("filter-raw-where"));
+    let muted = dbee_ui_egui::theme::tokens(&ui.harness.ctx).text_muted;
+    let texts = ui.texts();
+    let (where_at, where_g) = texts.iter().find(|(r, g)| g.text() == "WHERE" && field.contains_rect(*r)).expect("WHERE drawn in the field");
+    let (typed, _) = ui.text_in(field, "total > 100").expect("the condition drawn in the field");
+    assert!(prefix.contains_rect(*where_at), "`filter-raw-where` {prefix:?} is where WHERE is drawn {where_at:?}");
+    assert!(where_at.right() < typed.left(), "WHERE {where_at:?} left of the condition {typed:?}");
+    assert_eq!(where_g.job.sections.first().map(|s| s.format.color), Some(muted), "WHERE in text_muted");
+    ui.key("Enter");
+    ui.until("the raw filter", |ui| ui.table()["applied"]["raw"] == "total > 100" && ui.table()["loading"].is_null());
+    assert_eq!(ui.table()["applied"]["raw"], "total > 100");
+}
+
+/// 4B: while the connection is lost every control of the filter bar is off, no line under the bar
+/// says why, and each control says it on hover.
+#[test]
+fn a_lost_connection_greys_the_filters_with_the_reason_on_hover() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { exclusive: true, ..Setup::default() });
+    ui.open("shop", "orders");
+    ui.until("the page", |ui| ui.table()["loading"].is_null());
+    ui.click("filter-add");
+    ui.frame();
+    let sql = "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = 'dbee'";
+    dbee_testkit::psql(db.server("pg14").unwrap(), sql).unwrap();
+    // The next page load finds the connection gone.
+    ui.click("table-refresh");
+    ui.until("the lost mark", |ui| ui.document()["connection"]["lost"] == true);
+    ui.frame();
+    let i = ui.inspect();
+    let controls: Vec<String> = ids(&i).into_iter().filter(|id| id.starts_with("filter-")).collect();
+    assert!(controls.len() >= 10, "the two rows' controls: {controls:?}");
+    for id in &controls {
+        assert_eq!(tag_in(&i, id).map(|e| e["enabled"].clone()), Some(json!(false)), "`{id}` is off");
+    }
+    let reason = format!("The filters can't change now: {}.", dbee_engine::cmd::LOST);
+    assert!(!ui.texts().iter().any(|(_, g)| g.text().starts_with("The filters can't change now")), "no line under the bar");
+    for id in ["filter-0-column", "filter-raw-toggle", "filter-1-value", "filter-apply"] {
+        let at = ui.drawn(id).center();
+        ui.rest(at);
+        assert!(ui.texts().iter().any(|(_, g)| g.text() == reason), "hovering `{id}` says `{reason}`");
+    }
+}
+
+/// The operator choice at the app's window with the value panel open: closed, a long operator is
+/// cut with `…` and reads whole on hover; open, its item reads whole.
+#[test]
+fn the_operator_reads_whole_when_open_at_1100_with_the_panel() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, egui::vec2(1100.0, 720.0));
+    ui.open("shop", "orders");
+    ui.until("the page", |ui| ui.table()["loading"].is_null());
+    assert_eq!(ui.value("value-toggle"), true, "the value panel is open");
+    ui.click("filter-0-op");
+    ui.frame();
+    ui.click("filter-0-op-ge");
+    ui.frame();
+    assert_eq!(ui.value("filter-0-op"), "ge");
+    let label = "greater than or equal (>=)";
+    let closed = ui.drawn("filter-0-op");
+    let cut = ui.texts().into_iter().any(|(r, g)| closed.expand(1.0).contains(r.center()) && g.elided);
+    assert!(cut, "closed, the operator is cut");
+    ui.rest(closed.center());
+    assert!(ui.texts().iter().any(|(r, g)| g.text() == label && !g.elided && !closed.contains(r.center())), "hovered, it reads whole");
+    ui.click("filter-0-op");
+    ui.frame();
+    let item = ui.drawn("filter-0-op-ge");
+    let (text, cut) = ui.text_in(item, label).expect("the open item reads the operator");
+    assert!(!cut && item.expand(0.5).contains_rect(text), "open, `{label}` reads whole: {text:?} in {item:?}");
+}
+
 /// The filter row's tags keep their ids, values and enabled flags as the row moves to the
 /// shared controls (each now the page's 28 tall): the rows, the open lists, the raw field.
 #[test]

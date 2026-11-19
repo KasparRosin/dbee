@@ -9,6 +9,7 @@ use egui::{
 };
 
 use super::icon::Icon;
+use super::tooltip::Hint;
 use super::{Look, focus, menu, painter};
 use crate::theme::size::{DROPDOWN_GAP, DROPDOWN_H, DROPDOWN_PAD_X, RADIUS_CONTROL};
 use crate::theme::{Text, tokens};
@@ -21,13 +22,14 @@ pub struct Dropdown<'a> {
     width: f32,
     list_h: Option<f32>,
     muted: bool,
+    note: Option<&'a str>,
     look: Option<Look>,
 }
 
 impl<'a> Dropdown<'a> {
     /// `selected_text` is drawn as written, cut short with `…` when it doesn't fit.
     pub fn new(id_salt: impl std::hash::Hash + std::fmt::Debug, selected_text: &'a str) -> Dropdown<'a> {
-        Dropdown { id_salt: Id::new(id_salt), selected: selected_text, width: f32::INFINITY, list_h: None, muted: false, look: None }
+        Dropdown { id_salt: Id::new(id_salt), selected: selected_text, width: f32::INFINITY, list_h: None, muted: false, note: None, look: None }
     }
 
     /// This wide, or as wide as there is room for (the default fills the row).
@@ -49,14 +51,21 @@ impl<'a> Dropdown<'a> {
         self
     }
 
+    /// Said on hover, after the chosen text when that is cut short (an operator's note).
+    pub fn note(mut self, note: Option<&'a str>) -> Dropdown<'a> {
+        self.note = note;
+        self
+    }
+
     /// Draws it with `look` whatever its response says (the showcase only).
     pub fn look(mut self, look: Look) -> Dropdown<'a> {
         self.look = Some(look);
         self
     }
 
-    /// Draws it; while it is open, `list` draws the list under it. A click or Space opens and
-    /// closes it, as egui's combo box does. A click on a row closes it; a row chosen with the
+    /// Draws it; while it is open, `list` draws the list under it, at least as wide as its widest
+    /// row, so every row reads whole. Its chosen text, when cut short, reads whole on hover. A
+    /// click or Space opens and closes it, as egui's combo box does. A click on a row closes it; a row chosen with the
     /// keyboard closes it when `list` calls `ui.close()`, as in a menu.
     pub fn show<R>(self, ui: &mut Ui, list: impl FnOnce(&mut Ui) -> R) -> InnerResponse<Option<R>> {
         let id = ui.make_persistent_id(self.id_salt);
@@ -70,6 +79,7 @@ impl<'a> Dropdown<'a> {
             info
         });
         let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
+        let mut cut = false;
         if ui.is_rect_visible(rect) {
             let t = tokens(ui.ctx());
             let p = painter(ui);
@@ -86,6 +96,7 @@ impl<'a> Dropdown<'a> {
             let mut job = Text::Body.job_as_written(self.selected, Color32::PLACEHOLDER);
             job.wrap = TextWrapping::truncate_at_width((width - 2.0 * inset - DROPDOWN_GAP - chevron).max(0.0));
             let words = p.layout_job(job);
+            cut = words.elided;
             let (text, mark) = match (look.disabled, self.muted) {
                 (true, _) => (t.text_faint, t.text_faint),
                 (false, true) => (t.text_muted, t.text_muted),
@@ -94,6 +105,15 @@ impl<'a> Dropdown<'a> {
             p.galley(pos2(rect.left() + inset, rect.center().y - words.size().y / 2.0), words, text);
             Icon::ChevronDown.paint(&p, pos2(rect.right() - inset - chevron / 2.0, rect.center().y), mark);
         }
+        let hover = match (cut, self.note) {
+            (true, Some(note)) => Some(format!("{}\n{note}", self.selected)),
+            (true, None) => Some(self.selected.to_owned()),
+            (false, note) => note.map(str::to_owned),
+        };
+        let r = match hover {
+            Some(words) => r.hint(words),
+            None => r,
+        };
         // As egui's combo box opens its list: the same popup, its id, width and closing.
         let height = self.list_h.unwrap_or_else(|| ui.spacing().combo_height);
         let inner = Popup::menu(&r)
@@ -124,7 +144,7 @@ mod tests {
 
     use super::*;
     use crate::components::menu::Item;
-    use crate::components::{Edge, ROOM, both, edges_in, fills_in, harness, icon_in, painted, texts};
+    use crate::components::{Edge, ROOM, both, edges_in, fills_in, flat, harness, icon_in, painted, texts};
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() <= 0.5
@@ -182,6 +202,51 @@ mod tests {
             let at = *h.state();
             let edge = Edge { outer: at, width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
             assert_eq!(edges_in(&h.output().shapes, at, 0.0), [edge], "{theme:?}: Tab shows its focus");
+        }
+    }
+
+    #[test]
+    fn an_open_list_is_as_wide_as_its_widest_item() {
+        // The operator choice in a narrow row: closed, its words cut with `…` and whole on hover;
+        // open, the list at least as wide as its longest item, so every item reads whole.
+        const LONG: &str = "greater than or equal (>=)";
+        for (theme, _) in both() {
+            let mut h = harness(theme, Rect::NOTHING, |ui, at| {
+                ui.add_space(ROOM);
+                ui.horizontal(|ui| {
+                    ui.add_space(ROOM);
+                    *at = Dropdown::new("op", LONG)
+                        .width(120.0)
+                        .show(ui, |ui| {
+                            for words in ["equals (=)", LONG, "in"] {
+                                ui.add(Item::new(words).choice(Some(words == LONG)));
+                            }
+                        })
+                        .response
+                        .rect;
+                });
+            });
+            h.run();
+            let at = *h.state();
+            let cut = flat(&h.output().shapes).into_iter().any(|s| matches!(s, egui::Shape::Text(t) if t.galley.elided && at.contains(t.pos)));
+            assert!(cut, "{theme:?}: closed, the words are cut");
+            // Hovered for longer than a tooltip waits: the words whole.
+            h.hover_at(at.center());
+            for _ in 0..4 {
+                h.step();
+            }
+            h.run();
+            let hover = texts(&h.output().shapes);
+            assert!(hover.iter().any(|(w, r, _)| w == LONG && !at.contains_rect(*r)), "{theme:?}: whole on hover: {hover:?}");
+            h.get_by_role(Role::ComboBox).click();
+            h.run();
+            h.run();
+            let item = h.get_by_label(LONG);
+            let item_w = item.rect().width();
+            let open = texts(&h.output().shapes);
+            let (_, words, _) = open.iter().find(|(w, _, _)| w == LONG).unwrap_or_else(|| panic!("{theme:?}: the item reads whole: {open:?}"));
+            assert!(item_w >= words.width(), "{theme:?}: the item {item_w} holds its words {words:?}");
+            assert!(item_w > at.width(), "{theme:?}: the list {item_w} wider than the closed field {at:?}");
         }
     }
 

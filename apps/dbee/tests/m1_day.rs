@@ -274,6 +274,23 @@ fn m1_day_end_to_end() {
     assert_eq!(rows[r][1]["text"], day.customer.as_str());
     app.shot(&root, "3-filters");
 
+    // 3b. The raw toggle: the field reads as SQL, a grey WHERE before the condition; back, the
+    //     three filters are as they were and nothing reloaded.
+    let filtered = app.table();
+    app.click("filter-raw-toggle");
+    app.until("the raw field", |app| app.tag("filter-raw-where").is_some());
+    assert_eq!(app.value("filter-raw-toggle"), true);
+    assert_eq!(app.value("filter-raw-where"), "WHERE");
+    app.shot(&root, "3b-raw");
+    app.click("filter-raw-toggle");
+    app.until("the filter rows", |app| app.tag("filter-0-column").is_some());
+    assert_eq!(app.value("filter-raw-toggle"), false);
+    assert!(app.tag("filter-raw-where").is_none(), "the rows again");
+    let back = app.table();
+    assert_eq!(back["filters"], filtered["filters"], "the three filters are still there");
+    assert_eq!(back["applied"], filtered["applied"], "nothing was applied");
+    assert!(back["loading"].is_null(), "nothing reloaded: {back}");
+
     // 4. A click on the order's billing cell: the value panel shows the jsonb formatted. A line
     //    of it selected (a click, then a shift-click) and Ctrl+C copy that line.
     app.click(&format!("grid-cell-{r}-5"));

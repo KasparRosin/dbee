@@ -19,6 +19,7 @@ pub struct Input<'a> {
     text: &'a mut String,
     font: Text,
     placeholder: &'a str,
+    prefix: &'a str,
     password: bool,
     error: bool,
     width: f32,
@@ -30,7 +31,7 @@ pub struct Input<'a> {
 impl Input<'_> {
     /// In `body`: names, words.
     pub fn body(text: &mut String) -> Input<'_> {
-        Input { text, font: Text::Body, placeholder: "", password: false, error: false, width: f32::INFINITY, id: None, look: None }
+        Input { text, font: Text::Body, placeholder: "", prefix: "", password: false, error: false, width: f32::INFINITY, id: None, look: None }
     }
 
     /// In `data`: hosts, ports, users, URLs, values.
@@ -43,6 +44,13 @@ impl<'a> Input<'a> {
     /// Shown in `text_muted` while nothing is typed.
     pub fn placeholder(mut self, words: &'a str) -> Input<'a> {
         self.placeholder = words;
+        self
+    }
+
+    /// `words` in `text_muted` before the text, in its font, one space before it: not part of the
+    /// text, so it can't be selected or deleted (a raw condition's `WHERE`).
+    pub fn prefix(mut self, words: &'a str) -> Input<'a> {
+        self.prefix = words;
         self
     }
 
@@ -77,8 +85,21 @@ impl<'a> Input<'a> {
     }
 }
 
+/// What an [`Input`] drew: its text edit's response, and where its prefix is drawn when it has one.
+pub struct Drawn {
+    pub field: Response,
+    pub prefix: Option<Rect>,
+}
+
 impl Widget for Input<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
+        self.show(ui).field
+    }
+}
+
+impl Input<'_> {
+    /// Draws it; its response and its prefix's place.
+    pub fn show(self, ui: &mut Ui) -> Drawn {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         // The ground goes under the words, which egui's text edit draws.
@@ -90,13 +111,23 @@ impl Widget for Input<'_> {
             let shown = if hidden { dots(text.as_str()) } else { text.as_str().to_owned() };
             ui.fonts_mut(|f| f.layout_job(font.job_as_written(&shown, colour)))
         };
-        // The words stay this far in whatever the edge does, so nothing moves with focus.
+        // The words stay this far in whatever the edge does, so nothing moves with focus; a
+        // prefix and a space before them push them further in.
+        let prefix = (!self.prefix.is_empty()).then(|| {
+            let colour = if off { t.text_faint } else { t.text_muted };
+            let words = ui.painter().layout_job(font.job_as_written(self.prefix, colour));
+            let space = ui.painter().layout_job(font.job_as_written(" ", colour)).size().x;
+            (words, space)
+        });
+        let pad = INPUT_PAD_X + 1.0;
+        let lead = prefix.as_ref().map_or(0.0, |(words, space)| words.size().x + space);
         let inset = (INPUT_PAD_X + 1.0) as i8;
+        let left = (pad + lead).ceil().min(f32::from(i8::MAX)) as i8;
         let mut edit = TextEdit::singleline(self.text)
             .font(font.font())
             .text_color(colour)
             .password(self.password)
-            .frame(Frame::NONE.inner_margin(Margin { left: inset, right: inset, top: 0, bottom: 0 }))
+            .frame(Frame::NONE.inner_margin(Margin { left, right: inset, top: 0, bottom: 0 }))
             .desired_width(self.width)
             .min_size(vec2(0.0, INPUT_H))
             .vertical_align(Align::Center)
@@ -128,7 +159,12 @@ impl Widget for Input<'_> {
         } else {
             p.rect_stroke(rect, radius, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
         }
-        r
+        let prefix = prefix.map(|(words, _)| {
+            let at = Rect::from_min_size(pos2(rect.left() + pad, rect.center().y - words.size().y / 2.0), words.size());
+            p.galley(at.min, words, t.text_muted);
+            at
+        });
+        Drawn { field: r, prefix }
     }
 }
 
@@ -503,6 +539,48 @@ mod tests {
                 assert!(close(caret.center().y, at.center().y), "{theme:?} {font:?}: {caret:?} centred in {at:?}");
                 assert_eq!(caret.height(), font.line() + 3.0, "{theme:?} {font:?}: as tall as egui draws it");
             }
+        }
+    }
+
+    #[test]
+    fn a_prefix_is_drawn_before_the_text_and_is_not_part_of_it() {
+        // 1B: the raw condition's field starts with a grey `WHERE` in the field's font; the
+        // condition is typed after it and is the field's whole value. Select all and delete
+        // leaves the prefix.
+        for (theme, t) in both() {
+            let mut h = harness(theme, Seen::default(), |ui, s: &mut Seen| {
+                ui.add_space(ROOM);
+                let r = ui.add(Input::data(&mut s.text).prefix("WHERE").desired_width(240.0));
+                s.at = r.rect;
+                s.focus = r.has_focus();
+            });
+            h.run();
+            h.get_by_role(Role::TextInput).click();
+            h.run();
+            h.get_by_role(Role::TextInput).type_text("a > 1");
+            h.run();
+            h.run();
+            assert_eq!(h.state().text, "a > 1", "{theme:?}: the value is what was typed");
+            let at = h.state().at;
+            let shapes = h.output().shapes.clone();
+            let drawn = texts(&shapes);
+            let find = |words: &str| drawn.iter().find(|(w, r, _)| w == words && at.contains_rect(*r)).map(|(_, r, c)| (*r, *c));
+            let (prefix, colour) = find("WHERE").unwrap_or_else(|| panic!("{theme:?}: WHERE drawn in the field: {drawn:?}"));
+            assert_eq!(colour, t.text_muted, "{theme:?}: WHERE in text_muted");
+            assert!(close(prefix.left(), at.left() + 9.0), "{theme:?}: {prefix:?} 8 inside the edge of {at:?}");
+            let (typed, colour) = find("a > 1").unwrap_or_else(|| panic!("{theme:?}: the condition drawn: {drawn:?}"));
+            assert_eq!(colour, t.text, "{theme:?}: the condition in text");
+            assert!(typed.left() > prefix.right() + 2.0, "{theme:?}: {typed:?} after {prefix:?} and a space");
+            assert!(close(typed.center().y, prefix.center().y), "{theme:?}: on one line");
+            assert_eq!(fonts_in(&shapes, prefix), [Text::Data.font()], "{theme:?}: WHERE in the field's font");
+            h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+            h.run();
+            h.key_press(Key::Delete);
+            h.run();
+            h.run();
+            assert_eq!(h.state().text, "", "{theme:?}: everything typed is gone");
+            let drawn = texts(&h.output().shapes);
+            assert!(drawn.iter().any(|(w, r, c)| w == "WHERE" && at.contains_rect(*r) && *c == t.text_muted), "{theme:?}: WHERE stays: {drawn:?}");
         }
     }
 
