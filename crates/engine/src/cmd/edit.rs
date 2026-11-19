@@ -9,8 +9,10 @@
 //! tab whose table was dropped, or that reconnected to a read-only server, can always drop them.
 //! Rows are grid rows (see [`crate::edits`]); `column` is a name or a 0-based index into the
 //! page's columns. A value is text or `null`; a number or a boolean is taken as its text, except
-//! that a boolean in a Bool column takes the connection's own spelling (its dialect's
-//! `bool_literals`: Postgres `t` and `f`).
+//! that in a Bool column a boolean, or text that reads as one (`true`, `false`, `t`, `f`, `yes`,
+//! `no`, `on`, `off`, `1`, `0`, in any case, spaces around it ignored), takes the connection's own
+//! spelling (its dialect's `bool_literals`: Postgres `t` and `f`, MySQL and SQLite `1` and `0`).
+//! Other text in a Bool column is staged as given, for the database to judge at Apply.
 //!
 //! **Apply** builds every statement on the caller's thread (`Edits::statements`; edits it cannot
 //! build are `BadParams` and change nothing), then runs one job on the browse connection: its
@@ -275,20 +277,41 @@ fn column(params: &Json, data: &ResultSet) -> Result<usize, EngineError> {
 }
 
 /// `value` for a cell of class `class`: text, or `null` for NULL; a number or a boolean is taken
-/// as its text, but a boolean for a Bool column as `dialect`'s spelling of it. Text with a NUL
+/// as its text, but a boolean, or text that reads as one ([`bool_word`]), for a Bool column as
+/// `dialect`'s spelling of it. Text with a NUL
 /// character only where `dialect` can write one.
 fn value(params: &Json, class: TypeClass, dialect: Dialect) -> Result<NewValue, EngineError> {
     match params.get("value") {
         None => Err(bad("`value` is required (text, or null for NULL)")),
         Some(Json::Null) => Ok(NewValue::Null),
         Some(Json::String(t)) if t.contains('\0') && !dialect.statement_may_hold_nul() => Err(bad(NUL)),
-        Some(Json::String(t)) => Ok(NewValue::Text(t.clone())),
-        Some(Json::Bool(b)) if class == TypeClass::Bool => {
-            let (yes, no) = dialect.bool_literals();
-            Ok(NewValue::Text(if *b { yes } else { no }.to_owned()))
-        }
+        Some(Json::String(t)) => Ok(NewValue::Text(match bool_word(t) {
+            Some(b) if class == TypeClass::Bool => spelled(b, dialect),
+            _ => t.clone(),
+        })),
+        Some(Json::Bool(b)) if class == TypeClass::Bool => Ok(NewValue::Text(spelled(*b, dialect))),
         Some(v @ (Json::Number(_) | Json::Bool(_))) => Ok(NewValue::Text(v.to_string())),
         Some(_) => Err(bad("`value` must be text or null")),
+    }
+}
+
+/// `b` as `dialect` spells a boolean (Postgres `t` and `f`, MySQL and SQLite `1` and `0`).
+fn spelled(b: bool, dialect: Dialect) -> String {
+    let (yes, no) = dialect.bool_literals();
+    if b { yes } else { no }.to_owned()
+}
+
+/// The boolean `text` reads as: `true`, `false`, `t`, `f`, `yes`, `no`, `on`, `off`, `1` or `0`,
+/// in any case, with spaces around it.
+fn bool_word(text: &str) -> Option<bool> {
+    let word = text.trim();
+    let is = |w: &str| word.eq_ignore_ascii_case(w);
+    if ["true", "t", "yes", "on", "1"].into_iter().any(is) {
+        Some(true)
+    } else if ["false", "f", "no", "off", "0"].into_iter().any(is) {
+        Some(false)
+    } else {
+        None
     }
 }
 

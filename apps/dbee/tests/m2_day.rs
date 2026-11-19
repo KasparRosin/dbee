@@ -355,6 +355,11 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.ctrl("C");
     let d = app.document();
     assert_eq!((d["clipboard"].as_str(), d["clipboardBytes"].as_u64()), (Some(line), Some(line.len() as u64)), "{name}: the line was copied");
+    // `value.copy` gives the whole value as stored: the same JSON as the panel's pretty text.
+    let copied = app.execute("value.copy", json!({}));
+    assert_eq!((copied["bytes"].clone(), copied["row"].clone()), (d["value"]["bytes"].clone(), json!(false)), "{name}: {copied}");
+    let parsed: Json = serde_json::from_str(copied["text"].as_str().unwrap()).unwrap();
+    assert_eq!(parsed, serde_json::from_str::<Json>(&text).unwrap(), "{name}: the stored text is the shown JSON");
     app.shot(root, &format!("{p}-4-json"));
 
     // 5. The order's row selected, its customer_id link: a new customers tab filtered to the id.

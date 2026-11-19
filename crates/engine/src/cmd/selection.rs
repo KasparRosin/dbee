@@ -1,5 +1,5 @@
 //! The grid selection, copy and the value view: `selection.set`, `selection.rows`,
-//! `selection.all`, `copy.selection` and `value.show`.
+//! `selection.all`, `copy.selection`, `value.show` and `value.copy`.
 //!
 //! They act on the active tab's grid: on a table tab the loaded page followed by its new rows, on
 //! a query tab the shown result (see [`crate::view`]). A selection is the rectangle between an
@@ -20,9 +20,16 @@
 //! is `Disabled`, saying how much is selected or how many rows fit, and asking for fewer rows.
 //! The cells are read from the grid as they are written, so nothing the size of the selection is
 //! built first.
+//!
+//! `value.copy` gives what the value panel's COPY puts on the clipboard: the focus cell's whole
+//! value as stored (its staged value over the loaded one), not the pretty-printed or cut text the
+//! panel shows, and without a copy's quoting; for a whole-row selection the focus row's object as
+//! Copy as JSON writes it. It is disabled with nothing selected, for NULL, and for a value longer
+//! than [`COPY_MAX_BYTES`], checked on its length before anything is built (a row's length is its
+//! value view's, which the session keeps).
 
 use dbee_core::Column;
-use dbee_core::copy::{CopyFormat, TooLarge, render_within};
+use dbee_core::copy::{CopyFormat, TooLarge, render_within, row_json};
 use serde_json::json;
 
 use super::{CommandSpec, always, bad, disabled, p};
@@ -35,9 +42,12 @@ const ROWS: &str = "selection.rows";
 const ALL: &str = "selection.all";
 const COPY: &str = "copy.selection";
 const SHOW: &str = "value.show";
+const COPY_VALUE: &str = "value.copy";
 
 /// Why the selection commands are disabled with nothing to select in.
 pub const NO_GRID: &str = "no rows are shown";
+/// Why `value.copy` is disabled for NULL.
+pub const VALUE_IS_NULL: &str = "the value is NULL";
 /// Why copy is disabled when nothing is selected.
 pub const NOTHING_SELECTED: &str = "nothing is selected";
 /// The most text one copy puts on the clipboard, in bytes. Every copy measured, copied or
@@ -99,6 +109,19 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         params: "{} -> the value view of the focus cell, or of the focus row when whole rows are selected, or null",
         enabled: always,
         run: show,
+        journal: false,
+        undoable: false,
+    },
+    CommandSpec {
+        id: COPY_VALUE,
+        label: "Copy Value",
+        // The value panel's COPY is the UI's `clipboard.copyValue`, which puts this text on the
+        // clipboard.
+        menu: &[],
+        shortcut: None,
+        params: "{} -> {text, bytes, row}: the focus cell's whole value as stored (`row: false`), or the focus row's object as Copy as JSON writes it (`row: true`)",
+        enabled: can_copy_value,
+        run: copy_value,
         journal: false,
         undoable: false,
     },
@@ -253,6 +276,60 @@ fn show(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
     }))
 }
 
+/// What `value.copy` copies, found without building it.
+enum Copied<'a> {
+    Cell(&'a str),
+    /// The focus row of a whole-row selection.
+    Row(usize),
+}
+
+/// What `value.copy` would copy, or why it can't: nothing selected, NULL, or longer than
+/// [`COPY_MAX_BYTES`].
+fn value_to_copy<'a>(s: &'a Session, g: &Grid<'a>) -> Result<Copied<'a>, String> {
+    let sel = g.selection().ok_or(NOTHING_SELECTED)?;
+    let (row, col) = sel.focus;
+    let (copied, len) = if sel.whole {
+        let len = s.value_view_shared().map_or(0, |v| v.byte_len);
+        (Copied::Row(row), len)
+    } else {
+        let text = g.cell(row, col).ok_or(VALUE_IS_NULL)?;
+        (Copied::Cell(text), text.len())
+    };
+    if len > COPY_MAX_BYTES {
+        return Err(value_too_large(len));
+    }
+    Ok(copied)
+}
+
+fn can_copy_value(s: &Session) -> Result<(), String> {
+    let g = grid(s).ok_or(NOTHING_SELECTED)?;
+    value_to_copy(s, &g).map(|_| ())
+}
+
+/// `{}` → `{text, bytes, row}`.
+fn copy_value(s: &mut Session, _: &Json) -> Result<Outcome, EngineError> {
+    let g = grid(s).ok_or_else(|| disabled(NOTHING_SELECTED))?;
+    let (text, row) = match value_to_copy(s, &g).map_err(disabled)? {
+        Copied::Cell(text) => (text.to_owned(), false),
+        Copied::Row(row) => {
+            let rect = Rect { grid: &g, top: row, left: 0, rows: 1, columns: g.columns() };
+            (row_json(&g.data.columns, &rect, 0, COPY_MAX_BYTES).0, true)
+        }
+    };
+    let mut done = serde_json::Map::new();
+    done.insert("bytes".into(), json!(text.len()));
+    done.insert("row".into(), json!(row));
+    // Moved in, not copied: the text can be megabytes.
+    done.insert("text".into(), Json::String(text));
+    Ok(Outcome::Done(Json::Object(done)))
+}
+
+/// Why a value of `bytes` is not copied, its size rounded up so it never reads as the cap.
+fn value_too_large(bytes: usize) -> String {
+    let tenths = bytes.saturating_mul(10).div_ceil(MIB);
+    format!("the value is {}.{} MiB, more than the {} MiB a copy can take", tenths / 10, tenths % 10, COPY_MAX_BYTES / MIB)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +447,9 @@ mod tests {
 
     #[test]
     fn the_size_in_the_reason_never_reads_as_the_cap() {
+        assert_eq!(value_too_large(COPY_MAX_BYTES + 1), "the value is 8.1 MiB, more than the 8 MiB a copy can take");
+        assert_eq!(value_too_large(20_000_000), "the value is 19.1 MiB, more than the 8 MiB a copy can take");
+        assert!(value_too_large(usize::MAX).contains("MiB"), "no overflow");
         let why = too_large(COPY_MAX_BYTES + 1);
         assert_eq!(why, "the selection holds 8.1 MiB of cell text, more than the 8 MiB a copy can take; select fewer rows");
         assert!(too_large(40_000_123).contains("holds 38.2 MiB"));

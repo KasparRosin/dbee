@@ -469,3 +469,76 @@ fn copy_and_value_view_skip_the_hidden_key() {
         assert_eq!(s.execute("selection.set", json!({ "anchor": [0, 2] })).unwrap_err().code(), "badParams", "no third column");
     });
 }
+
+/// The `why` of `value.copy` refused as disabled.
+fn copy_refused(s: &mut Session) -> String {
+    match s.execute("value.copy", json!({})) {
+        Ok(Outcome::Done(v)) => panic!("copied {} bytes", v["text"].as_str().map_or(0, str::len)),
+        Ok(other) => panic!("{other:?}"),
+        Err(e) => {
+            assert_eq!(e.code(), "disabled", "{e}");
+            e.data()["why"].as_str().unwrap_or_default().to_string()
+        }
+    }
+}
+
+/// `value.copy` gives the focus cell's whole value as stored (staged over loaded), not the
+/// pretty-printed text the panel shows; a whole row as Copy as JSON writes its object. NULL, no
+/// selection and a value over the copy cap are refused, saying why.
+#[test]
+fn value_copy_gives_the_whole_value_as_stored() {
+    let _db = require_testdb!();
+    let t = pg14_target();
+    let name = unique("t_vcopy");
+    let mib = 1024 * 1024;
+    let _g = scratch_table(
+        &t,
+        &name,
+        &format!(
+            "CREATE TABLE {{t}} (id int PRIMARY KEY, billing jsonb, note text);
+             INSERT INTO {{t}} VALUES (1, '{{\"b\": 2, \"a\": [1, 2]}}', NULL), (2, NULL, ''),
+                 (3, NULL, repeat('x', {})), (4, NULL, repeat('y', {}));",
+            5 * mib,
+            9 * mib
+        ),
+    );
+    let mut s = connected_to(&t);
+    // Nothing selected.
+    open_table(&mut s, t.schema("scratch"), &name);
+    assert_eq!(copy_refused(&mut s), "nothing is selected");
+    let at = |s: &mut Session, row: usize, col: usize| {
+        run(s, "selection.set", json!({ "anchor": [row, col] }));
+        run(s, "value.copy", json!({}))
+    };
+    // The database's text, not the panel's pretty form.
+    let stored = q(&t, &format!("SELECT billing::text FROM {}.{name} WHERE id = 1", t.schema("scratch")));
+    let r = at(&mut s, 0, 1);
+    assert_eq!((text(&r), r["bytes"].clone(), r["row"].clone()), (stored.as_str(), json!(stored.len()), json!(false)), "{r}");
+    assert_ne!(s.value_view().unwrap().text, stored, "the panel shows it pretty");
+    // A staged value; the empty string.
+    set_cell(&mut s, 0, "billing", "[3]");
+    assert_eq!(text(&at(&mut s, 0, 1)), "[3]");
+    let r = at(&mut s, 1, 2);
+    assert_eq!((text(&r), r["bytes"].clone()), ("", json!(0)));
+    // NULL.
+    run(&mut s, "selection.set", json!({ "anchor": [1, 1] }));
+    assert_eq!(copy_refused(&mut s), "the value is NULL");
+    // 5 MiB, whole; 9 MiB is more than a copy takes.
+    let r = at(&mut s, 2, 2);
+    assert_eq!((text(&r).len(), r["bytes"].clone()), (5 * mib, json!(5 * mib)));
+    assert!(text(&r).bytes().all(|b| b == b'x'));
+    run(&mut s, "selection.set", json!({ "anchor": [3, 2] }));
+    assert_eq!(copy_refused(&mut s), "the value is 9.0 MiB, more than the 8 MiB a copy can take");
+    // `enabled` says the same, without building anything.
+    assert_eq!(s.enabled("value.copy").unwrap_err(), "the value is 9.0 MiB, more than the 8 MiB a copy can take");
+    // A whole row: the object Copy as JSON writes, staged values included.
+    let object = copied_object(&mut s, 0);
+    assert!(object.contains("\"billing\": [3]"), "{object}");
+    run(&mut s, "selection.rows", json!({ "first": 0 }));
+    let r = run(&mut s, "value.copy", json!({}));
+    assert_eq!((text(&r), r["bytes"].clone(), r["row"].clone()), (object.as_str(), json!(object.len()), json!(true)));
+    // A row over the cap.
+    run(&mut s, "selection.rows", json!({ "first": 3 }));
+    let why = copy_refused(&mut s);
+    assert!(why == "the value is 9.1 MiB, more than the 8 MiB a copy can take", "{why}");
+}

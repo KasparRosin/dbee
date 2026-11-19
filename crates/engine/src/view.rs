@@ -52,6 +52,9 @@ pub struct ValueView {
     pub text: String,
     /// `text` was pretty-printed.
     pub pretty: bool,
+    /// `text` was pretty-printed from text the database doesn't call JSON: a text column holding
+    /// JSON, or a JSON string holding JSON. Never for a row or a cut value.
+    pub formatted: bool,
     /// The value was longer than the cap and `text` is its start.
     pub truncated: bool,
     pub is_null: bool,
@@ -89,6 +92,7 @@ impl ValueView {
             kind_label: String::new(),
             text: String::new(),
             pretty: false,
+            formatted: false,
             truncated: false,
             is_null: value.is_none(),
             byte_len: value.map_or(0, str::len),
@@ -108,6 +112,7 @@ impl ValueView {
                 _ => json::pretty(raw),
             };
             view.pretty = pretty.is_some();
+            view.formatted = view.pretty && matches!(view.kind, JsonKind::TextContainingJson | JsonKind::JsonStringContainingJson);
             view.text = pretty.unwrap_or_else(|| raw.to_owned());
         }
         view.kind_label = match view.kind {
@@ -129,6 +134,7 @@ impl ValueView {
             kind: JsonKind::Json,
             kind_label: String::new(),
             pretty: pretty.is_some(),
+            formatted: false,
             text: pretty.unwrap_or(object),
             truncated,
             is_null: false,
@@ -337,6 +343,7 @@ pub(crate) fn summary(v: &ValueView) -> Json {
         "kindLabel": v.kind_label,
         "text": text,
         "pretty": v.pretty,
+        "formatted": v.formatted,
         "truncated": v.truncated,
         "isNull": v.is_null,
         "bytes": v.byte_len,
@@ -391,6 +398,27 @@ mod tests {
         assert!(v.truncated && v.text.len() <= VALUE_VIEW_MAX_BYTES && v.byte_len == long.len());
     }
 
+    /// `formatted` is set only when text the database doesn't call JSON was pretty-printed: a
+    /// text column holding JSON, or a JSON string holding JSON.
+    #[test]
+    fn formatted_says_when_text_was_turned_into_json() {
+        let v = ValueView::new(&col("t", "text"), Some(r#"{"a":1}"#));
+        assert!(v.pretty && v.formatted, "text holding JSON");
+        let v = ValueView::new(&col("j", "jsonb"), Some(r#"{"a":1}"#));
+        assert!(v.pretty && !v.formatted, "a JSON column's own JSON");
+        let v = ValueView::new(&col("j", "jsonb"), Some(r#""{\"a\":1}""#));
+        assert!(v.pretty && v.formatted, "a JSON string holding JSON");
+        let v = ValueView::new(&col("t", "text"), Some("plain"));
+        assert!(!v.formatted);
+        let long = format!("[{}1]", "1,".repeat(10_000_000));
+        let v = ValueView::new(&col("t", "text"), Some(&long));
+        assert!(v.truncated && !v.formatted, "a cut value isn't formatted");
+        let object = r#"{"a": "{\"b\":1}"}"#;
+        let v = ValueView::of_row(3, object.into(), object.len());
+        assert!(v.pretty && !v.formatted, "a row");
+        assert_eq!(serde_json::to_value(ValueView::new(&col("t", "text"), Some("[1]"))).unwrap()["formatted"], true);
+    }
+
     #[test]
     fn summary_is_the_view_with_its_text_cut() {
         let long = format!("{}é{}", "a".repeat(INSPECT_TEXT_BYTES - 1), "b".repeat(VALUE_VIEW_MAX_BYTES));
@@ -398,13 +426,13 @@ mod tests {
         let s = summary(&v);
         let expected = serde_json::json!({
             "column": "t", "typeLabel": "text", "kind": "notJson", "kindLabel": "", "text": "a".repeat(INSPECT_TEXT_BYTES - 1), "row": null,
-            "pretty": false, "truncated": true, "isNull": false, "bytes": long.len(), "textCut": true,
+            "pretty": false, "formatted": false, "truncated": true, "isNull": false, "bytes": long.len(), "textCut": true,
         });
         assert_eq!(s, expected);
         let v = ValueView::new(&col("j", "jsonb"), Some(r#"{"a":1}"#));
         let expected = serde_json::json!({
             "column": "j", "typeLabel": "jsonb", "kind": "json", "kindLabel": "jsonb", "text": v.text, "row": null,
-            "pretty": true, "truncated": false, "isNull": false, "bytes": 7, "textCut": false,
+            "pretty": true, "formatted": false, "truncated": false, "isNull": false, "bytes": 7, "textCut": false,
         });
         assert_eq!(summary(&v), expected);
         let v = ValueView::new(&col("n", "int4"), None);

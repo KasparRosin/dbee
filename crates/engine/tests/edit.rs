@@ -183,6 +183,44 @@ fn a_json_boolean_stages_the_engines_own_spelling() {
     });
 }
 
+/// Text that reads as a boolean (`true`, `no`, `1`… any case, spaces around it ignored) in a Bool
+/// column is staged in the engine's own spelling; other text as typed, for the database to judge.
+#[test]
+fn text_that_reads_as_a_boolean_takes_the_databases_spelling() {
+    let _db = require_testdb!();
+    on_each_table(|t, name, s| {
+        let sc = t.schema("scratch");
+        let (yes, no) = s.state().dialect(Which::Active).bool_literals();
+        // Rows 0, 1 and 2 hold true, false and NULL.
+        set_cell(s, 1, "flag", "TRUE");
+        set_cell(s, 0, "flag", " no ");
+        set_cell(s, 2, "flag", "1");
+        assert_eq!((staged(s, 1, 4), staged(s, 0, 4), staged(s, 2, 4)), (Some(json!(yes)), Some(json!(no)), Some(json!(yes))), "{}", t.name());
+        set_cell(s, 2, "flag", "maybe");
+        assert_eq!(staged(s, 2, 4), Some(json!("maybe")), "{}: other text as typed", t.name());
+        for (word, want) in [("Off", no), ("t", yes), ("F", no), ("yes", yes), ("ON", yes), ("0", no), ("false", no)] {
+            set_cell(s, 2, "flag", word);
+            assert_eq!(staged(s, 2, 4), Some(json!(want)), "{}: {word}", t.name());
+        }
+        // The loaded value again in another spelling unstages it.
+        set_cell(s, 0, "flag", "true");
+        assert_eq!(staged(s, 0, 4), None, "{}", t.name());
+        set_cell(s, 0, "flag", "no");
+        set_cell(s, 2, "flag", "true");
+        // A text column keeps the word as typed.
+        set_cell(s, 0, "name", "true");
+        assert_eq!(staged(s, 0, 1), Some(json!("true")));
+        apply(s);
+        let flag = "CASE WHEN flag IS NULL THEN 'null' WHEN flag THEN 'true' ELSE 'false' END";
+        assert_eq!(
+            rows_of(t, &format!("SELECT CONCAT({flag}, ':', name) FROM {sc}.{name} ORDER BY id")),
+            "false:true,true:Bob,true:Cy",
+            "{}",
+            t.name()
+        );
+    });
+}
+
 #[test]
 fn a_json_boolean_keeps_its_text_outside_bool_columns() {
     let _db = require_testdb!();

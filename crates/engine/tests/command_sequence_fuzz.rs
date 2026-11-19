@@ -97,6 +97,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("selection.all", &[]),
     ("copy.selection", &[("format", Hint::OneOf(&["tsv", "tsvHeader", "csv", "json", "markdown", "xml", ""]))]),
     ("value.show", &[]),
+    ("value.copy", &[]),
 ];
 
 /// Table commands: names from the seed data, odd ones and ones that do not exist.
