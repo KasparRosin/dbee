@@ -147,7 +147,7 @@ fn label(type_sql: &str, schema: &str, quoted_schema: &str, visible: &[String]) 
 }
 
 /// A `bool` as Postgres prints it: `t`/`true` or `f`/`false`.
-fn boolean(row: &[Cell], i: usize, what: &str) -> Result<bool, DbError> {
+pub(crate) fn boolean(row: &[Cell], i: usize, what: &str) -> Result<bool, DbError> {
     match text(row, i, what)? {
         "t" | "true" => Ok(true),
         "f" | "false" => Ok(false),
@@ -178,7 +178,7 @@ const CATALOG_PATH: &str = "SET LOCAL search_path TO pg_catalog, pg_temp; ";
 
 /// Runs the catalog query `sql` with [`CATALOG_PATH`], within what `budget` has left; a cut
 /// result is an error.
-async fn run(conn: &PgConnection, budget: &mut CatalogBudget, sql: &str) -> Result<ResultSet, DbError> {
+pub(crate) async fn run(conn: &PgConnection, budget: &mut CatalogBudget, sql: &str) -> Result<ResultSet, DbError> {
     budget.take(query::run_untyped(conn, &format!("{CATALOG_PATH}{sql}"), budget.limits()).await?)
 }
 

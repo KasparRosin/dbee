@@ -32,6 +32,7 @@ mod guard;
 mod query;
 mod result;
 mod rsa;
+mod structure;
 mod values;
 pub mod wire;
 

@@ -1082,3 +1082,48 @@ fn a_raw_filter_on_a_read_only_connection_writes_nothing() {
         assert_eq!(objects.made(), "0", "{}: no large object", t.name());
     }
 }
+
+/// `table.structure`: the catalog's columns and keys, the foreign keys that reference the table,
+/// and its indexes and triggers read from the database, for a named table or the active tab's.
+#[test]
+fn structure_of_a_table() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        let shop = t.schema("shop");
+        let r = run(s, "table.structure", json!({ "schema": shop, "table": "orders" }));
+        assert_eq!(r["table"], json!({ "schema": shop, "name": "orders" }), "{}", t.name());
+        assert_eq!(r["kind"], "table");
+        assert_eq!(r["columns"][0]["name"], "id");
+        assert_eq!(r["primaryKey"], json!(["id"]));
+        let fk = &r["foreignKeys"][0];
+        assert_eq!((&fk["columns"], &fk["target"]["name"]), (&json!(["customer_id"]), &json!("customers")), "{}", t.name());
+        let referenced: Vec<&Json> = r["referencedBy"].as_array().unwrap().iter().map(|f| &f["table"]["name"]).collect();
+        assert_eq!(referenced, [&json!("order_items")], "{}", t.name());
+        assert_eq!(r["referencedBy"][0]["columns"], json!(["order_id"]));
+        assert_eq!(r["referencedBy"][0]["targetColumns"], json!(["id"]));
+        let indexes = r["indexes"].as_array().unwrap();
+        // SQLite's INTEGER PRIMARY KEY is the rowid, which has no index.
+        if !t.is_file() {
+            assert_eq!((&indexes[0]["primary"], &indexes[0]["parts"][0]["column"]), (&json!(true), &json!("id")), "{}: {indexes:?}", t.name());
+        }
+        assert_eq!(r["triggers"], json!([]), "the seed has no triggers");
+        assert!(s.state().tabs.is_empty(), "no tab opens");
+
+        // No table named: the active table tab's.
+        open_table(s, shop, "order_items");
+        let mine = run(s, "table.structure", json!({}));
+        assert_eq!(mine["table"]["name"], "order_items");
+        assert_eq!(mine["referencedBy"][0]["table"]["name"], "shipments", "{}", t.name());
+
+        for bad in [
+            json!({ "table": "orders" }),
+            json!({ "schema": shop }),
+            json!({ "schema": shop, "table": "nope" }),
+            json!({ "schema": 3, "table": "x" }),
+        ] {
+            assert_eq!(s.execute("table.structure", bad.clone()).unwrap_err().code(), "badParams", "{bad}");
+        }
+        run(s, "tab.newQuery", json!({}));
+        assert_eq!(s.execute("table.structure", json!({})).unwrap_err().code(), "badParams", "a query tab is active");
+    });
+}

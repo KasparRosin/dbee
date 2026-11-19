@@ -1,5 +1,5 @@
-//! Table tabs: open, the filter bar, paging, sort, the row count, cancel, refresh, read, and
-//! following a foreign key.
+//! Table tabs: open, the filter bar, paging, sort, the row count, cancel, refresh, read,
+//! following a foreign key, and a table's structure.
 //!
 //! Every command needs a connected session that is not lost. `table.open` opens a new tab; the
 //! others act on the active tab, which must be a table tab. Applying filters, paging, sort and
@@ -75,6 +75,7 @@ const CANCEL: &str = "table.cancel";
 const REFRESH: &str = "table.refresh";
 const READ: &str = "table.read";
 const FOLLOW: &str = "table.followForeignKey";
+const STRUCTURE: &str = "table.structure";
 
 /// Why filters, paging, sort and refresh cannot run while edits are staged.
 pub const STAGED: &str = "apply or reset your changes first";
@@ -190,6 +191,17 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         enabled: active_table,
         run: follow,
         journal: true,
+        undoable: false,
+    },
+    CommandSpec {
+        id: STRUCTURE,
+        label: "Table Structure",
+        menu: &[],
+        shortcut: None,
+        params: "{schema?, table?, connection?} (none: the active table tab's table)",
+        enabled: needs_db,
+        run: structure,
+        journal: false,
         undoable: false,
     },
 ];
@@ -986,6 +998,62 @@ fn follow(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
     let target = fk.target.clone();
     open_tab(s, FOLLOW, which, target, filters)
+}
+
+// ---- structure -------------------------------------------------------------------------------
+
+/// `{schema?, table?, connection?}` → a job returning the table's structure: `{connection, table,
+/// kind, columns, primaryKey, uniqueKeys, foreignKeys, referencedBy, indexes, triggers}`. The
+/// columns and keys are the catalog's (as `schema.inspect` gives them); `referencedBy` lists, from
+/// the catalog, every foreign key of any table that references this one, as `{table, name, columns,
+/// targetColumns}`; the indexes and triggers are read now, on the browse connection in its turn,
+/// within the catalog's time limit (past it the connection is dropped, as for `schema.refresh`).
+/// With neither `schema` nor `table`, the active table tab's table on its connection; otherwise
+/// both are needed, and the table must be in the catalog. Opens no tab and changes nothing.
+fn structure(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    let (which, table) = match (p::opt_str(params, "schema")?, p::opt_str(params, "table")?) {
+        (Some(schema), Some(name)) => (Which::Id(needed_connection(s, params)?), TableRef { schema: schema.into(), name: name.into() }),
+        (None, None) => match s.state.active_tab() {
+            Some(Tab::Table(t)) => (Which::Id(t.connection), t.table.clone()),
+            _ => return Err(bad("`schema` and `table` are required when no table tab is active")),
+        },
+        _ => return Err(bad("`schema` and `table` go together")),
+    };
+    let cat = catalog(s, which)?;
+    let info = lookup(&cat, &table)?;
+    let referenced_by: Vec<Json> = cat
+        .referenced_by(&table)
+        .into_iter()
+        .map(|(from, fk)| json!({ "table": from, "name": fk.name, "columns": fk.columns, "targetColumns": fk.target_columns }))
+        .collect();
+    let mut result = json!({
+        "table": info.table,
+        "kind": info.kind,
+        "columns": info.columns,
+        "primaryKey": info.primary_key,
+        "uniqueKeys": info.unique_keys,
+        "foreignKeys": info.foreign_keys,
+        "referencedBy": referenced_by,
+    });
+    let (id, turned) = s.browse_in_turn(which)?;
+    let job = s.spawn_job(STRUCTURE, async move {
+        let read = super::connection::structure_in_turn(&turned, &table).await;
+        let conn: Arc<dyn Connection> = turned;
+        let apply: Apply = Box::new(move |s: &mut Session| {
+            if !s.is_current_browse(id, &conn) {
+                return Ok(ignored());
+            }
+            let structure = read.map_err(|e| s.catalog_read_failed(id, &conn, e))?;
+            if let Some(map) = result.as_object_mut() {
+                map.insert("connection".into(), json!(id));
+                map.insert("indexes".into(), json!(structure.indexes));
+                map.insert("triggers".into(), json!(structure.triggers));
+            }
+            Ok(result)
+        });
+        apply
+    });
+    Ok(Outcome::Started(job))
 }
 
 #[cfg(test)]

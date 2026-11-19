@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-16 · **Change:** minor (entry 58 done and dropped: the cells an Apply wrote show the saved mark, then it fades; before: entry 14 done: closing the window asks too, so every way out of a transaction asks first; what stays is the shared session, a limit; before: entry 14: the window's transaction prompt, its toast and the switch that waits for it; only quit is left; before: entry 14: closing over a transaction asks how to end it in the engine; before: the M3 Phase 2 review: entries 14, 53 and 54 say what is left now that the status bar and the error band are built; entries 67 to 73 are new; entries 24, 56 and 61 gain a line)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-19 · **Change:** minor (entry 55: the engine side done: `table.structure` reads a table's indexes and triggers on all four engines; the switch and the page are left; before: entry 58 done and dropped: the cells an Apply wrote show the saved mark, then it fades; before: entry 14 done: closing the window asks too, so every way out of a transaction asks first; what stays is the shared session, a limit; before: entry 14: the window's transaction prompt, its toast and the switch that waits for it; only quit is left; before: entry 14: closing over a transaction asks how to end it in the engine; before: the M3 Phase 2 review: entries 14, 53 and 54 say what is left now that the status bar and the error band are built; entries 67 to 73 are new; entries 24, 56 and 61 gain a line)
 
 Ranked by user impact; pick from the top. Each entry says what is missing or limited, the evidence a reviewer can rerun, who it hurts and an estimate. Hours are agent wall-clock hours, **estimated**. Timings are **measured**, in a dev build (the workspace's dev profile: dbee's crates at opt-level 1, dependencies at 2). They are quoted from [`target-app-parity.md`](target-app-parity.md), "Performance", which holds every measurement with its machine, runs and load averages.
 
@@ -45,6 +45,7 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
   | Columns | Frame, nothing changing | Frame while scrolling |
   |---|---|---|
+| 2026-11-19 | minor | Entry 55: the engine side done: `table.structure` gives a table's columns, keys, REFERENCED BY, indexes and triggers on all four engines, read when asked; the switch and the page are left. |
   | 50 | 6.5–13.9 ms | 8.2–17.3 ms |
   | 100 | 10.7–27.1 ms | 15.4–39.8 ms |
   | 300 | 38–67 ms | 50–97 ms |
@@ -413,10 +414,11 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 55. No structure view (F)
 
-- **Missing:** the table tab's DATA / STRUCTURE switch and its read-only page, on all four engines: COLUMNS, INDEXES, FOREIGN KEYS, REFERENCED BY and TRIGGERS. The M3 table tab draws the switch and the page.
-- **Evidence:** `docs/ui-parity.md` ("Structure and new table": None). The catalog (`crates/driver/src/catalog.rs`) holds tables, columns and foreign keys, so REFERENCED BY can be worked out from them, but it holds no list of a table's indexes or triggers.
-- **Impact:** seeing a table's indexes or triggers means querying the system catalogs by hand.
-- **Estimate:** 6-10 h (estimated): reading indexes and triggers per engine, and the page. Planned for M3.
+- **Done (engine):** `table.structure` gives everything the page shows, on PostgreSQL, MySQL, MariaDB and SQLite: the catalog's COLUMNS and FOREIGN KEYS, REFERENCED BY worked out from every table's foreign keys in the catalog, and the INDEXES (parts in order, column or expression, descending, unique, primary, method, a partial index's condition) and TRIGGERS (timing, events, row or statement, definition) read from the database when asked, not at connect. Each driver reads its own catalog (Postgres `pg_index` and `pg_trigger`, MySQL and MariaDB `information_schema.STATISTICS` and `TRIGGERS`, SQLite's pragmas and the `CREATE` statements in `sqlite_schema`); server text is cut where kept (8 KiB for an expression or a condition, 64 KiB for a definition).
+- **Left:** the table tab's DATA / STRUCTURE switch and its read-only page (the M3 table tab draws both), which run `table.structure`. Known limits: SQLite's `INTEGER PRIMARY KEY` has no index to list; Postgres's `INCLUDE` columns are left out; MySQL and MariaDB give a trigger's body, not its whole statement; MySQL before 8.0.13 and MariaDB have no expression parts.
+- **Evidence:** `docs/ui-parity.md` ("Structure and new table": None) for the page; for the engine, `crates/driver/src/structure.rs`, the drivers' `structure.rs`, `table.structure` (`crates/engine/src/cmd/table.rs`) and the tests `crates/{pg,mysql,sqlite}/tests/structure.rs` and `structure_of_a_table` (`crates/engine/tests/table.rs`).
+- **Impact:** until the page lands, seeing a table's indexes or triggers in the window means querying the system catalogs by hand; agents can call `table.structure`.
+- **Estimate:** 3-5 h (estimated) for the page, with the M3 structure view screen.
 
 ### 56. Cancelling a connection attempt: the engine is done, the button is not (F)
 

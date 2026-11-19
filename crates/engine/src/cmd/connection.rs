@@ -68,7 +68,7 @@ use dbee_config::{
     ConfigError, ConnectionConfig, ConnectionStore, DbKind, SavedFor, SecretKind, SecretStore, Settings, SshAuth, SslMode, StoredSecret, new_id,
     parse_url,
 };
-use dbee_core::Catalog;
+use dbee_core::{Catalog, TableRef, TableStructure};
 use dbee_driver::{Cancel, Connection, DbError, DbFuture, Driver, Drivers, Purpose, Target, tls};
 use dbee_ssh::{KeyPlan, SshEnv, SshError, SshSecrets, Tunnel};
 use serde::Deserialize as _;
@@ -804,6 +804,32 @@ async fn load_catalog_within(conn: &dyn Connection, limit: Duration) -> Result<C
 /// then, as waiting behind another tab's statement is no reason to give up on the connection.
 async fn load_catalog_in_turn(conn: &InTurn, limit: Duration) -> Result<Catalog, CatalogLoad> {
     turns::in_turn(conn, |c| load_catalog_within(c, limit)).await
+}
+
+/// The indexes and triggers of `table` on the browse connection, once its turn comes, bounded by
+/// [`CATALOG_TIMEOUT`] as a catalog load is.
+pub(crate) async fn structure_in_turn(conn: &InTurn, table: &TableRef) -> Result<TableStructure, CatalogReadError> {
+    turns::in_turn(conn, |c| read_within(c, CATALOG_TIMEOUT, c.table_structure(table))).await.map_err(CatalogReadError)
+}
+
+/// A bounded catalog read that gave nothing, for [`Session::catalog_read_failed`].
+pub(crate) struct CatalogReadError(CatalogLoad);
+
+impl Session {
+    /// A bounded catalog read on `conn`, the browse connection of `id`, failed: as any operation's
+    /// failure ([`Session::db_failed`]), or, past its limit, the connection is discarded and the
+    /// session lost, as when the catalog's refresh times out.
+    pub(crate) fn catalog_read_failed(&mut self, id: ConnectionId, conn: &Arc<dyn Connection>, e: CatalogReadError) -> EngineError {
+        match e.0 {
+            CatalogLoad::Failed(e) => self.db_failed(id, conn, &e),
+            CatalogLoad::TimedOut => {
+                if let Some(c) = self.state.connection_mut(Which::Id(id)) {
+                    c.lost = true;
+                }
+                lost_by_timeout()
+            }
+        }
+    }
 }
 
 /// A refresh whose catalog load timed out: its connection was discarded and the session is lost,

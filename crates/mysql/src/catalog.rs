@@ -110,7 +110,7 @@ fn no_edit_reason(engine: &str) -> String {
 }
 
 /// Cell `i` of `row`, which may be NULL; a missing cell is [`bad`].
-fn nullable<'a>(row: &'a [Cell], i: usize, what: &str) -> Result<Option<&'a str>, DbError> {
+pub(crate) fn nullable<'a>(row: &'a [Cell], i: usize, what: &str) -> Result<Option<&'a str>, DbError> {
     row.get(i).map(Option::as_deref).ok_or_else(|| bad(what))
 }
 
@@ -169,7 +169,7 @@ pub async fn list_connection(target: Target<'_>) -> Result<MySqlConnection, DbEr
 
 impl MySqlConnection {
     /// A catalog query's result, within what `budget` has left; a cut one is an error.
-    async fn catalog_query(&self, budget: &mut CatalogBudget, sql: &str) -> Result<ResultSet, DbError> {
+    pub(crate) async fn catalog_query(&self, budget: &mut CatalogBudget, sql: &str) -> Result<ResultSet, DbError> {
         budget.take(self.run_untyped(sql, budget.limits()).await?)
     }
 
