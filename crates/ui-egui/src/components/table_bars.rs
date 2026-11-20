@@ -67,6 +67,8 @@ pub struct TableBar {
     /// The value panel's toggle, on while the panel shows; `None` draws no Value cell, and the bar
     /// ends at EXPORT.
     pub value: Option<bool>,
+    /// The toggle drawn off: the value panel has no room beside the grid.
+    pub value_off: bool,
 }
 
 /// What a click in the table bar asked for.
@@ -313,7 +315,7 @@ impl TableBar {
             } else {
                 (None, None)
             };
-            (import, export, toggle.map(|toggle| right.add(toggle)))
+            (import, export, toggle.map(|toggle| right.add_enabled(!self.value_off, toggle)))
         } else {
             (None, None, None)
         };
@@ -644,6 +646,7 @@ mod tests {
                 can_add: true,
                 can_count: true,
                 value: Some(false),
+                value_off: false,
                 structure: true,
             };
             for (state, b) in [
@@ -752,6 +755,7 @@ mod tests {
                 can_add: true,
                 can_count: true,
                 value: Some(true),
+                value_off: false,
             };
             ui.allocate_ui(vec2(840.0, 36.0), |ui| seen.extend(b.show(ui).asked));
         });
@@ -786,6 +790,7 @@ mod tests {
             can_add: true,
             can_count: true,
             value: None,
+            value_off: false,
         }
     }
 

@@ -232,7 +232,7 @@ fn table_bar_tags(
     tags: &mut Tags,
     words: (&str, &str),
     why: (Option<&str>, Option<&str>, Option<&str>),
-    open: bool,
+    (open, narrow): (bool, bool),
 ) -> Option<(&'static str, Json)> {
     let (rows, count) = words;
     let (refresh_blocked, add_blocked, count_blocked) = why;
@@ -288,8 +288,7 @@ fn table_bar_tags(
         tags.tag_value_as("table-export", &r, "Export", false);
     }
     if let Some(r) = shown.value {
-        let r = r.hint(if open { "Hide the value panel" } else { "Show the value panel" });
-        tags.tag_value(value_panel::TOGGLE, &r, open);
+        value_panel::tag_toggle(tags, r, open, narrow);
     }
     Some(match shown.asked? {
         TableAsked::Refresh => ("table.refresh", json!({})),
@@ -462,6 +461,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         let lost = connected.is_none_or(|c| c.lost);
         let body = ui.available_rect_before_wrap();
         let split = (body.bottom() - BAR_H).max(body.top());
+        // The panel gives way before the grid does: with no room beside it, its toggle is off.
+        let narrow = open && !value_panel::has_room(body.width());
         // Every bar is cut at the body's edges: nothing is drawn past them at any width.
         let clip = ui.clip_rect().intersect(body);
         let mut top = ui.new_child(
@@ -520,11 +521,12 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
             can_refresh: refresh_blocked.is_none(),
             can_add: edit_blocked.is_none(),
             can_count: count_blocked.is_none(),
-            value: Some(open),
+            value: Some(open && !narrow),
+            value_off: narrow,
         };
         let drawn = table_bar.show(&mut top);
         let words = (count.words(shown), count_text(tab.total, estimate));
-        runs.extend(table_bar_tags(drawn, tags, (&words.0, &words.1), (refresh_blocked, edit_blocked.as_deref(), count_blocked), open));
+        runs.extend(table_bar_tags(drawn, tags, (&words.0, &words.1), (refresh_blocked, edit_blocked.as_deref(), count_blocked), (open, narrow)));
         // Under the table bar down to the paging bar: the band and the grid, with the value panel
         // at their right while it shows.
         let below = top.available_rect_before_wrap().top().min(split);

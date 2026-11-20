@@ -791,7 +791,7 @@ fn results(ui: &mut Ui) {
             stack(ui, &mut |ui| {
                 for (running, run_current) in [(false, false), (true, false), (false, true)] {
                     bar(ui, &mut |ui| {
-                        RunRow { running, cancel: running, run_current, can_run: true }.show(ui);
+                        RunRow { running, cancel: running, run_current, can_run: true, lead: None }.show(ui);
                     });
                 }
             });
@@ -818,7 +818,7 @@ fn results(ui: &mut Ui) {
         |ui| {
             let done = RunState::Done { rows: 10, ms: Some(24) };
             let rows = [
-                ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(false), time_hover: None },
+                ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(false), time_hover: None, value_off: false },
                 ResultBar {
                     tabs: two(),
                     state: RunState::Running { elapsed: Some(s(2400)) },
@@ -826,6 +826,7 @@ fn results(ui: &mut Ui) {
                     export: true,
                     value: Some(false),
                     time_hover: None,
+                    value_off: false,
                 },
                 ResultBar {
                     tabs: Vec::new(),
@@ -834,6 +835,7 @@ fn results(ui: &mut Ui) {
                     export: false,
                     value: Some(false),
                     time_hover: None,
+                    value_off: false,
                 },
                 ResultBar {
                     tabs: Vec::new(),
@@ -842,6 +844,7 @@ fn results(ui: &mut Ui) {
                     export: false,
                     value: Some(false),
                     time_hover: None,
+                    value_off: false,
                 },
                 ResultBar {
                     tabs: two(),
@@ -850,6 +853,7 @@ fn results(ui: &mut Ui) {
                     export: false,
                     value: Some(false),
                     time_hover: None,
+                    value_off: false,
                 },
                 ResultBar {
                     tabs: two(),
@@ -858,9 +862,10 @@ fn results(ui: &mut Ui) {
                     export: true,
                     value: Some(false),
                     time_hover: None,
+                    value_off: false,
                 },
-                ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(true), time_hover: None },
-                ResultBar { tabs: many(), state: done, first_of: None, export: true, value: Some(false), time_hover: None },
+                ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(true), time_hover: None, value_off: false },
+                ResultBar { tabs: many(), state: done, first_of: None, export: true, value: Some(false), time_hover: None, value_off: false },
             ];
             stack(ui, &mut |ui| {
                 for row in &rows {
@@ -899,6 +904,7 @@ fn results(ui: &mut Ui) {
                         export: true,
                         value: Some(false),
                         time_hover: None,
+                        value_off: false,
                     }
                     .show(ui);
                 });
@@ -937,6 +943,7 @@ fn table_tab_bars(ui: &mut Ui) {
         can_add: true,
         can_count: true,
         value: Some(false),
+        value_off: false,
     };
     section(
         ui,

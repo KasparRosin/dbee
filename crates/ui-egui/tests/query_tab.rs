@@ -1709,3 +1709,166 @@ fn the_underline_goes_at_the_first_edit() {
     assert_eq!(ui.editor()["underline"], json!([7, 13]), "the next run's error");
     assert_eq!(marks(&ui).len(), 1);
 }
+
+/// The value panel shown or not, through `ui.toggleValuePanel`.
+fn panel(ui: &mut Ui, on: bool) {
+    if ui.execute("ui.toggleValuePanel", json!({}))["visible"] != json!(on) {
+        ui.execute("ui.toggleValuePanel", json!({}));
+    }
+    ui.frame();
+}
+
+/// The window widths the narrow sweeps go through, from wide to narrow.
+const SWEEP: [f32; 10] = [1400.0, 1100.0, 900.0, 760.0, 640.0, 520.0, 420.0, 300.0, 200.0, 120.0];
+
+/// Two tagged controls that are one widget: the facts are also `query-rows` or `query-affected`.
+fn one_widget(a: &str, b: &str) -> bool {
+    let facts = |x: &str| ["query-facts", "query-rows", "query-affected"].contains(&x);
+    facts(a) && facts(b)
+}
+
+/// Every tagged control of the query tab's run row, result bar and band lies inside the tab's
+/// body, and no two overlap; RUN CURRENT, while drawn, is drawn whole, never cut at the body's
+/// edge.
+fn assert_nothing_over_anything(ui: &mut Ui, at: &str) {
+    let body = ui.tab_x();
+    let height = ui.harness.ctx.content_rect().height();
+    let areas = ["query-editor", "query-split", "query-error"];
+    let tags = ui.harness.state().tags();
+    let drawn: Vec<(String, egui::Rect)> = tags
+        .ids()
+        .into_iter()
+        .filter(|id| ["query-", "result-", "value-toggle"].iter().any(|p| id.starts_with(p)) && !areas.contains(id))
+        .filter_map(|id| tags.rect(id).map(|r| (id.to_string(), r)))
+        .collect();
+    for (id, r) in &drawn {
+        assert!(
+            r.left() >= body.min - 0.5 && r.right() <= body.max + 0.5 && r.top() >= 0.0 && r.bottom() <= height + 0.5,
+            "{at}: `{id}` {r:?} inside the body {body:?}"
+        );
+    }
+    if let Some((_, r)) = drawn.iter().find(|(id, _)| id == "query-run-current") {
+        assert!(r.right() <= body.max - 11.5, "{at}: RUN CURRENT {r:?} whole, 12 before the body's end {body:?}");
+    }
+    for (i, (a, ra)) in drawn.iter().enumerate() {
+        for (b, rb) in &drawn[i + 1..] {
+            let o = ra.intersect(*rb);
+            assert!(one_widget(a, b) || !o.is_positive() || o.area() <= 0.5, "{at}: `{a}` {ra:?} over `{b}` {rb:?}");
+        }
+    }
+}
+
+/// [`assert_nothing_over_anything`] at each width of [`SWEEP`], with the value panel shut and then
+/// open; the window back at 1100 × 720 after.
+fn sweep_widths(ui: &mut Ui, state: &str) {
+    for on in [false, true] {
+        ui.harness.set_size(egui::vec2(1400.0, 720.0));
+        ui.frame();
+        panel(ui, on);
+        for width in SWEEP {
+            ui.harness.set_size(egui::vec2(width, 720.0));
+            ui.frame();
+            ui.frame();
+            assert_nothing_over_anything(ui, &format!("{state}, {width} wide, the panel {}", if on { "open" } else { "shut" }));
+        }
+    }
+    ui.harness.set_size(APP_SIZE);
+    ui.frame();
+}
+
+/// Review Focus 6: at every width, the panel open and shut, with several results, while a run
+/// goes (after 300 ms), and after a failure (with a position on Postgres), on Postgres and on
+/// MySQL with its database chip, no control of the query tab's bars is drawn over another or past
+/// the body.
+#[test]
+fn no_query_bar_draws_one_control_over_another() {
+    let db = dbee_testkit::require_testdb!();
+    let mysql = dbee_testkit::target(db.server("mysql80").unwrap());
+    let engines = [("pg14", pg14(db), "select pg_sleep(30)"), ("mysql80", config_of(&mysql), "select sleep(30)")];
+    for (name, config, sleep) in engines {
+        let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, step: Some(0.05), config: Some(config), ..Setup::default() });
+        ui.ctrl("T");
+        ui.frame();
+        if name == "mysql80" {
+            assert!(ui.tag("query-database").is_some(), "{name}: the database chip");
+        }
+        ui.execute("query.setText", json!({ "text": "select 1 as a;\nselect * from shop.orders limit 5;\nselect 2 as b" }));
+        ui.ctrl("Enter");
+        ui.ran();
+        assert!(ui.tag("result-3").is_some(), "{name}: three results");
+        sweep_widths(&mut ui, &format!("{name}, several results"));
+        ui.execute("query.setText", json!({ "text": "select o.totl from shop.orders o" }));
+        ui.ctrl("Enter");
+        ui.ran();
+        assert!(ui.tag("query-error").is_some(), "{name}: the band");
+        sweep_widths(&mut ui, &format!("{name}, failed"));
+        ui.execute("query.setText", json!({ "text": sleep }));
+        ui.frame();
+        held_run(&mut ui, 0.4, |_, _| {});
+        assert!(ui.tag("query-cancel").is_some(), "{name}: running");
+        sweep_widths(&mut ui, &format!("{name}, running"));
+        ui.click("query-cancel");
+        ui.until("the cancel", |ui| ui.query()["running"].is_null());
+    }
+}
+
+/// At 640 × 420 the panel gives the results the body: it isn't drawn, its toggle is off and says
+/// why, `ui.toggleValuePanel` still flips it, and at 1100 it is back at its width.
+#[test]
+fn at_640_the_panel_gives_way() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, egui::vec2(640.0, 420.0));
+    panel(&mut ui, true);
+    ui.ctrl("T");
+    ui.frame();
+    ui.text("select * from shop.orders limit 5");
+    ui.ctrl("Enter");
+    ui.ran();
+    assert!(ui.tag("value-panel").is_none(), "no panel at 640");
+    assert_eq!(ui.value("value-toggle"), true, "the panel still asked for");
+    assert!(!ui.enabled("value-toggle"), "the toggle off");
+    let body = ui.tab_x();
+    assert_eq!(ui.body_x(), body, "the results take the body");
+    let toggle = ui.drawn("value-toggle");
+    assert!((toggle.right() - body.max).abs() <= 0.5, "the toggle at the body's end: {toggle:?} {body:?}");
+    ui.rest(toggle.center());
+    let why = "Value panel: not now, the window is too narrow";
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == why), "the toggle says why");
+    ui.hover_away();
+    assert_eq!(ui.execute("ui.toggleValuePanel", json!({})), json!({ "visible": false }));
+    assert_eq!(ui.execute("ui.toggleValuePanel", json!({})), json!({ "visible": true }));
+    ui.harness.set_size(APP_SIZE);
+    ui.frame();
+    ui.frame();
+    let panel = ui.drawn("value-panel");
+    assert!((panel.width() - 340.0).abs() <= 1.0, "back at 1100, 340 wide: {panel:?}");
+    assert!(ui.enabled("value-toggle"), "the toggle on again");
+}
+
+/// At 900 the panel, dragged wide, leaves the results at least 320.
+#[test]
+fn at_900_the_results_keep_320() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, egui::vec2(900.0, 720.0));
+    panel(&mut ui, true);
+    ui.ctrl("T");
+    ui.frame();
+    ui.text("select * from shop.orders limit 5");
+    ui.ctrl("Enter");
+    ui.ran();
+    let before = ui.drawn("value-panel");
+    let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+    let (from, to) = (egui::pos2(before.left() + 2.0, before.center().y), egui::pos2(before.left() - 300.0, before.center().y));
+    ui.frame_with(vec![Event::PointerMoved(from)]);
+    ui.frame_with(vec![press(from, true)]);
+    for i in 1..=8 {
+        ui.frame_with(vec![Event::PointerMoved(from + (to - from) * (i as f32 / 8.0))]);
+    }
+    ui.frame_with(vec![press(to, false)]);
+    ui.frame();
+    let results = ui.body_x();
+    assert!(results.span() >= 320.0 - 0.5, "the results keep 320: {results:?}");
+    let toggle = ui.drawn("value-toggle");
+    assert!((toggle.right() - results.max).abs() <= 0.5, "the toggle at the results' end: {toggle:?} {results:?}");
+    assert!(ui.drawn("value-panel").width() >= 240.0 - 0.5, "the panel still drawn");
+}

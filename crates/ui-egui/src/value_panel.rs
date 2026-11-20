@@ -75,10 +75,14 @@ use serde_json::{Value as Json, json};
 
 use crate::DbeeApp;
 use crate::automation::Tags;
+use crate::components::tooltip::Hint;
 use crate::components::value::{self, Facts, Panel, Shown, State};
 use crate::editors::size_text;
 use crate::shortcuts;
-use crate::theme::{self, Text, Words, size::VALUE_PANEL_W};
+use crate::theme::{
+    self, Text, Words,
+    size::{RESULTS_MIN_W, VALUE_PANEL_W},
+};
 
 /// The automation ids.
 pub const PANEL: &str = "value-panel";
@@ -646,24 +650,56 @@ pub(crate) struct Placed {
     pub contents: Rect,
 }
 
+/// What the bars' toggle says while the panel has no room beside the results.
+pub(crate) const TOO_NARROW: &str = "Value panel: not now, the window is too narrow";
+
+/// Tags the toggle `r` a bar drew as [`TOGGLE`] (value: whether the panel is asked for), with its
+/// hover; off while the panel has no room (`narrow`), saying why.
+pub(crate) fn tag_toggle(tags: &mut Tags, r: Response, open: bool, narrow: bool) {
+    let r = if narrow { r.hint_disabled(TOO_NARROW) } else { r.hint(if open { "Hide the value panel" } else { "Show the value panel" }) };
+    tags.tag_value(TOGGLE, &r, open);
+}
+
+/// Whether the panel has room in a results area `width` wide: the results keep
+/// [`RESULTS_MIN_W`], and the panel can be made no narrower than [`MIN_WIDTH`].
+pub(crate) fn has_room(width: f32) -> bool {
+    width - RESULTS_MIN_W >= MIN_WIDTH
+}
+
 /// Before the tab's grid: the panel's place at the right of `area` (the tab's results), when it
-/// shows (`open`). [`fill`] draws its contents once the grid has run; the results take the rest
-/// of `area`, left of [`Placed::left`].
+/// shows (`open`) and has room ([`has_room`]). It is as wide as it was made (it starts
+/// [`VALUE_PANEL_W`]), but never so wide that the results keep less than [`RESULTS_MIN_W`]; that
+/// cap leaves its own width as it was, so it comes back at it once there is room. [`fill`] draws
+/// its contents once the grid has run; the results take the rest of `area`, left of
+/// [`Placed::left`].
 pub(crate) fn reserve(open: bool, ui: &mut egui::Ui, area: Rect) -> Option<Placed> {
-    if !open {
+    if !open || !has_room(area.width()) {
         return None;
     }
+    let most = (area.width() - RESULTS_MIN_W).min(MAX_WIDTH);
+    let ctx = ui.ctx().clone();
+    let own_id = panel_id().with("own");
+    let own = ctx.data(|d| d.get_temp::<f32>(own_id)).unwrap_or(VALUE_PANEL_W);
+    let given = own.clamp(MIN_WIDTH, most);
+    // egui keeps the size it drew last; it is told the one this frame gives.
+    let at = Rect::from_min_max(pos2(area.right() - given, area.top()), area.max);
+    ctx.data_mut(|d| d.insert_persisted(panel_id(), egui::PanelState { outer_rect: at }));
     let mut room = ui.new_child(UiBuilder::new().id_salt("dbee-value-room").max_rect(area).layout(Layout::top_down(Align::Min)));
     room.set_clip_rect(area.intersect(ui.clip_rect()));
     // The ground is the panel's own ([`fill`]); egui draws the line down its left edge, which
     // lights while it is dragged.
-    let panel = egui::Panel::right(panel_id()).resizable(true).default_size(VALUE_PANEL_W).size_range(MIN_WIDTH..=MAX_WIDTH).frame(Frame::NONE);
+    let panel = egui::Panel::right(panel_id()).resizable(true).default_size(given).size_range(MIN_WIDTH..=most).frame(Frame::NONE);
     let out = panel.show(&mut room, |ui| {
         // The whole width: the panel keeps the size its contents take.
         let rect = ui.max_rect();
         ui.expand_to_include_rect(rect);
         rect
     });
+    let drawn = out.response.rect.width();
+    // A width other than the one given is a drag: it is the panel's own from now on.
+    if (drawn - given).abs() > 0.5 {
+        ctx.data_mut(|d| d.insert_temp(own_id, drawn));
+    }
     Some(Placed { left: out.response.rect.left().max(area.left()), contents: out.inner })
 }
 

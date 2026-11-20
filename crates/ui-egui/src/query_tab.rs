@@ -941,16 +941,17 @@ struct Chip<'a> {
     why_not: Option<String>,
 }
 
-/// The database chip, as tall as the toolbar's buttons and of a fixed width, so nothing beside
-/// it moves when the database changes (a long name is cut, and reads whole on hover). A click
-/// opens the list of `chip.choices` under its heading; returns the one chosen.
-fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<String> {
+/// The database chip, as tall as the run row's buttons and `width` wide ([`CHIP_W`] while the
+/// row has room), so nothing beside it moves when the database changes (a long name is cut, and
+/// reads whole on hover). A click opens the list of `chip.choices` under its heading; returns the
+/// one chosen.
+fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>, width: f32) -> Option<String> {
     let t = theme::tokens(ui.ctx());
     let (one, many) = chip.word;
     let enabled = chip.why_not.is_none();
     let mut chosen = None;
     ui.add_enabled_ui(enabled, |ui| {
-        let (rect, r) = ui.allocate_exact_size(vec2(CHIP_W, size::BUTTON_H), Sense::click());
+        let (rect, r) = ui.allocate_exact_size(vec2(width, size::BUTTON_H), Sense::click());
         let p = ui.painter();
         let fill = if enabled && r.hovered() { t.hover } else { t.card };
         p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
@@ -987,7 +988,7 @@ fn database_chip(ui: &mut egui::Ui, tags: &mut Tags, chip: &Chip<'_>) -> Option<
             // egui closes a popup that is not drawn: no list while the chip waits.
             return;
         }
-        Popup::menu(&r).width(CHIP_W).style(menu::style(ui.ctx())).show(|ui| {
+        Popup::menu(&r).width(CHIP_W.max(width)).style(menu::style(ui.ctx())).show(|ui| {
             // At least as wide as the chip.
             ui.set_min_width(ui.available_width());
             menu::heading(ui, many);
@@ -1102,14 +1103,14 @@ fn result_holds(o: &StatementOutcome) -> String {
 }
 
 /// The result bar of tab `q` saying `says` (its tabs named `titles`; `running`: the run has gone
-/// 300 ms, so EXPORT shows; `open`: the value panel shows, its toggle at the bar's right end on);
-/// tags what it drew. What its click asked for.
+/// 300 ms, so EXPORT shows; `open`: the value panel is asked for, its toggle at the bar's right end
+/// on; `narrow`: it has no room, its toggle off); tags what it drew. What its click asked for.
 fn result_bar(
     ui: &mut egui::Ui,
     tags: &mut Tags,
     q: &dbee_engine::QueryTab,
     titles: &[String],
-    (says, running, open): (RunState, bool, bool),
+    (says, running, open, narrow): (RunState, bool, bool, bool),
 ) -> Option<ResultAsked> {
     let shown = q.shown_result();
     let cut = shown.filter(|o| !o.result.complete && !o.result.columns.is_empty());
@@ -1121,8 +1122,9 @@ fn result_bar(
         state: says,
         first_of: first_of.filter(|_| matches!(says, RunState::Done { .. })),
         export: running || rows,
-        value: Some(open),
+        value: Some(open && !narrow),
         time_hover: no_count.then_some(NO_COUNT),
+        value_off: narrow,
     };
     let drawn = bar.show(ui);
     let value =
@@ -1142,7 +1144,14 @@ fn result_bar(
             tags.tag_value_as(&format!("{RESULT_LIST}{}", i.saturating_add(1)), r, value(*i, o), true);
         }
     }
-    let words = if first_of.is_some() && matches!(says, RunState::Done { .. }) { drawn.facts.clone().hint(cap_hover()) } else { drawn.facts.clone() };
+    // Cut words read whole on hover, with the cap's sentence when the run's cap cut the result.
+    let cap = (first_of.is_some() && matches!(says, RunState::Done { .. })).then(cap_hover);
+    let words = match (drawn.cut, cap) {
+        (true, Some(cap)) => drawn.facts.clone().hint(format!("{}. {cap}", drawn.says)),
+        (true, None) => drawn.facts.clone().hint(drawn.says.as_str()),
+        (false, Some(cap)) => drawn.facts.clone().hint(cap),
+        (false, None) => drawn.facts.clone(),
+    };
     let facts = match &drawn.time {
         Some(time) => words.union(time.clone()),
         None => words,
@@ -1156,9 +1165,8 @@ fn result_bar(
     if let Some(r) = &drawn.export {
         tags.tag_value(EXPORT, r, "Export");
     }
-    if let Some(r) = &drawn.value {
-        let r = r.clone().hint(if open { "Hide the value panel" } else { "Show the value panel" });
-        tags.tag_value(value_panel::TOGGLE, &r, open);
+    if let Some(r) = drawn.value {
+        value_panel::tag_toggle(tags, r, open, narrow);
     }
     drawn.asked
 }
@@ -1223,8 +1231,11 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         tags.tag_value(SPLIT, &split, f64::from(view.query_split));
         // The editor, edge to edge from the body's top.
         let editor_rect = Rect::from_min_size(body.min, vec2(body.width(), editor_h));
+        // Every area is cut at the body's edges: nothing is drawn past them at any width.
+        let clip = ui.clip_rect().intersect(body);
         let mut editor_ui =
             ui.new_child(UiBuilder::new().id_salt(("dbee-query-editor", id.0)).max_rect(editor_rect).layout(Layout::top_down(Align::Min)));
+        editor_ui.set_clip_rect(clip.intersect(editor_rect));
         let error_line = q.error.as_ref().and_then(|e| e.position).map(|p| state.editor.line_column_of(p).0);
         // The error's token is underlined while the text is the one the run started with: the
         // window notes the text's version when it first sees the run's error.
@@ -1265,6 +1276,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
         let row_rect = Rect::from_min_size(pos2(body.left(), line.bottom()), vec2(body.width(), BAR_H));
         let mut row_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-run-row", id.0)).max_rect(row_rect).layout(Layout::top_down(Align::Min)));
+        row_ui.set_clip_rect(clip);
         let running = q.running.is_some();
         let chip = session.state().connection(Which::Tab(id)).filter(|c| c.dialect.has_use_database()).map(|c| Chip {
             database: c.starts_in(q),
@@ -1276,10 +1288,10 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                 .or_else(|| run_blocked.clone()),
         });
         let mut chosen = None;
-        let run_row = RunRow { running: past, cancel: past, run_current: true, can_run: run_blocked.is_none() };
-        let row = run_row.show_with(&mut row_ui, |ui| {
+        let run_row = RunRow { running: past, cancel: past, run_current: true, can_run: run_blocked.is_none(), lead: chip.as_ref().map(|_| CHIP_W) };
+        let row = run_row.show_with(&mut row_ui, |ui, width| {
             if let Some(chip) = &chip {
-                chosen = database_chip(ui, tags, chip);
+                chosen = database_chip(ui, tags, chip, width);
             }
         });
         if let Some(name) = chosen {
@@ -1310,14 +1322,16 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         // The results column: the result bar, the band and the grid, with the value panel at its
         // right from the bar's top while there is a bar.
         let mut right = body.right();
+        // The panel gives way before the results do: with no room beside them, its toggle is off.
+        let narrow = open && !value_panel::has_room(body.width());
         if let Some(says) = run_state(q, elapsed) {
             panel = value_panel::reserve(open, ui, Rect::from_min_max(pos2(body.left(), row_rect.bottom()), body.max));
             right = panel.map_or(right, |p| p.left);
             let bar_rect = Rect::from_min_max(pos2(body.left(), row_rect.bottom()), pos2(right, row_rect.bottom() + BAR_H));
             let mut bar_ui =
                 ui.new_child(UiBuilder::new().id_salt(("dbee-query-result-bar", id.0)).max_rect(bar_rect).layout(Layout::top_down(Align::Min)));
-            bar_ui.set_clip_rect(bar_rect.intersect(ui.clip_rect()));
-            match result_bar(&mut bar_ui, tags, q, &state.results.titles, (says, past, open)) {
+            bar_ui.set_clip_rect(bar_rect.intersect(clip));
+            match result_bar(&mut bar_ui, tags, q, &state.results.titles, (says, past, open, narrow)) {
                 Some(ResultAsked::Show(index)) => runs.push(("query.showResult", json!({ "index": index }))),
                 Some(ResultAsked::Value) => runs.push(("ui.toggleValuePanel", json!({}))),
                 None => {}
@@ -1328,7 +1342,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         // results.
         let rest = Rect::from_min_max(pos2(body.left(), results_top), pos2(right, body.bottom()));
         let mut rest_ui = ui.new_child(UiBuilder::new().id_salt(("dbee-query-results", id.0)).max_rect(rest).layout(Layout::top_down(Align::Min)));
-        rest_ui.set_clip_rect(rest.intersect(ui.clip_rect()));
+        rest_ui.set_clip_rect(rest.intersect(clip));
         rest_ui.spacing_mut().item_spacing.y = 0.0;
         if let Some(e) = q.error.as_ref().filter(|e| e.code != "cancelled") {
             let at = e.position.map(|p| state.editor.line_column_of(p));

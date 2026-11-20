@@ -472,6 +472,12 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     show_result(app, root, 1, &format!("{p}-7b-results-list"));
     assert_eq!(app.cell(0, 0)["text"], cell, "{name}: the unqualified statement ran where the chip says");
     app.shot(root, &format!("{p}-7b-results"));
+    // The run row and the result bar give way in order: none of their controls over another or
+    // past the window.
+    let bars = ["query-database", "query-run", "query-run-current", "query-facts", "query-export", "value-toggle"];
+    app.assert_apart(&bars, &format!("{name}: the query tab's bars"));
+    assert!(app.tag("query-facts").is_some() && app.tag("value-toggle").is_some(), "{name}: the facts and the toggle drawn");
+    app.shot(root, &format!("{p}-7e-bars"));
 
     //    A statement that runs until cancelled; Cancel in the run row stops it.
     let marker = unique("m2day_run");

@@ -157,6 +157,8 @@ pub const RUN_ROW_PAD_X: f32 = 12.0;
 pub const RUN_ROW_GAP: f32 = 4.0;
 /// What leads the run row (the database chip) stands this far before RUN.
 pub const CHIP_RUN_GAP: f32 = SPACE_8;
+/// Short of room, the run row's database chip narrows to this, its name cut.
+pub const RUN_CHIP_MIN_W: f32 = 96.0;
 /// The query editor (`editor`): its line numbers' box this far in from its left, its text this
 /// far after the box and under its top.
 pub const EDITOR_INSET: f32 = 12.0;
@@ -287,6 +289,9 @@ pub const VALUE_KIND_GAP: f32 = 2.0;
 pub const VALUE_NOTE_GAP: f32 = 6.0;
 /// The value panel's width when it first shows, beside the tab's results.
 pub const VALUE_PANEL_W: f32 = 340.0;
+/// The tab's results keep at least this beside the value panel: the panel narrows first, and
+/// isn't drawn when that would leave it narrower than it can be made.
+pub const RESULTS_MIN_W: f32 = 320.0;
 
 /// The error band (`error band`): its edge down the left this wide; what it holds this far in from
 /// its sides, past the edge; its parts this far apart, with this much more above a field (HINT,

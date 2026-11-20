@@ -23,7 +23,7 @@ use super::tooltip::Hint;
 use super::{Look, focus, painter};
 use crate::theme::size::{
     BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, CHIP_RUN_GAP, NEW_TAB_W, RESULT_FACT_GAP, RESULT_TAB_PAD_X, RESULT_TAB_TITLE_MAX, ROW_COUNT_COUNTING_GAP,
-    ROW_COUNT_GAP, RUN_ROW_GAP, RUN_ROW_PAD_X, SPINNER, TAB_ACTIVE_LINE,
+    ROW_COUNT_GAP, RUN_CHIP_MIN_W, RUN_ROW_GAP, RUN_ROW_PAD_X, SPINNER, TAB_ACTIVE_LINE,
 };
 use crate::theme::{Text, Tokens, tokens};
 use crate::tree::thousands;
@@ -58,6 +58,8 @@ pub struct RunRow {
     pub run_current: bool,
     /// A run can start (the engine's own check): RUN and RUN CURRENT are on while nothing runs.
     pub can_run: bool,
+    /// How wide what leads the row is (the database chip), when something does.
+    pub lead: Option<f32>,
 }
 
 /// What a click in the run row asked for.
@@ -68,37 +70,93 @@ pub enum RunAsked {
     Cancel,
 }
 
-/// The run row as drawn: each button, and what a click asked for.
+/// The run row as drawn: each button, the form it took, and what a click asked for.
 pub struct RunShown {
     pub run: Response,
     pub cancel: Option<Response>,
     pub run_current: Option<Response>,
+    pub fit: RunFit,
     pub asked: Option<RunAsked>,
 }
 
+/// Which of the run row's parts show, short of room. They give way in this order (the first
+/// first): RUN CURRENT's shortcut, RUN's shortcut (their hovers still name the keys), RUN CURRENT
+/// (its keys still run the statement under the cursor), then the lead narrows to
+/// [`RUN_CHIP_MIN_W`]. Past that the row is cut at its end; RUN and CANCEL never go.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunFit {
+    pub run_current_keys: bool,
+    pub run_keys: bool,
+    pub run_current: bool,
+    /// How wide the lead is drawn (0 with none).
+    pub lead_w: f32,
+}
+
 impl RunRow {
-    /// Draws it as wide as `ui`, [`BAR_H`] tall.
-    pub fn show(self, ui: &mut Ui) -> RunShown {
-        self.show_with(ui, |_| {})
+    /// Every form, from the widest to the narrowest: each gives way one step more than the one
+    /// before it.
+    fn forms(&self) -> [RunFit; 5] {
+        let lead_w = self.lead.unwrap_or(0.0).max(0.0);
+        let narrow = lead_w.min(RUN_CHIP_MIN_W);
+        [
+            RunFit { run_current_keys: true, run_keys: true, run_current: true, lead_w },
+            RunFit { run_current_keys: false, run_keys: true, run_current: true, lead_w },
+            RunFit { run_current_keys: false, run_keys: false, run_current: true, lead_w },
+            RunFit { run_current_keys: false, run_keys: false, run_current: false, lead_w },
+            RunFit { run_current_keys: false, run_keys: false, run_current: false, lead_w: narrow },
+        ]
     }
 
-    /// Draws it as wide as `ui`, [`BAR_H`] tall, with what `lead` adds first in the row
-    /// ([`RUN_ROW_GAP`] apart, as the buttons are), and RUN [`CHIP_RUN_GAP`] after it when it
-    /// added something.
-    pub fn show_with(self, ui: &mut Ui, lead: impl FnOnce(&mut Ui)) -> RunShown {
+    fn run_button(keys: bool) -> BoxButton<'static> {
+        let b = BoxButton::primary("Run");
+        if keys { b.shortcut("Ctrl+Enter") } else { b }
+    }
+
+    fn run_current_button(keys: bool) -> BoxButton<'static> {
+        let b = BoxButton::outline("Run current");
+        if keys { b.shortcut("Ctrl+Shift+Enter") } else { b }
+    }
+
+    /// How wide the row draws in form `fit`, its 12 at either end included.
+    fn needs(&self, ui: &Ui, fit: RunFit) -> f32 {
+        let lead = if fit.lead_w > 0.0 { fit.lead_w + CHIP_RUN_GAP } else { 0.0 };
+        let cancel = if self.cancel { RUN_ROW_GAP + BoxButton::primary("Cancel").width(ui) } else { 0.0 };
+        let current = if self.run_current && fit.run_current { RUN_ROW_GAP + Self::run_current_button(fit.run_current_keys).width(ui) } else { 0.0 };
+        2.0 * RUN_ROW_PAD_X + lead + Self::run_button(fit.run_keys).width(ui) + cancel + current
+    }
+
+    /// The first form that fits a row `room` wide, each form taking room only from the steps
+    /// before it; the narrowest when none does (the row then cut at its end).
+    pub fn fit(&self, ui: &Ui, room: f32) -> RunFit {
+        let forms = self.forms();
+        forms.into_iter().find(|&fit| self.needs(ui, fit) <= room).unwrap_or(forms[4])
+    }
+
+    /// Draws it as wide as `ui`, [`BAR_H`] tall.
+    pub fn show(self, ui: &mut Ui) -> RunShown {
+        self.show_with(ui, |_, _| {})
+    }
+
+    /// Draws it as wide as `ui`, [`BAR_H`] tall, in the first form that fits ([`RunRow::fit`]),
+    /// with what `lead` adds first in the row, as wide as it is given ([`RUN_ROW_GAP`] apart, as
+    /// the buttons are), and RUN [`CHIP_RUN_GAP`] after it when it added something. Nothing is
+    /// drawn past the row.
+    pub fn show_with(self, ui: &mut Ui, lead: impl FnOnce(&mut Ui, f32)) -> RunShown {
         let (bar, cell) = bar_ground(ui);
+        let fit = self.fit(ui, cell.width());
         let row = Rect::from_min_max(pos2(cell.left() + RUN_ROW_PAD_X, cell.top()), cell.max);
         let mut ui = ui.new_child(UiBuilder::new().id_salt(bar.id).max_rect(row).layout(Layout::left_to_right(Align::Center)));
+        ui.set_clip_rect(ui.clip_rect().intersect(bar.rect));
         ui.spacing_mut().item_spacing.x = RUN_ROW_GAP;
         let before = ui.cursor().min.x;
-        lead(&mut ui);
+        lead(&mut ui, fit.lead_w);
         if ui.cursor().min.x > before {
             ui.add_space(CHIP_RUN_GAP - RUN_ROW_GAP);
         }
         let on = self.can_run && !self.running;
-        let run = ui.add_enabled(on, BoxButton::primary("Run").shortcut("Ctrl+Enter"));
+        let run = ui.add_enabled(on, Self::run_button(fit.run_keys));
         let cancel = self.cancel.then(|| ui.add(BoxButton::primary("Cancel")));
-        let run_current = self.run_current.then(|| ui.add_enabled(on, BoxButton::outline("Run current").shortcut("Ctrl+Shift+Enter")));
+        let run_current = (self.run_current && fit.run_current).then(|| ui.add_enabled(on, Self::run_current_button(fit.run_current_keys)));
         let clicked = |r: &Option<Response>| r.as_ref().is_some_and(Response::clicked);
         let asked = if run.clicked() {
             Some(RunAsked::Run)
@@ -109,7 +167,7 @@ impl RunRow {
         } else {
             None
         };
-        RunShown { run, cancel, run_current, asked }
+        RunShown { run, cancel, run_current, fit, asked }
     }
 }
 
@@ -233,6 +291,32 @@ pub struct ResultBar<'a> {
     pub value: Option<bool>,
     /// What hovering the time says (a statement whose count the database didn't give).
     pub time_hover: Option<&'a str>,
+    /// The toggle drawn off: the value panel has no room beside the results.
+    pub value_off: bool,
+}
+
+/// Which of the result bar's parts show, short of room. They give way in this order (the first
+/// first): EXPORT's word (its icon stays), EXPORT (off until a later version, so nothing that
+/// works goes), the facts' time, then the facts' words are cut with "…". The tabs scroll behind
+/// the ⌄ list as soon as they don't all fit, every result still listed; the toggle never goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResultFit {
+    pub export_word: bool,
+    pub export: bool,
+    pub time: bool,
+    pub words_cut: bool,
+}
+
+impl ResultFit {
+    /// Every form, from the widest to the narrowest: each gives way one step more than the one
+    /// before it.
+    pub const FORMS: [ResultFit; 5] = [
+        ResultFit { export_word: true, export: true, time: true, words_cut: false },
+        ResultFit { export_word: false, export: true, time: true, words_cut: false },
+        ResultFit { export_word: false, export: false, time: true, words_cut: false },
+        ResultFit { export_word: false, export: false, time: false, words_cut: false },
+        ResultFit { export_word: false, export: false, time: false, words_cut: true },
+    ];
 }
 
 /// The result bar as drawn: its tabs, its facts' words and their time, the facts as written
@@ -248,6 +332,9 @@ pub struct ResultShown {
     pub value: Option<Response>,
     pub list: Option<Response>,
     pub listed: Vec<(usize, Response)>,
+    pub fit: ResultFit,
+    /// The facts' words were cut: hovering them should say them whole.
+    pub cut: bool,
     pub asked: Option<ResultAsked>,
 }
 
@@ -330,27 +417,58 @@ impl ResultBar<'_> {
         }
     }
 
-    /// Draws it as wide as `ui`, [`BAR_H`] tall. While its tabs don't fit in what the facts
-    /// leave them, they scroll as the workspace's tabs do (`row`), and the list button stands
-    /// right after them and right before the facts, listing every result.
+    /// EXPORT, with its word or without.
+    fn export_button(word: bool) -> BarButton<'static> {
+        BarButton::label(Icon::Export, "Export").over_line().words(word)
+    }
+
+    /// The first form ([`ResultFit::FORMS`]) that fits a bar `room` wide, each form taking room
+    /// only from the steps before it; the narrowest when none does. The tabs need the room of
+    /// all of them, or of the list button once they don't all fit.
+    pub fn fit(&self, ui: &Ui, room: f32) -> ResultFit {
+        let t = tokens(ui.ctx());
+        let (words, colour, time) = self.facts(ui, t);
+        let gap = if words.is_empty() { 0.0 } else { RESULT_FACT_GAP };
+        let words_w = Piece::new(ui, Text::Label.job(&words, colour), words).width();
+        let time_w = time.as_ref().map_or(0.0, |time| gap + time.width());
+        let value_w = self.value.map_or(0.0, |on| BarButton::icon(Icon::Panel).on(on).over_line().width(ui));
+        let tabs_w: f32 = self.tabs.iter().map(|tab| tab.parts(ui).1).sum();
+        let tabs = (tabs_w + RESULT_FACT_GAP).min(NEW_TAB_W);
+        let needs = |fit: ResultFit| {
+            let export = if self.export && fit.export { Self::export_button(fit.export_word).width(ui) } else { 0.0 };
+            tabs + words_w + if fit.time { time_w } else { 0.0 } + RESULT_FACT_GAP + export + value_w
+        };
+        ResultFit::FORMS[..4].iter().copied().find(|&fit| needs(fit) <= room).unwrap_or(ResultFit::FORMS[4])
+    }
+
+    /// Draws it as wide as `ui`, [`BAR_H`] tall, in the first form that fits
+    /// ([`ResultBar::fit`]). While its tabs don't fit in what the facts leave them, they scroll
+    /// as the workspace's tabs do (`row`), and the list button stands right after them and right
+    /// before the facts, listing every result. Nothing is drawn past the bar.
     pub fn show(self, ui: &mut Ui) -> ResultShown {
         let t = tokens(ui.ctx());
         let (bar, cell) = bar_ground(ui);
         let id = bar.id;
         let mid = cell.center().y;
+        let fit = self.fit(ui, cell.width());
         let mut ui = ui.new_child(UiBuilder::new().id_salt(id).max_rect(cell).layout(Layout::left_to_right(Align::Min)));
+        let clip = ui.clip_rect().intersect(bar.rect);
         // Measured from the right end: the toggle, EXPORT, then the facts 12 in from them.
         let value = self.value.map(|on| BarButton::icon(Icon::Panel).on(on).over_line());
         let value_rect = value.as_ref().map(|b| Rect::from_min_max(pos2(cell.right() - b.width(&ui), cell.top()), cell.max));
         let value_left = value_rect.map_or(cell.right(), |r| r.left());
-        let export = self.export.then(|| BarButton::label(Icon::Export, "Export").over_line());
+        // Everything but the toggle is cut where it starts: in a bar too narrow for the rest, the
+        // toggle is what stays.
+        ui.set_clip_rect(clip.intersect(Rect::from_min_max(bar.rect.min, pos2(value_left, bar.rect.bottom()))));
+        let export = (self.export && fit.export).then(|| Self::export_button(fit.export_word));
         let export_rect = export.as_ref().map(|b| Rect::from_min_max(pos2(value_left - b.width(&ui), cell.top()), pos2(value_left, cell.bottom())));
-        let (words_say, colour, mut time) = self.facts(&ui, t);
+        let (words_say, colour, time) = self.facts(&ui, t);
         let says = match time.as_ref().and_then(Time::says) {
             Some(time) if words_say.is_empty() => time.to_owned(),
             Some(time) => format!("{words_say} {time}"),
             None => words_say.clone(),
         };
+        let mut time = time.filter(|_| fit.time);
         let mut job = Text::Label.job(&words_say, colour);
         let laid = Piece::new(&ui, job.clone(), words_say.clone());
         let facts_end = export_rect.map_or(value_left, |r| r.left()) - RESULT_FACT_GAP;
@@ -367,14 +485,16 @@ impl ResultBar<'_> {
         if time.as_ref().is_some_and(|time| laid.width() + gap + time.width() > facts_room) {
             time = None;
         }
-        let words = if laid.width() > facts_room {
+        let cut = laid.width() > facts_room;
+        let words = if cut {
             job.wrap = TextWrapping::truncate_at_width(facts_room.max(1.0));
             Piece::new(&ui, job, words_say)
         } else {
             laid
         };
         let facts_w = words.width() + time.as_ref().map_or(0.0, |time| gap + time.width());
-        let facts_left = facts_end - facts_w;
+        // Never under the list button: what doesn't fit even cut is cut at the facts' end.
+        let facts_left = (facts_end - facts_w).max(cell.left() + list_w);
 
         // Left to right, so Tab reaches them as they read: the tabs, kept left of the facts.
         let tabs_end = if fits { facts_left - RESULT_FACT_GAP } else { facts_left - NEW_TAB_W };
@@ -402,18 +522,22 @@ impl ResultBar<'_> {
             }
             (Some(listed.button), listed.items)
         };
+        let left_clip = ui.clip_rect();
+        ui.set_clip_rect(left_clip.intersect(Rect::from_x_y_ranges(facts_left..=facts_end.max(facts_left), bar.rect.y_range())));
         let facts = piece(&ui, id.with("facts"), &words, pos2(facts_left, mid), colour);
         let time = time.and_then(|time| time.show(&ui, id.with("time"), facts_left + words.width() + gap, mid, t));
+        ui.set_clip_rect(left_clip);
         let time = match (time, self.time_hover) {
             (Some(r), Some(hover)) => Some(r.hint(hover)),
             (time, _) => time,
         };
         let export = export.zip(export_rect).map(|(b, rect)| ui.add_enabled_ui(false, |ui| ui.put(rect, b)).inner.hint_disabled(EXPORT_LATER));
-        let value = value.zip(value_rect).map(|(b, rect)| ui.put(rect, b));
+        ui.set_clip_rect(clip);
+        let value = value.zip(value_rect).map(|(b, rect)| ui.add_enabled_ui(!self.value_off, |ui| ui.put(rect, b)).inner);
         if value.as_ref().is_some_and(Response::clicked) {
             asked = Some(ResultAsked::Value);
         }
-        ResultShown { tabs, facts, time, says, export, value, list, listed, asked }
+        ResultShown { tabs, facts, time, says, export, value, list, listed, fit, cut, asked }
     }
 }
 
@@ -556,7 +680,7 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
-    use crate::components::{Edge, Look, ROOM, both, edges_in, fills_in, harness, harness_in, icon_in, painted, sections, texts};
+    use crate::components::{Edge, Look, ROOM, both, edges_in, fills_in, harness, harness_in, icon_in, painted, painted_in, sections, texts};
     use crate::theme::Text;
     use crate::theme::size::{BAR_H, SPINNER};
 
@@ -616,7 +740,7 @@ mod tests {
                 let at_ = format!("{theme:?} running {running} run current {run_current}");
                 let mut rects = (Rect::NOTHING, None, None);
                 let (shapes, at) = drawn(theme, |ui| {
-                    let s = RunRow { running, cancel: running, run_current, can_run: true }.show(ui);
+                    let s = RunRow { running, cancel: running, run_current, can_run: true, lead: None }.show(ui);
                     rects = (s.run.rect, s.cancel.map(|r| r.rect), s.run_current.map(|r| r.rect));
                 });
                 assert_ground(&shapes, at, &t, &at_);
@@ -674,13 +798,13 @@ mod tests {
         for (theme, t) in both() {
             let mut rects = (Rect::NOTHING, None);
             let (shapes, _) = drawn(theme, |ui| {
-                let s = RunRow { running: false, cancel: false, run_current: true, can_run: true }.show(ui);
+                let s = RunRow { running: false, cancel: false, run_current: true, can_run: true, lead: None }.show(ui);
                 rects = (s.run.rect, s.cancel.map(|r| r.rect));
             });
             assert!(rects.1.is_none() && whole(&shapes, "CANCEL").is_none(), "{theme:?}: no CANCEL unless asked");
             assert_eq!(fills_in(&shapes, rects.0), [(rects.0, t.ink)], "{theme:?}: RUN on");
             let (shapes, _) = drawn(theme, |ui| {
-                let s = RunRow { running: true, cancel: true, run_current: true, can_run: true }.show(ui);
+                let s = RunRow { running: true, cancel: true, run_current: true, can_run: true, lead: None }.show(ui);
                 rects = (s.run.rect, s.cancel.map(|r| r.rect));
             });
             assert_eq!(fills_in(&shapes, rects.0), [(rects.0, t.fill)], "{theme:?}: RUN drawn off while running");
@@ -695,7 +819,7 @@ mod tests {
         for (theme, _) in both() {
             let mut rects = (Rect::NOTHING, Rect::NOTHING);
             let (_, at) = drawn(theme, |ui| {
-                let s = RunRow { running: false, cancel: false, run_current: true, can_run: true }.show_with(ui, |ui| {
+                let s = RunRow { running: false, cancel: false, run_current: true, can_run: true, lead: Some(150.0) }.show_with(ui, |ui, _| {
                     rects.0 = ui.allocate_exact_size(vec2(150.0, 28.0), Sense::hover()).0;
                 });
                 rects.1 = s.run.rect;
@@ -756,7 +880,7 @@ mod tests {
     /// A result bar of `state` with the page's two tabs (`select ... orders` shown), or none.
     fn bar(tabs: bool, state: RunState, first_of: Option<(u64, u64)>, export: bool, value_on: bool) -> ResultBar<'static> {
         let tabs = if tabs { vec![ResultTab::new("select ... orders").active(true), ResultTab::new("select ... series")] } else { Vec::new() };
-        ResultBar { tabs, state, first_of, export, value: Some(value_on), time_hover: None }
+        ResultBar { tabs, state, first_of, export, value: Some(value_on), time_hover: None, value_off: false }
     }
 
     #[test]
@@ -887,7 +1011,8 @@ mod tests {
         for (state, first_of, want, says) in rows {
             let mut seen = None;
             let (shapes, at) = drawn(Theme::Light, |ui| {
-                let s = ResultBar { tabs: Vec::new(), state, first_of, export: true, value: None, time_hover: Some("why") }.show(ui);
+                let s =
+                    ResultBar { tabs: Vec::new(), state, first_of, export: true, value: None, time_hover: Some("why"), value_off: false }.show(ui);
                 seen = Some((s.says.clone(), s.export.map(|r| r.rect), s.value.is_some(), s.time.map(|r| r.rect)));
             });
             let (said, export, value, time) = seen.expect("drawn");
@@ -979,6 +1104,7 @@ mod tests {
                     export: true,
                     value: Some(false),
                     time_hover: None,
+                    value_off: false,
                 }
                 .show(ui);
             });
@@ -1021,7 +1147,7 @@ mod tests {
             (RunState::Running { elapsed: Some(ms(2400)) }, "00:02.4", Text::Data),
         ] {
             let (shapes, _) = drawn(Theme::Light, |ui| {
-                ResultBar { tabs: Vec::new(), state, first_of: None, export: false, value: Some(false), time_hover: None }.show(ui);
+                ResultBar { tabs: Vec::new(), state, first_of: None, export: false, value: Some(false), time_hover: None, value_off: false }.show(ui);
             });
             assert_eq!(sections(&shapes, caps), [(caps.to_owned(), style.font(), crate::theme::LIGHT.text_muted)], "{state:?}");
         }
@@ -1040,6 +1166,7 @@ mod tests {
                 export: false,
                 value: Some(false),
                 time_hover: None,
+                value_off: false,
             }
             .show(ui);
         });
@@ -1062,8 +1189,8 @@ mod tests {
 
     #[test]
     fn a_narrow_result_bar_draws_nothing_over_another() {
-        // The tabs take what the facts leave and are cut there; short of room the time goes,
-        // then the words are cut; EXPORT and the toggle stay.
+        // The tabs take what the facts leave and are cut there; short of room EXPORT goes, then
+        // the time, then the words are cut; the toggle stays.
         let tabs: Vec<ResultTab<'static>> =
             (0..6).map(|i| ResultTab::new(["select ... orders", "select ... series"][i % 2]).active(i == 0)).collect();
         let result = ResultBar {
@@ -1073,6 +1200,7 @@ mod tests {
             export: true,
             value: Some(false),
             time_hover: None,
+            value_off: false,
         };
         for width in [760.0, 560.0, 420.0, 300.0, 200.0] {
             let mut seen = (Vec::new(), None, Rect::NOTHING, Rect::NOTHING, Rect::NOTHING);
@@ -1090,7 +1218,8 @@ mod tests {
                 });
             });
             let (tabs, export, value, facts, at) = seen;
-            let export = export.unwrap_or_else(|| panic!("{width}: EXPORT stays"));
+            // EXPORT gives way first; the facts end before it, or before the toggle.
+            let export = export.unwrap_or(Rect::from_min_max(pos2(value.left(), value.top()), pos2(value.left(), value.bottom())));
             assert!(value.right() <= at.right() + 0.5 && export.right() <= value.left(), "{width}: EXPORT, then the toggle at the end");
             let drawn: Vec<(String, Rect)> = texts(&shapes).into_iter().map(|(w, r, _)| (w, r)).collect();
             let facts_drawn: Vec<&(String, Rect)> = drawn.iter().filter(|(w, _)| !w.starts_with("select") && !w.contains("EXPORT")).collect();
@@ -1113,6 +1242,149 @@ mod tests {
                     assert!(clip.width() <= 0.0 || clip.right() <= facts.left() - 11.5, "{width}: a tab's title cut before the facts: {clip:?}");
                 }
             }
+        }
+    }
+
+    /// The widths the give-way sweeps draw a bar at, from wide to narrow.
+    fn sweep() -> impl Iterator<Item = f32> {
+        (0..=39).map(|i| 900.0 - 20.0 * i as f32)
+    }
+
+    /// No two of `rects` overlap (by more than half a point).
+    fn assert_apart(rects: &[(&str, Rect)], at_: &str) {
+        for (i, (a, ra)) in rects.iter().enumerate() {
+            for (b, rb) in &rects[i + 1..] {
+                let o = ra.intersect(*rb);
+                assert!(!o.is_positive() || o.area() <= 0.5, "{at_}: `{a}` {ra:?} over `{b}` {rb:?}");
+            }
+        }
+    }
+
+    /// Nothing `shapes` paints reaches past `bar`.
+    fn assert_within(shapes: &[ClippedShape], bar: Rect, at_: &str) {
+        for s in shapes {
+            let seen = s.shape.visual_bounding_rect().intersect(s.clip_rect);
+            assert!(!seen.is_positive() || bar.expand(0.5).contains_rect(seen), "{at_}: {seen:?} drawn past the bar {bar:?}");
+        }
+    }
+
+    #[test]
+    fn the_run_row_gives_way_in_its_order() {
+        // RUN CURRENT's shortcut, RUN's, RUN CURRENT, then the lead narrows to 96; past that the
+        // row is cut at its end. RUN and CANCEL never go, nothing overlaps, nothing is drawn past
+        // the row, and narrowing never takes room back.
+        for lead in [None, Some(150.0)] {
+            for running in [false, true] {
+                let row = RunRow { running, cancel: running, run_current: true, can_run: true, lead };
+                let forms = row.forms();
+                let mut last = 0;
+                for width in sweep() {
+                    let at_ = format!("lead {lead:?} running {running} {width} wide");
+                    let mut seen = None;
+                    let mut bar = Rect::NOTHING;
+                    let shapes = painted_in(vec2(1000.0, 200.0), Theme::Light, |ui| {
+                        ui.allocate_ui(vec2(width, BAR_H), |ui| {
+                            bar = Rect::from_min_size(ui.cursor().min, vec2(width, BAR_H));
+                            let mut lead_rect = None;
+                            let s = row.show_with(ui, |ui, w| {
+                                if lead.is_some() {
+                                    lead_rect = Some(ui.allocate_exact_size(vec2(w, 28.0), Sense::hover()).0);
+                                }
+                            });
+                            let fits = row.needs(ui, s.fit) <= width;
+                            seen = Some((s.fit, fits, lead_rect, s.run.rect, s.cancel.map(|r| r.rect), s.run_current.map(|r| r.rect)));
+                        });
+                    });
+                    let (fit, fits, lead_rect, run, cancel, current) = seen.unwrap_or_else(|| panic!("{at_}: drawn"));
+                    let k = forms.iter().position(|f| *f == fit).unwrap_or_else(|| panic!("{at_}: {fit:?} is a form"));
+                    assert!(k >= last, "{at_}: form {k} after form {last}: room taken back");
+                    last = k;
+                    assert_eq!(current.is_some(), fit.run_current, "{at_}: RUN CURRENT as the form says");
+                    assert_eq!(cancel.is_some(), running, "{at_}: CANCEL while running");
+                    let keys = |words: &str| whole(&shapes, words).is_some();
+                    assert_eq!(keys("CTRL+SHIFT+ENTER"), fit.run_current && fit.run_current_keys, "{at_}: RUN CURRENT's keys");
+                    assert_eq!(keys("CTRL+ENTER"), fit.run_keys, "{at_}: RUN's keys");
+                    if let Some(l) = lead_rect {
+                        assert!(close(l.width(), fit.lead_w), "{at_}: the lead as wide as given: {l:?}");
+                        assert!(fit.lead_w >= RUN_CHIP_MIN_W - 0.5, "{at_}: the lead never under 96");
+                    }
+                    assert!(run.width() > 0.0 && run.left() < bar.right(), "{at_}: RUN drawn: {run:?}");
+                    let mut parts = vec![("run", run)];
+                    parts.extend(lead_rect.map(|r| ("lead", r)));
+                    parts.extend(cancel.map(|r| ("cancel", r)));
+                    parts.extend(current.map(|r| ("run current", r)));
+                    assert_apart(&parts, &at_);
+                    if fits {
+                        for (name, r) in &parts {
+                            assert!(r.right() <= bar.right() - 11.5, "{at_}: {name} {r:?} whole, 12 before the end");
+                        }
+                    }
+                    assert_within(&shapes, bar, &at_);
+                }
+                // Without a lead the last two forms are one.
+                let narrowest = if lead.is_some() { 4 } else { 3 };
+                assert_eq!(last, narrowest, "lead {lead:?} running {running}: the sweep reaches the narrowest form");
+            }
+        }
+    }
+
+    #[test]
+    fn the_result_bar_gives_way_in_its_order() {
+        // EXPORT's word, EXPORT, the facts' time, then the facts' words cut; the tabs scroll
+        // behind the list; VALUE never goes, nothing overlaps, nothing is drawn past the bar, and
+        // narrowing never takes room back.
+        for n in [0, 1, 3] {
+            let result = ResultBar {
+                tabs: MANY.iter().take(n).enumerate().map(|(i, title)| ResultTab::new(title).active(i == 0)).collect(),
+                state: RunState::Done { rows: 10_000, ms: Some(80) },
+                first_of: Some((10_000, 25_000)),
+                export: true,
+                value: Some(false),
+                time_hover: None,
+                value_off: false,
+            };
+            let mut last = 0;
+            for width in sweep() {
+                let at_ = format!("{n} tabs, {width} wide");
+                let mut seen = None;
+                let mut bar = Rect::NOTHING;
+                let shapes = painted_in(vec2(1000.0, 200.0), Theme::Light, |ui| {
+                    ui.allocate_ui(vec2(width, BAR_H), |ui| {
+                        bar = Rect::from_min_size(ui.cursor().min, vec2(width, BAR_H));
+                        let s = result.clone().show(ui);
+                        let tabs: Vec<Rect> = s.tabs.iter().map(|r| r.interact_rect).filter(|r| r.is_positive()).collect();
+                        seen = Some((
+                            s.fit,
+                            tabs,
+                            s.list.map(|r| r.rect),
+                            s.facts.rect,
+                            s.time.map(|r| r.rect),
+                            s.export.map(|r| r.rect),
+                            s.value.map(|r| r.rect),
+                        ));
+                    });
+                });
+                let (fit, tabs, list, facts, time, export, value) = seen.unwrap_or_else(|| panic!("{at_}: drawn"));
+                let k = ResultFit::FORMS.iter().position(|f| *f == fit).unwrap_or_else(|| panic!("{at_}: {fit:?} is a form"));
+                assert!(k >= last, "{at_}: form {k} after form {last}: room taken back");
+                last = k;
+                let value = value.unwrap_or_else(|| panic!("{at_}: VALUE never goes"));
+                assert!(close(value.right(), bar.right()), "{at_}: VALUE at the end: {value:?}");
+                assert_eq!(export.is_some(), fit.export, "{at_}: EXPORT as the form says");
+                assert_eq!(whole(&shapes, "EXPORT").is_some(), fit.export && fit.export_word, "{at_}: EXPORT's word");
+                assert!(time.is_none() || fit.time, "{at_}: no time once it gave way");
+                let mut parts = vec![("value", value), ("facts", facts)];
+                parts.extend(export.map(|r| ("export", r)));
+                parts.extend(time.map(|r| ("time", r)));
+                parts.extend(list.map(|r| ("list", r)));
+                parts.extend(tabs.iter().map(|r| ("tab", *r)));
+                assert_apart(&parts, &at_);
+                for (name, r) in &parts {
+                    assert!(r.left() >= bar.left() - 0.5 && r.right() <= bar.right() + 0.5, "{at_}: {name} {r:?} inside the bar");
+                }
+                assert_within(&shapes, bar, &at_);
+            }
+            assert_eq!(last, 4, "{n} tabs: the sweep reaches the narrowest form");
         }
     }
 
@@ -1148,6 +1420,7 @@ mod tests {
                     export: true,
                     value: Some(false),
                     time_hover: None,
+                    value_off: false,
                 }
                 .show(ui);
                 s.tabs = shown.tabs.iter().map(|r| r.rect).collect();
@@ -1254,10 +1527,10 @@ mod tests {
     fn the_bars_say_what_was_asked() {
         let mut h = harness(Theme::Light, Asked::default(), |ui, seen| {
             ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
-                seen.run.extend(RunRow { running: false, cancel: false, run_current: true, can_run: true }.show(ui).asked)
+                seen.run.extend(RunRow { running: false, cancel: false, run_current: true, can_run: true, lead: None }.show(ui).asked)
             });
             ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
-                seen.run.extend(RunRow { running: true, cancel: true, run_current: false, can_run: true }.show(ui).asked)
+                seen.run.extend(RunRow { running: true, cancel: true, run_current: false, can_run: true, lead: None }.show(ui).asked)
             });
             ui.allocate_ui(vec2(NARROW, BAR_H), |ui| {
                 let tabs = vec![ResultTab::new("first").active(true), ResultTab::new("second")];
@@ -1269,6 +1542,7 @@ mod tests {
                         export: true,
                         value: Some(false),
                         time_hover: None,
+                        value_off: false,
                     }
                     .show(ui)
                     .asked,
@@ -1317,6 +1591,7 @@ mod tests {
                         export: false,
                         value: Some(false),
                         time_hover: None,
+                        value_off: false,
                     }
                     .show(ui)
                     .asked,
