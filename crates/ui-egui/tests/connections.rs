@@ -2511,11 +2511,6 @@ fn tab_follows_the_reading_order() {
     }
 }
 
-/// Egui's clock in the last frame, in seconds.
-fn clock(ui: &Ui) -> f64 {
-    ui.harness.ctx.input(|i| i.time)
-}
-
 /// The tag `id` as the last frame drew it, read without running a frame.
 fn drawn_tag(ui: &Ui, id: &str) -> Option<Json> {
     tag_in(&json!({ "automation": ui.harness.state().tags().to_json() }), id)
@@ -2540,11 +2535,11 @@ fn frames_while_running(ui: &mut Ui, button: &str, secs: f64, mut check: impl Fn
         assert!(start.elapsed() < Duration::from_secs(10), "{button} starts a job");
         ui.frame();
     }
-    let first = clock(ui);
+    let first = ui.clock();
     check(ui, 0.0);
     loop {
         ui.frame();
-        let gone = clock(ui) - first;
+        let gone = ui.clock() - first;
         check(ui, gone);
         if gone >= secs - 1e-6 {
             return;

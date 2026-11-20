@@ -351,9 +351,6 @@ pub const ERROR_BAND_HEADING_MIN: f32 = 120.0;
 pub const STRIP_EDGE: f32 = 2.0;
 pub const STRIP_PAD_Y: f32 = SPACE_8;
 pub const STRIP_MAX_LINES: usize = 3;
-/// What is dimmed (the connection form's fields while a test or connect runs, LC3) is drawn at
-/// this opacity.
-pub const DIM_OPACITY: f32 = 0.5;
 /// The editor (`editor/line number`, `editor/error token`): a line number's box is this wide, the
 /// number flush with its right; an error's underline is this thick, this far down its line.
 pub const LINE_NUMBER_W: f32 = 36.0;

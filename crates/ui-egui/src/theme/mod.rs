@@ -14,6 +14,11 @@ pub use tokens::{DARK, LIGHT, Tokens, connection_color, on_connection_color, tok
 use egui::{Color32, CornerRadius, Shadow, Stroke};
 use size::{CARET_W, RADIUS_CONTROL, RADIUS_FLOAT};
 
+/// The one strength of the dim: what waits on a job is drawn at this opacity, the connection
+/// form's fields while a test or connect runs (LC3, "dims the form to 50 %") and the old rows of a
+/// reload (LC2, "the old rows at 50 % opacity").
+pub const DIM: f32 = 0.5;
+
 /// The design's one shadow, under every popup and dialog.
 pub fn float_shadow(t: &Tokens) -> Shadow {
     // The design's blur 18 is a radius: its fade reaches 18 past the edge. egui's blur is the

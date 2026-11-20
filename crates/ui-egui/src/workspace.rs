@@ -63,6 +63,7 @@ use crate::components::tooltip::Hint;
 use crate::components::{self, Look, focus};
 use crate::editors::CellEditor;
 use crate::query_tab::{self, Queries};
+use crate::quiet::{Quiet, Watch};
 use crate::table_tab::{self, Grids};
 use crate::theme::size::{KEYCAP_GAP, KEYCAP_H, NO_TAB_GAP, NO_TAB_ROW_GAP, NO_TAB_W, SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_W, SLIM_BAR_H, TAB_H};
 use crate::theme::{self, Text, Words};
@@ -78,9 +79,6 @@ pub(crate) struct Workspace {
     pub tree: Tree,
     /// Each table tab's grid (its column widths), dropped with the tab.
     pub grids: Grids,
-    /// When the window first saw each table tab's page load or count running, on egui's clock
-    /// ([`table_tab::Since`]): the table bar's timers count from it. Dropped with the tab.
-    pub since: table_tab::Since,
     /// The cell editor, while one is open ([`crate::editors`]).
     pub editor: Option<CellEditor>,
     /// Each query tab's editor text and result grids, dropped with the tab.
@@ -147,22 +145,19 @@ pub(crate) fn dirty(tab: &Tab) -> bool {
 }
 
 /// `tab`'s live jobs (by its markers).
-fn jobs(tab: &Tab) -> Vec<JobId> {
+pub(crate) fn jobs(tab: &Tab) -> Vec<JobId> {
     match tab {
         Tab::Table(t) => [t.loading, t.counting, t.applying].into_iter().flatten().collect(),
         Tab::Query(q) => q.running.into_iter().collect(),
     }
 }
 
-/// One of `tab`'s jobs has run 300 ms as the window saw it (the job clock, `since`, keyed by tab
-/// and job, as the table bar's timers): the tab's running mark waits as long, so a fast job never
-/// flickers it.
-fn busy(since: &mut table_tab::Since, tab: &Tab, now: f64) -> bool {
-    let jobs = jobs(tab);
+/// One of `tab`'s jobs has run 300 ms as the window saw it ([`Quiet`]): the tab's running mark
+/// waits as long, so a fast job never flickers it.
+fn busy(quiet: &mut Quiet, ctx: &egui::Context, tab: &Tab) -> bool {
     let id = tab.id();
-    since.retain(|(tab_id, job), _| *tab_id != id || jobs.contains(job));
     // Every job's start is noted, not only the first's.
-    let past: Vec<bool> = jobs.into_iter().map(|job| table_tab::after_quiet(since, id, Some(job), now).is_some()).collect();
+    let past: Vec<bool> = jobs(tab).into_iter().map(|job| quiet.past(ctx, Watch::Tab(id, job)).is_some()).collect();
     past.contains(&true)
 }
 
@@ -258,7 +253,6 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let tabs = &app.session.state().tabs;
     app.view.work.grids.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     app.view.work.queries.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
-    app.view.work.since.retain(|(id, _), _| tabs.iter().any(|t| t.id() == *id));
     egui::Panel::top("dbee-menubar").exact_size(SLIM_BAR_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();
     // The status bar's room now and its contents last, so Tab reaches it after the tab's controls.
@@ -421,8 +415,8 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
 /// The tabs strip ([`tab::Strip`]); where it ends below.
 fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> f32 {
     let st: &State = app.session.state();
-    let now = ui.ctx().input(|i| i.time);
-    let since = &mut app.view.work.since;
+    let ctx = ui.ctx().clone();
+    let quiet = &mut app.view.quiet;
     let tabs: Vec<TabView> = st
         .tabs
         .iter()
@@ -433,7 +427,7 @@ fn strip(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) -> f32 {
             hover: tab.title(),
             active: st.active == Some(tab.id()),
             dirty: dirty(tab),
-            busy: busy(since, tab, now),
+            busy: busy(quiet, &ctx, tab),
         })
         .collect();
     let tags = &mut app.tags;

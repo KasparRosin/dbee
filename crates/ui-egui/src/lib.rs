@@ -19,6 +19,7 @@ pub mod paging;
 pub mod picker;
 pub mod query_tab;
 pub mod quick_search;
+pub(crate) mod quiet;
 pub mod shortcuts;
 pub mod table_tab;
 pub mod theme;

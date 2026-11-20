@@ -86,7 +86,7 @@ use crate::components::tooltip::Hint;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
-use crate::table_tab::{QUIET, TICK};
+use crate::quiet::Watch;
 use crate::theme::{
     self, Text, connection_color,
     size::{
@@ -246,9 +246,6 @@ pub(crate) struct ConnScreen {
     pub filter: String,
     /// The test or connect started from the form, until its result arrives.
     pub running: Option<(JobId, Running)>,
-    /// The job of `running` and the time on egui's clock of the first frame that saw it: the
-    /// facts, CANCEL and the dim show from [`QUIET`] after it.
-    pub since: Option<(JobId, f64)>,
     pub message: Option<Message>,
     pub key: KeyLine,
     pub picker: Option<Picker>,
@@ -282,7 +279,6 @@ impl ConnScreen {
             generation: 0,
             filter: String::new(),
             running: None,
-            since: None,
             message: None,
             key: KeyLine::default(),
             picker: None,
@@ -291,24 +287,6 @@ impl ConnScreen {
             switch: None,
             switch_closed: false,
         }
-    }
-
-    /// What runs and how long it has, once it has run [`QUIET`] (at `now` on egui's clock): the
-    /// connecting state shows then, so a fast connect never flickers.
-    pub(crate) fn running_for(&self, now: f64) -> Option<(Running, Duration)> {
-        let (job, kind) = self.running?;
-        let (_, first) = self.since.filter(|(seen, _)| *seen == job)?;
-        let ran = now - first;
-        (ran >= QUIET).then(|| (kind, Duration::try_from_secs_f64(ran).unwrap_or_default()))
-    }
-
-    /// The frame at `now` sees what runs: a job not seen before starts its own clock.
-    fn see_running(&mut self, now: f64) {
-        self.since = match (self.running, self.since) {
-            (Some((job, _)), Some((seen, first))) if seen == job => Some((seen, first)),
-            (Some((job, _)), _) => Some((job, now)),
-            (None, _) => None,
-        };
     }
 
     /// Shows a new, empty connection: the engine cards first.
@@ -703,8 +681,11 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
         let DbeeApp { session, view, tags, .. } = app;
         let kinds = session.kinds();
         let saved = !view.conn.form.id.is_empty() && session.state().store.is_saved(&view.conn.form.id);
+        // What runs, once it has run 300 ms: the connecting state shows then, so a fast connect
+        // never flickers.
+        let shown = view.conn.running.and_then(|(job, kind)| view.quiet.past(ui.ctx(), Watch::Form(job)).map(|ran| (kind, ran)));
         side(ui, session.state(), &mut view.conn, tags, &mut acts);
-        main(ui, &mut view.conn, &kinds, saved, tags, &mut acts);
+        main(ui, &mut view.conn, shown, &kinds, saved, tags, &mut acts);
     }
     for act in acts {
         apply(app, act, &ctx);
@@ -715,11 +696,6 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
 fn tick(app: &mut DbeeApp, ctx: &egui::Context) {
     picker::poll(&mut app.view.conn, ctx);
     let conn = &mut app.view.conn;
-    conn.see_running(ctx.input(|i| i.time));
-    if conn.running.is_some() {
-        // The connecting state at 300 ms, then its timer.
-        ctx.request_repaint_after(TICK);
-    }
     if !conn.form.ssh_on || !conn.form.kind.takes_ssh() || conn.step != Step::Form {
         return;
     }
@@ -1009,7 +985,15 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, sele
 /// The right pane, everything right of the sidebar between the menu bar and the version bar, on
 /// `card` (tagged `conn-card`): the title row, with the connection's colour as an edge along its
 /// top; then the engine cards, or the engine row and the form (`saved`: a saved connection's).
-fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], saved: bool, tags: &mut Tags, acts: &mut Vec<Act>) {
+fn main(
+    ui: &mut egui::Ui,
+    conn: &mut ConnScreen,
+    shown: Option<(Running, Duration)>,
+    kinds: &[DbKind],
+    saved: bool,
+    tags: &mut Tags,
+    acts: &mut Vec<Act>,
+) {
     let t = theme::tokens(ui.ctx());
     egui::CentralPanel::default().frame(Frame::new().fill(t.card)).show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -1025,7 +1009,7 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], saved: bool,
             Step::Engines => engines(ui, kinds, tags, acts),
             Step::Form => {
                 conn_form::engine_row(ui, conn, tags, acts);
-                conn_form::body(ui, conn, saved, tags, acts);
+                conn_form::body(ui, conn, shown, saved, tags, acts);
             }
         }
     });

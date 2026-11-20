@@ -1836,11 +1836,6 @@ fn an_empty_table_reads_0_rows() {
     assert_eq!(ui.rect("page-count"), ui.rect("table-rows"), "no COUNT ROWS");
 }
 
-/// Egui's clock in the last frame, in seconds.
-fn clock(ui: &Ui) -> f64 {
-    ui.harness.ctx.input(|i| i.time)
-}
-
 /// Whether the active table tab's page load (or else its count) runs.
 fn running(ui: &Ui, count: bool) -> bool {
     let s = ui.harness.state().session().state();
@@ -1856,25 +1851,9 @@ fn running(ui: &Ui, count: bool) -> bool {
     }
 }
 
-/// Runs frames until the active tab's load (or count) runs, then on until the window's clock
-/// has gone `secs` past the frame that first showed it; checks `check` on each frame on the way
-/// with the time gone so far.
-fn frames_while_running(ui: &mut Ui, count: bool, secs: f64, mut check: impl FnMut(&mut Ui, f64)) {
-    let start = Instant::now();
-    while !running(ui, count) {
-        assert!(start.elapsed() < WAIT, "it runs");
-        ui.frame();
-    }
-    let first = clock(ui);
-    loop {
-        ui.frame();
-        let gone = clock(ui) - first;
-        assert!(running(ui, count), "still running at {gone:.2} s");
-        check(ui, gone);
-        if gone >= secs {
-            return;
-        }
-    }
+/// [`Ui::frames_while`] the active tab's load (or count) runs.
+fn frames_while_running(ui: &mut Ui, count: bool, secs: f64, check: impl FnMut(&mut Ui, f64)) {
+    ui.frames_while(|ui| running(ui, count), secs, check);
 }
 
 /// A scratch table of 150 rows, more than a page, so its first page doesn't tell the count; and a

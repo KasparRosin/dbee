@@ -56,6 +56,7 @@ use crate::connections::{self, ConnScreen};
 use crate::control::{self, ControlRequest, Deferred, Input};
 use crate::dialogs::{self, Dialog, Ending, Rerun};
 use crate::quick_search::{self, QuickSearch};
+use crate::quiet::Watch;
 use crate::theme::{self, Words};
 use crate::workspace::Workspace;
 use crate::{editors, shortcuts, ui_commands, workspace};
@@ -254,6 +255,9 @@ pub(crate) struct View {
     pub notices: VecDeque<Notice>,
     /// The connection screen's form, lists and jobs.
     pub conn: ConnScreen,
+    /// When the window first saw each job it shows waiting for, for both screens: nothing shows a
+    /// job waits before it has run 300 ms ([`crate::quiet`]).
+    pub quiet: crate::quiet::Quiet,
     /// The query editor's cursor, a byte offset into the active query tab's text, for
     /// Ctrl+Shift+Enter (run the statement under the cursor).
     pub query_cursor: Option<usize>,
@@ -275,6 +279,7 @@ impl View {
             dialog: None,
             notices: VecDeque::new(),
             conn: ConnScreen::new(has_store),
+            quiet: crate::quiet::Quiet::default(),
             query_cursor: None,
             query_split: crate::query_tab::DEFAULT_SPLIT,
         }
@@ -721,7 +726,9 @@ impl DbeeApp {
         if self.view.dialog.is_none() && !self.view.quick.open {
             shortcuts::handle(self, &ctx);
         }
-        // 5. Draw, then the cell editor's key.
+        // 5. Forget the jobs that no longer run, so the next starts its own 300 ms; draw, then the
+        // cell editor's key.
+        self.forget_ended_jobs();
         self.tags.begin_frame();
         self.draw(ui);
         editors::after_draw(self, &ctx);
@@ -747,6 +754,17 @@ impl DbeeApp {
             ctx.request_repaint();
         }
         self.frames = self.frames.saturating_add(1);
+    }
+
+    /// [`crate::quiet::Quiet::keep`]: a tab's job lives while the tab has it as a marker
+    /// (`loading`, `counting`, `applying`, `running`), the form's while the form runs it.
+    fn forget_ended_jobs(&mut self) {
+        let state = self.session.state();
+        let form = self.view.conn.running.map(|(job, _)| job);
+        self.view.quiet.keep(|watch| match *watch {
+            Watch::Tab(id, job) => state.tabs.iter().find(|t| t.id() == id).is_some_and(|tab| workspace::jobs(tab).contains(&job)),
+            Watch::Form(job) => form == Some(job),
+        });
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
