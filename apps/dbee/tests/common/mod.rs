@@ -263,6 +263,13 @@ impl App {
         }
     }
 
+    /// Presses widget `id` from the keyboard (`ui.focus`, then Space), as a click does but
+    /// without one: egui would count a click shortly before a double-click towards a triple one.
+    pub fn press(&mut self, id: &str) {
+        self.ok("ui.focus", json!({ "id": id }));
+        self.key("Space");
+    }
+
     pub fn double_click(&mut self, id: &str) {
         self.ok("ui.click", json!({ "id": id, "count": 2 }));
     }
