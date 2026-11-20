@@ -407,3 +407,46 @@ fn a_refresh_of_a_tree_with_nothing_shows_eight_bar_rows() {
     assert_eq!(ui.value("tree-count"), "0 tables");
     assert!(ui.tag("tree-skeleton").is_none(), "no bars after");
 }
+
+/// A second refresh started while the first runs waits its own 300 ms once the first ends: the
+/// count's words come back, and LOADING only after the second has run 300 ms alone (the clock is
+/// the job's, not the command's).
+#[test]
+fn a_second_refresh_starts_its_own_300_ms() {
+    let db = dbee_testkit::require_testdb!();
+    // In the catalog from the start, for the second page load below.
+    let other = Scratch::new(db, "t_tree2", |t| format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY)"));
+    let (mut ui, _table, lock) = browse_held(db);
+    let job = |reply: serde_json::Value| dbee_engine::JobId(reply["result"]["job"].as_u64().expect("a job"));
+    let started = |ui: &mut Ui| ui.call("engine.execute", json!({ "command": "schema.refresh", "params": {}, "wait": false }));
+    let first = job(started(&mut ui));
+    ui.frames_while(refreshing, 0.45, |_, _| {});
+    assert_eq!(drawn_value(&ui, "tree-count"), Some(json!("Loading")), "the first refresh shows LOADING");
+    // A second page load behind its own lock, then the second refresh behind it.
+    let lock_b = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", other.0)).unwrap();
+    ui.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": other.0 }, "wait": false }));
+    let second = job(started(&mut ui));
+    drop(lock);
+    let alone = move |ui: &mut Ui| {
+        let s = ui.harness.state().session();
+        !s.job_running(first) && s.job_running(second)
+    };
+    let mut seen = false;
+    ui.frames_while(alone, 0.45, |ui, gone| {
+        if gone <= 0.15 {
+            // The first refresh's count (other tests make tables meanwhile, so not `words`).
+            let count = drawn_value(ui, "tree-count");
+            assert!(
+                count.as_ref().and_then(|c| c.as_str()).is_some_and(|c| c.ends_with(" tables")),
+                "at {gone:.2} s of the second alone: the count's words, not {count:?}"
+            );
+        }
+        if gone >= 0.4 {
+            assert_eq!(drawn_value(ui, "tree-count"), Some(json!("Loading")), "at {gone:.2} s of the second alone");
+            seen = true;
+        }
+    });
+    assert!(seen, "the second showed LOADING after its own 300 ms");
+    drop(lock_b);
+    ui.until("the second refresh's end", |ui| !refreshing(ui));
+}

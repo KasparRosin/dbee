@@ -765,7 +765,7 @@ impl DbeeApp {
         self.view.quiet.keep(|watch| match *watch {
             Watch::Tab(id, job) => state.tabs.iter().find(|t| t.id() == id).is_some_and(|tab| workspace::jobs(tab).contains(&job)),
             Watch::Form(job) => form == Some(job),
-            Watch::Command(label) => self.session.running(label),
+            Watch::Command(_, job) => self.session.job_running(job),
         });
     }
 
