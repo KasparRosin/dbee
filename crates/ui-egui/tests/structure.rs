@@ -173,8 +173,9 @@ fn structure_shows_sa() {
     }
 
     // The five headings in order, each 12 under the last line of the section above it.
+    let shown = ui.table()["structure"]["shown"].clone();
     let mut bottom = None;
-    for (id, words) in SECTIONS {
+    for ((id, words), count) in SECTIONS.into_iter().zip(["columns", "indexes", "foreignKeys", "referencedBy", "triggers"]) {
         assert_eq!(ui.value(id), words);
         let at = ui.laid(id);
         if let Some(above) = bottom {
@@ -182,8 +183,12 @@ fn structure_shows_sa() {
         }
         let section = id.trim_start_matches("structure-");
         let cells: Vec<String> = ids(&ui.inspect()).into_iter().filter(|c| c.starts_with(&format!("{id}-"))).collect();
-        let last = cells.iter().map(|c| ui.laid(c).bottom()).fold(at.bottom() + 30.0, f32::max);
+        let drawn = cells.iter().map(|c| ui.laid(c).bottom()).fold(at.bottom() + 30.0, f32::max);
         assert!(cells.iter().all(|c| c.trim_start_matches(&format!("structure-{section}-")).starts_with(char::is_numeric)), "{cells:?}");
+        // Its last row's line, drawn or below the page's bottom.
+        let rows = shown[count].as_u64().unwrap_or_else(|| panic!("{count} counted: {shown}"));
+        let last = at.bottom() + 30.0 + 26.0 * rows as f32;
+        assert!(drawn <= last + 0.5, "`{id}`'s rows end at {last}: {drawn}");
         bottom = Some(last);
     }
 }
@@ -354,4 +359,257 @@ fn grid_keys_do_nothing_in_structure() {
     assert_eq!(t["edits"], before["edits"], "nothing staged: {t}");
     assert_eq!(t["selection"], before["selection"], "the selection as it was");
     assert!(ui.toast().is_none(), "no notice");
+}
+
+/// A schema of its own on pg14 for a test's tables (`st_<hex>`), dropped at the end, also when
+/// the test fails.
+struct SchemaGuard(String);
+
+impl SchemaGuard {
+    /// Makes the schema and runs `sql(<schema>)` in it.
+    fn new(db: &TestDb, sql: impl FnOnce(&str) -> String) -> SchemaGuard {
+        let name = dbee_testkit::unique("st");
+        let guard = SchemaGuard(name.clone());
+        dbee_testkit::psql(pg14_server(db), &format!("CREATE SCHEMA {name}; {}", sql(&name))).unwrap();
+        guard
+    }
+}
+
+impl Drop for SchemaGuard {
+    fn drop(&mut self) {
+        if let Some(db) = dbee_testkit::testdb() {
+            let _ = dbee_testkit::psql(pg14_server(db), &format!("DROP SCHEMA IF EXISTS {} CASCADE", self.0));
+        }
+    }
+}
+
+/// The brief §9's scratch tables: `p` with a unique pair, an expression index, a partial index
+/// with a descending part and two triggers; `c` with a one-column and a two-column foreign key
+/// to `p`.
+fn st_tables(s: &str) -> String {
+    format!(
+        "CREATE TABLE {s}.p (id int8 PRIMARY KEY, email text, status text, total numeric, a int, b int, UNIQUE (a, b));
+         CREATE INDEX p_lower ON {s}.p (lower(email));
+         CREATE INDEX p_part ON {s}.p (status, total DESC) WHERE total > 100;
+         CREATE TABLE {s}.c (id int PRIMARY KEY, p_id int8 REFERENCES {s}.p ON DELETE CASCADE, a int, b int, FOREIGN KEY (a, b) REFERENCES {s}.p (a, b));
+         CREATE FUNCTION {s}.f() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+         CREATE TRIGGER t_touch BEFORE UPDATE ON {s}.p FOR EACH ROW EXECUTE FUNCTION {s}.f();
+         CREATE TRIGGER t_log AFTER INSERT OR DELETE ON {s}.p FOR EACH STATEMENT EXECUTE FUNCTION {s}.f();"
+    )
+}
+
+/// `schema.table` open, its STRUCTURE shown and read.
+fn structure_of(ui: &mut Ui, schema: &str, table: &str) {
+    ui.open(schema, table);
+    ui.until("the page", |ui| ui.table()["loading"].is_null());
+    ui.click("table-view-structure");
+    ui.until("the structure", |ui| ui.tag("structure-columns-0-name").is_some());
+    ui.hover_away();
+}
+
+/// The row of `section` whose `key` reads `value`: its index.
+fn row_where(ui: &mut Ui, section: &str, key: &str, value: &str) -> usize {
+    (0..64)
+        .find(|n| ui.tag(&format!("structure-{section}-{n}-{key}")).is_some_and(|t| t["value"] == value))
+        .unwrap_or_else(|| panic!("a row of {section} with {key} `{value}`"))
+}
+
+/// Brief §3.2–§3.5: each section's cells as the brief writes them, data as Postgres wrote it.
+#[test]
+fn the_sections_read_as_the_brief_writes_them() {
+    let db = dbee_testkit::require_testdb!();
+    let schema = SchemaGuard::new(db, st_tables);
+    let s = schema.0.as_str();
+    // Tall enough for every section of `p` in view.
+    let mut ui = Ui::connected_in(db, vec2(1400.0, 1200.0));
+    structure_of(&mut ui, s, "p");
+    // INDEXES: the primary key's first.
+    assert_eq!(ui.value("structure-indexes-0-name"), "p_pkey");
+    assert_eq!(ui.value("structure-indexes-0-keys"), "primary key");
+    assert_eq!(ui.value("structure-indexes-0-unique"), true);
+    assert_eq!(ui.value("structure-indexes-0-method"), "btree");
+    assert_eq!(ui.value("structure-indexes-0-columns"), "id");
+    let pair = row_where(&mut ui, "indexes", "name", "p_a_b_key");
+    assert_eq!(ui.value(&format!("structure-indexes-{pair}-columns")), "a, b");
+    assert_eq!(ui.value(&format!("structure-indexes-{pair}-unique")), true);
+    assert_eq!(ui.value(&format!("structure-indexes-{pair}-keys")), "");
+    let lower = row_where(&mut ui, "indexes", "name", "p_lower");
+    assert_eq!(ui.value(&format!("structure-indexes-{lower}-columns")), "lower(email)");
+    assert_eq!(ui.value(&format!("structure-indexes-{lower}-unique")), false);
+    let part = row_where(&mut ui, "indexes", "name", "p_part");
+    let words = ui.value(&format!("structure-indexes-{part}-columns")).as_str().unwrap_or_default().to_string();
+    let (columns, predicate) = words.split_once(" where ").unwrap_or_else(|| panic!("a partial index's predicate: {words}"));
+    assert_eq!(columns, "status, total desc");
+    assert!(predicate.contains("total") && predicate.contains("100"), "Postgres's own predicate: {predicate}");
+    // REFERENCED BY: c's two keys, from c's columns, to p's.
+    let one = row_where(&mut ui, "referenced-by", "from", &format!("{s}.c.p_id"));
+    assert_eq!(ui.value(&format!("structure-referenced-by-{one}-columns")), "id");
+    let two = row_where(&mut ui, "referenced-by", "from", &format!("{s}.c (a, b)"));
+    assert_eq!(ui.value(&format!("structure-referenced-by-{two}-columns")), "a, b");
+    // TRIGGERS, by name.
+    assert_eq!(ui.value("structure-triggers-0-name"), "t_log");
+    assert_eq!(ui.value("structure-triggers-0-when"), "after");
+    assert_eq!(ui.value("structure-triggers-0-events"), "insert, delete");
+    assert_eq!(ui.value("structure-triggers-0-forEach"), "statement");
+    assert_eq!(ui.value("structure-triggers-1-name"), "t_touch");
+    assert_eq!(ui.value("structure-triggers-1-when"), "before");
+    assert_eq!(ui.value("structure-triggers-1-events"), "update");
+    assert_eq!(ui.value("structure-triggers-1-forEach"), "row");
+    let definition = ui.value("structure-triggers-1-definition").as_str().unwrap_or_default().to_string();
+    assert!(definition.starts_with("CREATE TRIGGER t_touch BEFORE UPDATE"), "the definition as written: {definition}");
+    // FOREIGN KEYS on c.
+    structure_of(&mut ui, s, "c");
+    let one = row_where(&mut ui, "foreign-keys", "references", &format!("{s}.p.id"));
+    assert_eq!(ui.value(&format!("structure-foreign-keys-{one}-columns")), "p_id");
+    assert_eq!(ui.value(&format!("structure-foreign-keys-{one}-onDelete")), "cascade");
+    let two = row_where(&mut ui, "foreign-keys", "references", &format!("{s}.p (a, b)"));
+    assert_eq!(ui.value(&format!("structure-foreign-keys-{two}-columns")), "a, b");
+    assert_eq!(ui.value(&format!("structure-foreign-keys-{two}-onDelete")), "no action");
+    assert_eq!(ui.value("structure-foreign-keys-0-name"), "c_a_b_fkey", "the catalog's order, by name");
+}
+
+/// Review Focus 3: a trigger whose definition runs to thousands of lines (SQLite keeps the
+/// statement as written) draws on one line cut inside its cell, its hover at most 40 lines ending
+/// with `…`, and frames stay quick with the page open.
+#[test]
+fn a_huge_trigger_definition_draws_on_one_line() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite copy");
+    let body: String = (0..2000).map(|n| format!("  UPDATE t_big SET a = a + {n} WHERE id = new.id;\n")).collect();
+    sqlite
+        .sql(&format!("CREATE TABLE t_big (id INTEGER PRIMARY KEY, a int); CREATE TRIGGER t_huge AFTER INSERT ON t_big BEGIN\n{body}END;"))
+        .unwrap();
+    // Wide enough for TRIGGERS' Definition to start in the body (the page scrolls sideways later).
+    let mut ui = connected_to_target(db, &sqlite, None, vec2(1400.0, 900.0));
+    structure_of(&mut ui, "main", "t_big");
+    assert_eq!(ui.value("structure-triggers-0-name"), "t_huge");
+    let line = ui.value("structure-triggers-0-definition").as_str().unwrap_or_default().to_string();
+    assert!(line.starts_with("CREATE TRIGGER t_huge AFTER INSERT ON t_big BEGIN UPDATE t_big SET a = a + 0 WHERE"), "on one line: {}", &line[..120]);
+    assert!(!line.contains('\n') && line.len() < 4096, "its one line is kept short: {} bytes", line.len());
+    let cell = ui.drawn("structure-triggers-0-definition");
+    let painted: Vec<_> = ui.texts().into_iter().filter(|(r, g)| cell.contains_rect(*r) && g.text().starts_with("CREATE TRIGGER")).collect();
+    let [(at, galley)] = painted.as_slice() else { panic!("one text in the cell: {painted:?}") };
+    assert!(galley.elided && galley.rows.len() == 1, "one line, cut");
+    assert!(at.right() <= cell.right() - 8.0 + 0.5, "cut inside the cell: {at:?} in {cell:?}");
+    // The hover: the definition as written, its first 40 lines, then `…`.
+    ui.rest(cell.center());
+    let hover =
+        ui.texts().into_iter().map(|(_, g)| g.text().to_string()).find(|t| t.starts_with("CREATE TRIGGER t_huge AFTER INSERT ON t_big BEGIN\n"));
+    let hover = hover.expect("the hover shows the definition as written");
+    assert_eq!(hover.lines().count(), 40, "40 lines: {hover}");
+    assert!(hover.ends_with('…') && hover.len() <= 4096 + '…'.len_utf8(), "cut with `…`, at most 4 KiB");
+    ui.hover_away();
+    for _ in 0..10 {
+        let start = std::time::Instant::now();
+        ui.frame();
+        assert!(start.elapsed() < std::time::Duration::from_millis(200), "a frame with the page open: {:?}", start.elapsed());
+    }
+}
+
+/// Brief §3.7: a foreign key's link opens its table, by a click or by Enter with the keyboard;
+/// an open tab is reused.
+#[test]
+fn a_link_opens_its_table() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = orders_structure(db);
+    let orders = ui.document()["active"].clone();
+    let t = dbee_ui_egui::theme::LIGHT;
+    // At rest grey; under the pointer `text`, with the pointing hand.
+    let link = ui.drawn("structure-columns-1-keys");
+    assert!(ui.text_in(link, "shop.customers.id").is_some(), "the link's words");
+    ui.hover(link.center());
+    ui.frame();
+    let colours = text_colours(&ui.shapes().into_iter().filter(|(_, s)| link.contains_rect(s.visual_bounding_rect())).collect::<Vec<_>>());
+    assert!(!colours.is_empty() && colours.iter().all(|c| *c == t.text), "hovered words in `text`: {colours:?}");
+    assert_eq!(ui.harness.output().platform_output.cursor_icon, egui::CursorIcon::PointingHand);
+    ui.click("structure-columns-1-keys");
+    ui.until("customers", |ui| ui.table()["name"] == "customers");
+    let customers = ui.document()["active"].clone();
+    assert_ne!(customers, orders, "a tab of its own");
+    assert_eq!(ui.table()["view"], "data");
+    let tabs = ui.document()["tabs"].as_array().map_or(0, Vec::len);
+    // Back on orders, still in STRUCTURE: Enter on the foreign key's References.
+    ui.execute("tab.activate", json!({ "tab": orders }));
+    ui.until("the structure", |ui| ui.tag("structure-foreign-keys-0-references").is_some());
+    assert_eq!(ui.table()["view"], "structure");
+    assert_eq!(ui.value("structure-foreign-keys-0-references"), "shop.customers.id");
+    ui.focus("structure-foreign-keys-0-references");
+    ui.key("Enter");
+    ui.until("customers again", |ui| ui.table()["name"] == "customers");
+    assert_eq!(ui.document()["active"], customers, "the same tab");
+    assert_eq!(ui.document()["tabs"].as_array().map_or(0, Vec::len), tabs, "no second one");
+    // A link below the page's bottom is listed with its words, and a click scrolls to it first.
+    ui.execute("tab.activate", json!({ "tab": orders }));
+    ui.until("the structure", |ui| ui.tag("structure-columns-0-name").is_some());
+    let from = ui.tag("structure-referenced-by-0-from").expect("REFERENCED BY's link listed");
+    assert_eq!((from["visible"].clone(), from["value"].clone()), (json!(false), json!("shop.order_items.order_id")), "out of view: {from}");
+    ui.click("structure-referenced-by-0-from");
+    ui.until("order_items", |ui| ui.table()["name"] == "order_items");
+}
+
+/// Brief §3.7: while the connection is lost the links are off and say why.
+#[test]
+fn links_are_off_on_a_lost_connection() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, exclusive: true, ..Setup::default() });
+    structure_of(&mut ui, "shop", "orders");
+    let sql = "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = 'dbee'";
+    dbee_testkit::psql(db.server("pg14").unwrap(), sql).unwrap();
+    ui.click("table-refresh");
+    ui.until("the lost mark", |ui| ui.document()["connection"]["lost"] == true);
+    ui.frame();
+    assert!(!enabled(&mut ui, "structure-columns-1-keys"), "the link off");
+    let t = dbee_ui_egui::theme::LIGHT;
+    let link = ui.drawn("structure-columns-1-keys");
+    let colours = text_colours(&ui.shapes().into_iter().filter(|(_, s)| link.contains_rect(s.visual_bounding_rect())).collect::<Vec<_>>());
+    assert!(!colours.is_empty() && colours.iter().all(|c| *c == t.text_faint), "off in `text_faint`: {colours:?}");
+    let lost = dbee_engine::cmd::LOST;
+    assert!(hover_says(&mut ui, "structure-columns-1-keys", &format!("Can't open shop.customers now: {lost}")), "it says why");
+    drop(ui.call("ui.click", json!({ "id": "structure-columns-1-keys" })));
+    ui.frame();
+    assert_eq!(ui.table()["name"], "orders", "nothing opened");
+}
+
+/// Brief §3.6: a view's empty sections keep their heading and header, and say nothing.
+#[test]
+fn empty_sections_keep_their_header() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    structure_of(&mut ui, "shop", "order_totals");
+    for section in ["indexes", "foreign-keys", "referenced-by", "triggers"] {
+        assert!(ui.tag(&format!("structure-{section}-0-name")).is_none(), "no rows in {section}");
+    }
+    let heading = ui.laid("structure-triggers");
+    let header = Rect::from_x_y_ranges(ui.tab_x(), heading.bottom()..=heading.bottom() + 30.0);
+    for title in ["Name", "When", "Events", "For each", "Definition"] {
+        assert!(ui.text_in(header, title).is_some(), "TRIGGERS' header `{title}`");
+    }
+    // Three rows' room under its header (above the status bar at this size).
+    let below = Rect::from_x_y_ranges(ui.tab_x(), heading.bottom() + 31.0..=heading.bottom() + 30.0 + 3.0 * 26.0);
+    assert!(below.bottom() < ui.drawn("status-connection").top(), "the room checked is above the status bar");
+    let words: Vec<String> = ui.texts().into_iter().filter(|(r, _)| below.intersects(*r)).map(|(_, g)| g.text().to_string()).collect();
+    assert!(words.is_empty(), "no phrase under an empty section: {words:?}");
+}
+
+/// Spec §7: names, types and indexes are drawn as written, never in capitals.
+#[test]
+fn data_is_never_uppercased() {
+    let db = dbee_testkit::require_testdb!();
+    let schema = SchemaGuard::new(db, |s| {
+        format!(
+            "CREATE TYPE {s}.\"Mood\" AS ENUM ('ok'); CREATE TABLE {s}.\"Mixed Case\" (\"Odd Name\" {s}.\"Mood\"); CREATE INDEX \"Idx Upper\" ON {s}.\"Mixed Case\" (\"Odd Name\");"
+        )
+    });
+    let s = schema.0.as_str();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    structure_of(&mut ui, s, "Mixed Case");
+    let ty = ui.value("structure-columns-0-type").as_str().unwrap_or_default().to_string();
+    assert!(ty.contains("Mood") && !ty.contains("MOOD"), "the type as written: {ty}");
+    for (id, words) in
+        [("structure-columns-0-name", "Odd Name"), ("structure-indexes-0-name", "Idx Upper"), ("structure-indexes-0-columns", "Odd Name")]
+    {
+        assert_eq!(ui.value(id), words);
+        let at = ui.drawn(id);
+        assert!(ui.text_in(at, words).is_some(), "`{words}` painted as written in `{id}`");
+    }
 }

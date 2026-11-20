@@ -8,8 +8,16 @@
 //!   TRIGGERS ([`components::structure::Table`]), each a heading, a header and its rows, the next
 //!   one [`STRUCTURE_SECTION_GAP`] under the last line of the one before. COLUMNS has a row per
 //!   visible column of the table read: its place, name, type, whether it may be NULL, its default
-//!   and its key (the primary key, else the column a foreign key points at). The other sections
-//!   show their heading and header. Everything the engine wrote is drawn as written.
+//!   and its key (the primary key, else the column a foreign key points at). INDEXES: name, parts
+//!   (` desc`, ` where …`), unique, method, primary key. FOREIGN KEYS: name, columns, the columns
+//!   referenced, on delete. REFERENCED BY: the keys of other tables pointing here, from where.
+//!   TRIGGERS: name, when, events, for each, the definition on one line (its first lines on
+//!   hover). An empty section keeps its heading and header. Everything the engine wrote is drawn
+//!   as written, never in capitals; the cells' words are worked out once per read ([`Kept`]).
+//!
+//! A foreign key, a reference and a referencing table are links: a click, or Enter or Space with
+//! the keyboard, opens that table (`table.open`; the table tab switches to its tab when one is
+//! open). While the connection is lost they are off and say why.
 //!
 //! While a read runs (once it has run 300 ms, [`crate::quiet`]): a first read draws COLUMNS'
 //! heading and header over ten rows of bars ([`crate::components::skeleton`], LC1), a reload the
@@ -17,12 +25,15 @@
 //! loaded.` where the page would be.
 //!
 //! It reads the tab's [`TabStructure`](dbee_engine::TabStructure) each frame and starts nothing
-//! itself: the table bar's STRUCTURE (`table.view`), REFRESH (`table.refresh`) and CANCEL
+//! itself but the links' commands: the table bar's STRUCTURE (`table.view`), REFRESH (`table.refresh`) and CANCEL
 //! (`table.cancel`) are the table tab's. Nothing on the page is selectable.
 
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
-use dbee_core::ColumnInfo;
+use dbee_core::{FkAction, IndexInfo, TableRef, TriggerEvent, TriggerTiming};
+use dbee_engine::cmd::LOST;
 use dbee_engine::{StructureRead, TabId, TableTab};
 use egui::{Align, CornerRadius, Layout, ScrollArea, Sense, UiBuilder, vec2};
 use serde_json::{Value as Json, json};
@@ -31,6 +42,7 @@ use crate::automation::Tags;
 use crate::components::error_band::Band;
 use crate::components::skeleton::GridRows;
 use crate::components::structure::{Cell, Column, PRIMARY_KEY, Table};
+use crate::components::tooltip::Hint;
 use crate::theme::size::{
     BAR_LINE, STRUCTURE_COLUMNS_LAST_MIN, STRUCTURE_COLUMNS_W, STRUCTURE_EMPTY_PAD, STRUCTURE_FOREIGN_KEYS_LAST_MIN, STRUCTURE_FOREIGN_KEYS_W,
     STRUCTURE_INDEXES_LAST_MIN, STRUCTURE_INDEXES_W, STRUCTURE_POSITION_W, STRUCTURE_REFERENCED_BY_LAST_MIN, STRUCTURE_REFERENCED_BY_W,
@@ -104,65 +116,292 @@ const SECTIONS: [Section; 5] = [
     },
 ];
 
-/// COLUMNS' cells' keys in `structure-columns-<row>-<key>`, by column.
-const COLUMN_KEYS: [&str; 6] = ["position", "name", "type", "nullable", "default", "keys"];
+/// Each section's cells' keys in `structure-<section>-<row>-<key>`, by column (the position's
+/// column untagged outside COLUMNS).
+const KEYS: [&[&str]; 5] = [
+    &["position", "name", "type", "nullable", "default", "keys"],
+    &["", "name", "columns", "unique", "method", "keys"],
+    &["", "name", "columns", "references", "onDelete"],
+    &["", "name", "columns", "from"],
+    &["", "name", "when", "events", "forEach", "definition"],
+];
 
-/// A column's key in COLUMNS' Keys.
-enum Key {
-    None,
-    Primary,
-    /// The column a foreign key points at, `schema.table.column`.
-    Foreign(String),
+/// A trigger's definition on one line is cut at this many bytes: wider than any cell.
+const LINE_BYTES: usize = 1024;
+/// A definition's hover shows at most this many of its lines…
+pub const STRUCTURE_HOVER_LINES: usize = 40;
+/// …and at most this many bytes of them.
+pub const STRUCTURE_HOVER_BYTES: usize = 4096;
+
+/// What a cell of the page shows, worked out once per read.
+#[derive(Clone, Debug, PartialEq)]
+enum Shown {
+    Empty,
+    Position(usize),
+    /// A name, in `text`.
+    Text(String),
+    /// What is said about it, in `text_muted`.
+    Muted(String),
+    /// A check, or nothing (Nullable, Unique).
+    Check(bool),
+    PrimaryKey,
+    /// A link to `to`: its words, and whether it is COLUMNS' foreign key (with the key's icon).
+    Link {
+        words: String,
+        to: TableRef,
+        key: bool,
+    },
+    /// Long text drawn on one line, `whole` (its first lines) on hover.
+    Long {
+        line: String,
+        whole: String,
+    },
 }
 
-/// A row of COLUMNS.
-struct ColumnRow<'a> {
-    column: &'a ColumnInfo,
-    default: &'a str,
-    key: Key,
-}
+impl Shown {
+    /// The component's cell for it.
+    fn cell(&self) -> Cell<'_> {
+        match self {
+            Shown::Empty | Shown::Check(false) => Cell::Muted(""),
+            Shown::Position(n) => Cell::Position(*n),
+            Shown::Text(s) => Cell::Text(s),
+            Shown::Muted(s) | Shown::Long { line: s, .. } => Cell::Muted(s),
+            Shown::Check(true) => Cell::Nullable,
+            Shown::PrimaryKey => Cell::PrimaryKey,
+            Shown::Link { words, key: true, .. } => Cell::ForeignKey(words),
+            Shown::Link { words, key: false, .. } => Cell::Link(words),
+        }
+    }
 
-impl ColumnRow<'_> {
-    /// Cell `col` and its tag's value.
-    fn cell(&self, row: usize, col: usize) -> (Cell<'_>, Json) {
-        let c = self.column;
-        match col {
-            0 => (Cell::Position(row.saturating_add(1)), json!(row.saturating_add(1))),
-            1 => (Cell::Text(&c.name), json!(c.name)),
-            2 => (Cell::Muted(c.label()), json!(c.label())),
-            3 if !c.not_null => (Cell::Nullable, json!(true)),
-            3 => (Cell::Muted(""), json!(false)),
-            4 => (Cell::Muted(self.default), json!(self.default)),
-            _ => match &self.key {
-                Key::Primary => (Cell::PrimaryKey, json!(PRIMARY_KEY)),
-                Key::Foreign(target) => (Cell::ForeignKey(target), json!(target)),
-                Key::None => (Cell::Muted(""), json!("")),
-            },
+    /// Its tag's value: the words as written, `true`/`false` for a check, the number for a
+    /// position.
+    fn value(&self) -> Json {
+        match self {
+            Shown::Empty => json!(""),
+            Shown::Position(n) => json!(n),
+            Shown::Text(s) | Shown::Muted(s) | Shown::Long { line: s, .. } | Shown::Link { words: s, .. } => json!(s),
+            Shown::Check(on) => json!(on),
+            Shown::PrimaryKey => json!(PRIMARY_KEY),
         }
     }
 }
 
-/// COLUMNS' rows for `read`: its table's visible columns in order, each with its default and key.
-fn column_rows(read: &StructureRead) -> Vec<ColumnRow<'_>> {
+/// `text` kept to `max` bytes, cut at a character with `…` (as the drivers' `kept_text`).
+fn kept(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    format!("{}…", text.get(..text.floor_char_boundary(max)).unwrap_or_default())
+}
+
+/// A definition on one line: each run of whitespace (line breaks too) one space, kept short.
+fn one_line(text: &str) -> String {
+    let mut out = String::new();
+    for word in text.split_whitespace() {
+        if out.len() > LINE_BYTES {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    kept(&out, LINE_BYTES)
+}
+
+/// A definition's hover: as written, its first [`STRUCTURE_HOVER_LINES`] lines and
+/// [`STRUCTURE_HOVER_BYTES`], then `…` when there is more.
+fn hover_text(text: &str) -> String {
+    let text = text.trim_end();
+    let mut end = 0;
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        if n >= STRUCTURE_HOVER_LINES {
+            break;
+        }
+        end += line.len();
+    }
+    let head = text.get(..end).unwrap_or_default().trim_end();
+    if head.len() > STRUCTURE_HOVER_BYTES {
+        kept(head, STRUCTURE_HOVER_BYTES)
+    } else if head.len() < text.len() {
+        format!("{head}…")
+    } else {
+        head.to_owned()
+    }
+}
+
+/// `table` and its columns as a link writes them: `schema.table.column` for one,
+/// `schema.table (a, b)` for several.
+fn reference(table: &TableRef, columns: &[String]) -> String {
+    match columns {
+        [] => table.display(),
+        [one] => format!("{}.{one}", table.display()),
+        many => format!("{} ({})", table.display(), many.join(", ")),
+    }
+}
+
+/// A foreign key action's words (brief §1.2).
+fn action(a: FkAction) -> &'static str {
+    match a {
+        FkAction::NoAction => "no action",
+        FkAction::Restrict => "restrict",
+        FkAction::Cascade => "cascade",
+        FkAction::SetNull => "set null",
+        FkAction::SetDefault => "set default",
+    }
+}
+
+/// An index's Columns: its parts (a column, an expression, `?` for neither; ` desc` after a
+/// descending one), then ` where <predicate>` for a partial index.
+fn index_columns(index: &IndexInfo) -> String {
+    let parts: Vec<String> = index
+        .parts
+        .iter()
+        .map(|p| {
+            let part = p.column.as_deref().or(p.expression.as_deref()).unwrap_or("?");
+            if p.descending { format!("{part} desc") } else { part.to_owned() }
+        })
+        .collect();
+    let mut words = parts.join(", ");
+    if let Some(p) = &index.predicate {
+        words.push_str(" where ");
+        words.push_str(p);
+    }
+    words
+}
+
+/// COLUMNS' rows for `read`: its table's visible columns in order, each with its place, name,
+/// type, whether it may be NULL, its default and its key.
+fn column_rows(read: &StructureRead) -> Vec<Vec<Shown>> {
     let info = &read.info;
     info.visible_columns()
-        .map(|column| {
-            let default = read.structure.defaults.iter().find(|d| d.column == column.name).and_then(|d| d.default.as_deref()).unwrap_or("");
+        .enumerate()
+        .map(|(n, column)| {
+            let default = read.structure.defaults.iter().find(|d| d.column == column.name).and_then(|d| d.default.clone()).unwrap_or_default();
             let key = if info.primary_key.contains(&column.name) {
-                Key::Primary
+                Shown::PrimaryKey
             } else {
                 match info.fk_for(&column.name) {
                     Some(fk) => {
                         let at = fk.columns.iter().position(|c| *c == column.name).unwrap_or(0);
                         let target = fk.target_columns.get(at).map_or("", String::as_str);
-                        Key::Foreign(format!("{}.{}.{}", fk.target.schema, fk.target.name, target))
+                        Shown::Link { words: format!("{}.{target}", fk.target.display()), to: fk.target.clone(), key: true }
                     }
-                    None => Key::None,
+                    None => Shown::Empty,
                 }
             };
-            ColumnRow { column, default, key }
+            vec![
+                Shown::Position(n.saturating_add(1)),
+                Shown::Text(column.name.clone()),
+                Shown::Muted(column.label().to_owned()),
+                Shown::Check(!column.not_null),
+                Shown::Muted(default),
+                key,
+            ]
         })
         .collect()
+}
+
+/// The page's rows for `read`, section by section.
+fn rows_of(read: &StructureRead) -> [Vec<Vec<Shown>>; 5] {
+    let st = &read.structure;
+    let indexes = st
+        .indexes
+        .iter()
+        .map(|i| {
+            vec![
+                Shown::Empty,
+                Shown::Text(i.name.clone()),
+                Shown::Text(index_columns(i)),
+                Shown::Check(i.unique),
+                Shown::Muted(i.method.clone().unwrap_or_default()),
+                if i.primary { Shown::PrimaryKey } else { Shown::Empty },
+            ]
+        })
+        .collect();
+    let foreign_keys = read
+        .info
+        .foreign_keys
+        .iter()
+        .map(|fk| {
+            let actions = st.actions.iter().find(|a| a.columns == fk.columns && a.target == fk.target);
+            let on_delete = actions.and_then(|a| a.on_delete).map_or("", action);
+            vec![
+                Shown::Empty,
+                Shown::Text(fk.name.clone()),
+                Shown::Text(fk.columns.join(", ")),
+                Shown::Link { words: reference(&fk.target, &fk.target_columns), to: fk.target.clone(), key: false },
+                Shown::Muted(on_delete.to_owned()),
+            ]
+        })
+        .collect();
+    let referenced_by = read
+        .referenced_by
+        .iter()
+        .map(|(from, fk)| {
+            vec![
+                Shown::Empty,
+                Shown::Text(fk.name.clone()),
+                Shown::Text(fk.target_columns.join(", ")),
+                Shown::Link { words: reference(from, &fk.columns), to: from.clone(), key: false },
+            ]
+        })
+        .collect();
+    let triggers = st
+        .triggers
+        .iter()
+        .map(|t| {
+            let when = match t.timing {
+                Some(TriggerTiming::Before) => "before",
+                Some(TriggerTiming::After) => "after",
+                Some(TriggerTiming::InsteadOf) => "instead of",
+                None => "",
+            };
+            let events: Vec<&str> = t
+                .events
+                .iter()
+                .map(|e| match e {
+                    TriggerEvent::Insert => "insert",
+                    TriggerEvent::Update => "update",
+                    TriggerEvent::Delete => "delete",
+                    TriggerEvent::Truncate => "truncate",
+                })
+                .collect();
+            let each = match t.for_each_row {
+                Some(true) => "row",
+                Some(false) => "statement",
+                None => "",
+            };
+            vec![
+                Shown::Empty,
+                Shown::Text(t.name.clone()),
+                Shown::Muted(when.to_owned()),
+                Shown::Muted(events.join(", ")),
+                Shown::Muted(each.to_owned()),
+                Shown::Long { line: one_line(&t.definition), whole: hover_text(&t.definition) },
+            ]
+        })
+        .collect();
+    [column_rows(read), indexes, foreign_keys, referenced_by, triggers]
+}
+
+/// What the window keeps for a table tab's page: the rows worked out from the last read shown
+/// (a definition's one line and its hover built once), dropped with the tab.
+#[derive(Debug, Default)]
+pub(crate) struct Kept {
+    read: Option<Arc<StructureRead>>,
+    rows: [Vec<Vec<Shown>>; 5],
+}
+
+impl Kept {
+    /// The rows for `read`, worked out again only when it is another read.
+    fn rows(&mut self, read: &Arc<StructureRead>) -> &[Vec<Vec<Shown>>; 5] {
+        if !self.read.as_ref().is_some_and(|r| Arc::ptr_eq(r, read)) {
+            self.rows = rows_of(read);
+            self.read = Some(Arc::clone(read));
+        }
+        &self.rows
+    }
 }
 
 /// How many rows COLUMNS has for `read`: the facts' column count.
@@ -170,10 +409,18 @@ pub(crate) fn columns_of(read: &StructureRead) -> usize {
     read.info.visible_columns().count()
 }
 
-/// Draws tab `id`'s STRUCTURE view of `tab` into `ui` (all of its room, under the table bar).
-/// `loading` is how long the running read has run, once past 300 ms. Returns the commands its
-/// clicks asked for.
-pub(crate) fn show(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, tab: &TableTab, loading: Option<Duration>) -> Vec<(&'static str, Json)> {
+/// Draws tab `id`'s STRUCTURE view of `tab` into `ui` (all of its room, under the table bar), from
+/// what `kept` keeps for it. `loading` is how long the running read has run, once past 300 ms;
+/// `lost` turns the links off. Returns the commands its clicks asked for.
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    tags: &mut Tags,
+    id: TabId,
+    tab: &TableTab,
+    kept: &mut Kept,
+    loading: Option<Duration>,
+    lost: bool,
+) -> Vec<(&'static str, Json)> {
     let st = &tab.structure;
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
     if let Some(error) = st.error.as_deref() {
@@ -187,7 +434,8 @@ pub(crate) fn show(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, tab: &TableTab
     let mut page = ui.new_child(UiBuilder::new().id_salt(("dbee-structure-page", id.0)).max_rect(area).layout(Layout::top_down(Align::Min)));
     page.set_clip_rect(ui.clip_rect().intersect(area));
     page.spacing_mut().item_spacing = egui::Vec2::ZERO;
-    match st.shown.as_deref() {
+    let mut asked = Vec::new();
+    match st.shown.as_ref() {
         Some(read) => {
             // A reload: the page from before at half until the new one lands.
             if loading.is_some() {
@@ -195,7 +443,7 @@ pub(crate) fn show(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, tab: &TableTab
             }
             ScrollArea::vertical().id_salt(("dbee-structure", id.0)).auto_shrink([false, false]).show(&mut page, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                sections(ui, tags, id, read);
+                asked = sections(ui, tags, id, kept.rows(read), lost);
             });
         }
         // A first read on its way: from 300 ms, COLUMNS' heading and header over rows of bars.
@@ -216,35 +464,62 @@ pub(crate) fn show(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, tab: &TableTab
             });
         }
     }
-    Vec::new()
+    asked
 }
 
-/// The page's sections for `read`, top to bottom.
-fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, read: &StructureRead) {
-    let rows = column_rows(read);
-    for (n, section) in SECTIONS.iter().enumerate() {
+/// The page's sections from `rows`, top to bottom; the commands a link's click asked for.
+fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, rows: &[Vec<Vec<Shown>>; 5], lost: bool) -> Vec<(&'static str, Json)> {
+    let mut asked = Vec::new();
+    for (n, ((section, rows), keys)) in SECTIONS.iter().zip(rows).zip(KEYS).enumerate() {
         if n > 0 {
             ui.add_space(STRUCTURE_SECTION_GAP);
         }
         let columns = section.columns();
-        let count = if n == 0 { rows.len() } else { 0 };
-        let table = Table { heading: section.heading, columns: &columns, rows: count };
-        let mut values: Vec<(usize, usize, Json)> = Vec::new();
-        let drawn = table.show(ui, egui::Id::new((section.id, id.0)), |row, col| match rows.get(row) {
-            Some(r) => {
-                let (cell, value) = r.cell(row, col);
-                values.push((row, col, value));
-                cell
-            }
-            None => Cell::Muted(""),
-        });
+        let table = Table { heading: section.heading, columns: &columns, rows: rows.len(), links: !lost };
+        let drawn =
+            table.show(ui, egui::Id::new((section.id, id.0)), |row, col| rows.get(row).and_then(|r| r.get(col)).map_or(Cell::Muted(""), Shown::cell));
         tags.tag_value(section.id, &drawn.heading, section.heading);
-        for ((row, col, r), (_, _, value)) in drawn.cells.iter().zip(values) {
-            if let Some(key) = COLUMN_KEYS.get(*col) {
-                tags.tag_value(&format!("{}-{row}-{key}", section.id), r, value);
+        // A link out of view is listed where it is laid out, and scrolled to when a click asks
+        // for it (as the tree's rows are).
+        let pending = tags.scroll_pending().map(str::to_owned);
+        let seen: HashSet<(usize, usize)> = drawn.cells.iter().map(|(row, col, _)| (*row, *col)).collect();
+        for (row, cells) in rows.iter().enumerate() {
+            for (col, shown) in cells.iter().enumerate() {
+                let (Shown::Link { .. }, Some(key), Some(rect)) = (shown, keys.get(col), drawn.cell_rect(row, col)) else { continue };
+                if seen.contains(&(row, col)) {
+                    continue;
+                }
+                let tag = format!("{}-{row}-{key}", section.id);
+                tags.tag_out_of_view_value(&tag, rect, shown.value(), !lost);
+                if pending.as_deref() == Some(tag.as_str()) {
+                    ui.scroll_to_rect(rect, Some(Align::Center));
+                }
+            }
+        }
+        for (row, col, r) in drawn.cells {
+            let (Some(shown), Some(key)) = (rows.get(row).and_then(|r| r.get(col)), keys.get(col).filter(|k| !k.is_empty())) else { continue };
+            let tag = format!("{}-{row}-{key}", section.id);
+            match shown {
+                Shown::Link { to, .. } if lost => {
+                    // Not a disabled widget to egui (it draws itself off): its hover as a hint.
+                    let r = r.hint(format!("Can't open {} now: {LOST}", to.display()));
+                    tags.tag_value_as(&tag, &r, shown.value(), false);
+                }
+                Shown::Link { to, .. } => {
+                    if r.clicked() {
+                        asked.push(("table.open", json!({ "schema": to.schema, "table": to.name })));
+                    }
+                    tags.tag_value(&tag, &r, shown.value());
+                }
+                Shown::Long { whole, .. } => {
+                    let r = r.hint(whole.as_str());
+                    tags.tag_value(&tag, &r, shown.value());
+                }
+                _ => tags.tag_value(&tag, &r, shown.value()),
             }
         }
     }
+    asked
 }
 
 /// A first read's skeleton: COLUMNS' heading and header over [`crate::theme::size::SKELETON_ROWS`]
@@ -252,7 +527,7 @@ fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, read: &StructureRead)
 fn skeleton(ui: &mut egui::Ui, tags: &mut Tags, id: TabId) {
     let Some(section) = SECTIONS.first() else { return };
     let columns = section.columns();
-    let table = Table { heading: section.heading, columns: &columns, rows: 0 };
+    let table = Table { heading: section.heading, columns: &columns, rows: 0, links: false };
     let drawn = table.show(ui, egui::Id::new((section.id, id.0)), |_, _| Cell::Muted(""));
     tags.tag_value(section.id, &drawn.heading, section.heading);
     let widths = table.widths(drawn.rect.width());

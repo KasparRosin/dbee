@@ -328,6 +328,26 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     assert_eq!(app.value("structure-facts"), format!("9 columns  {} rows", thousands(n)), "{name}");
     assert!(app.tag("filter-0-column").is_none(), "{name}: no filter bar in STRUCTURE");
     app.shot(root, &format!("{p}-2d-structure"));
+    // The other sections (SQLite's rowid key has no index), REFERENCED BY below the page's
+    // bottom (listed, out of view); a foreign key's link opens its table, and closing that comes
+    // back to orders' STRUCTURE.
+    if e.t.kind() == Kind::Sqlite {
+        assert!(app.tag("structure-indexes-0-name").is_none(), "{name}: the rowid has no index");
+    } else {
+        assert_eq!(app.value("structure-indexes-0-keys"), "primary key", "{name}");
+    }
+    assert_eq!(app.value("structure-referenced-by-0-from"), format!("{shop}.order_items.order_id"), "{name}");
+    assert!(app.tag("structure-triggers-0-name").is_none(), "{name}: orders has no triggers");
+    let orders_tab = app.document()["active"].clone();
+    app.click("structure-columns-1-keys");
+    app.until("customers", |app| app.table()["name"] == "customers");
+    assert_eq!(app.table()["view"], "data", "{name}: a link opens DATA");
+    app.until("the customers' rows", |app| app.tag("grid-header-0").is_some());
+    app.shot(root, &format!("{p}-2d-link"));
+    app.ctrl("W");
+    app.until("back on orders", |app| app.document()["active"] == orders_tab);
+    assert_eq!(app.table()["view"], "structure", "{name}: orders still in STRUCTURE");
+    app.until("the structure", |app| app.tag("structure-columns-0-name").is_some());
     app.click("table-view-data");
     app.until("the rows", |app| app.tag("grid-header-0").is_some());
     assert_eq!((app.table()["view"].clone(), app.table()["rows"].clone()), (json!("data"), json!(100)), "{name}");

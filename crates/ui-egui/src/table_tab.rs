@@ -404,7 +404,21 @@ fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let page = Rect::from_min_max(pos2(body.left(), below), body.max);
         let mut page_ui = top.new_child(UiBuilder::new().id_salt("dbee-structure").max_rect(page).layout(Layout::top_down(Align::Min)));
         page_ui.set_clip_rect(clip.intersect(page));
-        runs.extend(structure_view::show(&mut page_ui, tags, id, tab, loading));
+        let kept = view.work.structures.entry(id).or_default();
+        let asked = structure_view::show(&mut page_ui, tags, id, tab, kept, loading, lost);
+        // A link opens its table's tab when one is open on this connection, else a new one.
+        runs.extend(asked.into_iter().map(|(command, params)| {
+            let open = session.state().tabs.iter().find_map(|t| match t {
+                Tab::Table(t) if t.connection == tab.connection && t.table.schema == params["schema"] && t.table.name == params["table"] => {
+                    Some(t.id)
+                }
+                _ => None,
+            });
+            match open {
+                Some(t) if command == "table.open" => ("tab.activate", json!({ "tab": t.0 })),
+                _ => (command, params),
+            }
+        }));
     }
     for (command, params) in runs {
         // A read's failure shows in the page's band, not as a notice.

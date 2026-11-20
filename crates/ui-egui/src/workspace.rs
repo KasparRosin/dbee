@@ -50,6 +50,7 @@
 //! `status-job` (value: what runs, or `Reconnecting…`), `status-timer` (value: its words,
 //! `00:01.2`), `status-cancel`, `status-lost`, `status-reconnect`, `status-transaction`.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -72,7 +73,7 @@ use crate::table_tab::{self, Grids};
 use crate::theme::size::{KEYCAP_GAP, KEYCAP_H, NO_TAB_GAP, NO_TAB_ROW_GAP, NO_TAB_W, SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_W, SLIM_BAR_H, TAB_H};
 use crate::theme::{self, Text, Words};
 use crate::tree::{self, MenuState, Refresh, Tree, TreeAct};
-use crate::{DbeeApp, menu};
+use crate::{DbeeApp, menu, structure_view};
 
 /// The status bar's height.
 pub(crate) const STATUS_H: f32 = SLIM_BAR_H;
@@ -88,6 +89,8 @@ pub(crate) struct Workspace {
     pub tree: Tree,
     /// Each table tab's grid (its column widths), dropped with the tab.
     pub grids: Grids,
+    /// Each table tab's structure page as worked out from its last read, dropped with the tab.
+    pub structures: HashMap<TabId, structure_view::Kept>,
     /// The cell editor, while one is open ([`crate::editors`]).
     pub editor: Option<CellEditor>,
     /// Each query tab's editor text and result grids, dropped with the tab.
@@ -262,6 +265,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     }
     let tabs = &app.session.state().tabs;
     app.view.work.grids.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
+    app.view.work.structures.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     app.view.work.queries.retain(|id, _| tabs.iter().any(|t| t.id() == *id));
     egui::Panel::top("dbee-menubar").exact_size(SLIM_BAR_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| menu::bar(app, ui));
     let mut acts = Vec::new();

@@ -5,16 +5,20 @@
 //!
 //! A section's heading is dbee's words in `label` capitals. The header's titles are `header`
 //! over a 1 px `ink` line. A cell is `data` over a 1 px `line`: a column's name in `text`, what is
-//! said about it (its type, its default, its position) in `text_muted`, all as written.
+//! said about it (its type, its default, its position) in `text_muted`, all as written. A link (a
+//! foreign key, the table a key comes from) is `text_muted` words and an arrow, no underline:
+//! `text` under the pointer with the pointing hand, `text_faint` while off; a click, or Enter or
+//! Space with the keyboard, is the view's to act on, and keyboard focus draws a 2 px `ink` box
+//! 4 around the words.
 
 use std::sync::Arc;
 
 use egui::text::TextWrapping;
-use egui::{Color32, CornerRadius, Galley, Painter, Rect, Sense, Ui, pos2};
+use egui::{Color32, CornerRadius, CursorIcon, Galley, Painter, Rect, Sense, Ui, WidgetInfo, WidgetType, pos2};
 
 use super::grid_cell::one_line;
 use super::icon::Icon;
-use super::painter;
+use super::{focus, painter};
 use crate::theme::size::{
     STRUCTURE_CELL_PAD_X, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_HEADING_PAD_X, STRUCTURE_ICON_GAP, STRUCTURE_LINK_GAP,
     STRUCTURE_POSITION_PAD_X, STRUCTURE_ROW_H,
@@ -55,11 +59,11 @@ impl HeaderCell<'_> {
     }
 }
 
-/// Draws `g` from `x`, centred on `y`; returns its width.
-fn place(p: &Painter, g: Arc<Galley>, x: f32, y: f32, colour: Color32) -> f32 {
-    let size = g.size();
-    p.galley(pos2(x, y - size.y / 2.0), g, colour);
-    size.x
+/// Draws `g` from `x`, centred on `y`; returns where.
+fn place(p: &Painter, g: Arc<Galley>, x: f32, y: f32, colour: Color32) -> Rect {
+    let at = Rect::from_min_size(pos2(x, y - g.size().y / 2.0), g.size());
+    p.galley(at.min, g, colour);
+    at
 }
 
 /// What a cell of the table shows, by the page's kinds.
@@ -75,8 +79,18 @@ pub enum Cell<'a> {
     Nullable,
     /// The column is in the primary key.
     PrimaryKey,
-    /// The column is a foreign key to this column (`schema.table.column`), as written.
+    /// The column is a foreign key to this column (`schema.table.column`), as written: a link.
     ForeignKey(&'a str),
+    /// A link to a table without the key's icon (`schema.table.column`, `schema.table (a, b)`).
+    Link(&'a str),
+}
+
+/// How a cell shows: a link at rest, under the pointer, or off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Look {
+    Rest,
+    Hovered,
+    Off,
 }
 
 /// A primary key's words.
@@ -85,39 +99,55 @@ pub const PRIMARY_KEY: &str = "primary key";
 pub const ARROW: &str = "→";
 
 impl Cell<'_> {
-    /// Draws it into `rect`.
+    /// Whether it is a link.
+    pub fn is_link(&self) -> bool {
+        matches!(self, Cell::ForeignKey(_) | Cell::Link(_))
+    }
+
+    /// Draws it into `rect`, a link at rest.
     pub fn paint(&self, ui: &Ui, rect: Rect) {
+        self.paint_as(ui, rect, Look::Rest);
+    }
+
+    /// Draws it into `rect`, a link as `look` says (other cells look the same whatever it says);
+    /// returns where its words were drawn ([`Rect::NOTHING`] for none).
+    pub fn paint_as(&self, ui: &Ui, rect: Rect, look: Look) -> Rect {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         p.rect_filled(Rect::from_min_max(pos2(rect.left(), rect.bottom() - 1.0), rect.max), CornerRadius::ZERO, t.line);
         let (x, y, end) = (rect.left() + STRUCTURE_CELL_PAD_X, rect.center().y, rect.right() - STRUCTURE_CELL_PAD_X);
-        // `s` in `data` from `x` to `end`, cut with `…`; how wide it came out.
+        // `s` in `data` from `x` to `end`, cut with `…`; where it came out.
         let words = |s: &str, x: f32, end: f32, colour: Color32| place(&p, one_line(ui, s, Text::Data, colour, end - x), x, y, colour);
         // The key's icon at the start; where its words start.
         let key = |colour: Color32| {
             Icon::Key.paint(&p, pos2(x + Icon::Key.size().x / 2.0, y), colour);
             x + Icon::Key.size().x + STRUCTURE_ICON_GAP
         };
+        let link_colour = match look {
+            Look::Rest => t.text_muted,
+            Look::Hovered => t.text,
+            Look::Off => t.text_faint,
+        };
+        // A link's words from `x`, then its arrow; where both came out.
+        let link = |target: &str, x: f32| {
+            let arrow = one_line(ui, ARROW, Text::Data, link_colour, f32::INFINITY);
+            let shown = words(target, x, end - STRUCTURE_LINK_GAP - arrow.size().x, link_colour);
+            shown.union(place(&p, arrow, shown.right() + STRUCTURE_LINK_GAP, y, link_colour))
+        };
         match *self {
-            Cell::Text(s) => {
-                words(s, x, end, t.text);
+            Cell::Text(s) => words(s, x, end, t.text),
+            Cell::Muted(s) => words(s, x, end, t.text_muted),
+            Cell::Position(n) => words(&n.to_string(), rect.left() + STRUCTURE_POSITION_PAD_X, end, t.text_muted),
+            Cell::Nullable => {
+                Icon::Check.paint(&p, pos2(x + Icon::Check.size().x / 2.0, y), t.text_muted);
+                Rect::NOTHING
             }
-            Cell::Muted(s) => {
-                words(s, x, end, t.text_muted);
-            }
-            Cell::Position(n) => {
-                words(&n.to_string(), rect.left() + STRUCTURE_POSITION_PAD_X, end, t.text_muted);
-            }
-            Cell::Nullable => Icon::Check.paint(&p, pos2(x + Icon::Check.size().x / 2.0, y), t.text_muted),
-            Cell::PrimaryKey => {
-                words(PRIMARY_KEY, key(t.key), end, t.text_muted);
-            }
+            Cell::PrimaryKey => words(PRIMARY_KEY, key(t.key), end, t.text_muted),
             Cell::ForeignKey(target) => {
-                let x = key(t.text_muted);
-                let arrow = one_line(ui, ARROW, Text::Data, t.text_muted, f32::INFINITY);
-                let shown = words(target, x, end - STRUCTURE_LINK_GAP - arrow.size().x, t.text_muted);
-                place(&p, arrow, x + shown + STRUCTURE_LINK_GAP, y, t.text_muted);
+                let icon = if look == Look::Off { t.text_faint } else { t.text_muted };
+                link(target, key(icon))
             }
+            Cell::Link(target) => link(target, x),
         }
     }
 }
@@ -139,6 +169,8 @@ pub struct Table<'a> {
     pub heading: &'a str,
     pub columns: &'a [Column<'a>],
     pub rows: usize,
+    /// Whether its links are on.
+    pub links: bool,
 }
 
 /// A section as drawn: where, its heading, its header's cells, and each cell drawn in view with
@@ -148,6 +180,18 @@ pub struct TableDrawn {
     pub heading: egui::Response,
     pub header: Vec<egui::Response>,
     pub cells: Vec<(usize, usize, egui::Response)>,
+    /// Each column's width, as drawn.
+    pub widths: Vec<f32>,
+}
+
+impl TableDrawn {
+    /// Where cell (`row`, `col`) is laid out, in view or not; `None` past the last column.
+    pub fn cell_rect(&self, row: usize, col: usize) -> Option<Rect> {
+        let w = *self.widths.get(col)?;
+        let x = self.rect.left() + self.widths.iter().take(col).sum::<f32>();
+        let top = self.rect.top() + STRUCTURE_HEADING_H + STRUCTURE_HEADER_H + STRUCTURE_ROW_H * row as f32;
+        Some(Rect::from_min_size(pos2(x, top), egui::vec2(w, STRUCTURE_ROW_H)))
+    }
 }
 
 impl Table<'_> {
@@ -166,7 +210,8 @@ impl Table<'_> {
 
     /// Draws it from the top of `ui`'s room, as wide as the room (or the columns, when wider), and
     /// takes its room. `cell(row, col)` gives what a cell shows; it is asked only for the cells in
-    /// view. Every part senses hover (a link's cell, a click too); `id` keeps their ids apart.
+    /// view. Every part senses hover; a link's cell, while links are on, a click too, and takes the
+    /// keyboard (it reads out as a link). `id` keeps their ids apart.
     pub fn show<'c>(&self, ui: &mut Ui, id: egui::Id, mut cell: impl FnMut(usize, usize) -> Cell<'c>) -> TableDrawn {
         let room = ui.available_width();
         let widths = self.widths(room);
@@ -210,11 +255,31 @@ impl Table<'_> {
                 if !clip.intersects(r) {
                     continue;
                 }
-                cell(row, col).paint(ui, r);
-                cells.push((row, col, ui.interact(r, id.with((row, col)), Sense::hover())));
+                let c = cell(row, col);
+                let link = c.is_link();
+                let on = link && self.links;
+                let response = ui.interact(r, id.with((row, col)), if on { Sense::click() } else { Sense::hover() });
+                let look = match (link, on) {
+                    (true, false) => Look::Off,
+                    (true, true) if response.hovered() => Look::Hovered,
+                    _ => Look::Rest,
+                };
+                let words = c.paint_as(ui, r, look);
+                if link {
+                    if let Cell::ForeignKey(target) | Cell::Link(target) = c {
+                        response.widget_info(|| WidgetInfo::labeled(WidgetType::Link, on, format!("{target} {ARROW}")));
+                    }
+                    if on && response.hovered() {
+                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                    }
+                    if on && focus::shown(ui, &response) {
+                        focus::box_around(&painter(ui), words);
+                    }
+                }
+                cells.push((row, col, response));
             }
         }
-        TableDrawn { rect, heading, header, cells }
+        TableDrawn { rect, heading, header, cells, widths }
     }
 }
 
@@ -360,6 +425,31 @@ mod tests {
         }
     }
     #[test]
+    fn a_link_without_its_key_icon() {
+        // Brief §3.7: FOREIGN KEYS' and REFERENCED BY's links are COLUMNS' foreign key without
+        // its icon: the words and the arrow in `text_muted`, `text` while hovered, `text_faint`
+        // while off.
+        for (theme, t) in both() {
+            let link = Cell::Link("shop.customers.id");
+            let (shapes, r) = drawn(theme, vec2(284.0, 26.0), |ui, rect| link.paint(ui, rect));
+            let target = words_in(&shapes, r).first().map(|w| w.1).unwrap_or(Rect::NOTHING);
+            let arrow = target.right() + 4.0 - r.left();
+            check_cell(theme, &t, link, 284.0, None, &[("shop.customers.id", 8.0, t.text_muted), (ARROW, arrow, t.text_muted)]);
+            for (look, colour) in [(Look::Hovered, t.text), (Look::Off, t.text_faint)] {
+                let at = std::cell::Cell::new(Rect::NOTHING);
+                let (shapes, r) = drawn(theme, vec2(284.0, 26.0), |ui, rect| at.set(link.paint_as(ui, rect, look)));
+                let at = at.get();
+                let words = words_in(&shapes, r);
+                let seen: Vec<(&str, Color32)> = words.iter().map(|(w, _, c)| (w.as_str(), *c)).collect();
+                assert_eq!(seen, [("shop.customers.id", colour), (ARROW, colour)], "{theme:?} {look:?}");
+                assert_eq!(icon_in(&shapes, Rect::from_min_max(r.min, pos2(r.left() + 22.0, r.bottom()))).0, vec![], "{theme:?} {look:?}: no icon");
+                let all = words.iter().fold(Rect::NOTHING, |a, w| a.union(w.1));
+                assert!(close(at.left(), all.left()) && close(at.right(), all.right()), "{theme:?} {look:?}: the words' rect {at:?}, drawn {all:?}");
+            }
+        }
+    }
+
+    #[test]
     fn a_table_draws_its_lines_the_full_width() {
         // SA: the heading 36 tall, the header 30, each row 26; the header's `ink` line and every
         // row's `line` run the table's full width, past its last column's minimum; no column lines.
@@ -374,7 +464,7 @@ mod tests {
             let mut cells = 0;
             let shapes = painted_in(vec2(1000.0, 400.0), theme, |ui| {
                 ui.add_space(ROOM);
-                let table = Table { heading: "Columns", columns: &columns, rows: 3 };
+                let table = Table { heading: "Columns", columns: &columns, rows: 3, links: true };
                 let shown = ui
                     .allocate_ui(vec2(900.0, 300.0), |ui| {
                         table.show(ui, egui::Id::new("t"), |row, col| match col {

@@ -307,6 +307,21 @@ fn m1_day_end_to_end() {
     assert_eq!(app.value("structure-facts"), format!("9 columns  {} rows", thousands(n)));
     assert!(app.tag("filter-0-column").is_none(), "no filter bar in STRUCTURE");
     app.shot(&root, "2d-structure");
+    // The other sections, REFERENCED BY below the page's bottom (listed, out of view); a foreign
+    // key's link opens its table, and closing that comes back to orders' STRUCTURE.
+    assert_eq!(app.value("structure-indexes-0-keys"), "primary key");
+    assert_eq!(app.value("structure-referenced-by-0-from"), "shop.order_items.order_id");
+    assert!(app.tag("structure-triggers-0-name").is_none(), "orders has no triggers");
+    let orders_tab = app.document()["active"].clone();
+    app.click("structure-columns-1-keys");
+    app.until("customers", |app| app.table()["name"] == "customers");
+    assert_eq!(app.table()["view"], "data", "a link opens DATA");
+    app.until("the customers' rows", |app| app.tag("grid-header-0").is_some());
+    app.shot(&root, "2d-link");
+    app.ctrl("W");
+    app.until("back on orders", |app| app.document()["active"] == orders_tab);
+    assert_eq!(app.table()["view"], "structure", "orders still in STRUCTURE");
+    app.until("the structure", |app| app.tag("structure-columns-0-name").is_some());
     app.click("table-view-data");
     app.until("the rows", |app| app.tag("grid-header-0").is_some());
     assert_eq!((app.table()["view"].clone(), app.table()["rows"].clone()), (json!("data"), json!(100)));
