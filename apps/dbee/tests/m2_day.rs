@@ -232,8 +232,22 @@ fn query_done(app: &mut App) -> Json {
 fn switch(app: &mut App, root: &Path, shot: &str, query: &str, name: &str, label: &str, from: &str) -> Json {
     app.ctrl("P");
     app.text(query);
-    app.until("the connection's hit", |app| app.tag("qs-item-0").is_some_and(|t| t["value"] == name));
-    assert_eq!(app.value("qs-item-0-kind"), label);
+    // The connection's row, under OTHER CONNECTIONS, wherever the open connection's tables put it.
+    let row = |app: &mut App| {
+        let i = app.inspect();
+        let rows = i["automation"].as_array().unwrap().clone();
+        (0..64).find(|n| rows.iter().any(|a| a["id"] == format!("qs-item-{n}") && a["value"] == name))
+    };
+    app.until("the connection's hit", |app| row(app).is_some());
+    let n = row(app).unwrap();
+    assert_eq!(app.value(&format!("qs-item-{n}-kind")), label);
+    let at = app.rect(&format!("qs-item-{n}"));
+    let others = (0..8).map(|g| format!("qs-group-{g}")).find(|g| app.tag(g).is_some_and(|t| t["value"] == "Other connections"));
+    let others = others.unwrap_or_else(|| panic!("an OTHER CONNECTIONS heading over `{name}`"));
+    assert!(app.rect(&others)[1] < at[1], "OTHER CONNECTIONS above `{name}`");
+    for _ in 0..n {
+        app.key("ArrowDown");
+    }
     app.shot(root, shot);
     app.key("Enter");
     app.until("the question", |app| app.inspect()["dialog"] == "confirm");
@@ -272,6 +286,8 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.text("ord");
     let orders = format!("{shop}.orders");
     app.until("the quick search's hits", |app| app.tag("qs-item-0").is_some_and(|t| t["value"] == orders.as_str()));
+    let open = app.document()["connection"]["name"].clone();
+    assert_eq!(app.value("qs-group-0"), open, "{name}: the open connection's heading");
     app.shot(root, &format!("{p}-2a-quick-search"));
     app.key("Enter");
     let t = app.settled("the orders page");

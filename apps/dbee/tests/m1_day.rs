@@ -254,6 +254,12 @@ fn m1_day_end_to_end() {
     app.ctrl("P");
     app.text("ord");
     app.until("the quick search's hits", |app| app.tag("qs-item-0").is_some_and(|t| t["value"] == "shop.orders"));
+    // Grouped under the open connection's heading; the field 40 tall, rows 32, 616 wide.
+    assert_eq!(app.value("qs-group-0"), "Shop live");
+    let (heading, first, field) = (app.rect("qs-group-0"), app.rect("qs-item-0"), app.rect("qs-input"));
+    assert!(heading[1] + heading[3] <= first[1] + 0.5, "the heading above the first row: {heading:?} {first:?}");
+    assert!((field[2] - 616.0).abs() <= 0.5 && (field[3] - 40.0).abs() <= 0.5, "the field: {field:?}");
+    assert!((first[3] - 32.0).abs() <= 0.5, "a row: {first:?}");
     app.shot(&root, "2a-quick-search");
     app.key("Enter");
     let t = app.settled("the orders page");
