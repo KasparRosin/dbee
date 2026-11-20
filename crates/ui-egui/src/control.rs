@@ -59,6 +59,7 @@ const METHODS: &[&str] = &[
     "document.inspect",
     "ui.inspect",
     "ui.click",
+    "ui.focus",
     "ui.key",
     "ui.text",
     "ui.screenshot",
@@ -263,6 +264,7 @@ fn dispatch(app: &mut DbeeApp, ctx: &egui::Context, method: &str, params: Json) 
         "document.inspect" => Handled::Now(ok(document(app))),
         "ui.inspect" => Handled::Now(ok(ui_inspect(app, ctx))),
         "ui.click" => click(app, &params),
+        "ui.focus" => Handled::Now(focus(app, ctx, &params)),
         "ui.key" => key(app, &params),
         "ui.text" => match params.get("text") {
             Some(Json::String(t)) => input(app, vec![vec![Event::Text(t.clone())]], json!({})),
@@ -493,6 +495,27 @@ fn click(app: &mut DbeeApp, p: &Json) -> Handled {
     // The pointer moves first, so the widget under it is hovered when the button goes down.
     let batches = with_modifiers(m, vec![vec![Event::PointerMoved(pos)], presses]);
     input(app, batches, json!({ "x": pos.x, "y": pos.y }))
+}
+
+/// `ui.focus {id}`: gives the keyboard to widget `id`, drawn in view in the last frame, as Tab
+/// would, without a click (which egui would count towards a double or triple click).
+fn focus(app: &DbeeApp, ctx: &egui::Context, p: &Json) -> Json {
+    let id = match p.get("id") {
+        Some(Json::String(id)) => id,
+        _ => return bad("`id` is required (a string)"),
+    };
+    match app.tags.focusable(id) {
+        Some(widget) => {
+            ctx.memory_mut(|m| m.request_focus(widget));
+            ctx.request_repaint();
+            ok(json!({}))
+        }
+        None => error(
+            "notFound",
+            format!("no widget `{}` that can take the keyboard was drawn in view in the last frame (see ui.inspect)", shown(id)),
+            json!({ "id": shown(id) }),
+        ),
+    }
 }
 
 /// A key by its egui name (`Enter`, `ArrowDown`, `A`, `F2`), ignoring case, or a common alias

@@ -691,6 +691,7 @@ fn grid_frame_within_budget() {
         grid: GridState,
         tags: Tags,
         selection: Option<Selection>,
+        ready: bool,
     }
     // 10,000 rows of 20 columns (a query result at its cap), one value 20 MB long.
     let huge = "y".repeat(20_000_000);
@@ -703,9 +704,16 @@ fn grid_frame_within_budget() {
         grid: GridState::default(),
         tags: Tags::default(),
         selection: None,
+        ready: false,
     };
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(
         |ui, s: &mut State| {
+            // The first frame sets the fonts; the grid draws from the next.
+            if !s.ready {
+                dbee_ui_egui::theme::apply(ui.ctx());
+                s.ready = true;
+                return;
+            }
             s.tags.begin_frame();
             let grid = Grid {
                 id: egui::Id::new("timing"),
@@ -726,6 +734,7 @@ fn grid_frame_within_budget() {
         },
         state,
     );
+    h.step();
     h.step();
     let mut frames = Vec::new();
     for i in 0..60 {

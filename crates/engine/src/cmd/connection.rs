@@ -1390,7 +1390,16 @@ fn apply_open(
         return Err(EngineError::Busy("already connected".into()));
     }
     let saved = asked.save.map(|typed| save_opened(s, &config, &typed));
-    let kept = asked.keep.map(|typed| keep_secrets(s, &mut config, &typed));
+    // Another dbee holding the file holds it for every change: the open waits for it once.
+    let locked = |r: &Option<Result<(), String>>| r.as_ref().is_some_and(|r| r.as_ref().err().is_some_and(|e| e == LOCKED));
+    let kept = asked.keep.map(|typed| if locked(&saved) { Err(LOCKED.to_owned()) } else { keep_secrets(s, &mut config, &typed) });
+    let recent = if locked(&saved) {
+        Recent::Told
+    } else if locked(&kept) {
+        Recent::Locked
+    } else {
+        Recent::Record
+    };
     let Opened { conn, tunnel } = opened;
     let (info, dialect) = (conn.info().clone(), conn.dialect());
     let used = config.clone();
@@ -1436,9 +1445,26 @@ fn apply_open(
     }
     s.state.connections.push(c);
     s.state.screen = Screen::Workspace;
-    record_use(s, &used);
+    match recent {
+        Recent::Record => record_use(s, &used),
+        // The recent list is in the same file: said once, without a second wait.
+        Recent::Locked => s.ui_requests.push(UiRequest::Notice(ConfigError::Locked.to_string())),
+        Recent::Told => {}
+    }
     Ok(result)
 }
+
+/// What an open does with the recent list once its save and its secrets are done: puts the
+/// connection first, or, when another dbee held the file for them, says so (`Locked`) or nothing
+/// more (`Told`: the save's notice said it).
+enum Recent {
+    Record,
+    Locked,
+    Told,
+}
+
+/// Why an open's save or its secrets were not kept while another dbee held the file.
+const LOCKED: &str = "another dbee window was changing the connections file";
 
 /// `save` after a successful open: saves `config` with `typed` as [`save_with_secrets`] does.
 /// `Err` says why it was not saved, also in a notice; the open stands.
@@ -1448,7 +1474,7 @@ fn save_opened(s: &mut Session, config: &ConnectionConfig, typed: &Credentials) 
         Err(e) => e,
     };
     let note = match e {
-        ConfigError::Locked => "another dbee window was changing the connections file".to_owned(),
+        ConfigError::Locked => LOCKED.to_owned(),
         e => format!("the connections file could not be written: {e}"),
     };
     log::warn!("an opened connection could not be saved");
@@ -1483,7 +1509,7 @@ fn keep_secrets(s: &mut Session, config: &mut ConnectionConfig, typed: &Credenti
         Ok(saved_for)
     })
     .map_err(|e| match e {
-        ConfigError::Locked => "another dbee window was changing the connections file".to_owned(),
+        ConfigError::Locked => LOCKED.to_owned(),
         e => format!("the connections file could not be written: {e}"),
     })?;
     let saved_for = kept?;

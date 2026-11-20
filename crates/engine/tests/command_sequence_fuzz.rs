@@ -194,6 +194,9 @@ const OPEN: &[(&str, Hint)] = &[
     ("sshPassphrase", Hint::Text),
     ("trustHostKey", FINGERPRINT),
     ("savePassword", Hint::Bool),
+    ("save", Hint::Bool),
+    // The fuzz's configs and saved connections are servers, never files: nothing is created.
+    ("createFile", Hint::Bool),
 ];
 /// Database file paths that are never there (or a name without a type dbee opens), so the fuzz
 /// opens no file.

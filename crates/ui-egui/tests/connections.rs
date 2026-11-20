@@ -1004,6 +1004,40 @@ fn passphrase_dialog_saves_in_the_keyring() {
     assert!(!journal.to_string().contains(&db.keys.passphrase), "{journal}");
 }
 
+/// A saved connection with "Save passwords" ticked, a database password typed in the form and an
+/// SSH password login: the SSH password dialog's "Save in keyring" decides. Unticked, the secret
+/// store keeps neither password; ticked, both.
+#[test]
+fn the_ssh_password_dialogs_save_box_decides_for_a_saved_connection() {
+    let db = dbee_testkit::require_testdb!();
+    for keep in [false, true] {
+        let mut ui = ui_in(temp_home(None, Some(&db.sshd.known_hosts_line)), true);
+        let mut config = via_ssh(db, SshAuth::Password);
+        if let Some(ssh) = config.ssh.as_mut() {
+            ssh.user = db.sshd.password_user.clone();
+        }
+        let card = ui.save(&config, None);
+        let id = card.trim_start_matches("conn-saved-").to_string();
+        ui.click(&card);
+        assert_eq!(ui.value("conn-save-secrets"), true, "the form's Save passwords");
+        ui.replace("conn-password", &db.password);
+        ui.click("conn-connect");
+        ui.until("the SSH password dialog", |ui| ui.inspect()["dialog"] == "sshPassword");
+        assert_eq!(ui.value("dialog-save"), true, "starts as the form says");
+        if !keep {
+            ui.click("dialog-save");
+            assert_eq!(ui.value("dialog-save"), false);
+        }
+        ui.click("dialog-secret");
+        ui.text(&db.password);
+        ui.click("dialog-ok");
+        ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+        for kind in [SecretKind::DbPassword, SecretKind::SshPassword] {
+            assert_eq!(stored(&ui, &id, kind).as_deref(), keep.then_some(db.password.as_str()), "keep {keep}: {kind:?}");
+        }
+    }
+}
+
 #[test]
 fn single_click_loads_and_double_click_connects() {
     let db = dbee_testkit::require_testdb!();

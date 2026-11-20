@@ -204,13 +204,15 @@ fn m1_day_end_to_end() {
     let silent_row = format!("conn-saved-{silent_id}");
     app.until("the Silent row", |app| app.tag(&silent_row).is_some());
     app.double_click(&silent_row);
+    let last_click = std::time::Instant::now();
     app.until("the connecting state", |app| app.tag("conn-running").is_some());
     assert_eq!(app.value("conn-running")["words"], "Connecting");
     assert!(app.value("conn-running")["timer"].as_str().is_some_and(|t| t.starts_with("00:")), "the timer");
     assert_eq!(app.tag("conn-connect").unwrap()["enabled"], false, "CONNECT off, CANCEL beside it");
     assert!(app.tag("conn-cancel").is_some());
     app.shot(&root, "0a-connecting");
-    app.click("conn-cancel");
+    // Pressed from the keyboard, as the card below: no pointer click until step 1's double-click.
+    app.press("conn-cancel");
     app.until("the cancelled connect's end", |app| app.tag("conn-running").is_none());
     let d = app.document();
     assert_eq!((d["screen"].clone(), d["jobs"].clone()), (json!("connections"), json!([])), "{d}");
@@ -219,9 +221,11 @@ fn m1_day_end_to_end() {
     app.until("the Silent row gone", |app| app.tag(&silent_row).is_none());
     drop(silent);
 
-    // 0b. A click on the card shows its form, in two columns: its engine fixed, the tunnel on, the
-    //     key it will use under KEY FILE, SHOW ending with its column as PORT does.
-    app.click(&card);
+    // 0b. A press on the card shows its form, in two columns: its engine fixed, the tunnel on, the
+    //     key it will use under KEY FILE, SHOW ending with its column as PORT does. It is pressed
+    //     from the keyboard (`ui.focus`, Space): egui counts clicks less than 0.6 s apart as one
+    //     double or triple click, so a click here would make step 1's double-click a triple one.
+    app.press(&card);
     app.until("the form", |app| app.tag("conn-host").is_some());
     assert_eq!(app.value("conn-kind"), "postgres");
     assert!(app.tag("conn-change-engine").is_none(), "a saved connection's engine is fixed");
@@ -230,9 +234,10 @@ fn m1_day_end_to_end() {
     let (show, port) = (app.rect("conn-password-show"), app.rect("conn-port"));
     assert!(((show[0] + show[2]) - (port[0] + port[2])).abs() <= 0.5, "SHOW {show:?} ends where PORT {port:?} does");
     app.shot(&root, "0b-edit-form");
-    // egui counts clicks less than 0.6 s apart as one double or triple click: the card's click
-    // above would make the double-click below a triple one.
-    std::thread::sleep(std::time::Duration::from_millis(700));
+    // 0a's connecting state alone takes 300 ms, and its cancel, the form and the picture more:
+    // about 1.4 s under Xvfb. Under 0.6 s egui would read the double-click below as a triple one.
+    let since = last_click.elapsed();
+    assert!(since > std::time::Duration::from_millis(600), "the last pointer click only {since:?} before step 1's double-click");
 
     // 1. A double-click on the card reaches the workspace: no key to pick, no host key to trust,
     //    no password to type.
