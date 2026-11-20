@@ -1183,8 +1183,9 @@ fn view(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     }
 }
 
-/// Starts tab `tab`'s structure read, labelled `label`, and names it the tab's `structure.loading`
-/// (an older read still running is then ignored when it ends). The read waits for its turn on the
+/// Starts tab `tab`'s structure read, labelled `label`, and names it the tab's `structure.loading`;
+/// an older read still running is stopped (it ends cancelled, leaves the queue for the browse
+/// connection, and is ignored should it end otherwise). The read waits for its turn on the
 /// browse connection and is bounded as [`connection::structure_in_turn`]'s; `table.cancel` stops
 /// it as it stops a page load.
 fn read_structure(s: &mut Session, label: &'static str, tab: TabId) -> Result<JobId, EngineError> {
@@ -1193,6 +1194,12 @@ fn read_structure(s: &mut Session, label: &'static str, tab: TabId) -> Result<Jo
         _ => return Err(disabled(NO_TABLE_TAB)),
     };
     let StructureStart { id, conn: turned, info, referenced_by } = structure_start(s, Which::Tab(tab), &table)?;
+    if let Some(older) = s.state.tab(tab).and_then(|t| match t {
+        Tab::Table(t) => t.structure.loading,
+        _ => None,
+    }) {
+        s.jobs.stop(older);
+    }
     let stop = Arc::new(Stop::default());
     let job_stop = Arc::clone(&stop);
     let job = s.spawn_stoppable_job(label, stop, async move {

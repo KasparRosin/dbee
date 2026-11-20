@@ -1270,6 +1270,31 @@ fn cancelling_a_structure_read() {
     });
 }
 
+/// Review B3 M5: a structure read replaced by a newer one (another switch to STRUCTURE, or its
+/// REFRESH) is stopped: it ends at once (ignored, or cancelled), leaving the browse connection's
+/// queue, and the newer one runs and lands.
+#[test]
+fn a_replaced_structure_read_is_stopped() {
+    let _db = require_testdb!();
+    for_each_engine(|t, s| {
+        open_table(s, t.schema("shop"), "orders");
+        let (gate, load) = hold_the_queue(t, s);
+        let Outcome::Started(old) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        until_queued(t, s);
+        let Outcome::Started(new) = s.execute("table.view", json!({ "view": "structure" })).unwrap() else { panic!("a job") };
+        assert_ne!(old, new);
+        // It ends while the gate still holds the queue: stopped, and ignored as no longer the tab's.
+        let ended = s.wait(old, T).map_err(|e| e.code());
+        assert!(matches!(&ended, Err("cancelled")) || ended == Ok(json!({ "ignored": true })), "{}: the replaced read stopped: {ended:?}", t.name());
+        assert_eq!(summary(s)["structure"]["loading"], json!(new), "{}", t.name());
+        drop(gate);
+        s.wait(load, WATCHDOG).unwrap_or_else(|e| panic!("{}: the page load: {e}", t.name()));
+        let r = s.wait(new, T).unwrap_or_else(|e| panic!("{}: the newer read: {e}", t.name()));
+        assert_eq!(r["table"]["name"], "orders", "{}", t.name());
+        assert_eq!(summary(s)["structure"]["shown"]["columns"], 9, "{}: the newer read landed", t.name());
+    });
+}
+
 /// On a lost connection STRUCTURE shows why it has nothing, and DATA is still reachable.
 #[test]
 fn structure_on_a_lost_connection() {
