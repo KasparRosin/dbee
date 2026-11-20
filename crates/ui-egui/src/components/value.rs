@@ -661,7 +661,7 @@ mod tests {
         let mut h = harness_in(size, theme, App { view, panel: PanelState::default(), tags: Tags::default() }, |ui, s| {
             s.tags.begin_frame();
             let mut child = ui.new_child(UiBuilder::new().max_rect(ui.max_rect()));
-            contents(&mut child, s.view.as_ref(), &mut s.panel, &mut s.tags);
+            contents(&mut child, s.view.as_ref(), &mut s.panel, &mut s.tags, true);
         });
         h.run();
         h
@@ -816,15 +816,18 @@ mod tests {
         let json_view = view("billing", "jsonb", Some(raw));
         let h = app(Theme::Light, size, Some(json_view.clone()));
         let head = h.state().tags.value("value-panel").unwrap().clone();
-        assert_eq!(keys(&head), ["bytes", "column", "facts", "label", "note", "null", "row", "truncated", "type"]);
+        assert_eq!(keys(&head), ["bytes", "column", "facts", "label", "note", "null", "row", "truncated", "type", "wrap"]);
         let lines = json_view.text.split('\n').count();
         assert_eq!(
             head,
-            json!({ "column": "billing", "row": null, "type": "jsonb", "label": "jsonb", "null": false, "bytes": raw.len(), "truncated": false, "note": null, "facts": format!("{lines} lines {} B", raw.len()) })
+            json!({ "column": "billing", "row": null, "type": "jsonb", "label": "jsonb", "null": false, "bytes": raw.len(), "truncated": false, "note": null, "facts": format!("{lines} lines {} B", raw.len()), "wrap": true })
         );
         let v = h.state().tags.value("value-text").unwrap().clone();
-        assert_eq!(keys(&v), ["cut", "firstRow", "highlighted", "rows", "selection", "text"]);
-        assert_eq!(v, json!({ "text": json_view.text, "cut": false, "selection": null, "highlighted": true, "rows": lines, "firstRow": 0 }));
+        assert_eq!(keys(&v), ["cut", "firstColumn", "firstRow", "highlighted", "rows", "selection", "text"]);
+        assert_eq!(
+            v,
+            json!({ "text": json_view.text, "cut": false, "selection": null, "highlighted": true, "rows": lines, "firstRow": 0, "firstColumn": 0 })
+        );
         let text = h.state().tags.rect("value-text").unwrap();
         assert!(whole.contains_rect(text) && text.top() >= whole.top() + 36.0, "the text under the bar: {text:?} in {whole:?}");
         // Its facts along the bottom: the lines shown and the whole value's size.
@@ -837,12 +840,12 @@ mod tests {
         assert_eq!(h.state().tags.value("value-panel").unwrap()["null"], true);
         assert_eq!(
             h.state().tags.value("value-text").unwrap(),
-            &json!({ "text": "", "cut": false, "selection": null, "highlighted": false, "rows": 0, "firstRow": 0 })
+            &json!({ "text": "", "cut": false, "selection": null, "highlighted": false, "rows": 0, "firstRow": 0, "firstColumn": 0 })
         );
         let h = app(Theme::Light, size, Some(view("note", "text", Some(""))));
         assert_eq!(
             h.state().tags.value("value-text").unwrap(),
-            &json!({ "text": "", "cut": false, "selection": null, "highlighted": false, "rows": 1, "firstRow": 0 })
+            &json!({ "text": "", "cut": false, "selection": null, "highlighted": false, "rows": 1, "firstRow": 0, "firstColumn": 0 })
         );
         // A cut value says so.
         let h = app(Theme::Light, size, Some(view("note", "text", Some(&"x".repeat(20_000_000)))));
@@ -862,7 +865,7 @@ mod tests {
         let lines = 6;
         assert_eq!(
             head,
-            json!({ "column": "", "row": 1_203, "type": "", "label": null, "null": false, "bytes": len, "truncated": false, "note": null, "facts": format!("{lines} lines {len} B") })
+            json!({ "column": "", "row": 1_203, "type": "", "label": null, "null": false, "bytes": len, "truncated": false, "note": null, "facts": format!("{lines} lines {len} B"), "wrap": true })
         );
         let v = h.state().tags.value("value-text").unwrap();
         assert_eq!((v["text"].as_str(), v["highlighted"].clone()), (Some("{\n  \"id\": 3,\n  \"doc\": {\n    \"a\": 1\n  }\n}"), json!(true)));

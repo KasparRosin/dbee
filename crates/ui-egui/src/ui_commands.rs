@@ -4,6 +4,9 @@
 //!
 //! - `ui.quickSearch` (Ctrl+P): opens the quick search over either screen → `{open: true}`.
 //! - `ui.toggleValuePanel`: hides or shows the value panel → `{visible}`.
+//! - `ui.toggleValueWrap` (View > Wrap Values, the value panel's WRAP): wraps the value panel's
+//!   text at its width, or stops wrapping it (it then scrolls sideways) → `{wrap}`. One setting
+//!   for the window, for the session.
 //! - `ui.themeSystem`, `ui.themeLight`, `ui.themeDark` (View > Theme): choose how the window is
 //!   coloured and keep the choice → `{choice, mode}`; `System` follows what the desktop said at
 //!   startup. A choice that cannot be kept still applies, and a notice says so.
@@ -61,6 +64,15 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params: "{} -> {visible}",
         enabled: |_| Ok(()),
         run: toggle_value_panel,
+    },
+    UiCommand {
+        id: "ui.toggleValueWrap",
+        label: "Wrap Values",
+        menu: &["View"],
+        shortcut: None,
+        params: "{} -> {wrap}",
+        enabled: |_| Ok(()),
+        run: toggle_value_wrap,
     },
     UiCommand {
         id: "ui.themeSystem",
@@ -162,6 +174,11 @@ fn quick_search(app: &mut DbeeApp, _: Json) -> Result<Outcome, EngineError> {
 fn toggle_value_panel(app: &mut DbeeApp, _: Json) -> Result<Outcome, EngineError> {
     app.view.value_panel = !app.view.value_panel;
     Ok(Outcome::Done(json!({ "visible": app.view.value_panel })))
+}
+
+fn toggle_value_wrap(app: &mut DbeeApp, _: Json) -> Result<Outcome, EngineError> {
+    app.view.value_wrap = !app.view.value_wrap;
+    Ok(Outcome::Done(json!({ "wrap": app.view.value_wrap })))
 }
 
 /// The command id of `choice`, which the menu marks.

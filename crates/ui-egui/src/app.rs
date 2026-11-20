@@ -237,6 +237,8 @@ impl std::fmt::Debug for UiJob {
 pub(crate) struct View {
     /// The value panel shows ([`crate::value_panel`]).
     pub value_panel: bool,
+    /// The value panel wraps its text (WRAP, `ui.toggleValueWrap`); off, it scrolls sideways.
+    pub value_wrap: bool,
     /// The value panel's value, its rows and the selection in it.
     pub panel: crate::value_panel::PanelState,
     /// The workspace's tree, tabs and editors.
@@ -265,6 +267,7 @@ impl View {
     fn new(has_store: bool) -> View {
         View {
             value_panel: true,
+            value_wrap: true,
             panel: crate::value_panel::PanelState::default(),
             work: Workspace::default(),
             quick: QuickSearch::default(),

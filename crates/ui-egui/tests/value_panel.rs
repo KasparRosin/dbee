@@ -441,6 +441,8 @@ fn value_panel_frames_within_budget() {
         panel: PanelState,
         tags: Tags,
         width: f32,
+        wrap: bool,
+        ready: bool,
     }
     let column = |name: &str, base: &str| {
         let class = if base == "jsonb" { TypeClass::Json } else { TypeClass::LongText };
@@ -465,13 +467,19 @@ fn value_panel_frames_within_budget() {
         ("20 MB jsonb", Arc::new(ValueView::new(&column("j", "jsonb"), Some(&jsonb)))),
         ("9 MiB pretty jsonb", Arc::new(ValueView::new(&column("j", "jsonb"), Some(&under)))),
     ];
-    let state = State { view: None, panel: PanelState::default(), tags: Tags::default(), width: 360.0 };
+    let state = State { view: None, panel: PanelState::default(), tags: Tags::default(), width: 360.0, wrap: true, ready: false };
     let mut h = Harness::builder().with_size(vec2(400.0, 900.0)).build_ui_state(
         |ui, s: &mut State| {
+            // The first frame sets the fonts; the panel draws from the next.
+            if !s.ready {
+                dbee_ui_egui::theme::apply(ui.ctx());
+                s.ready = true;
+                return;
+            }
             s.tags.begin_frame();
             let rect = Rect::from_min_size(ui.max_rect().min, vec2(s.width, ui.max_rect().height()));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-            contents(&mut child, s.view.as_ref(), &mut s.panel, &mut s.tags);
+            contents(&mut child, s.view.as_ref(), &mut s.panel, &mut s.tags, s.wrap);
         },
         state,
     );
@@ -845,4 +853,199 @@ fn a_text_column_holding_json_says_formatted_as_json() {
     ui.click("grid-cell-0-5");
     let facts = ui.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
     assert!(!facts.starts_with("Formatted"), "{facts:?}");
+}
+
+/// `scratch.<u> (id int PK, note text, other text)`: row 1's `note` is one line of 300
+/// characters (`0123456789` thirty times), its `other` one of 300 `y`; row 2's `note` is `short`.
+fn one_long_line(db: &TestDb) -> Scratch {
+    Scratch::new(db, "t_value_wrap", |n| {
+        format!(
+            "CREATE TABLE scratch.{n} (id int PRIMARY KEY, note text, other text);
+             INSERT INTO scratch.{n} VALUES (1, repeat('0123456789', 30), repeat('y', 300)), (2, 'short', 'z');"
+        )
+    })
+}
+
+/// The width of a column of the panel's text: an `x` of the code font.
+fn column_w(ui: &Ui) -> f32 {
+    ui.harness.ctx.fonts_mut(|f| f.glyph_width(&dbee_ui_egui::theme::Text::Code.font(), 'x'))
+}
+
+/// WRAP as `value-wrap` says it, and as `value-panel` says it.
+fn wrap_state(ui: &mut Ui) -> bool {
+    let on = ui.value("value-wrap");
+    assert_eq!(ui.value("value-panel")["wrap"], on, "value-panel.wrap is WRAP");
+    on == true
+}
+
+/// The rects painted in the bottom strip of the text box's left half: a horizontal scroll bar.
+fn sideways_bar(ui: &mut Ui) -> usize {
+    let r = ui.rect("value-text");
+    let strip = Rect::from_min_max(pos2(r.left(), r.bottom() - 14.0), pos2(r.center().x, r.bottom()));
+    ui.shapes().iter().filter(|(_, s)| matches!(s, egui::Shape::Rect(rs) if strip.contains_rect(rs.rect) && rs.rect.width() > 10.0)).count()
+}
+
+/// WRAP starts on (a long line wraps); off, the line is one row and scrolls sideways; the
+/// setting is the window's, for every cell and tab, and `ui.toggleValueWrap` flips it.
+#[test]
+fn wrap_starts_on_and_turns_off() {
+    let db = dbee_testkit::require_testdb!();
+    let t = one_long_line(db);
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    ui.open_rows("scratch", &t.0, 2);
+    ui.click("grid-cell-0-1");
+    assert!(wrap_state(&mut ui), "WRAP starts on");
+    let v = ui.value("value-text");
+    assert!(v["rows"].as_u64().unwrap() > 1 && v["firstColumn"] == 0, "300 characters wrap: {v}");
+    let r = ui.rect("value-text");
+    ui.wheel(r.center(), vec2(-400.0, 0.0));
+    assert_eq!(ui.value("value-text")["firstColumn"], 0, "wrapped text doesn't scroll sideways");
+    assert_eq!(sideways_bar(&mut ui), 0, "no sideways scroll bar while wrapped");
+
+    ui.click("value-wrap");
+    assert!(!wrap_state(&mut ui), "WRAP off");
+    assert_eq!(ui.value("value-text")["rows"], 1, "one line, one row");
+    ui.wheel(r.center(), vec2(-400.0, 0.0));
+    let first = ui.value("value-text")["firstColumn"].as_u64().unwrap();
+    assert_eq!(first, (400.0 / column_w(&ui)).floor() as u64, "scrolled 400 points sideways");
+    // egui's floating bars show while the pointer is over the text.
+    assert!(sideways_bar(&mut ui) > 0, "a sideways scroll bar");
+
+    // Another cell, another tab: still off; another text starts at its left.
+    ui.click("grid-cell-0-2");
+    let v = ui.value("value-text");
+    assert_eq!((v["rows"].as_u64(), v["firstColumn"].as_u64()), (Some(1), Some(0)), "{v}");
+    ui.open_rows("shop", "orders", 100);
+    ui.click("grid-cell-0-8");
+    assert!(!wrap_state(&mut ui), "the setting is the window's");
+    assert_eq!(ui.execute("ui.toggleValueWrap", json!({})), json!({ "wrap": true }));
+    ui.frame();
+    assert!(wrap_state(&mut ui));
+    ui.click("menu-View");
+    ui.click("menu-ui.toggleValueWrap");
+    assert!(!wrap_state(&mut ui), "the View menu's Wrap Values flips it");
+}
+
+/// With WRAP off and the text scrolled sideways, a drag selects the characters under the
+/// pointer, and Ctrl+C copies them.
+#[test]
+fn a_selection_works_scrolled_sideways() {
+    let db = dbee_testkit::require_testdb!();
+    let t = one_long_line(db);
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    ui.open_rows("scratch", &t.0, 2);
+    ui.click("grid-cell-0-1");
+    if ui.value("value-wrap") == true {
+        ui.click("value-wrap");
+    }
+    let r = ui.rect("value-text");
+    ui.wheel(r.center(), vec2(-400.0, 0.0));
+    let line = "0123456789".repeat(30);
+    let first = ui.value("value-text")["firstColumn"].as_u64().unwrap() as usize;
+    assert!(first > 0, "scrolled sideways");
+    // The row as drawn: it starts left of the box, scrolled about 400 points.
+    let (row, _) = ui.texts().into_iter().find(|(_, g)| g.text() == line).expect("the row drawn");
+    assert!((row.left() - (r.left() + PAD - 400.0)).abs() < 8.0, "the row starts 400 points left: {row:?} in {r:?}");
+    let w = row.width() / 300.0;
+    // From a quarter into column `from` to a quarter into column `from + 10`.
+    let from = first + 3;
+    let x = |col: usize| row.left() + (col as f32 + 0.25) * w;
+    let y = r.top() + LINE_H * 0.5;
+    ui.drag(pos2(x(from), y), pos2(x(from + 10), y));
+    assert_eq!(ui.value("value-text")["selection"], json!([from, from + 10]));
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some(&line[from..from + 10]));
+}
+
+/// WRAP off stays fast (Review Focus 4): a 10 MiB value on one line and 10 MiB of short lines,
+/// scrolled to the end and sideways. Rows stop at 1,000 columns, so no frame lays out more than
+/// the rows in view; frames within `value_panel_frames_within_budget`'s budget.
+#[test]
+#[ignore = "timing; run with --ignored --nocapture"]
+fn wrap_off_keeps_a_ten_mib_line_within_budget() {
+    use dbee_core::{Column, TypeClass};
+    use dbee_engine::ValueView;
+    use dbee_ui_egui::automation::Tags;
+    use dbee_ui_egui::value_panel::{NOWRAP_MAX_COLUMNS, PanelState, contents};
+
+    struct State {
+        view: Option<Arc<ValueView>>,
+        panel: PanelState,
+        tags: Tags,
+        ready: bool,
+    }
+    let column = Column { name: "t".into(), base_type: "text".into(), type_label: "text".into(), class: TypeClass::LongText };
+    const TEN_MIB: usize = 10 * 1024 * 1024;
+    let line = "0123456789abcdef".repeat(TEN_MIB / 16);
+    let short = "a short line of text\n".repeat(TEN_MIB / 21);
+    let views = [
+        ("10 MiB on one line", Arc::new(ValueView::new(&column, Some(&line))), TEN_MIB.div_ceil(NOWRAP_MAX_COLUMNS)),
+        ("10 MiB of short lines", Arc::new(ValueView::new(&column, Some(&short))), TEN_MIB / 21 + 1),
+    ];
+    let state = State { view: None, panel: PanelState::default(), tags: Tags::default(), ready: false };
+    let mut h = Harness::builder().with_size(vec2(400.0, 900.0)).build_ui_state(
+        |ui, s: &mut State| {
+            // The first frame sets the fonts; the panel draws from the next.
+            if !s.ready {
+                dbee_ui_egui::theme::apply(ui.ctx());
+                s.ready = true;
+                return;
+            }
+            s.tags.begin_frame();
+            let rect = Rect::from_min_size(ui.max_rect().min, vec2(360.0, ui.max_rect().height()));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            contents(&mut child, s.view.as_ref(), &mut s.panel, &mut s.tags, false);
+        },
+        state,
+    );
+    h.step();
+    let median = |mut v: Vec<Duration>| {
+        v.sort();
+        v[v.len() / 2]
+    };
+    let timed = |h: &mut Harness<'_, State>| {
+        let start = Instant::now();
+        h.step();
+        start.elapsed()
+    };
+    let wheel = |h: &mut Harness<'_, State>, at: Pos2, delta: egui::Vec2| {
+        h.input_mut().events.push(Event::PointerMoved(at));
+        h.input_mut().events.push(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        timed(h)
+    };
+    let mut report = Vec::new();
+    for (name, view, rows) in views {
+        h.state_mut().view = Some(view);
+        let select = timed(&mut h);
+        let tag = h.state().tags.value("value-text").unwrap();
+        assert_eq!(tag["rows"].as_u64(), Some(rows as u64), "{name}: rows of at most {NOWRAP_MAX_COLUMNS} columns");
+        let steady = median((0..60).map(|_| timed(&mut h)).collect());
+        let at = h.state().tags.rect("value-text").unwrap().center();
+        // Down to the end, then sideways, then up again.
+        let mut scroll: Vec<Duration> = (0..30).map(|_| wheel(&mut h, at, vec2(0.0, -1.0e7))).collect();
+        scroll.extend((0..30).map(|_| wheel(&mut h, at, vec2(-400.0, 0.0))));
+        scroll.extend((0..30).map(|_| wheel(&mut h, at, vec2(0.0, 4_000.0))));
+        for _ in 0..12 {
+            h.step();
+        }
+        let tag = h.state().tags.value("value-text").unwrap();
+        let (first, column) = (tag["firstRow"].as_u64().unwrap(), tag["firstColumn"].as_u64().unwrap());
+        assert!(first > 0, "{name}: scrolled down");
+        let slowest = *scroll.iter().max().unwrap();
+        let scroll = median(scroll);
+        report.push(format!(
+            "{name}: select {select:?}, steady median {steady:?}, scrolling median {scroll:?} (max {slowest:?}), at row {first} column {column}"
+        ));
+        assert!(select < FRAME_BOUND, "{name}: selecting took {select:?}");
+        assert!(steady < Duration::from_millis(16) && scroll < Duration::from_millis(16), "{name}: {steady:?} {scroll:?}");
+        assert!(slowest < FRAME_BOUND, "{name}: a scrolling frame took {slowest:?}");
+    }
+    println!("value panel, WRAP off, on {}:\n  {}", machine(), report.join("\n  "));
 }

@@ -324,6 +324,14 @@ fn m1_day_end_to_end() {
     assert!(toggle_y < head[1] && toggle_y > filter[1] + filter[3], "the toggle in the table bar: {toggle:?}, {filter:?}, {head:?}");
     let shown_panel = app.rect("value-panel");
     assert!((shown_panel[1] - (toggle[1] + toggle[3] + 1.0)).abs() <= 1.0, "the panel from the table bar's bottom: {shown_panel:?}, {toggle:?}");
+    // WRAP off and on again: the text comes back as it was.
+    let value_rows = app.value("value-text")["rows"].clone();
+    assert_eq!(app.value("value-panel")["wrap"], true, "WRAP starts on");
+    app.click("value-wrap");
+    assert_eq!((app.value("value-panel")["wrap"].clone(), app.value("value-wrap")), (json!(false), json!(false)), "WRAP off");
+    app.click("value-wrap");
+    assert_eq!(app.value("value-panel")["wrap"], true, "WRAP on again");
+    assert_eq!(app.value("value-text")["rows"], value_rows, "the rows as they were");
     let shown = app.value("value-text");
     let text = shown["text"].as_str().unwrap().to_string();
     assert!(text.starts_with("{\n") && text.contains("\"city\": \"Testville\""), "formatted: {text}");
