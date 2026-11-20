@@ -14,7 +14,6 @@ use egui::{
 
 use super::button::IconButton;
 use super::icon::Icon;
-use super::spinner::Spinner;
 use super::status::{Piece, piece};
 use super::{Look, focus, painter};
 use crate::theme::size::{BAR_CELL_H, BAR_H, BAR_LINE, ICON_BUTTON, SIDEBAR_COUNT_H, SIDEBAR_PAD_RIGHT, SIDEBAR_PAD_X};
@@ -26,7 +25,7 @@ use crate::tree::thousands;
 pub enum Refresh {
     /// A click asks for a refresh.
     Idle,
-    /// A refresh runs: the spinner in the icon's place, and a click does nothing.
+    /// A refresh runs: the plain icon, and a click does nothing (LC4; the count says `LOADING`).
     Running,
     /// It can't run now: the icon in `text_faint`, and a click does nothing.
     Off,
@@ -128,8 +127,8 @@ fn field(ui: &mut Ui, text: &mut String, placeholder: &str, id: Option<Id>) -> R
     ui.add(edit)
 }
 
-/// The refresh in `ui`'s square: the plain icon button, the spinner in its place while a refresh
-/// runs, or the button off.
+/// The refresh in `ui`'s square: the plain icon button; while a refresh runs the same icon, with no
+/// hover ground and no click (the count says `LOADING`); or the button off.
 fn refresh_button(ui: &mut Ui, state: Refresh) -> Response {
     let button = IconButton::plain(Icon::Refresh);
     match state {
@@ -138,7 +137,7 @@ fn refresh_button(ui: &mut Ui, state: Refresh) -> Response {
         Refresh::Running => {
             let (square, r) = ui.allocate_exact_size(Vec2::splat(ICON_BUTTON), Sense::hover());
             r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, false, Icon::Refresh.name()));
-            Spinner::new().paint(ui, square.center());
+            Icon::Refresh.paint(&painter(ui), square.center(), tokens(ui.ctx()).text);
             r
         }
     }
@@ -178,7 +177,7 @@ impl Count<'_> {
 mod tests {
     use egui::accesskit::Role;
     use egui::epaint::ClippedShape;
-    use egui::{CornerRadius, Key, Modifiers, Pos2, Rect, Shape, Theme, pos2, vec2};
+    use egui::{CornerRadius, Key, Modifiers, Rect, Shape, Theme, pos2, vec2};
     use egui_kittest::kittest::{NodeT, Queryable};
 
     use super::*;
@@ -224,26 +223,14 @@ mod tests {
         Drawn { shapes, row, field, refresh: button }
     }
 
-    /// The points of the arcs drawn within `at`.
-    fn arcs_in(shapes: &[ClippedShape], at: Rect) -> Vec<Pos2> {
-        flat(shapes)
-            .into_iter()
-            .filter_map(|s| match s {
-                Shape::Path(p) if p.points.iter().all(|q| at.contains(*q)) => Some(p.points),
-                _ => None,
-            })
-            .flatten()
-            .collect()
-    }
-
     #[test]
     fn the_sidebar_filter_matches_the_page() {
         // Node 164486: a row 36 tall with a 1 px `line` along its bottom and no ground. The field
         // fills it up to the refresh, 35 tall above the line, its words 12 in and centred, in
         // `body`: the placeholder `text_muted`, what is typed `text`. Keyboard focus is a 2 px
         // `ink` box 2 inside the field, corners 2. The refresh is a plain icon button, a 28
-        // square 4 from the row's end, centred on the field, its icon `text`; while a refresh
-        // runs, the spinner in its place (not on the page); off, the icon `text_faint`.
+        // square 4 from the row's end, centred on the field, its icon `text`, also while a
+        // refresh runs (LC4); off, the icon `text_faint`.
         let focused = Look { focused: true, ..Look::default() };
         for (theme, t) in both() {
             for state in ["placeholder", "filled", "focus", "running", "off"] {
@@ -272,14 +259,6 @@ mod tests {
                 assert_eq!(sections(&shapes, words).first().map(|s| s.1.clone()), Some(Text::Body.font()), "{at_}: in `body`");
                 let (icon, _) = icon_in(&shapes, square);
                 match state {
-                    "running" => {
-                        assert_eq!(icon, [t.text_muted], "{at_}: only the spinner");
-                        let points = arcs_in(&shapes, square);
-                        assert!(
-                            !points.is_empty() && points.iter().all(|p| (p.distance(square.center()) - 5.0).abs() < 0.01),
-                            "{at_}: the spinner's arc round the square's centre"
-                        );
-                    }
                     "off" => assert_eq!(icon, [t.text_faint], "{at_}: the icon off"),
                     _ => assert_eq!(icon, [t.text], "{at_}: the icon"),
                 }
@@ -289,6 +268,31 @@ mod tests {
         for (theme, _) in both() {
             let Drawn { row, field, refresh, .. } = filter(theme, "", None, None);
             assert_eq!((field, refresh), (Rect::from_min_size(row.min, vec2(W - 4.0, 35.0)), None), "{theme:?}: no refresh");
+        }
+    }
+
+    #[test]
+    fn a_running_refresh_shows_no_spinner() {
+        // LC4: while a refresh runs the refresh keeps its plain icon, and a click asks nothing.
+        for (theme, t) in both() {
+            let Drawn { shapes, refresh, .. } = filter(theme, "", Some(Refresh::Running), None);
+            let square = refresh.expect("the refresh is drawn");
+            assert_eq!(icon_in(&shapes, square).0, [t.text], "{theme:?}: the plain icon");
+            let spinner = flat(&shapes)
+                .into_iter()
+                .any(|s| matches!(s, Shape::Path(p) if p.stroke.width == 3.0 && p.points.iter().all(|q| square.contains(*q))));
+            assert!(!spinner, "{theme:?}: no spinner's arc");
+            let mut h = harness(theme, 0usize, |ui, asked: &mut usize| {
+                ui.add_space(ROOM);
+                ui.allocate_ui(vec2(W, BAR_H), |ui| {
+                    let mut text = String::new();
+                    *asked += usize::from(Filter::new(&mut text, "Filter tables").refresh(Refresh::Running).show(ui).asked);
+                });
+            });
+            h.run();
+            h.get_by_label("refresh").click();
+            h.run();
+            assert_eq!(*h.state(), 0, "{theme:?}: a click asks nothing");
         }
     }
 

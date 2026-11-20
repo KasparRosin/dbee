@@ -25,7 +25,7 @@ pub(crate) enum Watch {
     Tab(TabId, JobId),
     /// The connection form's test or connect (`ConnScreen.running`'s job).
     Form(JobId),
-    /// A job no tab owns, by its command's label: `connection.reconnect`.
+    /// A job no tab owns, by its command's label: `connection.reconnect`, `schema.refresh`.
     Command(&'static str),
 }
 

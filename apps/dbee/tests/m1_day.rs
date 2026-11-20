@@ -329,6 +329,23 @@ fn m1_day_end_to_end() {
     app.execute("tab.close", json!({ "tab": shipments_tab, "force": true }));
     app.execute("tab.activate", json!({ "tab": orders_tab }));
     assert_eq!(app.table()["name"], "orders");
+    // 2f. A tree refresh waiting its turn behind a held first load reads LOADING over the tree's
+    //     rows at half; CANCEL on the held load lets it run, and the count's words come back.
+    let held = dbee_testkit::hold(pg14(db), lock).unwrap();
+    app.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "shop", "table": "shipments" }, "wait": false }));
+    app.until("the held load", |app| !app.table()["loading"].is_null());
+    let shipments_tab = app.document()["active"].as_u64().unwrap();
+    app.click("tree-refresh");
+    app.until("the tree's LOADING", |app| app.tag("tree-count").is_some_and(|t| t["value"] == "Loading"));
+    assert_eq!(app.tag("tree-dimmed").map(|t| t["value"].clone()), Some(json!(true)), "the rows at half");
+    app.shot(&root, "2f-tree-loading");
+    app.click("table-cancel");
+    app.until("the refresh's end", |app| app.tag("tree-count").is_some_and(|t| t["value"].as_str().is_some_and(|w| w.ends_with("tables"))));
+    assert!(app.tag("tree-dimmed").is_none(), "the rows at full");
+    drop(held);
+    app.execute("tab.close", json!({ "tab": shipments_tab, "force": true }));
+    app.execute("tab.activate", json!({ "tab": orders_tab }));
+    assert_eq!(app.table()["name"], "orders");
 
     // 3. The three filters through the bar (dealer_id = 42, + status = completed, + total > 100),
     //    then Enter in the last value field.

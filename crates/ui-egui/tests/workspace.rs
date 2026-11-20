@@ -2445,7 +2445,7 @@ fn tree_filter_1000_tables_within_a_frame() {
                 return;
             }
             s.tags.begin_frame();
-            let _ = tree::show(ui, &s.catalog, dbee_sql::Dialect::Postgres, &mut s.tree, &mut s.tags);
+            let _ = tree::show(ui, &s.catalog, dbee_sql::Dialect::Postgres, &mut s.tree, None, &mut s.tags);
         },
         state,
     );

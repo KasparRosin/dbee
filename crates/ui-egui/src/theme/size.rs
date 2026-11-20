@@ -413,3 +413,8 @@ pub const SKELETON_MIN_W: f32 = 12.0;
 pub const SKELETON_MAX_W: f32 = 96.0;
 pub const SKELETON_ROWS: usize = 10;
 pub const SKELETON_FRACTIONS: [f32; 10] = [0.6, 0.85, 0.45, 0.75, 0.55, 0.9, 0.5, 0.7, 0.65, 0.8];
+/// A tree's skeleton (LC4): this many rows, each a bar this wide in the icon's slot and a name bar
+/// as wide as its row picks from these.
+pub const TREE_SKELETON_ROWS: usize = 8;
+pub const TREE_SKELETON_ICON_W: f32 = 12.0;
+pub const TREE_SKELETON_W: [f32; 8] = [64.0, 48.0, 80.0, 56.0, 72.0, 44.0, 88.0, 52.0];

@@ -51,11 +51,20 @@
 //! `{type, key}`, `key` being `primary`, `foreign` or null; drawn rows only); while a row's menu is
 //! open, `tree-menu-open`, `tree-menu-new-query` and `tree-menu-copy-name` (value
 //! `{label, shortcut, why?}`); `tree-count` (the count's words as written: `516 tables`,
-//! `3 of 516 tables`, `0 tables`) and, when the catalog has nothing to show, `tree-empty` (its
+//! `3 of 516 tables`, `0 tables`, `Loading`) and, when the catalog has nothing to show, `tree-empty` (its
 //! sentence).
+//!
+//! **A refresh** (LC4) changes nothing before it has run 300 ms ([`crate::quiet`]; the workspace
+//! asks the clock). From then the count reads `LOADING`, whatever the filter holds, and the rows
+//! are drawn at [`theme::DIM`] (`tree-dimmed`, value `true`, the rows' area): a look only, they
+//! scroll, select, open and take a right-click as before. With no rows to show (nothing in the
+//! catalog, a filter with no match) eight rows of bars stand in their place
+//! ([`skeleton::TreeRows`], `tree-skeleton`, value the rows drawn) and the empty catalog's sentence
+//! waits. The refresh beside the filter keeps its plain icon.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
 use dbee_engine::Screen;
@@ -69,6 +78,7 @@ use crate::components::grid_cell::Key;
 use crate::components::menu::{self, Item};
 use crate::components::rows::{TreeKind, TreeRow};
 use crate::components::sidebar::{self, Count};
+use crate::components::skeleton;
 use crate::components::tooltip::Hint;
 use crate::components::{Look, focus};
 use crate::shortcuts;
@@ -435,8 +445,16 @@ enum Click {
 }
 
 /// Draws the tree for `catalog`, read in `dialect`, into `ui` (the filter, the refresh button,
-/// the count and the rows) and returns what the user asked for.
-pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &mut Tree, tags: &mut Tags) -> Vec<TreeAct> {
+/// the count and the rows) and returns what the user asked for. `loading`: how long a refresh has
+/// run, once it has run 300 ms.
+pub fn show(
+    ui: &mut egui::Ui,
+    catalog: &Arc<Catalog>,
+    dialect: Dialect,
+    tree: &mut Tree,
+    loading: Option<Duration>,
+    tags: &mut Tags,
+) -> Vec<TreeAct> {
     let t = theme::tokens(ui.ctx());
     let mut acts = Vec::new();
     let many = dialect.schema_word().1.to_lowercase();
@@ -467,7 +485,9 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     };
     let word = ["table", "tables"];
     // A filter with no match reads `0 TABLES` over an empty tree (E3), not `0 OF 516 TABLES`.
-    let count = if !filtering {
+    let count = if loading.is_some() {
+        Count::Loading
+    } else if !filtering {
         Count::All(total, word)
     } else if matching == 0 {
         Count::All(0, word)
@@ -484,6 +504,12 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     tree.focused = None;
     let mut focused = None;
     let rows = tree.rows(catalog);
+    if rows.list.is_empty() && loading.is_some() {
+        let (rect, drawn) = skeleton::TreeRows.show(ui);
+        let r = ui.interact(rect, ui.id().with("dbee-tree-skeleton"), Sense::hover());
+        tags.tag_value("tree-skeleton", &r, drawn);
+        return acts;
+    }
     if rows.list.is_empty() {
         // A filter with no match: the count says it, no phrase (E3). A catalog with nothing to
         // show: its sentence 12 in and 12 under the count, as the table tab's empty words sit.
@@ -498,12 +524,20 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         return acts;
     }
     let system_label = format!("System {many}");
+    if loading.is_some() {
+        // Before the rows, so they stay on top for the pointer.
+        let r = ui.interact(ui.available_rect_before_wrap(), ui.id().with("dbee-tree-dimmed"), Sense::hover());
+        tags.tag_value("tree-dimmed", &r, true);
+    }
     let mut area = ScrollArea::vertical().id_salt("tree-rows").auto_shrink([false, false]);
     if fresh {
         area = area.vertical_scroll_offset(0.0);
     }
     area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 0.0;
+        if loading.is_some() {
+            ui.multiply_opacity(theme::DIM);
+        }
         let frame = ui.max_rect();
         let height = TREE_ROW_H * rows.list.len() as f32;
         ui.set_min_height(height);
