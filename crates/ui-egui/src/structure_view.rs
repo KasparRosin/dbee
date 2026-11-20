@@ -481,7 +481,11 @@ pub(crate) fn show(
     let st = &tab.structure;
     ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
     if let Some(error) = st.error.as_deref() {
-        let band = Band { heading: FAILED, message: error, note: st.shown.is_some().then_some(FAILED_NOTE), ..Band::default() };
+        // The server's DETAIL and HINT as fields of their own, out of the message (as a failed
+        // Apply's band shows them).
+        let (detail, hint) = (st.detail.as_deref(), st.hint.as_deref());
+        let message = crate::table_tab::without_fields(error, detail, hint);
+        let band = Band { heading: FAILED, message, detail, hint, note: st.shown.is_some().then_some(FAILED_NOTE), ..Band::default() };
         let r = band.show(ui, egui::Id::new(("dbee-structure-error", id.0))).response;
         tags.tag_value("structure-error", &r, error);
         let (line, _) = ui.allocate_exact_size(vec2(r.rect.width(), BAR_LINE), Sense::hover());
@@ -589,6 +593,41 @@ fn skeleton(ui: &mut egui::Ui, tags: &mut Tags, id: TabId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Brief §5: a failed read's band shows the server's DETAIL and HINT as fields of their own,
+    /// the message without them; `structure-error`'s value keeps the whole text.
+    #[test]
+    fn the_error_band_shows_detail_and_hint() {
+        let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
+        let mut tab =
+            TableTab::new(TabId(1), dbee_engine::ConnectionId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
+        let whole = "permission denied for table t\nDetail: the role has no grant\nHint: ask the owner";
+        tab.structure.error = Some(whole.into());
+        tab.structure.detail = Some("the role has no grant".into());
+        tab.structure.hint = Some("ask the owner".into());
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let (mut tags, mut kept) = (Tags::default(), Kept::default());
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            tags.begin_frame();
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let _ = show(ui, &mut tags, TabId(1), &tab, &mut kept, None, false);
+            });
+            shapes = std::mem::take(&mut out.shapes);
+            out.drop_without_applying_deltas();
+        }
+        let words: Vec<String> = crate::components::texts(&shapes).into_iter().map(|(w, _, _)| w).collect();
+        for want in ["permission denied for table t", "the role has no grant", "ask the owner"] {
+            assert!(words.iter().any(|w| w == want), "`{want}` painted: {words:?}");
+        }
+        assert!(
+            words.iter().any(|w| w.eq_ignore_ascii_case("detail")) && words.iter().any(|w| w.eq_ignore_ascii_case("hint")),
+            "the fields' names: {words:?}"
+        );
+        assert!(words.iter().all(|w| !w.contains("Detail: ")), "the detail once, as a field: {words:?}");
+        assert_eq!(tags.value("structure-error"), Some(&serde_json::json!(whole)));
+    }
 
     /// Only a section's Name column widens for a long name (up to twice as drawn); a long default,
     /// type or definition keeps its column as drawn, cut with … and whole on hover.

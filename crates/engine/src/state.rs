@@ -500,6 +500,20 @@ pub struct TabStructure {
     pub loading: Option<JobId>,
     pub shown: Option<Arc<StructureRead>>,
     pub error: Option<String>,
+    /// The server's DETAIL and HINT of the read that failed, when it gave them (`error` ends with
+    /// them too, as the server error's text does).
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl TabStructure {
+    /// The last read failed with `error`, and the server's `detail` and `hint`; or, with `None`,
+    /// nothing failed.
+    pub(crate) fn failed(&mut self, error: Option<String>, detail: Option<String>, hint: Option<String>) {
+        self.error = error;
+        self.detail = detail;
+        self.hint = hint;
+    }
 }
 
 /// A table data tab.

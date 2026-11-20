@@ -1162,7 +1162,7 @@ fn view(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let Some(t) = table_tab_mut(s, tab) else { return Err(disabled(NO_TABLE_TAB)) };
     t.showing = showing;
     if showing == Showing::Data {
-        t.structure.error = None;
+        t.structure.failed(None, None, None);
         return Ok(Outcome::Done(json!({ "tab": tab, "view": showing, "job": null })));
     }
     match read_structure(s, VIEW, tab) {
@@ -1176,7 +1176,7 @@ fn view(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
                 other => other.to_string(),
             };
             if let Some(t) = table_tab_mut(s, tab) {
-                t.structure.error = Some(why);
+                t.structure.failed(Some(why), None, None);
             }
             Ok(Outcome::Done(json!({ "tab": tab, "view": showing, "job": null })))
         }
@@ -1235,7 +1235,7 @@ fn apply_structure(
             let read = StructureRead { info, referenced_by, structure };
             let mut result = structure_json(id, &read);
             t.structure.shown = Some(Arc::new(read));
-            t.structure.error = None;
+            t.structure.failed(None, None, None);
             if let Some(map) = result.as_object_mut() {
                 map.insert("tab".into(), json!(tab));
                 map.insert("view".into(), json!(Showing::Structure));
@@ -1244,9 +1244,10 @@ fn apply_structure(
         }
         Err(e) => {
             let cancelled = e.is_cancelled();
+            let (detail, hint) = e.server_fields();
             let e = s.catalog_read_failed(id, conn, e);
             if !cancelled && let Some(t) = table_tab_mut(s, tab) {
-                t.structure.error = Some(e.to_string());
+                t.structure.failed(Some(e.to_string()), detail, hint);
             }
             Err(e)
         }

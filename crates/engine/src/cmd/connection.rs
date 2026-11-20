@@ -844,6 +844,14 @@ impl CatalogReadError {
     pub(crate) fn is_cancelled(&self) -> bool {
         matches!(self.0, CatalogLoad::Failed(DbError::Cancelled))
     }
+
+    /// The server's DETAIL and HINT, when a server error ended it and gave them.
+    pub(crate) fn server_fields(&self) -> (Option<String>, Option<String>) {
+        match &self.0 {
+            CatalogLoad::Failed(DbError::Server(e)) => (e.detail.clone(), e.hint.clone()),
+            _ => (None, None),
+        }
+    }
 }
 
 impl Session {

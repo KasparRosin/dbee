@@ -544,7 +544,7 @@ pub(crate) fn card_text(t: &TableTab) -> Option<(Band<'_>, &str)> {
 
 /// `message` without the `Detail: …` and `Hint: …` lines a server error's words end with, when
 /// they are `detail` and `hint` (the band shows those as fields of their own).
-fn without_fields<'a>(message: &'a str, detail: Option<&str>, hint: Option<&str>) -> &'a str {
+pub(crate) fn without_fields<'a>(message: &'a str, detail: Option<&str>, hint: Option<&str>) -> &'a str {
     let strip = |m: &'a str, field: Option<&str>, name: &str| -> &'a str {
         field.and_then(|f| m.strip_suffix(f)).and_then(|m| m.strip_suffix(name)).unwrap_or(m)
     };
