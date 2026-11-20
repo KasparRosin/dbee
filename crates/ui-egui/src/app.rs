@@ -780,11 +780,14 @@ impl DbeeApp {
             }
             self.view.notices.pop_front();
         }
-        // Above the status bar, and above a table tab's paging bar (its Apply and Reset).
+        // Above the bars at the window's bottom: the status bar, and a table tab's paging bar (its
+        // Apply and Reset); on the connection screen the version bar, and the form's bar (its TEST
+        // and CONNECT) while the form shows.
         let lift = match (self.session.state().screen, self.session.state().active_tab()) {
             (Screen::Workspace, Some(dbee_engine::Tab::Table(_))) => workspace::STATUS_H + crate::paging::BAR_H,
             (Screen::Workspace, _) => workspace::STATUS_H,
-            _ => 0.0,
+            (Screen::Connections, _) if self.view.conn.step == connections::Step::Form => theme::size::SLIM_BAR_H + theme::size::BAR_H,
+            (Screen::Connections, _) => theme::size::SLIM_BAR_H,
         };
         let Some(notice) = self.view.notices.front_mut() else { return };
         let until = *notice.until.get_or_insert(now + NOTICE_SECS);
@@ -995,6 +998,29 @@ mod tests {
             frame(h);
         }
         assert!(h.state().tags.rect("notice").is_some(), "the notice shows");
+    }
+
+    /// On the connection screen a toast stands above the version bar, and above the form's bar
+    /// while the form shows: never over TEST, CONNECT or the version.
+    #[test]
+    fn a_toast_on_the_connection_screen_stays_off_its_bars() {
+        let (mut h, _tx, _home) = window();
+        h.state_mut().notice(Kind::Success, "Copied 13 rows");
+        until_shown(&mut h);
+        let clear = |h: &Harness<'_, DbeeApp>, ids: &[&str], at: &str| {
+            let toast = h.state().tags.rect("notice").unwrap_or_else(|| panic!("{at}: the toast"));
+            for id in ids {
+                let r = h.state().tags.rect(id).unwrap_or_else(|| panic!("{at}: `{id}` drawn"));
+                assert!(toast.bottom() <= r.top() || !toast.intersects(r), "{at}: the toast {toast:?} over `{id}` {r:?}");
+            }
+        };
+        clear(&h, &["conn-version"], "the cards");
+        // The form of a new connection (this session has no drivers, so no engine cards to click).
+        h.state_mut().view.conn.step = connections::Step::Form;
+        for _ in 0..4 {
+            frame(&mut h);
+        }
+        clear(&h, &["conn-version", "conn-test", "conn-connect"], "the form");
     }
 
     #[test]
