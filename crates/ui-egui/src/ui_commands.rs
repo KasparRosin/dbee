@@ -13,6 +13,10 @@
 //!   result: it can be large, and it is cell values. A copy whose text would pass the limit
 //!   (`COPY_MAX_BYTES`) is `Disabled` with the engine's reason, which a shortcut or the menu shows
 //!   as a notice.
+//! - `clipboard.copyValue` (the value panel's COPY): runs `value.copy` and puts the whole value
+//!   shown in the panel, as stored (a selected row as Copy as JSON writes it), on the clipboard →
+//!   `{bytes}`, with no notice (COPY says ✓ COPIED). `Disabled` with `value.copy`'s reason: nothing
+//!   selected, NULL, or more than `COPY_MAX_BYTES`.
 
 use dbee_config::ThemeChoice;
 use dbee_engine::{CommandInfo, EngineError, Json, Outcome};
@@ -34,6 +38,7 @@ pub struct UiCommand {
 }
 
 const COPY: &str = "clipboard.copy";
+const COPY_VALUE: &str = "clipboard.copyValue";
 
 pub const UI_COMMANDS: &[UiCommand] = &[
     UiCommand {
@@ -92,6 +97,16 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params: "{format: \"tsv\" | \"tsvHeader\" | \"csv\" | \"json\" | \"markdown\"} -> {rows, columns, bytes}; the text goes to the clipboard",
         enabled: |_| Ok(()),
         run: copy,
+    },
+    UiCommand {
+        id: COPY_VALUE,
+        label: "Copy Value",
+        // The value panel's COPY.
+        menu: &[],
+        shortcut: None,
+        params: "{} -> {bytes}; the value panel's value, whole and as stored, goes to the clipboard",
+        enabled: |app| app.session.enabled("value.copy"),
+        run: copy_value,
     },
 ];
 
@@ -188,6 +203,26 @@ fn copy(app: &mut DbeeApp, params: Json) -> Result<Outcome, EngineError> {
     };
     app.notice_again(Kind::Success, copied_notice(rows.as_u64().unwrap_or(0)));
     Ok(Outcome::Done(json!({ "rows": rows, "columns": done.remove("columns").unwrap_or(Json::Null), "bytes": bytes })))
+}
+
+fn copy_value(app: &mut DbeeApp, _: Json) -> Result<Outcome, EngineError> {
+    let rename = |e: EngineError| match e {
+        EngineError::Disabled { why, .. } => EngineError::Disabled { id: COPY_VALUE.into(), why },
+        other => other,
+    };
+    let done = match app.session.execute("value.copy", json!({})).map_err(rename)? {
+        Outcome::Done(v) => v,
+        Outcome::Started(_) => return Err(EngineError::Internal { id: COPY_VALUE.into(), msg: "value.copy started a job".into() }),
+    };
+    let Json::Object(mut done) = done else {
+        return Err(EngineError::Internal { id: COPY_VALUE.into(), msg: "value.copy returned no object".into() });
+    };
+    let Some(Json::String(text)) = done.remove("text") else {
+        return Err(EngineError::Internal { id: COPY_VALUE.into(), msg: "value.copy returned no text".into() });
+    };
+    let bytes = text.len();
+    app.copy_text(text);
+    Ok(Outcome::Done(json!({ "bytes": bytes })))
 }
 
 /// The notice after a grid copy: `Copied 1 row`, `Copied 1,250 rows`.

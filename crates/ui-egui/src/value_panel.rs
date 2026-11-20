@@ -3,13 +3,20 @@
 //!
 //! **What it shows** is the engine's value view (`Session::value_view_shared`): the value as the
 //! grid shows it, a staged one included, pretty-printed when it is JSON and cut to
-//! `VALUE_VIEW_MAX_BYTES` (10 MiB). The header names the column, its real type and, when one
-//! applies, what JSON it is (`jsonb`, `json`, `text containing JSON`, `JSON string containing
-//! JSON`); a cut value says how much of it shows ([`note`]). With no cell selected it says so.
-//! NULL shows as a dim `NULL`, with no text to select. A whole selected row (issue #17) shows as
-//! its JSON object under `Row <n>` and no type ([`State::Row`]); one cut at the cap says so as a
-//! long value does. The look is the component's ([`crate::components::value`]); this screen
-//! keeps the rows, colours, selection and scrolling.
+//! `VALUE_VIEW_MAX_BYTES` (10 MiB). The bar names the column and its real type, a cut one whole
+//! on hover; the facts along the bottom say its lines and size, `Formatted as JSON` when the
+//! engine pretty-printed text the database doesn't call JSON (`ValueView::formatted`), and for a
+//! cut value how much of it shows (`First 10 MiB of 19.1 MiB`). What JSON it is and the old note
+//! on a cut value ([`note`]) are no longer drawn; the tag keeps them. With no cell selected it
+//! says so. NULL shows as a dim `NULL`, with no text to select. A whole selected row (issue #17)
+//! shows as its JSON object under `Row <n>` and no type ([`State::Row`]); one cut at the cap says
+//! so as a long value does. The look is the component's ([`crate::components::value`]); this
+//! screen keeps the rows, colours, selection and scrolling.
+//!
+//! **COPY** runs `clipboard.copyValue`: the engine's `value.copy`, the whole value as stored
+//! (staged over loaded; a row as Copy as JSON writes it), onto the clipboard. It then reads
+//! ✓ COPIED for [`COPIED_FOR`] on the window's clock, with no notice; another value ends that. It
+//! is off, saying why on hover, whenever `value.copy` is (no cell, NULL, past 8 MiB).
 //!
 //! **The text** is read-only, in a monospace font, wrapped at the panel's width by characters
 //! ([`Rows`]: a row ends at a line break or before the character that would take it past the
@@ -52,9 +59,11 @@
 //! then [`fill`]), so a click on a cell shows its value in the same frame.
 //!
 //! Automation ids: `value-panel` (value `{column, row, type, label, null, bytes, truncated,
-//! note}`, `row` the number of a whole selected row (`column` and `type` then empty) or null,
-//! `label` the JSON label or null, `bytes` the whole value's length, `note` what a cut value
-//! says; `null` when no cell is selected), `value-text` (value `{text, cut, selection,
+//! note, facts}`, `row` the number of a whole selected row (`column` and `type` then empty) or
+//! null, `label` the JSON label or null, `bytes` the whole value's length, `note` what a cut value
+//! says (not drawn), `facts` the facts as written before capitals or null with no facts strip;
+//! `null` when no cell is selected), `value-copy` (COPY; value `{label, why}`, `label` `Copy` or
+//! `Copied`, `why` while it is off), `value-text` (value `{text, cut, selection,
 //! highlighted, rows, firstRow}`: the text's first [`TAG_BYTES`] bytes and whether there is more,
 //! the selection as `[start, end]` byte offsets or null, whether the JSON colours show, the
 //! number of rows and the first row in view) and `value-toggle` (the toggle the result bar and the
@@ -75,12 +84,13 @@ use serde_json::{Value as Json, json};
 
 use crate::DbeeApp;
 use crate::automation::Tags;
+use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
-use crate::components::value::{self, Facts, Panel, Shown, State};
+use crate::components::value::{self, COPY_HOVER, COPY_ROW_HOVER, CopyButton, Facts, Panel, Shown, State};
 use crate::editors::size_text;
 use crate::shortcuts;
 use crate::theme::{
-    self, Text, Words,
+    self, Text,
     size::{RESULTS_MIN_W, VALUE_PANEL_W},
 };
 
@@ -88,6 +98,10 @@ use crate::theme::{
 pub const PANEL: &str = "value-panel";
 pub const TEXT: &str = "value-text";
 pub const TOGGLE: &str = "value-toggle";
+pub const COPY: &str = "value-copy";
+
+/// How long COPY reads ✓ COPIED after a copy, in seconds.
+pub const COPIED_FOR: f64 = 1.5;
 
 /// How narrow and wide the panel can be made; it starts [`VALUE_PANEL_W`] wide.
 pub const MIN_WIDTH: f32 = 240.0;
@@ -550,6 +564,8 @@ pub struct PanelState {
     worker: Option<ColourWorker>,
     /// The panel's edge is being dragged: the text keeps its rows until it is let go.
     holding_rows: bool,
+    /// COPY copied the value shown: it reads ✓ COPIED until then, on egui's clock.
+    copied_until: Option<f64>,
 }
 
 /// Leaves the value out: it is a cell's.
@@ -567,6 +583,7 @@ impl PanelState {
     pub fn clear(&mut self) {
         self.doc = None;
         self.selection = None;
+        self.copied_until = None;
     }
 
     /// Ends the selection.
@@ -624,6 +641,7 @@ impl PanelState {
             }
             _ => {
                 self.selection = None;
+                self.copied_until = None;
                 let rows = Rows::new(&view.text, width, columns);
                 let colours = colours_of(view, &mut self.worker);
                 self.doc = Some(Doc { view: Arc::clone(view), rows, colours, fresh: true });
@@ -708,15 +726,40 @@ fn panel_id() -> Id {
     Id::new("dbee-value-panel")
 }
 
-/// After the tab's body: the panel's contents in `rect`, for the value the session shows now.
+/// After the tab's body: the panel's contents in `rect`, for the value the session shows now;
+/// COPY as `value.copy` allows, running `clipboard.copyValue` when pressed.
 pub(crate) fn fill(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
     let view = app.session.value_view_shared();
+    let now = ui.ctx().input(|i| i.time);
+    let why = app.session.enabled("value.copy").err();
     let DbeeApp { view: v, tags, .. } = app;
+    let copied = match v.panel.copied_until {
+        Some(until) if now < until => {
+            ui.ctx().request_repaint_after(Duration::try_from_secs_f64(until - now).unwrap_or(Duration::ZERO));
+            true
+        }
+        _ => {
+            v.panel.copied_until = None;
+            false
+        }
+    };
+    let hover = match (&why, view.as_ref().is_some_and(|v| v.row.is_some())) {
+        (Some(why), _) => format!("Copy the value: not now, {why}"),
+        (None, true) => COPY_ROW_HOVER.to_owned(),
+        (None, false) => COPY_HOVER.to_owned(),
+    };
+    let copy = CopyButton { enabled: why.is_none(), copied, hover: &hover };
     // egui's resize handle of a panel is its id with `__resize`: while it is dragged the text
     // keeps its rows, and wraps again once it is let go.
     v.panel.hold_rows(ui.ctx().is_being_dragged(panel_id().with("__resize")));
     let mut child = ui.new_child(UiBuilder::new().id_salt("dbee-value-contents").max_rect(rect).layout(Layout::top_down(Align::Min)));
-    contents(&mut child, view.as_ref(), &mut v.panel, tags);
+    let pressed = show(&mut child, view.as_ref(), &mut v.panel, tags, copy, why.as_deref());
+    if pressed {
+        match app.run("clipboard.copyValue", json!({})) {
+            Ok(_) => app.view.panel.copied_until = Some(now + COPIED_FOR),
+            Err(e) => app.notice(Kind::Error, crate::app::notice_text(&e)),
+        }
+    }
 }
 
 /// Step 4 of the frame, before the shortcuts, unless a text field or a text editor has the
@@ -755,18 +798,35 @@ pub(crate) fn take_keys(app: &mut DbeeApp, ctx: &egui::Context) {
     }
 }
 
-/// The panel's contents for `view` (`None`: no cell is selected), in all of `ui`.
+/// The panel's contents for `view` (`None`: no cell is selected), in all of `ui`, COPY on.
 pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut PanelState, tags: &mut Tags) {
+    show(ui, view, state, tags, CopyButton::ON, None);
+}
+
+/// Tags COPY's response: its word, and why it is off.
+fn tag_copy(tags: &mut Tags, r: Option<&Response>, copied: bool, why: Option<&str>) {
+    if let Some(r) = r {
+        let mut value = json!({ "label": if copied { "Copied" } else { "Copy" } });
+        if let Some(why) = why {
+            value["why"] = json!(why);
+        }
+        tags.tag_value(COPY, r, value);
+    }
+}
+
+/// [`contents`] with COPY as `copy` says (`why`: the reason it is off, for its tag); whether COPY
+/// was pressed.
+fn show(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut PanelState, tags: &mut Tags, copy: CopyButton<'_>, why: Option<&str>) -> bool {
     let full = ui.max_rect();
     let panel = ui.interact(full, ui.id().with("dbee-value-panel"), Sense::hover());
-    // The app's panel: no COPY or WRAP until the value panel screen; egui draws its left line.
-    let shell =
-        |shows: State| Panel { state: shows, title: "", ty: "", kind: None, note: None, facts: None, buttons: false, wrap: false, edge: false };
+    // egui draws its left line.
+    let shell = |shows: State| Panel { state: shows, title: "", ty: "", facts: None, buttons: true, copy, wrap: true, edge: false };
     let Some(view) = view else {
         state.clear();
-        shell(State::NoCell).show(ui, full);
+        let shown = shell(State::NoCell).show(ui, full);
+        tag_copy(tags, shown.copy.as_ref(), false, Some(why.unwrap_or(dbee_engine::cmd::selection::NOTHING_SELECTED)));
         tags.tag_value(PANEL, &panel, Json::Null);
-        return;
+        return false;
     };
     let shows = if view.row.is_some() {
         State::Row
@@ -786,11 +846,18 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
         state.clear();
         None
     };
-    let facts = state.doc.as_ref().filter(|_| glyph.is_some()).map(|d| Facts { lines: d.rows.lines(), bytes: view.byte_len });
+    let facts = state.doc.as_ref().filter(|_| glyph.is_some()).map(|d| Facts {
+        lines: d.rows.lines(),
+        bytes: if view.truncated { view.text.len() } else { view.byte_len },
+        formatted: view.formatted,
+        whole: view.truncated.then_some(view.byte_len),
+    });
     let note = note(view);
     let title = view.title();
-    let look = Panel { title: &title, ty: &view.type_label, kind: kind(view), note: note.as_deref(), facts, ..shell(shows) };
+    let look = Panel { title: &title, ty: &view.type_label, facts, ..shell(shows) };
     let shown = look.show(ui, full);
+    let pressed = shown.copy.as_ref().is_some_and(Response::clicked);
+    tag_copy(tags, shown.copy.as_ref(), copy.copied, why);
     match glyph {
         Some(glyph) => body(ui, &shown, view, state, tags, glyph),
         None => {
@@ -809,8 +876,10 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
         "bytes": view.byte_len,
         "truncated": view.truncated,
         "note": note,
+        "facts": facts.map(|f| f.words().join(" ")),
     });
     tags.tag_value(PANEL, &panel, head);
+    pressed
 }
 
 /// The part of the text's box `area` the pointer reaches: all of it but the strip at the panel's
@@ -818,16 +887,6 @@ pub fn contents(ui: &mut egui::Ui, view: Option<&Arc<ValueView>>, state: &mut Pa
 fn reach(ui: &egui::Ui, area: Rect) -> Rect {
     let grab = ui.style().interaction.resize_grab_radius_side;
     Rect::from_min_max(pos2((area.left() + grab).min(area.right()), area.top()), area.max)
-}
-
-/// Today's kind chip: the column's own type is a name, as written; dbee's words (`text containing
-/// JSON`) are in capitals.
-fn kind(view: &ValueView) -> Option<Words> {
-    match view.kind_label.as_str() {
-        "" => None,
-        label if label == view.type_label => Some(Words::default().name(label)),
-        label => Some(Words::from(label)),
-    }
 }
 
 /// Tags the text's box: the start of `view`'s text, the selection, whether its colours show, its

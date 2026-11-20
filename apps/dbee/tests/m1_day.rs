@@ -337,6 +337,23 @@ fn m1_day_end_to_end() {
     assert_eq!((d["clipboard"].as_str(), d["clipboardBytes"].as_u64()), (Some(line), Some(line.len() as u64)), "the selected line was copied");
     app.shot(&root, "4-billing");
 
+    // 4b. COPY puts the whole jsonb on the clipboard as the database stores it, not as the panel
+    //     shows it; the facts say its lines and size. A text column holding JSON says the panel
+    //     formatted it.
+    let facts = app.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
+    let words: Vec<&str> = facts.split(' ').collect();
+    let number = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit());
+    assert!(matches!(words.as_slice(), [n, "lines", b, "B"] if number(n) && number(b)), "the facts: {facts:?}");
+    app.click("value-copy");
+    let stored = day.q(&format!("SELECT billing::text FROM shop.orders WHERE id = {}", day.order));
+    assert!(!stored.contains('\n'), "the database keeps it on one line: {stored}");
+    app.until("the copy", |app| app.document()["clipboard"].as_str() == Some(stored.as_str()));
+    let raw = names.iter().position(|n| n == "raw_json_text").unwrap_or_else(|| panic!("raw_json_text in {names:?}"));
+    app.click(&format!("grid-cell-{r}-{raw}"));
+    let facts = app.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
+    assert!(facts.starts_with("Formatted as JSON "), "the facts: {facts:?}");
+    app.shot(&root, "4b-formatted");
+
     // 5. The order's row selected, its customer_id link: a new customers tab filtered to the id.
     app.click(&format!("grid-cell-{r}-1"));
     assert_eq!(app.document()["selection"], json!({ "anchor": [r, 1], "focus": [r, 1], "whole": false }));

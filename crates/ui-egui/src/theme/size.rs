@@ -274,19 +274,17 @@ pub const STRUCTURE_LINK_GAP: f32 = 4.0;
 /// The value panel (`value panel`): the bar's words, the value and the facts this far in from its
 /// sides, the value this far below the bar and above the facts; the bar's parts (the column's
 /// name and type, COPY and WRAP) this far apart; the facts in a slim bar along the bottom, this far apart; CANCEL and SAVE this far
-/// apart; the editing caret this tall in its row. Under the bar, today's kind chip (this tall, its
-/// words this far in), then the note on a cut value this far under it, then this much before the
-/// value.
+/// apart; the editing caret this tall in its row. Short of room the name keeps at least
+/// `VALUE_NAME_MIN` before COPY and WRAP lose their words, each then an icon in a cell
+/// `VALUE_ICON_CELL_W` wide (a bar button's square).
 pub const VALUE_INSET: f32 = 12.0;
 pub const VALUE_BAR_GAP: f32 = 6.0;
 pub const VALUE_FACTS_H: f32 = SLIM_BAR_H;
 pub const VALUE_FACT_GAP: f32 = 12.0;
 pub const VALUE_EDIT_GAP: f32 = 8.0;
 pub const VALUE_CARET_H: f32 = 16.0;
-pub const VALUE_KIND_H: f32 = 18.0;
-pub const VALUE_KIND_PAD_X: f32 = 6.0;
-pub const VALUE_KIND_GAP: f32 = 2.0;
-pub const VALUE_NOTE_GAP: f32 = 6.0;
+pub const VALUE_NAME_MIN: f32 = 64.0;
+pub const VALUE_ICON_CELL_W: f32 = BAR_BUTTON_H;
 /// The value panel's width when it first shows, beside the tab's results.
 pub const VALUE_PANEL_W: f32 = 340.0;
 /// The tab's results keep at least this beside the value panel: the panel narrows first, and

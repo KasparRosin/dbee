@@ -102,6 +102,13 @@ fn jsonb_cell_shows_pretty_json_with_label() {
     assert_eq!(ui.document()["value"]["text"], json!(text));
     let v = ui.value("value-text");
     assert_eq!((v["highlighted"].clone(), v["cut"].clone(), v["selection"].clone()), (json!(true), json!(false), Json::Null), "{v}");
+    // No kind chip (K2): `jsonb` is drawn once, as the type; the facts say lines and bytes.
+    let panel = ui.rect("value-panel");
+    assert_eq!(drawn_in(&ui, panel, "jsonb"), 1, "the type alone, no chip");
+    let facts = ui.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
+    assert!(facts_read(&facts, false), "`12 lines 137 B`'s form: {facts:?}");
+    let lines = facts.split(' ').take(2).collect::<Vec<_>>().join(" ").to_uppercase();
+    assert!(ui.text_in(panel, &lines).is_some(), "{lines} drawn in capitals");
     // Another cell of the row: the panel follows.
     ui.click("grid-cell-0-3");
     assert_eq!(ui.value("value-panel")["column"], "status");
@@ -118,8 +125,13 @@ fn json_string_containing_json_is_labelled() {
     ui.click("grid-cell-0-6");
     let head = ui.value("value-panel");
     assert_eq!((head["type"].clone(), head["label"].clone()), (json!("json"), json!("JSON string containing JSON")), "{head}");
-    // The document inside the string, pretty-printed.
+    // The document inside the string, pretty-printed; no chip, the facts say why it differs.
     assert_eq!(ui.panel_text(), "{\n  \"a\": 1\n}");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "JSON STRING CONTAINING JSON").is_none(), "no chip");
+    let facts = ui.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
+    assert!(facts.starts_with("Formatted as JSON 3 lines ") && facts_read(facts.trim_start_matches("Formatted as JSON "), false), "{facts:?}");
+    assert!(ui.text_in(panel, "FORMATTED AS JSON").is_some(), "drawn in capitals");
     // A text column holding JSON says so too.
     ui.click("grid-cell-0-8");
     let head = ui.value("value-panel");
@@ -230,14 +242,14 @@ fn the_panel_follows_staged_values_and_null() {
 }
 
 #[test]
-fn a_twenty_megabyte_cell_shows_a_truncation_note() {
+fn a_twenty_megabyte_cell_says_first_10_mib_in_its_facts() {
     let db = dbee_testkit::require_testdb!();
     twenty_megabyte_cell(db);
 }
 
 #[test]
 #[ignore = "timing; run with --ignored --nocapture"]
-fn a_twenty_megabyte_cell_shows_a_truncation_note_without_a_slow_frame() {
+fn a_twenty_megabyte_cell_says_first_10_mib_in_its_facts_without_a_slow_frame() {
     let db = dbee_testkit::require_testdb!();
     for (what, t) in twenty_megabyte_cell(db) {
         assert!(t < FRAME_BOUND, "{what} took a {t:?} frame");
@@ -256,7 +268,14 @@ fn twenty_megabyte_cell(db: &TestDb) -> [(&'static str, Duration); 4] {
     let head = ui.value("value-panel");
     assert_eq!((head["truncated"].clone(), head["bytes"].clone()), (json!(true), json!(20_000_000)), "{head}");
     let note = head["note"].as_str().unwrap_or_default().to_string();
-    assert!(note.contains("first 10.0 MiB of 19.1 MiB"), "{note}");
+    assert_eq!(note, "Showing the first 10.0 MiB of 19.1 MiB.", "the old sentence stays readable");
+    // N2: the facts say it; nothing is painted above the value.
+    assert_eq!(head["facts"], "1 line First 10 MiB of 19.1 MiB", "{head}");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, &note).is_none(), "no note painted");
+    assert!(ui.text_in(panel, "FIRST 10 MIB OF 19.1 MIB").is_some(), "the facts in capitals");
+    let text = ui.rect("value-text");
+    assert!(near(text.top(), panel.top() + 36.0 + 12.0, 0.5), "the value 12 under the bar: {text:?} in {panel:?}");
     let v = ui.value("value-text");
     assert_eq!(v["cut"], true, "the tag carries the start of the text: {}", v["text"]);
     assert!(v["text"].as_str().unwrap().starts_with("0123456789abcdef"));
@@ -701,4 +720,129 @@ fn a_click_on_a_cell_shows_its_value_in_the_same_frame() {
     ui.frame();
     click(&mut ui, "grid-cell-0-3");
     assert_eq!(ui.value("value-panel")["column"], "status", "a table tab");
+}
+
+// ---- COPY and the facts ---------------------------------------------------------------------------
+
+/// How often `text` is drawn inside `within`.
+fn drawn_in(ui: &Ui, within: Rect, text: &str) -> usize {
+    ui.texts().iter().filter(|(r, g)| g.text() == text && within.expand(1.0).contains(r.center())).count()
+}
+
+/// `n lines m B` (or `1 line …`), with `cut`: `1 line First 10 MiB of …`.
+fn facts_read(facts: &str, cut: bool) -> bool {
+    let words: Vec<&str> = facts.split(' ').collect();
+    let number = |w: &str| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit() || c == ',');
+    match words.as_slice() {
+        [n, unit, rest @ ..] if number(n) && (*unit == "lines" || (*unit == "line" && *n == "1")) => {
+            if cut {
+                rest.first() == Some(&"First")
+            } else {
+                matches!(rest, [b, "B"] if number(b)) || matches!(rest, [_, "KiB" | "MiB"])
+            }
+        }
+        _ => false,
+    }
+}
+
+/// COPY as `value-copy` says it: its word, and why it is off (`None` while on).
+fn copy_state(ui: &mut Ui) -> (String, Option<String>) {
+    let tag = ui.tag("value-copy").unwrap_or_else(|| panic!("no `value-copy`"));
+    let word = tag["value"]["label"].as_str().unwrap_or_default().to_string();
+    let off = tag["enabled"] == false;
+    let why = tag["value"]["why"].as_str().map(str::to_string);
+    assert_eq!(off, why.is_some(), "off exactly when it says why: {tag}");
+    (word, why)
+}
+
+/// COPY copies the whole value as the database stores it (staged over loaded), a row as Copy as
+/// JSON writes it; off with why for no cell, NULL and past 8 MiB; ✓ COPIED for 1.5 s, no notice.
+#[test]
+fn copy_copies_the_whole_value_as_stored() {
+    let db = dbee_testkit::require_testdb!();
+    let t = Scratch::new(db, "t_value_copy", |n| {
+        format!(
+            "CREATE TABLE scratch.{n} (id int PRIMARY KEY, note text);
+             INSERT INTO scratch.{n} VALUES (1, repeat('x', 5 * 1024 * 1024)), (2, repeat('y', 9 * 1024 * 1024)), (3, NULL), (4, ''), (5, 'plain');"
+        )
+    });
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    ui.open_rows("shop", "orders", 100);
+    ui.frame();
+    assert_eq!(copy_state(&mut ui), ("Copy".into(), Some("nothing is selected".into())), "no cell: off");
+
+    // A whole row: the object Copy as JSON writes for it.
+    ui.execute("selection.set", json!({ "anchor": [0, 0], "focus": [0, 99] }));
+    let list = ui.execute("copy.selection", json!({ "format": "json" }))["text"].as_str().unwrap().to_string();
+    let object = list.strip_prefix("[\n  ").and_then(|l| l.strip_suffix("\n]")).unwrap().to_string();
+    ui.click("grid-row-0");
+    ui.click("value-copy");
+    assert_eq!(ui.copied().as_deref(), Some(object.as_str()), "the row as JSON");
+
+    // A jsonb: the database's text, not the pretty form.
+    ui.click("grid-cell-0-5");
+    assert_eq!(copy_state(&mut ui), ("Copy".into(), None));
+    let stored = dbee_testkit::psql(pg14_server(db), "SELECT billing::text FROM shop.orders WHERE id = 1").unwrap();
+    let stored = stored.trim_end_matches('\n');
+    assert!(!stored.contains('\n') && ui.panel_text().contains('\n'), "the panel shows it pretty, the database keeps one line");
+    let copies = ui.copied.len();
+    ui.click("value-copy");
+    assert_eq!(ui.copied.len(), copies + 1, "one copy");
+    assert_eq!(ui.copied().as_deref(), Some(stored), "as stored");
+    assert_eq!(copy_state(&mut ui).0, "Copied");
+    assert!(ui.tag("notice").is_none(), "no notice: COPIED says it");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "COPIED").is_some(), "✓ COPIED drawn");
+    // 1.5 s of the harness clock (a frame is 0.25 s) and it reads COPY again.
+    for _ in 0..8 {
+        ui.frame();
+    }
+    assert_eq!(copy_state(&mut ui).0, "Copy", "back after 1.5 s");
+
+    // The scratch table: 5 MiB whole, 9 MiB off, NULL off, '' copied, a staged value.
+    ui.open_rows("scratch", &t.0, 5);
+    ui.click("grid-cell-0-1");
+    ui.click("value-copy");
+    let five = ui.copied().unwrap_or_default();
+    assert!(five.len() == 5 * 1024 * 1024 && five.bytes().all(|b| b == b'x'), "5 MiB whole: {} bytes", five.len());
+    assert_eq!(ui.execute("clipboard.copyValue", json!({})), json!({ "bytes": 5 * 1024 * 1024 }), "the command says how much");
+    ui.click("grid-cell-1-1");
+    let (_, why) = copy_state(&mut ui);
+    assert!(why.as_deref().is_some_and(|w| w.contains("9.0 MiB") && w.contains("8 MiB")), "9 MiB: off, {why:?}");
+    let r = ui.call("engine.execute", json!({ "command": "clipboard.copyValue", "params": {} }));
+    assert_eq!((r["code"].clone(), r["data"]["why"].as_str().is_some_and(|w| w.contains("8 MiB"))), (json!("disabled"), true), "{r}");
+    ui.click("grid-cell-2-1");
+    assert_eq!(copy_state(&mut ui).1.as_deref(), Some("the value is NULL"));
+    ui.click("grid-cell-3-1");
+    let copies = ui.copied.len();
+    ui.click("value-copy");
+    assert_eq!((ui.copied.len(), ui.copied().as_deref()), (copies + 1, Some("")), "the empty text");
+    ui.execute("cell.edit", json!({ "row": 4, "column": 1, "value": "staged text" }));
+    ui.click("grid-cell-4-1");
+    ui.click("value-copy");
+    assert_eq!(ui.copied().as_deref(), Some("staged text"), "the staged value");
+}
+
+/// A text column holding JSON: its facts start `Formatted as JSON` (K2), no chip.
+#[test]
+fn a_text_column_holding_json_says_formatted_as_json() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    panel_open(&mut ui);
+    ui.open_rows("shop", "orders", 100);
+    ui.click("grid-cell-0-8");
+    let head = ui.value("value-panel");
+    assert_eq!(head["label"], "text containing JSON", "the label kept: {head}");
+    let facts = head["facts"].as_str().unwrap_or_default();
+    assert!(facts.starts_with("Formatted as JSON ") && facts_read(facts.trim_start_matches("Formatted as JSON "), false), "{head}");
+    let panel = ui.rect("value-panel");
+    assert!(ui.text_in(panel, "TEXT CONTAINING JSON").is_none(), "no chip");
+    assert!(ui.text_in(panel, "FORMATTED AS JSON").is_some(), "the fact drawn");
+    let text = ui.rect("value-text");
+    assert!(near(text.top(), panel.top() + 36.0 + 12.0, 0.5), "the value 12 under the bar: {text:?}");
+    // A jsonb isn't formatted: it is JSON.
+    ui.click("grid-cell-0-5");
+    let facts = ui.value("value-panel")["facts"].as_str().unwrap_or_default().to_string();
+    assert!(!facts.starts_with("Formatted"), "{facts:?}");
 }

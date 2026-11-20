@@ -8,27 +8,30 @@
 //! NULL and `empty` sit where a value starts, in `code` `text_muted`; only "No cell selected" is
 //! centred. Names keep their case: the column's name and type are drawn as written.
 //!
-//! The bar's COPY and WRAP (CANCEL and SAVE while editing) come with the value panel screen: the
-//! app's panel has none yet, and nothing in the app sets the copied and editing states, which
-//! the showcase shows. Today's kind chip (`JSONB`) and the note on a cut value keep today's look,
-//! under the bar and before the value, until it is decided.
+//! The bar: the name and type at its left, COPY and WRAP at its right (CANCEL and SAVE while
+//! editing). Short of room it gives way in order ([`BarFit`]): the type is cut, then goes; the
+//! name is cut, keeping [`VALUE_NAME_MIN`]; COPY and WRAP lose their words; last the name is cut
+//! to `…`. A cut name or type reads whole on hover. The facts along the bottom say how many
+//! lines, how big, whether the text was formatted as JSON and how much of a cut value shows
+//! ([`Facts`]); no kind chip or note stands above the value.
 
 use std::ops::Range;
 
 use dbee_core::json::JsonToken;
-use egui::text::{CCursor, LayoutJob, TextWrapping};
-use egui::{Align2, Color32, CornerRadius, Rect, Response, Ui, pos2, vec2};
+use egui::text::{CCursor, LayoutJob};
+use egui::{Align2, Color32, CornerRadius, Rect, Response, Sense, Ui, pos2, vec2};
 
 use super::button::{BarButton, BoxButton};
 use super::grid_cell::one_line;
 use super::icon::Icon;
 use super::painter;
+use super::tooltip::Hint;
 use crate::editors::size_text;
 use crate::theme::size::{
-    BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, CARET_W, RADIUS_FLOAT, VALUE_BAR_GAP, VALUE_CARET_H, VALUE_EDIT_GAP, VALUE_FACT_GAP, VALUE_FACTS_H,
-    VALUE_INSET, VALUE_KIND_GAP, VALUE_KIND_H, VALUE_KIND_PAD_X, VALUE_NOTE_GAP,
+    BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, CARET_W, VALUE_BAR_GAP, VALUE_CARET_H, VALUE_EDIT_GAP, VALUE_FACT_GAP, VALUE_FACTS_H, VALUE_ICON_CELL_W,
+    VALUE_INSET, VALUE_NAME_MIN,
 };
-use crate::theme::{Text, Tokens, Words, tokens};
+use crate::theme::{Text, Tokens, tokens};
 use crate::tree::thousands;
 
 /// A row of the value's text: [`Text::Code`]'s line.
@@ -63,19 +66,98 @@ impl State {
     }
 }
 
-/// The facts along the bottom: the value's lines and its size.
+/// The facts along the bottom: the value's lines and its size, whether its text was formatted
+/// as JSON, and for a cut value how long the whole is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Facts {
     pub lines: usize,
+    /// The value's size; for a cut value, the size of the part shown.
     pub bytes: usize,
+    /// The text was pretty-printed from text the database doesn't call JSON (K2).
+    pub formatted: bool,
+    /// A cut value's whole length (N2).
+    pub whole: Option<usize>,
 }
 
 impl Facts {
-    /// What the facts say, as written (capitals are drawn): `12 lines`, `137 B`.
-    pub fn words(self) -> [String; 2] {
-        let lines = format!("{} {}", thousands(self.lines as u64), if self.lines == 1 { "line" } else { "lines" });
-        let size = if self.bytes < 1024 { format!("{} B", self.bytes) } else { size_text(self.bytes) };
-        [lines, size]
+    /// What the facts say, as written (capitals are drawn): `Formatted as JSON`, `12 lines`,
+    /// `137 B`; a cut value `1 line`, `First 10 MiB of 19.1 MiB`.
+    pub fn words(self) -> Vec<String> {
+        let mut words = Vec::with_capacity(3);
+        if self.formatted {
+            words.push("Formatted as JSON".to_owned());
+        }
+        words.push(format!("{} {}", thousands(self.lines as u64), if self.lines == 1 { "line" } else { "lines" }));
+        words.push(match self.whole {
+            Some(whole) => format!("First {} of {}", fact_size(self.bytes), fact_size(whole)),
+            None => fact_size(self.bytes),
+        });
+        words
+    }
+}
+
+/// A size as the facts say it: under 1 KiB in bytes (`137 B`), else as the app writes sizes
+/// (`300 KiB`, `19.1 MiB`), a whole number of MiB without its `.0` (`10 MiB`).
+pub fn fact_size(n: usize) -> String {
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let size = size_text(n);
+    match size.strip_suffix(".0 MiB") {
+        Some(whole) => format!("{whole} MiB"),
+        None => size,
+    }
+}
+
+/// COPY's hover while it can copy a cell's value, and a row's.
+pub const COPY_HOVER: &str = "Copy the whole value";
+pub const COPY_ROW_HOVER: &str = "Copy the row as JSON";
+/// WRAP's hover while it is off, and on.
+pub const WRAP_HOVER: &str = "Wrap long lines";
+pub const UNWRAP_HOVER: &str = "Stop wrapping long lines";
+
+/// COPY as the bar draws it: whether it can copy, whether it just did (✓ COPIED), and its hover
+/// (while off, why).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CopyButton<'a> {
+    pub enabled: bool,
+    pub copied: bool,
+    pub hover: &'a str,
+}
+
+impl CopyButton<'static> {
+    /// On, not just pressed.
+    pub const ON: CopyButton<'static> = CopyButton { enabled: true, copied: false, hover: COPY_HOVER };
+}
+
+/// How the bar fits its width, from the widest form to the narrowest: each gives way one step
+/// more than the one before it, and a narrower bar never takes a form before a wider one's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BarFit {
+    /// The name and the type whole, COPY and WRAP with their words.
+    Whole,
+    /// The type cut with `…`, keeping at least [`VALUE_NAME_MIN`] (or its whole width).
+    TypeCut,
+    /// The type gone, the name whole.
+    TypeGone,
+    /// The name cut with `…`, keeping at least [`VALUE_NAME_MIN`].
+    NameCut,
+    /// COPY and WRAP icons alone ([`VALUE_ICON_CELL_W`] wide), the name given their room, keeping
+    /// at least [`VALUE_NAME_MIN`].
+    Icons,
+    /// The name cut to what is left, down to `…`.
+    NameShort,
+}
+
+impl BarFit {
+    /// COPY and WRAP keep their words.
+    pub fn words(self) -> bool {
+        self < BarFit::Icons
+    }
+
+    /// The type is drawn.
+    pub fn ty(self) -> bool {
+        self <= BarFit::TypeCut
     }
 }
 
@@ -95,21 +177,20 @@ pub struct Panel<'a> {
     pub title: &'a str,
     /// The column's type as written; a row has none.
     pub ty: &'a str,
-    /// Today's kind chip: what JSON the value is, a type from the database as a name.
-    pub kind: Option<Words>,
-    /// Today's note on a cut value: how much of it shows.
-    pub note: Option<&'a str>,
     /// The value's facts, along the bottom of a state that shows a value.
     pub facts: Option<Facts>,
-    /// COPY and WRAP in the bar, CANCEL and SAVE while editing (the value panel screen's).
+    /// COPY and WRAP in the bar, CANCEL and SAVE while editing.
     pub buttons: bool,
+    /// COPY: whether it can copy, whether it just did, its hover.
+    pub copy: CopyButton<'a>,
     /// WRAP is on.
     pub wrap: bool,
     /// Its own 1 px `line` down its left side; off in a panel that draws that line itself.
     pub edge: bool,
 }
 
-/// What [`Panel::show`] drew: where the value goes, and the bar's buttons.
+/// What [`Panel::show`] drew: where the value goes, the bar's buttons, how the bar fitted, and
+/// the name and type whole when they were cut (their hover).
 #[derive(Debug)]
 pub struct Shown {
     /// Between the bar and the facts.
@@ -120,6 +201,9 @@ pub struct Shown {
     pub wrap: Option<Response>,
     pub cancel: Option<Response>,
     pub save: Option<Response>,
+    pub fit: BarFit,
+    /// The name and type whole (`name type`, as written), when the bar cut either.
+    pub hover: Option<String>,
 }
 
 impl Panel<'_> {
@@ -148,10 +232,11 @@ impl Panel<'_> {
             }
         }
         let body = Rect::from_min_max(pos2(inner.left(), bar.bottom()), pos2(inner.right(), facts_top.max(bar.bottom())));
-        let mut shown = Shown { body, text: body, copy: None, wrap: None, cancel: None, save: None };
-        let buttons_left = if self.buttons { self.buttons(ui, bar, &mut shown) } else { bar.right() };
-        self.title(ui, t, bar, buttons_left);
-        let top = self.under_bar(ui, t, body);
+        let fit = self.fit(ui, bar.width());
+        let mut shown = Shown { body, text: body, copy: None, wrap: None, cancel: None, save: None, fit, hover: None };
+        let buttons_left = if self.buttons { self.buttons(ui, bar, fit, &mut shown) } else { bar.right() };
+        shown.hover = self.title(ui, t, bar, buttons_left, fit);
+        let top = body.top() + VALUE_INSET;
         shown.text = Rect::from_min_max(pos2(body.left(), top), pos2(body.right(), (body.bottom() - VALUE_INSET).max(top)));
         let p = painter(ui).with_clip_rect(body.intersect(ui.clip_rect()));
         match self.state {
@@ -169,29 +254,97 @@ impl Panel<'_> {
         shown
     }
 
-    /// The name and type at the bar's left, cut to end before `right`.
-    fn title(&self, ui: &Ui, t: &Tokens, bar: Rect, right: f32) {
-        if self.state == State::NoCell {
-            return;
-        }
-        let p = painter(ui);
-        let left = bar.left() + VALUE_INSET;
-        let room = right - VALUE_INSET - left;
-        let ty = if self.state == State::Row { "" } else { self.ty };
-        // Today's share: the name takes at most 70 % when there is a type after it.
-        let name_max = if ty.is_empty() { room } else { room * 0.7 };
-        let name = one_line(ui, self.title, Text::Header, t.text, name_max);
-        let name_w = name.size().x;
-        p.galley(pos2(left, bar.center().y - name.size().y / 2.0), name, t.text);
-        let type_left = left + name_w + VALUE_BAR_GAP;
-        if !ty.is_empty() && right - VALUE_INSET - type_left > VALUE_INSET {
-            let ty = one_line(ui, ty, Text::Data, t.text_muted, right - VALUE_INSET - type_left);
-            p.galley(pos2(type_left, bar.center().y - ty.size().y / 2.0), ty, t.text_muted);
+    /// The name and the type the bar draws: none with no cell, no type for a row.
+    fn names(&self) -> (&str, &str) {
+        match self.state {
+            State::NoCell => ("", ""),
+            State::Row => (self.title, ""),
+            _ => (self.title, self.ty),
         }
     }
 
-    /// The bar's buttons at its right end; returns where they start.
-    fn buttons(&self, ui: &mut Ui, bar: Rect, shown: &mut Shown) -> f32 {
+    /// The width of the bar's buttons at its right end, with their words or without.
+    fn buttons_width(&self, ui: &Ui, words: bool) -> f32 {
+        if !self.buttons {
+            return 0.0;
+        }
+        if self.state == State::Editing {
+            return BoxButton::outline("Cancel").width(ui) + VALUE_EDIT_GAP + BoxButton::primary("Save").width(ui) + VALUE_INSET;
+        }
+        if !words {
+            return 2.0 * VALUE_ICON_CELL_W + VALUE_BAR_GAP;
+        }
+        copy_width(ui) + VALUE_BAR_GAP + wrap_button(true, false).width(ui)
+    }
+
+    /// How the bar fits `width` (the bar's, its left line included or not as drawn): the widest
+    /// of [`BarFit`]'s forms whose name and type fit beside the buttons, 12 in from the bar's left
+    /// and 12 before the buttons.
+    pub fn fit(&self, ui: &Ui, width: f32) -> BarFit {
+        let (name, ty) = self.names();
+        let measure = |text: &str, style: Text| {
+            if text.is_empty() { 0.0 } else { ui.painter().layout_job(style.job_as_written(text, Color32::PLACEHOLDER)).size().x }
+        };
+        let (name_w, ty_w) = (measure(name, Text::Header), measure(ty, Text::Data));
+        let room = |words: bool| width - self.buttons_width(ui, words) - 2.0 * VALUE_INSET;
+        let with_words = room(true);
+        if !ty.is_empty() {
+            if name_w + VALUE_BAR_GAP + ty_w <= with_words {
+                return BarFit::Whole;
+            }
+            if name_w + VALUE_BAR_GAP + ty_w.min(VALUE_NAME_MIN) <= with_words {
+                return BarFit::TypeCut;
+            }
+            if name_w <= with_words {
+                return BarFit::TypeGone;
+            }
+        } else if name_w <= with_words {
+            return BarFit::Whole;
+        }
+        let keep = name_w.min(VALUE_NAME_MIN);
+        if keep <= with_words {
+            return BarFit::NameCut;
+        }
+        if self.buttons && self.state != State::Editing && keep <= room(false) {
+            return BarFit::Icons;
+        }
+        BarFit::NameShort
+    }
+
+    /// The name and type at the bar's left, cut as `fit` says to end 12 before `right`; with a
+    /// hover saying them whole when either was cut, which it returns.
+    fn title(&self, ui: &Ui, t: &Tokens, bar: Rect, right: f32, fit: BarFit) -> Option<String> {
+        let (name, ty) = self.names();
+        if name.is_empty() {
+            return None;
+        }
+        let p = painter(ui);
+        let left = bar.left() + VALUE_INSET;
+        let room = (right - VALUE_INSET - left).max(0.0);
+        let name = one_line(ui, name, Text::Header, t.text, room);
+        let mut end = left + name.size().x;
+        let cut = name.elided;
+        p.galley(pos2(left, bar.center().y - name.size().y / 2.0), name, t.text);
+        let mut ty_cut = !ty.is_empty() && !fit.ty();
+        if fit.ty() && !ty.is_empty() {
+            let type_left = end + VALUE_BAR_GAP;
+            let ty = one_line(ui, ty, Text::Data, t.text_muted, right - VALUE_INSET - type_left);
+            ty_cut = ty.elided;
+            end = type_left + ty.size().x;
+            p.galley(pos2(type_left, bar.center().y - ty.size().y / 2.0), ty, t.text_muted);
+        }
+        if !cut && !ty_cut {
+            return None;
+        }
+        let whole = if ty.is_empty() { self.title.to_owned() } else { format!("{} {ty}", self.title) };
+        let at = Rect::from_min_max(pos2(left, bar.top()), pos2(end.max(left), bar.bottom() - BAR_LINE));
+        ui.interact(at, ui.id().with("dbee-value-title"), Sense::hover()).hint(whole.clone());
+        Some(whole)
+    }
+
+    /// The bar's buttons at its right end, with their words as `fit` says; returns where they
+    /// start.
+    fn buttons(&self, ui: &mut Ui, bar: Rect, fit: BarFit, shown: &mut Shown) -> f32 {
         let right = bar.right();
         if self.state == State::Editing {
             let save = BoxButton::primary("Save");
@@ -204,47 +357,31 @@ impl Panel<'_> {
             shown.save = Some(ui.put(save_at, save));
             return cancel_at.left();
         }
-        let wrap = BarButton::label(Icon::Wrap, "Wrap").over_line().on(self.wrap);
-        let wrap_w = wrap.width(ui);
-        let copied = self.state == State::Copied;
-        let copy_w = BarButton::label(Icon::Check, "Copied").width(ui);
+        let words = fit.words();
+        let wrap = wrap_button(words, self.wrap);
+        let wrap_w = if words { wrap.width(ui) } else { VALUE_ICON_CELL_W };
+        let copied = self.state == State::Copied || self.copy.copied;
+        let copy_w = if words { copy_width(ui) } else { VALUE_ICON_CELL_W };
         let copy = if copied { BarButton::label(Icon::Check, "Copied").done(true) } else { BarButton::label(Icon::Copy, "Copy") };
-        let copy = copy.over_line().min_width(copy_w);
+        let copy = copy.over_line().min_width(copy_w).words(words);
         let wrap_at = Rect::from_min_size(pos2(right - wrap_w, bar.top()), vec2(wrap_w, BAR_CELL_H));
         let copy_at = Rect::from_min_size(pos2(wrap_at.left() - VALUE_BAR_GAP - copy_w, bar.top()), vec2(copy_w, BAR_CELL_H));
-        shown.copy = Some(ui.add_enabled_ui(self.state != State::NoCell, |ui| ui.put(copy_at, copy)).inner);
-        shown.wrap = Some(ui.put(wrap_at, wrap));
+        let enabled = self.copy.enabled && self.state != State::NoCell;
+        let r = ui.add_enabled_ui(enabled, |ui| ui.put(copy_at, copy)).inner;
+        shown.copy = Some(if enabled { r.hint(self.copy.hover) } else { r.hint_disabled(self.copy.hover) });
+        shown.wrap = Some(ui.put(wrap_at, wrap).hint(if self.wrap { UNWRAP_HOVER } else { WRAP_HOVER }));
         copy_at.left()
     }
+}
 
-    /// Today's kind chip and note under the bar; returns where the value starts.
-    fn under_bar(&self, ui: &Ui, t: &Tokens, body: Rect) -> f32 {
-        let left = body.left() + VALUE_INSET;
-        let width = (body.width() - 2.0 * VALUE_INSET).max(1.0);
-        let mut y = body.top() + VALUE_INSET;
-        if self.kind.is_none() && self.note.is_none() {
-            return y;
-        }
-        let p = painter(ui);
-        if let Some(kind) = &self.kind {
-            let mut job = kind.caps_job(t.ink);
-            job.wrap = TextWrapping::truncate_at_width((width - 2.0 * VALUE_KIND_PAD_X).max(1.0));
-            let words = p.layout_job(job);
-            let pill = Rect::from_min_size(pos2(left, y), vec2(words.size().x + 2.0 * VALUE_KIND_PAD_X, VALUE_KIND_H));
-            p.rect_filled(pill, CornerRadius::same(RADIUS_FLOAT), t.selection);
-            p.galley(pos2(pill.left() + VALUE_KIND_PAD_X, pill.center().y - words.size().y / 2.0), words, t.ink);
-            y = pill.bottom() + VALUE_KIND_GAP;
-        }
-        if let Some(note) = self.note {
-            let mut job = Text::Small.job(note, t.text_muted);
-            job.wrap.max_width = width;
-            let words = p.layout_job(job);
-            let h = words.size().y;
-            p.galley(pos2(left, y), words, t.text_muted);
-            y += h;
-        }
-        y + VALUE_NOTE_GAP
-    }
+/// COPY's cell with its words: as wide as ✓ COPIED, so nothing moves when it changes.
+fn copy_width(ui: &Ui) -> f32 {
+    BarButton::label(Icon::Check, "Copied").width(ui)
+}
+
+/// WRAP, with its word or without, on or off.
+fn wrap_button(words: bool, on: bool) -> BarButton<'static> {
+    BarButton::label(Icon::Wrap, "Wrap").over_line().on(on).words(words)
 }
 
 /// The colour of a JSON token.
@@ -431,7 +568,8 @@ mod tests {
                 let facts_line = Rect::from_min_size(pos2(x0 + 1.0, y0 + 342.0), vec2(339.0, 1.0));
                 if let Some(facts) = sample.panel.facts.filter(|_| state.has_text()) {
                     assert!(filled(facts_line, t.line), "{at_}: the facts' line");
-                    let [lines, size] = facts.words().map(|w| w.to_uppercase());
+                    let words: Vec<String> = facts.words().into_iter().map(|w| w.to_uppercase()).collect();
+                    let (lines, size) = (words[0].clone(), words[1].clone());
                     let (lr, lc, lfont, _) = drawn(&shapes, &lines).unwrap_or_else(|| panic!("{at_}: {lines} drawn"));
                     let (sr, sc, _, _) = drawn(&shapes, &size).unwrap_or_else(|| panic!("{at_}: {size} drawn"));
                     assert_eq!((lc, sc, lfont), (t.text_muted, t.text_muted, Text::Label.font()), "{at_}: the facts in `label` `text_muted`");
@@ -553,7 +691,8 @@ mod tests {
             let (r, c, font, _) = drawn(shapes, "No cell selected").unwrap_or_else(|| panic!("{theme:?}: the note: {:?}", texts(shapes)));
             assert_eq!((c, font), (t.text_muted, Text::Body.font()), "{theme:?}: the note");
             assert!(close(r.center().x, body.center().x) && close(r.center().y, body.center().y), "{theme:?}: centred in {body:?}: {r:?}");
-            assert_eq!(texts(shapes).len(), 1, "{theme:?}: the note alone (today's second line goes): {:?}", texts(shapes));
+            let in_body: Vec<_> = texts(shapes).into_iter().filter(|(_, r, _)| body.contains(r.center())).collect();
+            assert_eq!(in_body.len(), 1, "{theme:?}: the note alone (today's second line goes): {in_body:?}");
         }
     }
 
@@ -585,17 +724,10 @@ mod tests {
             }
             assert_eq!(drawn(shapes, "Meta").map(|d| (d.1, d.2)), Some((t.text, Text::Header.font())), "{theme:?}: the column as written");
             assert_eq!(drawn(shapes, "jsonb").map(|d| d.1), Some(t.text_muted), "{theme:?}: the type as written");
-            // Today's chip names the column's type: as written, never `JSONB`.
+            // No kind chip (K2): the type once, never `JSONB`.
             assert!(
-                all.iter().filter(|w| *w == "jsonb").count() == 2 && !all.iter().any(|w| w == "JSONB"),
-                "{theme:?}: the chip as written: {all:?}"
-            );
-            // dbee's own words in the chip stay in capitals.
-            let h = app(theme, vec2(420.0, 500.0), Some(view("raw", "text", Some(r#"{"k": 1}"#))));
-            assert!(
-                drawn(&h.output().shapes, "TEXT CONTAINING JSON").is_some(),
-                "{theme:?}: dbee's label in capitals: {:?}",
-                texts(&h.output().shapes)
+                all.iter().filter(|w| *w == "jsonb").count() == 1 && !all.iter().any(|w| w == "JSONB"),
+                "{theme:?}: the type alone, as written: {all:?}"
             );
 
             // The text 'NULL' and NULL, in a column whose type has capitals.
@@ -684,14 +816,14 @@ mod tests {
         let json_view = view("billing", "jsonb", Some(raw));
         let h = app(Theme::Light, size, Some(json_view.clone()));
         let head = h.state().tags.value("value-panel").unwrap().clone();
-        assert_eq!(keys(&head), ["bytes", "column", "label", "note", "null", "row", "truncated", "type"]);
+        assert_eq!(keys(&head), ["bytes", "column", "facts", "label", "note", "null", "row", "truncated", "type"]);
+        let lines = json_view.text.split('\n').count();
         assert_eq!(
             head,
-            json!({ "column": "billing", "row": null, "type": "jsonb", "label": "jsonb", "null": false, "bytes": raw.len(), "truncated": false, "note": null })
+            json!({ "column": "billing", "row": null, "type": "jsonb", "label": "jsonb", "null": false, "bytes": raw.len(), "truncated": false, "note": null, "facts": format!("{lines} lines {} B", raw.len()) })
         );
         let v = h.state().tags.value("value-text").unwrap().clone();
         assert_eq!(keys(&v), ["cut", "firstRow", "highlighted", "rows", "selection", "text"]);
-        let lines = json_view.text.split('\n').count();
         assert_eq!(v, json!({ "text": json_view.text, "cut": false, "selection": null, "highlighted": true, "rows": lines, "firstRow": 0 }));
         let text = h.state().tags.rect("value-text").unwrap();
         assert!(whole.contains_rect(text) && text.top() >= whole.top() + 36.0, "the text under the bar: {text:?} in {whole:?}");
@@ -716,19 +848,170 @@ mod tests {
         let h = app(Theme::Light, size, Some(view("note", "text", Some(&"x".repeat(20_000_000)))));
         let head = h.state().tags.value("value-panel").unwrap();
         assert_eq!((head["truncated"].clone(), head["note"].clone()), (json!(true), json!("Showing the first 10.0 MiB of 19.1 MiB.")));
+        assert_eq!(head["facts"], "1 line First 10 MiB of 19.1 MiB");
         assert_eq!(h.state().tags.value("value-text").unwrap()["cut"], true);
-        assert!(drawn(&h.output().shapes, "Showing the first 10.0 MiB of 19.1 MiB.").is_some(), "today's note, drawn");
+        assert!(drawn(&h.output().shapes, "Showing the first 10.0 MiB of 19.1 MiB.").is_none(), "the note no longer drawn (N2)");
+        // NULL: no facts.
+        let h = app(Theme::Light, size, Some(view("note", "text", None)));
+        assert_eq!(h.state().tags.value("value-panel").unwrap()["facts"], Json::Null);
         // A whole row: its number, its JSON coloured, `Row <n>` in the bar.
         let object = r#"{"id": 3, "doc": {"a": 1}}"#.to_string();
         let len = object.len();
         let h = app(Theme::Light, size, Some(Arc::new(ValueView::of_row(1_203, object, len))));
         let head = h.state().tags.value("value-panel").unwrap().clone();
+        let lines = 6;
         assert_eq!(
             head,
-            json!({ "column": "", "row": 1_203, "type": "", "label": null, "null": false, "bytes": len, "truncated": false, "note": null })
+            json!({ "column": "", "row": 1_203, "type": "", "label": null, "null": false, "bytes": len, "truncated": false, "note": null, "facts": format!("{lines} lines {len} B") })
         );
         let v = h.state().tags.value("value-text").unwrap();
         assert_eq!((v["text"].as_str(), v["highlighted"].clone()), (Some("{\n  \"id\": 3,\n  \"doc\": {\n    \"a\": 1\n  }\n}"), json!(true)));
         assert!(drawn(&h.output().shapes, "Row 1,203").is_some(), "the title: {:?}", texts(&h.output().shapes));
+    }
+
+    /// What `panel` drew into `at`: the shapes and what it says it drew, with COPIED's width.
+    fn shown_in(theme: Theme, panel: &Panel<'_>, at: Rect) -> (Vec<ClippedShape>, Shown, f32) {
+        let mut seen = None;
+        let shapes = painted_in(vec2(at.right() + 20.0, at.bottom() + 20.0), theme, |ui| {
+            seen = Some((panel.show(ui, at), copy_width(ui)));
+        });
+        let (shown, copied) = seen.unwrap();
+        (shapes, shown, copied)
+    }
+
+    #[test]
+    fn the_bar_matches_b1() {
+        // B1: COPY then WRAP at the bar's right end, a 1 px `line` at the left of each; COPY's
+        // cell as wide as ✓ COPIED's, so nothing moves when it reads COPIED (`text_muted`); with
+        // no cell COPY is off (`text_faint`).
+        for (theme, t) in both() {
+            let mut first = None;
+            for (state, copied) in [(State::Json, false), (State::Json, true), (State::Copied, false), (State::Row, true), (State::NoCell, false)] {
+                let at_ = format!("{theme:?} {state:?} copied {copied}");
+                let base = value_samples()[if state == State::Row { 7 } else { 0 }].panel.clone();
+                let panel = Panel { state, copy: CopyButton { copied, ..CopyButton::ON }, ..base };
+                let (shapes, shown, copied_w) = shown_in(theme, &panel, AT);
+                let (copy, wrap) = (shown.copy.unwrap().rect, shown.wrap.unwrap().rect);
+                assert!(close(wrap.right(), AT.right()) && close(wrap.top(), AT.top()) && close(wrap.height(), 35.0), "{at_}: WRAP {wrap:?}");
+                assert!(close(copy.right(), wrap.left() - 6.0) && close(copy.width(), copied_w), "{at_}: COPY {copy:?}, COPIED {copied_w}");
+                let fills = fills(&shapes);
+                for cell in [copy, wrap] {
+                    let line = Rect::from_min_size(cell.min, vec2(1.0, 35.0));
+                    assert!(
+                        fills.iter().any(|(r, c)| *c == t.line && close(r.left(), line.left()) && close(r.width(), 1.0)),
+                        "{at_}: a line before {cell:?}"
+                    );
+                }
+                let first = *first.get_or_insert(copy);
+                assert_eq!(copy, first, "{at_}: nothing moves");
+                let (word, colour) = match (state, copied) {
+                    (State::NoCell, _) => ("COPY", t.text_faint),
+                    (State::Copied, _) | (_, true) => ("COPIED", t.text_muted),
+                    _ => ("COPY", t.text),
+                };
+                assert_eq!(drawn(&shapes, word).map(|d| d.1), Some(colour), "{at_}: {word}");
+            }
+        }
+    }
+
+    #[test]
+    fn facts_read_as_drawn() {
+        let mib = 1024 * 1024;
+        let f = |lines, bytes, formatted, whole| Facts { lines, bytes, formatted, whole };
+        assert_eq!(f(12, 137, false, None).words(), ["12 lines", "137 B"]);
+        assert_eq!(f(12, 137, true, None).words(), ["Formatted as JSON", "12 lines", "137 B"]);
+        assert_eq!(f(1, 10 * mib, false, Some(20_000_000)).words(), ["1 line", "First 10 MiB of 19.1 MiB"]);
+        assert_eq!(f(1_250, 300 * 1024, false, None).words(), ["1,250 lines", "300 KiB"]);
+        assert_eq!((fact_size(1023), fact_size(10 * mib), fact_size(20 * mib + 1)), ("1023 B".into(), "10 MiB".into(), "20 MiB".into()));
+        assert_eq!(fact_size(20_000_000), "19.1 MiB");
+        // Drawn in capitals along the bottom, 12 apart, `FORMATTED AS JSON` first.
+        for (theme, t) in both() {
+            let panel = Panel { facts: Some(f(12, 137, true, None)), ..value_samples()[0].panel.clone() };
+            let (shapes, ..) = shown_in(theme, &panel, AT);
+            let mut x = AT.left() + 13.0;
+            for word in ["FORMATTED AS JSON", "12 LINES", "137 B"] {
+                let (r, c, font, _) = drawn(&shapes, word).unwrap_or_else(|| panic!("{theme:?}: {word} drawn"));
+                assert_eq!((c, font), (t.text_muted, Text::Label.font()), "{theme:?}: {word}");
+                assert!(close(r.left(), x) && close(r.center().y, AT.top() + 357.0), "{theme:?}: {word} at {r:?}, want x {x}");
+                x = r.right() - Text::Label.spacing() + 12.0;
+            }
+        }
+        // No chip or note above the value: the first row 12 under the bar in every state.
+        let size = vec2(400.0, 500.0);
+        for (what, v) in [
+            ("jsonb", view("meta", "jsonb", Some(r#"{"a": 1}"#))),
+            ("text holding JSON", view("raw", "text", Some(r#"{"a": 1}"#))),
+            ("cut", view("note", "text", Some(&"x".repeat(20_000_000)))),
+            ("NULL", view("note", "text", None)),
+        ] {
+            let h = app(Theme::Light, size, Some(v));
+            let (panel, text) = (h.state().tags.rect("value-panel").unwrap(), h.state().tags.rect("value-text").unwrap());
+            assert!(close(text.top(), panel.top() + BAR_H + 12.0), "{what}: the value at {text:?} in {panel:?}");
+            let all: Vec<String> = texts(&h.output().shapes).into_iter().map(|(w, _, _)| w).collect();
+            assert!(!all.iter().any(|w| w.contains("CONTAINING") || w.starts_with("Showing")), "{what}: no chip or note: {all:?}");
+        }
+        let h = app(Theme::Light, size, Some(view("raw", "text", Some(r#"{"a": 1}"#))));
+        assert_eq!(h.state().tags.value("value-panel").unwrap()["facts"], "Formatted as JSON 3 lines 8 B");
+        assert!(drawn(&h.output().shapes, "FORMATTED AS JSON").is_some());
+    }
+
+    #[test]
+    fn names_keep_their_case_in_the_panel_bar() {
+        let ty = "enum('small','Large')";
+        for (theme, t) in both() {
+            let panel = Panel { title: "Notes", ty, ..value_samples()[1].panel.clone() };
+            let wide = Rect::from_min_size(AT.min, vec2(460.0, AT.height()));
+            let (shapes, shown, _) = shown_in(theme, &panel, wide);
+            assert_eq!(drawn(&shapes, "Notes").map(|d| d.1), Some(t.text), "{theme:?}: the name as written");
+            assert_eq!(drawn(&shapes, ty).map(|d| d.1), Some(t.text_muted), "{theme:?}: the type as written");
+            assert_eq!((shown.fit, shown.hover), (BarFit::Whole, None), "{theme:?}: whole, no hover");
+            let narrow = Rect::from_min_size(AT.min, vec2(240.0, AT.height()));
+            let (shapes, shown, _) = shown_in(theme, &panel, narrow);
+            assert_eq!(shown.hover.as_deref(), Some("Notes enum('small','Large')"), "{theme:?}: whole on hover, as written");
+            assert!(drawn(&shapes, "Notes").is_some() && drawn(&shapes, "NOTES").is_none(), "{theme:?}: {:?}", texts(&shapes));
+            // The value keeps its case too.
+            let h = app(theme, vec2(256.0, 500.0), Some(view("Notes", ty, Some("MiXeD"))));
+            assert_eq!(drawn(&h.output().shapes, "MiXeD").map(|d| d.1), Some(t.text), "{theme:?}: the value as written");
+            let facts = h.state().tags.value("value-panel").unwrap()["facts"].as_str().unwrap().to_owned();
+            assert!(!facts.contains("Notes") && !facts.contains("MiXeD"), "{theme:?}: no data in the facts: {facts}");
+        }
+    }
+
+    #[test]
+    fn the_panel_bar_gives_way_in_order() {
+        let panel = Panel { title: "delivery_instructions", ty: "character varying(200)", ..value_samples()[0].panel.clone() };
+        let mut last = BarFit::Whole;
+        let mut seen = Vec::new();
+        for w in (120..=600).rev().step_by(5) {
+            let at = Rect::from_min_size(AT.min, vec2(w as f32, AT.height()));
+            let (shapes, shown, _) = shown_in(Theme::Light, &panel, at);
+            let at_ = format!("{w} wide, {:?}", shown.fit);
+            assert!(shown.fit >= last, "{at_}: after {last:?}");
+            last = shown.fit;
+            if seen.last() != Some(&shown.fit) {
+                seen.push(shown.fit);
+            }
+            let (copy, wrap) = (shown.copy.unwrap().rect, shown.wrap.unwrap().rect);
+            assert!(at.contains_rect(copy) && at.contains_rect(wrap) && copy.right() <= wrap.left(), "{at_}: COPY {copy:?} and WRAP {wrap:?}");
+            let words = shown.fit.words();
+            assert_eq!(drawn(&shapes, "COPY").is_some(), words, "{at_}: COPY's word");
+            assert_eq!(drawn(&shapes, "WRAP").is_some(), words, "{at_}: WRAP's word");
+            if !words {
+                assert!(close(copy.width(), 36.0) && close(wrap.width(), 36.0), "{at_}: icons alone, 36 wide");
+            }
+            // The name and type end 12 before COPY; nothing past the bar.
+            let bar = Rect::from_min_max(at.min, pos2(at.right(), at.top() + 35.0));
+            for (word, r, _) in texts(&shapes).into_iter().filter(|(_, r, _)| bar.contains(r.center()) && r.center().x < copy.left()) {
+                assert!(r.right() <= copy.left() - 12.0 + 0.5 && r.left() >= at.left(), "{at_}: {word:?} at {r:?}, COPY at {copy:?}");
+            }
+            let ty_drawn = texts(&shapes).iter().any(|(w, r, _)| bar.contains(r.center()) && w.starts_with("char"));
+            assert_eq!(ty_drawn, shown.fit.ty(), "{at_}: the type");
+            assert_eq!(shown.hover.is_some(), shown.fit != BarFit::Whole, "{at_}: whole on hover once cut");
+        }
+        assert_eq!(
+            seen,
+            [BarFit::Whole, BarFit::TypeCut, BarFit::TypeGone, BarFit::NameCut, BarFit::Icons, BarFit::NameShort],
+            "every form, in order"
+        );
     }
 }

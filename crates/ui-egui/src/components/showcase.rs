@@ -35,7 +35,7 @@ use super::tab::{self, ListButton, NewTab, Tab};
 use super::table_bars::{self, Loading, PagingBar, TableBar, View};
 use super::toast::Toast;
 use super::tooltip;
-use super::value::{self, Facts as ValueFacts, Panel, State as ValueState};
+use super::value::{self, CopyButton, Facts as ValueFacts, Panel, State as ValueState};
 use crate::theme::size::{
     BAR_H, CONNECTION_LOGO, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8,
     SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_ROW_H, TAB_H, TAB_LIST_GAP, TREE_ROW_H,
@@ -415,14 +415,15 @@ pub(crate) fn value_samples() -> [ValueSample; 8] {
     let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_else(|| VALUE_JSON.to_owned());
     let row = dbee_core::json::pretty(VALUE_ROW).unwrap_or_else(|| VALUE_ROW.to_owned());
     let lines = |s: &str| s.split('\n').count();
-    let panel = |state, title, ty, facts| Panel { state, title, ty, kind: None, note: None, facts, buttons: true, wrap: false, edge: true };
-    let json_facts = Some(ValueFacts { lines: lines(&json), bytes: VALUE_JSON.len() });
+    let panel = |state, title, ty, facts| Panel { state, title, ty, facts, buttons: true, copy: CopyButton::ON, wrap: false, edge: true };
+    let facts = |lines, bytes| Some(ValueFacts { lines, bytes, formatted: false, whole: None });
+    let json_facts = facts(lines(&json), VALUE_JSON.len());
     // The value being edited, the caret after `false`.
     let caret = VALUE_EDITING.find("false").map(|at| at + "false".len());
     [
         ValueSample { panel: panel(ValueState::Json, "meta", "jsonb", json_facts), value: Some((json.clone(), true, None)) },
         ValueSample {
-            panel: panel(ValueState::Text, "notes", "text", Some(ValueFacts { lines: lines(VALUE_TEXT), bytes: VALUE_TEXT.len() })),
+            panel: panel(ValueState::Text, "notes", "text", facts(lines(VALUE_TEXT), VALUE_TEXT.len())),
             value: Some((VALUE_TEXT.to_owned(), false, None)),
         },
         ValueSample { panel: panel(ValueState::Null, "coupon", "text", None), value: None },
@@ -430,14 +431,11 @@ pub(crate) fn value_samples() -> [ValueSample; 8] {
         ValueSample { panel: panel(ValueState::NoCell, "", "", None), value: None },
         ValueSample { panel: panel(ValueState::Copied, "meta", "jsonb", json_facts), value: Some((json, true, None)) },
         ValueSample {
-            panel: panel(ValueState::Editing, "meta", "json", Some(ValueFacts { lines: lines(VALUE_EDITING), bytes: 58 })),
+            panel: panel(ValueState::Editing, "meta", "json", facts(lines(VALUE_EDITING), 58)),
             value: Some((VALUE_EDITING.to_owned(), true, caret)),
         },
         // The page's facts for the row: a row's size is the value panel screen's to work out.
-        ValueSample {
-            panel: panel(ValueState::Row, "Row 3", "", Some(ValueFacts { lines: lines(&row), bytes: 134 })),
-            value: Some((row, true, None)),
-        },
+        ValueSample { panel: panel(ValueState::Row, "Row 3", "", facts(lines(&row), 134)), value: Some((row, true, None)) },
     ]
 }
 
@@ -451,8 +449,54 @@ pub(crate) fn value_panel(ui: &mut Ui, sample: &ValueSample, at: Rect) -> value:
     shown
 }
 
-/// The value panel in each state as the page's Value panel frame shows it; then as the app draws it
-/// until the value panel screen, with today's kind chip and note.
+/// The page's long type, for the narrow bar.
+const VALUE_LONG_TYPE: &str = "enum('small','Large')";
+
+/// The value panel's facts and its narrowest bar, as the app draws them: K2's text holding JSON
+/// (`FORMATTED AS JSON`), N2's cut value (`FIRST 10 MIB OF 19.1 MIB`), and the panel at 240 with
+/// a long name and type (the type gone, the name cut, COPY and WRAP icons).
+pub(crate) fn value_facts_samples() -> [(ValueSample, f32); 3] {
+    let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_else(|| VALUE_JSON.to_owned());
+    let lines = json.split('\n').count();
+    let mib = 1024 * 1024;
+    let base = value_samples()[0].panel.clone();
+    let cut = "0123456789abcdef".repeat(4);
+    [
+        (
+            ValueSample {
+                panel: Panel {
+                    state: ValueState::Json,
+                    title: "raw_json_text",
+                    ty: "text",
+                    facts: Some(ValueFacts { lines, bytes: VALUE_JSON.len(), formatted: true, whole: None }),
+                    ..base.clone()
+                },
+                value: Some((json.clone(), true, None)),
+            },
+            VALUE_PANEL.x,
+        ),
+        (
+            ValueSample {
+                panel: Panel {
+                    state: ValueState::Text,
+                    title: "note",
+                    ty: "text",
+                    facts: Some(ValueFacts { lines: 1, bytes: 10 * mib, formatted: false, whole: Some(20_000_000) }),
+                    ..base.clone()
+                },
+                value: Some((cut, false, None)),
+            },
+            VALUE_PANEL.x,
+        ),
+        (
+            ValueSample { panel: Panel { title: "delivery_instructions", ty: VALUE_LONG_TYPE, ..base }, value: Some((json, true, None)) },
+            crate::value_panel::MIN_WIDTH,
+        ),
+    ]
+}
+
+/// The value panel in each state as the page's Value panel frame shows it; then its facts and its
+/// narrowest bar.
 fn value_panels(ui: &mut Ui) {
     let samples = value_samples();
     section(
@@ -461,29 +505,14 @@ fn value_panels(ui: &mut Ui) {
         SPACE_8,
         |ui| panels(ui, samples.len(), |ui, i, at| _ = value_panel(ui, &samples[i], at)),
     );
-    let json = dbee_core::json::pretty(VALUE_JSON).unwrap_or_default();
-    let apps = [
-        ValueSample {
-            panel: Panel { kind: Some(Words::default().name("jsonb")), buttons: false, ..value_samples()[0].panel.clone() },
-            value: Some((json, true, None)),
-        },
-        ValueSample {
-            panel: Panel {
-                kind: Some(Words::from("text containing JSON")),
-                note: Some("Showing the first 10.0 MiB of 19.1 MiB. Too long to format."),
-                buttons: false,
-                ..value_samples()[0].panel.clone()
-            },
-            value: Some((VALUE_JSON.to_owned(), true, None)),
-        },
-        ValueSample { panel: Panel { buttons: false, ..value_samples()[4].panel.clone() }, value: None },
-    ];
-    section(
-        ui,
-        "not on the page yet: the app's panel until the value panel screen, no COPY or WRAP; today's kind chip (a type as written) and the note on a cut value, under the bar",
-        SPACE_8,
-        |ui| panels(ui, apps.len(), |ui, i, at| _ = value_panel(ui, &apps[i], at)),
-    );
+    let facts = value_facts_samples();
+    section(ui, "value panel: FORMATTED AS JSON (K2), a cut value (N2), 240 wide with a long name and type", SPACE_8, |ui| {
+        panels(ui, facts.len(), |ui, i, at| {
+            if let Some((sample, width)) = facts.get(i) {
+                _ = value_panel(ui, sample, Rect::from_min_size(at.min, vec2(*width, at.height())));
+            }
+        });
+    });
 }
 
 /// The Error band frame's bands: 840 wide, 12 apart.
