@@ -538,9 +538,9 @@ Kinds: F feature, U UI, D database engine, FF file format, H hardware, L localiz
 
 ### 81. Tab into the dimmed connecting form drops the keyboard (U)
 
-- **Limit:** while a test or connect has run 300 ms the form's fields are dimmed and take nothing; a Tab or Shift+Tab that would land in them takes the keyboard away from the field, so nothing has it, instead of going on to the form's bar (TEST, CONNECT, CANCEL) or before the form. A Tab more starts again from the window's first widget.
+- **Limit:** while a test or connect has run 300 ms the form's fields are dimmed and take nothing; a Tab or Shift+Tab that would land in them takes the keyboard away from the field, so nothing has it, instead of going on to the form's bar (TEST, CONNECT, CANCEL) or before the form.
 - **Evidence:** `let_go` in `crates/ui-egui/src/components/mod.rs` gives the keyboard up and asks egui to move on, but egui moves focus from the widget that has it, and there is none then; `the_form_takes_no_input_while_it_connects` (`crates/ui-egui/tests/connections.rs`) accepts no focus (Phase 3 controller's review item C2). Not done in the fix round: `dim` knows its area, not the widget after it, so the fix wants the form to name its bar's first button as where the keyboard goes.
-- **Impact:** small: a keyboard user Tabs once more to reach CANCEL; nothing is typed into the dimmed form.
+- **Impact:** small: a keyboard user has to bring the keyboard back (a click, or Tab again); nothing is typed into the dimmed form.
 - **Estimate:** 1 h (estimated).
 
 ### 82. Toasts wait in turn, and one draws over the quick search (U)
