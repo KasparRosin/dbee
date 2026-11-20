@@ -409,7 +409,11 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
         }
         let note = match &qs.error {
             Some(e) => Some((Note::Error(e.as_str()), "qs-error")),
-            None if qs.hits.is_empty() && !qs.query.trim().is_empty() => Some((Note::NoMatch, "qs-none")),
+            // Only once the results are this text's: the frame a letter is typed in still holds
+            // the previous text's.
+            None if qs.hits.is_empty() && !qs.query.trim().is_empty() && qs.found_for.as_ref().is_some_and(|f| f.query == qs.query) => {
+                Some((Note::NoMatch, "qs-none"))
+            }
             None => None,
         };
         if note.is_none() && qs.items.is_empty() {
@@ -575,6 +579,27 @@ mod tests {
         let shapes = std::mem::take(&mut out.shapes);
         out.drop_without_applying_deltas();
         shapes
+    }
+
+    /// The frame a letter is typed in still has the blank query's (no) results: it shows no `No
+    /// match`; the next frame lists what the letter finds.
+    #[test]
+    fn the_first_letter_shows_no_no_match_before_its_results() {
+        let (_home, mut app, ctx) = searching();
+        let config = json!({ "name": "Orders replica", "host": "127.0.0.1", "port": 1, "user": "postgres", "database": "dbee" });
+        assert!(app.run("connection.save", json!({ "config": config })).is_ok());
+        let frame = |app: &mut DbeeApp, events: Vec<Event>| {
+            app.tags.begin_frame();
+            ctx.run_ui(RawInput { events, ..RawInput::default() }, |ui| show(app, ui.ctx())).drop_without_applying_deltas();
+        };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![Event::Text("o".into())]);
+        assert_eq!(app.view.quick.query, "o", "typed");
+        assert!(app.tags.value("qs-none").is_none(), "no `No match` before the letter's results: {:?}", app.tags.ids());
+        frame(&mut app, vec![]);
+        assert_eq!(app.tags.value("qs-item-0"), Some(&json!("Orders replica")), "{:?}", app.tags.ids());
+        assert!(app.tags.value("qs-none").is_none());
     }
 
     #[test]
