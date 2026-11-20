@@ -541,6 +541,31 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     assert!(copied.lines().any(|l| l == format!("{}\t{}\t4242.42\t2026-10-26", day.order, day.fixed)), "{name}: the day's order: {copied}");
     assert_eq!((copied.lines().count() as u64, d["clipboardBytes"].as_u64()), (n + 1, Some(copied.len() as u64)), "{name}: {copied}");
     app.shot(root, &format!("{p}-7e-copied"));
+
+    // 7f. The tree's menu on `orders`: New query opens on its schema (the chip names it on MySQL
+    //     and MariaDB); Ctrl+W closes the empty tab.
+    let tabs = app.document()["tabs"].as_array().map(Vec::len).unwrap_or_default();
+    let row = format!("tree-table-{shop}.orders");
+    // Step 7's click may have closed it (SQLite's `main` starts open).
+    if app.tag(&row).is_none() {
+        app.click(&shop_row);
+        app.until("the schema open", |app| app.tag(&row).is_some());
+    }
+    app.right_click(&row);
+    app.until("the tree's menu", |app| app.tag("tree-menu-new-query").is_some());
+    app.click("tree-menu-new-query");
+    app.until("the new query tab", |app| {
+        let d = app.document();
+        d["tabs"].as_array().map(Vec::len) == Some(tabs + 1) && d["query"].is_object() && d["query"]["text"] == ""
+    });
+    let chip = app.tag("query-database");
+    match &e.chip {
+        Some(_) => assert_eq!(chip.map(|t| t["value"].clone()), Some(json!(shop)), "{name}: the chip names the row's schema"),
+        None => assert!(chip.is_none(), "{name}: no chip without USE"),
+    }
+    app.shot(root, &format!("{p}-7f-tree-new-query"));
+    app.ctrl("W");
+    app.until("the empty tab closed", |app| app.document()["tabs"].as_array().map(Vec::len) == Some(tabs));
 }
 
 #[test]

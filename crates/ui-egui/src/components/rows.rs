@@ -240,7 +240,7 @@ mod tests {
     use crate::DbeeApp;
     use crate::automation::Tags;
     use crate::components::{Edge, ROOM, both, edges_in, fills_in, flat, harness_in, icon_in, images, painted, sections, texts};
-    use crate::tree::{Tree, TreeAct};
+    use crate::tree::{MenuState, Tree, TreeAct};
 
     /// The page's rows are this wide (`tree/row` 167592, `sidebar/connection` 167734).
     const TREE_W: f32 = 259.0;
@@ -757,6 +757,120 @@ mod tests {
         h.run();
         let id = rect_of(&h, "tree-column-shop.orders.id");
         assert_eq!(edges_in(&h.output().shapes, id, 0.0), [ring(id)], "the next row's focus box");
+    }
+
+    /// A right-click at `at`, the pointer there first, and a frame for the menu to settle.
+    fn right_click(h: &mut egui_kittest::Harness<'static, Shown>, at: Pos2) {
+        h.event(Event::PointerMoved(at));
+        h.run();
+        h.input_mut().events.extend([true, false].map(|pressed| press(at, pressed, PointerButton::Secondary)));
+        h.run();
+        h.run();
+    }
+
+    /// `shop` (open) holds a table with a column and a view; the system group a table.
+    fn menu_catalog() -> Catalog {
+        Catalog {
+            schemas: vec![
+                schema(
+                    "shop",
+                    false,
+                    vec![table("shop", "orders", RelKind::Table, vec![column("id", "int8")]), table("shop", "order_totals", RelKind::View, vec![])],
+                ),
+                schema("pg_catalog", true, vec![table("pg_catalog", "pg_class", RelKind::Table, vec![])]),
+            ],
+            default_schema: Some("shop".into()),
+        }
+    }
+
+    const MENU_IDS: [&str; 3] = ["tree-menu-open", "tree-menu-new-query", "tree-menu-copy-name"];
+
+    fn menu_shown(h: &egui_kittest::Harness<'static, Shown>) -> Vec<String> {
+        h.state().tags.ids().into_iter().filter(|id| id.starts_with("tree-menu-")).map(str::to_owned).collect()
+    }
+
+    /// The tag `id` as `ui.inspect` lists it.
+    fn listed(h: &egui_kittest::Harness<'static, Shown>, id: &str) -> serde_json::Value {
+        let all = h.state().tags.to_json();
+        all.as_array().and_then(|a| a.iter().find(|e| e["id"] == id).cloned()).unwrap_or_else(|| panic!("`{id}` listed: {all}"))
+    }
+
+    #[test]
+    fn a_table_row_has_the_menu_and_a_schema_row_has_none() {
+        let mut h = tree_harness(vec2(300.0, 500.0), menu_catalog());
+        h.run();
+        let at = rect_of(&h, "tree-table-shop.orders").center();
+        right_click(&mut h, at);
+        assert_eq!(menu_shown(&h), MENU_IDS, "the three items, in order");
+        let values: Vec<_> = MENU_IDS.iter().map(|id| h.state().tags.value(id).cloned()).collect();
+        assert_eq!(
+            values,
+            [
+                Some(json!({ "label": "Open", "shortcut": "Enter" })),
+                Some(json!({ "label": "New query", "shortcut": "Ctrl+T" })),
+                Some(json!({ "label": "Copy name", "shortcut": "Ctrl+C" })),
+            ]
+        );
+        let rects: Vec<Rect> = MENU_IDS.iter().map(|id| rect_of(&h, id)).collect();
+        assert!(rects[0].bottom() <= rects[1].top() + 0.5, "Open over New query: {rects:?}");
+        let gap = rects[2].top() - rects[1].bottom();
+        let separator = crate::theme::size::MENU_SEPARATOR_PAD * 2.0 + 1.0;
+        assert!((gap - separator).abs() <= 1.0, "the separator between New query and Copy name: {gap} vs {separator}");
+        let words: Vec<String> = texts(&h.output().shapes).into_iter().map(|w| w.0).collect();
+        for w in ["Open", "New query", "Copy name", "ENTER", "CTRL", "T", "C"] {
+            assert!(words.iter().any(|x| x == w), "`{w}` drawn: {words:?}");
+        }
+        // A view's row has it too.
+        h.key_press(Keys::Escape);
+        h.run();
+        assert!(menu_shown(&h).is_empty(), "Escape closes it");
+        let at = rect_of(&h, "tree-table-shop.order_totals").center();
+        right_click(&mut h, at);
+        assert_eq!(menu_shown(&h), MENU_IDS, "a view's row has the menu");
+        h.key_press(Keys::Escape);
+        h.run();
+        // Not on a schema, the system group or a column.
+        let at = rect_of(&h, "tree-expand-shop.orders").center();
+        click(&mut h, at, 1);
+        for id in ["tree-schema-shop", "tree-system", "tree-column-shop.orders.id"] {
+            let at = rect_of(&h, id).center();
+            right_click(&mut h, at);
+            assert!(menu_shown(&h).is_empty(), "{id}: no menu: {:?}", menu_shown(&h));
+        }
+        assert!(h.state().acts.is_empty(), "nothing asked: {:?}", h.state().acts);
+    }
+
+    #[test]
+    fn the_menu_reports_what_was_chosen() {
+        let orders = TableRef { schema: "shop".into(), name: "orders".into() };
+        let mut h = tree_harness(vec2(300.0, 500.0), menu_catalog());
+        h.run();
+        let row = rect_of(&h, "tree-table-shop.orders").center();
+        let wants = [TreeAct::Open(orders.clone()), TreeAct::NewQuery(orders.clone()), TreeAct::CopyName(orders.clone())];
+        for (id, want) in MENU_IDS.iter().zip(wants) {
+            right_click(&mut h, row);
+            let at = rect_of(&h, id).center();
+            click(&mut h, at, 1);
+            h.run();
+            assert_eq!(std::mem::take(&mut h.state_mut().acts), [want], "{id}");
+            assert!(menu_shown(&h).is_empty(), "{id}: the menu closes: {:?}", menu_shown(&h));
+        }
+        // Off: greyed, the reason in its tag, a click runs nothing.
+        let why = "the connection is lost; reconnect first";
+        h.state_mut().tree.menu = MenuState { open: Some(why.into()), ..MenuState::default() };
+        right_click(&mut h, row);
+        let open = listed(&h, "tree-menu-open");
+        assert_eq!(open["value"], json!({ "label": "Open", "shortcut": "Enter", "why": why }), "{open}");
+        assert_eq!(open["enabled"], json!(false), "{open}");
+        assert!(listed(&h, "tree-menu-copy-name").get("enabled").is_none(), "Copy name stays on");
+        let t = crate::theme::LIGHT;
+        let words = texts(&h.output().shapes);
+        let colour = words.iter().find(|w| w.0 == "Open").map(|w| w.2);
+        assert_eq!(colour, Some(t.text_faint), "Open in text_faint");
+        let at = rect_of(&h, "tree-menu-open").center();
+        click(&mut h, at, 1);
+        h.run();
+        assert!(h.state().acts.is_empty(), "nothing runs: {:?}", h.state().acts);
     }
 
     #[test]

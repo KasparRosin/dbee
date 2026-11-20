@@ -534,6 +534,31 @@ fn m1_day_end_to_end() {
     app.until("its toast", |app| app.tag("notice").is_some_and(|t| t["value"].as_str().is_some_and(|v| v.starts_with("Rolled back on"))));
     app.until("ROLLBACK gone", |app| app.tag("query-rollback").is_none());
 
+    // 8. The tree's right-click menu: filtered to order_items, Copy name, then Open.
+    app.replace("tree-filter", "order_it");
+    app.until("the filtered row", |app| app.tag("tree-table-shop.order_items").is_some_and(|t| t["visible"] != false));
+    app.right_click("tree-table-shop.order_items");
+    app.until("the tree's menu", |app| app.tag("tree-menu-open").is_some());
+    let items: Vec<Json> = app.tags_with("tree-menu-").into_iter().map(|t| t["value"].clone()).collect();
+    assert_eq!(
+        items,
+        [
+            json!({ "label": "Open", "shortcut": "Enter" }),
+            json!({ "label": "New query", "shortcut": "Ctrl+T" }),
+            json!({ "label": "Copy name", "shortcut": "Ctrl+C" }),
+        ],
+        "the menu's items in order"
+    );
+    app.shot(&root, "8a-tree-menu");
+    app.click("tree-menu-copy-name");
+    app.until("the name copied", |app| app.document()["clipboard"] == "order_items");
+    app.right_click("tree-table-shop.order_items");
+    app.until("the tree's menu", |app| app.tag("tree-menu-open").is_some());
+    app.click("tree-menu-open");
+    let t = app.settled("the order_items page");
+    assert_eq!((t["schema"].clone(), t["name"].clone()), (json!("shop"), json!("order_items")), "{t}");
+    app.shot(&root, "8b-tree-opened");
+
     // No seed row changed, and once the app and the day's rows are gone the counts are as before.
     assert_eq!(day.seed_digest(), seed, "the seed's customers and orders are unchanged");
     drop(app);

@@ -19,6 +19,15 @@
 //!   query tab opens on the selection's schema ([`Tree::selected_schema`]). A selection the
 //!   catalog no longer holds (after a refresh or a reconnect) is forgotten.
 //!
+//! **Right-click menu.** A secondary click on a table, view or materialized view row opens its
+//! menu (the `menu` component): Open (`Enter`, [`TreeAct::Open`]), New query (`Ctrl+T`,
+//! [`TreeAct::NewQuery`], on the row's schema), a separator, Copy name (`Ctrl+C`,
+//! [`TreeAct::CopyName`]). Each act carries the row's own [`TableRef`], never an index. An item
+//! the workspace says can't run ([`MenuState`]) is greyed, with `<Label>: not now, <why>` on
+//! hover, and a click on it runs nothing. The right-click changes neither the selection nor what
+//! is open; the row keeps the `hover` ground while its menu is open, and the menu closes when its
+//! row is no longer drawn. Schema rows, the system group and column rows have no menu.
+//!
 //! **Speed.** A catalog can hold thousands of tables, and the tree must stay within a frame. The
 //! rows are built once per catalog, filter and open/closed state ([`Tree`] caches them, keyed by
 //! the catalog's identity, so a refresh rebuilds them), and the lowercased names the filter
@@ -29,7 +38,9 @@
 //! Automation ids: `tree-filter`, `tree-refresh`, `tree-system`, `tree-schema-<schema>`,
 //! `tree-table-<schema>.<table>` (value: its kind), `tree-expand-<schema>.<table>` (its chevron;
 //! out of view too, like the table rows) and `tree-column-<schema>.<table>.<column>` (value:
-//! `{type, key}`, `key` being `primary`, `foreign` or null; drawn rows only).
+//! `{type, key}`, `key` being `primary`, `foreign` or null; drawn rows only); while a row's menu is
+//! open, `tree-menu-open`, `tree-menu-new-query` and `tree-menu-copy-name` (value
+//! `{label, shortcut, why?}`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -41,6 +52,7 @@ use serde_json::json;
 
 use crate::automation::Tags;
 use crate::components::grid_cell::Key;
+use crate::components::menu::{self, Item};
 use crate::components::rows::{TreeKind, TreeRow};
 use crate::components::sidebar::{self, Count};
 use crate::components::tooltip::Hint;
@@ -51,8 +63,12 @@ use crate::theme::size::{SIDEBAR_PAD_X, TREE_ROW_H};
 /// What the user asked of the tree in a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeAct {
-    /// A table was double-clicked: open it in a tab.
+    /// A table was double-clicked, or Open chosen in its menu: open it in a tab.
     Open(TableRef),
+    /// New query chosen in a table's menu: a query tab on its schema.
+    NewQuery(TableRef),
+    /// Copy name chosen in a table's menu: its name on the clipboard.
+    CopyName(TableRef),
     /// The refresh button was clicked.
     Refresh,
 }
@@ -68,6 +84,15 @@ pub enum Refresh {
     Disabled(String),
 }
 
+/// Why each item of a table row's menu can't run now; `None` runs. Set by the workspace while a
+/// menu is open ([`Tree::menu_open`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MenuState {
+    pub open: Option<String>,
+    pub new_query: Option<String>,
+    pub copy_name: Option<String>,
+}
+
 /// The tree's state: the filter, what is open, the selection, and the rows built for them.
 #[derive(Default)]
 pub struct Tree {
@@ -75,6 +100,10 @@ pub struct Tree {
     pub filter: String,
     /// Set by the workspace before each frame.
     pub refresh: Refresh,
+    /// What the menu's items can do; set by the workspace while a menu is open.
+    pub menu: MenuState,
+    /// The table whose menu showed in the last frame.
+    menu_row: Option<TableRef>,
     /// User schemas the user opened or closed, and how they are now ([`default_open`] for the
     /// others).
     user_open: HashMap<String, bool>,
@@ -211,6 +240,11 @@ pub fn thousands(n: u64) -> String {
 }
 
 impl Tree {
+    /// A table row's menu showed in the last frame.
+    pub fn menu_open(&self) -> bool {
+        self.menu_row.is_some()
+    }
+
     /// The schema of what is selected, while `catalog` holds it: the selected schema, or the
     /// selected table's.
     pub fn selected_schema(&self, catalog: &Catalog) -> Option<&str> {
@@ -420,6 +454,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     let selected = tree.selected.clone();
     let pending = tags.scroll_pending().map(str::to_owned);
     let fresh = !tree.drawn;
+    let mut menu = Menu { state: tree.menu.clone(), last: tree.menu_row.take(), now: None, acts: Vec::new() };
     let rows = tree.rows(catalog);
     if rows.list.is_empty() {
         let text = if filtering { "No table matches the filter.".to_owned() } else { format!("This connection has no {many} dbee can show.") };
@@ -442,7 +477,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         for (i, ((row, id), expander)) in rows.list.iter().zip(&rows.ids).zip(&rows.expanders).enumerate() {
             let rect = Rect::from_min_size(pos2(frame.left(), frame.top() + TREE_ROW_H * i as f32), vec2(frame.width(), TREE_ROW_H));
             if i >= first && i < last {
-                let c = draw_row(ui, rect, *row, id, expander, &rows.catalog, &system_label, selected.as_ref(), tags);
+                let c = draw_row(ui, rect, *row, id, expander, &rows.catalog, &system_label, selected.as_ref(), &mut menu, tags);
                 if !matches!(c, Click::None) {
                     click = c;
                 }
@@ -459,6 +494,8 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         }
     });
     tree.drawn = true;
+    tree.menu_row = menu.now;
+    acts.extend(menu.acts);
     let table_ref = |s: usize, t: usize| catalog.schemas.get(s).and_then(|x| x.tables.get(t)).map(|x| x.table.clone());
     match click {
         Click::None => {}
@@ -495,8 +532,49 @@ fn level(row: Row) -> usize {
     }
 }
 
-/// Draws one row in view and tags it (a table row's chevron as `expander`). The system group
-/// reads `system_label`.
+/// A table row's menu across a frame's rows: what its items can do, the table whose menu showed in
+/// the last frame and in this one, and what was chosen.
+struct Menu {
+    state: MenuState,
+    last: Option<TableRef>,
+    now: Option<TableRef>,
+    acts: Vec<TreeAct>,
+}
+
+impl Menu {
+    /// The menu of `table`'s row, attached to its response `r`, when it is open.
+    fn show(&mut self, r: &Response, table: &TableRef, tags: &mut Tags) {
+        let state = &self.state;
+        let mut chosen = None;
+        let shown = egui::Popup::context_menu(r).style(menu::style(&r.ctx)).show(|ui| {
+            let mut item = |ui: &mut egui::Ui, id: &str, label: &str, keys: &str, why: Option<&String>, act: TreeAct| {
+                let mut r = ui.add_enabled(why.is_none(), Item::new(label).shortcut(keys));
+                let mut value = json!({ "label": label, "shortcut": keys });
+                if let Some(why) = why {
+                    r = r.hint_disabled(format!("{label}: not now, {why}"));
+                    value["why"] = json!(why);
+                }
+                // A menu's first frame reads every widget as disabled: tag what the code knows.
+                tags.tag_value_as(id, &r, value, why.is_none());
+                if r.clicked() {
+                    chosen = Some(act);
+                    ui.close();
+                }
+            };
+            item(ui, "tree-menu-open", "Open", "Enter", state.open.as_ref(), TreeAct::Open(table.clone()));
+            item(ui, "tree-menu-new-query", "New query", "Ctrl+T", state.new_query.as_ref(), TreeAct::NewQuery(table.clone()));
+            menu::separator(ui);
+            item(ui, "tree-menu-copy-name", "Copy name", "Ctrl+C", state.copy_name.as_ref(), TreeAct::CopyName(table.clone()));
+        });
+        if shown.is_some() && chosen.is_none() {
+            self.now = Some(table.clone());
+        }
+        self.acts.extend(chosen);
+    }
+}
+
+/// Draws one row in view and tags it (a table row's chevron as `expander`), with a table row's
+/// menu. The system group reads `system_label`.
 #[allow(clippy::too_many_arguments, reason = "one row's data, borrowed from the tree's cache and the frame")]
 fn draw_row(
     ui: &mut egui::Ui,
@@ -507,6 +585,7 @@ fn draw_row(
     catalog: &Catalog,
     system_label: &str,
     selected: Option<&Selected>,
+    menu: &mut Menu,
     tags: &mut Tags,
 ) -> Click {
     let level = level(row);
@@ -524,7 +603,14 @@ fn draw_row(
         _ => false,
     };
     let look = Look::of(ui, &r);
-    let hovered = look.hovered || expand.as_ref().is_some_and(Response::hovered);
+    // The row whose menu is open keeps the `hover` ground, the pointer in the menu or not.
+    let menu_row = match row {
+        Row::Table { s, t, .. } => {
+            menu.last.as_ref().is_some_and(|m| catalog.schemas.get(s).and_then(|x| x.tables.get(t)).is_some_and(|x| x.table == *m))
+        }
+        _ => false,
+    };
+    let hovered = look.hovered || menu_row || expand.as_ref().is_some_and(Response::hovered);
     let chevron_focused = expand.as_ref().is_some_and(|e| focus::shown(ui, e));
     let draw = |kind: TreeKind, name: &str, right: Option<&str>, open: Option<bool>| {
         let drawn = TreeRow { level, kind, name, right, open, selected: is_selected, focused: look.focused, chevron_focused, hovered };
@@ -558,6 +644,7 @@ fn draw_row(
             }
             let r = r.hint(hover);
             tags.tag_value(id, &r, kind_name(info.kind));
+            menu.show(&r, &info.table, tags);
             if let Some(expand) = expand {
                 tags.tag_value(expander, &expand, open);
                 if expand.clicked() {

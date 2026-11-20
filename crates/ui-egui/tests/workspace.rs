@@ -2018,15 +2018,23 @@ fn tree_filter_1000_tables_within_a_frame() {
         catalog: Arc<Catalog>,
         tree: Tree,
         tags: Tags,
+        ready: bool,
     }
-    let state = State { catalog: synthetic(1000), tree: Tree::default(), tags: Tags::default() };
+    let state = State { catalog: synthetic(1000), tree: Tree::default(), tags: Tags::default(), ready: false };
     let mut h = Harness::builder().with_size(egui::vec2(320.0, 900.0)).build_ui_state(
         |ui, s: &mut State| {
+            // The first frame sets the fonts; the tree draws from the next.
+            if !s.ready {
+                dbee_ui_egui::theme::apply(ui.ctx());
+                s.ready = true;
+                return;
+            }
             s.tags.begin_frame();
             let _ = tree::show(ui, &s.catalog, dbee_sql::Dialect::Postgres, &mut s.tree, &mut s.tags);
         },
         state,
     );
+    h.step();
     h.step();
     // Every keystroke changes the filter: each frame filters 1,000 tables anew.
     let filters = ["t", "ta", "tab", "table_", "table_5", "table_5_", "table_5_00", "table_5_0", "table_", "able"];

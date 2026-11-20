@@ -66,7 +66,7 @@ use crate::query_tab::{self, Queries};
 use crate::table_tab::{self, Grids};
 use crate::theme::size::{KEYCAP_GAP, KEYCAP_H, NO_TAB_GAP, NO_TAB_ROW_GAP, NO_TAB_W, SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_W, SLIM_BAR_H, TAB_H};
 use crate::theme::{self, Text, Words};
-use crate::tree::{self, Refresh, Tree, TreeAct};
+use crate::tree::{self, MenuState, Refresh, Tree, TreeAct};
 use crate::{DbeeApp, menu};
 
 /// The status bar's height.
@@ -382,6 +382,15 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
         }
     };
     app.view.work.tree.refresh = refresh;
+    // The menu's reasons, read only in frames a menu may show (open, or just opened).
+    let menu = if app.view.work.tree.menu_open() || ui.input(|i| i.pointer.secondary_released()) {
+        let commands = app.commands();
+        let why = |id: &str| commands.iter().find(|c| c.id == id).and_then(|c| (!c.enabled).then(|| c.disabled_reason.clone().unwrap_or_default()));
+        MenuState { open: why("table.open"), new_query: why("tab.newQuery"), copy_name: why("clipboard.copyName") }
+    } else {
+        MenuState::default()
+    };
+    app.view.work.tree.menu = menu;
     let mut acts = Vec::new();
     {
         let DbeeApp { view, tags, .. } = app;
@@ -395,6 +404,12 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
         match act {
             TreeAct::Open(table) => {
                 app.start("table.open", json!({ "schema": table.schema, "table": table.name }), Origin::Menu);
+            }
+            TreeAct::NewQuery(table) => {
+                app.start("tab.newQuery", json!({ "schema": table.schema }), Origin::Menu);
+            }
+            TreeAct::CopyName(table) => {
+                app.start("clipboard.copyName", json!({ "schema": table.schema, "table": table.name }), Origin::Menu);
             }
             TreeAct::Refresh => {
                 app.start("schema.refresh", json!({}), Origin::Menu);
