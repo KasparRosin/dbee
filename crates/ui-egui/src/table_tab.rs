@@ -55,6 +55,7 @@ use serde_json::json;
 
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::empty::{self, Phrase};
 use crate::components::error_band::Band;
 use crate::components::results::RowCount;
 use crate::components::table_bars::{Loading, PagingAsked, PagingBar, PagingShown, TableAsked, TableBar, TableShown, View};
@@ -65,7 +66,7 @@ use crate::filter_bar::{self, Bar};
 use crate::grid::{self, CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
 use crate::quiet::Watch;
-use crate::theme::size::{BAR_LINE, NOTE_BAR_H, NOTE_BAR_PAD_X, TABLE_EMPTY_PAD};
+use crate::theme::size::{BAR_LINE, NOTE_BAR_H, NOTE_BAR_PAD_X};
 use crate::theme::{self, Text};
 use crate::{DbeeApp, structure_view, value_panel};
 
@@ -563,7 +564,6 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         show_structure(app, ui, id);
         return false;
     }
-    let t = theme::tokens(ui.ctx());
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
     let mut edit: Option<(usize, usize)> = None;
     let panel;
@@ -721,11 +721,11 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
             }
             // No page: the words stand where the grid would, 12 in and 12 down.
             None => {
-                top.add_space(TABLE_EMPTY_PAD);
-                top.horizontal(|ui| {
-                    ui.add_space(TABLE_EMPTY_PAD);
-                    ui.label(Text::Body.rich_as_written("No rows are loaded.").color(t.text_muted));
-                });
+                let below = top.available_rect_before_wrap().top().min(split);
+                let area = Rect::from_min_max(pos2(body.left(), below), pos2(right, split));
+                let words = "No rows are loaded.";
+                let shown = Phrase::new(words, empty::Place::Top).show(&mut top, area);
+                tags.tag_value("table-empty", &shown, words);
             }
         }
         let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(body.left(), split), body.max)));

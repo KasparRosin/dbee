@@ -1859,6 +1859,86 @@ fn a_page_load_is_not_a_footer_job() {
     drop(lock);
 }
 
+/// What a bar already says, as a sentence: never painted anywhere (the caps facts `LOADING`,
+/// `COUNTING`, `CANCELLED` are the bars' own).
+const BAR_SAYS: [&str; 6] = ["Loading ", "No rows", "Run cancelled", "Counting…", "Testing…", "Connecting…"];
+
+/// Asserts the last frame painted none of [`BAR_SAYS`], whole or as a sentence's start.
+fn says_nothing_a_bar_says(ui: &Ui, at: &str) {
+    for (_, g) in ui.texts() {
+        let words = g.text();
+        assert!(!BAR_SAYS.iter().any(|b| words == *b || words.starts_with(b)), "{at}: `{words}` is painted");
+    }
+}
+
+/// Review Focus 7: an area with nothing in it says nothing where a bar says why, in each state
+/// that waits or holds nothing.
+#[test]
+fn no_phrase_says_what_a_bar_says() {
+    let db = dbee_testkit::require_testdb!();
+    let full = Scratch::new(db, "t_bar_says", |t| {
+        format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, a text); INSERT INTO scratch.{t} SELECT i, 'a' || i FROM generate_series(1, 150) i")
+    });
+    let empty = Scratch::new(db, "t_bar_says_empty", |t| format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY)"));
+    let mut ui = Ui::connected_with(db, Setup { size: egui::vec2(1100.0, 720.0), step: Some(0.05), ..Setup::default() });
+    let server = pg14_server(db);
+    let lock_on = |t: &Scratch| dbee_testkit::hold(server, &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", t.0)).unwrap();
+    let table = |ui: &mut Ui| match ui.harness.state().session().state().active_tab() {
+        Some(dbee_engine::Tab::Table(t)) => (t.loading.is_some(), t.counting.is_some()),
+        _ => (false, false),
+    };
+    ui.frame();
+    says_nothing_a_bar_says(&ui, "no tab");
+
+    // A query tab: before its run, running at 0.5 s, cancelled, with no rows.
+    ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
+    ui.frame();
+    says_nothing_a_bar_says(&ui, "a query before its run");
+    ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
+    ui.frames_while(query_runs, 0.5, |ui, gone| says_nothing_a_bar_says(ui, &format!("a run at {gone:.2} s")));
+    ui.click("status-cancel");
+    ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+    ui.frame();
+    says_nothing_a_bar_says(&ui, "a cancelled run");
+    ui.execute("tab.newQuery", json!({ "text": "select 1 as one where false" }));
+    ui.ok("engine.execute", json!({ "command": "query.run" }));
+    ui.until("the empty result", |ui| ui.document()["query"]["running"].is_null());
+    ui.frame();
+    says_nothing_a_bar_says(&ui, "a query with no rows");
+
+    // A table: its first load at 0.5 s, a reload at 0.5 s with a tree refresh behind it, a count.
+    let lock = lock_on(&full);
+    ui.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": full.0 }, "wait": false }));
+    ui.frames_while(|ui| table(ui).0, 0.5, |ui, gone| says_nothing_a_bar_says(ui, &format!("a first load at {gone:.2} s")));
+    drop(lock);
+    ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+    let lock = lock_on(&full);
+    ui.ok("engine.execute", json!({ "command": "table.refresh", "params": {}, "wait": false }));
+    ui.frames_while(|ui| table(ui).0, 0.5, |ui, gone| says_nothing_a_bar_says(ui, &format!("a reload at {gone:.2} s")));
+    let refreshing = |ui: &mut Ui| ui.harness.state().session().running("schema.refresh");
+    ui.ok("engine.execute", json!({ "command": "schema.refresh", "params": {}, "wait": false }));
+    ui.frames_while(refreshing, 0.5, |ui, gone| says_nothing_a_bar_says(ui, &format!("a tree refresh at {gone:.2} s")));
+    drop(lock);
+    ui.until("the reload and the refresh", |ui| ui.table()["loading"].is_null() && !ui.harness.state().session().running("schema.refresh"));
+    let lock = lock_on(&full);
+    ui.ok("engine.execute", json!({ "command": "table.count", "params": {}, "wait": false }));
+    ui.frames_while(|ui| table(ui).1, 0.5, |ui, gone| says_nothing_a_bar_says(ui, &format!("a count at {gone:.2} s")));
+    ui.click("status-cancel");
+    ui.until("the cancelled count", |ui| ui.table()["counting"].is_null());
+    drop(lock);
+
+    // An empty table; a tree filter that matches nothing.
+    ui.open("scratch", &empty.0);
+    ui.until("the empty page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64() == Some(0));
+    ui.frame();
+    says_nothing_a_bar_says(&ui, "an empty table");
+    ui.click("tree-filter");
+    ui.text("zzz");
+    ui.frame();
+    assert_eq!(ui.value("tree-count"), "0 tables");
+    says_nothing_a_bar_says(&ui, "a tree filter with no match");
+}
+
 #[test]
 fn lost_connection_offers_reconnect() {
     let db = dbee_testkit::require_testdb!();
@@ -2445,7 +2525,7 @@ fn tree_filter_1000_tables_within_a_frame() {
                 return;
             }
             s.tags.begin_frame();
-            let _ = tree::show(ui, &s.catalog, dbee_sql::Dialect::Postgres, &mut s.tree, &mut s.tags);
+            let _ = tree::show(ui, &s.catalog, dbee_sql::Dialect::Postgres, &mut s.tree, None, &mut s.tags);
         },
         state,
     );

@@ -75,6 +75,7 @@ use crate::automation::Tags;
 use crate::components::Look;
 use crate::components::button::BarButton;
 use crate::components::chip::Chip;
+use crate::components::empty::{Phrase, Place};
 use crate::components::icon::Icon;
 use crate::components::logo::Logo;
 use crate::components::menu::{self, Item};
@@ -92,7 +93,7 @@ use crate::theme::{
     size::{
         BAR_H, BAR_LINE, CONN_COLOUR_EDGE, CONN_WARNING_PAD_Y, CONNECTION_ROW_H, ENGINE_CARD_CHIP_INSET, ENGINE_CARD_H, ENGINE_CARD_LOGO,
         ENGINE_CARD_MIN_W, ENGINE_CARD_NAME_GAP, ENGINE_CARD_PAD, ENGINE_CARDS_TOP, ENGINE_HEADING_TOP, INSET, RADIUS_CONTROL, SIDEBAR_MAX_W,
-        SIDEBAR_MIN_W, SIDEBAR_PAD_X, SIDEBAR_W, SLIM_BAR_H, TABLE_EMPTY_PAD,
+        SIDEBAR_MIN_W, SIDEBAR_PAD_X, SIDEBAR_W, SLIM_BAR_H,
     },
 };
 
@@ -911,10 +912,7 @@ fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, a
         ScrollArea::vertical().id_salt("conn-lists").auto_shrink([false, false]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             if rows.is_empty() && any {
-                let inset = Margin { left: SIDEBAR_PAD_X as i8, right: SIDEBAR_PAD_X as i8, top: TABLE_EMPTY_PAD as i8, bottom: 0 };
-                Frame::NONE
-                    .inner_margin(inset)
-                    .show(ui, |ui| ui.add(Label::new(Text::Body.rich_as_written("No connection matches.").color(t.text_muted)).wrap()));
+                Phrase::new("No connection matches.", Place::Top).show(ui, ui.available_rect_before_wrap());
             }
             for (id, c) in rows {
                 card(ui, tags, &id, c, c.id == selected, busy, acts);

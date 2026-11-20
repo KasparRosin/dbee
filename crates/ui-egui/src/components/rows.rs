@@ -595,7 +595,7 @@ mod tests {
         let shown = Shown { catalog: Arc::new(catalog), dialect, tree: Tree::default(), tags: Tags::default(), acts: Vec::new() };
         harness_in(size, Theme::Light, shown, |ui, s: &mut Shown| {
             s.tags.begin_frame();
-            let acts = crate::tree::show(ui, &s.catalog, s.dialect, &mut s.tree, &mut s.tags);
+            let acts = crate::tree::show(ui, &s.catalog, s.dialect, &mut s.tree, None, &mut s.tags);
             s.acts.extend(acts);
         })
     }

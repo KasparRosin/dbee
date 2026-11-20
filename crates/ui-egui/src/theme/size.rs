@@ -205,9 +205,9 @@ pub const PAGING_NOTE_MIN: f32 = 24.0;
 /// bottom included), its sentence this far in from either side.
 pub const NOTE_BAR_H: f32 = 28.0;
 pub const NOTE_BAR_PAD_X: f32 = 12.0;
-/// The table tab's words where the grid would be (`No rows are loaded.`): this far in
-/// from the grid area's left and down from its top.
-pub const TABLE_EMPTY_PAD: f32 = 12.0;
+/// The one grey phrase of an empty area (`components::empty`): this far in from the area's left
+/// and down from its top, and clear of either side when it wraps.
+pub const EMPTY_INSET: f32 = 12.0;
 /// The sidebar's header (`sidebar/filter`, `sidebar/count`): the filter is a bar with its line
 /// along the bottom, its words this far in from the left, the refresh this far from its right end;
 /// the count's row is this tall, its words this far in.
@@ -434,3 +434,8 @@ pub const SKELETON_MIN_W: f32 = 12.0;
 pub const SKELETON_MAX_W: f32 = 96.0;
 pub const SKELETON_ROWS: usize = 10;
 pub const SKELETON_FRACTIONS: [f32; 10] = [0.6, 0.85, 0.45, 0.75, 0.55, 0.9, 0.5, 0.7, 0.65, 0.8];
+/// A tree's skeleton (LC4): this many rows, each a bar this wide in the icon's slot and a name bar
+/// as wide as its row picks from these.
+pub const TREE_SKELETON_ROWS: usize = 8;
+pub const TREE_SKELETON_ICON_W: f32 = 12.0;
+pub const TREE_SKELETON_W: [f32; 8] = [64.0, 48.0, 80.0, 56.0, 72.0, 44.0, 88.0, 52.0];

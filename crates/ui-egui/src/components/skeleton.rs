@@ -2,7 +2,8 @@
 //! show. A bar is `fill`, [`SKELETON_BAR_H`] tall with corners of [`SKELETON_RADIUS`] ([`bar`]);
 //! its width comes from a fixed pattern ([`width`]), the same on every frame and every run, so the
 //! rows don't flicker. [`GridRows`] draws the rows of a grid's first load under the header: the
-//! table tab's grid, and any other screen that shows rows in columns (the structure view).
+//! table tab's grid, and any other screen that shows rows in columns (the structure view);
+//! [`TreeRows`] the tree's while its tables load and it has none to show.
 //!
 //! The skeleton only shows once its job has run 300 ms ([`crate::quiet`]): the caller decides.
 
@@ -10,7 +11,8 @@ use egui::{CornerRadius, Rect, Sense, Ui, pos2, vec2};
 
 use super::painter;
 use crate::theme::size::{
-    GRID_CELL_PAD_X, ROW_H, SKELETON_BAR_H, SKELETON_FRACTIONS, SKELETON_MAX_W, SKELETON_MIN_W, SKELETON_RADIUS, SKELETON_ROWS,
+    GRID_CELL_PAD_X, ROW_H, SKELETON_BAR_H, SKELETON_FRACTIONS, SKELETON_MAX_W, SKELETON_MIN_W, SKELETON_RADIUS, SKELETON_ROWS, TREE_CHEVRON,
+    TREE_GAP, TREE_ICON, TREE_PAD_X, TREE_ROW_H, TREE_SKELETON_ICON_W, TREE_SKELETON_ROWS, TREE_SKELETON_W,
 };
 use crate::theme::tokens;
 
@@ -76,6 +78,34 @@ impl GridRows<'_> {
                 bar(ui, left, mid, bar_w);
                 x += w;
             }
+        }
+        (rect, rows)
+    }
+}
+
+/// The rows of a tree whose tables are on their way and that has none to show (LC4):
+/// [`TREE_SKELETON_ROWS`] rows [`TREE_ROW_H`] tall, no lines. Each holds a bar
+/// [`TREE_SKELETON_ICON_W`] wide centred in a row's icon slot, and a name bar from where a name
+/// starts, as wide as [`TREE_SKELETON_W`] gives its row, never past the tree's right less
+/// [`TREE_PAD_X`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TreeRows;
+
+impl TreeRows {
+    /// Draws the rows from the top of `ui`'s room across its width and takes their room: the rows'
+    /// rect and how many were drawn.
+    pub fn show(&self, ui: &mut Ui) -> (Rect, usize) {
+        let room = ui.available_rect_before_wrap();
+        let fit = (room.height().max(0.0) / TREE_ROW_H).floor();
+        let rows = if fit.is_finite() { (fit as usize).min(TREE_SKELETON_ROWS) } else { 0 };
+        let (rect, _) = ui.allocate_exact_size(vec2(room.width().max(0.0), TREE_ROW_H * rows as f32), Sense::hover());
+        let slot = rect.left() + TREE_PAD_X + TREE_CHEVRON + TREE_GAP;
+        let name = slot + TREE_ICON + TREE_GAP;
+        let end = rect.right() - TREE_PAD_X;
+        for (row, w) in TREE_SKELETON_W.iter().take(rows).enumerate() {
+            let mid = rect.top() + TREE_ROW_H * row as f32 + TREE_ROW_H / 2.0;
+            bar(ui, slot + (TREE_ICON - TREE_SKELETON_ICON_W) / 2.0, mid, TREE_SKELETON_ICON_W.min(end - slot));
+            bar(ui, name, mid, w.min(end - name));
         }
         (rect, rows)
     }
@@ -167,5 +197,37 @@ mod tests {
         assert_eq!(width(0, 0, 4.0), 4.0, "never more than the room");
         assert_eq!(width(3, 1, 0.0), 0.0);
         assert_eq!(width(3, 1, -5.0), 0.0);
+    }
+
+    #[test]
+    fn tree_skeleton_rows_match_lc4() {
+        for (theme, t) in both() {
+            for tree_w in [259.0, 120.0] {
+                let at_ = format!("{theme:?} {tree_w}");
+                let mut got = (Rect::NOTHING, 0);
+                let shapes = painted_in(vec2(400.0, 400.0), theme, |ui| {
+                    let room = Rect::from_min_size(pos2(0.0, 0.0), vec2(tree_w, 400.0));
+                    let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(room));
+                    got = TreeRows.show(&mut inner);
+                });
+                let (area, rows) = got;
+                assert_eq!(rows, 8, "{at_}");
+                assert!((area.height() - 208.0).abs() < 0.01 && (area.width() - tree_w).abs() < 0.01, "{at_}: {area:?}");
+                assert!(rects(&shapes, t.line, 1.0).is_empty(), "{at_}: no lines");
+                let bars = rects(&shapes, t.fill, 8.0);
+                assert_eq!(bars.len(), 16, "{at_}: two bars a row: {bars:?}");
+                for (row, pair) in bars.chunks(2).enumerate() {
+                    let [(icon, ri), (name, rn)] = pair else { panic!("{at_}: a pair") };
+                    let mid = 26.0 * row as f32 + 13.0;
+                    assert!((icon.center().y - mid).abs() < 0.01 && (name.center().y - mid).abs() < 0.01, "{at_}: row {row} on its middle");
+                    assert_eq!((*ri, *rn), (CornerRadius::same(4), CornerRadius::same(4)), "{at_}: radius 4");
+                    assert!((icon.left() - 31.0).abs() <= 0.5 && (icon.width() - 12.0).abs() < 0.01, "{at_}: row {row}'s icon bar: {icon:?}");
+                    assert!((name.left() - 50.0).abs() <= 0.5, "{at_}: row {row}'s name bar: {name:?}");
+                    let want: f32 = [64.0_f32, 48.0, 80.0, 56.0, 72.0, 44.0, 88.0, 52.0][row].min(tree_w - 12.0 - 50.0);
+                    assert!((name.width() - want).abs() < 0.01, "{at_}: row {row}'s name bar {want} wide: {name:?}");
+                    assert!(name.right() <= tree_w - 12.0 + 0.01, "{at_}: never past the right less 12");
+                }
+            }
+        }
     }
 }

@@ -297,3 +297,113 @@ fn enter_in_the_open_menu_runs_one_item() {
     assert_eq!(ui.copied().as_deref(), Some("orders"), "Enter chose Copy name");
     assert_eq!(tab_count(&mut ui), 0, "and opened nothing");
 }
+
+/// The value `id` was drawn with in the last frame, read from the window itself (a control
+/// request would run frames of its own and move the clock).
+fn drawn_value(ui: &Ui, id: &str) -> Option<serde_json::Value> {
+    ui.harness.state().tags().value(id).cloned()
+}
+
+/// Whether `id` was drawn in the last frame, read from the window itself.
+fn drawn(ui: &Ui, id: &str) -> bool {
+    ui.harness.state().tags().rect(id).is_some()
+}
+
+/// The alpha the words `words` were painted with inside `within` (the most opaque of their
+/// glyphs: a dim multiplies them all), when drawn.
+fn alpha_of(ui: &Ui, within: egui::Rect, words: &str) -> Option<u8> {
+    ui.shapes().into_iter().find_map(|(_, s)| match s {
+        egui::Shape::Text(t) if t.galley.text() == words && within.expand(1.0).contains(t.galley.rect.translate(t.pos.to_vec2()).center()) => {
+            t.galley.rows.iter().flat_map(|r| r.row.visuals.mesh.vertices.iter().map(|v| v.color.a())).max()
+        }
+        _ => None,
+    })
+}
+
+/// Whether a tree refresh runs.
+fn refreshing(ui: &mut Ui) -> bool {
+    ui.harness.state().session().running("schema.refresh")
+}
+
+/// A `shop_open` window whose frames are 50 ms apart, and a scratch table opened behind a lock
+/// that holds its first page: the browse connection's turn is taken, so a refresh waits behind it.
+fn browse_held(db: &dbee_testkit::TestDb) -> (Ui, Scratch, dbee_testkit::Held) {
+    let table = Scratch::new(db, "t_tree", |t| format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY)"));
+    let mut ui = shop_open(db, Setup { step: Some(0.05), ..Setup::default() });
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", table.0)).unwrap();
+    ui.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": table.0 }, "wait": false }));
+    (ui, table, lock)
+}
+
+/// Review Focus 5: a refresh changes nothing for 300 ms; then the count reads LOADING over the
+/// rows at half, which still open; when it ends, the count's words at full.
+#[test]
+fn a_tree_refresh_reads_loading_over_its_rows_at_half() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, _table, lock) = browse_held(db);
+    let before = ui.value("tree-count");
+    let words = before.as_str().expect("the count's words").to_owned();
+    assert!(words.ends_with(" tables"), "{words}");
+    let rx = ui.send("engine.execute", json!({ "command": "schema.refresh", "params": {}, "wait": false }));
+    let mut seen = false;
+    ui.frames_while(refreshing, 0.45, |ui, gone| {
+        let orders = ui.drawn("tree-table-shop.orders");
+        if gone <= 0.25 {
+            assert_eq!(drawn_value(ui, "tree-count"), Some(json!(words)), "at {gone:.2} s: the count as it was");
+            assert!(!drawn(ui, "tree-dimmed"), "at {gone:.2} s: no dim yet");
+            assert_eq!(alpha_of(ui, orders, "orders"), Some(255), "at {gone:.2} s: the rows at full");
+        }
+        if gone >= 0.4 {
+            assert_eq!(drawn_value(ui, "tree-count"), Some(json!("Loading")), "at {gone:.2} s");
+            assert!(ui.texts().iter().any(|(_, g)| g.text() == "LOADING"), "at {gone:.2} s: LOADING painted");
+            assert_eq!(drawn_value(ui, "tree-dimmed"), Some(json!(true)), "at {gone:.2} s");
+            let a = alpha_of(ui, orders, "orders").expect("orders is drawn");
+            assert!(a.abs_diff(128) <= 2, "at {gone:.2} s: the rows at half: {a}");
+            seen = true;
+        }
+    });
+    assert!(seen, "LOADING showed");
+    ui.reply(&rx, "the refresh's start");
+    let tabs = tab_count(&mut ui);
+    ui.double_click("tree-table-shop.orders");
+    ui.until("an orders tab", |ui| tab_count(ui) == tabs + 1);
+    assert!(refreshing(&mut ui), "still held");
+    drop(lock);
+    ui.until("the refresh's end", |ui| !refreshing(ui));
+    ui.frame();
+    assert_eq!(ui.value("tree-count").as_str().map(|w| w.ends_with(" tables")), Some(true), "the count's words back");
+    assert!(ui.tag("tree-dimmed").is_none(), "no dim");
+    let orders = ui.drawn("tree-table-shop.orders");
+    assert_eq!(alpha_of(&ui, orders, "orders"), Some(255), "the rows at full");
+}
+
+/// LC4: a refresh of a tree with no rows to show draws eight rows of bars once it has run 300 ms.
+#[test]
+fn a_refresh_of_a_tree_with_nothing_shows_eight_bar_rows() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, _table, lock) = browse_held(db);
+    ui.click("tree-filter");
+    ui.text("zzz");
+    ui.until("no match", |ui| ui.value("tree-count") == "0 tables");
+    let rx = ui.send("engine.execute", json!({ "command": "schema.refresh", "params": {}, "wait": false }));
+    let mut seen = false;
+    ui.frames_while(refreshing, 0.45, |ui, gone| {
+        if gone <= 0.25 {
+            assert!(!drawn(ui, "tree-skeleton"), "at {gone:.2} s: no bars yet");
+            assert_eq!(drawn_value(ui, "tree-count"), Some(json!("0 tables")), "at {gone:.2} s");
+        }
+        if gone >= 0.4 {
+            assert_eq!(drawn_value(ui, "tree-skeleton"), Some(json!(8)), "at {gone:.2} s");
+            assert_eq!(drawn_value(ui, "tree-count"), Some(json!("Loading")), "at {gone:.2} s");
+            assert!(!drawn(ui, "tree-empty"), "at {gone:.2} s: no sentence");
+            seen = true;
+        }
+    });
+    assert!(seen, "the bars showed");
+    ui.reply(&rx, "the refresh's start");
+    drop(lock);
+    ui.until("the refresh's end", |ui| !refreshing(ui));
+    ui.frame();
+    assert_eq!(ui.value("tree-count"), "0 tables");
+    assert!(ui.tag("tree-skeleton").is_none(), "no bars after");
+}

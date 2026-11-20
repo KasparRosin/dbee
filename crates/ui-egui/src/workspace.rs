@@ -79,6 +79,8 @@ pub(crate) const STATUS_H: f32 = SLIM_BAR_H;
 
 /// The reconnect's command: the status bar shows it while it runs.
 const RECONNECT: &str = "connection.reconnect";
+/// The tree's refresh: the window times it to show `LOADING` ([`crate::quiet`]).
+const REFRESH: &str = "schema.refresh";
 
 /// What only the workspace keeps.
 #[derive(Debug, Default)]
@@ -378,7 +380,7 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
     let t = theme::tokens(ui.ctx());
     let Some(catalog) = app.session.state().connection(Which::Active).map(|c| Arc::clone(&c.catalog)) else { return };
     let dialect = app.session.state().dialect(Which::Active);
-    let refresh = if app.session.running("schema.refresh") {
+    let refresh = if app.session.running(REFRESH) {
         Refresh::Running
     } else {
         match app.session.state().connection(Which::Active).map(|c| c.lost) {
@@ -386,6 +388,7 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
             _ => Refresh::Ready,
         }
     };
+    let loading = (refresh == Refresh::Running).then(|| app.view.quiet.past(ui.ctx(), Watch::Command(REFRESH))).flatten();
     app.view.work.tree.refresh = refresh;
     // The menu's reasons, read only in frames a menu may show (open, or just opened).
     let menu = if app.view.work.tree.menu_open() || ui.input(|i| i.pointer.secondary_released()) {
@@ -402,7 +405,7 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
         let frame = Frame::new().fill(t.bg);
         let panel = egui::Panel::left("dbee-tree").resizable(true).default_size(SIDEBAR_W).size_range(SIDEBAR_MIN_W..=SIDEBAR_MAX_W);
         panel.frame(frame).show(ui, |ui| {
-            acts = tree::show(ui, &catalog, dialect, &mut view.work.tree, tags);
+            acts = tree::show(ui, &catalog, dialect, &mut view.work.tree, loading, tags);
         });
     }
     for act in acts {
@@ -417,7 +420,7 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
                 app.start("clipboard.copyName", json!({ "schema": table.schema, "table": table.name }), Origin::Menu);
             }
             TreeAct::Refresh => {
-                app.start("schema.refresh", json!({}), Origin::Menu);
+                app.start(REFRESH, json!({}), Origin::Menu);
             }
         }
     }

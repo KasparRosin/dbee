@@ -2255,6 +2255,9 @@ fn no_rows_are_loaded_is_restyled() {
         None => painted_at(&ui, egui::pos2(body.min + 2.0, ui.drawn("table-view-data").center().y)).expect("the table bar").1.bottom(),
     };
     assert!((at.top() - (top + 12.0)).abs() <= 1.0, "12 down from the grid area's top {top}: {at:?}");
+    assert_eq!(ui.value("table-empty"), "No rows are loaded.", "tagged");
+    let tagged = ui.drawn("table-empty");
+    assert!((tagged.left() - at.left()).abs() <= 1.0 && (tagged.top() - at.top()).abs() <= 1.0, "the tag on the words: {tagged:?} {at:?}");
 }
 
 /// The value panel open or shut (through the View menu's command: a narrow bar may leave its
