@@ -76,7 +76,7 @@ pub(crate) type Since = HashMap<(TabId, JobId), f64>;
 
 /// The table bar's loading and counting states show once their job has run this long, so a fast
 /// one never flickers.
-const QUIET: f64 = 0.3;
+pub(crate) const QUIET: f64 = 0.3;
 
 /// How often the window draws again while a job runs, so its timer moves.
 pub(crate) const TICK: Duration = Duration::from_millis(100);

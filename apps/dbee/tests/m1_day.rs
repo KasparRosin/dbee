@@ -167,7 +167,10 @@ fn m1_day_end_to_end() {
     let before = counts(pg14(db));
     let day = DayRows::insert(db);
     let seed = day.seed_digest();
-    let mut app = App::start(&root, &home.home, db, SHOTS);
+    // A server that never answers: the day's own listener, which accepts no connection.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_port = silent.local_addr().unwrap().port();
+    let mut app = App::start_allowing(&root, &home.home, db, SHOTS, &[silent_port]);
     let d = app.document();
     assert_eq!((d["screen"].clone(), d["clipboard"].clone()), (json!("connections"), Json::Null), "{d}");
 
@@ -192,6 +195,29 @@ fn m1_day_end_to_end() {
     assert!(app.value("conn-version").as_str().is_some_and(|v| v.starts_with("dbee ")), "the version bar");
     assert!(app.tags_with("conn-recent-").is_empty(), "the saved connection isn't listed twice");
     app.shot(&root, "0-connections");
+
+    // 0a. A connection to a server that never answers: a double-click connects; from 300 ms the
+    //     form's bar shows CONNECTING, its timer and CANCEL, the form dimmed. CANCEL ends it and
+    //     shows nothing. The connection is deleted again, so the list is as it was.
+    let silent_config = json!({ "name": "Silent", "host": "127.0.0.1", "port": silent_port, "user": "postgres", "database": "dbee" });
+    let silent_id = app.execute("connection.save", json!({ "config": silent_config }))["id"].as_str().unwrap().to_string();
+    let silent_row = format!("conn-saved-{silent_id}");
+    app.until("the Silent row", |app| app.tag(&silent_row).is_some());
+    app.double_click(&silent_row);
+    app.until("the connecting state", |app| app.tag("conn-running").is_some());
+    assert_eq!(app.value("conn-running")["words"], "Connecting");
+    assert!(app.value("conn-running")["timer"].as_str().is_some_and(|t| t.starts_with("00:")), "the timer");
+    assert_eq!(app.tag("conn-connect").unwrap()["enabled"], false, "CONNECT off, CANCEL beside it");
+    assert!(app.tag("conn-cancel").is_some());
+    app.shot(&root, "0a-connecting");
+    app.click("conn-cancel");
+    app.until("the cancelled connect's end", |app| app.tag("conn-running").is_none());
+    let d = app.document();
+    assert_eq!((d["screen"].clone(), d["jobs"].clone()), (json!("connections"), json!([])), "{d}");
+    assert!(app.tag("conn-error").is_none() && app.tag("conn-cancel").is_none(), "a cancel shows nothing");
+    app.execute("connection.delete", json!({ "id": silent_id }));
+    app.until("the Silent row gone", |app| app.tag(&silent_row).is_none());
+    drop(silent);
 
     // 0b. A click on the card shows its form, in two columns: its engine fixed, the tunnel on, the
     //     key it will use under KEY FILE, SHOW ending with its column as PORT does.

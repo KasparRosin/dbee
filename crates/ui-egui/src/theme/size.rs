@@ -282,6 +282,9 @@ pub const CONN_SECTION_GAP: f32 = 20.0;
 pub const CONN_FIELD_GAP: f32 = SPACE_12;
 pub const CONN_PORT_W: f32 = 110.0;
 pub const CONN_BESIDE_GAP: f32 = SPACE_8;
+/// The form's bar while a test or connect has run 300 ms: the facts' word and the timer this far
+/// apart, and the timer this far before the first button.
+pub const CONN_RUNNING_GAP: f32 = SPACE_12;
 /// The engine cards (K2): `Choose a database` this far under the title row, the cards this far
 /// under it; a card this tall, at least this wide, its logo this big, this far in from the card's
 /// left and top, the name this far under the logo; the UPCOMING chip this far in from the corner.
@@ -348,6 +351,9 @@ pub const ERROR_BAND_HEADING_MIN: f32 = 120.0;
 pub const STRIP_EDGE: f32 = 2.0;
 pub const STRIP_PAD_Y: f32 = SPACE_8;
 pub const STRIP_MAX_LINES: usize = 3;
+/// What is dimmed (the connection form's fields while a test or connect runs, LC3) is drawn at
+/// this opacity.
+pub const DIM_OPACITY: f32 = 0.5;
 /// The editor (`editor/line number`, `editor/error token`): a line number's box is this wide, the
 /// number flush with its right; an error's underline is this thick, this far down its line.
 pub const LINE_NUMBER_W: f32 = 36.0;

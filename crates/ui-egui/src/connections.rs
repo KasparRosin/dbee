@@ -61,6 +61,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use dbee_config::{ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, JobId, Json, Screen, State, Which};
@@ -85,6 +86,7 @@ use crate::components::tooltip::Hint;
 use crate::conn_form::{self, Form};
 use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
+use crate::table_tab::{QUIET, TICK};
 use crate::theme::{
     self, Text, connection_color,
     size::{
@@ -103,6 +105,7 @@ pub(crate) const CLOSE: &str = "connection.close";
 const SSH_KEY: &str = "connection.sshKey";
 const DELETE: &str = "connection.delete";
 const DUPLICATE: &str = "connection.duplicate";
+const CANCEL: &str = "connection.cancel";
 
 /// Which form job runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +233,9 @@ pub(crate) enum Step {
     Form,
 }
 
+/// The error code of an attempt `connection.cancel` stopped.
+const CANCELLED: &str = "cancelled";
+
 /// What only the connection screen keeps.
 #[derive(Debug)]
 pub(crate) struct ConnScreen {
@@ -240,6 +246,9 @@ pub(crate) struct ConnScreen {
     pub filter: String,
     /// The test or connect started from the form, until its result arrives.
     pub running: Option<(JobId, Running)>,
+    /// The job of `running` and the time on egui's clock of the first frame that saw it: the
+    /// facts, CANCEL and the dim show from [`QUIET`] after it.
+    pub since: Option<(JobId, f64)>,
     pub message: Option<Message>,
     pub key: KeyLine,
     pub picker: Option<Picker>,
@@ -273,6 +282,7 @@ impl ConnScreen {
             generation: 0,
             filter: String::new(),
             running: None,
+            since: None,
             message: None,
             key: KeyLine::default(),
             picker: None,
@@ -281,6 +291,24 @@ impl ConnScreen {
             switch: None,
             switch_closed: false,
         }
+    }
+
+    /// What runs and how long it has, once it has run [`QUIET`] (at `now` on egui's clock): the
+    /// connecting state shows then, so a fast connect never flickers.
+    pub(crate) fn running_for(&self, now: f64) -> Option<(Running, Duration)> {
+        let (job, kind) = self.running?;
+        let (_, first) = self.since.filter(|(seen, _)| *seen == job)?;
+        let ran = now - first;
+        (ran >= QUIET).then(|| (kind, Duration::try_from_secs_f64(ran).unwrap_or_default()))
+    }
+
+    /// The frame at `now` sees what runs: a job not seen before starts its own clock.
+    fn see_running(&mut self, now: f64) {
+        self.since = match (self.running, self.since) {
+            (Some((job, _)), Some((seen, first))) if seen == job => Some((seen, first)),
+            (Some((job, _)), _) => Some((job, now)),
+            (None, _) => None,
+        };
     }
 
     /// Shows a new, empty connection: the engine cards first.
@@ -439,6 +467,8 @@ pub(crate) fn form_done(
             }
             _ => {}
         },
+        // A cancel the user asked for shows nothing: the form is as it was before.
+        Err(e) if e.code() == CANCELLED => {}
         Err(e) => {
             let rerun = dialogs::Rerun { command, params, origin: Origin::Form(generation) };
             if !dialogs::ask(app, &e, rerun) {
@@ -629,6 +659,8 @@ pub(crate) enum Act {
     },
     Test,
     ConnectForm,
+    /// CANCEL beside CONNECT: stops the test or connect that runs.
+    Cancel,
     Save,
     /// The Database field's list button: list the server's databases.
     ListDatabases,
@@ -683,6 +715,11 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
 fn tick(app: &mut DbeeApp, ctx: &egui::Context) {
     picker::poll(&mut app.view.conn, ctx);
     let conn = &mut app.view.conn;
+    conn.see_running(ctx.input(|i| i.time));
+    if conn.running.is_some() {
+        // The connecting state at 300 ms, then its timer.
+        ctx.request_repaint_after(TICK);
+    }
     if !conn.form.ssh_on || !conn.form.kind.takes_ssh() || conn.step != Step::Form {
         return;
     }
@@ -740,6 +777,11 @@ fn apply(app: &mut DbeeApp, act: Act, ctx: &egui::Context) {
         Act::Test if !busy => run_form(app, TEST),
         Act::ConnectForm if !busy => run_form(app, OPEN),
         Act::Test | Act::ConnectForm => {}
+        Act::Cancel if busy => {
+            let generation = app.view.conn.generation;
+            app.start(CANCEL, json!({}), Origin::Form(generation));
+        }
+        Act::Cancel => {}
         Act::Save => run_form(app, SAVE),
         Act::ListDatabases if !busy && app.view.conn.databases.pending.is_none() => {
             app.view.conn.databases.open = false;
@@ -837,7 +879,7 @@ pub(crate) fn line_job(ui: &egui::Ui, mut job: LayoutJob, width: f32) -> std::sy
 }
 
 /// The row menu's and File > Connect's reason while a test or connect runs.
-const BUSY_CONNECT: &str = "Connect: not now, a test or connect is running";
+pub(crate) const BUSY_CONNECT: &str = "Connect: not now, a test or connect is running";
 
 /// The version bar along the window's bottom: `dbee <version>` in `label` caps, 12 in, on `card`
 /// with a 1 px `line` along its top. Tagged `conn-version` (the whole bar) with the words as written.

@@ -14,11 +14,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
-    Align, CornerRadius, Key, Label, Layout, Modifiers, Popup, PopupCloseBehavior, RectAlign, ScrollArea, Sense, Stroke, UiBuilder, pos2, vec2,
+    Align, Align2, CornerRadius, Key, Label, Layout, Modifiers, Popup, PopupCloseBehavior, RectAlign, ScrollArea, Sense, Stroke, UiBuilder, pos2,
+    vec2,
 };
 
 use crate::automation::Tags;
@@ -33,12 +35,13 @@ use crate::components::segmented::Segmented;
 use crate::components::strip::{self, Strip, Tone};
 use crate::components::swatch::{self, Swatch};
 use crate::components::tooltip::Hint;
-use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Message, Running, line_galley, tilde};
+use crate::components::{self, status};
+use crate::connections::{Act, BUSY_CONNECT, ConnScreen, DatabaseList, Kind, Message, Running, line_galley, tilde};
 use crate::picker::Pick;
 use crate::theme::size::{
-    BAR_H, BAR_LINE, BUTTON_H, CONN_BESIDE_GAP, CONN_COLUMN_GAP, CONN_COLUMN_MAX_W, CONN_FIELD_GAP, CONN_FIELDS_TOP, CONN_PORT_W, CONN_SECTION_GAP,
-    CONN_TITLE_MIN_W, CONN_TWO_COLUMNS_MIN, ENGINE_ROW_GAP, ENGINE_ROW_LOGO, ERROR_BAND_EDGE, ERROR_BAND_GAP, ERROR_BAND_PAD, FIELD_GAP, INPUT_H,
-    INPUT_PAD_X, INSET, MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP,
+    BAR_H, BAR_LINE, BUTTON_H, CONN_BESIDE_GAP, CONN_COLUMN_GAP, CONN_COLUMN_MAX_W, CONN_FIELD_GAP, CONN_FIELDS_TOP, CONN_PORT_W, CONN_RUNNING_GAP,
+    CONN_SECTION_GAP, CONN_TITLE_MIN_W, CONN_TWO_COLUMNS_MIN, ENGINE_ROW_GAP, ENGINE_ROW_LOGO, ERROR_BAND_EDGE, ERROR_BAND_GAP, ERROR_BAND_PAD,
+    FIELD_GAP, INPUT_H, INPUT_PAD_X, INSET, MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP,
 };
 use crate::theme::{self, Text};
 
@@ -314,7 +317,7 @@ fn column_noted<R>(
 const FORM_FIELDS: [&str; 9] =
     ["conn-name", "conn-host", "conn-port", "conn-user", "conn-password", "conn-database", "conn-ssh-host", "conn-ssh-port", "conn-ssh-user"];
 
-pub(crate) fn field_id(id: &str) -> egui::Id {
+pub fn field_id(id: &str) -> egui::Id {
     egui::Id::new(("dbee-form", id))
 }
 
@@ -443,27 +446,35 @@ pub(crate) fn body(ui: &mut egui::Ui, conn: &mut ConnScreen, saved: bool, tags: 
     if in_field && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         acts.push(Act::ConnectForm);
     }
+    let shown = conn.running_for(ui.ctx().input(|i| i.time));
     let area = ui.available_rect_before_wrap();
     let bar = egui::Rect::from_min_max(pos2(area.left(), (area.bottom() - BAR_H).max(area.top())), area.max);
     let strip_h = conn.message.as_ref().map_or(0.0, |m| strip_h(ui, m, area.width()));
     let strip = egui::Rect::from_min_max(pos2(area.left(), (bar.top() - strip_h).max(area.top())), pos2(area.right(), bar.top()));
     let fields = egui::Rect::from_min_max(area.min, pos2(area.right(), strip.top()));
-    fields_in(ui, conn, tags, acts, fields);
+    fields_in(ui, conn, shown.is_some(), tags, acts, fields);
     if let Some(m) = &conn.message {
         strip_in(&mut cell_ui(ui, strip), m, tags);
     }
-    form_bar(ui, conn, saved, tags, acts, bar);
+    form_bar(ui, conn, saved, shown, tags, acts, bar);
     ui.advance_cursor_after_rect(area);
 }
 
 /// The fields in `at`, [`INSET`] in from its left and [`CONN_FIELDS_TOP`] under its top; their
-/// scroll bar runs along its right edge.
-fn fields_in(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, at: egui::Rect) {
+/// scroll bar runs along its right edge. While a test or connect has run 300 ms (`dimmed`), they
+/// are drawn at half strength and take no input ([`components::dim`]).
+fn fields_in(ui: &mut egui::Ui, conn: &mut ConnScreen, dimmed: bool, tags: &mut Tags, acts: &mut Vec<Act>, at: egui::Rect) {
     let (n, w) = columns(at.width());
     let room = egui::Rect::from_min_max(pos2(at.left() + INSET, (at.top() + CONN_FIELDS_TOP).min(at.bottom())), at.max);
     let mut ui = ui.new_child(UiBuilder::new().id_salt("conn-fields").max_rect(room).layout(Layout::top_down(Align::Min)));
     ui.set_clip_rect(at.intersect(ui.clip_rect()));
-    ScrollArea::vertical().id_salt("conn-form-scroll").max_height(room.height()).auto_shrink([false, false]).show(&mut ui, |ui| {
+    let guard = FORM_FIELDS.map(field_id);
+    components::dim(&mut ui, dimmed, &guard, |ui| fields_scroll(ui, conn, tags, acts, room.height(), n, w));
+}
+
+/// The fields' scroll area, `height` tall, in `n` columns `w` wide.
+fn fields_scroll(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, height: f32, n: usize, w: f32) {
+    ScrollArea::vertical().id_salt("conn-form-scroll").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         if n == 2 {
             ui.horizontal_top(|ui| {
@@ -536,14 +547,24 @@ fn strip_in(ui: &mut egui::Ui, m: &Message, tags: &mut Tags) {
 /// The form's bar in `at`, along the pane's bottom on `card` with a 1 px `line` on top: SAVE (a
 /// text button) [`INSET`] in from the left; at the right, ending [`INSET`] from the pane's edge,
 /// `…` (a saved connection's: Duplicate, Delete), TEST and CONNECT, [`CONN_BESIDE_GAP`] apart.
-/// TEST and CONNECT are off while a test or connect runs, and as wide for both their words.
-fn form_bar(ui: &mut egui::Ui, conn: &ConnScreen, saved: bool, tags: &mut Tags, acts: &mut Vec<Act>, at: egui::Rect) {
+/// TEST and CONNECT are off while a test or connect runs, with their words. Once it has run
+/// 300 ms (`shown`: what runs and for how long), CANCEL comes after CONNECT, the buttons moving
+/// left for it, and the facts (`CONNECTING` or `TESTING`, then the timer) before the first button.
+fn form_bar(
+    ui: &mut egui::Ui,
+    conn: &ConnScreen,
+    saved: bool,
+    shown: Option<(Running, Duration)>,
+    tags: &mut Tags,
+    acts: &mut Vec<Act>,
+    at: egui::Rect,
+) {
     let t = theme::tokens(ui.ctx());
     let p = ui.painter();
     p.rect_filled(at, CornerRadius::ZERO, t.card);
     p.rect_filled(egui::Rect::from_min_size(at.min, vec2(at.width(), BAR_LINE)), CornerRadius::ZERO, t.line);
     let row = egui::Rect::from_min_max(pos2(at.left(), at.top() + BAR_LINE), at.max);
-    let running = conn.running.map(|(_, kind)| kind);
+    let busy = conn.running.is_some();
     let place = |x: f32, w: f32| egui::Rect::from_min_size(pos2(x, row.center().y - BUTTON_H / 2.0), vec2(w, BUTTON_H));
 
     let save = TextButton::new("Save");
@@ -554,31 +575,59 @@ fn form_bar(ui: &mut egui::Ui, conn: &ConnScreen, saved: bool, tags: &mut Tags, 
         acts.push(Act::Save);
     }
 
-    // From the right: CONNECT, TEST, then `…`; drawn left to right so Tab reads them so.
-    let connect_w = BoxButton::primary("Connect").width(ui).max(BoxButton::primary("Connecting…").width(ui));
-    let test_w = BoxButton::outline("Test").width(ui).max(BoxButton::outline("Testing…").width(ui));
-    let connect_at = place(row.right() - INSET - connect_w, connect_w);
+    // From the right: CANCEL (while it shows), CONNECT, TEST, then `…`; drawn left to right so Tab
+    // reads them so.
+    let mut right = row.right() - INSET;
+    let cancel_at = shown.map(|_| {
+        let w = BoxButton::primary("Cancel").width(ui);
+        let at = place(right - w, w);
+        right = at.left() - CONN_BESIDE_GAP;
+        at
+    });
+    let connect_w = BoxButton::primary("Connect").width(ui);
+    let test_w = BoxButton::outline("Test").width(ui);
+    let connect_at = place(right - connect_w, connect_w);
     let test_at = place(connect_at.left() - CONN_BESIDE_GAP - test_w, test_w);
-    if saved {
-        let more = BoxButton::outline("…");
-        let more_at = place(test_at.left() - CONN_BESIDE_GAP - more.width(ui), more.width(ui));
+    let more = BoxButton::outline("…");
+    let more_at = saved.then(|| place(test_at.left() - CONN_BESIDE_GAP - more.width(ui), more.width(ui)));
+    if let Some((kind, elapsed)) = shown {
+        let words = if kind == Running::Test { "Testing" } else { "Connecting" };
+        let timer = status::timer(elapsed);
+        let first = more_at.unwrap_or(test_at).left();
+        let p = ui.painter();
+        let timer_at = Text::Label.paint(p, pos2(first - CONN_RUNNING_GAP, row.center().y), Align2::RIGHT_CENTER, &timer, t.text_muted);
+        let words_at = Text::Label.paint(p, pos2(timer_at.left() - CONN_RUNNING_GAP, row.center().y), Align2::RIGHT_CENTER, words, t.text_muted);
+        let r = ui.interact(words_at.union(timer_at), egui::Id::new("conn-running"), Sense::hover());
+        tags.tag_value("conn-running", &r, serde_json::json!({ "words": words, "timer": timer }));
+    }
+    if let Some(more_at) = more_at {
         let r = button_in(ui, more_at, true, more).hint("Duplicate or delete this connection");
         tags.tag("conn-more", &r);
         more_menu(&r, conn, tags, acts);
     }
-    let label = if running == Some(Running::Test) { "Testing…" } else { "Test" };
-    let r = button_in(ui, test_at, running.is_none(), BoxButton::outline(label));
-    tags.tag_value("conn-test", &r, label);
+    let r = button_in(ui, test_at, !busy, BoxButton::outline("Test"));
+    let r = if busy { r.hint_disabled(BUSY_TEST) } else { r };
+    tags.tag_value("conn-test", &r, "Test");
     if r.clicked() {
         acts.push(Act::Test);
     }
-    let label = if running == Some(Running::Connect) { "Connecting…" } else { "Connect" };
-    let r = button_in(ui, connect_at, running.is_none(), BoxButton::primary(label));
-    tags.tag_value("conn-connect", &r, label);
+    let r = button_in(ui, connect_at, !busy, BoxButton::primary("Connect"));
+    let r = if busy { r.hint_disabled(BUSY_CONNECT) } else { r };
+    tags.tag_value("conn-connect", &r, "Connect");
     if r.clicked() {
         acts.push(Act::ConnectForm);
     }
+    if let Some(cancel_at) = cancel_at {
+        let r = button_in(ui, cancel_at, true, BoxButton::primary("Cancel"));
+        tags.tag("conn-cancel", &r);
+        if r.clicked() {
+            acts.push(Act::Cancel);
+        }
+    }
 }
+
+/// TEST's reason while a test or connect runs.
+const BUSY_TEST: &str = "Test: not now, a test or connect is running";
 
 /// `…`'s menu, under it and right-aligned: Duplicate, then Delete (which asks first), as the
 /// row's menu has them.

@@ -59,6 +59,40 @@ pub(crate) fn painter(ui: &egui::Ui) -> egui::Painter {
     p
 }
 
+/// Draws `add` in a scope of `ui`. When `on`, at half strength in its normal look, taking no
+/// input: a cover over the scope takes the pointer, and the keyboard leaves any widget in it
+/// (those of `guard`, and any drawn inside the scope), before and after `add` draws, so neither a
+/// click nor Tab nor typing reaches them. The scope is the same whether `on` or not, so what is
+/// in it keeps its ids (a scroll area its offset).
+pub fn dim<R>(ui: &mut egui::Ui, on: bool, guard: &[egui::Id], add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let area = ui.max_rect().intersect(ui.clip_rect());
+    if on {
+        let_go(ui.ctx(), guard, area);
+    }
+    let inner = ui
+        .scope_builder(egui::UiBuilder::new(), |ui| {
+            if on {
+                ui.multiply_opacity(crate::theme::size::DIM_OPACITY);
+            }
+            add(ui)
+        })
+        .inner;
+    if on {
+        let_go(ui.ctx(), guard, area);
+        ui.interact(area, ui.id().with("dbee-dim"), egui::Sense::click_and_drag());
+    }
+    inner
+}
+
+/// The keyboard leaves the widget that has it when it is one of `guard` or lies in `area`.
+fn let_go(ctx: &egui::Context, guard: &[egui::Id], area: egui::Rect) {
+    let Some(focused) = ctx.memory(|m| m.focused()) else { return };
+    let inside = guard.contains(&focused) || ctx.read_response(focused).is_some_and(|r| area.contains_rect(r.rect));
+    if inside {
+        ctx.memory_mut(|m| m.surrender_focus(focused));
+    }
+}
+
 /// What [`painted`] gives: every shape of the last frame, nested lists flattened.
 #[cfg(test)]
 pub(crate) fn flat(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Shape> {
@@ -285,6 +319,41 @@ mod tests {
 
     use super::*;
     use crate::theme::{DARK, LIGHT};
+
+    /// A click at the middle of `at`: pressed in one frame, released in the next.
+    fn click_at<S>(h: &mut egui_kittest::Harness<'_, S>, at: Rect) {
+        let (pos, modifiers) = (at.center(), egui::Modifiers::NONE);
+        let press = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers };
+        h.input_mut().events.extend([egui::Event::PointerMoved(pos), press(true)]);
+        h.step();
+        h.input_mut().events.push(press(false));
+        h.step();
+        h.step();
+    }
+
+    #[test]
+    fn dim_draws_at_half_and_takes_no_click() {
+        let mut alpha = [0u8; 2];
+        for (n, on) in [false, true].into_iter().enumerate() {
+            let mut h = harness(egui::Theme::Light, (0u32, Rect::NOTHING), move |ui, (clicks, at)| {
+                ui.add_space(ROOM);
+                dim(ui, on, &[], |ui| {
+                    let r = ui.add(button::BoxButton::primary("Go"));
+                    *at = r.rect;
+                    if r.clicked() {
+                        *clicks += 1;
+                    }
+                });
+            });
+            h.run();
+            let at = h.state().1;
+            let fill = fills(&h.output().shapes).into_iter().find(|(r, _)| *r == at).map(|(_, c)| c);
+            alpha[n] = fill.unwrap_or_else(|| panic!("on {on}: the button's ground drawn")).a();
+            click_at(&mut h, at);
+            assert_eq!(h.state().0, u32::from(!on), "on {on}: clicked only when not dimmed");
+        }
+        assert!(alpha[1].abs_diff(alpha[0] / 2) <= 1, "half: {alpha:?}");
+    }
 
     #[test]
     fn keycap_and_chip_match_the_page() {

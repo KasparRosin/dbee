@@ -1087,14 +1087,21 @@ fn test_and_connect_run_once_and_show_it() {
     let card = ui.save(&silent_config(silent.port), None);
     ui.click(&card);
     ui.click("conn-test");
-    ui.until("the running test", |ui| ui.value("conn-test") == "Testing…");
+    ui.until("the running test", |ui| ui.tag("conn-test").unwrap().get("enabled").is_some());
     let i = ui.inspect();
-    assert_eq!(tag_in(&i, "conn-test").unwrap()["enabled"], false, "{i}");
-    assert_eq!(tag_in(&i, "conn-connect").unwrap()["enabled"], false, "{i}");
+    // The buttons keep their words while a job runs, both off.
+    for (id, words) in [("conn-test", "Test"), ("conn-connect", "Connect")] {
+        let tag = tag_in(&i, id).unwrap();
+        assert_eq!((tag["value"].clone(), tag["enabled"].clone()), (json!(words), json!(false)), "{i}");
+    }
     // Clicking again starts nothing; double-clicking the card starts no connect.
     ui.click("conn-test");
     ui.click("conn-connect");
     ui.double_click(&card);
+    let at = ui.centre("conn-test");
+    ui.rest(at);
+    let words: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_owned()).collect();
+    assert!(words.iter().any(|w| w == "Test: not now, a test or connect is running"), "TEST says why on hover: {words:?}");
     let d = ui.document();
     assert_eq!(d["jobs"].as_array().unwrap().len(), 1, "{d}");
     assert_eq!(d["jobs"][0]["label"], "connection.test", "{d}");
@@ -1711,10 +1718,10 @@ fn the_database_list_button_shows_that_it_lists() {
     let silent = Silent::start();
     ui.replace("conn-port", &silent.port.to_string());
     ui.click("conn-test");
-    ui.until("the running test", |ui| ui.value("conn-test") == "Testing…");
+    ui.until("the running test", |ui| ui.tag("conn-test").unwrap().get("enabled").is_some());
     assert_eq!(ui.tag("conn-database-list").unwrap()["enabled"], false);
     drop(silent);
-    ui.until("the test to fail", |ui| ui.value("conn-test") == "Test");
+    ui.until("the test to fail", |ui| ui.tag("conn-test").unwrap().get("enabled").is_none());
     assert!(ui.tag("conn-database-list").unwrap().get("enabled").is_none());
 }
 
@@ -2502,4 +2509,160 @@ fn tab_follows_the_reading_order() {
         ui.frame();
         assert!(ui.focused(next), "Tab reaches {next}");
     }
+}
+
+/// Egui's clock in the last frame, in seconds.
+fn clock(ui: &Ui) -> f64 {
+    ui.harness.ctx.input(|i| i.time)
+}
+
+/// The tag `id` as the last frame drew it, read without running a frame.
+fn drawn_tag(ui: &Ui, id: &str) -> Option<Json> {
+    tag_in(&json!({ "automation": ui.harness.state().tags().to_json() }), id)
+}
+
+/// A 1200 × 900 window whose frames are 50 ms apart on egui's clock, showing the form of a saved
+/// connection to `silent`; its row's id.
+fn silent_form(silent: &Silent) -> (Ui, String) {
+    let mut ui = Ui::window(Setup { size: egui::vec2(1200.0, 900.0), step: Some(0.05), ..Setup::default() });
+    let card = ui.save(&silent_config(silent.port), None);
+    ui.click(&card);
+    (ui, card)
+}
+
+/// Clicks `button` (TEST or CONNECT) without waiting, runs frames until one draws CONNECT off (the
+/// first frame that sees the job), then on until egui's clock is `secs` past that frame; `check`
+/// sees each of those frames with the time gone.
+fn frames_while_running(ui: &mut Ui, button: &str, secs: f64, mut check: impl FnMut(&mut Ui, f64)) {
+    let _reply = ui.send("ui.click", json!({ "id": button }));
+    let start = Instant::now();
+    while drawn_tag(ui, "conn-connect").is_some_and(|t| t.get("enabled").is_none()) {
+        assert!(start.elapsed() < Duration::from_secs(10), "{button} starts a job");
+        ui.frame();
+    }
+    let first = clock(ui);
+    check(ui, 0.0);
+    loop {
+        ui.frame();
+        let gone = clock(ui) - first;
+        check(ui, gone);
+        if gone >= secs - 1e-6 {
+            return;
+        }
+    }
+}
+
+/// CANCEL is clicked and the job ends: TEST and CONNECT on again, no facts, no CANCEL.
+fn cancel(ui: &mut Ui) {
+    ui.click("conn-cancel");
+    ui.until("the cancelled job's end", |ui| ui.tag("conn-connect").unwrap().get("enabled").is_none());
+    ui.frame();
+    assert!(drawn_tag(ui, "conn-running").is_none() && drawn_tag(ui, "conn-cancel").is_none(), "the facts and CANCEL go");
+    assert!(drawn_tag(ui, "conn-test").unwrap().get("enabled").is_none(), "TEST on again");
+}
+
+/// Review Focus 4: the facts and CANCEL show only once a connect has run 300 ms; a cancel shows
+/// nothing; the next connect waits its own 300 ms and its timer starts from 0.
+#[test]
+fn the_connecting_state_waits_300_ms_and_restarts() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    for run in ["first", "second"] {
+        let mut seen = false;
+        frames_while_running(&mut ui, "conn-connect", 0.36, |ui, gone| {
+            let connect = drawn_tag(ui, "conn-connect").unwrap();
+            assert_eq!((connect["value"].clone(), connect["enabled"].clone()), (json!("Connect"), json!(false)), "{run} at {gone:.2} s");
+            let (running, cancel) = (drawn_tag(ui, "conn-running"), drawn_tag(ui, "conn-cancel"));
+            if gone <= 0.25 {
+                assert!(running.is_none() && cancel.is_none(), "{run} at {gone:.2} s: no facts or CANCEL yet");
+            }
+            if gone >= 0.35 {
+                let running = running.unwrap_or_else(|| panic!("{run} at {gone:.2} s: the facts show"));
+                assert_eq!(running["value"]["words"], "Connecting", "{run} at {gone:.2} s");
+                // Each run's timer counts from its own start.
+                let timer = running["value"]["timer"].as_str().unwrap().to_string();
+                let want = if gone < 0.39 { "00:00.3" } else { "00:00.4" };
+                assert_eq!(timer, want, "{run} at {gone:.2} s");
+                let cancel = rect_of(&cancel.unwrap_or_else(|| panic!("{run} at {gone:.2} s: CANCEL shows")));
+                assert!(cancel.left() >= rect_of(&connect).right(), "{run}: CANCEL right of CONNECT");
+                seen = true;
+            }
+        });
+        assert!(seen, "{run}: the connecting state showed");
+        cancel(&mut ui);
+        assert!(ui.tag("conn-error").is_none(), "{run}: a cancel shows no strip");
+    }
+}
+
+/// A cancelled connect leaves the screen, the list and the form as they were.
+#[test]
+fn cancel_stops_a_connect_and_shows_nothing() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    let fields = ["conn-name", "conn-host", "conn-port", "conn-user", "conn-database", "conn-color"];
+    let before: Vec<Json> = fields.iter().map(|id| ui.value(id)).collect();
+    let list = ui.execute("connection.list", json!({}));
+    frames_while_running(&mut ui, "conn-connect", 0.35, |_, _| {});
+    assert!(ui.tag("conn-cancel").is_some());
+    cancel(&mut ui);
+    let d = ui.document();
+    assert_eq!((d["jobs"].clone(), d["screen"].clone()), (json!([]), json!("connections")), "{d}");
+    assert_eq!(ui.execute("connection.list", json!({})), list);
+    let after: Vec<Json> = fields.iter().map(|id| ui.value(id)).collect();
+    assert_eq!(after, before);
+    for id in ["conn-error", "conn-result", "conn-note", "notice"] {
+        assert!(ui.tag(id).is_none(), "no {id}");
+    }
+}
+
+/// A test shows TESTING after 300 ms, and CANCEL ends it.
+#[test]
+fn a_test_shows_testing_and_can_be_cancelled() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    frames_while_running(&mut ui, "conn-test", 0.35, |ui, gone| {
+        let test = drawn_tag(ui, "conn-test").unwrap();
+        assert_eq!((test["value"].clone(), test["enabled"].clone()), (json!("Test"), json!(false)), "at {gone:.2} s");
+    });
+    assert_eq!(ui.value("conn-running")["words"], "Testing");
+    cancel(&mut ui);
+    assert!(ui.tag("conn-error").is_none(), "a cancel shows no strip");
+    assert_eq!(ui.document()["jobs"], json!([]));
+}
+
+/// Review Focus 5: once a connect has run 300 ms, the form is dimmed and takes nothing: no click,
+/// no typing, and Tab never puts the keyboard in a field.
+#[test]
+fn the_form_takes_no_input_while_it_connects() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    frames_while_running(&mut ui, "conn-connect", 0.35, |_, _| {});
+    assert!(ui.tag("conn-cancel").is_some());
+    let host = ui.value("conn-host");
+    ui.click("conn-host");
+    ui.text("x");
+    assert_eq!(ui.value("conn-host"), host, "a click and typing change nothing");
+    let colour = ui.value("conn-color");
+    ui.click("conn-color-blue");
+    assert_eq!(ui.value("conn-color"), colour, "a swatch click changes nothing");
+    let fields: Vec<egui::Id> =
+        ["conn-name", "conn-host", "conn-port", "conn-user", "conn-password", "conn-database", "conn-ssh-host", "conn-ssh-port", "conn-ssh-user"]
+            .into_iter()
+            .map(dbee_ui_egui::conn_form::field_id)
+            .collect();
+    ui.focus("conn-cancel");
+    for n in 0..10 {
+        ui.key_with("Tab", json!({ "shift": true }));
+        ui.frame();
+        let focused = ui.harness.ctx.memory(|m| m.focused());
+        assert!(focused.is_none_or(|f| !fields.contains(&f)), "Shift+Tab {n}: a field has the keyboard");
+    }
+    for n in 0..10 {
+        ui.key("Tab");
+        ui.frame();
+        let focused = ui.harness.ctx.memory(|m| m.focused());
+        assert!(focused.is_none_or(|f| !fields.contains(&f)), "Tab {n}: a field has the keyboard");
+    }
+    assert_eq!(ui.value("conn-host"), host);
+    cancel(&mut ui);
 }

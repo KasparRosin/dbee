@@ -121,8 +121,23 @@ impl App {
 
     /// [`App::start`] with `args` after `--control <port>` on the command line (`dbee <file>`).
     pub fn start_with(root: &Path, home: &Path, db: &TestDb, shots: &'static str, args: &[&OsStr]) -> App {
+        App::launch(root, home, db, shots, args, &[])
+    }
+
+    /// [`App::start`] that may also connect to `127.0.0.1` on each of `ports` (a listener of the
+    /// test's own).
+    pub fn start_allowing(root: &Path, home: &Path, db: &TestDb, shots: &'static str, ports: &[u16]) -> App {
+        App::launch(root, home, db, shots, &[], ports)
+    }
+
+    fn launch(root: &Path, home: &Path, db: &TestDb, shots: &'static str, args: &[&OsStr], ports: &[u16]) -> App {
         let port = free_port();
-        let child = command(root, home, db, shots, port).args(args).spawn().unwrap();
+        let mut command = command(root, home, db, shots, port);
+        if !ports.is_empty() {
+            let also = ports.iter().map(|p| format!("127.0.0.1:{p}"));
+            command.env("DBEE_ALLOW_TARGETS", std::iter::once(allowed(db)).chain(also).collect::<Vec<_>>().join(","));
+        }
+        let child = command.args(args).spawn().unwrap();
         let child = Running(child);
         // The channel listens before the window opens, and the file comes once it does.
         let token_file = token_file(home);
