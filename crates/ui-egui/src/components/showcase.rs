@@ -17,6 +17,7 @@ use super::chip::Chip;
 use super::dialog::{Button, Dialog};
 use super::dropdown::Dropdown;
 use super::editor::{ErrorToken, LineNumber};
+use super::empty::{Phrase, Place};
 use super::error_band::{Action, Band};
 use super::grid_cell::{self, Align as CellAlign, Cell, CellText, Header, Key, Mark, RowNumber, Sort};
 use super::icon::Icon;
@@ -29,6 +30,7 @@ use super::results::{ResultBar, ResultTab, RowCount, RunRow, RunState};
 use super::rows::{ConnectionRow, TreeKind, TreeRow};
 use super::segmented::{Segment, Segmented};
 use super::sidebar::{self, Count};
+use super::skeleton;
 use super::status::{self, Activity, Connection, Facts};
 use super::strip::{Strip, Tone};
 use super::structure::{self, HeaderCell, Heading};
@@ -40,8 +42,8 @@ use super::tooltip;
 use super::value::{self, CopyButton, Facts as ValueFacts, Panel, State as ValueState};
 use crate::theme::size::{
     BAR_H, CONNECTION_LOGO, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, QS_LIST_GAP, QS_PAD, QS_ROW_H, QS_W,
-    RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_ROW_H,
-    TAB_H, TAB_LIST_GAP, TREE_ROW_H,
+    RADIUS_CONTROL, ROW_H, SIDEBAR_COUNT_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H,
+    STRUCTURE_ROW_H, TAB_H, TAB_LIST_GAP, TREE_ROW_H,
 };
 use crate::theme::{Text, Tokens, Words, connection_color, tokens};
 
@@ -189,6 +191,7 @@ pub fn show(ui: &mut Ui) {
         strips(ui);
         editor_sample(ui);
         structure_sample(ui);
+        waiting(ui);
     });
 }
 
@@ -776,6 +779,168 @@ fn structure_sample(ui: &mut Ui) {
     });
 }
 
+/// The waiting states' grid: the Grid frame's first three columns.
+const WAIT_COLUMNS: [(f32, &str, &str, Option<Key>, bool); 3] =
+    [(100.0, "id", "int8", Some(Key::Primary), true), (150.0, "customer", "text", None, false), (110.0, "total", "numeric", None, true)];
+/// The waiting states' rows of the grid and of the tree.
+const WAIT_ROWS: usize = 10;
+const WAIT_TREE_ROWS: usize = 8;
+/// The empty areas the phrases sit in.
+const EMPTY_AREA: Vec2 = vec2(300.0, 120.0);
+
+/// The waiting states (LC): a first load's skeleton, a reload at 50 %, the tree's `LOADING`, a
+/// dimmed area's off control, and the one grey phrase in its two places. The footer's jobs with
+/// their timers and RECONNECTING are the status bar's sections.
+fn waiting(ui: &mut Ui) {
+    let side_by_side = |ui: &mut Ui, add: &mut dyn FnMut(&mut Ui)| {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_24;
+            add(ui);
+        });
+    };
+    section(
+        ui,
+        "loading (LC1, LC2): a table's first load, the real header over ten rows of fill bars (none in the row numbers, a number's bar at the right); a reload, the old rows at 50 % under the header at full strength",
+        SPACE_8,
+        |ui| {
+            side_by_side(ui, &mut |ui| {
+                for reload in [false, true] {
+                    wait_grid(ui, reload);
+                }
+            })
+        },
+    );
+    section(ui, "loading (LC4): the tree's count reads loading over its rows at 50 %; with no rows to keep, eight rows of bars", SPACE_8, |ui| {
+        side_by_side(ui, &mut |ui| {
+            for rows in [true, false] {
+                wait_tree(ui, rows);
+            }
+        })
+    });
+    section(
+        ui,
+        "a dimmed area (the connecting form at 50 %): clear on and off, then the same dimmed; the one already off keeps its own look, never fainter",
+        SPACE_8,
+        |ui| {
+            side_by_side(ui, &mut |ui| {
+                for on in [false, true] {
+                    ui.horizontal(|ui| {
+                        super::dim(ui, on, &[], |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_8;
+                                ui.add(BoxButton::outline("Clear"));
+                                ui.add_enabled(false, BoxButton::outline("Clear"));
+                            });
+                        });
+                    });
+                }
+            })
+        },
+    );
+    section(ui, "the one grey phrase of an empty area: at the top (no rows are loaded.); centred (no cell selected)", SPACE_8, |ui| {
+        side_by_side(ui, &mut |ui| {
+            for (words, place) in [("No rows are loaded.", Place::Top), ("No cell selected", Place::Centre)] {
+                let (area, _) = ui.allocate_exact_size(EMPTY_AREA, Sense::hover());
+                ui.painter().rect_filled(area, CornerRadius::ZERO, tokens(ui.ctx()).card);
+                Phrase::new(words, place).show(ui, area);
+            }
+        })
+    });
+}
+
+/// The waiting states' grid: the header over the skeleton's rows, or (`reload`) over rows at
+/// [`crate::theme::DIM`].
+fn wait_grid(ui: &mut Ui, reload: bool) {
+    let width = GRID_ROW_NUMBERS + WAIT_COLUMNS.iter().map(|c| c.0).sum::<f32>();
+    let (table, _) = ui.allocate_exact_size(vec2(width, GRID_HEADER_H + ROW_H * WAIT_ROWS as f32), Sense::hover());
+    ui.painter().rect_filled(table, CornerRadius::ZERO, tokens(ui.ctx()).card);
+    grid_cell::corner(ui, Rect::from_min_size(table.min, vec2(GRID_ROW_NUMBERS, GRID_HEADER_H)));
+    let mut x = table.left() + GRID_ROW_NUMBERS;
+    for (i, &(w, name, ty, key, right)) in WAIT_COLUMNS.iter().enumerate() {
+        let align = if right { CellAlign::Right } else { CellAlign::Left };
+        let head = Header { name, ty, key, sort: (i == 0).then_some(Sort::Asc), align, sortable: reload, hovered: false };
+        head.paint(ui, Rect::from_min_size(pos2(x, table.top()), vec2(w, GRID_HEADER_H)));
+        x += w;
+    }
+    let rows = Rect::from_min_max(pos2(table.left(), table.top() + GRID_HEADER_H), table.max);
+    ui.scope_builder(UiBuilder::new().max_rect(rows).layout(Layout::top_down(Align::Min)), |ui| {
+        if !reload {
+            let widths = WAIT_COLUMNS.map(|c| c.0);
+            let right = WAIT_COLUMNS.map(|c| c.4);
+            skeleton::GridRows { widths: &widths, right: &right, number_w: GRID_ROW_NUMBERS }.show(ui);
+            return;
+        }
+        ui.multiply_opacity(crate::theme::DIM);
+        for (r, row) in GRID_ROWS.iter().take(WAIT_ROWS).enumerate() {
+            let top = rows.top() + ROW_H * r as f32;
+            let number = RowNumber { n: r as u64 + 1, new: false, deleted: false, selected: false, whole: false, hovered: false };
+            number.paint(ui, Rect::from_min_size(pos2(rows.left(), top), vec2(GRID_ROW_NUMBERS, ROW_H)));
+            let mut x = rows.left() + GRID_ROW_NUMBERS;
+            for (c, &(w, _, _, _, right)) in WAIT_COLUMNS.iter().enumerate() {
+                let cell = Cell {
+                    text: row.values[c].map_or(CellText::Null, CellText::Text),
+                    align: if right { CellAlign::Right } else { CellAlign::Left },
+                    mark: None,
+                    selected: false,
+                    focused: false,
+                    deleted: false,
+                    link: false,
+                    row_selected: false,
+                    hovered: false,
+                    strength: 1.0,
+                    editing: false,
+                };
+                cell.show(ui, Rect::from_min_size(pos2(x, top), vec2(w, ROW_H)), ui.id().with(("showcase-wait-cell", r, c)));
+                x += w;
+            }
+        }
+    });
+}
+
+/// The waiting states' tree: the count's `LOADING` over rows at [`crate::theme::DIM`], or
+/// (without `rows`) over the skeleton's eight rows; on `bg` with a 1 px `line` at the right.
+fn wait_tree(ui: &mut Ui, rows: bool) {
+    let t = tokens(ui.ctx());
+    let (frame, _) = ui.allocate_exact_size(vec2(SIDEBAR_W + 1.0, SIDEBAR_COUNT_H + TREE_ROW_H * WAIT_TREE_ROWS as f32), Sense::hover());
+    ui.painter().rect_filled(frame, CornerRadius::ZERO, t.bg);
+    ui.painter().rect_filled(Rect::from_min_max(pos2(frame.right() - 1.0, frame.top()), frame.max), CornerRadius::ZERO, t.line);
+    let inside = Rect::from_min_size(frame.min, vec2(SIDEBAR_W, frame.height()));
+    ui.scope_builder(UiBuilder::new().max_rect(inside).layout(Layout::top_down(Align::Min)), |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        Count::Loading.show(ui);
+        if !rows {
+            skeleton::TreeRows.show(ui);
+            return;
+        }
+        let top = ui.cursor().top();
+        ui.multiply_opacity(crate::theme::DIM);
+        let table = |name| TreeRow {
+            level: 1,
+            kind: TreeKind::Relation(RelKind::Table),
+            name,
+            right: None,
+            open: Some(false),
+            selected: false,
+            focused: false,
+            chevron_focused: false,
+            hovered: false,
+        };
+        let tree = [
+            TreeRow { level: 0, kind: TreeKind::Schema, open: Some(true), ..table("shop") },
+            table("customers"),
+            table("dealers"),
+            table("order_items"),
+            table("orders"),
+            table("payments"),
+            table("shipments"),
+            table("users"),
+        ];
+        for (i, row) in tree.iter().enumerate() {
+            row.paint(ui, Rect::from_min_size(pos2(inside.left(), top + TREE_ROW_H * i as f32), vec2(SIDEBAR_W, TREE_ROW_H)));
+        }
+    });
+}
+
 /// `parts` in `code` from `at`, each in its colour; where the text ends.
 fn code(p: &egui::Painter, at: Pos2, parts: &[(&str, Color32)]) -> f32 {
     let mut job = egui::text::LayoutJob::default();
@@ -1192,7 +1357,7 @@ fn sidebar_header(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: the refresh while a refresh runs and off; the connection list's filter, no refresh; typed text keeps its case",
+        "not on the page yet: the refresh while a refresh runs (its plain icon, a click does nothing) and off; the connection list's filter, no refresh; typed text keeps its case",
         SPACE_8,
         |ui| {
             row(ui, &mut |ui, n| {

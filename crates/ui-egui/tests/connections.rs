@@ -2696,6 +2696,40 @@ fn the_form_takes_no_input_while_it_connects() {
     cancel(&mut ui);
 }
 
+/// The colour `words` were painted in, last frame, within `id`'s rect: as seen, the painter's
+/// fading applied.
+fn painted_words(ui: &mut Ui, id: &str, words: &str) -> egui::Color32 {
+    let within = ui.drawn(id);
+    ui.shapes()
+        .into_iter()
+        .find_map(|(_, s)| match s {
+            egui::Shape::Text(t) if t.galley.text() == words && within.contains_rect(t.galley.rect.translate(t.pos.to_vec2())) => {
+                let c = text_colours(&[(within, egui::Shape::Text(t.clone()))]).first().copied()?;
+                Some(if t.opacity_factor < 1.0 { c.gamma_multiply(t.opacity_factor) } else { c })
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{words} painted in {id}"))
+}
+
+/// Review Focus 6: the connecting form at 50 % keeps the CA file's CLEAR, already off, at its own
+/// look: not fainter than off. CHOOSE, on, is at half.
+#[test]
+fn the_connecting_forms_off_clear_is_not_fainter_than_off() {
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    ui.frame();
+    assert_eq!(ui.tag("conn-ca-clear").unwrap()["enabled"], json!(false), "no CA file: CLEAR is off");
+    let (clear, choose) = (painted_words(&mut ui, "conn-ca-clear", "CLEAR"), painted_words(&mut ui, "conn-ca-choose", "CHOOSE"));
+    frames_while_running(&mut ui, "conn-connect", 0.4, |_, _| {});
+    assert!(drawn_tag(&ui, "conn-cancel").is_some(), "the form is dimmed");
+    let (clear_dimmed, choose_dimmed) = (painted_words(&mut ui, "conn-ca-clear", "CLEAR"), painted_words(&mut ui, "conn-ca-choose", "CHOOSE"));
+    let near = |a: egui::Color32, b: egui::Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| x.abs_diff(y) <= 2);
+    assert!(near(clear_dimmed, clear), "CLEAR {clear_dimmed:?} while connecting, {clear:?} idle");
+    assert!(near(choose_dimmed, choose.gamma_multiply(dbee_ui_egui::theme::DIM)), "CHOOSE {choose_dimmed:?} while connecting, half of {choose:?}");
+    cancel(&mut ui);
+}
+
 /// `a` holds `b` (or `b` holds `a`): a group and one of its parts, which it draws in its own rect
 /// (a segmented row and its segments, the colour row and its swatches, a list row and its `-kind`
 /// twin, the error band and its heading).
