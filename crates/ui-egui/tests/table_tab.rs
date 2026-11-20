@@ -2298,7 +2298,7 @@ fn loading_names_the_table_in_the_data_font() {
     let data = dbee_ui_egui::theme::Text::Data.font().family;
     assert!(fonts.iter().any(|(s, f)| s == &name && *f == data), "the name in the data font: {fonts:?}");
     assert!(fonts.iter().any(|(s, f)| s == "Loading " && *f != data), "the words in body: {fonts:?}");
-    ui.click("status-cancel");
-    ui.until("the cancelled load", |ui| ui.table()["loading"].is_null());
+    // The lock goes with the transaction, and the page loads.
     ui.execute("query.rollback", json!({ "tab": query }));
+    ui.until("the load", |ui| ui.table()["loading"].is_null());
 }
