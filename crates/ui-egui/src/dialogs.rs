@@ -6,8 +6,9 @@
 //! ([`Rerun`]), and the dialog's OK runs it again with the answer added:
 //! - `needsHostKey` → [`Dialog::HostKey`]: the fingerprint, Trust and connect (`trustHostKey`);
 //! - `needsPassphrase`, `needsPassword`, `needsSshPassword` → [`Dialog::Secret`]: a secret field
-//!   (`sshPassphrase`, `password`, `sshPassword`) and, for `connection.open`, "Save in keyring"
-//!   (`savePassword`), which the engine honours for saved connections only;
+//!   (`sshPassphrase`, `password`, `sshPassword`) and, for `connection.open`, "Save in keyring":
+//!   `savePassword` for a saved connection; for an open that saves the connection (`save`), the
+//!   config's `saveSecrets`, so unticked nothing goes to the secret store;
 //! - `needsConfirm` → [`Dialog::Confirm`]: Close anyway, or Apply again after an unknown outcome (`force`);
 //! - `needsTransactionEnd` → [`Dialog::EndTransaction`], the transaction prompt: COMMIT (the main
 //!   button, Enter), ROLLBACK or CANCEL, or only ROLLBACK and CANCEL when the transaction failed or
@@ -446,9 +447,9 @@ fn secret_line(app: &DbeeApp, ask: &SecretAsk, rerun: &Rerun) -> Words {
 }
 
 /// "Save in keyring" for a secret `rerun` asks for: offered for `connection.open`, and possible
-/// only with a secret store and for a saved connection (the engine keeps nothing for an unsaved
-/// one). Checked as the form says ("Save passwords") when the form asked, else as the saved
-/// connection says.
+/// only with a secret store, for a saved connection or one the open saves (`save`; the engine
+/// keeps nothing for an unsaved one). Checked as the form says ("Save passwords") when the form
+/// asked, else as the saved connection says.
 fn keep_of(app: &DbeeApp, rerun: &Rerun) -> Keep {
     if rerun.command != connections::OPEN {
         return Keep::NotOffered;
@@ -463,8 +464,28 @@ fn keep_of(app: &DbeeApp, rerun: &Rerun) -> Keep {
     };
     match app.session.state().store.saved.iter().find(|c| !id.is_empty() && c.id == id) {
         Some(saved) => Keep::Yes { checked: form_says.unwrap_or(saved.save_secrets) },
+        None if saves(&rerun.params) => Keep::Yes { checked: form_says.unwrap_or(true) },
         None => Keep::No("Save the connection to keep its passwords."),
     }
+}
+
+/// The open saves the connection once it connects (`save: true`).
+fn saves(params: &Json) -> bool {
+    params.get("save").and_then(Json::as_bool) == Some(true)
+}
+
+/// `params` of an open whose secret dialog's "Save in keyring" says `keep`: an open that saves
+/// the connection keeps its secrets as its `saveSecrets` says, so that is set to `keep`, and with
+/// it off nothing goes to the secret store; another keeps the secrets given with `savePassword`.
+fn kept(params: Json, keep: bool) -> Json {
+    if !saves(&params) {
+        return if keep { with(params, "savePassword", json!(true)) } else { params };
+    }
+    let mut params = params;
+    if let Some(config) = params.get_mut("config").and_then(Json::as_object_mut) {
+        config.insert("saveSecrets".into(), json!(keep));
+    }
+    params
 }
 
 /// What the user did in a dialog this frame.
@@ -641,8 +662,8 @@ fn draw(ctx: &egui::Context, dialog: &mut Dialog, tags: &mut Tags) -> Act {
                 Act::Cancel
             } else if (pressed == Some(OK) || entered) && !value.is_empty() {
                 let mut params = with(rerun.params.take(), ask.param(), json!(std::mem::take(value)));
-                if *save && matches!(keep, Keep::Yes { .. }) {
-                    params = with(params, "savePassword", json!(true));
+                if matches!(keep, Keep::Yes { .. }) {
+                    params = kept(params, *save);
                 }
                 Act::Rerun(Rerun { command: rerun.command, params, origin: rerun.origin })
             } else {

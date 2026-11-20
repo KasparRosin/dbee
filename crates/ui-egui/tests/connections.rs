@@ -1391,32 +1391,47 @@ fn confirm_dialog_closes_anyway() {
     assert_eq!((d["screen"].clone(), d["tabs"].clone()), (json!("connections"), json!([])), "{d}");
 }
 
+/// CONNECT on a new connection that asks for its password: the dialog's "Save in keyring" starts
+/// as the form's "Save passwords" and says what happens: ticked, the saved connection keeps the
+/// password; unticked, nothing goes to the secret store.
 #[test]
-fn password_dialog_for_an_unsaved_connection_offers_no_keep() {
+fn the_password_dialogs_save_box_decides_for_a_new_connection() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = ui();
-    let pg = pg14(db);
-    ui.replace("conn-host", &pg.host);
-    ui.replace("conn-port", &pg.port.to_string());
-    ui.replace("conn-user", &pg.user);
-    ui.replace("conn-database", &pg.database);
-    ui.click("conn-connect");
-    ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
-    // Not saved: there is nothing to keep it for.
-    let save = ui.tag("dialog-save").unwrap();
-    assert_eq!((save["value"].clone(), save["enabled"].clone()), (json!(false), json!(false)), "{save}");
-    assert_eq!(ui.tag("dialog-ok").unwrap()["enabled"], false, "no password typed yet");
-    ui.text(&db.password);
-    ui.click("dialog-ok");
-    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
-    // CONNECT saved it once it connected, as SAVE would: with the password, since the form's
-    // "Save passwords in the keyring" is ticked.
-    let list = ui.execute("connection.list", json!({}));
-    assert_eq!(list["saved"].as_array().unwrap().len(), 1, "{list}");
-    let id = list["saved"][0]["id"].as_str().unwrap().to_string();
-    assert_eq!(stored(&ui, &id, SecretKind::DbPassword).as_deref(), Some(db.password.as_str()));
-    let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
-    assert!(!everything.contains(&db.password), "{everything}");
+    for keep in [true, false] {
+        let mut ui = ui();
+        let pg = pg14(db);
+        ui.replace("conn-host", &pg.host);
+        ui.replace("conn-port", &pg.port.to_string());
+        ui.replace("conn-user", &pg.user);
+        ui.replace("conn-database", &pg.database);
+        ui.click("conn-connect");
+        ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
+        let save = ui.tag("dialog-save").unwrap();
+        assert_eq!(save["value"], true, "starts as the form's Save passwords: {save}");
+        assert!(save.get("enabled").is_none(), "it can be changed: {save}");
+        if !keep {
+            ui.click("dialog-save");
+            assert_eq!(ui.value("dialog-save"), false);
+        }
+        ui.click("dialog-secret");
+        ui.text(&db.password);
+        ui.click("dialog-ok");
+        ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+        // CONNECT saved it once it connected, the password only as the box said.
+        let list = ui.execute("connection.list", json!({}));
+        assert_eq!(list["saved"].as_array().unwrap().len(), 1, "{list}");
+        let id = list["saved"][0]["id"].as_str().unwrap().to_string();
+        let kept = stored(&ui, &id, SecretKind::DbPassword);
+        assert_eq!(kept.as_deref(), keep.then_some(db.password.as_str()), "keep {keep}");
+        if !keep {
+            let store = ui.secrets.clone().unwrap();
+            for kind in [SecretKind::DbPassword, SecretKind::SshPassword, SecretKind::SshPassphrase] {
+                assert_eq!(store.get(&id, kind).unwrap(), None, "nothing in the store: {kind:?}");
+            }
+        }
+        let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
+        assert!(!everything.contains(&db.password), "{everything}");
+    }
 }
 
 #[test]
@@ -2108,7 +2123,7 @@ fn the_moved_keyring_checkbox_keeps_its_id_and_value() {
     ui.click("dialog-save");
     assert_eq!(ui.value("dialog-save"), false, "a click unticks it");
     ui.click("dialog-cancel");
-    // A connection that isn't saved: nothing to keep the password for.
+    // A connection that isn't saved yet: CONNECT saves it, so the password can be kept too.
     let mut ui = self::ui();
     let pg = pg14(db);
     ui.replace("conn-host", &pg.host);
@@ -2119,7 +2134,7 @@ fn the_moved_keyring_checkbox_keeps_its_id_and_value() {
     ui.until("the password dialog", |ui| ui.inspect()["dialog"] == "password");
     ui.frame();
     let i = ui.inspect();
-    assert_checkbox(&ui, &i, "dialog-save", false, false, "Save in keyring");
+    assert_checkbox(&ui, &i, "dialog-save", true, true, "Save in keyring");
     ui.click("dialog-cancel");
 }
 
