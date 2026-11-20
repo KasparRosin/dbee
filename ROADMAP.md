@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, once file export lands (M4). M1 "Daily Postgres workflow" and M2 "Three databases" are built and wait for their last check: a day of real use on the maintainer's own databases.
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (M3 is the Redesign; import and export are M4) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-20 · **Last updated:** 2026-11-20 · **Change:** minor (M3's Phase 3 screens built: Structure 40 %, ~30 % overall) · **Target:** Beekeeper Studio 5.5.7
 
 Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs` on Postgres, `apps/dbee/tests/m2_day.rs` on MySQL, MariaDB and SQLite; both run by hand: `#[ignore]`, ci skips them). They are connecting (a server also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M4. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
 
@@ -10,7 +10,7 @@ Why pre-alpha: five of the six alpha gate rows work end to end, measured in the 
 
 | Number | Value | Kind |
 |---|---|---|
-| Overall parity with Beekeeper Studio | ~29 % | estimated (weighted dimensions, [target-app-parity](docs/target-app-parity.md)) |
+| Overall parity with Beekeeper Studio | ~30 % | estimated (weighted dimensions, [target-app-parity](docs/target-app-parity.md)) |
 | Alpha gate rows that pass | 5 of 6, on all four engines | measured (`m1_day`, `m2_day` and the test suites, [roadmap](docs/roadmap.md)) |
 | Commands registered | 50: 47 engine, 3 UI-only | measured (the command tables) |
 | Tests | 1,003 `#[test]` attributes in 66,848 lines of Rust; `cargo xtask ci` runs 1,188 | measured (`cargo xtask stats` and `cargo xtask ci`, 2026-11-06) |
@@ -19,7 +19,7 @@ Why pre-alpha: five of the six alpha gate rows work end to end, measured in the 
 
 | Dimension | Parity | Remaining (h) | Doc |
 |---|---|---|---|
-| Features | ~35 % (estimated) | not estimated yet | [target-app-parity](docs/target-app-parity.md) |
+| Features | ~38 % (estimated) | not estimated yet | [target-app-parity](docs/target-app-parity.md) |
 | Database engines | 4 of 20: PostgreSQL, MySQL, MariaDB, SQLite (20 %, measured) | not estimated yet | [driver-parity](docs/driver-parity.md) |
 | UI | ~45 % (estimated) | not estimated yet | [ui-parity](docs/ui-parity.md) |
 | Performance | M1's targets met, again on every engine (measured); ~30 % against Beekeeper (estimated) | — | [target-app-parity](docs/target-app-parity.md) |
@@ -41,9 +41,9 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 | Query | 32 % | ~25 % | not estimated yet | [target-app-parity](docs/target-app-parity.md) |
 | Results | 33 % | ~30 % | M4 | [target-app-parity](docs/target-app-parity.md) |
 | Data | 59 % | ~45 % | not estimated yet | [target-app-parity](docs/target-app-parity.md) |
-| Structure | 0 % | 0 % | not estimated yet | [target-app-parity](docs/target-app-parity.md) |
+| Structure | 40 % | ~30 % | not estimated yet | [target-app-parity](docs/target-app-parity.md) |
 | Import/export | 0 % | 0 % | M4 | [file-format-parity](docs/file-format-parity.md) |
-| Tools, App | 0 % | 0 % | not estimated yet | [target-app-parity](docs/target-app-parity.md) |
+| Tools, App | 5 % | ~4 % | not estimated yet | [target-app-parity](docs/target-app-parity.md) |
 
 ## Languages
 
@@ -54,13 +54,14 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 ## Upcoming
 
 1. The last check of M1 and M2: a day of real use of a Linux release build on the maintainer's own Postgres, MySQL, MariaDB and SQLite databases. Only the maintainer does this step; agents never connect to those databases.
-2. M3 Redesign: a new look and layout for every screen, with dark mode, from the design round. Mostly the UI; the engine only gains the few commands the new screens need.
+2. M3 Redesign: a new look and layout for every screen, with dark mode, from the design round. Its Phase 3 screens are built (2026-11-20); the checkpoint reviews and the day pictures come next.
 3. M4 Import and export, for all four engines: file export and import, the last alpha gate row, and dump and restore with each engine's own tools.
 
 ## Progress log
 
 | Date | Entry |
 |---|---|
+| 2026-11-20 | M3 Phase 3 screens 3–10 built: the table tab's bars, the query tab (result bar, error band with ROLLBACK), the value panel inside the tab (WRAP, editing several lines), the schema tree's menu and count, the connection screen (one list, a two-column form, CONNECT saves), the quick search grouped by connection, the empty and loading states on one 300 ms clock, and a read-only STRUCTURE page; light and dark. The review rounds' fixes landed with them. |
 | 2026-11-08 | Milestones renumbered: M3 is the Redesign, and import and export move to M4. Alpha waits for M4's file export. |
 | 2026-11-08 | The larger review's bugs fixed: two dbee windows no longer lose each other's saved connections (each change re-reads the file under a lock); a newer dbee's connections file is read and never overwritten, and fields an older build does not know survive; a table tab's stopped load stops no other tab; the Postgres cancel and the MySQL KILL go to the server the connection reached; every wall-clock bound in a test is in an ignored timing twin. |
 | 2026-11-06 | M2's whole-branch review fixed: a stopped statement's cancel is sent again until it ends and never reaches a later one; a stored password is not used with another CA file or an option that protects it less; the filter bar's `like` escapes with `\` on every engine; a file dropped while connected opens through the disconnect question, and one a saved connection names opens as saved (read-only kept); each engine's fixed facts in its own file. The engine differences the review found are in gaps.md. |
@@ -75,6 +76,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-20 | minor | M3's Phase 3 screens: Structure 40 %, Tools and App 5 %, features ~38 %, overall ~30 % (estimated); upcoming list and progress log. |
 | 2026-11-08 | minor | M3 is the Redesign; import and export are M4; upcoming list and progress log updated. |
 | 2026-11-08 | minor | Progress log: the larger review's bugs. |
 | 2026-11-06 | minor | Progress log: M2's review fixes; test numbers measured again. |
