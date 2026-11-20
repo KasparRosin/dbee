@@ -60,7 +60,7 @@ pub(crate) fn painter(ui: &egui::Ui) -> egui::Painter {
     p
 }
 
-/// Draws `add` in a scope of `ui`. When `on`, at half strength in its normal look, taking no
+/// Draws `add` in a scope of `ui`. When `on`, at [`crate::theme::DIM`] in its normal look, taking no
 /// input: a cover over the scope takes the pointer, and the keyboard leaves any widget in it
 /// (those of `guard`, and any drawn inside the scope), before and after `add` draws, so neither a
 /// click nor Tab nor typing reaches them. Tab and Shift+Tab step over the scope: the keyboard
@@ -75,7 +75,7 @@ pub fn dim<R>(ui: &mut egui::Ui, on: bool, guard: &[egui::Id], add: impl FnOnce(
     let inner = ui
         .scope_builder(egui::UiBuilder::new(), |ui| {
             if on {
-                ui.multiply_opacity(crate::theme::size::DIM_OPACITY);
+                ui.multiply_opacity(crate::theme::DIM);
             }
             add(ui)
         })

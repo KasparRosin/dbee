@@ -522,6 +522,14 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.until("CANCEL in the run row", |app| app.tag("query-cancel").is_some());
     assert!(app.tag("query-cancel").is_some_and(|t| t.get("enabled") != Some(&json!(false))), "{name}: Cancel is enabled while it runs");
     assert!(app.tag("query-run").is_some_and(|t| t.get("enabled") == Some(&json!(false))), "{name}: Run is off while it runs");
+    // The footer's job shows from 300 ms too, with its timer.
+    app.until("the footer's timer", |app| app.tag("status-timer").is_some());
+    assert!(app.value("status-job").as_str().is_some_and(|j| j.starts_with("Running ")), "{name}: the run is the footer's job");
+    let timer = app.value("status-timer");
+    let read = timer.as_str().unwrap_or_default();
+    let timed = read.len() == 7
+        && read.chars().enumerate().all(|(i, c)| [(2, ':'), (5, '.')].iter().find(|(at, _)| *at == i).map_or(c.is_ascii_digit(), |(_, s)| c == *s));
+    assert!(timed, "{name}: the timer reads like 00:00.0: {timer}");
     app.shot(root, &format!("{p}-7c-running"));
     app.click("query-cancel");
     let q = query_done(app);

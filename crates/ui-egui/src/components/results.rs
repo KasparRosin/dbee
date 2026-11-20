@@ -16,14 +16,13 @@ use egui::{Align, Color32, CornerRadius, Galley, Id, Layout, Rect, Response, Sen
 
 use super::button::{BarButton, BoxButton, TextButton};
 use super::icon::Icon;
-use super::spinner::Spinner;
 use super::status::{Piece, piece, timer};
 use super::tab::{Placed, list_button, row};
 use super::tooltip::Hint;
 use super::{Look, focus, painter};
 use crate::theme::size::{
     BAR_CELL_H, BAR_H, BAR_LINE, BUTTON_H, CHIP_RUN_GAP, NEW_TAB_W, RESULT_FACT_GAP, RESULT_TAB_PAD_X, RESULT_TAB_TITLE_MAX, ROW_COUNT_COUNTING_GAP,
-    ROW_COUNT_GAP, RUN_CHIP_MIN_W, RUN_ROW_GAP, RUN_ROW_PAD_X, SPINNER, TAB_ACTIVE_LINE,
+    ROW_COUNT_GAP, RUN_CHIP_MIN_W, RUN_ROW_GAP, RUN_ROW_PAD_X, TAB_ACTIVE_LINE,
 };
 use crate::theme::{Text, Tokens, tokens};
 use crate::tree::thousands;
@@ -247,9 +246,9 @@ pub enum RunState {
         rows: u64,
         ms: Option<u64>,
     },
-    /// The run goes, for `elapsed` so far (today's spinner while the app gives no timer).
+    /// The run goes, for `elapsed` so far (the tab shows it only once it has gone 300 ms).
     Running {
-        elapsed: Option<Duration>,
+        elapsed: Duration,
     },
     /// The run failed (its error shows below the bar).
     Failed {
@@ -352,49 +351,34 @@ fn took(d: Duration) -> String {
     }
 }
 
-/// A fact of a bar after its words: how long, or a spinner while that isn't known.
-pub(super) enum Time {
-    Words(Piece),
-    Spinner,
-}
+/// A fact of a bar after its words: how long.
+pub(super) struct Time(Piece);
 
 impl Time {
     /// How long something took, in `label` capitals: `24 MS`.
     fn took(ui: &Ui, t: &Tokens, d: Duration) -> Time {
         let words = took(d);
-        Time::Words(Piece::new(ui, Text::Label.job(&words, t.text_muted), words))
+        Time(Piece::new(ui, Text::Label.job(&words, t.text_muted), words))
     }
 
     /// A running timer, in `data`: `00:02.4`.
     pub(super) fn timer(ui: &Ui, t: &Tokens, d: Duration) -> Time {
         let words = timer(d);
-        Time::Words(Piece::new(ui, Text::Data.job_as_written(&words, t.text_muted), words))
+        Time(Piece::new(ui, Text::Data.job_as_written(&words, t.text_muted), words))
     }
 
     pub(super) fn width(&self) -> f32 {
-        match self {
-            Time::Words(p) => p.width(),
-            Time::Spinner => SPINNER,
-        }
+        self.0.width()
     }
 
-    /// What it reads out as: its words, or nothing for the spinner.
-    fn says(&self) -> Option<&str> {
-        match self {
-            Time::Words(p) => Some(p.says()),
-            Time::Spinner => None,
-        }
+    /// What it reads out as: its words.
+    fn says(&self) -> &str {
+        self.0.says()
     }
 
     /// Draws it from `x`, centred on `mid`: its words' response.
-    pub(super) fn show(self, ui: &Ui, id: Id, x: f32, mid: f32, t: &Tokens) -> Option<Response> {
-        match self {
-            Time::Words(p) => Some(piece(ui, id, &p, pos2(x, mid), t.text_muted)),
-            Time::Spinner => {
-                Spinner::new().paint(ui, pos2(x + SPINNER / 2.0, mid));
-                None
-            }
-        }
+    pub(super) fn show(self, ui: &Ui, id: Id, x: f32, mid: f32, t: &Tokens) -> Response {
+        piece(ui, id, &self.0, pos2(x, mid), t.text_muted)
     }
 }
 
@@ -410,7 +394,7 @@ impl ResultBar<'_> {
                 };
                 (words, t.text_muted, ms(m))
             }
-            RunState::Running { elapsed } => ("Running".to_owned(), t.text_muted, Some(elapsed.map_or(Time::Spinner, |e| Time::timer(ui, t, e)))),
+            RunState::Running { elapsed } => ("Running".to_owned(), t.text_muted, Some(Time::timer(ui, t, elapsed))),
             RunState::Failed { ms: m } => ("Failed".to_owned(), t.danger, ms(m)),
             RunState::Cancelled { elapsed } => ("Cancelled".to_owned(), t.text_muted, elapsed.map(|e| Time::took(ui, t, e))),
             RunState::Affected { rows, ms: m } => (rows.map(|n| format!("{} affected", rows_of(n))).unwrap_or_default(), t.text_muted, ms(m)),
@@ -463,7 +447,7 @@ impl ResultBar<'_> {
         let export = (self.export && fit.export).then(|| Self::export_button(fit.export_word));
         let export_rect = export.as_ref().map(|b| Rect::from_min_max(pos2(value_left - b.width(&ui), cell.top()), pos2(value_left, cell.bottom())));
         let (words_say, colour, time) = self.facts(&ui, t);
-        let says = match time.as_ref().and_then(Time::says) {
+        let says = match time.as_ref().map(Time::says) {
             Some(time) if words_say.is_empty() => time.to_owned(),
             Some(time) => format!("{words_say} {time}"),
             None => words_say.clone(),
@@ -525,7 +509,7 @@ impl ResultBar<'_> {
         let left_clip = ui.clip_rect();
         ui.set_clip_rect(left_clip.intersect(Rect::from_x_y_ranges(facts_left..=facts_end.max(facts_left), bar.rect.y_range())));
         let facts = piece(&ui, id.with("facts"), &words, pos2(facts_left, mid), colour);
-        let time = time.and_then(|time| time.show(&ui, id.with("time"), facts_left + words.width() + gap, mid, t));
+        let time = time.map(|time| time.show(&ui, id.with("time"), facts_left + words.width() + gap, mid, t));
         ui.set_clip_rect(left_clip);
         let time = match (time, self.time_hover) {
             (Some(r), Some(hover)) => Some(r.hint(hover)),
@@ -897,7 +881,7 @@ mod tests {
             let m = t.text_muted;
             let rows: Vec<(&str, ResultBar<'static>, (&str, Color32), Option<(&str, Text)>)> = vec![
                 ("done", bar(true, RunState::Done { rows: 10, ms: Some(24) }, None, true, false), ("10 ROWS", m), Some(("24 MS", Label))),
-                ("running", bar(true, RunState::Running { elapsed: Some(s(2400)) }, None, true, false), ("RUNNING", m), Some(("00:02.4", Data))),
+                ("running", bar(true, RunState::Running { elapsed: s(2400) }, None, true, false), ("RUNNING", m), Some(("00:02.4", Data))),
                 ("failed", bar(false, RunState::Failed { ms: Some(12) }, None, false, false), ("FAILED", t.danger), Some(("12 MS", Label))),
                 (
                     "cancelled",
@@ -1144,7 +1128,7 @@ mod tests {
             (RunState::Done { rows: 3, ms: Some(24) }, "24 MS", Text::Label),
             (RunState::Done { rows: 3, ms: Some(65_300) }, "01:05.3", Text::Label),
             (RunState::Cancelled { elapsed: Some(ms(3200)) }, "3.2 S", Text::Label),
-            (RunState::Running { elapsed: Some(ms(2400)) }, "00:02.4", Text::Data),
+            (RunState::Running { elapsed: ms(2400) }, "00:02.4", Text::Data),
         ] {
             let (shapes, _) = drawn(Theme::Light, |ui| {
                 ResultBar { tabs: Vec::new(), state, first_of: None, export: false, value: Some(false), time_hover: None, value_off: false }.show(ui);
@@ -1154,26 +1138,9 @@ mod tests {
     }
 
     #[test]
-    fn with_no_timer_running_shows_todays_spinner_and_counting_its_words_alone() {
-        // The query tab gives no timer yet: RUNNING shows today's spinner where the timer goes.
+    fn counting_without_a_timer_shows_its_words_alone() {
         // A count shows nothing of its own for its first 300 ms (no timer yet): the words alone,
         // no COUNTING and no spinner. An estimate of 0 asks to COUNT ROWS.
-        let (shapes, at) = drawn(Theme::Light, |ui| {
-            ResultBar {
-                tabs: Vec::new(),
-                state: RunState::Running { elapsed: None },
-                first_of: None,
-                export: false,
-                value: Some(false),
-                time_hover: None,
-                value_off: false,
-            }
-            .show(ui);
-        });
-        let (running, _) = word(&shapes, "RUNNING");
-        let slot =
-            Rect::from_min_max(pos2(running.right() - Text::Label.spacing() + 12.0, at.top()), pos2(running.right() + 12.0 + SPINNER, at.bottom()));
-        assert_eq!(icon_in(&shapes, slot.expand(1.0)).0, [crate::theme::LIGHT.text_muted], "the spinner 12 after RUNNING: {slot:?}");
         let shapes = painted(Theme::Light, |ui| {
             ui.horizontal(|ui| {
                 RowCount::Counting { estimate: Some(100_000), elapsed: None }.show(ui, Some((1, 100)));

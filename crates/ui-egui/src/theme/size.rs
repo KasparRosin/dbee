@@ -351,9 +351,6 @@ pub const ERROR_BAND_HEADING_MIN: f32 = 120.0;
 pub const STRIP_EDGE: f32 = 2.0;
 pub const STRIP_PAD_Y: f32 = SPACE_8;
 pub const STRIP_MAX_LINES: usize = 3;
-/// What is dimmed (the connection form's fields while a test or connect runs, LC3) is drawn at
-/// this opacity.
-pub const DIM_OPACITY: f32 = 0.5;
 /// The quick search (QC with R4's rows): a box this wide (less where the window is narrower,
 /// keeping this margin from its sides and its bottom), this far below the window's top, its
 /// content this far inside; a field this tall, then this gap before the list, whose headings and

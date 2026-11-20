@@ -871,17 +871,21 @@ fn bars(ui: &mut Ui) {
                         Some(Activity::Exporting { elapsed: Some(s(12_400)) }),
                     ),
                     (red, at(&TUNNEL), Some(Activity::Importing { elapsed: Some(s(3900)) })),
-                    (red, at(&SHOP_FILE), Some(Activity::Job { text: Words::from("Counting rows"), elapsed: Some(s(1200)), cancel: true })),
+                    (red, at(&SHOP_FILE), Some(Activity::Job { text: Words::from("Counting rows"), elapsed: s(1200), cancel: true })),
                 ],
             );
         },
     );
     section(
         ui,
-        "not on the page yet: a job before the app gives timers, today's spinner in the timer's place; a table's name keeps its case; a name dbee made, as written, with no address; a long path cut in the middle",
+        "not on the page yet: a count's job with its timer, a table's name keeps its case; reconnecting in its first 300 ms, its words alone; a name dbee made, as written, with no address; a long path cut in the middle",
         SPACE_8,
         |ui| {
-            let job = Activity::Job { text: Words::from("Loading ").name("Orders").plain("…"), elapsed: None, cancel: true };
+            let job = Activity::Job {
+                text: Words::from("Counting the rows of ").name("Orders").plain("…"),
+                elapsed: Duration::from_millis(1200),
+                cancel: true,
+            };
             let made = Connection { name: "postgres@pg14.internal/Shop", colour: ConnectionColor::None, own: false };
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = STATUS_APART;
@@ -889,6 +893,7 @@ fn bars(ui: &mut Ui) {
                     ui,
                     vec![
                         (shop(ConnectionColor::Blue), Facts { address: pg14, ..Facts::default() }, Some(job)),
+                        (shop(ConnectionColor::Blue), Facts { address: pg14, ..Facts::default() }, Some(Activity::Reconnecting { elapsed: None })),
                         (made, Facts { server: Some("PostgreSQL 14.24"), ..Facts::default() }, None),
                     ],
                 );
@@ -902,7 +907,7 @@ fn bars(ui: &mut Ui) {
 }
 
 /// The run row, the result tabs, the result bar and the row count, as the page's Tabs and bars
-/// frame shows them, and their states before the app gives timers.
+/// frame shows them, and their first states.
 fn results(ui: &mut Ui) {
     let hovered = Look { hovered: true, ..Look::default() };
     let focused = Look { focused: true, ..Look::default() };
@@ -953,7 +958,7 @@ fn results(ui: &mut Ui) {
                 ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(false), time_hover: None, value_off: false },
                 ResultBar {
                     tabs: two(),
-                    state: RunState::Running { elapsed: Some(s(2400)) },
+                    state: RunState::Running { elapsed: s(2400) },
                     first_of: None,
                     export: true,
                     value: Some(false),
@@ -1023,7 +1028,7 @@ fn results(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: before the app gives timers, today's spinner in the timer's place; a count's first 300 ms, its words alone; a result's name keeps its case",
+        "not on the page yet: a run as it first shows, at 00:00.3; a count's first 300 ms, its words alone; a result's name keeps its case",
         SPACE_8,
         |ui| {
             stack(ui, &mut |ui| {
@@ -1031,7 +1036,7 @@ fn results(ui: &mut Ui) {
                     let tabs = vec![ResultTab::new("select … Orders").active(true), ResultTab::new("select … Line_Items")];
                     ResultBar {
                         tabs,
-                        state: RunState::Running { elapsed: None },
+                        state: RunState::Running { elapsed: Duration::from_millis(300) },
                         first_of: None,
                         export: true,
                         value: Some(false),
@@ -1051,7 +1056,7 @@ fn results(ui: &mut Ui) {
 }
 
 /// The table bar, the filter bar and the paging bar, as the page's Tabs and bars frame shows
-/// them, and a page loading before the app gives timers.
+/// them.
 fn table_tab_bars(ui: &mut Ui) {
     let stack = |ui: &mut Ui, rows: &mut dyn FnMut(&mut Ui)| {
         ui.vertical(|ui| {
@@ -1085,7 +1090,7 @@ fn table_tab_bars(ui: &mut Ui) {
             let rows = [
                 table(View::Data, None, RowCount::Exact(25_000)),
                 table(View::Structure, None, RowCount::Estimate(25_000)),
-                table(View::Data, Some(Loading { elapsed: Some(s(800)) }), RowCount::Exact(25_000)),
+                table(View::Data, Some(Loading { elapsed: s(800) }), RowCount::Exact(25_000)),
                 table(View::Data, None, RowCount::Estimate(100_000)),
                 table(View::Data, None, RowCount::Unknown),
                 table(View::Data, None, RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }),
@@ -1100,11 +1105,6 @@ fn table_tab_bars(ui: &mut Ui) {
             });
         },
     );
-    section(ui, "not on the page yet: a page loading before the app gives timers, today's spinner in the timer's place", SPACE_8, |ui| {
-        bar(ui, &mut |ui| {
-            table(View::Data, Some(Loading { elapsed: None }), RowCount::Exact(25_000)).show(ui);
-        });
-    });
     section(
         ui,
         "filter bar: filter row first (raw SQL toggle, column, operator, value, remove, add, APPLY), then AND rows; on card, 4 by 12 inset, line under",

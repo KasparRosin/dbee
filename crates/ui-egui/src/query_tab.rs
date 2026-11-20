@@ -13,7 +13,7 @@
 //!   choosing one sends `query.setDatabase`. It waits while the tab runs, and while Run cannot.
 //!   Then RUN (`query.run`), CANCEL (`query.cancel`) and RUN CURRENT (`query.run` with `current`
 //!   and the cursor). Once the tab's run has gone 300 ms (the window's job clock,
-//!   [`table_tab::after_quiet`]), RUN and RUN CURRENT are off and CANCEL shows, until it ends;
+//!   [`crate::quiet`]), RUN and RUN CURRENT are off and CANCEL shows, until it ends;
 //! - the result bar ([`ResultBar`], [`result_bar`]), once there are results, an error, or the run
 //!   has gone 300 ms (none before the first run): a tab per result, titled for what its statement
 //!   works on ([`result_title`]; a click shows it, `query.showResult`), scrolling behind the ⌄
@@ -135,7 +135,7 @@ use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
 use crate::connections::line_galley;
 use crate::grid::{Grid, GridAct, GridState, RowEdits};
-use crate::table_tab;
+use crate::quiet::Watch;
 use crate::theme::{
     self, Text,
     size::{self, BAR_H, BAR_LINE, EDITOR_INSET, RADIUS_CONTROL, SPLIT_ZONE_H},
@@ -1079,7 +1079,7 @@ pub(crate) fn band(
 /// result before it; else what the shown result holds.
 fn run_state(q: &dbee_engine::QueryTab, elapsed: Option<std::time::Duration>) -> Option<RunState> {
     if let Some(elapsed) = elapsed {
-        return Some(RunState::Running { elapsed: Some(elapsed) });
+        return Some(RunState::Running { elapsed });
     }
     if let Some(e) = &q.error {
         if e.code == "cancelled" {
@@ -1207,13 +1207,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         let body = ui.available_rect_before_wrap();
         let h = body.height();
         // The run's 300 ms: CANCEL, RUN off and the running words wait as long.
-        let now = ui.ctx().input(|i| i.time);
-        let elapsed = table_tab::after_quiet(&mut view.work.since, id, q.running, now);
+        let ctx = ui.ctx().clone();
+        let elapsed = q.running.and_then(|job| view.quiet.past(&ctx, Watch::Tab(id, job)));
         let past = elapsed.is_some();
-        if q.running.is_some() {
-            // So the 300 ms pass, and the timer moves.
-            ui.ctx().request_repaint_after(table_tab::TICK);
-        }
         // The split first, so a drag moves the editor in this frame: a zone centred on the run
         // row's top line.
         let mut editor_h = editor_height(h, view.query_split);

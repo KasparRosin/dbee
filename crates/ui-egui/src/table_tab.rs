@@ -9,7 +9,8 @@
 //!   COUNT ROWS, IMPORT and EXPORT (off until M4), and at its right end the value panel's toggle
 //!   (`value-toggle`, `ui.toggleValuePanel`). A page load that has run 300 ms shows CANCEL in
 //!   REFRESH's place and LOADING with its timer in the count's; a count that has run 300 ms shows
-//!   COUNTING with its timer. The timers count from the frame that first saw the job ([`Since`]);
+//!   COUNTING with its timer. The timers count from the frame that first saw the job
+//!   ([`crate::quiet`]);
 //! - the error band (`table-error`, [`crate::components::error_band`]) when the last Apply failed,
 //!   with the server's message, detail and hint (the staged changes stay, and the grid marks the
 //!   row it failed on), or else when the last page load failed, with the rows from before kept
@@ -43,7 +44,7 @@ use dbee_core::{ResultSet, TableInfo};
 use dbee_engine::cmd::LOST;
 use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
-use dbee_engine::{Edits, JobId, Json, Outcome, Tab, TabId, TableTab, Total, Which};
+use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab, Total, Which};
 use dbee_sql::select::PAGE_SIZE;
 use egui::{Align, CornerRadius, Layout, Rect, Sense, UiBuilder, pos2, vec2};
 use serde_json::json;
@@ -60,6 +61,7 @@ use crate::editors::{self, Place};
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
+use crate::quiet::Watch;
 use crate::theme::size::{BAR_LINE, NOTE_BAR_H, NOTE_BAR_PAD_X, TABLE_EMPTY_PAD};
 use crate::theme::{self, Text};
 use crate::{DbeeApp, value_panel};
@@ -69,17 +71,6 @@ const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "t
 
 /// The grids' states, by tab.
 pub(crate) type Grids = HashMap<TabId, GridState>;
-
-/// When the window first saw each table tab's page load or count running, by tab and job, in
-/// seconds on egui's clock.
-pub(crate) type Since = HashMap<(TabId, JobId), f64>;
-
-/// The table bar's loading and counting states show once their job has run this long, so a fast
-/// one never flickers.
-pub(crate) const QUIET: f64 = 0.3;
-
-/// How often the window draws again while a job runs, so its timer moves.
-pub(crate) const TICK: Duration = Duration::from_millis(100);
 
 /// Why STRUCTURE is off, on its hover.
 pub(crate) const STRUCTURE_LATER: &str = "Structure: not now, the structure view comes in a later step.";
@@ -214,15 +205,6 @@ fn row_count(total: Total, estimate: Option<u64>, counting: Option<Duration>) ->
 fn shown_rows(page: u64, rows: usize) -> Option<(u64, u64)> {
     let before = page.saturating_mul(PAGE_SIZE);
     (rows > 0).then(|| (before.saturating_add(1), before.saturating_add(rows as u64)))
-}
-
-/// How long `job` of tab `tab` has run as the window saw it, from the first frame that saw it
-/// (`now` on egui's clock), once that is [`QUIET`] or more.
-pub(crate) fn after_quiet(since: &mut Since, tab: TabId, job: Option<JobId>, now: f64) -> Option<Duration> {
-    let job = job?;
-    let first = *since.entry((tab, job)).or_insert(now);
-    let ran = now - first;
-    (ran >= QUIET).then(|| Duration::try_from_secs_f64(ran).unwrap_or_default())
 }
 
 /// Tags what the table bar drew, says on hover why something is off, and gives the command its
@@ -500,14 +482,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         };
         runs.extend(filter_bar::show(&mut top, &bar, tags));
         // The table bar, its loading and counting states 300 ms after their jobs started.
-        let now = top.ctx().input(|i| i.time);
-        let since = &mut view.work.since;
-        since.retain(|(tab_id, job), _| *tab_id != id || [tab.loading, tab.counting, tab.applying].contains(&Some(*job)));
-        let loading = after_quiet(since, id, tab.loading, now);
-        let counting = after_quiet(since, id, tab.counting, now);
-        if tab.loading.is_some() || tab.counting.is_some() {
-            top.ctx().request_repaint_after(TICK);
-        }
+        let ctx = top.ctx().clone();
+        let loading = tab.loading.and_then(|job| view.quiet.past(&ctx, Watch::Tab(id, job)));
+        let counting = tab.counting.and_then(|job| view.quiet.past(&ctx, Watch::Tab(id, job)));
         let estimate = info.and_then(|i| quick_estimate(session.state().dialect(Which::Tab(id)), i, &tab.applied));
         let count = row_count(tab.total, estimate, counting);
         let shown = shown_rows(tab.shown.page, tab.data.as_ref().map_or(0, |d| d.rows.len()));
@@ -516,7 +493,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         let table_bar = TableBar {
             view: View::Data,
             structure: false,
-            loading: loading.map(|elapsed| Loading { elapsed: Some(elapsed) }),
+            loading: loading.map(|elapsed| Loading { elapsed }),
             count,
             shown,
             columns: tab.data.as_ref().map_or(0, |d| d.columns()),
