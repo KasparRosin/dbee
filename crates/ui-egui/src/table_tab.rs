@@ -17,8 +17,11 @@
 //!   underneath;
 //! - the grid ([`crate::grid`]) on the loaded page and its staged edits, sortable by a header
 //!   click, with foreign key links on the selected row, and the cell editor over it while one is
-//!   open ([`crate::editors`]; a double-click opens one); before a page has loaded, `Loading …`
-//!   in its place, or `No rows are loaded.` after a first load that failed;
+//!   open ([`crate::editors`]; a double-click opens one). While a page loads over the rows (once
+//!   it has run 300 ms) they are drawn at half, the header at full (LC2). Before a first page,
+//!   once its load has run 300 ms, the header from the catalog over ten rows of bars
+//!   ([`crate::grid::skeleton`], LC1; nothing before, and nothing for a table the catalog no
+//!   longer has), or `No rows are loaded.` after a first load that failed or was cancelled;
 //! - the paging bar ([`PagingBar`], its words and rules [`crate::paging`]): the arrows with the
 //!   page's words, a cut page's note, and the staged changes with RESET and APPLY.
 //!
@@ -40,7 +43,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use dbee_core::{ResultSet, TableInfo};
+use dbee_core::{Column, ResultSet, TableInfo};
 use dbee_engine::cmd::LOST;
 use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
@@ -53,13 +56,12 @@ use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::error_band::Band;
 use crate::components::results::RowCount;
-use crate::components::spinner::Spinner;
 use crate::components::table_bars::{Loading, PagingAsked, PagingBar, PagingShown, TableAsked, TableBar, TableShown, View};
 use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
 use crate::editors::{self, Place};
 use crate::filter_bar::{self, Bar};
-use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
+use crate::grid::{self, CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
 use crate::quiet::Watch;
 use crate::theme::size::{BAR_LINE, NOTE_BAR_H, NOTE_BAR_PAD_X, TABLE_EMPTY_PAD};
@@ -137,6 +139,20 @@ fn keys(data: &ResultSet, info: Option<&TableInfo>) -> Vec<Option<Key>> {
             _ => None,
         })
         .collect()
+}
+
+/// The columns `info` shows, with no rows: what a first load's skeleton draws its header from.
+fn catalog_columns(info: &TableInfo) -> ResultSet {
+    let columns = info
+        .visible_columns()
+        .map(|c| Column { name: c.name.clone(), base_type: c.base_type.clone(), type_label: c.label().to_owned(), class: c.class })
+        .collect();
+    ResultSet { columns, ..ResultSet::default() }
+}
+
+/// The sorted column of `data` and its direction, for the tab's sort.
+fn sorted(data: &ResultSet, tab: &TableTab) -> Option<(usize, dbee_sql::filter::SortDir)> {
+    tab.sort.as_ref().and_then(|s| data.columns.iter().position(|c| c.name == s.column).map(|col| (col, s.dir)))
 }
 
 /// The command a grid act asks for.
@@ -532,7 +548,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                 let state = view.work.grids.entry(id).or_default();
                 let saved = if tab.saved.is_empty() { 0.0 } else { state.saved_strength(ui.ctx(), page) };
                 let keys = keys(data, info);
-                let sort = tab.sort.as_ref().and_then(|s| data.columns.iter().position(|c| c.name == s.column).map(|col| (col, s.dir)));
+                let sort = sorted(data, tab);
                 let grid = Grid {
                     id: egui::Id::new(("dbee-grid", id.0)),
                     source: &source,
@@ -550,6 +566,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),
                     edited_elsewhere: view.work.editor.as_ref().is_some_and(|e| e.tab == id && e.place == Place::Panel),
                     saved,
+                    dimmed: loading.is_some(),
                 };
                 // The body's width, even when a row above it is wider (the filter bar in a narrow
                 // window), so every column can be scrolled into view.
@@ -573,17 +590,24 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     }
                 }
             }
-            // No page yet: the words stand where the grid would, 12 in and 12 down.
+            // A first page on its way: from 300 ms, the header over rows of bars where the grid
+            // will be; before, nothing.
+            None if tab.loading.is_some() => {
+                if let (Some(_), Some(info)) = (loading, info) {
+                    let columns = catalog_columns(info);
+                    let keys = keys(&columns, Some(info));
+                    let below = top.available_rect_before_wrap().top().min(split);
+                    let area = Rect::from_min_max(pos2(body.left(), below), pos2(right, split));
+                    let mut grid_ui = top.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)));
+                    grid::skeleton(&mut grid_ui, &columns, &keys, sorted(&columns, tab), tags);
+                }
+            }
+            // No page: the words stand where the grid would, 12 in and 12 down.
             None => {
-                let loading = tab.loading.is_some();
                 top.add_space(TABLE_EMPTY_PAD);
                 top.horizontal(|ui| {
                     ui.add_space(TABLE_EMPTY_PAD);
-                    if loading {
-                        ui.add(Spinner::new());
-                    }
-                    let words = if loading { format!("Loading {}…", tab.table.display()) } else { "No rows are loaded.".to_owned() };
-                    ui.label(Text::Body.rich_as_written(words).color(t.text_muted));
+                    ui.label(Text::Body.rich_as_written("No rows are loaded.").color(t.text_muted));
                 });
             }
         }

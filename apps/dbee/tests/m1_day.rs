@@ -304,6 +304,31 @@ fn m1_day_end_to_end() {
     assert_eq!(app.table()["structure"]["shown"]["columns"], 9, "the orders' columns");
     app.execute("table.view", json!({ "view": "data" }));
     assert_eq!((app.table()["view"].clone(), app.table()["rows"].clone()), (json!("data"), json!(100)));
+    // 2e. A first load held by a lock shows the shipments' header over rows of bars, LOADING and
+    //     CANCEL in the table bar and no job in the footer; then a reload held the same way shows
+    //     the old rows at half until CANCEL ends it. Back to orders.
+    let lock = "LOCK TABLE shop.shipments IN ACCESS EXCLUSIVE MODE";
+    let held = dbee_testkit::hold(pg14(db), lock).unwrap();
+    app.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "shop", "table": "shipments" }, "wait": false }));
+    app.until("the skeleton", |app| app.tag("grid-skeleton").is_some());
+    assert!(app.tag("status-job").is_none(), "a page load is no footer job");
+    assert!(app.tag("table-loading").is_some() && app.tag("table-cancel").is_some(), "LOADING and CANCEL");
+    let shipments_tab = app.document()["active"].as_u64().unwrap();
+    app.shot(&root, "2e-skeleton");
+    drop(held);
+    let t = app.settled("the shipments page");
+    assert_eq!(t["name"], "shipments", "{t}");
+    assert!(app.tag("grid-skeleton").is_none(), "the rows in its place");
+    let held = dbee_testkit::hold(pg14(db), lock).unwrap();
+    app.click("table-refresh");
+    app.until("the old rows dimmed", |app| app.tag("grid-dimmed").is_some());
+    app.shot(&root, "2e-reload");
+    app.click("table-cancel");
+    app.until("the cancelled reload", |app| app.table()["loading"].is_null() && app.tag("grid-dimmed").is_none());
+    drop(held);
+    app.execute("tab.close", json!({ "tab": shipments_tab, "force": true }));
+    app.execute("tab.activate", json!({ "tab": orders_tab }));
+    assert_eq!(app.table()["name"], "orders");
 
     // 3. The three filters through the bar (dealer_id = 42, + status = completed, + total > 100),
     //    then Enter in the last value field.

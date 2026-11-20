@@ -323,6 +323,27 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     assert_eq!(app.table()["structure"]["shown"]["columns"], 9, "{name}: the orders' columns");
     app.execute("table.view", json!({ "view": "data" }));
     assert_eq!((app.table()["view"].clone(), app.table()["rows"].clone()), (json!("data"), json!(100)));
+    // 2e. On a server, a first load held by a table lock shows the shipments' header over rows
+    //     of bars; once it loads the tab closes, back to orders. (A file has no other session.)
+    if let Some(server) = e.t.server() {
+        let lock = match e.t.kind() {
+            Kind::Postgres => format!("LOCK TABLE {shop}.shipments IN ACCESS EXCLUSIVE MODE"),
+            _ => format!("LOCK TABLES {shop}.shipments WRITE"),
+        };
+        let held = dbee_testkit::hold(server, &lock).unwrap();
+        app.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": shop, "table": "shipments" }, "wait": false }));
+        app.until("the skeleton", |app| app.tag("grid-skeleton").is_some());
+        assert!(app.tag("status-job").is_none(), "{name}: a page load is no footer job");
+        let shipments_tab = app.document()["active"].as_u64().unwrap();
+        app.shot(root, &format!("{p}-2e-skeleton"));
+        drop(held);
+        let t = app.settled("the shipments page");
+        assert_eq!(t["name"], "shipments", "{name}: {t}");
+        assert!(app.tag("grid-skeleton").is_none(), "{name}: the rows in its place");
+        app.execute("tab.close", json!({ "tab": shipments_tab, "force": true }));
+        app.execute("tab.activate", json!({ "tab": orders_tab }));
+        assert_eq!(app.table()["name"], "orders", "{name}");
+    }
 
     // 3. The three filters through the bar, then Enter in the last value field.
     app.click("filter-add");

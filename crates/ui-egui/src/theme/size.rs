@@ -205,7 +205,7 @@ pub const PAGING_NOTE_MIN: f32 = 24.0;
 /// bottom included), its sentence this far in from either side.
 pub const NOTE_BAR_H: f32 = 28.0;
 pub const NOTE_BAR_PAD_X: f32 = 12.0;
-/// The table tab's words where the grid would be (`Loading …`, `No rows are loaded.`): this far in
+/// The table tab's words where the grid would be (`No rows are loaded.`): this far in
 /// from the grid area's left and down from its top.
 pub const TABLE_EMPTY_PAD: f32 = 12.0;
 /// The sidebar's header (`sidebar/filter`, `sidebar/count`): the filter is a bar with its line
@@ -403,3 +403,13 @@ pub const FOCUS_AROUND: f32 = 4.0;
 pub const FOCUS_INSET: f32 = 2.0;
 pub const RADIUS_FOCUS_AROUND: u8 = 4;
 pub const RADIUS_FOCUS_LINE: u8 = 1;
+
+/// The skeleton (`components::skeleton`, LC1): a bar is this tall with this corner radius, at
+/// least this wide and at most this wide; a grid's first load shows this many rows of them, each
+/// bar its cell's room times the fraction its row and column pick from these.
+pub const SKELETON_BAR_H: f32 = 8.0;
+pub const SKELETON_RADIUS: u8 = 4;
+pub const SKELETON_MIN_W: f32 = 12.0;
+pub const SKELETON_MAX_W: f32 = 96.0;
+pub const SKELETON_ROWS: usize = 10;
+pub const SKELETON_FRACTIONS: [f32; 10] = [0.6, 0.85, 0.45, 0.75, 0.55, 0.9, 0.5, 0.7, 0.65, 0.8];

@@ -729,6 +729,7 @@ fn grid_frame_within_budget() {
                 editing: None,
                 edited_elsewhere: false,
                 saved: 0.0,
+                dimmed: false,
             };
             let _ = grid.show(ui, &mut s.grid, &mut s.tags);
         },
@@ -1909,6 +1910,208 @@ fn the_loading_state_waits_300_ms_and_restarts_per_load() {
     drop(lock);
 }
 
+/// Whether a spinner (an arc 3 wide) is painted inside `within`: the tab's running mark.
+fn spinner_in(ui: &Ui, within: egui::Rect) -> bool {
+    ui.shapes().into_iter().any(|(_, s)| match s {
+        egui::Shape::Path(p) => p.stroke.width == 3.0 && p.points.iter().all(|q| within.contains(*q)),
+        _ => false,
+    })
+}
+
+/// The alpha the words `words` were painted with inside `within` (the most opaque of their
+/// glyphs: a dim multiplies them all), when drawn.
+fn alpha_of(ui: &Ui, within: egui::Rect, words: &str) -> Option<u8> {
+    ui.shapes().into_iter().find_map(|(_, s)| match s {
+        egui::Shape::Text(t) if t.galley.text() == words && within.expand(1.0).contains(t.galley.rect.translate(t.pos.to_vec2()).center()) => {
+            t.galley.rows.iter().flat_map(|r| r.row.visuals.mesh.vertices.iter().map(|v| v.color.a())).max()
+        }
+        _ => None,
+    })
+}
+
+/// The active tab's strip tab, where its running mark shows, as the last frame drew it. (Read
+/// from the window itself: a control request would run frames of its own.)
+fn tab_slot(ui: &Ui) -> egui::Rect {
+    let tab = ui.harness.state().session().state().active_tab().map(|t| t.id().0).expect("a tab is active");
+    ui.drawn(&format!("tab-{tab}"))
+}
+
+/// The value `id` was drawn with in the last frame, read from the window itself.
+fn drawn_value(ui: &Ui, id: &str) -> Option<Json> {
+    ui.harness.state().tags().value(id).cloned()
+}
+
+/// `held_table`'s table opened behind a lock that holds its first page: the window, the lock and
+/// the table. The open is only sent: the first frame that runs it starts the load, so its 300 ms
+/// count from a frame the test sees.
+fn first_load_held(db: &TestDb) -> (Scratch, Ui, dbee_testkit::Held) {
+    let (table, mut ui) = held_table(db);
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", table.0)).unwrap();
+    drop(ui.send("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": table.0 }, "wait": false })));
+    (table, ui, lock)
+}
+
+/// Review Focus 1: on a first load nothing waits on screen before 300 ms (no skeleton, no LOADING,
+/// no CANCEL, no running mark); from then the header over ten rows of bars, LOADING, CANCEL and
+/// the mark, and never a footer job. The rows end the skeleton.
+#[test]
+fn every_wait_on_a_first_load_shows_after_300_ms() {
+    let db = dbee_testkit::require_testdb!();
+    let (_table, mut ui, lock) = first_load_held(db);
+    let t = dbee_ui_egui::theme::LIGHT;
+    let mut seen = false;
+    frames_while_running(&mut ui, false, 0.45, |ui, gone| {
+        let slot = tab_slot(ui);
+        if gone <= 0.25 {
+            for id in ["grid-skeleton", "table-loading", "table-cancel", "status-job"] {
+                assert!(ui.rect(id).is_none(), "at {gone:.2} s: no `{id}` yet");
+            }
+            assert!(!spinner_in(ui, slot), "at {gone:.2} s: no running mark yet");
+        }
+        if gone >= 0.4 {
+            assert_eq!(drawn_value(ui, "grid-skeleton"), Some(json!({ "rows": 10, "columns": 3 })), "at {gone:.2} s");
+            let rows = ui.drawn("grid-skeleton");
+            assert_eq!(
+                colour_at(ui, egui::pos2(rows.left() + 2.0, rows.top() - 0.5)),
+                Some(t.ink),
+                "at {gone:.2} s: the rows start under the header's ink line"
+            );
+            assert!(ui.rect("table-loading").is_some() && ui.rect("table-cancel").is_some(), "at {gone:.2} s: LOADING and CANCEL");
+            assert!(spinner_in(ui, slot), "at {gone:.2} s: the running mark");
+            for id in ["status-job", "grid-header-0", "page-first"] {
+                assert!(ui.rect(id).is_none(), "at {gone:.2} s: no `{id}`");
+            }
+            seen = true;
+        }
+        assert!(!ui.texts().iter().any(|(_, g)| g.text().starts_with("Loading")), "at {gone:.2} s: no `Loading …` painted");
+    });
+    assert!(seen, "the skeleton showed");
+    drop(lock);
+    ui.until("the page", loaded);
+    ui.frame();
+    assert!(ui.tag("grid-header-0").is_some() && ui.tag("grid-skeleton").is_none(), "the rows in the skeleton's place");
+}
+
+/// The skeleton draws only the header's names and types over its bars: no words in the grid's
+/// area.
+#[test]
+fn the_first_load_says_nothing_but_the_bar() {
+    let db = dbee_testkit::require_testdb!();
+    let (_table, mut ui, lock) = first_load_held(db);
+    let mut header = Vec::new();
+    frames_while_running(&mut ui, false, 0.4, |ui, gone| {
+        if gone < 0.4 {
+            return;
+        }
+        let rows = ui.drawn("grid-skeleton");
+        let area = egui::Rect::from_x_y_ranges(rows.x_range(), egui::Rangef::new(rows.top() - 30.0, rows.bottom() + 200.0));
+        for (at, g) in ui.texts().into_iter().filter(|(at, _)| area.contains(at.center())) {
+            assert!(at.center().y < rows.top(), "only the header has words, not `{}` at {at:?}", g.text());
+            header.push(g.text().to_string());
+        }
+    });
+    for name in ["id", "a", "b"] {
+        assert!(header.iter().any(|w| w == name), "the header names `{name}`: {header:?}");
+    }
+    drop(lock);
+}
+
+/// Review Focus 3: the columns take the widths the rows give them, as when no skeleton came first.
+#[test]
+fn the_skeleton_leaves_the_column_widths_to_the_rows() {
+    let db = dbee_testkit::require_testdb!();
+    let (table, mut ui, lock) = first_load_held(db);
+    ui.until("the skeleton", |ui| ui.tag("grid-skeleton").is_some());
+    drop(lock);
+    ui.until("the page", loaded);
+    ui.frame();
+    let widths = |ui: &Ui| (0..3).map(|c| ui.drawn(&format!("grid-header-{c}")).width()).collect::<Vec<f32>>();
+    let held = widths(&ui);
+    let mut plain = Ui::connected_with(db, Setup { size: APP_SIZE, step: Some(0.05), ..Setup::default() });
+    without_the_panel(&mut plain);
+    plain.open("scratch", &table.0);
+    plain.until("the page", loaded);
+    plain.frame();
+    let unheld = widths(&plain);
+    assert!(held.iter().zip(&unheld).all(|(a, b)| close(*a, *b)), "the same widths: {held:?} after a skeleton, {unheld:?} without");
+}
+
+/// Review Focus 4: a reload draws the old rows at half from 300 ms (the header at full; a click
+/// still selects), and the dim goes the frame the load ends: with a page, cancelled, or failed.
+#[test]
+fn the_reload_dims_only_while_it_runs() {
+    let db = dbee_testkit::require_testdb!();
+    let (table, mut ui) = held_table(db);
+    ui.open("scratch", &table.0);
+    ui.until("the page", loaded);
+    ui.frame();
+    let server = pg14_server(db);
+    let cell_alpha = |ui: &Ui| {
+        let at = ui.drawn("grid-cell-0-1");
+        alpha_of(ui, at, "a1").expect("row 0's `a` is drawn")
+    };
+    for end in ["page", "cancel", "failure"] {
+        let marker = dbee_testkit::unique("dbee_test_drop");
+        let (mut held, dropper) = match end {
+            "failure" => {
+                // Holds the table, then drops a column the page asks for and commits.
+                let script = format!(
+                    "SET application_name = '{marker}'; BEGIN; LOCK TABLE scratch.{t} IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(3); ALTER TABLE scratch.{t} DROP COLUMN b; COMMIT;",
+                    t = table.0
+                );
+                let owned = server.clone();
+                let dropper = std::thread::spawn(move || dbee_testkit::psql(&owned, &script));
+                let asleep = format!("SELECT count(*) FROM pg_stat_activity WHERE application_name = '{marker}' AND wait_event = 'PgSleep'");
+                let start = Instant::now();
+                while dbee_testkit::psql(server, &asleep).unwrap_or_default().trim() != "1" {
+                    assert!(start.elapsed() < Duration::from_secs(20), "the dropping session holds the table");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                (None, Some(dropper))
+            }
+            _ => (Some(dbee_testkit::hold(server, &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", table.0)).unwrap()), None),
+        };
+        ui.hover_away();
+        let rx = ui.send("engine.execute", json!({ "command": "table.refresh", "params": {} }));
+        let mut seen = false;
+        frames_while_running(&mut ui, false, 0.45, |ui, gone| {
+            if gone <= 0.25 {
+                assert!(ui.rect("grid-dimmed").is_none(), "{end}: at {gone:.2} s no dim yet");
+                assert_eq!(cell_alpha(ui), 255, "{end}: at {gone:.2} s the rows at full");
+            }
+            if gone >= 0.4 {
+                assert_eq!(drawn_value(ui, "grid-dimmed"), Some(json!(true)), "{end}: at {gone:.2} s");
+                assert!(cell_alpha(ui).abs_diff(128) <= 2, "{end}: at {gone:.2} s the rows at half: {}", cell_alpha(ui));
+                let head = ui.drawn("grid-header-1");
+                assert_eq!(alpha_of(ui, head, "a"), Some(255), "{end}: at {gone:.2} s the header at full");
+                seen = true;
+            }
+        });
+        assert!(seen, "{end}: the dim showed");
+        if end == "page" {
+            ui.click("grid-cell-1-1");
+            assert_eq!(ui.document()["selection"], json!({ "anchor": [1, 1], "focus": [1, 1], "whole": false }), "a dimmed row still selects");
+        }
+        match end {
+            "page" => drop(held.take()),
+            "cancel" => ui.click("table-cancel"),
+            _ => {}
+        }
+        let r = ui.reply(&rx, "the refresh");
+        ui.until("the load's end", |ui| ui.table()["loading"].is_null());
+        ui.frame();
+        assert!(ui.tag("grid-dimmed").is_none(), "{end}: the dim is gone with the load: {r}");
+        assert_eq!(cell_alpha(&ui), 255, "{end}: the rows at full");
+        if end == "failure" {
+            assert!(ui.tag("table-error").is_some(), "the failed load's band: {r}");
+        }
+        if let Some(dropper) = dropper {
+            dropper.join().expect("the dropping session").expect("the column dropped");
+        }
+        drop(held);
+    }
+}
+
 /// A count shows COUNTING and its timer in the facts once it has run 300 ms; the footer's job
 /// cancels it.
 #[test]
@@ -2042,6 +2245,7 @@ fn no_rows_are_loaded_is_restyled() {
     assert_eq!(opened["ok"], false, "the first page can't load: {opened}");
     ui.until("the failed load", |ui| ui.table()["loading"].is_null() && ui.table()["error"].is_string());
     ui.hover_away();
+    assert!(ui.tag("grid-skeleton").is_none(), "no skeleton after a failed first load");
     let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
     let body = ui.body_x();
     let everywhere = egui::Rect::from_x_y_ranges(body, egui::Rangef::new(0.0, 10_000.0));

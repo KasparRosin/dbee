@@ -910,6 +910,7 @@ mod tests {
                 editing: None,
                 edited_elsewhere: false,
                 saved: s.saved,
+                dimmed: false,
             };
             let acts = grid.show(ui, &mut s.state, &mut s.tags);
             s.acts.extend(acts);
@@ -1081,6 +1082,7 @@ mod tests {
                     editing: None,
                     edited_elsewhere: false,
                     saved: 0.0,
+                    dimmed: false,
                 };
                 let _ = grid.show(ui, &mut s.state, &mut s.tags);
             });
