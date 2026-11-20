@@ -229,8 +229,8 @@ pub(crate) fn address(config: &ConnectionConfig, home: Option<&Path>) -> Option<
 /// transaction, which lasts, so its CANCEL is never hidden.
 fn activity(session: &Session, quiet: &mut Quiet, ctx: &egui::Context) -> Option<(Activity, Option<&'static str>)> {
     let c = session.state().connection(Which::Active)?;
-    if session.running(RECONNECT) {
-        return Some((Activity::Reconnecting { elapsed: quiet.past(ctx, Watch::Command(RECONNECT)) }, None));
+    if let Some(job) = session.running_job(RECONNECT) {
+        return Some((Activity::Reconnecting { elapsed: quiet.past(ctx, Watch::Command(RECONNECT, job)) }, None));
     }
     if c.lost {
         return Some((Activity::Disconnected, None));
@@ -392,7 +392,11 @@ fn side(app: &mut DbeeApp, ui: &mut egui::Ui) {
             _ => Refresh::Ready,
         }
     };
-    let loading = (refresh == Refresh::Running).then(|| app.view.quiet.past(ui.ctx(), Watch::Command(REFRESH))).flatten();
+    let loading = app
+        .session
+        .running_job(REFRESH)
+        .filter(|_| refresh == Refresh::Running)
+        .and_then(|job| app.view.quiet.past(ui.ctx(), Watch::Command(REFRESH, job)));
     app.view.work.tree.refresh = refresh;
     // The menu's reasons, read only in frames a menu may show (open, or just opened).
     let menu = if app.view.work.tree.menu_open() || ui.input(|i| i.pointer.secondary_released()) {

@@ -470,6 +470,18 @@ impl Session {
         self.jobs.is_running_label(command)
     }
 
+    /// The oldest running job of command `command`, when one runs: a window that times a job
+    /// keys its clock by it, so a second run of the same command starts its own once the first
+    /// has ended.
+    pub fn running_job(&self, command: &str) -> Option<JobId> {
+        self.jobs.running().filter(|(_, label)| *label == command).map(|(job, _)| job).min_by_key(|job| job.0)
+    }
+
+    /// Whether job `job` still runs.
+    pub fn job_running(&self, job: JobId) -> bool {
+        self.jobs.is_running(job)
+    }
+
     /// Whether command `id` can run now, or why not: its `enabled` check alone, for a window that
     /// draws one button every frame. An unknown id, or a panicking check, is a reason.
     pub fn enabled(&self, id: &str) -> Result<(), String> {
