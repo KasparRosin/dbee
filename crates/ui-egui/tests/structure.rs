@@ -106,9 +106,9 @@ fn seq(ui: &Ui) -> u64 {
     }
 }
 
-/// The window for `shop.orders`' page: wide enough for COLUMNS whole (its Default widens for
+/// The window for `shop.orders`' page: COLUMNS whole (its Default keeps its 150 and cuts
 /// Postgres's `nextval(…)`), REFERENCED BY below the page's bottom.
-const ORDERS_SIZE: egui::Vec2 = egui::vec2(1400.0, 720.0);
+const ORDERS_SIZE: egui::Vec2 = APP_SIZE;
 
 /// `shop.orders` open on pg14 at [`ORDERS_SIZE`], its page loaded, then STRUCTURE clicked and its
 /// read landed.
@@ -169,10 +169,18 @@ fn structure_shows_sa() {
     assert_eq!(ui.value("structure-columns-8-position"), 9);
     assert!(ui.tag("structure-columns-9-name").is_none(), "nine columns");
 
-    // The header's titles where SA draws them; Default wider than SA's 150 for Postgres's
-    // `nextval(…)` (up to twice), Keys after it.
-    let default = ui.drawn("structure-columns-0-default").width();
-    assert!((150.0..=300.5).contains(&default), "Default 150 to 300 wide: {default}");
+    // The header's titles where SA draws them: only Name widens for a long name, so Default keeps
+    // SA's 150 and cuts Postgres's `nextval(…)`, whole on hover; Keys after it, in view.
+    let cell = ui.drawn("structure-columns-0-default");
+    let default = cell.width();
+    assert!(close(default, 150.0), "Default as drawn, 150: {default}");
+    let words = ui.value("structure-columns-0-default").as_str().unwrap_or_default().to_string();
+    let (_, cut) = ui.text_in(cell, &words).expect("the default painted");
+    assert!(cut, "a long default is cut with …");
+    ui.rest(cell.center());
+    assert!(ui.texts().into_iter().any(|(r, g)| g.text() == words && !g.elided && !cell.contains_rect(r)), "the whole default on hover");
+    ui.hover_away();
+    assert!(ui.shows("structure-columns-0-keys"), "Keys in view at {ORDERS_SIZE:?}");
     let header = Rect::from_x_y_ranges(body, heading.bottom()..=heading.bottom() + 30.0);
     for (title, x) in [("Name", 48.0), ("Type", 198.0), ("Nullable", 338.0), ("Default", 414.0), ("Keys", 414.0 + default)] {
         let at = ui.text_in(header, title).map(|(r, _)| r).unwrap_or_else(|| panic!("`{title}` in COLUMNS' header"));
@@ -621,8 +629,9 @@ fn data_is_never_uppercased() {
     }
 }
 
-/// Brief §2.2: a column other than the last takes `max(drawn, widest text + 16)`, up to twice its
-/// drawn width; past that its text is cut with `…` and reads whole on hover.
+/// Brief §2.2, call 6: a section's Name column takes `max(drawn, widest name + 16)`, up to twice
+/// its drawn width; past that the name is cut with `…` and reads whole on hover. The other columns
+/// keep their drawn widths.
 #[test]
 fn long_names_widen_their_column_up_to_twice() {
     let db = dbee_testkit::require_testdb!();

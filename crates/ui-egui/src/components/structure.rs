@@ -97,7 +97,7 @@ pub enum Look {
 pub const PRIMARY_KEY: &str = "primary key";
 /// What follows the column a foreign key points at.
 pub const ARROW: &str = "→";
-/// A column widens for its widest text up to this many times its drawn width.
+/// A section's Name column widens for its widest name up to this many times its drawn width.
 pub const WIDEN_MAX: f32 = 2.0;
 /// Text past this many bytes is measured no further: far wider than a column ever grows.
 const MEASURE_BYTES: usize = 512;
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn a_column_widens_for_its_text_up_to_twice() {
-        // Brief §2.2: `max(drawn, widest + 16)`, at most twice as drawn.
+        // Brief §2.2, call 6: a Name column takes `max(drawn, widest + 16)`, at most twice as drawn.
         assert_eq!(widened(150.0, 100.0), 150.0);
         assert_eq!(widened(150.0, 144.0), 160.0);
         assert_eq!(widened(150.0, 432.0), 300.0);

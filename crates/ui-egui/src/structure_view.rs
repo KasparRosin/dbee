@@ -14,8 +14,8 @@
 //!   TRIGGERS: name, when, events, for each, the definition on one line (its first lines on
 //!   hover). An empty section keeps its heading and header. Everything the engine wrote is drawn
 //!   as written, never in capitals; the cells' words are worked out once per read ([`Kept`]).
-//!   A column other than the first and the last widens for its widest text, up to twice its
-//!   drawn width (measured once per read); every table runs as wide as the widest, and the page
+//!   A section's Name column widens for its widest name, up to twice its drawn width (measured
+//!   once per read); the other columns keep their drawn widths; every table runs as wide as the widest, and the page
 //!   scrolls sideways when that is wider than the body. Cut words read whole on hover.
 //!
 //! A foreign key, a reference and a referencing table are links: a click, or Enter or Space with
@@ -397,24 +397,30 @@ struct Page {
     width: f32,
 }
 
+/// Each section's Name column, after the position's.
+const NAME_COLUMN: usize = 1;
+
+/// A section's column `col`, drawn `drawn` wide, whose widest text is `widest()` wide: the Name
+/// column widens for a long name ([`widened`]); every other keeps its drawn width, its words cut
+/// with … and whole on hover.
+fn column_width(col: usize, drawn: f32, widest: impl FnOnce() -> f32) -> f32 {
+    if col == NAME_COLUMN { widened(drawn, widest()) } else { drawn }
+}
+
 impl Page {
-    /// The page for `read`, measured in `ui`: a column other than the position's and the last
-    /// widens for its widest text ([`widened`]); the last keeps its least width.
+    /// The page for `read`, measured in `ui`: each section's Name column widens for its widest
+    /// name ([`column_width`]); the others keep their drawn widths.
     fn of(ui: &egui::Ui, read: &StructureRead) -> Page {
         let rows = rows_of(read);
         let mut page = Page::default();
         for (n, (section, rows)) in SECTIONS.iter().zip(&rows).enumerate() {
             let columns = section.columns();
-            let last = columns.len().saturating_sub(1);
             let widths: Vec<f32> = columns
                 .iter()
                 .enumerate()
                 .map(|(col, c)| {
-                    if col == 0 || col == last {
-                        return c.width;
-                    }
-                    let widest = rows.iter().filter_map(|r| r.get(col)).map(|s| s.cell().width(ui)).fold(0.0, f32::max);
-                    widened(c.width, widest)
+                    let widest = || rows.iter().filter_map(|r| r.get(col)).map(|s| s.cell().width(ui)).fold(0.0, f32::max);
+                    column_width(col, c.width, widest)
                 })
                 .collect();
             let links = rows
@@ -576,4 +582,21 @@ fn skeleton(ui: &mut egui::Ui, tags: &mut Tags, id: TabId) {
     let (rows_rect, rows) = GridRows { widths: widths.get(1..).unwrap_or_default(), right: &[], number_w: STRUCTURE_POSITION_W }.show(ui);
     let r = ui.interact(rows_rect, ui.id().with(("dbee-structure-skeleton", id.0)), Sense::hover());
     tags.tag_value("structure-skeleton", &r, json!({ "rows": rows }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a section's Name column widens for a long name (up to twice as drawn); a long default,
+    /// type or definition keeps its column as drawn, cut with … and whole on hover.
+    #[test]
+    fn only_the_name_column_widens() {
+        let long = || 297.0;
+        assert_eq!(column_width(NAME_COLUMN, 150.0, long), widened(150.0, 297.0), "a long name widens its column");
+        assert_eq!(column_width(NAME_COLUMN, 150.0, || 60.0), 150.0, "a short one keeps it");
+        for col in [0, 2, 3, 4, 5] {
+            assert_eq!(column_width(col, 140.0, long), 140.0, "column {col} keeps its drawn width");
+        }
+    }
 }
