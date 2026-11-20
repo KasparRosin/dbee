@@ -408,10 +408,21 @@ pub(crate) fn card_text(t: &TableTab) -> Option<(Band<'_>, &str)> {
             ("The changes were not applied", Some(FAILED_NOTE))
         };
         let (detail, hint) = (failed.detail.as_deref(), failed.hint.as_deref());
-        let message = without_fields(&failed.message, detail, hint);
+        let message = server_words(without_fields(&failed.message, detail, hint));
         return Some((Band { heading, message, detail, hint, note, ..Band::default() }, failed.message.as_str()));
     }
     t.error.as_deref().map(|e| (Band { heading: "The page did not load", message: e, note: Some(PAGE_NOTE), ..Band::default() }, e))
+}
+
+/// A failed Apply's message as the band shows it: the server's words, without the engine's
+/// `change <n> failed, so nothing was written: ` before them, which the heading and the failed
+/// row's mark already say. Any other message as it is.
+fn server_words(message: &str) -> &str {
+    message
+        .strip_prefix("change ")
+        .and_then(|m| m.split_once(" failed, so nothing was written: "))
+        .filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(message, |(_, words)| words)
 }
 
 /// `message` without the `Detail: …` and `Hint: …` lines a server error's words end with, when
@@ -700,6 +711,33 @@ mod tests {
         std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed("cancelled"));
         assert_eq!(said(&t), Some(("The changes were not applied", "m", Some(CANCELLED_NOTE))));
         assert_eq!(CANCELLED_NOTE, "Cancelled before the commit: nothing was written, and the changes are still staged.");
+    }
+
+    /// A failed Apply's band says the server's words alone under its heading; `table-error`'s value
+    /// keeps the engine's whole message.
+    #[test]
+    fn a_failed_applys_band_says_the_servers_words() {
+        let view = dbee_engine::PageView { applied: dbee_sql::filter::Condition::None, sort: None, page: 0 };
+        let mut t = TableTab::new(TabId(1), dbee_engine::ConnectionId(1), dbee_core::TableRef { schema: "s".into(), name: "t".into() }, vec![], view);
+        let whole =
+            "change 12 failed, so nothing was written: duplicate key value violates unique constraint \"k\"\nDetail: Key (id)=(1) already exists.";
+        let failed = dbee_engine::Failed {
+            row: 0,
+            column: None,
+            message: whole.into(),
+            code: "server",
+            detail: Some("Key (id)=(1) already exists.".into()),
+            hint: None,
+        };
+        std::sync::Arc::make_mut(&mut t.edits).failed = Some(failed);
+        let (band, value) = card_text(&t).unwrap_or_else(|| panic!("a band"));
+        assert_eq!(band.message, "duplicate key value violates unique constraint \"k\"");
+        assert_eq!(value, whole);
+        assert_eq!(
+            server_words("changes 1 failed, so nothing was written: x"),
+            "changes 1 failed, so nothing was written: x",
+            "only the engine's own words go"
+        );
     }
 
     /// A failed Apply's band shows the server's detail and hint; a page that did not load has none.

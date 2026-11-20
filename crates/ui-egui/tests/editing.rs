@@ -1315,8 +1315,11 @@ fn a_failed_apply_shows_the_band_with_its_detail() {
     assert!(band.top() > ui.drawn("table-view-data").bottom(), "under the table bar: {band:?}");
     assert!(band.bottom() < ui.drawn("grid-header-0").top(), "over the grid, its line between: {band:?}");
     let top = |words: &str| ui.texts().into_iter().find(|(r, g)| g.text() == words && band.contains(r.center())).map_or(f32::NAN, |(r, _)| r.top());
-    // The message as the band draws it: without its `Detail: …` line, which shows as a field.
+    // The message as the band draws it: the server's words, without the engine's `change 1
+    // failed, so nothing was written: ` before them (the heading says it) and without the
+    // `Detail: …` line, which shows as a field.
     let shown = message.strip_suffix(&format!("\nDetail: {detail}")).unwrap_or_else(|| panic!("the detail ends the message: {message}"));
+    let shown = shown.strip_prefix("change 1 failed, so nothing was written: ").unwrap_or_else(|| panic!("the engine's words first: {message}"));
     let tops = ["The changes were not applied", shown, "DETAIL", detail.as_str()].map(top);
     assert!(tops.windows(2).all(|w| w[0] < w[1]), "the heading, the message, DETAIL, the detail, top to bottom: {tops:?}");
     assert!(ui.texts().iter().all(|(_, g)| !g.text().contains("Detail: ")), "the detail shows once, as a field");
