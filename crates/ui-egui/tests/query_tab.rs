@@ -1039,8 +1039,10 @@ fn wide(columns: usize, text: bool) -> String {
 /// Frames (with their tessellation) of the whole window in a plain egui context, which has no
 /// AccessKit tree (as the app without a screen reader), showing the result of `sql` in a query
 /// tab: the median and slowest of `n` frames with nothing changing, then of `n` frames that each
-/// scroll the result grid down. The run must keep all of `columns` × 10,000 rows.
-fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration, Duration), (Duration, Duration)) {
+/// scroll the result grid down, and the rows the run kept. The run keeps all 10,000 rows of
+/// `columns`, or as many as the query editor's byte cap holds (`QUERY_LIMITS`, which counts a
+/// NULL's slot too: 1,664 columns of NULLs hold about 400 MB in 10,000 rows).
+fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration, Duration), (Duration, Duration), usize) {
     use dbee_engine::{Outcome, Screen};
     let home = temp_home(None, None);
     let secrets: Arc<dyn SecretStore> = Arc::new(MemoryStore::default());
@@ -1078,7 +1080,7 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
     app.run("tab.newQuery", json!({ "text": sql })).unwrap();
     app.run("query.run", json!({})).unwrap();
     let start = Instant::now();
-    loop {
+    let kept = loop {
         frame(&mut app, Vec::new());
         if let Some(dbee_engine::Tab::Query(q)) = app.session().state().active_tab()
             && q.running.is_none()
@@ -1086,12 +1088,25 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
             assert!(q.error.is_none(), "the run failed: {:?}", q.error);
             let [outcome] = &q.results[..] else { panic!("one result, not {}", q.results.len()) };
             let r = &outcome.result;
-            assert_eq!((r.columns.len(), r.rows.len(), r.complete), (columns, 10_000, true), "the whole result is kept");
-            break;
+            assert_eq!(r.columns.len(), columns);
+            if r.complete {
+                assert_eq!(r.rows.len(), 10_000, "the whole result is kept");
+            } else {
+                // Cut by the byte cap, not short of it: one more row would not have fitted. The
+                // driver counts the columns as it read them, before the engine names their types.
+                let row_cost = |row: &Vec<dbee_core::Cell>| {
+                    row.iter().map(|c| dbee_driver::cell_cost(c.as_ref().map(String::len))).fold(dbee_driver::ROW_COST, usize::saturating_add)
+                };
+                let heads = r.columns.iter().map(|c| dbee_driver::column_cost(&dbee_core::Column::untyped(&c.name))).sum::<usize>();
+                let held = r.rows.iter().map(row_cost).fold(heads, usize::saturating_add);
+                let (max, row) = (dbee_driver::QUERY_LIMITS.max_bytes, r.rows.last().map_or(0, row_cost));
+                assert!(r.rows.len() < 10_000 && held <= max && held + row > max, "cut by the cap: {} rows hold {held} of {max}", r.rows.len());
+            }
+            break r.rows.len();
         }
         assert!(start.elapsed() < WAIT, "the run ended");
         std::thread::sleep(Duration::from_millis(5));
-    }
+    };
     for _ in 0..3 {
         frame(&mut app, Vec::new());
     }
@@ -1106,11 +1121,12 @@ fn result_frames(db: &TestDb, sql: &str, columns: usize, n: usize) -> ((Duration
     };
     frame(&mut app, vec![Event::PointerMoved(over)]);
     let scrolling = (0..n).map(|_| frame(&mut app, vec![wheel()])).collect();
-    (median_max(idle), median_max(scrolling))
+    (median_max(idle), median_max(scrolling), kept)
 }
 
 /// How long a frame takes with a wide result in view, by the number of columns (50, 100, 300 and
-/// 1,664, Postgres's most in a result), 10,000 rows of NULLs or of short texts: the whole window
+/// 1,664, Postgres's most in a result), 10,000 rows of NULLs or of short texts (at 1,664 columns as
+/// many as the query editor's byte cap holds, 2026-11-08 in `docs/decisions.md`): the whole window
 /// without an AccessKit tree (the app's case), unchanged and scrolling, and in kittest, which
 /// builds one. Reported, not bounded: a wide result's frame grows with its columns
 /// (`docs/gaps.md`).
@@ -1123,7 +1139,7 @@ fn wide_result_frames() {
     for columns in [50, 100, 300, 1_664] {
         for text in [false, true] {
             let sql = wide(columns, text);
-            let ((idle, idle_max), (scroll, scroll_max)) = result_frames(db, &sql, columns, frames);
+            let ((idle, idle_max), (scroll, scroll_max), kept) = result_frames(db, &sql, columns, frames);
             let mut ui = Ui::connected(db);
             ui.execute("tab.newQuery", json!({ "text": sql }));
             ui.execute("query.run", json!({}));
@@ -1131,7 +1147,7 @@ fn wide_result_frames() {
             let q = ui.query();
             assert!(q["error"].is_null(), "{}", q["error"]);
             let r = &q["results"][0];
-            assert_eq!((r["columns"].as_array().map(Vec::len), r["rows"].as_u64()), (Some(columns), Some(10_000)), "the whole result in kittest");
+            assert_eq!((r["columns"].as_array().map(Vec::len), r["rows"].as_u64()), (Some(columns), Some(kept as u64)), "the same rows in kittest");
             let kittest: Vec<Duration> = (0..frames)
                 .map(|_| {
                     let start = Instant::now();
@@ -1142,7 +1158,7 @@ fn wide_result_frames() {
             let (k, kx) = median_max(kittest);
             let cells = if text { "texts" } else { "NULLs" };
             println!(
-                "  {columns:>5} columns of {cells}: window unchanged {idle:?} ({idle_max:?}), scrolling {scroll:?} ({scroll_max:?}); kittest unchanged {k:?} ({kx:?})"
+                "  {columns:>5} columns of {cells} ({kept} rows kept): window unchanged {idle:?} ({idle_max:?}), scrolling {scroll:?} ({scroll_max:?}); kittest unchanged {k:?} ({kx:?})"
             );
         }
     }
