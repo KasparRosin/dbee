@@ -151,7 +151,7 @@ fn chevron_slot(rect: Rect, level: usize) -> Rect {
     Rect::from_min_size(pos2(left, rect.center().y - TREE_CHEVRON / 2.0), Vec2::splat(TREE_CHEVRON))
 }
 
-/// A saved or recent connection in the connection list.
+/// A connection in the connection list (saved, or used lately and not saved).
 #[derive(Clone, Debug)]
 pub struct ConnectionRow<'a> {
     /// The connection's name, the user's own.
@@ -161,8 +161,6 @@ pub struct ConnectionRow<'a> {
     /// The line under the name, in `data`: a server's address, cut at its end when short of room,
     /// or a file's path, cut in the middle as the status bar cuts it.
     pub address: Address,
-    /// Words before the address, in `body`: when a recent one was used (`3 min ago · `).
-    pub used: Option<String>,
     /// The colour the user gave it.
     pub colour: Option<Color32>,
     pub selected: bool,
@@ -193,8 +191,7 @@ impl ConnectionRow<'_> {
         let name = one_line(ui, self.name, Text::Body, t.text, width);
         let name_cut = name.elided;
         p.galley(pos2(left, top), name, t.text);
-        let used = self.used.as_deref().unwrap_or_default();
-        let words = |address: &str| Words::default().plain(used).name(address).job(t.text_muted);
+        let words = |address: &str| Words::default().name(address).job(t.text_muted);
         let fits = |address: &str| ui.painter().layout_job(words(address)).size().x <= width;
         let (mut job, cut) = match &self.address {
             Address::File(path) if !fits(path) => (words(&cut_middle(path, fits).unwrap_or_else(|| path.clone())), true),
@@ -209,7 +206,7 @@ impl ConnectionRow<'_> {
         if self.focused {
             focus::own_edge(&p, rect.shrink(CONNECTION_FOCUS_INSET), RADIUS_CONTROL);
         }
-        cut.then(|| format!("{}\n{used}{}", self.name, self.address.text()))
+        cut.then(|| format!("{}\n{}", self.name, self.address.text()))
     }
 
     /// What it reads out: its name as written, then its engine, which only its logo shows.
@@ -394,7 +391,6 @@ mod tests {
                 name: "Shop live",
                 engine: DbKind::Postgres,
                 address: line(),
-                used: None,
                 colour,
                 selected: false,
                 focused: false,
@@ -472,30 +468,28 @@ mod tests {
         // The status bar's path rule (`a_long_sqlite_path_is_cut_in_the_middle`), on a row: the
         // home folder as `~` (the list's), cut in the middle with `…` when short of room, as many
         // letters kept at the start as at the end, so the file's name stays; the whole path on
-        // hover (the list's, through `Hint`). A recent row keeps its words before the path. A
-        // server's address is still cut at its end.
+        // hover (the list's, through `Hint`). A server's address is still cut at its end.
         const LONG: &str = "~/Projects/clients/northwind-traders/archive/2026/exports/nightly/notes.sqlite";
         for (theme, t) in both() {
-            let row = |address: Address, used: Option<&str>| ConnectionRow {
+            let row = |address: Address| ConnectionRow {
                 name: "Notes",
                 engine: DbKind::Sqlite,
                 address,
-                used: used.map(str::to_owned),
                 colour: Some(t.conn_purple),
                 selected: false,
                 focused: false,
                 hovered: false,
             };
             // Room enough: whole, as the page draws `~/data/notes.sqlite`.
-            let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File("~/data/notes.sqlite".into()), None), CONNECTION_W);
+            let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File("~/data/notes.sqlite".into())), CONNECTION_W);
             assert_eq!((text.as_str(), elided, cut), ("~/data/notes.sqlite", false, false), "{theme:?}: whole");
             assert!(close(at.left(), r.left() + 34.0), "{theme:?}: 34 in: {at:?}");
-            // The page's row, alone and recent (the name then needs more than half), and narrower.
-            for (width, used) in [(CONNECTION_W, None), (CONNECTION_W, Some("3 min ago · ")), (220.0, None)] {
-                let at_ = format!("{theme:?} {width} {used:?}");
-                let (text, at, elided, parts, cut, r) = line_of(theme, &row(Address::File(LONG.into()), used), width);
+            // The page's row, and narrower.
+            for width in [CONNECTION_W, 220.0] {
+                let at_ = format!("{theme:?} {width}");
+                let (text, at, elided, parts, cut, r) = line_of(theme, &row(Address::File(LONG.into())), width);
                 assert!(cut && !elided, "{at_}: cut in the middle, not at the end: `{text}`");
-                let path = text.strip_prefix(used.unwrap_or_default()).unwrap_or_else(|| panic!("{at_}: the words before it kept: `{text}`"));
+                let path = text.as_str();
                 let (head, tail) = path.split_once('…').unwrap_or_else(|| panic!("{at_}: a cut path: `{text}`"));
                 assert!(head.starts_with("~/") && LONG.starts_with(head) && LONG.ends_with(tail), "{at_}: `{path}`");
                 assert!(tail.ends_with("/notes.sqlite") && head.chars().count() >= 6, "{at_}: the file's name kept: `{path}`");
@@ -504,27 +498,22 @@ mod tests {
                 // Inside the row's right 12, and no letter more would fit.
                 let room = r.right() - 12.0 - at.left();
                 assert!(at.right() <= r.right() - 12.0 + 0.5 && room - at.width() < 7.2 + 0.5, "{at_}: {at:?} in {room}");
-                let want: Vec<(String, egui::FontId, Color32)> = used
-                    .map(|u| (u.to_owned(), Text::Body.font(), t.text_muted))
-                    .into_iter()
-                    .chain([(path.to_owned(), Text::Data.font(), t.text_muted)])
-                    .collect();
-                assert_eq!(parts, want, "{at_}: the path in `data` `text_muted`");
+                assert_eq!(parts, [(path.to_owned(), Text::Data.font(), t.text_muted)], "{at_}: the path in `data` `text_muted`");
             }
             // A file's name longer than the row (as the design draws it): the folders go,
             // and the name is cut in its own middle, with one `…`.
             let design = "~/Projects/clients/acme-corp/Orders-and-Invoices-Backup.sqlite";
-            let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File(design.into()), None), CONNECTION_W);
+            let (text, at, elided, _, cut, r) = line_of(theme, &row(Address::File(design.into())), CONNECTION_W);
             assert_eq!((text.as_str(), elided, cut), ("Orders-and-Invoi…s-Backup.sqlite", false, true), "{theme:?}: the name in its middle");
             assert!(at.right() <= r.right() - 12.0 + 0.5, "{theme:?}: inside the row's right 12: {at:?}");
             // Too narrow to keep 6 letters at either end (the status bar then drops the path): cut
             // at its end, and still whole on hover.
-            let (text, _, elided, _, cut, _) = line_of(theme, &row(Address::File(LONG.into()), None), 120.0);
+            let (text, _, elided, _, cut, _) = line_of(theme, &row(Address::File(LONG.into())), 120.0);
             assert!(elided && cut && !text.contains('…'), "{theme:?}: a row with no room for the cut: `{text}`");
             // A server's address too long for its row is cut at its end, as before; whole on hover.
             let server = ConnectionRow {
                 engine: DbKind::Postgres,
-                ..row(Address::Server("postgres@analytics-replica.internal.example.com:5432/analytics".into()), None)
+                ..row(Address::Server("postgres@analytics-replica.internal.example.com:5432/analytics".into()))
             };
             let (text, _, elided, _, cut, _) = line_of(theme, &server, 200.0);
             assert!(elided && cut && !text.contains('…'), "{theme:?}: a server's address cut at its end: `{text}`");
@@ -534,13 +523,12 @@ mod tests {
     #[test]
     fn a_cut_name_or_line_reads_whole_on_hover() {
         // Review 1, M1: when the name or the line is cut, the list shows both whole on hover, the
-        // name over the line (a recent one's words with it); with nothing cut, no hover.
+        // name over the line; with nothing cut, no hover. No time words before the line.
         const FAR: &str = "postgres@analytics-replica.internal.example.com:5432/analytics";
-        let row = |name: &'static str, address: &str, used: Option<&str>| ConnectionRow {
+        let row = |name: &'static str, address: &str| ConnectionRow {
             name,
             engine: DbKind::Postgres,
             address: Address::Server(address.into()),
-            used: used.map(str::to_owned),
             colour: None,
             selected: false,
             focused: false,
@@ -551,10 +539,10 @@ mod tests {
             drawn(Theme::Light, vec2(CONNECTION_W, 40.0), |ui, rect| said = row.paint(ui, rect));
             said
         };
-        assert_eq!(hover(&row("Shop live", "postgres@pg14:5432/dbee", None)), None, "nothing cut");
+        assert_eq!(hover(&row("Shop live", "postgres@pg14:5432/dbee")), None, "nothing cut");
         let long = "Reporting replica for the Customer Success team";
-        assert_eq!(hover(&row(long, "postgres@pg14:5432/dbee", None)), Some(format!("{long}\npostgres@pg14:5432/dbee")), "the name cut");
-        assert_eq!(hover(&row("Analytics", FAR, Some("just now · "))), Some(format!("Analytics\njust now · {FAR}")), "the line cut");
+        assert_eq!(hover(&row(long, "postgres@pg14:5432/dbee")), Some(format!("{long}\npostgres@pg14:5432/dbee")), "the name cut");
+        assert_eq!(hover(&row("Analytics", FAR)), Some(format!("Analytics\n{FAR}")), "the line cut");
     }
 
     fn column(name: &str, label: &str) -> ColumnInfo {
@@ -650,7 +638,6 @@ mod tests {
                 name: "Shop (Live)",
                 engine: DbKind::MariaDb,
                 address: Address::Server("Root@DB.Example.com:3306/Shop".into()),
-                used: None,
                 colour: Some(t.conn_blue),
                 selected: false,
                 focused: false,
@@ -1088,8 +1075,8 @@ mod tests {
         let ring = Edge { outer: shop.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
         assert!(edges_in(&h.output().shapes, shop, 0.0).contains(&ring), "Tab shows the focus box: {:?}", edges_in(&h.output().shapes, shop, 0.0));
 
-        // The connection list: `conn-saved-<id>` and `conn-recent-<n>` show the name, their
-        // `-kind` the engine's label; rows 40 tall, one under the other. A click loads one into the
+        // The connection list: `conn-saved-<id>` and `conn-recent-<n>` (a connection used and not
+        // saved) show the name, their `-kind` the engine's label; rows 40 tall, one under the other. A click loads one into the
         // form; a right-click offers Connect, Edit, Duplicate and Delete.
         let home = dbee_testkit::temp_home(None, None);
         let session = Session::new(SessionOptions {
@@ -1126,7 +1113,8 @@ mod tests {
             app.run("connection.save", json!({ "config": config })).unwrap_or_else(|e| panic!("{e:?}"));
         }
         let ids: Vec<String> = app.session.state().store.saved.iter().map(|c| c.id.clone()).collect();
-        let opened = app.session.run_blocking("connection.open", json!({ "config": notes, "createFile": true }), Duration::from_secs(30));
+        let scratch = ConnectionConfig { id: String::new(), name: "Scratch".into(), file: Some(home.home.join("Scratch.sqlite")), ..notes.clone() };
+        let opened = app.session.run_blocking("connection.open", json!({ "config": scratch, "createFile": true }), Duration::from_secs(30));
         opened.unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(app.session.state().screen, Screen::Workspace);
         app.session.run_blocking("connection.close", json!({ "force": true }), Duration::from_secs(30)).unwrap_or_else(|e| panic!("{e:?}"));
@@ -1137,7 +1125,7 @@ mod tests {
         let names: Vec<_> = saved.iter().map(|id| tags.value(id).cloned()).collect();
         assert_eq!(names, [Some(json!("Notes (Live)")), Some(json!("Other"))], "{:?}", tags.ids());
         assert_eq!(tags.value(&format!("{}-kind", saved[0])), Some(&json!("SQLite")));
-        assert_eq!(tags.value("conn-recent-0"), Some(&json!("Notes (Live)")));
+        assert_eq!(tags.value("conn-recent-0"), Some(&json!("Scratch")));
         assert_eq!(tags.value("conn-recent-0-kind"), Some(&json!("SQLite")));
         let rows: Vec<Rect> = saved.iter().map(|id| tags.rect(id).unwrap_or(Rect::NOTHING)).collect();
         assert!(rows.iter().all(|r| r.height() == 40.0), "rows 40 tall: {rows:?}");

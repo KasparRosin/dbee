@@ -186,6 +186,11 @@ fn m1_day_end_to_end() {
     let id = app.execute("connection.save", json!({ "config": config, "password": db.password }))["id"].as_str().unwrap().to_string();
     let card = format!("conn-saved-{id}");
     app.until("the saved card", |app| app.tag(&card).is_some());
+    // The workspace's frame: the menu bar, and the version along the bottom; one list, with the
+    // saved connection listed once.
+    assert!(app.tag("menu-View").is_some(), "the menu bar on the connection screen");
+    assert!(app.value("conn-version").as_str().is_some_and(|v| v.starts_with("dbee ")), "the version bar");
+    assert!(app.tags_with("conn-recent-").is_empty(), "the saved connection isn't listed twice");
     app.shot(&root, "0-connections");
 
     // 1. A double-click on the card reaches the workspace: no key to pick, no host key to trust,

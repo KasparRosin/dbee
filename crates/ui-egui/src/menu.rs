@@ -50,7 +50,21 @@ fn tops(commands: &[CommandInfo]) -> Vec<&str> {
 
 /// Draws the menu bar ([`menu::bar`]) into `ui` and runs the entry clicked, if any.
 pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
-    let commands = app.commands();
+    // Nothing is taken, so every entry clicked runs here.
+    bar_taking(app, ui, &[]);
+}
+
+/// [`bar`], except that the entries of `taken` are the caller's: each drawn enabled when its
+/// reason is `None`, else off with that reason on hover, and returned when clicked instead of run
+/// (the connection screen's File > Connect runs its form's Connect).
+pub(crate) fn bar_taking(app: &mut DbeeApp, ui: &mut egui::Ui, taken: &[(&str, Option<&str>)]) -> Option<&'static str> {
+    let mut commands = app.commands();
+    for c in &mut commands {
+        if let Some((_, why)) = taken.iter().find(|(id, _)| *id == c.id) {
+            c.enabled = why.is_none();
+            c.disabled_reason = why.map(str::to_owned);
+        }
+    }
     let mut chosen: Option<&'static str> = None;
     let checked = crate::ui_commands::theme_id(app.theme_choice);
     let tags = &mut app.tags;
@@ -64,10 +78,13 @@ pub(crate) fn bar(app: &mut DbeeApp, ui: &mut egui::Ui) {
             }
         })
     });
-    if let Some(id) = chosen {
-        let shortcut = commands.iter().find(|c| c.id == id).and_then(|c| c.shortcut);
-        app.start(id, params_for(shortcut), Origin::Menu);
+    let id = chosen?;
+    if taken.iter().any(|(t, _)| *t == id) {
+        return Some(id);
     }
+    let shortcut = commands.iter().find(|c| c.id == id).and_then(|c| c.shortcut);
+    app.start(id, params_for(shortcut), Origin::Menu);
+    None
 }
 
 /// One line of an open menu.

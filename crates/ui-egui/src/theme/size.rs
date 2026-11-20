@@ -257,6 +257,9 @@ pub const CONNECTION_PAD_X: f32 = 12.0;
 pub const CONNECTION_LOGO: f32 = 14.0;
 pub const CONNECTION_LOGO_GAP: f32 = 8.0;
 pub const CONNECTION_FOCUS_INSET: f32 = 1.0;
+/// The connection screen's sidebar: the connections file's warning, under the filter, has this
+/// much room above and below its words (and [`SIDEBAR_PAD_X`] at its sides).
+pub const CONN_WARNING_PAD_Y: f32 = 8.0;
 
 /// The structure view (`structure/heading`, `structure/header cell`, `structure/cell`): a section's
 /// heading this tall, its words this far in; the header this tall; a row this tall; what a cell

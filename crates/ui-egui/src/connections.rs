@@ -1,10 +1,15 @@
-//! The connection screen: the saved and recent connections on the left, the engine cards or the
-//! connection form on the right ([`screen`]).
+//! The connection screen: the workspace's frame (the menu bar on top, the version bar along the
+//! bottom), the connections in a sidebar on the left, the engine cards or the connection form on
+//! the right ([`screen`]).
 //!
-//! - Left: "New connection", a filter, then the SAVED and RECENT cards, each with its colour, its
-//!   database type's label under the name. A single click loads a connection into the form, a
-//!   double-click connects; right-click offers Connect · Edit · Duplicate · Delete (Delete asks
-//!   first: it deletes the saved passwords too).
+//! - The menu bar is the workspace's; its File > Connect runs the form's Connect here, and is off
+//!   on the engine cards.
+//! - Left: `+ NEW CONNECTION`, a filter, the connections file's warning, then one list: the saved
+//!   connections in the file's order, then the recent ones that are not saved, newest first (a
+//!   saved one is not listed twice), each row with its colour, its engine's logo and its address
+//!   under the name. A single click loads a connection into the form, a double-click connects;
+//!   right-click offers Connect · Edit · Duplicate · Delete (Delete asks first: it deletes the
+//!   saved passwords too).
 //! - Right, under the title row (the title, Fill from URL): a new connection starts with the
 //!   engine cards, one per database type ([`DbKind::ALL`]); a type this build has no driver for
 //!   (not in the session's `kinds`) is greyed with "Upcoming" and cannot be chosen. A card, or a
@@ -52,18 +57,18 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use dbee_config::{ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::{EngineError, JobId, Json, Screen, State, Which};
 use egui::text::{LayoutJob, TextWrapping};
-use egui::{Align, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, RichText, ScrollArea, Sense, Stroke, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, ScrollArea, Sense, Stroke, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
 use crate::app::{Origin, sentence};
 use crate::automation::Tags;
 use crate::components::Look;
+use crate::components::button::BarButton;
 use crate::components::chip::Chip;
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
@@ -77,7 +82,10 @@ use crate::dialogs::{self, Dialog};
 use crate::picker::{self, Pick, Picker};
 use crate::theme::{
     self, Text, connection_color,
-    size::{CONNECTION_ROW_H, RADIUS_CONTROL, RADIUS_FLOAT},
+    size::{
+        BAR_H, BAR_LINE, CONN_WARNING_PAD_Y, CONNECTION_ROW_H, INSET, RADIUS_CONTROL, RADIUS_FLOAT, SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_PAD_X,
+        SIDEBAR_W, SLIM_BAR_H, TABLE_EMPTY_PAD,
+    },
 };
 
 pub(crate) const OPEN: &str = "connection.open";
@@ -603,6 +611,23 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
         app.view.conn.databases.open = false;
     }
     let mut acts = Vec::new();
+    // The workspace's menu bar; File > Connect is the form's Connect here.
+    let why = if app.view.conn.step != Step::Form {
+        Some("Connect: not now, choose a database first")
+    } else if app.view.conn.running.is_some() {
+        Some(BUSY_CONNECT)
+    } else {
+        None
+    };
+    let t = theme::tokens(&ctx);
+    egui::Panel::top("dbee-menubar").exact_size(SLIM_BAR_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| {
+        if crate::menu::bar_taking(app, ui, &[(OPEN, why)]) == Some(OPEN) {
+            acts.push(Act::ConnectForm);
+        }
+    });
+    egui::Panel::bottom("conn-version-bar").exact_size(SLIM_BAR_H).show_separator_line(false).frame(Frame::NONE).show(ui, |ui| {
+        version_bar(ui, t, &mut app.tags);
+    });
     {
         let DbeeApp { session, view, tags, .. } = app;
         let kinds = session.kinds();
@@ -755,18 +780,6 @@ fn matches(c: &ConnectionConfig, q: &str) -> bool {
     shown.iter().any(|f| f.to_lowercase().contains(q))
 }
 
-/// `3 min ago` for a Unix time.
-fn ago(used_at: u64) -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let s = now.saturating_sub(used_at);
-    match s {
-        0..60 => "just now".into(),
-        60..3600 => format!("{} min ago", s / 60),
-        3600..86_400 => format!("{} h ago", s / 3600),
-        _ => format!("{} d ago", s / 86_400),
-    }
-}
-
 /// `text` on one line in `style` and `color`, cut with "…" to `width`.
 pub(crate) fn line_galley(ui: &egui::Ui, text: &str, style: Text, color: Color32, width: f32) -> std::sync::Arc<egui::Galley> {
     line_job(ui, style.job(text, color), width)
@@ -778,95 +791,78 @@ pub(crate) fn line_job(ui: &egui::Ui, mut job: LayoutJob, width: f32) -> std::sy
     ui.painter().layout_job(job)
 }
 
-/// A full-width button with a code-drawn icon left of its label.
-fn icon_button(ui: &mut egui::Ui, label: &str, icon: Icon) -> egui::Response {
-    let t = theme::tokens(ui.ctx());
-    let size = vec2(ui.available_width(), 36.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-    let fill = if response.is_pointer_button_down_on() {
-        t.selection
-    } else if response.hovered() {
-        t.hover
-    } else {
-        t.card
-    };
+/// The row menu's and File > Connect's reason while a test or connect runs.
+const BUSY_CONNECT: &str = "Connect: not now, a test or connect is running";
+
+/// The version bar along the window's bottom: `dbee <version>` in `label` caps, 12 in, on `card`
+/// with a 1 px `line` along its top. Tagged `conn-version` (the whole bar) with the words as written.
+fn version_bar(ui: &mut egui::Ui, t: &theme::Tokens, tags: &mut Tags) {
+    let (bar, r) = ui.allocate_exact_size(vec2(ui.available_width(), SLIM_BAR_H), Sense::hover());
     let p = ui.painter();
-    p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
-    icon.paint(p, pos2(rect.left() + 20.0, rect.center().y), t.ink);
-    Text::ButtonCaps.paint(p, pos2(rect.left() + 36.0, rect.center().y), egui::Align2::LEFT_CENTER, label, t.text);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    response
+    p.rect_filled(bar, CornerRadius::ZERO, t.card);
+    p.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width(), BAR_LINE)), CornerRadius::ZERO, t.line);
+    let words = format!("dbee {}", env!("CARGO_PKG_VERSION"));
+    let centre = pos2(bar.left() + INSET, bar.center().y + BAR_LINE / 2.0);
+    Text::Label.paint(p, centre, egui::Align2::LEFT_CENTER, &words, t.text_muted);
+    tags.tag_value("conn-version", &r, words);
 }
 
-/// A small, muted section heading with a count.
-fn section(ui: &mut egui::Ui, title: &str, count: usize) {
-    let t = theme::tokens(ui.ctx());
-    ui.horizontal(|ui| {
-        ui.label(Text::Label.rich(title).color(t.text_muted));
-        ui.label(Text::Label.rich(count.to_string()).color(t.text_muted));
-    });
-    ui.add_space(2.0);
-}
-
-/// The left side: New connection, the filter, the store warning, the saved and recent cards.
+/// The sidebar ([`SIDEBAR_W`], resizable as the workspace's): `+ NEW CONNECTION` in a bar row,
+/// the filter, the connections file's warning, then one list of connections: the saved ones in
+/// the file's order, then the recent ones that are not saved, newest first.
 fn side(ui: &mut egui::Ui, st: &State, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>) {
     let t = theme::tokens(ui.ctx());
-    egui::Panel::left("connections-side").resizable(false).exact_size(300.0).frame(Frame::new().fill(t.bg).inner_margin(Margin::same(14))).show(
-        ui,
-        |ui| {
-            let new = icon_button(ui, "New connection", Icon::Plus);
-            tags.tag("conn-new", &new);
-            if new.clicked() {
-                acts.push(Act::New);
-            }
-            ui.add_space(10.0);
-            let filter = sidebar::Filter::new(&mut conn.filter, "Filter connections").id(egui::Id::new("conn-filter")).show(ui).field;
-            tags.tag_value("conn-filter", &filter, conn.filter.as_str());
-            if let Some(w) = &st.store_warning {
-                ui.add_space(8.0);
-                let r = ui.add(Label::new(Text::Small.rich(w.as_str()).color(t.danger)).wrap());
-                tags.tag_value("conn-store-warning", &r, w.as_str());
-            }
-            ui.add_space(14.0);
-            let q = conn.filter.trim().to_lowercase();
-            let selected = conn.form.id.clone();
-            let busy = conn.running.is_some();
-            ScrollArea::vertical().id_salt("conn-lists").auto_shrink([false, false]).show(ui, |ui| {
-                let saved: Vec<&ConnectionConfig> = st.store.saved.iter().filter(|c| matches(c, &q)).collect();
-                section(ui, "SAVED", saved.len());
-                if saved.is_empty() {
-                    let empty = if st.store.saved.is_empty() { "No saved connections yet." } else { "No saved connection matches." };
-                    ui.label(RichText::new(empty).color(t.text_muted));
-                }
-                // The rows one under the other, the line along each one's bottom between them.
-                ui.scope(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for c in saved {
-                        card(ui, tags, &format!("conn-saved-{}", c.id), c, None, c.id == selected, busy, acts);
-                    }
-                });
-                ui.add_space(14.0);
-                let recent: Vec<(usize, &dbee_config::RecentEntry)> =
-                    st.store.recent.iter().enumerate().filter(|(_, r)| matches(&r.config, &q)).collect();
-                section(ui, "RECENT", recent.len());
-                if recent.is_empty() {
-                    let empty = if st.store.recent.is_empty() { "Connections you open show here." } else { "No recent connection matches." };
-                    ui.label(RichText::new(empty).color(t.text_muted));
-                }
-                ui.scope(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for (n, r) in recent {
-                        card(ui, tags, &format!("conn-recent-{n}"), &r.config, Some(r.used_at), false, busy, acts);
-                    }
-                });
+    let panel = egui::Panel::left("connections-side").resizable(true).default_size(SIDEBAR_W).size_range(SIDEBAR_MIN_W..=SIDEBAR_MAX_W);
+    panel.frame(Frame::new().fill(t.bg)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
+        let button = BarButton::label(Icon::Plus, "New connection").divider(false);
+        let new = ui.put(Rect::from_min_size(row.min, vec2(button.width(ui), BAR_H)), button);
+        ui.painter().rect_filled(Rect::from_min_max(pos2(row.left(), row.bottom() - BAR_LINE), row.max), CornerRadius::ZERO, t.line);
+        tags.tag("conn-new", &new);
+        if new.clicked() {
+            acts.push(Act::New);
+        }
+        let filter = sidebar::Filter::new(&mut conn.filter, "Filter connections").id(egui::Id::new("conn-filter")).show(ui).field;
+        tags.tag_value("conn-filter", &filter, conn.filter.as_str());
+        if let Some(w) = &st.store_warning {
+            // Wrapped, never cut: it says what happened to the user's file.
+            let pad =
+                Margin { left: SIDEBAR_PAD_X as i8, right: SIDEBAR_PAD_X as i8, top: CONN_WARNING_PAD_Y as i8, bottom: CONN_WARNING_PAD_Y as i8 };
+            let shown = Frame::NONE.inner_margin(pad).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(Label::new(Text::Small.rich_as_written(w.as_str()).color(t.danger)).wrap())
             });
-        },
-    );
+            let area = shown.response.rect;
+            ui.painter().rect_filled(Rect::from_min_max(pos2(area.left(), area.bottom() - BAR_LINE), area.max), CornerRadius::ZERO, t.line);
+            tags.tag_value("conn-store-warning", &shown.inner, w.as_str());
+        }
+        let q = conn.filter.trim().to_lowercase();
+        let selected = conn.form.id.clone();
+        let busy = conn.running.is_some();
+        let saved = st.store.saved.iter().filter(|c| matches(c, &q)).map(|c| (format!("conn-saved-{}", c.id), c));
+        // A recent entry keeps its index in the file's list as its id; a saved one shows as saved.
+        let recent = st.store.recent.iter().enumerate().filter(|(_, r)| !st.store.is_saved(&r.config.id) && matches(&r.config, &q));
+        let rows: Vec<(String, &ConnectionConfig)> = saved.chain(recent.map(|(n, r)| (format!("conn-recent-{n}"), &r.config))).collect();
+        let any = !st.store.saved.is_empty() || st.store.recent.iter().any(|r| !st.store.is_saved(&r.config.id));
+        ScrollArea::vertical().id_salt("conn-lists").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            if rows.is_empty() && any {
+                let inset = Margin { left: SIDEBAR_PAD_X as i8, right: SIDEBAR_PAD_X as i8, top: TABLE_EMPTY_PAD as i8, bottom: 0 };
+                Frame::NONE
+                    .inner_margin(inset)
+                    .show(ui, |ui| ui.add(Label::new(Text::Body.rich_as_written("No connection matches.").color(t.text_muted)).wrap()));
+            }
+            for (id, c) in rows {
+                card(ui, tags, &id, c, c.id == selected, busy, acts);
+            }
+        });
+    });
 }
 
 /// One connection's row (`sidebar/connection`): its colour on the left edge, the name and where
 /// it goes.
-fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used_at: Option<u64>, selected: bool, busy: bool, acts: &mut Vec<Act>) {
+fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, selected: bool, busy: bool, acts: &mut Vec<Act>) {
     let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), CONNECTION_ROW_H), Sense::click());
     let name = c.display_name();
     let look = Look::of(ui, &r);
@@ -874,7 +870,6 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
         name: &name,
         engine: c.kind,
         address: card_address(c),
-        used: used_at.map(|at| format!("{} · ", ago(at))),
         colour: connection_color(c.color),
         selected,
         focused: look.focused,
@@ -901,8 +896,14 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
             ("Delete", "conn-menu-delete", true),
         ];
         for (label, item, destructive) in items {
+            if destructive {
+                menu::separator(ui);
+            }
             let enabled = !(busy && item == "conn-menu-connect");
-            let b = ui.add_enabled(enabled, Item::new(label).destructive(destructive));
+            let mut b = ui.add_enabled(enabled, Item::new(label).destructive(destructive));
+            if !enabled {
+                b = b.hint_disabled(BUSY_CONNECT);
+            }
             // The menu's first frame is a sizing pass, which reads every widget as disabled.
             tags.tag_value_as(item, &b, label, enabled);
             if b.clicked() {
@@ -918,9 +919,6 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, used
     });
 }
 
-/// The version line under the card, with its spacing.
-const VERSION_H: f32 = 31.0;
-
 /// The least height of the card's body (the engine cards, or the form under the title row).
 const MIN_BODY_H: f32 = 240.0;
 
@@ -931,7 +929,8 @@ const SCROLL_GAP: i8 = 12;
 /// window allows either way.
 fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>) {
     let t = theme::tokens(ui.ctx());
-    egui::CentralPanel::default().frame(Frame::new().fill(t.bg).inner_margin(Margin::symmetric(24, 20))).show(ui, |ui| {
+    // Little room above and below: the menu bar and the version bar take the window's height.
+    egui::CentralPanel::default().frame(Frame::new().fill(t.bg).inner_margin(Margin::symmetric(24, 4))).show(ui, |ui| {
         // The card adds its margins and border to the form's width.
         let width = (ui.available_width() - 46.0).clamp(240.0, FORM_WIDTH);
         ui.vertical_centered(|ui| {
@@ -946,7 +945,7 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         let url = !url_kinds(&conn.form, kinds).is_empty();
                         conn_form::header(ui, conn, url, conn.step == Step::Form, tags, acts, width);
-                        let body_h = (ui.available_height() - VERSION_H).max(MIN_BODY_H);
+                        let body_h = ui.available_height().max(MIN_BODY_H);
                         ui.allocate_ui_with_layout(vec2(width + f32::from(SCROLL_GAP), body_h), Layout::top_down(Align::Min), |ui| {
                             ui.set_min_height(body_h);
                             match conn.step {
@@ -964,8 +963,6 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
                 let radius = RADIUS_FLOAT;
                 ui.painter().rect_filled(strip, CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 }, color);
             }
-            ui.add_space(10.0);
-            ui.label(Text::Small.rich(format!("dbee {}", env!("CARGO_PKG_VERSION"))).color(t.text_muted));
         });
     });
 }

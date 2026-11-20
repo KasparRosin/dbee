@@ -370,7 +370,6 @@ fn sidebar_rows(ui: &mut Ui) {
         name,
         engine,
         address: if engine.uses_file() { status::Address::File(line.into()) } else { status::Address::Server(line.into()) },
-        used: None,
         colour: connection_color(colour),
         selected: false,
         focused: false,

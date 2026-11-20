@@ -816,11 +816,11 @@ fn single_click_loads_and_double_click_connects() {
     assert_eq!(tag_in(&i, "conn-password").unwrap()["set"], false);
     ui.double_click(&card);
     ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
-    // Back on the connection screen, the recent list has it.
+    // Back on the connection screen, its saved row shows, and it isn't listed twice.
     ui.execute("connection.close", json!({}));
     let i = ui.inspect();
-    let recent = tag_in(&i, "conn-recent-0").expect("the recent card");
-    assert_eq!(recent["value"], "pg14");
+    assert_eq!(tag_in(&i, &card).expect("the saved row")["value"], "pg14");
+    assert!(!ids(&i).iter().any(|id| id.starts_with("conn-recent-")), "{}", ids(&i).join(" "));
 }
 
 /// The design: a click on the scrim does nothing for a dialog. It stays open, and what is under the
@@ -972,6 +972,159 @@ fn store_warning_shows_while_set() {
     assert!(warning["value"].as_str().unwrap().contains("damaged"), "{warning}");
     ui.click("conn-new");
     assert!(ui.tag("conn-store-warning").is_some(), "it stays while the warning is set");
+    // Its own area under the filter, across the sidebar, its words 12 in.
+    let filter = rect_of(&ui.tag("conn-filter").unwrap());
+    let w = rect_of(&ui.tag("conn-store-warning").unwrap());
+    assert!(w.top() >= filter.bottom() + 8.0 - 0.5 && (w.left() - filter.left() - 12.0).abs() <= 0.5, "under the filter, 12 in: {w:?} {filter:?}");
+}
+
+/// The connection screen takes the workspace's frame: the menu bar on top, a 260 sidebar whose
+/// first row is `+ NEW CONNECTION` (a bar button in a 36 row from the sidebar's left edge), the
+/// filter under it, and the version bar along the window's bottom (gap 62).
+#[test]
+fn the_connection_screen_has_the_workspace_frame() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    // The window as the app gets it: inside the harness's own 8 round it.
+    let window = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1100.0, 720.0)).shrink(KITTEST_MARGIN);
+    let i = ui.inspect();
+    for id in ["menu-File", "menu-View"] {
+        let r = rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}: {}", ids(&i).join(" "))));
+        assert!(r.top() < window.top() + 30.0 && r.bottom() <= window.top() + 30.5, "{id} in the menu bar: {r:?}");
+    }
+    let version = tag_in(&i, "conn-version").expect("the version bar");
+    assert!(version["value"].as_str().unwrap().starts_with("dbee "), "{version}");
+    let v = rect_of(&version);
+    let along = (v.bottom() - window.bottom()).abs() <= 0.5 && (v.height() - 30.0).abs() <= 0.5 && (v.left() - window.left()).abs() <= 0.5;
+    assert!(along, "the version bar along the bottom: {v:?}");
+    let new = rect_of(&tag_in(&i, "conn-new").unwrap());
+    let row = (new.left() - window.left()).abs() <= 0.5 && (new.height() - 36.0).abs() <= 0.5 && new.width() <= 260.0;
+    assert!(row, "`+ NEW CONNECTION`: {new:?}");
+    assert!((new.top() - window.top() - 30.0).abs() <= 0.5, "right under the menu bar: {new:?}");
+    let filter = rect_of(&tag_in(&i, "conn-filter").unwrap());
+    assert!(filter.top() >= new.bottom() - 0.5 && filter.right() <= window.left() + 260.5, "the filter under it, in the sidebar: {filter:?}");
+    // The words in caps, the version as written in the tag.
+    assert!(ui.text_in(v, &format!("DBEE {}", env!("CARGO_PKG_VERSION"))).is_some(), "`DBEE x.y.z` drawn in the bar");
+    // No boxed button: nothing stroked around `+ NEW CONNECTION`.
+    assert!(edges_on(&ui, new).is_empty(), "a bar button, not a boxed one");
+}
+
+/// Gap 62: View > Theme works before connecting.
+#[test]
+fn view_theme_works_before_connecting() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    ui.click("menu-View");
+    ui.frame();
+    ui.click("menu-View-Theme");
+    ui.frame();
+    ui.frame();
+    ui.click("menu-ui.themeDark");
+    ui.frame();
+    assert_eq!(ui.inspect()["theme"]["choice"], "dark");
+    assert_eq!(ui.document()["screen"], "connections");
+}
+
+/// The room egui_kittest leaves round what the app draws.
+const KITTEST_MARGIN: f32 = 8.0;
+
+/// Writes a connections file to `home` with `saved` and `recent` (newest first).
+fn write_store(home: &TempHome, saved: &[&ConnectionConfig], recent: &[&ConnectionConfig]) {
+    let dir = home.home.join("config");
+    std::fs::create_dir_all(&dir).unwrap();
+    let recent: Vec<Json> = recent.iter().enumerate().map(|(n, c)| json!({ "config": c, "usedAt": 1_700_000_000 - n as u64 * 60 })).collect();
+    let file = json!({ "version": 1, "saved": saved, "recent": recent });
+    std::fs::write(dir.join("connections.json"), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+}
+
+/// Review Focus 3: the saved rows, then each recent entry that isn't saved, newest first, in one
+/// list with no headings and no time words; a saved entry used lately isn't listed twice.
+#[test]
+fn recent_connections_stay_in_the_one_list() {
+    let with = |id: &str, name: &str| ConnectionConfig { id: id.into(), ..server_of(DbKind::Postgres, name) };
+    let (a, b, c, d) = (with("A", "Alpha"), with("B", "Beta"), with("C", "Gamma"), with("D", "Delta"));
+    let home = temp_home(None, None);
+    write_store(&home, &[&a, &b], &[&c, &a, &d]);
+    let mut ui = ui_in(home, true);
+    let i = ui.inspect();
+    let mut rows: Vec<(f32, String)> = ids(&i)
+        .into_iter()
+        .filter(|id| (id.starts_with("conn-saved-") || id.starts_with("conn-recent-")) && !id.ends_with("-kind"))
+        .map(|id| (rect_of(&tag_in(&i, &id).unwrap()).top(), id))
+        .collect();
+    rows.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let order: Vec<&str> = rows.iter().map(|(_, id)| id.as_str()).collect();
+    assert_eq!(order, ["conn-saved-A", "conn-saved-B", "conn-recent-0", "conn-recent-2"], "{rows:?}");
+    assert_eq!(tag_in(&i, "conn-recent-0").unwrap()["value"], "Gamma");
+    assert_eq!(tag_in(&i, "conn-recent-2").unwrap()["value"], "Delta");
+    let words: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_owned()).collect();
+    for gone in ["SAVED", "RECENT", "2"] {
+        assert!(!words.iter().any(|w| w == gone), "`{gone}` painted: {words:?}");
+    }
+    assert!(!words.iter().any(|w| w.contains(" ago") || w.contains("just now")), "no time words: {words:?}");
+}
+
+/// E2: on first start the list is empty, with no phrase, beside the cards.
+#[test]
+fn first_start_shows_an_empty_list_and_the_cards() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    let i = ui.inspect();
+    assert!(!ids(&i).iter().any(|id| id.starts_with("conn-saved-") || id.starts_with("conn-recent-")), "{}", ids(&i).join(" "));
+    assert!(tag_in(&i, "conn-kind-postgres").is_some());
+    let words: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_owned()).collect();
+    for gone in ["No saved connections yet.", "Connections you open show here.", "No connection matches."] {
+        assert!(!words.iter().any(|w| w == gone), "`{gone}` painted: {words:?}");
+    }
+}
+
+/// A filter that hides every row says so once, in `body` `text_muted`.
+#[test]
+fn a_filter_that_matches_nothing_says_so() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    ui.save(&server_of(DbKind::Postgres, "Shop"), None);
+    ui.click("conn-filter");
+    ui.text("zzz");
+    ui.frame();
+    let side = egui::Rect::from_min_max(
+        egui::pos2(KITTEST_MARGIN, KITTEST_MARGIN + 30.0),
+        egui::pos2(KITTEST_MARGIN + 260.0, 720.0 - KITTEST_MARGIN - 30.0),
+    );
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let (colour, font) = drawn_as(&ui, side, "No connection matches.").expect("the words in the sidebar");
+    assert_eq!((colour, font), (t.text_muted, dbee_ui_egui::theme::Text::Body.font()));
+    assert!(drawn_as(&ui, side, "No saved connection matches.").is_none() && drawn_as(&ui, side, "No recent connection matches.").is_none());
+}
+
+/// The row's menu: Connect, Edit, Duplicate, a line, Delete; Connect off while a test runs, its
+/// hover saying why.
+#[test]
+fn the_row_menu_says_why_connect_is_off() {
+    let silent = Silent::start();
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    let card = ui.save(&silent_config(silent.port), None);
+    ui.click(&card);
+    ui.click("conn-test");
+    ui.frame();
+    ui.right_click(&card);
+    ui.frame();
+    ui.frame();
+    let i = ui.inspect();
+    let connect = tag_in(&i, "conn-menu-connect").expect("the menu");
+    assert_eq!(connect["enabled"], false, "{connect}");
+    let duplicate = rect_of(&tag_in(&i, "conn-menu-duplicate").unwrap());
+    let delete = rect_of(&tag_in(&i, "conn-menu-delete").unwrap());
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let line = ui.shapes().into_iter().any(|(_, s)| match s {
+        egui::Shape::LineSegment { points, stroke } => {
+            stroke.color == t.raised_line && points[0].y > duplicate.bottom() - 0.5 && points[0].y < delete.top() + 0.5
+        }
+        _ => false,
+    });
+    assert!(line, "a separator between Duplicate and Delete");
+    let at = ui.centre("conn-menu-connect");
+    ui.rest(at);
+    let words: Vec<String> = ui.texts().into_iter().map(|(_, g)| g.text().to_owned()).collect();
+    assert!(words.iter().any(|w| w == "Connect: not now, a test or connect is running"), "the reason on hover: {words:?}");
+    ui.key("Escape");
+    ui.execute("connection.cancel", json!({}));
 }
 
 #[test]
