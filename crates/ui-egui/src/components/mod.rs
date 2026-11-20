@@ -21,6 +21,7 @@ pub mod rows;
 pub mod segmented;
 pub mod showcase;
 pub mod sidebar;
+pub mod skeleton;
 pub mod spinner;
 pub mod status;
 pub mod strip;

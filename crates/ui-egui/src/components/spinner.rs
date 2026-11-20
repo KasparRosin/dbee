@@ -1,13 +1,13 @@
 //! The one spinner: something runs. A [`size::SPINNER`] square in `text_muted`, as the app drew
 //! it before the redesign. The one place it shows is the tab's running mark, once the tab's job
-//! has run 300 ms (and, until they go too, the tree's refresh while one runs and the words before a
-//! table's first page); every bar shows a timer instead.
+//! has run 300 ms (and, until it goes too, the tree's refresh while one runs); every bar shows a
+//! timer instead, and a table's first load its skeleton.
 
-use egui::{Pos2, Rect, Response, Ui, Vec2, Widget};
+use egui::{Pos2, Rect, Ui, Vec2};
 
 use crate::theme::{size, tokens};
 
-/// A spinner, added where it stands ([`Widget`]) or painted over a slot ([`Spinner::paint`]).
+/// A spinner, painted over a slot ([`Spinner::paint`]): it takes no room of its own.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Spinner;
 
@@ -23,12 +23,6 @@ impl Spinner {
     /// Paints it centred on `center`, taking no room: a busy tab's icon slot, the tree's refresh.
     pub fn paint(self, ui: &Ui, center: Pos2) {
         Spinner::egui(ui).paint_at(ui, Rect::from_center_size(center, Vec2::splat(size::SPINNER)));
-    }
-}
-
-impl Widget for Spinner {
-    fn ui(self, ui: &mut Ui) -> Response {
-        ui.add(Spinner::egui(ui))
     }
 }
 
@@ -81,12 +75,11 @@ mod tests {
     fn the_spinner_keeps_todays_look() {
         // A 14 square in `text_muted`: an arc 3 wide of radius 5, round its centre.
         for (theme, t) in both() {
-            let mut at = Rect::NOTHING;
+            let at = Rect::from_center_size(pos2(100.0, 60.0), Vec2::splat(14.0));
             let shapes = painted(theme, |ui| {
-                at = ui.add(Spinner::new()).rect;
+                Spinner::new().paint(ui, at.center());
                 Spinner::new().paint(ui, pos2(300.0, 100.0));
             });
-            assert_eq!(at.size(), Vec2::splat(14.0), "{theme:?}: it takes a 14 square");
             let arcs: Vec<(Pos2, f32, egui::Color32)> = flat(&shapes)
                 .into_iter()
                 .filter_map(|s| match s {

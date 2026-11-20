@@ -54,6 +54,12 @@
 //! timed by the window's clock once per page, so once per Apply ([`GridState::saved_strength`]);
 //! after that it is drawn and named as if unmarked. Only while it shows does it ask for frames.
 //!
+//! **Loading.** While a page loads over the rows shown ([`Grid::dimmed`], once the load has run
+//! 300 ms), the rows (cells, numbers, their grounds and marks) are drawn at [`crate::theme::DIM`]
+//! and the header at full: the dim is a look, the rows take input as ever. Before a first page,
+//! [`skeleton`] draws the header from the catalog over rows of bars
+//! ([`crate::components::skeleton`]); it keeps nothing, so the widths the rows bring win.
+//!
 //! **Foreign keys.** With [`Grid::links`], each non-NULL foreign key cell of the selected row
 //! (the focus cell's) shows a link that follows it.
 //!
@@ -62,7 +68,8 @@
 //! `staged`, `new`, `deleted`, `failed`, `saved` (while its mark shows), and `deleted: true` on a
 //! row to delete, also when it is the failed one), `grid-row-<row>` (a row's number, value
 //! `{number, selected}`: the number shown, and whether the row is selected whole),
-//! `fk-link-<row>-<col>`, and while the menu is open `grid-menu-null`, `grid-menu-copy`,
+//! `fk-link-<row>-<col>`, `grid-dimmed` (value `true`, the rows' area, while the rows are dimmed),
+//! `grid-skeleton` (value `{rows, columns}`, the bars' rows under the header), and while the menu is open `grid-menu-null`, `grid-menu-copy`,
 //! `grid-menu-copy-header`, `grid-menu-copy-csv`, `grid-menu-copy-json`,
 //! `grid-menu-copy-markdown`, `grid-menu-delete` (value `{label, shortcut, why?}`, `why` saying
 //! why a disabled entry cannot run now). Cells of rows out of view are listed with
@@ -85,8 +92,9 @@ use crate::components::grid_cell::{self, Cell, CellText, DATA_CHAR_W, Filler, He
 pub use crate::components::grid_cell::{Key, Mark};
 use crate::components::icon::Icon;
 use crate::components::menu::{self, Item};
+use crate::components::skeleton::GridRows;
 use crate::components::tooltip::Hint;
-use crate::theme::size;
+use crate::theme::{self, size};
 
 /// A row's height.
 pub const ROW_H: f32 = size::ROW_H;
@@ -270,6 +278,8 @@ pub struct Grid<'a> {
     /// How strongly the cells the source marks [`Mark::Saved`] show it, from 1 at full to 0, when
     /// they are drawn and named as if unmarked ([`GridState::saved_strength`]).
     pub saved: f32,
+    /// A page loads over these rows: they are drawn at [`theme::DIM`], the header at full.
+    pub dimmed: bool,
 }
 
 /// The inclusive rows and columns `sel` covers: `(rows, columns)`.
@@ -303,6 +313,46 @@ pub fn initial_widths(source: &dyn GridSource, keys: &[Option<Key>]) -> Vec<f32>
             head.max(cells * DATA_CHAR_W + 2.0 * pad).clamp(MIN_WIDTH, MAX_WIDTH)
         })
         .collect()
+}
+
+/// A grid whose first rows are on their way, into the rest of `ui`: the header of `columns` (with
+/// each column's key and the sort) as [`Grid`] draws it, but taking no click and no hover, over
+/// rows of bars ([`GridRows`]) in the widths [`initial_widths`] gives the header alone. Nothing is
+/// kept: the grid works out its widths from the rows when they come. Tags `grid-skeleton`, its
+/// value `{rows, columns}`, its rect the rows' area under the header.
+pub fn skeleton(ui: &mut egui::Ui, columns: &ResultSet, keys: &[Option<Key>], sort: Option<(usize, SortDir)>, tags: &mut Tags) -> Response {
+    let rect = ui.available_rect_before_wrap();
+    let widths = initial_widths(columns, keys);
+    let number_w = RowNumber::width(1);
+    let right: Vec<bool> = (0..columns.columns()).map(|c| columns.right_aligned(c)).collect();
+    let mut ui = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+    ui.set_clip_rect(ui.clip_rect().intersect(rect));
+    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+    let (head, _) = ui.allocate_exact_size(egui::vec2(rect.width(), HEADER_H), Sense::hover());
+    let cell = |left: f32, w: f32| Rect::from_min_max(pos2(left, head.top()), pos2(left + w, head.bottom()));
+    grid_cell::corner(&ui, cell(head.left(), number_w));
+    let mut x = head.left() + number_w;
+    for (col, &w) in widths.iter().enumerate() {
+        let align = if columns.right_aligned(col) { grid_cell::Align::Right } else { grid_cell::Align::Left };
+        let header = Header {
+            name: columns.column_name(col),
+            ty: columns.column_type(col),
+            key: keys.get(col).copied().flatten(),
+            sort: sort.filter(|(c, _)| *c == col).map(|(_, dir)| dir),
+            align,
+            sortable: false,
+            hovered: false,
+        };
+        header.paint(&ui, cell(x, w));
+        x += w;
+    }
+    if x < head.right() {
+        grid_cell::header_filler(&ui, Rect::from_min_max(pos2(x, head.top()), head.max));
+    }
+    let (rows_rect, rows) = GridRows { widths: &widths, right: &right, number_w }.show(&mut ui);
+    let r = ui.interact(rows_rect, ui.id().with("dbee-grid-skeleton"), Sense::hover());
+    tags.tag_value("grid-skeleton", &r, json!({ "rows": rows, "columns": widths.len() }));
+    r
 }
 
 /// What drawing a cell left for the frame to act on.
@@ -407,6 +457,7 @@ impl Grid<'_> {
                     let mut hovered = false;
                     let mut number = None;
                     row.col(|ui| {
+                        self.dim(ui);
                         // Across the view: the number cell's own clip is the number cell.
                         let at = Rect::from_x_y_ranges(view_x, ui.clip_rect().y_range());
                         hovered = ui.ctx().rect_contains_pointer(ui.layer_id(), at);
@@ -431,7 +482,10 @@ impl Grid<'_> {
                     }
                     for c in 0..cols {
                         let mut drawn = None;
-                        row.col(|ui| drawn = Some(self.draw_cell(ui, r, c, lit, hovered)));
+                        row.col(|ui| {
+                            self.dim(ui);
+                            drawn = Some(self.draw_cell(ui, r, c, lit, hovered));
+                        });
                         let Some(drawn) = drawn else { continue };
                         let resp = &drawn.resp;
                         if first_drawn.is_none() {
@@ -486,7 +540,10 @@ impl Grid<'_> {
                         }
                         egui::Popup::context_menu(resp).style(menu::style(&resp.ctx)).show(|ui| self.menu(ui, (r, Some(c)), tags, &mut acts));
                     }
-                    row.col(|ui| Filler { selected: lit, hovered }.paint(ui, ui.max_rect()));
+                    row.col(|ui| {
+                        self.dim(ui);
+                        Filler { selected: lit, hovered }.paint(ui, ui.max_rect());
+                    });
                 });
             });
         });
@@ -510,12 +567,24 @@ impl Grid<'_> {
         state.content_w = out.content_size.x;
         state.edit_cell = edit_cell;
         let view = out.inner_rect;
-        state.rows_view = Some(Rect::from_min_max(pos2(view.left(), (view.top() + HEADER_H).min(view.bottom())), view.max));
+        let rows_view = Rect::from_min_max(pos2(view.left(), (view.top() + HEADER_H).min(view.bottom())), view.max);
+        state.rows_view = Some(rows_view);
+        if self.dimmed {
+            let r = ui.interact(rows_view, self.id.with("dbee-grid-dimmed"), Sense::hover());
+            tags.tag_value("grid-dimmed", &r, true);
+        }
         if let Some((row, top)) = first_drawn {
             let top = top - ROW_H * row as f32;
             tags.tag_cells_out_of_view(CellBlock { prefix: CELL.into(), rows, top, row_height: ROW_H, columns: heads });
         }
         acts
+    }
+
+    /// A row's part drawn into `ui` takes the dim while a page loads over the rows.
+    fn dim(&self, ui: &mut egui::Ui) {
+        if self.dimmed {
+            ui.multiply_opacity(theme::DIM);
+        }
     }
 
     /// Row `row` lights as selected across the grid: it holds the one selected cell, or the
