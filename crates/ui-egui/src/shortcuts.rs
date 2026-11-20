@@ -23,6 +23,9 @@
 //! text and `clipboard.copy` does not run), and while it has the keyboard Ctrl+A selects its
 //! text, not the grid's cells.
 //!
+//! While the active table tab shows STRUCTURE, the grid's keys ([`GRID_KEYS`]) are taken and do
+//! nothing: they would act on a selection out of sight.
+//!
 //! The tree ([`crate::tree::take_keys`]) comes next, under the same rule: while its menu is open,
 //! Ctrl+C copies the menu's table's name, and while a table row has the keyboard, that table's;
 //! `clipboard.copy` does not run. Ctrl+Shift+C stays the grid's.
@@ -58,6 +61,15 @@ pub const TEXT_KEYS: &[&str] = &["Ctrl+C", "Ctrl+Shift+C", "Ctrl+A", "Ctrl+Z", "
 
 /// The shortcuts an open cell editor keeps from running: Enter is the editor's.
 pub const EDITOR_KEYS: &[&str] = &["Ctrl+Enter", "Ctrl+Shift+Enter"];
+
+/// The shortcuts that act on a table tab's grid selection: while the tab shows STRUCTURE they do
+/// nothing (the grid is out of sight), though their commands stay callable.
+pub const GRID_KEYS: &[&str] = &["Ctrl+A", "Ctrl+C", "Ctrl+Shift+C"];
+
+/// Whether the active tab is a table tab showing STRUCTURE.
+pub(crate) fn grid_unseen(app: &DbeeApp) -> bool {
+    matches!(app.session.state().active_tab(), Some(dbee_engine::Tab::Table(t)) if t.showing == dbee_engine::Showing::Structure)
+}
 
 /// Whether the shortcut `keys` runs its command, given that a text field has keyboard focus.
 pub fn fires(keys: &str, text_focused: bool) -> bool {
@@ -108,6 +120,7 @@ pub(crate) fn take(events: &mut Vec<Event>, pattern: Modifiers, key: Key, held: 
 pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context) {
     let text_focused = ctx.text_edit_focused();
     let editing = editors::open_kind(app).is_some();
+    let unseen = grid_unseen(app);
     if !text_focused && !editing {
         value_panel::take_keys(app, ctx);
         tree::take_keys(app, ctx);
@@ -121,7 +134,9 @@ pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context) {
             }
             let Some((pattern, key)) = parse(keys) else { continue };
             while take(&mut i.events, pattern, key, held) {
-                fired.push((id, params.clone()));
+                if !(unseen && GRID_KEYS.contains(keys)) {
+                    fired.push((id, params.clone()));
+                }
             }
         }
     });

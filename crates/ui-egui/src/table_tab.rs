@@ -4,8 +4,8 @@
 //!   view, no row key, a read-only connection, or the table's own reason as the driver writes it),
 //!   on one line: a longer one is cut short, and reads whole on hover;
 //! - the filter bar ([`crate::filter_bar`]);
-//! - the table bar ([`TableBar`]): DATA / STRUCTURE (STRUCTURE off until the structure view),
-//!   REFRESH, "+ Row" (the new row is selected and scrolled to), the rows' count with COUNT or
+//! - the table bar ([`TableBar`]): DATA / STRUCTURE (`table.view`; STRUCTURE shows the
+//!   table's structure instead, [`crate::structure_view`], and DATA's state waits unchanged), REFRESH, "+ Row" (the new row is selected and scrolled to), the rows' count with COUNT or
 //!   COUNT ROWS, IMPORT and EXPORT (off until M4), and at its right end the value panel's toggle
 //!   (`value-toggle`, `ui.toggleValuePanel`). A page load that has run 300 ms shows CANCEL in
 //!   REFRESH's place and LOADING with its timer in the count's; a count that has run 300 ms shows
@@ -47,7 +47,8 @@ use dbee_core::{Column, ResultSet, TableInfo};
 use dbee_engine::cmd::LOST;
 use dbee_engine::cmd::edit::{APPLYING, can_edit};
 use dbee_engine::cmd::table::{STAGED, quick_estimate};
-use dbee_engine::{Edits, Json, Outcome, Tab, TabId, TableTab, Total, Which};
+use dbee_engine::{Edits, Json, Outcome, Showing, Tab, TabId, TableTab, Total, Which};
+use dbee_sql::filter::Condition;
 use dbee_sql::select::PAGE_SIZE;
 use egui::{Align, CornerRadius, Layout, Rect, Sense, UiBuilder, pos2, vec2};
 use serde_json::json;
@@ -66,16 +67,14 @@ use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
 use crate::quiet::Watch;
 use crate::theme::size::{BAR_LINE, NOTE_BAR_H, NOTE_BAR_PAD_X, TABLE_EMPTY_PAD};
 use crate::theme::{self, Text};
-use crate::{DbeeApp, value_panel};
+use crate::{DbeeApp, structure_view, value_panel};
 
-/// The commands that load a page, whose database errors the tab's band shows.
-const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "table.refresh"];
+/// The commands that load a page (or read the structure), whose database errors the tab's band
+/// shows.
+const PAGE_LOADS: &[&str] = &["table.setFilters", "table.page", "table.sort", "table.refresh", "table.view"];
 
 /// The grids' states, by tab.
 pub(crate) type Grids = HashMap<TabId, GridState>;
-
-/// Why STRUCTURE is off, on its hover.
-pub(crate) const STRUCTURE_LATER: &str = "Structure: not now, the structure view comes in a later step.";
 
 /// A table tab's page and staged edits as the grid reads them: the loaded rows, then the new
 /// ones; staged values over loaded ones.
@@ -234,11 +233,7 @@ fn table_bar_tags(
 ) -> Option<(&'static str, Json)> {
     let (rows, count) = words;
     let (refresh_blocked, add_blocked, count_blocked) = why;
-    if let [data, structure] = shown.view.as_slice() {
-        tags.tag_value("table-view-data", data, true);
-        let structure = structure.clone().hint_disabled(STRUCTURE_LATER);
-        tags.tag_value_as("table-view-structure", &structure, false, false);
-    }
+    view_tags(&shown, tags, View::Data);
     // Without its words (a narrow bar) REFRESH's hover names it; + ROW's always does.
     let words = shown.fit.words;
     if let Some(r) = shown.refresh {
@@ -294,9 +289,127 @@ fn table_bar_tags(
         TableAsked::AddRow => ("row.add", json!({})),
         TableAsked::Count => ("table.count", json!({})),
         TableAsked::Value => ("ui.toggleValuePanel", json!({})),
-        // DATA is the only view yet.
-        TableAsked::View(_) => return None,
+        TableAsked::View(v) => view_command(v),
     })
+}
+
+/// Tags the view switch's segments, `chosen` the view that shows.
+fn view_tags(shown: &TableShown, tags: &mut Tags, chosen: View) {
+    if let [data, structure] = shown.view.as_slice() {
+        tags.tag_value("table-view-data", data, chosen == View::Data);
+        tags.tag_value("table-view-structure", structure, chosen == View::Structure);
+    }
+}
+
+/// The command that shows view `v`.
+fn view_command(v: View) -> (&'static str, Json) {
+    let view = match v {
+        View::Data => "data",
+        View::Structure => "structure",
+    };
+    ("table.view", json!({ "view": view }))
+}
+
+/// Tags what the table bar drew in its structure state (as [`table_bar_tags`] does in DATA's):
+/// LOADING while a read shows its loading state, else the facts as written (`structure-facts`).
+fn structure_bar_tags(shown: TableShown, tags: &mut Tags, facts: &str, refresh_blocked: Option<&str>) -> Option<(&'static str, Json)> {
+    view_tags(&shown, tags, View::Structure);
+    if let Some(r) = shown.refresh {
+        let r = match refresh_blocked {
+            Some(why) => r.hint_disabled(format!("Refresh: not now, {why}")),
+            None if shown.fit.words => r.hint("Read the structure again"),
+            None => r.hint("Refresh: read the structure again"),
+        };
+        tags.tag_value_as("table-refresh", &r, "Refresh", refresh_blocked.is_none());
+    }
+    let loading = shown.cancel.is_some();
+    if let Some(r) = shown.cancel {
+        let r = r.hint("Stop reading the structure");
+        tags.tag_value("table-cancel", &r, "Cancel");
+    }
+    if let Some(r) = shown.facts {
+        if loading {
+            tags.tag_value("table-loading", &r, "Loading");
+        } else {
+            tags.tag_value("structure-facts", &r, facts);
+        }
+    }
+    Some(match shown.asked? {
+        TableAsked::Refresh => ("table.refresh", json!({})),
+        TableAsked::Cancel => ("table.cancel", json!({})),
+        TableAsked::View(v) => view_command(v),
+        // The structure state has none of these.
+        TableAsked::AddRow | TableAsked::Count | TableAsked::Value => return None,
+    })
+}
+
+/// The structure state's row count (brief §2.1): exact when the tab knows the whole table's
+/// count, else the catalog's estimate above 0, else none. A count running in DATA shows as the
+/// estimate.
+fn structure_count(t: &TableTab, estimate: Option<u64>) -> RowCount {
+    match t.total {
+        Total::Exact(n) if t.shown.applied == Condition::None => RowCount::Exact(n),
+        _ => estimate.filter(|n| *n > 0).map_or(RowCount::Unknown, RowCount::Estimate),
+    }
+}
+
+/// Draws table tab `id` in its STRUCTURE view into `ui`: the table bar's structure state over
+/// [`structure_view::show`], the body's full width (no note, filter bar, paging bar or value
+/// panel), and runs what it asks for.
+fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
+    let mut runs: Vec<(&'static str, Json)> = Vec::new();
+    {
+        let DbeeApp { session, view, tags, .. } = app;
+        let Some(Tab::Table(tab)) = session.state().tab(id) else { return };
+        let connected = session.state().connection(Which::Tab(id));
+        let info = connected.and_then(|c| c.catalog.table(&tab.table));
+        let lost = connected.is_none_or(|c| c.lost);
+        let body = ui.available_rect_before_wrap();
+        let clip = ui.clip_rect().intersect(body);
+        // An editor open over a cell of DATA's grid left the view: it commits, as when scrolled
+        // out of sight.
+        if let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id) {
+            editors::left_view(editor, ui.ctx().input(|i| i.time));
+        }
+        let mut top = ui.new_child(UiBuilder::new().id_salt("dbee-table-tab").max_rect(body).layout(Layout::top_down(Align::Min)));
+        top.set_clip_rect(clip);
+        top.spacing_mut().item_spacing.y = 0.0;
+        let ctx = top.ctx().clone();
+        let loading = tab.structure.loading.and_then(|job| view.quiet.past(&ctx, Watch::Tab(id, job)));
+        let estimate = info.and_then(|i| quick_estimate(session.state().dialect(Which::Tab(id)), i, &Condition::None));
+        let columns = match (tab.structure.shown.as_deref(), info) {
+            (Some(read), _) => structure_view::columns_of(read),
+            (None, Some(i)) => i.visible_columns().count(),
+            (None, None) => 0,
+        };
+        let refresh_blocked = lost.then_some(LOST);
+        let table_bar = TableBar {
+            view: View::Structure,
+            structure: true,
+            loading: loading.map(|elapsed| Loading { elapsed }),
+            count: structure_count(tab, estimate),
+            shown: None,
+            columns,
+            can_refresh: refresh_blocked.is_none(),
+            can_add: false,
+            can_count: false,
+            value: None,
+            value_off: false,
+        };
+        let facts = table_bar.structure_words();
+        let drawn = table_bar.show(&mut top);
+        runs.extend(structure_bar_tags(drawn, tags, &facts, refresh_blocked));
+        let below = top.available_rect_before_wrap().top().min(body.bottom());
+        let page = Rect::from_min_max(pos2(body.left(), below), body.max);
+        let mut page_ui = top.new_child(UiBuilder::new().id_salt("dbee-structure").max_rect(page).layout(Layout::top_down(Align::Min)));
+        page_ui.set_clip_rect(clip.intersect(page));
+        runs.extend(structure_view::show(&mut page_ui, tags, id, tab, loading));
+    }
+    for (command, params) in runs {
+        // A read's failure shows in the page's band, not as a notice.
+        let origin = if PAGE_LOADS.contains(&command) { Origin::Page } else { Origin::Menu };
+        app.start(command, params, origin);
+    }
 }
 
 /// Draws the paging bar for `p` into `ui`, tags what it drew, says on hover why something is off,
@@ -446,6 +559,10 @@ fn add_row(app: &mut DbeeApp) {
 
 /// Draws table tab `id` into `ui` and runs what it asks for. Whether it drew the value panel.
 pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
+    if matches!(app.session.state().tab(id), Some(Tab::Table(tab)) if tab.showing == Showing::Structure) {
+        show_structure(app, ui, id);
+        return false;
+    }
     let t = theme::tokens(ui.ctx());
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
     let mut edit: Option<(usize, usize)> = None;
@@ -508,7 +625,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         let count_blocked = lost.then_some(LOST);
         let table_bar = TableBar {
             view: View::Data,
-            structure: false,
+            structure: true,
             loading: loading.map(|elapsed| Loading { elapsed }),
             count,
             shown,

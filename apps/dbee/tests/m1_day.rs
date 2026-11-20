@@ -283,10 +283,10 @@ fn m1_day_end_to_end() {
     app.shot(&root, "2b-orders");
     // The table bar's controls stand apart, inside the window.
     app.assert_apart(&["table-view-data", "table-refresh", "row-add", "page-count", "table-import", "table-export"], "2b");
-    // The table bar between the filter bar and the rows: DATA chosen, STRUCTURE off, EXPORT off
+    // The table bar between the filter bar and the rows: DATA chosen, STRUCTURE on, EXPORT off
     // (when it has room), the planner's estimate; COUNT counts the rows exactly.
     assert_eq!(app.value("table-view-data"), true);
-    assert_eq!(app.tag("table-view-structure").map(|e| e["enabled"].clone()), Some(json!(false)), "STRUCTURE off");
+    assert!(app.tag("table-view-structure").is_some_and(|e| e["enabled"] != false), "STRUCTURE on");
     assert!(app.tag("table-export").is_none_or(|e| e["enabled"] == false), "EXPORT off");
     let (filter, refresh, header) = (app.rect("filter-0-column"), app.rect("table-refresh"), app.rect("grid-header-0"));
     assert!(filter[1] < refresh[1] && refresh[1] < header[1], "the table bar under the filters, over the rows: {filter:?} {refresh:?} {header:?}");
@@ -297,13 +297,20 @@ fn m1_day_end_to_end() {
     assert_eq!(n.to_string(), psql(pg14(db), "SELECT count(*) FROM shop.orders").unwrap().trim(), "psql's count");
     assert_eq!(app.value("table-rows"), format!("1–100 of {} rows", thousands(n)));
     app.shot(&root, "2c-counted");
-    // 2d. STRUCTURE (through the control channel until the window draws it): the tab reads the
-    //     structure, and DATA comes back with its rows.
-    app.execute("table.view", json!({ "view": "structure" }));
-    app.until("the structure read", |app| app.table()["structure"]["shown"].is_object());
-    assert_eq!(app.table()["structure"]["shown"]["columns"], 9, "the orders' columns");
-    app.execute("table.view", json!({ "view": "data" }));
+    // 2d. STRUCTURE: the page reads the orders' structure (COLUMNS as the server has them, the
+    //     facts with the count from 2c), and DATA comes back with its rows and filters.
+    app.click("table-view-structure");
+    app.until("the structure", |app| app.tag("structure-columns-0-name").is_some());
+    assert_eq!(app.value("structure-columns-0-name"), "id");
+    assert_eq!(app.value("structure-columns-0-keys"), "primary key");
+    assert_eq!(app.value("structure-columns-1-keys"), "shop.customers.id");
+    assert_eq!(app.value("structure-facts"), format!("9 columns  {} rows", thousands(n)));
+    assert!(app.tag("filter-0-column").is_none(), "no filter bar in STRUCTURE");
+    app.shot(&root, "2d-structure");
+    app.click("table-view-data");
+    app.until("the rows", |app| app.tag("grid-header-0").is_some());
     assert_eq!((app.table()["view"].clone(), app.table()["rows"].clone()), (json!("data"), json!(100)));
+    assert!(app.tag("filter-0-column").is_some(), "the filter bar back");
     // 2e. A first load held by a lock shows the shipments' header over rows of bars, LOADING and
     //     CANCEL in the table bar and no job in the footer; then a reload held the same way shows
     //     the old rows at half until CANCEL ends it. Back to orders.

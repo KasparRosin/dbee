@@ -1781,7 +1781,7 @@ fn the_table_tab_runs_in_tas_order_edge_to_edge() {
     assert!((data.left() - (body.min + 12.0)).abs() <= 1.0, "DATA 12 in from {}: {data:?}", body.min);
 }
 
-/// The table bar as TA draws it: DATA chosen, STRUCTURE off, IMPORT and EXPORT off, REFRESH and
+/// The table bar as TA draws it: DATA chosen, STRUCTURE on, IMPORT and EXPORT off, REFRESH and
 /// "+ Row" on, the facts with the estimate and COUNT; a click on COUNT counts, and the facts then
 /// read the exact count with no button.
 #[test]
@@ -1793,20 +1793,16 @@ fn the_table_bar_matches_ta() {
     without_the_panel(&mut ui);
     assert_eq!(ui.value("table-view-data"), true);
     assert_eq!(ui.value("table-view-structure"), false);
-    assert!(!enabled(&mut ui, "table-view-structure"), "STRUCTURE off");
     for id in ["table-import", "table-export"] {
         assert!(!enabled(&mut ui, id), "`{id}` off until M4");
     }
-    for id in ["table-refresh", "row-add", "table-view-data"] {
+    for id in ["table-refresh", "row-add", "table-view-data", "table-view-structure"] {
         assert!(enabled(&mut ui, id), "`{id}` on");
     }
     let estimate = ui.value("page-count").as_str().unwrap_or_default().to_string();
     assert!(estimate.starts_with('~') && estimate.ends_with(" rows"), "the estimate: {estimate}");
     assert_eq!(ui.value("table-rows"), format!("1–100 of {estimate}"));
-    assert!(
-        hover_says(&mut ui, "table-view-structure", "Structure: not now, the structure view comes in a later step."),
-        "STRUCTURE says why it is off"
-    );
+    assert!(!hover_says(&mut ui, "table-view-structure", "Structure: not now, the structure view comes in a later step."), "STRUCTURE on");
     assert!(hover_says(&mut ui, "table-export", dbee_ui_egui::components::table_bars::EXPORT_LATER), "EXPORT says why");
     ui.click("page-count");
     ui.until("the count", |ui| ui.table()["total"]["exact"].is_u64());

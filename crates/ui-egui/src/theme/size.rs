@@ -309,6 +309,27 @@ pub const STRUCTURE_CELL_PAD_X: f32 = 8.0;
 pub const STRUCTURE_POSITION_PAD_X: f32 = 12.0;
 pub const STRUCTURE_ICON_GAP: f32 = 6.0;
 pub const STRUCTURE_LINK_GAP: f32 = 4.0;
+/// The structure view's page (SA): a section's heading this far under the last line of the
+/// section above it; every table's first column (COLUMNS' positions, empty in the others) this
+/// wide; what an empty page says this far in and down.
+pub const STRUCTURE_SECTION_GAP: f32 = SPACE_12;
+pub const STRUCTURE_POSITION_W: f32 = 40.0;
+pub const STRUCTURE_EMPTY_PAD: f32 = SPACE_12;
+/// COLUMNS' widths after the position (Name, Type, Nullable, Default), and the least of the last
+/// (Keys), which takes the rest.
+pub const STRUCTURE_COLUMNS_W: [f32; 4] = [150.0, 140.0, 76.0, 150.0];
+pub const STRUCTURE_COLUMNS_LAST_MIN: f32 = 240.0;
+/// INDEXES' (Name, Columns, Unique, Method; Keys), FOREIGN KEYS' (Name, Columns, References; On
+/// delete), REFERENCED BY's (Name, Columns; From) and TRIGGERS' (Name, When, Events, For each;
+/// Definition), the same way.
+pub const STRUCTURE_INDEXES_W: [f32; 4] = [240.0, 180.0, 76.0, 110.0];
+pub const STRUCTURE_INDEXES_LAST_MIN: f32 = 160.0;
+pub const STRUCTURE_FOREIGN_KEYS_W: [f32; 3] = [240.0, 180.0, 240.0];
+pub const STRUCTURE_FOREIGN_KEYS_LAST_MIN: f32 = 110.0;
+pub const STRUCTURE_REFERENCED_BY_W: [f32; 2] = [240.0, 180.0];
+pub const STRUCTURE_REFERENCED_BY_LAST_MIN: f32 = 240.0;
+pub const STRUCTURE_TRIGGERS_W: [f32; 4] = [240.0, 110.0, 180.0, 100.0];
+pub const STRUCTURE_TRIGGERS_LAST_MIN: f32 = 240.0;
 
 /// The value panel (`value panel`): the bar's words, the value and the facts this far in from its
 /// sides, the value this far below the bar and above the facts; the bar's parts (the column's

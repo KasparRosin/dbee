@@ -3,7 +3,7 @@
 //!
 //! The table bar and the paging bar are views: they take what to show and say what was clicked;
 //! the screen tags what they drew, says on hover why something is off, and acts. The table tab
-//! ([`crate::table_tab`]) draws the table bar with STRUCTURE off until the structure view, and
+//! ([`crate::table_tab`]) draws the table bar in its data or structure state, and
 //! its Value cell (drawn last, so Tab reaches it after the count). The filter bar is a frame the screen's filter
 //! rows stand in ([`filter_bar`], [`filter_row`], [`and_mark`]): [`crate::filter_bar`] draws its
 //! controls there, from the shared controls.
@@ -136,7 +136,7 @@ enum Facts {
 
 impl TableBar {
     /// The structure's facts, as the page writes them: `8 columns  ~25,000 rows`.
-    fn structure_words(&self) -> String {
+    pub fn structure_words(&self) -> String {
         let columns = if self.columns == 1 { "1 column".to_string() } else { format!("{} columns", self.columns) };
         match self.count.words(None) {
             rows if rows.is_empty() => columns,

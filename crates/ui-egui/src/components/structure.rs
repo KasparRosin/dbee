@@ -1,6 +1,7 @@
 //! The structure view's parts (`structure/heading`, `structure/header cell`, `structure/cell`):
 //! views over plain data that draw into the rect the view gives them, on the view's own ground.
-//! The view (Phase 3) keeps its layout, its columns' widths and what a click does.
+//! [`Table`] lays out one section of the page from them; the view ([`crate::structure_view`]) gives
+//! its columns' widths and what each cell shows, and decides what a click does.
 //!
 //! A section's heading is dbee's words in `label` capitals. The header's titles are `header`
 //! over a 1 px `ink` line. A cell is `data` over a 1 px `line`: a column's name in `text`, what is
@@ -9,12 +10,15 @@
 use std::sync::Arc;
 
 use egui::text::TextWrapping;
-use egui::{Color32, CornerRadius, Galley, Painter, Rect, Ui, pos2};
+use egui::{Color32, CornerRadius, Galley, Painter, Rect, Sense, Ui, pos2};
 
 use super::grid_cell::one_line;
 use super::icon::Icon;
 use super::painter;
-use crate::theme::size::{STRUCTURE_CELL_PAD_X, STRUCTURE_HEADING_PAD_X, STRUCTURE_ICON_GAP, STRUCTURE_LINK_GAP, STRUCTURE_POSITION_PAD_X};
+use crate::theme::size::{
+    STRUCTURE_CELL_PAD_X, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_HEADING_PAD_X, STRUCTURE_ICON_GAP, STRUCTURE_LINK_GAP,
+    STRUCTURE_POSITION_PAD_X, STRUCTURE_ROW_H,
+};
 use crate::theme::{Text, tokens};
 
 /// A section's heading over its table: COLUMNS, INDEXES, …
@@ -118,6 +122,102 @@ impl Cell<'_> {
     }
 }
 
+/// A column of a section's table: its header's title and its width (the last column's is its
+/// least: it takes the rest of the table's width).
+#[derive(Clone, Copy, Debug)]
+pub struct Column<'a> {
+    pub title: &'a str,
+    pub width: f32,
+}
+
+/// A section of the page: its heading, its header and `rows` rows of [`Cell`]s, in columns as
+/// wide as `columns` say, the last taking what is left. No ground, no column lines: the header's
+/// `ink` line and each row's `line` run the table's full width (the view's width, or the columns'
+/// when they are wider).
+#[derive(Clone, Copy, Debug)]
+pub struct Table<'a> {
+    pub heading: &'a str,
+    pub columns: &'a [Column<'a>],
+    pub rows: usize,
+}
+
+/// A section as drawn: where, its heading, its header's cells, and each cell drawn in view with
+/// its row and column (a cell scrolled out of view is neither drawn nor listed).
+pub struct TableDrawn {
+    pub rect: Rect,
+    pub heading: egui::Response,
+    pub header: Vec<egui::Response>,
+    pub cells: Vec<(usize, usize, egui::Response)>,
+}
+
+impl Table<'_> {
+    /// Each column's width in a table `room` wide: as given, the last taking the rest, at least
+    /// its own.
+    pub fn widths(&self, room: f32) -> Vec<f32> {
+        let fixed: f32 = self.columns.iter().rev().skip(1).map(|c| c.width.max(0.0)).sum();
+        let last = self.columns.len().saturating_sub(1);
+        self.columns.iter().enumerate().map(|(i, c)| if i == last { c.width.max(room - fixed).max(0.0) } else { c.width.max(0.0) }).collect()
+    }
+
+    /// The table's height: heading, header and rows.
+    pub fn height(&self) -> f32 {
+        STRUCTURE_HEADING_H + STRUCTURE_HEADER_H + STRUCTURE_ROW_H * self.rows as f32
+    }
+
+    /// Draws it from the top of `ui`'s room, as wide as the room (or the columns, when wider), and
+    /// takes its room. `cell(row, col)` gives what a cell shows; it is asked only for the cells in
+    /// view. Every part senses hover (a link's cell, a click too); `id` keeps their ids apart.
+    pub fn show<'c>(&self, ui: &mut Ui, id: egui::Id, mut cell: impl FnMut(usize, usize) -> Cell<'c>) -> TableDrawn {
+        let room = ui.available_width();
+        let widths = self.widths(room);
+        let width = widths.iter().sum::<f32>().max(room);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, self.height()), Sense::hover());
+        let heading_rect = Rect::from_min_size(rect.min, egui::vec2(width, STRUCTURE_HEADING_H));
+        let heading = ui.interact(heading_rect, id.with("heading"), Sense::hover());
+        let clip = ui.clip_rect();
+        if clip.intersects(heading_rect) {
+            Heading { title: self.heading }.paint(ui, heading_rect);
+        }
+        // The cells of a band from `top`, `h` tall: their rects, left to right.
+        let band = |top: f32, h: f32| {
+            let mut x = rect.left();
+            widths
+                .iter()
+                .map(move |w| {
+                    let r = Rect::from_min_size(pos2(x, top), egui::vec2(*w, h));
+                    x += w;
+                    r
+                })
+                .collect::<Vec<Rect>>()
+        };
+        let header_top = heading_rect.bottom();
+        let mut header = Vec::with_capacity(self.columns.len());
+        for (col, (c, r)) in self.columns.iter().zip(band(header_top, STRUCTURE_HEADER_H)).enumerate() {
+            if clip.intersects(r) {
+                HeaderCell { title: c.title }.paint(ui, r);
+            }
+            header.push(ui.interact(r, id.with(("header", col)), Sense::hover()));
+        }
+        let rows_top = header_top + STRUCTURE_HEADER_H;
+        // Only the rows in view: a table can have thousands.
+        let first = ((clip.top() - rows_top) / STRUCTURE_ROW_H).floor().max(0.0);
+        let last = ((clip.bottom() - rows_top) / STRUCTURE_ROW_H).ceil().max(0.0);
+        let (first, last) = if first.is_finite() && last.is_finite() { (first as usize, (last as usize).min(self.rows)) } else { (0, 0) };
+        let mut cells = Vec::new();
+        for row in first..last {
+            let top = rows_top + STRUCTURE_ROW_H * row as f32;
+            for (col, r) in band(top, STRUCTURE_ROW_H).into_iter().enumerate() {
+                if !clip.intersects(r) {
+                    continue;
+                }
+                cell(row, col).paint(ui, r);
+                cells.push((row, col, ui.interact(r, id.with((row, col)), Sense::hover())));
+            }
+        }
+        TableDrawn { rect, heading, header, cells }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use egui::epaint::ClippedShape;
@@ -125,7 +225,7 @@ mod tests {
 
     use super::*;
     use crate::components::icon::Icon;
-    use crate::components::{ROOM, both, edges_in, fills_in, flat, icon_in, painted, sections, texts};
+    use crate::components::{ROOM, both, edges_in, fills_in, flat, icon_in, painted, painted_in, sections, texts};
     use crate::theme::{Text, Tokens};
 
     fn close(a: f32, b: f32) -> bool {
@@ -257,6 +357,73 @@ mod tests {
             assert!(cut(&shapes, target), "{theme:?}: the target cut");
             assert_eq!((arrow.as_str(), *c), (ARROW, t.text_muted), "{theme:?}: the arrow kept");
             assert!(at.right() <= r.right() - 8.0 + 0.5, "{theme:?}: the arrow inside: {at:?}");
+        }
+    }
+    #[test]
+    fn a_table_draws_its_lines_the_full_width() {
+        // SA: the heading 36 tall, the header 30, each row 26; the header's `ink` line and every
+        // row's `line` run the table's full width, past its last column's minimum; no column lines.
+        let columns = [
+            Column { title: "", width: 40.0 },
+            Column { title: "Name", width: 150.0 },
+            Column { title: "Type", width: 140.0 },
+            Column { title: "Keys", width: 226.0 },
+        ];
+        for (theme, t) in both() {
+            let mut at = Rect::NOTHING;
+            let mut cells = 0;
+            let shapes = painted_in(vec2(1000.0, 400.0), theme, |ui| {
+                ui.add_space(ROOM);
+                let table = Table { heading: "Columns", columns: &columns, rows: 3 };
+                let shown = ui
+                    .allocate_ui(vec2(900.0, 300.0), |ui| {
+                        table.show(ui, egui::Id::new("t"), |row, col| match col {
+                            0 => Cell::Position(row + 1),
+                            1 => Cell::Text("id"),
+                            2 => Cell::Muted("int8"),
+                            _ => Cell::Muted(""),
+                        })
+                    })
+                    .inner;
+                at = shown.rect;
+                cells = shown.cells.len();
+            });
+            assert_eq!(at.size(), vec2(900.0, 36.0 + 30.0 + 3.0 * 26.0), "{theme:?}: the table's size");
+            assert_eq!(cells, 12, "{theme:?}: a response for each cell");
+            let fills = fills_in(&shapes, at);
+            // Each line's pieces along `y`, joined: they must run from the left to the right.
+            let runs = |colour: Color32, y: f32| {
+                let mut xs: Vec<(f32, f32)> = fills
+                    .iter()
+                    .filter(|(r, c)| *c == colour && close(r.height(), 1.0) && close(r.bottom(), y))
+                    .map(|(r, _)| (r.left(), r.right()))
+                    .collect();
+                xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut joined: Vec<(f32, f32)> = Vec::new();
+                for (l, r) in xs {
+                    match joined.last_mut() {
+                        Some(last) if l <= last.1 + 0.5 => last.1 = last.1.max(r),
+                        _ => joined.push((l, r)),
+                    }
+                }
+                joined
+            };
+            let top = at.top();
+            assert_eq!(runs(t.ink, top + 66.0), [(at.left(), at.right())], "{theme:?}: the header's ink line, the full width");
+            for row in 1..=3 {
+                let y = top + 66.0 + 26.0 * row as f32;
+                assert_eq!(runs(t.line, y), [(at.left(), at.right())], "{theme:?}: row {row}'s line, the full width");
+            }
+            let lines: Vec<f32> = fills.iter().filter(|(_, c)| *c == t.line || *c == t.ink).map(|(r, _)| r.bottom()).collect();
+            let wanted = [66.0, 92.0, 118.0, 144.0].map(|y| top + y);
+            assert!(lines.iter().all(|y| wanted.iter().any(|w| close(*y, *w))), "{theme:?}: lines only under the header and the rows: {lines:?}");
+            assert!(fills.iter().all(|(r, _)| r.height() <= 1.0 + 0.01), "{theme:?}: no column lines and no grounds: {fills:?}");
+            // The heading's words centred in its 36, the header's in its 30.
+            let words = words_in(&shapes, at);
+            let centre = |w: &str| words.iter().find(|(s, _, _)| s == w).map(|(_, r, _)| r.center().y).unwrap_or(f32::NAN);
+            assert!(close(centre("COLUMNS"), top + 18.0), "{theme:?}: the heading 36 tall: {words:?}");
+            assert!(close(centre("Name"), top + 36.0 + 15.0), "{theme:?}: the header 30 tall");
+            assert!(close(centre("int8"), top + 66.0 + 13.0), "{theme:?}: a row 26 tall");
         }
     }
 }

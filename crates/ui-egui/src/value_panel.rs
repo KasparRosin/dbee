@@ -892,7 +892,8 @@ fn editing(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
 /// while the panel has the keyboard, so is Ctrl+A.
 pub(crate) fn take_keys(app: &mut DbeeApp, ctx: &egui::Context) {
     // A hidden panel has no selection, and asks for no value view (one can be 10 MiB to build).
-    if !app.view.value_panel || app.session.state().screen != Screen::Workspace {
+    // Nor one out of sight behind a table tab's STRUCTURE.
+    if !app.view.value_panel || app.session.state().screen != Screen::Workspace || shortcuts::grid_unseen(app) {
         app.view.panel.clear_selection();
         return;
     }

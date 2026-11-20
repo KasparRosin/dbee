@@ -154,7 +154,7 @@ pub(crate) fn dirty(tab: &Tab) -> bool {
 /// `tab`'s live jobs (by its markers).
 pub(crate) fn jobs(tab: &Tab) -> Vec<JobId> {
     match tab {
-        Tab::Table(t) => [t.loading, t.counting, t.applying].into_iter().flatten().collect(),
+        Tab::Table(t) => [t.loading, t.counting, t.applying, t.structure.loading].into_iter().flatten().collect(),
         Tab::Query(q) => q.running.into_iter().collect(),
     }
 }
