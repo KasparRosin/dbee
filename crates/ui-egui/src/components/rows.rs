@@ -1063,7 +1063,7 @@ mod tests {
         let t = crate::theme::LIGHT;
         let ring = Edge { outer: orders.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
         assert!(fills_in(&h.output().shapes, orders).contains(&(orders, t.selection)), "selected");
-        assert!(!edges_in(&h.output().shapes, orders, 0.0).contains(&ring), "a click shows no focus box");
+        assert!(edges_in(&h.output().shapes, orders, 0.0).contains(&ring), "a click gives the row the keyboard and its focus box");
         // From the filter, Tab goes to the refresh, then to the first row: its focus box shows.
         let at = rect_of(&h, "tree-filter").center();
         click(&mut h, at, 1);

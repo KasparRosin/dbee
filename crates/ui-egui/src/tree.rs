@@ -36,6 +36,8 @@
 //! selects it); Space stays a click (select). Ctrl+C copies a table's name ([`take_keys`], before
 //! the shortcuts): the open menu's row while a menu is open, else the table row that has the
 //! keyboard. Anywhere else Ctrl+C is the shortcuts' (the grid's copy), and Ctrl+Shift+C always is.
+//! A click on a table, schema or system group row gives it the keyboard, and it shows the focus
+//! box Tab gives it (unlike a pointer's focus elsewhere) while it keeps the keyboard.
 //! No key opens a row's menu yet.
 //!
 //! **Speed.** A catalog can hold thousands of tables, and the tree must stay within a frame. The
@@ -132,6 +134,8 @@ pub struct Tree {
     menu_row: Option<TableRef>,
     /// The table row that had the keyboard when the tree was last drawn, and its widget id.
     focused: Option<(egui::Id, TableRef)>,
+    /// The row a click last gave the keyboard: it shows the focus box while it keeps it.
+    clicked: Option<egui::Id>,
     /// User schemas the user opened or closed, and how they are now ([`default_open`] for the
     /// others).
     user_open: HashMap<String, bool>,
@@ -502,6 +506,7 @@ pub fn show(
     let mut menu = Menu { state: tree.menu.clone(), last: tree.menu_row.take(), now: None, acts: Vec::new() };
     tree.focused = None;
     let mut focused = None;
+    let mut clicked = tree.clicked;
     let rows = tree.rows(catalog);
     if rows.list.is_empty() && loading.is_some() {
         let (rect, drawn) = skeleton::TreeRows.show(ui);
@@ -542,7 +547,20 @@ pub fn show(
         for (i, ((row, id), expander)) in rows.list.iter().zip(&rows.ids).zip(&rows.expanders).enumerate() {
             let rect = Rect::from_min_size(pos2(frame.left(), frame.top() + TREE_ROW_H * i as f32), vec2(frame.width(), TREE_ROW_H));
             if i >= first && i < last {
-                let c = draw_row(ui, rect, *row, id, expander, &rows.catalog, &system_label, selected.as_ref(), &mut menu, &mut focused, tags);
+                let c = draw_row(
+                    ui,
+                    rect,
+                    *row,
+                    id,
+                    expander,
+                    &rows.catalog,
+                    &system_label,
+                    selected.as_ref(),
+                    &mut menu,
+                    &mut focused,
+                    &mut clicked,
+                    tags,
+                );
                 if !matches!(c, Click::None) {
                     click = c;
                 }
@@ -561,6 +579,7 @@ pub fn show(
     tree.drawn = true;
     tree.menu_row = menu.now;
     tree.focused = focused;
+    tree.clicked = clicked;
     acts.extend(menu.acts);
     let table_ref = |s: usize, t: usize| catalog.schemas.get(s).and_then(|x| x.tables.get(t)).map(|x| x.table.clone());
     match click {
@@ -641,6 +660,7 @@ impl Menu {
 
 /// Draws one row in view and tags it (a table row's chevron as `expander`), with a table row's
 /// menu. The system group reads `system_label`. A table row with the keyboard is put in `focused`.
+/// A click on a row (not a column's) gives it the keyboard, and `clicked` names it.
 #[allow(clippy::too_many_arguments, reason = "one row's data, borrowed from the tree's cache and the frame")]
 fn draw_row(
     ui: &mut egui::Ui,
@@ -653,6 +673,7 @@ fn draw_row(
     selected: Option<&Selected>,
     menu: &mut Menu,
     focused: &mut Option<(egui::Id, TableRef)>,
+    clicked: &mut Option<egui::Id>,
     tags: &mut Tags,
 ) -> Click {
     let level = level(row);
@@ -670,6 +691,14 @@ fn draw_row(
         _ => false,
     };
     let look = Look::of(ui, &r);
+    // A click gives the row the keyboard, and the row shows it as Tab's focus does (a pointer's
+    // focus shows nothing elsewhere), so Ctrl+C visibly copies the boxed row. A column row has no
+    // click.
+    if r.clicked() && !matches!(row, Row::Column { .. }) {
+        r.request_focus();
+        *clicked = Some(r.id);
+    }
+    let focus_shown = look.focused || (*clicked == Some(r.id) && r.has_focus());
     // The row whose menu is open keeps the `hover` ground, the pointer in the menu or not.
     let menu_row = match row {
         Row::Table { s, t, .. } => {
@@ -680,7 +709,7 @@ fn draw_row(
     let hovered = look.hovered || menu_row || expand.as_ref().is_some_and(Response::hovered);
     let chevron_focused = expand.as_ref().is_some_and(|e| focus::shown(ui, e));
     let draw = |kind: TreeKind, name: &str, right: Option<&str>, open: Option<bool>| {
-        let drawn = TreeRow { level, kind, name, right, open, selected: is_selected, focused: look.focused, chevron_focused, hovered };
+        let drawn = TreeRow { level, kind, name, right, open, selected: is_selected, focused: focus_shown, chevron_focused, hovered };
         let cut = drawn.paint(ui, rect);
         r.widget_info(|| drawn.widget_info());
         if let Some(e) = &expand {
@@ -742,9 +771,7 @@ fn draw_row(
                 return Click::Open(s, ti);
             }
             if r.clicked() {
-                // A click gives the row the keyboard (no focus box for a pointer's focus), so
-                // Ctrl+C copies its name from then on.
-                r.request_focus();
+                // The click gave the row the keyboard (above), so Ctrl+C copies its name from then on.
                 *focused = Some((r.id, info.table.clone()));
                 return Click::Select(s, ti);
             }
