@@ -322,8 +322,7 @@ fn m1_day_end_to_end() {
     let (toggle, head, filter) = (app.rect("value-toggle"), app.rect("grid-header-0"), app.rect("filter-0-column"));
     let toggle_y = toggle[1] + toggle[3] / 2.0;
     assert!(toggle_y < head[1] && toggle_y > filter[1] + filter[3], "the toggle in the table bar: {toggle:?}, {filter:?}, {head:?}");
-    let shown_panel = app.rect("value-panel");
-    assert!((shown_panel[1] - (toggle[1] + toggle[3] + 1.0)).abs() <= 1.0, "the panel from the table bar's bottom: {shown_panel:?}, {toggle:?}");
+    app.panel_between_the_bars("step 4");
     // WRAP off and on again: the text comes back as it was.
     let value_rows = app.value("value-text")["rows"].clone();
     assert_eq!(app.value("value-panel")["wrap"], true, "WRAP starts on");

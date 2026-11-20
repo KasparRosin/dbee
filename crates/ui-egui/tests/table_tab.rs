@@ -2093,9 +2093,15 @@ fn one_widget(a: &str, b: &str) -> bool {
 
 /// Every tagged control of the table tab's bars lies inside the tab's body, and no two overlap.
 fn assert_nothing_over_anything(ui: &mut Ui, at: &str) {
+    assert_none_of_these_overlap(ui, at, &["table-", "filter-", "page-", "row-add", "edit-", "edits-"]);
+}
+
+/// Every tagged control whose id starts with one of `prefixes` lies inside the tab's body, and no
+/// two overlap (`value-panel`, the panel itself, holds its controls and is left out).
+fn assert_none_of_these_overlap(ui: &mut Ui, at: &str, prefixes: &[&str]) {
     let body = ui.tab_x();
     let height = ui.harness.ctx.content_rect().height();
-    let ids: Vec<String> = ["table-", "filter-", "page-", "row-add", "edit-", "edits-"].iter().flat_map(|p| ui.ids_with(p)).collect();
+    let ids: Vec<String> = prefixes.iter().flat_map(|p| ui.ids_with(p)).filter(|id| id != "value-panel").collect();
     let drawn: Vec<(String, egui::Rect)> = ui.rects(&ids).into_iter().filter_map(|(id, r)| r.map(|r| (id, r))).collect();
     for (id, r) in &drawn {
         assert!(
@@ -2159,6 +2165,99 @@ fn no_bar_draws_one_control_over_another() {
     ui.ok("engine.execute", json!({ "command": "table.cancel", "params": {} }));
     ui.until("the load's end", |ui| ui.table()["loading"].is_null());
     drop(lock);
+}
+
+/// The value panel's place in a table tab (MC+): the table bar and the paging bar run the body's
+/// width, the panel stands between them (its top on the table bar's bottom, its foot on the paging
+/// bar's top), the band and the grid beside it; EXPORT and the toggle stay in the table bar, the
+/// toggle and APPLY keep their places at the body's right end.
+#[test]
+fn the_panel_stands_between_the_table_bar_and_the_paging_bar() {
+    let db = dbee_testkit::require_testdb!();
+    let staged = null_and_empty(db);
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.open("scratch", &staged.0);
+    ui.until("the page", loaded);
+    panel(&mut ui, true);
+    one_change_staged(&mut ui);
+    let body = ui.tab_x();
+    let at = egui::PanelState::load(&ui.harness.ctx, egui::Id::new("dbee-value-panel")).expect("the panel shows").outer_rect;
+    let bar_at = |ui: &Ui, id: &str| {
+        let y = ui.drawn(id).center().y;
+        painted_at(ui, egui::pos2(body.min + 2.0, y)).unwrap_or_else(|| panic!("the bar under `{id}`")).1
+    };
+    let (table_bar, paging_bar) = (bar_at(&ui, "table-refresh"), bar_at(&ui, "page-first"));
+    for (name, bar) in [("table", table_bar), ("paging", paging_bar)] {
+        assert!(
+            (bar.left() - body.min).abs() <= 1.0 && (bar.right() - body.max).abs() <= 1.0,
+            "the {name} bar runs the body's width {body:?}: {bar:?}"
+        );
+    }
+    assert!((at.top() - table_bar.bottom()).abs() <= 1.0, "the panel's top {at:?} on the table bar's bottom {table_bar:?}");
+    assert!((at.bottom() - paging_bar.top()).abs() <= 1.0, "the panel's foot {at:?} on the paging bar's top {paging_bar:?}");
+    assert!((at.right() - body.max).abs() <= 0.5, "the panel at the body's right: {at:?}");
+    for id in ["table-export", "value-toggle"] {
+        let r = ui.drawn(id);
+        assert!(table_bar.expand(0.5).contains_rect(r), "`{id}` {r:?} in the table bar {table_bar:?}");
+    }
+    let toggle = ui.drawn("value-toggle");
+    assert!((toggle.right() - body.max).abs() <= 0.5, "the toggle at the body's right: {toggle:?}");
+    let apply = ui.drawn("edit-apply");
+    assert!(paging_bar.expand(0.5).contains_rect(apply), "APPLY in the paging bar: {apply:?}");
+    assert!((apply.right() - (body.max - 12.0)).abs() <= 0.5, "APPLY 12 from the body's right, under the panel: {apply:?}");
+    let head = ui.drawn("grid-header-0");
+    assert!((head.top() - at.top()).abs() <= 1.0, "the grid's header level with the panel's top: {head:?}, {at:?}");
+    assert!(head.right() <= at.left() + 0.5, "the grid beside the panel: {head:?}, {at:?}");
+}
+
+/// A scratch table with a short column and a long-named text column holding several lines.
+fn long_name(db: &TestDb) -> Scratch {
+    Scratch::new(db, "t_name", |t| {
+        format!(
+            "CREATE TABLE scratch.{t} (id int PRIMARY KEY, a_rather_long_column_name_for_a_narrow_value_panel text); \
+             INSERT INTO scratch.{t} VALUES (1, E'one\\ntwo\\nthree'), (2, 'x');"
+        )
+    })
+}
+
+/// Review Focus 6: at 1400, 1100, 900, 760, 640 and 520 wide, the panel open and shut, with a
+/// value shown, a long name in the panel's bar and a value edited in the panel, no control of the
+/// panel or the table tab's bars lies outside the window or over another.
+#[test]
+fn no_value_panel_control_overlaps_another() {
+    const WIDTHS: [f32; 6] = [1400.0, 1100.0, 900.0, 760.0, 640.0, 520.0];
+    const IDS: [&str; 7] = ["value-", "table-", "filter-", "page-", "row-add", "edit-", "edits-"];
+    let db = dbee_testkit::require_testdb!();
+    let table = long_name(db);
+    let mut ui = Ui::connected_in(db, egui::vec2(1400.0, 720.0));
+    ui.open("scratch", &table.0);
+    ui.until("the page", loaded);
+    let sweep = |ui: &mut Ui, state: &str| {
+        for width in WIDTHS {
+            ui.harness.set_size(egui::vec2(width, 720.0));
+            ui.frame();
+            ui.frame();
+            assert_none_of_these_overlap(ui, &format!("{state}, {width} wide"), &IDS);
+        }
+        ui.harness.set_size(egui::vec2(1400.0, 720.0));
+        ui.frame();
+    };
+    for on in [false, true] {
+        panel(&mut ui, on);
+        let open = if on { "open" } else { "shut" };
+        ui.click("grid-cell-1-0");
+        sweep(&mut ui, &format!("a value, the panel {open}"));
+        ui.click("grid-cell-0-1");
+        sweep(&mut ui, &format!("a long name, the panel {open}"));
+    }
+    ui.double_click("grid-cell-0-1");
+    ui.frame();
+    assert_eq!(ui.value("value-panel")["editing"], true, "the panel edits");
+    assert!(ui.tag("value-save").is_some(), "SAVE drawn");
+    sweep(&mut ui, "editing in the panel");
+    ui.key("Escape");
+    ui.frame();
+    assert_eq!(ui.table()["edits"]["count"], 0, "nothing staged");
 }
 
 /// At 640 × 420 with the value panel shut the table bar keeps its controls: the view switch,

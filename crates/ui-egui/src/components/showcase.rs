@@ -443,9 +443,14 @@ pub(crate) fn value_samples() -> [ValueSample; 8] {
 /// Draws `sample` into `at`.
 pub(crate) fn value_panel(ui: &mut Ui, sample: &ValueSample, at: Rect) -> value::Shown {
     let shown = sample.panel.show(ui, at);
-    if let Some((text, json, caret)) = &sample.value {
-        let spans = json.then(|| crate::value_panel::spans(text));
-        value::paint_value(ui, shown.text, text, spans.as_deref(), *caret);
+    match &sample.value {
+        // The editing state's text as the panel's editor lays it out.
+        Some((text, json, caret)) if sample.panel.state == ValueState::Editing => value::paint_edited(ui, shown.text, text, *json, *caret),
+        Some((text, json, caret)) => {
+            let spans = json.then(|| crate::value_panel::spans(text));
+            value::paint_value(ui, shown.text, text, spans.as_deref(), *caret);
+        }
+        None => {}
     }
     shown
 }

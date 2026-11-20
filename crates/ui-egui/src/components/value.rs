@@ -447,6 +447,25 @@ pub fn paint_value(ui: &Ui, at: Rect, value: &str, spans: Option<&[Span]>, caret
     }
 }
 
+/// A value being edited, drawn in the value's box `at` as the panel's editor lays it out
+/// ([`crate::editors::panel_job`]: [`PAD`] in, from the box's top, wrapped at its width), with the
+/// caret before byte `caret` (the showcase's).
+pub fn paint_edited(ui: &Ui, at: Rect, value: &str, json: bool, caret: Option<usize>) {
+    let t = tokens(ui.ctx());
+    let p = painter(ui).with_clip_rect(at.intersect(ui.clip_rect()));
+    let mut job = crate::editors::panel_job(value, json, t);
+    job.wrap.max_width = (at.width() - 2.0 * PAD).max(0.0);
+    let galley = p.layout_job(job);
+    let origin = pos2(at.left() + PAD, at.top());
+    if let Some(c) = caret {
+        let chars = value.get(..c).map_or(0, |s| s.chars().count());
+        let row = galley.pos_from_cursor(CCursor::new(chars)).translate(origin.to_vec2());
+        let caret = Rect::from_min_size(pos2(row.left(), row.center().y - VALUE_CARET_H / 2.0), vec2(CARET_W, VALUE_CARET_H));
+        p.rect_filled(caret, CornerRadius::ZERO, t.ink);
+    }
+    p.galley(origin, galley, t.text);
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
@@ -601,12 +620,13 @@ mod tests {
                     }
                     _ => {
                         let (value, json, _) = sample.value.clone().unwrap();
-                        let first = value.split('\n').next().unwrap();
+                        // The value a row a text; the edited value one text, as the editor lays it out.
+                        let first = if state == State::Editing { value.as_str() } else { value.split('\n').next().unwrap() };
                         let (r, _, font, _) = drawn(&shapes, first).unwrap_or_else(|| panic!("{at_}: {first:?} drawn"));
                         assert_eq!(font, Text::Code.font(), "{at_}: `code`");
                         assert!(close(r.left(), x0 + 13.0) && close(r.top(), y0 + 48.0), "{at_}: the first row at {r:?}");
                         if json {
-                            let row = value.split('\n').nth(1).unwrap();
+                            let row = if state == State::Editing { value.as_str() } else { value.split('\n').nth(1).unwrap() };
                             let parts = sections(&shapes, row);
                             let key = parts.iter().find(|(w, _, _)| w.starts_with('"')).unwrap_or_else(|| panic!("{at_}: a key in {parts:?}"));
                             assert_eq!(key.2, t.syn_keyword, "{at_}: the key {key:?}");
@@ -627,9 +647,11 @@ mod tests {
                 }
                 let caret: Vec<Rect> = fills.iter().filter(|(r, c)| *c == t.ink && close(r.width(), 1.0)).map(|(r, _)| *r).collect();
                 if state == State::Editing {
-                    let row = "  \"gift\": false,";
-                    let (r, _, _, _) = drawn(&shapes, row).unwrap_or_else(|| panic!("{at_}: {row} drawn"));
-                    let x = r.left() + r.width() * 15.0 / 16.0;
+                    // `  "gift": false,` is the third row: the caret after its 15th character.
+                    let (value, _, _) = sample.value.clone().unwrap();
+                    let (r, _, _, _) = drawn(&shapes, &value).unwrap_or_else(|| panic!("{at_}: the edited value drawn"));
+                    let char_w = r.width() / value.split('\n').map(|l| l.chars().count()).max().unwrap() as f32;
+                    let x = r.left() + char_w * 15.0;
                     let want = Rect::from_min_size(pos2(x, y0 + 48.0 + 40.0 + 2.0), vec2(1.0, 16.0));
                     assert!(
                         caret.iter().any(|c| close(c.left(), want.left()) && close(c.top(), want.top()) && close(c.height(), 16.0)),

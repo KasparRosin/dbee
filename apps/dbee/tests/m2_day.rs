@@ -359,6 +359,7 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     );
     let panel = app.value("value-panel");
     assert_eq!((panel["column"].clone(), panel["type"].clone()), (json!("billing"), json!(info.plain_json_label)), "{name}: {panel}");
+    app.panel_between_the_bars(&format!("{name}, step 4"));
     let text = app.value("value-text")["text"].as_str().unwrap().to_string();
     assert!(text.starts_with("{\n") && text.contains("\"city\": \"Testville\""), "{name}: formatted: {text}");
     let lines: Vec<&str> = text.split('\n').collect();

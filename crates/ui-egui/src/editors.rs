@@ -725,7 +725,8 @@ const PANEL_PAD: f32 = crate::components::value::PAD;
 
 /// The layout of `text` being edited in the panel, in `code`: with `json`, coloured as JSON up to
 /// the first spot `json::highlight` stops at (punctuation `text_muted`), and plain `text` from
-/// there on; else all in `text`. Unwrapped: the caller sets the width.
+/// there on (text that is JSON whole keeps its closing brackets `text_muted`); else all in `text`.
+/// Unwrapped: the caller sets the width.
 pub fn panel_job(text: &str, json: bool, t: &theme::Tokens) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let mut add = |range: std::ops::Range<usize>, colour: egui::Color32| {
@@ -741,7 +742,8 @@ pub fn panel_job(text: &str, json: bool, t: &theme::Tokens) -> egui::text::Layou
             at = range.end;
         }
     }
-    add(at..text.len(), t.text);
+    let tail = if json && json::is_valid(text) { t.text_muted } else { t.text };
+    add(at..text.len(), tail);
     job
 }
 
@@ -784,6 +786,19 @@ mod tests {
         }
         h.run_steps(2);
         h.output().shapes.clone()
+    }
+
+    /// Text edited in the panel: JSON whole keeps its closing brackets `text_muted`, as the panel
+    /// draws a value; past the first spot that isn't JSON the text is plain `text`.
+    #[test]
+    fn the_panel_editors_json_keeps_its_closing_bracket_muted() {
+        let t = theme::LIGHT;
+        let colour = |text: &str| {
+            // The last section holds the last character.
+            panel_job(text, true, &t).sections.last().map(|s| s.format.color)
+        };
+        assert_eq!(colour("{\n  \"a\": [1]\n}"), Some(t.text_muted), "JSON whole");
+        assert_eq!(colour("{\"a\": 1,}"), Some(t.text), "past the stop");
     }
 
     #[test]

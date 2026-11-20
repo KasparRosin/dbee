@@ -189,6 +189,26 @@ impl App {
         x >= ox - 0.5 && y >= oy - 0.5 && x + w <= ox + ow + 0.5 && y + h <= oy + oh + 0.5
     }
 
+    /// In a table tab with the value panel shown (MC+): the panel's top is the table bar's bottom,
+    /// its foot the paging bar's top; the panel's and the bars' controls don't overlap.
+    #[allow(dead_code)]
+    pub fn panel_between_the_bars(&mut self, at: &str) {
+        let bar_h = f64::from(dbee_ui_egui::theme::size::BAR_H);
+        let (panel, toggle, first) = (self.rect("value-panel"), self.rect("value-toggle"), self.rect("page-first"));
+        assert!((panel[1] - (toggle[1] + toggle[3] + 1.0)).abs() <= 1.0, "{at}: the panel from the table bar's bottom: {panel:?}, {toggle:?}");
+        let paging_top = first[1] + first[3] / 2.0 - bar_h / 2.0;
+        assert!((panel[1] + panel[3] - paging_top).abs() <= 1.0, "{at}: the panel down to the paging bar's top {paging_top}: {panel:?}");
+        let ids = ["value-copy", "value-wrap", "value-toggle", "table-export", "page-last"];
+        let rects: Vec<[f64; 4]> = ids.iter().map(|id| self.rect(id)).collect();
+        for (i, a) in rects.iter().enumerate() {
+            for (j, b) in rects.iter().enumerate().skip(i + 1) {
+                let w = (a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0]);
+                let h = (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]);
+                assert!(w <= 0.0 || h <= 0.0 || w * h <= 0.5, "{at}: `{}` {a:?} over `{}` {b:?}", ids[i], ids[j]);
+            }
+        }
+    }
+
     /// `[x, y, width, height]` of widget `id`, in window points.
     pub fn rect(&mut self, id: &str) -> [f64; 4] {
         let tag = self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"));
