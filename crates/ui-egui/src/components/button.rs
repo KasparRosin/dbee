@@ -279,7 +279,8 @@ impl Widget for IconButton {
 /// A cell of a bar (`button/bar`), 36 tall: an icon with words, or an icon alone in a 36 square.
 /// Off when added with `ui.add_enabled(false, …)`.
 pub struct BarButton<'a> {
-    icon: Icon,
+    /// `None`: words alone, as CHANGE ENGINE.
+    icon: Option<Icon>,
     label: Option<&'a str>,
     on: bool,
     done: bool,
@@ -294,12 +295,27 @@ pub struct BarButton<'a> {
 impl<'a> BarButton<'a> {
     /// `icon` and `label`, as REFRESH and + ROW in the table bar.
     pub fn label(icon: Icon, label: &'a str) -> BarButton<'a> {
-        BarButton { icon, label: Some(label), on: false, done: false, divider: true, words: true, height: BAR_BUTTON_H, min_width: 0.0, look: None }
+        BarButton {
+            icon: Some(icon),
+            label: Some(label),
+            on: false,
+            done: false,
+            divider: true,
+            words: true,
+            height: BAR_BUTTON_H,
+            min_width: 0.0,
+            look: None,
+        }
+    }
+
+    /// `label` alone, with no icon, as CHANGE ENGINE on the connection form's engine row.
+    pub fn text(label: &'a str) -> BarButton<'a> {
+        BarButton { icon: None, ..BarButton::label(Icon::Plus, label) }
     }
 
     /// `icon` alone, as the value panel's toggle.
     pub fn icon(icon: Icon) -> BarButton<'a> {
-        BarButton { icon, label: None, on: false, done: false, divider: true, words: true, height: BAR_BUTTON_H, min_width: 0.0, look: None }
+        BarButton { label: None, ..BarButton::label(icon, "") }
     }
 
     /// In a bar with a line along its bottom: as tall as the room above the line.
@@ -353,13 +369,15 @@ impl<'a> BarButton<'a> {
 
     /// The words, if any, and the width.
     fn parts(&self, ui: &Ui) -> (Option<Arc<Galley>>, f32) {
-        let Some(label) = self.label.filter(|_| self.words) else {
+        // Without an icon the words always show: they are all it has.
+        let Some(label) = self.label.filter(|_| self.words || self.icon.is_none()) else {
             return (None, BAR_BUTTON_H);
         };
         let words = ui.painter().layout_job(Text::Label.job(label, Color32::PLACEHOLDER));
         // egui puts the letter spacing after the last letter too; the page's measure has none there.
         let words_w = words.size().x - Text::Label.spacing();
-        let width = (2.0 * BAR_BUTTON_PAD_X + self.icon.size().x + BAR_BUTTON_GAP + words_w).ceil();
+        let icon_w = self.icon.map_or(0.0, |i| i.size().x + BAR_BUTTON_GAP);
+        let width = (2.0 * BAR_BUTTON_PAD_X + icon_w + words_w).ceil();
         (Some(words), width.max(self.min_width))
     }
 }
@@ -368,7 +386,7 @@ impl Widget for BarButton<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let (words, width) = self.parts(ui);
         let (rect, r) = ui.allocate_exact_size(vec2(width, self.height), Sense::click());
-        let name = self.label.unwrap_or(self.icon.name());
+        let name = self.label.or(self.icon.map(Icon::name)).unwrap_or_default();
         r.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), self.on, name));
         let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
         if !ui.is_rect_visible(rect) {
@@ -395,14 +413,21 @@ impl Widget for BarButton<'_> {
         };
         match words {
             Some(words) => {
-                let icon_w = self.icon.size().x;
-                let held = icon_w + BAR_BUTTON_GAP + words.size().x - Text::Label.spacing();
+                let icon_w = self.icon.map_or(0.0, |i| i.size().x);
+                let lead = self.icon.map_or(0.0, |_| icon_w + BAR_BUTTON_GAP);
+                let held = lead + words.size().x - Text::Label.spacing();
                 let natural = (2.0 * BAR_BUTTON_PAD_X + held).ceil();
                 let x = if rect.width() > natural { rect.center().x - held / 2.0 } else { rect.left() + BAR_BUTTON_PAD_X };
-                self.icon.paint(&p, pos2(x + icon_w / 2.0, rect.center().y), colour);
-                p.galley(pos2(x + icon_w + BAR_BUTTON_GAP, rect.center().y - words.size().y / 2.0), words, colour);
+                if let Some(icon) = self.icon {
+                    icon.paint(&p, pos2(x + icon_w / 2.0, rect.center().y), colour);
+                }
+                p.galley(pos2(x + lead, rect.center().y - words.size().y / 2.0), words, colour);
             }
-            None => self.icon.paint(&p, rect.center(), colour),
+            None => {
+                if let Some(icon) = self.icon {
+                    icon.paint(&p, rect.center(), colour);
+                }
+            }
         }
         if self.divider {
             p.rect_filled(Rect::from_min_size(rect.min, vec2(BAR_BUTTON_DIVIDER, rect.height())), CornerRadius::ZERO, t.line);

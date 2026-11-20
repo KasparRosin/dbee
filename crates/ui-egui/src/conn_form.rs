@@ -1,7 +1,8 @@
 //! The connection form: its fields as typed ([`Form`]), turning them into a [`ConnectionConfig`]
 //! (port numbers, validation), and drawing it in parts, each of fixed height but the fields: the
-//! title row with the database type ([`header`]), then the fields, which scroll, and Save · Test ·
-//! Connect with the message slot under them at the bottom ([`fields_and_footer`]).
+//! pane's title row ([`title_row`]), the engine row with the database type ([`engine_row`]), then
+//! the fields, which scroll, and Save · Test · Connect with the message slot under them at the
+//! bottom ([`fields_and_footer`]).
 //! The screen around it, with the engine cards a new connection starts with, is
 //! [`crate::connections`].
 //!
@@ -22,16 +23,20 @@ use egui::{
 };
 
 use crate::automation::Tags;
-use crate::components::button::{BoxButton, TextButton};
+use crate::components::button::{BarButton, BoxButton, TextButton};
 use crate::components::checkbox::Checkbox;
+use crate::components::icon::Icon;
 use crate::components::input::{self, Field, Input};
+use crate::components::logo::Logo;
 use crate::components::menu::{self, Item};
 use crate::components::segmented::Segmented;
 use crate::components::swatch::{self, Swatch};
 use crate::components::tooltip::Hint;
 use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
 use crate::picker::Pick;
-use crate::theme::size::{MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP};
+use crate::theme::size::{
+    BAR_H, BAR_LINE, CONN_TITLE_MIN_W, ENGINE_ROW_GAP, ENGINE_ROW_LOGO, INSET, MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP,
+};
 use crate::theme::{self, Text};
 
 /// The height of a row under a field's label: an input, the choices, a file box, the colours.
@@ -40,8 +45,6 @@ const FIELD_H: f32 = 28.0;
 const MESSAGE_H: f32 = 52.0;
 /// Save · Test · Connect and the message slot under them, with the space between.
 const FOOTER_H: f32 = 32.0 + 6.0 + 6.0 + MESSAGE_H;
-/// Fill from URL and Change engine, side by side.
-const SIDE_BUTTON_W: f32 = 128.0;
 /// The Database field's list button.
 const LIST_BUTTON_W: f32 = 84.0;
 /// The most of the Database field's list that shows; more names scroll.
@@ -365,74 +368,83 @@ const GAP: f32 = 12.0;
 /// The port fields' width.
 const PORT_W: f32 = 110.0;
 
-/// A button of the title row, as wide as the other one beside it, tagged `id`; whether it was
-/// clicked.
-fn side_button(ui: &mut egui::Ui, tags: &mut Tags, id: &str, label: &str, enabled: bool) -> bool {
-    let r = ui.add_enabled_ui(enabled, |ui| ui.add_sized(vec2(SIDE_BUTTON_W, FIELD_H), Button::new(label))).inner;
-    tags.tag(id, &r);
-    r.clicked()
-}
-
-/// The narrowest the title gets before the type and Change engine move to a row of their own.
-const TITLE_MIN_W: f32 = 160.0;
-
-/// `text` in `font`, cut to `width` with "…" (then the whole text shows on hover), in a slot of
-/// that width, on its left or its `right`; tagged `id` with `value`.
-fn row_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, style): (&str, Text), value: &str, width: f32, right: bool) {
+/// `text` in `style` and `color` on one line in `slot`, from its left, centred in its height, cut
+/// with "…" to its width (then the whole text shows on hover); tagged `id` with `value`.
+fn slot_text(ui: &mut egui::Ui, tags: &mut Tags, id: &str, (text, style): (&str, Text), value: &str, slot: egui::Rect) {
     let t = theme::tokens(ui.ctx());
-    let galley = line_galley(ui, text, style, t.text, width);
+    let galley = line_galley(ui, text, style, t.text, slot.width());
     let elided = galley.elided;
-    let (rect, r) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
-    let x = if right { rect.right() - galley.size().x } else { rect.left() };
-    ui.painter().galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, t.text);
+    ui.painter().galley(pos2(slot.left(), slot.center().y - galley.size().y / 2.0), galley, t.text);
+    let r = ui.interact(slot, egui::Id::new(id), Sense::hover());
     let r = if elided { r.hint(text) } else { r };
     tags.tag_value(id, &r, value);
 }
 
-/// The title row, `w` wide: the form's title on the left; at the right end Fill from URL when
-/// `url` (a type the form can take has a URL), and on the `form`, left of it, the database type
-/// and Change engine (unless the type is fixed; not while a test or connect runs). When they
-/// would leave the title less than [`TITLE_MIN_W`], the type and Change engine take a row of their
-/// own under it, Change engine under Fill from URL.
-pub(crate) fn header(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, form: bool, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
+/// A row of the pane, [`BAR_H`] tall across it with a 1 px `line` along its bottom; the room
+/// above the line.
+fn bar_row(ui: &mut egui::Ui) -> egui::Rect {
     let t = theme::tokens(ui.ctx());
-    let change = form && !conn.form.engine_fixed;
-    // As wide as the widest type's name, so the layout is the same whichever type the form has.
-    let kind_w = DbKind::ALL.iter().map(|k| line_galley(ui, k.label(), Text::Subtitle, t.text, w).size().x).fold(0.0, f32::max).min(w / 3.0);
-    let spacing = ui.spacing().item_spacing.x;
-    let buttons = f32::from(u8::from(url) + u8::from(change)) * (SIDE_BUTTON_W + spacing);
-    let one_row = form && TITLE_MIN_W + GAP + kind_w + buttons <= w;
-    let kind = |ui: &mut egui::Ui, tags: &mut Tags, width: f32, right: bool| {
-        row_text(ui, tags, "conn-kind", (conn.form.kind.label(), Text::Subtitle), conn.form.kind.id(), width, right);
-    };
-    let change_engine = |ui: &mut egui::Ui, tags: &mut Tags, acts: &mut Vec<Act>| {
-        if change && side_button(ui, tags, "conn-change-engine", "Change engine", conn.running.is_none()) {
-            acts.push(Act::ChangeEngine);
-        }
-    };
-    ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::right_to_left(Align::Center), |ui| {
-        if url && side_button(ui, tags, "conn-fill-url", "Fill from URL…", true) {
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), BAR_H), Sense::hover());
+    let line = egui::Rect::from_min_max(pos2(row.left(), row.bottom() - BAR_LINE), row.max);
+    ui.painter().rect_filled(line, CornerRadius::ZERO, t.line);
+    egui::Rect::from_min_max(row.min, pos2(row.right(), line.top()))
+}
+
+/// The pane's title row: the form's title in `subtitle`, 12 in, cut with "…" to the room there
+/// is; at the right end FILL FROM URL when `url` (a type the form can take has a URL), after its
+/// divider. When the title would get narrower than [`CONN_TITLE_MIN_W`], FILL FROM URL draws its
+/// icon alone, its words on hover.
+pub(crate) fn title_row(ui: &mut egui::Ui, conn: &ConnScreen, url: bool, tags: &mut Tags, acts: &mut Vec<Act>) {
+    let row = bar_row(ui);
+    let mut end = row.right();
+    if url {
+        let full = BarButton::label(Icon::Link, "Fill from URL").over_line();
+        let words = row.width() - INSET - full.width(ui) - INSET >= CONN_TITLE_MIN_W;
+        let button = full.words(words);
+        let w = button.width(ui);
+        end = row.right() - w;
+        // In a child: the row has taken its room already.
+        let r = ui.new_child(UiBuilder::new().max_rect(egui::Rect::from_min_max(pos2(end, row.top()), row.max))).add(button);
+        let r = if words { r } else { r.hint("Fill from URL…") };
+        tags.tag("conn-fill-url", &r);
+        if r.clicked() {
             acts.push(Act::FillFromUrl);
         }
-        if one_row {
-            change_engine(ui, tags, acts);
-            kind(ui, tags, kind_w, true);
-        }
-        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            let title = conn.form.title();
-            let width = ui.available_width().max(1.0);
-            row_text(ui, tags, "conn-title", (&title, Text::Title), &title, width, false);
-        });
-    });
-    if form && !one_row {
-        ui.allocate_ui_with_layout(vec2(w, 30.0), Layout::right_to_left(Align::Center), |ui| {
-            change_engine(ui, tags, acts);
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                let width = ui.available_width().max(1.0);
-                kind(ui, tags, width, false);
-            });
-        });
     }
+    let title = conn.form.title();
+    let slot = egui::Rect::from_min_max(pos2(row.left() + INSET, row.top()), pos2((end - INSET).max(row.left() + INSET + 1.0), row.bottom()));
+    slot_text(ui, tags, "conn-title", (&title, Text::Subtitle), &title, slot);
+}
+
+/// The form's engine row: the engine's logo and name, 12 in, the name cut with "…" to the room
+/// there is; at the right end CHANGE ENGINE after its divider (not for a type that is fixed; off
+/// while a test or connect runs).
+pub(crate) fn engine_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>) {
+    let t = theme::tokens(ui.ctx());
+    let row = bar_row(ui);
+    let mut end = row.right();
+    if !conn.form.engine_fixed {
+        let button = BarButton::text("Change engine").over_line();
+        end = row.right() - button.width(ui);
+        let at = egui::Rect::from_min_max(pos2(end, row.top()), row.max);
+        let enabled = conn.running.is_none();
+        let mut cell = ui.new_child(UiBuilder::new().max_rect(at));
+        if !enabled {
+            cell.disable();
+        }
+        let r = cell.add(button);
+        let r = if enabled { r } else { r.hint_disabled("Change engine: not now, a test or connect is running") };
+        tags.tag("conn-change-engine", &r);
+        if r.clicked() {
+            acts.push(Act::ChangeEngine);
+        }
+    }
+    let kind = conn.form.kind;
+    let logo = egui::Rect::from_center_size(pos2(row.left() + INSET + ENGINE_ROW_LOGO / 2.0, row.center().y), vec2(ENGINE_ROW_LOGO, ENGINE_ROW_LOGO));
+    Logo::of(kind).paint(ui.painter(), logo, t.text);
+    let left = logo.right() + ENGINE_ROW_GAP;
+    let slot = egui::Rect::from_min_max(pos2(left, row.top()), pos2((end - INSET).max(left + 1.0), row.bottom()));
+    slot_text(ui, tags, "conn-kind", (kind.label(), Text::Subtitle), kind.id(), slot);
 }
 
 /// The fields, `w` wide, then the footer at the bottom of the room left: the fields scroll when

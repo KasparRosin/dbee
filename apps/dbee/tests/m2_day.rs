@@ -629,9 +629,18 @@ fn m2_day_end_to_end() {
         let card = app.value(&format!("conn-kind-{kind}"));
         assert_eq!(card["upcoming"], false, "{kind}: {card}");
     }
+    //    The cards are K2: 104 tall, side by side.
+    let cells = ["postgres", "mysql", "mariadb", "sqlite"].map(|kind| app.rect(&format!("conn-kind-{kind}")));
+    for (n, c) in cells.iter().enumerate() {
+        assert!((c[3] - 104.0).abs() <= 0.5 && (c[1] - cells[0][1]).abs() <= 0.5, "card {n}: {cells:?}");
+        assert!(n == 0 || c[0] >= cells[n - 1][0] + cells[n - 1][2] - 1.0, "card {n} after the one before: {cells:?}");
+    }
     app.shot(&root, "2-mysql80-0a-cards");
     app.click("conn-kind-postgres");
     assert_eq!((app.value("conn-kind"), app.value("conn-port")), (json!("postgres"), json!("5432")));
+    //    The engine row under the title row.
+    let (title, change) = (app.rect("conn-title"), app.rect("conn-change-engine"));
+    assert!(change[1] > title[1] + title[3], "Change engine under the title: {title:?} {change:?}");
     app.click("conn-name");
     app.text("Shop mysql80");
     app.click("conn-change-engine");

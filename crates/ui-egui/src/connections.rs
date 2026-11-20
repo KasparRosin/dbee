@@ -10,11 +10,12 @@
 //!   under the name. A single click loads a connection into the form, a double-click connects;
 //!   right-click offers Connect · Edit · Duplicate · Delete (Delete asks first: it deletes the
 //!   saved passwords too).
-//! - Right, under the title row (the title, Fill from URL): a new connection starts with the
-//!   engine cards, one per database type ([`DbKind::ALL`]); a type this build has no driver for
-//!   (not in the session's `kinds`) is greyed with "Upcoming" and cannot be chosen. A card, or a
-//!   URL (its scheme names the type), opens the form, and the title row gains the type and Change
-//!   engine, which goes back to the cards (the form keeps what was typed, and a port that still
+//! - Right, the pane, full bleed: the title row (the title, FILL FROM URL; the connection's colour
+//!   as a 2 px edge along its top). A new connection starts with the engine cards (K2), one cell
+//!   per database type ([`DbKind::ALL`]) with its logo; a type this build has no driver for (not
+//!   in the session's `kinds`) is greyed with UPCOMING and cannot be chosen. A card, or a URL (its
+//!   scheme names the type), opens the form under the engine row: the type's logo and name, and
+//!   CHANGE ENGINE, which goes back to the cards (the form keeps what was typed, and a port that still
 //!   holds the old type's default takes the new one's; not while a test or connect runs). A
 //!   connection opened from the saved list or Recent opens straight into the form, its type fixed;
 //!   Fill from URL then takes that type's URLs only. One saved during the edit, or a Duplicate,
@@ -71,6 +72,7 @@ use crate::components::Look;
 use crate::components::button::BarButton;
 use crate::components::chip::Chip;
 use crate::components::icon::Icon;
+use crate::components::logo::Logo;
 use crate::components::menu::{self, Item};
 use crate::components::rows::ConnectionRow;
 use crate::components::sidebar;
@@ -83,8 +85,9 @@ use crate::picker::{self, Pick, Picker};
 use crate::theme::{
     self, Text, connection_color,
     size::{
-        BAR_H, BAR_LINE, CONN_WARNING_PAD_Y, CONNECTION_ROW_H, INSET, RADIUS_CONTROL, RADIUS_FLOAT, SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_PAD_X,
-        SIDEBAR_W, SLIM_BAR_H, TABLE_EMPTY_PAD,
+        BAR_H, BAR_LINE, CONN_COLOUR_EDGE, CONN_WARNING_PAD_Y, CONNECTION_ROW_H, ENGINE_CARD_CHIP_INSET, ENGINE_CARD_H, ENGINE_CARD_LOGO,
+        ENGINE_CARD_MIN_W, ENGINE_CARD_NAME_GAP, ENGINE_CARD_PAD, ENGINE_CARDS_TOP, ENGINE_HEADING_TOP, INSET, RADIUS_CONTROL, SIDEBAR_MAX_W,
+        SIDEBAR_MIN_W, SIDEBAR_PAD_X, SIDEBAR_W, SLIM_BAR_H, TABLE_EMPTY_PAD,
     },
 };
 
@@ -97,9 +100,6 @@ pub(crate) const CLOSE: &str = "connection.close";
 const SSH_KEY: &str = "connection.sshKey";
 const DELETE: &str = "connection.delete";
 const DUPLICATE: &str = "connection.duplicate";
-
-/// The form's width when the window allows it.
-const FORM_WIDTH: f32 = 600.0;
 
 /// Which form job runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -919,104 +919,108 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, sele
     });
 }
 
-/// The least height of the card's body (the engine cards, or the form under the title row).
-const MIN_BODY_H: f32 = 240.0;
-
 /// Room for the fields' scroll bar, right of them.
-const SCROLL_GAP: i8 = 12;
+const SCROLL_GAP: f32 = 12.0;
 
-/// The right side: the title row, then the engine cards or the form, in a card as tall as the
-/// window allows either way.
+/// The right pane, everything right of the sidebar between the menu bar and the version bar, on
+/// `card` (tagged `conn-card`): the title row, with the connection's colour as an edge along its
+/// top; then the engine cards, or the engine row and the form.
 fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>) {
     let t = theme::tokens(ui.ctx());
-    // Little room above and below: the menu bar and the version bar take the window's height.
-    egui::CentralPanel::default().frame(Frame::new().fill(t.bg).inner_margin(Margin::symmetric(24, 4))).show(ui, |ui| {
-        // The card adds its margins and border to the form's width.
-        let width = (ui.available_width() - 46.0).clamp(240.0, FORM_WIDTH);
-        ui.vertical_centered(|ui| {
-            let card = Frame::new()
-                .fill(t.card)
-                .stroke(Stroke::new(1.0, t.line))
-                .corner_radius(CornerRadius::same(RADIUS_FLOAT))
-                // Less on the right: the fields' scroll bar sits there, beside them.
-                .inner_margin(Margin { left: 22, right: 22 - SCROLL_GAP, top: 22, bottom: 22 })
-                .show(ui, |ui| {
-                    ui.set_width(width + f32::from(SCROLL_GAP));
-                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                        let url = !url_kinds(&conn.form, kinds).is_empty();
-                        conn_form::header(ui, conn, url, conn.step == Step::Form, tags, acts, width);
-                        let body_h = ui.available_height().max(MIN_BODY_H);
-                        ui.allocate_ui_with_layout(vec2(width + f32::from(SCROLL_GAP), body_h), Layout::top_down(Align::Min), |ui| {
-                            ui.set_min_height(body_h);
-                            match conn.step {
-                                Step::Engines => engines(ui, kinds, tags, acts, width),
-                                Step::Form => conn_form::fields_and_footer(ui, conn, tags, acts, width),
-                            }
-                        });
-                    });
+    egui::CentralPanel::default().frame(Frame::new().fill(t.card)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let pane = ui.max_rect();
+        tags.tag("conn-card", &ui.interact(pane, egui::Id::new("conn-card"), Sense::hover()));
+        let url = !url_kinds(&conn.form, kinds).is_empty();
+        conn_form::title_row(ui, conn, url, tags, acts);
+        if let Some(color) = connection_color(conn.form.color) {
+            let edge = Rect::from_min_size(pane.min, vec2(pane.width(), CONN_COLOUR_EDGE));
+            ui.painter().rect_filled(edge, CornerRadius::ZERO, color);
+        }
+        match conn.step {
+            Step::Engines => engines(ui, kinds, tags, acts),
+            Step::Form => {
+                conn_form::engine_row(ui, conn, tags, acts);
+                let inset = Margin { left: INSET as i8, right: 0, top: INSET as i8, bottom: INSET as i8 };
+                Frame::NONE.inner_margin(inset).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::Spacing::default().item_spacing;
+                    let w = (ui.available_width() - SCROLL_GAP).max(1.0);
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| conn_form::fields_and_footer(ui, conn, tags, acts, w));
                 });
-            tags.tag("conn-card", &card.response);
-            // The connection's colour as a strip across the top of the card.
-            if let Some(color) = connection_color(conn.form.color) {
-                let r = card.response.rect;
-                let strip = Rect::from_min_size(r.min, vec2(r.width(), 5.0));
-                let radius = RADIUS_FLOAT;
-                ui.painter().rect_filled(strip, CornerRadius { nw: radius, ne: radius, sw: 0, se: 0 }, color);
+            }
+        }
+    });
+}
+
+/// The engine cards (K2) under `Choose a database`: one per database type, as many in a row as
+/// fit at [`ENGINE_CARD_MIN_W`] each, each row one box; scrolling when the window is short. Those
+/// of `kinds` can be chosen.
+fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>) {
+    let t = theme::tokens(ui.ctx());
+    ScrollArea::vertical().id_salt("conn-engines").auto_shrink([false, false]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        let inset = Margin { left: INSET as i8, right: INSET as i8, top: ENGINE_HEADING_TOP as i8, bottom: INSET as i8 };
+        Frame::NONE.inner_margin(inset).show(ui, |ui| {
+            let w = ui.available_width().max(1.0);
+            ui.add(Label::new(Text::Subtitle.rich_as_written("Choose a database").color(t.text)).truncate());
+            ui.add_space(ENGINE_CARDS_TOP);
+            let per_row = ((w / ENGINE_CARD_MIN_W).floor() as usize).clamp(1, DbKind::ALL.len());
+            let cell_w = w / per_row as f32;
+            for (n, row) in DbKind::ALL.chunks(per_row).enumerate() {
+                if n > 0 {
+                    ui.add_space(ENGINE_CARDS_TOP);
+                }
+                let (line, _) = ui.allocate_exact_size(vec2(w, ENGINE_CARD_H), Sense::hover());
+                let radius = CornerRadius::same(RADIUS_CONTROL);
+                for (k, kind) in row.iter().enumerate() {
+                    let cell = Rect::from_min_size(pos2(line.left() + cell_w * k as f32, line.top()), vec2(cell_w, ENGINE_CARD_H));
+                    // The ground's corners follow the box's at the row's ends.
+                    let corners = CornerRadius {
+                        nw: if k == 0 { radius.nw } else { 0 },
+                        sw: if k == 0 { radius.sw } else { 0 },
+                        ne: if k + 1 == row.len() { radius.ne } else { 0 },
+                        se: if k + 1 == row.len() { radius.se } else { 0 },
+                    };
+                    engine_card(ui, *kind, kinds.contains(kind), cell, corners, tags, acts);
+                    if k > 0 {
+                        let hairline = Rect::from_min_size(cell.min, vec2(BAR_LINE, cell.height()));
+                        ui.painter().rect_filled(hairline, CornerRadius::ZERO, t.line);
+                    }
+                }
+                let boxed = Rect::from_min_size(line.min, vec2(cell_w * row.len() as f32, ENGINE_CARD_H));
+                ui.painter().rect_stroke(boxed, radius, Stroke::new(BAR_LINE, t.line_strong), egui::StrokeKind::Inside);
             }
         });
     });
 }
 
-/// An engine card's height.
-const ENGINE_H: f32 = 104.0;
-/// The narrowest an engine card gets before the cards wrap: two in a row still fit the smallest
-/// window.
-const ENGINE_MIN_W: f32 = 110.0;
-
-/// The engine cards, `w` wide: one per database type, as many in a row as fit, scrolling when the
-/// window is short; those of `kinds` can be chosen.
-fn engines(ui: &mut egui::Ui, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    ui.add_space(4.0);
-    ui.label(Text::Subtitle.rich("Choose a database type"));
-    ui.add_space(6.0);
-    let gap = 8.0;
-    let per_row = (((w + gap) / (ENGINE_MIN_W + gap)).floor() as usize).clamp(1, DbKind::ALL.len());
-    let card_w = (w - gap * (per_row as f32 - 1.0)) / per_row as f32;
-    ScrollArea::vertical().id_salt("conn-engines").auto_shrink([false, true]).show(ui, |ui| {
-        ui.set_width(w);
-        for row in DbKind::ALL.chunks(per_row) {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for kind in row {
-                    engine_card(ui, *kind, kinds.contains(kind), card_w, tags, acts);
-                }
-            });
-            ui.add_space(gap - ui.spacing().item_spacing.y);
-        }
-    });
-}
-
-/// The card of the database type `kind`, `w` wide: its name, and an "Upcoming" chip in the corner
-/// when it is not `available` (this build has no driver for it), greyed and not clickable.
-fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, w: f32, tags: &mut Tags, acts: &mut Vec<Act>) {
+/// The cell of the database type `kind` at `cell`: its logo 28 square 16 in and 16 down, its name
+/// under it, and an UPCOMING chip in the top right corner when it is not `available` (this build
+/// has no driver for it), greyed and not clickable.
+fn engine_card(ui: &mut egui::Ui, kind: DbKind, available: bool, cell: Rect, corners: CornerRadius, tags: &mut Tags, acts: &mut Vec<Act>) {
     let t = theme::tokens(ui.ctx());
-    let (rect, r) = ui.allocate_exact_size(vec2(w, ENGINE_H), if available { Sense::click() } else { Sense::hover() });
-    let fill = if !available {
-        t.card
+    let id = egui::Id::new(("conn-kind", kind.id()));
+    let r = ui.interact(cell, id, if available { Sense::click() } else { Sense::hover() });
+    let ground = if !available {
+        None
     } else if r.is_pointer_button_down_on() {
-        t.selection
+        Some(t.selection)
     } else if r.hovered() {
-        t.hover
+        Some(t.hover)
     } else {
-        t.card
+        None
     };
     let p = ui.painter();
-    p.rect(rect, CornerRadius::same(RADIUS_CONTROL), fill, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
+    if let Some(ground) = ground {
+        p.rect_filled(cell, corners, ground);
+    }
     let color = if available { t.text } else { t.text_muted };
-    let name = line_galley(ui, kind.label(), Text::Subtitle, color, w - 28.0);
-    p.galley(pos2(rect.left() + 14.0, rect.center().y - name.size().y / 2.0), name, color);
+    let logo = Rect::from_min_size(cell.min + vec2(ENGINE_CARD_PAD, ENGINE_CARD_PAD), vec2(ENGINE_CARD_LOGO, ENGINE_CARD_LOGO));
+    Logo::of(kind).paint(p, logo, color);
+    let name = line_galley(ui, kind.label(), Text::Body, color, cell.width() - 2.0 * ENGINE_CARD_PAD);
+    p.galley(pos2(cell.left() + ENGINE_CARD_PAD, logo.bottom() + ENGINE_CARD_NAME_GAP), name, color);
     if !available {
-        let corner = egui::UiBuilder::new().max_rect(rect.shrink(8.0)).layout(Layout::right_to_left(Align::Min));
+        let corner = egui::UiBuilder::new().max_rect(cell.shrink(ENGINE_CARD_CHIP_INSET)).layout(Layout::right_to_left(Align::Min));
         ui.new_child(corner).add(Chip::next("Upcoming"));
     }
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, available, kind.label()));

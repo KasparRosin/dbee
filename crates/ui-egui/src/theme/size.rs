@@ -260,6 +260,24 @@ pub const CONNECTION_FOCUS_INSET: f32 = 1.0;
 /// The connection screen's sidebar: the connections file's warning, under the filter, has this
 /// much room above and below its words (and [`SIDEBAR_PAD_X`] at its sides).
 pub const CONN_WARNING_PAD_Y: f32 = 8.0;
+/// The connection screen's right pane: the connection's colour is an edge this thick along the
+/// top of the title row; the title gets no narrower than this before FILL FROM URL loses its
+/// words; the engine row's logo is this big, this far before the engine's name.
+pub const CONN_COLOUR_EDGE: f32 = 2.0;
+pub const CONN_TITLE_MIN_W: f32 = 80.0;
+pub const ENGINE_ROW_LOGO: f32 = 16.0;
+pub const ENGINE_ROW_GAP: f32 = SPACE_8;
+/// The engine cards (K2): `Choose a database` this far under the title row, the cards this far
+/// under it; a card this tall, at least this wide, its logo this big, this far in from the card's
+/// left and top, the name this far under the logo; the UPCOMING chip this far in from the corner.
+pub const ENGINE_HEADING_TOP: f32 = SPACE_16;
+pub const ENGINE_CARDS_TOP: f32 = SPACE_12;
+pub const ENGINE_CARD_H: f32 = 104.0;
+pub const ENGINE_CARD_MIN_W: f32 = 110.0;
+pub const ENGINE_CARD_LOGO: f32 = 28.0;
+pub const ENGINE_CARD_PAD: f32 = 16.0;
+pub const ENGINE_CARD_NAME_GAP: f32 = SPACE_12;
+pub const ENGINE_CARD_CHIP_INSET: f32 = SPACE_8;
 
 /// The structure view (`structure/heading`, `structure/header cell`, `structure/cell`): a section's
 /// heading this tall, its words this far in; the header this tall; a row this tall; what a cell

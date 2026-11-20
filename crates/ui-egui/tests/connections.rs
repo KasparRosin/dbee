@@ -163,15 +163,92 @@ fn new_connection_starts_with_the_engine_cards() {
     let url = rect(&tag_in(&i, "conn-fill-url").unwrap());
     ui.click("conn-kind-postgres");
     let i = ui.inspect();
-    let now = rect(&tag_in(&i, "conn-title").unwrap());
-    assert_eq!(([now[0], now[1], now[3]], rect(&tag_in(&i, "conn-fill-url").unwrap())), ([title[0], title[1], title[3]], url));
+    assert_eq!((rect(&tag_in(&i, "conn-title").unwrap()), rect(&tag_in(&i, "conn-fill-url").unwrap())), (title, url));
     assert_eq!(tag_in(&i, "conn-kind").unwrap()["value"], "postgres");
     assert_eq!(tag_in(&i, "conn-port").unwrap()["value"], "5432");
-    // The type and Change engine join the title row, left of Fill from URL and as wide as it.
+    // The engine row under the title row: the type, and Change engine at the pane's right end.
+    let pane = rect(&tag_in(&i, "conn-card").unwrap());
     let change = rect(&tag_in(&i, "conn-change-engine").unwrap());
     let kind = rect(&tag_in(&i, "conn-kind").unwrap());
-    assert_eq!((change[1], change[2], change[3]), (url[1], url[2], url[3]), "{change:?} {url:?}");
-    assert!(kind[0] + kind[2] <= change[0] && change[0] + change[2] <= url[0], "{kind:?} {change:?} {url:?}");
+    assert_eq!(kind[1], change[1], "one row: {kind:?} {change:?}");
+    assert!(kind[1] > title[1] + title[3] && kind[1] > url[1] + url[3], "under the title row: {kind:?} {title:?} {url:?}");
+    assert!(((change[0] + change[2]) - (pane[0] + pane[2])).abs() <= 0.5, "at the pane's right end: {change:?} {pane:?}");
+    assert!(kind[0] + kind[2] <= change[0], "{kind:?} {change:?}");
+}
+
+/// The engine cards are K2: one box of cells 104 tall, side by side and joined, each with its
+/// engine's logo 16 in and 16 down, 28 square.
+#[test]
+fn the_engine_cards_are_k2() {
+    // A build without SQLite: its card is upcoming.
+    let drivers = Drivers::new(dbee_drivers::all().iter().filter(|d| !d.kinds().contains(&DbKind::Sqlite)).cloned().collect());
+    let mut ui = Ui::window(Setup { size: egui::vec2(1100.0, 720.0), drivers: Some(drivers), ..Setup::default() });
+    let i = ui.inspect();
+    let cells: Vec<egui::Rect> = DbKind::ALL.iter().map(|k| rect_of(&tag_in(&i, &format!("conn-kind-{}", k.id())).unwrap())).collect();
+    for (n, c) in cells.iter().enumerate() {
+        assert!((c.height() - 104.0).abs() <= 0.5, "{n}: 104 tall: {c:?}");
+        assert!((c.top() - cells[0].top()).abs() <= 0.5, "{n}: side by side: {cells:?}");
+        if n > 0 {
+            assert!((c.left() - cells[n - 1].right()).abs() <= 1.0, "{n}: joined: {cells:?}");
+        }
+        // The logo: a texture drawn in the top-left 16 + 28 square.
+        let square = egui::Rect::from_min_size(c.min, egui::vec2(16.0 + 28.0, 16.0 + 28.0));
+        let logo = ui.shapes().into_iter().any(|(_, s)| {
+            let bounds = s.visual_bounding_rect();
+            matches!(s, egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default() && square.contains_rect(bounds))
+        });
+        assert!(logo, "{n}: a logo in {square:?}");
+    }
+    let sqlite = tag_in(&i, "conn-kind-sqlite").unwrap();
+    assert_eq!((sqlite["value"]["upcoming"].clone(), sqlite["enabled"].clone()), (json!(true), json!(false)), "{sqlite}");
+    assert!(ui.text_in(cells[3], "UPCOMING").is_some(), "the chip inside the SQLite card");
+    // No rounded card stroke round each cell: one box round the row.
+    let boxed: Vec<egui::Rect> = ui
+        .shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.stroke.width > 0.0 && r.rect.contains_rect(cells[0].shrink(1.0)) => Some(r.rect),
+            _ => None,
+        })
+        .collect();
+    assert!(boxed.iter().any(|b| b.contains_rect(cells[3].shrink(1.0))), "one box holds the row: {boxed:?}");
+}
+
+/// The right pane runs from the sidebar to the window's right edge, between the menu bar and the
+/// version bar: no centred card with a rounded edge.
+#[test]
+fn the_pane_is_full_bleed() {
+    let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
+    ui.click("conn-kind-postgres");
+    let window = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1100.0, 720.0)).shrink(KITTEST_MARGIN);
+    let i = ui.inspect();
+    let pane = rect_of(&tag_in(&i, "conn-card").unwrap());
+    let version = rect_of(&tag_in(&i, "conn-version").unwrap());
+    assert!((pane.left() - (window.left() + 260.0)).abs() <= 1.0, "from the sidebar: {pane:?}");
+    assert!((pane.right() - window.right()).abs() <= 0.5, "to the window's right: {pane:?}");
+    assert!((pane.top() - (window.top() + 30.0)).abs() <= 0.5, "under the menu bar: {pane:?}");
+    assert!((pane.bottom() - version.top()).abs() <= 0.5, "down to the version bar: {pane:?} {version:?}");
+    let host = rect_of(&tag_in(&i, "conn-host").unwrap());
+    let card = ui.shapes().into_iter().find(|(_, s)| match s {
+        egui::Shape::Rect(r) => r.stroke.width > 0.0 && r.corner_radius == egui::CornerRadius::same(4) && r.rect.contains_rect(host),
+        _ => false,
+    });
+    assert!(card.is_none(), "no card round the form: {card:?}");
+}
+
+/// The connection's colour is a 2 px edge along the top of the title row, across the pane.
+#[test]
+fn the_colour_shows_along_the_title_row() {
+    let mut ui = ui();
+    let edge = |ui: &mut Ui| {
+        let pane = rect_of(&ui.tag("conn-card").unwrap());
+        fills_on(ui, egui::Rect::from_min_size(pane.min, egui::vec2(pane.width(), 2.0)))
+    };
+    let red = dbee_ui_egui::theme::connection_color(dbee_config::ConnectionColor::Red).unwrap();
+    ui.click("conn-color-red");
+    assert!(edge(&mut ui).contains(&red), "a red edge: {:?}", edge(&mut ui));
+    ui.click("conn-color-none");
+    assert!(edge(&mut ui).is_empty(), "no edge: {:?}", edge(&mut ui));
 }
 
 #[test]
