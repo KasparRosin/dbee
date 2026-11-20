@@ -307,6 +307,11 @@ fn m1_day_end_to_end() {
     assert_eq!(app.value("structure-facts"), format!("9 columns  {} rows", thousands(n)));
     assert!(app.tag("filter-0-column").is_none(), "no filter bar in STRUCTURE");
     app.shot(&root, "2d-structure");
+    // The bar's parts and COLUMNS' first row (those drawn) stand apart, inside the window.
+    let row: Vec<String> = ["position", "name", "type", "nullable", "default", "keys"].iter().map(|k| format!("structure-columns-0-{k}")).collect();
+    let mut apart = vec!["table-view-data", "table-view-structure", "table-refresh", "structure-facts"];
+    apart.extend(row.iter().map(String::as_str));
+    app.assert_apart(&apart, "2d");
     // The other sections, REFERENCED BY below the page's bottom (listed, out of view); a foreign
     // key's link opens its table, and closing that comes back to orders' STRUCTURE.
     assert_eq!(app.value("structure-indexes-0-keys"), "primary key");

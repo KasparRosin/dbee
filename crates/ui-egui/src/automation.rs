@@ -140,12 +140,6 @@ impl Tags {
         self.insert(Entry { id: id.to_string(), rect, visible: false, shows: Shows::Nothing, enabled: true, focusable: None });
     }
 
-    /// [`Tags::tag_out_of_view`] for a widget that shows `value` (a link on a page laid out in
-    /// full but drawn only in view), `enabled` or not.
-    pub fn tag_out_of_view_value(&mut self, id: &str, rect: Rect, value: impl Into<Json>, enabled: bool) {
-        self.insert(Entry { id: id.to_string(), rect, visible: false, shows: Shows::Value(value.into()), enabled, focusable: None });
-    }
-
     fn insert(&mut self, entry: Entry) {
         let id = entry.id.as_str();
         match self.index.get(id).and_then(|&i| self.entries.get_mut(i)) {

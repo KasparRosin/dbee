@@ -4,7 +4,7 @@
 //! - the error band (`structure-error`, [`crate::components::error_band`]) when the last read
 //!   failed: `The structure did not load`, the reason, and a note when the page from before still
 //!   shows under it;
-//! - the page, one scroll: five sections stacked, COLUMNS, INDEXES, FOREIGN KEYS, REFERENCED BY and
+//! - the page, one scroll both ways: five sections stacked, COLUMNS, INDEXES, FOREIGN KEYS, REFERENCED BY and
 //!   TRIGGERS ([`components::structure::Table`]), each a heading, a header and its rows, the next
 //!   one [`STRUCTURE_SECTION_GAP`] under the last line of the one before. COLUMNS has a row per
 //!   visible column of the table read: its place, name, type, whether it may be NULL, its default
@@ -14,6 +14,9 @@
 //!   TRIGGERS: name, when, events, for each, the definition on one line (its first lines on
 //!   hover). An empty section keeps its heading and header. Everything the engine wrote is drawn
 //!   as written, never in capitals; the cells' words are worked out once per read ([`Kept`]).
+//!   A column other than the first and the last widens for its widest text, up to twice its
+//!   drawn width (measured once per read); every table runs as wide as the widest, and the page
+//!   scrolls sideways when that is wider than the body. Cut words read whole on hover.
 //!
 //! A foreign key, a reference and a referencing table are links: a click, or Enter or Space with
 //! the keyboard, opens that table (`table.open`; the table tab switches to its tab when one is
@@ -28,7 +31,6 @@
 //! itself but the links' commands: the table bar's STRUCTURE (`table.view`), REFRESH (`table.refresh`) and CANCEL
 //! (`table.cancel`) are the table tab's. Nothing on the page is selectable.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,7 +43,7 @@ use serde_json::{Value as Json, json};
 use crate::automation::Tags;
 use crate::components::error_band::Band;
 use crate::components::skeleton::GridRows;
-use crate::components::structure::{Cell, Column, PRIMARY_KEY, Table};
+use crate::components::structure::{Cell, Column, PRIMARY_KEY, Table, widened};
 use crate::components::tooltip::Hint;
 use crate::theme::size::{
     BAR_LINE, STRUCTURE_COLUMNS_LAST_MIN, STRUCTURE_COLUMNS_W, STRUCTURE_EMPTY_PAD, STRUCTURE_FOREIGN_KEYS_LAST_MIN, STRUCTURE_FOREIGN_KEYS_W,
@@ -385,22 +387,69 @@ fn rows_of(read: &StructureRead) -> [Vec<Vec<Shown>>; 5] {
     [column_rows(read), indexes, foreign_keys, referenced_by, triggers]
 }
 
-/// What the window keeps for a table tab's page: the rows worked out from the last read shown
-/// (a definition's one line and its hover built once), dropped with the tab.
+/// The page for one read: each section's rows, its columns' widths and its links' cells, and
+/// the widest table's width.
+#[derive(Debug, Default)]
+struct Page {
+    rows: [Vec<Vec<Shown>>; 5],
+    widths: [Vec<f32>; 5],
+    links: [Vec<(usize, usize)>; 5],
+    width: f32,
+}
+
+impl Page {
+    /// The page for `read`, measured in `ui`: a column other than the position's and the last
+    /// widens for its widest text ([`widened`]); the last keeps its least width.
+    fn of(ui: &egui::Ui, read: &StructureRead) -> Page {
+        let rows = rows_of(read);
+        let mut page = Page::default();
+        for (n, (section, rows)) in SECTIONS.iter().zip(&rows).enumerate() {
+            let columns = section.columns();
+            let last = columns.len().saturating_sub(1);
+            let widths: Vec<f32> = columns
+                .iter()
+                .enumerate()
+                .map(|(col, c)| {
+                    if col == 0 || col == last {
+                        return c.width;
+                    }
+                    let widest = rows.iter().filter_map(|r| r.get(col)).map(|s| s.cell().width(ui)).fold(0.0, f32::max);
+                    widened(c.width, widest)
+                })
+                .collect();
+            let links = rows
+                .iter()
+                .enumerate()
+                .flat_map(|(row, cells)| cells.iter().enumerate().filter(|(_, s)| matches!(s, Shown::Link { .. })).map(move |(col, _)| (row, col)))
+                .collect();
+            page.width = page.width.max(widths.iter().sum());
+            if let (Some(w), Some(l)) = (page.widths.get_mut(n), page.links.get_mut(n)) {
+                *w = widths;
+                *l = links;
+            }
+        }
+        page.rows = rows;
+        page
+    }
+}
+
+/// What the window keeps for a table tab's page: the page worked out from the last read shown
+/// (a definition's one line and its hover built once, the widths measured once), dropped with
+/// the tab.
 #[derive(Debug, Default)]
 pub(crate) struct Kept {
     read: Option<Arc<StructureRead>>,
-    rows: [Vec<Vec<Shown>>; 5],
+    page: Page,
 }
 
 impl Kept {
-    /// The rows for `read`, worked out again only when it is another read.
-    fn rows(&mut self, read: &Arc<StructureRead>) -> &[Vec<Vec<Shown>>; 5] {
+    /// The page for `read`, worked out again only when it is another read.
+    fn page(&mut self, ui: &egui::Ui, read: &Arc<StructureRead>) -> &Page {
         if !self.read.as_ref().is_some_and(|r| Arc::ptr_eq(r, read)) {
-            self.rows = rows_of(read);
+            self.page = Page::of(ui, read);
             self.read = Some(Arc::clone(read));
         }
-        &self.rows
+        &self.page
     }
 }
 
@@ -441,9 +490,10 @@ pub(crate) fn show(
             if loading.is_some() {
                 page.multiply_opacity(theme::DIM);
             }
-            ScrollArea::vertical().id_salt(("dbee-structure", id.0)).auto_shrink([false, false]).show(&mut page, |ui| {
+            let shown = kept.page(&page, read);
+            ScrollArea::both().id_salt(("dbee-structure", id.0)).auto_shrink([false, false]).show(&mut page, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                asked = sections(ui, tags, id, kept.rows(read), lost);
+                asked = sections(ui, tags, id, shown, lost);
             });
         }
         // A first read on its way: from 300 ms, COLUMNS' heading and header over rows of bars.
@@ -467,36 +517,22 @@ pub(crate) fn show(
     asked
 }
 
-/// The page's sections from `rows`, top to bottom; the commands a link's click asked for.
-fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, rows: &[Vec<Vec<Shown>>; 5], lost: bool) -> Vec<(&'static str, Json)> {
+/// The page's sections from `page`, top to bottom, every table as wide as the widest; the
+/// commands a link's click asked for. A link out of view is listed where it is laid out, and
+/// scrolled to when a click asks for it (as the tree's rows are) or the keyboard reaches it.
+fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, page: &Page, lost: bool) -> Vec<(&'static str, Json)> {
     let mut asked = Vec::new();
-    for (n, ((section, rows), keys)) in SECTIONS.iter().zip(rows).zip(KEYS).enumerate() {
+    let parts = SECTIONS.iter().zip(&page.rows).zip(&page.widths).zip(&page.links).zip(KEYS);
+    for (n, ((((section, rows), widths), links), keys)) in parts.enumerate() {
         if n > 0 {
             ui.add_space(STRUCTURE_SECTION_GAP);
         }
-        let columns = section.columns();
-        let table = Table { heading: section.heading, columns: &columns, rows: rows.len(), links: !lost };
+        let columns: Vec<Column<'_>> = section.columns().into_iter().zip(widths).map(|(c, w)| Column { width: *w, ..c }).collect();
+        let table = Table { heading: section.heading, columns: &columns, rows: rows.len(), links: !lost, link_cells: links, width: page.width };
         let drawn =
             table.show(ui, egui::Id::new((section.id, id.0)), |row, col| rows.get(row).and_then(|r| r.get(col)).map_or(Cell::Muted(""), Shown::cell));
         tags.tag_value(section.id, &drawn.heading, section.heading);
-        // A link out of view is listed where it is laid out, and scrolled to when a click asks
-        // for it (as the tree's rows are).
-        let pending = tags.scroll_pending().map(str::to_owned);
-        let seen: HashSet<(usize, usize)> = drawn.cells.iter().map(|(row, col, _)| (*row, *col)).collect();
-        for (row, cells) in rows.iter().enumerate() {
-            for (col, shown) in cells.iter().enumerate() {
-                let (Shown::Link { .. }, Some(key), Some(rect)) = (shown, keys.get(col), drawn.cell_rect(row, col)) else { continue };
-                if seen.contains(&(row, col)) {
-                    continue;
-                }
-                let tag = format!("{}-{row}-{key}", section.id);
-                tags.tag_out_of_view_value(&tag, rect, shown.value(), !lost);
-                if pending.as_deref() == Some(tag.as_str()) {
-                    ui.scroll_to_rect(rect, Some(Align::Center));
-                }
-            }
-        }
-        for (row, col, r) in drawn.cells {
+        for (row, col, r, cut) in drawn.cells {
             let (Some(shown), Some(key)) = (rows.get(row).and_then(|r| r.get(col)), keys.get(col).filter(|k| !k.is_empty())) else { continue };
             let tag = format!("{}-{row}-{key}", section.id);
             match shown {
@@ -505,14 +541,20 @@ fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, rows: &[Vec<Vec<Shown
                     let r = r.hint(format!("Can't open {} now: {LOST}", to.display()));
                     tags.tag_value_as(&tag, &r, shown.value(), false);
                 }
-                Shown::Link { to, .. } => {
+                Shown::Link { to, words, .. } => {
                     if r.clicked() {
                         asked.push(("table.open", json!({ "schema": to.schema, "table": to.name })));
                     }
+                    let r = if cut { r.hint(words.as_str()) } else { r };
                     tags.tag_value(&tag, &r, shown.value());
                 }
                 Shown::Long { whole, .. } => {
                     let r = r.hint(whole.as_str());
+                    tags.tag_value(&tag, &r, shown.value());
+                }
+                // Cut words read whole on hover.
+                Shown::Text(words) | Shown::Muted(words) if cut => {
+                    let r = r.hint(words.as_str());
                     tags.tag_value(&tag, &r, shown.value());
                 }
                 _ => tags.tag_value(&tag, &r, shown.value()),
@@ -527,7 +569,7 @@ fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, rows: &[Vec<Vec<Shown
 fn skeleton(ui: &mut egui::Ui, tags: &mut Tags, id: TabId) {
     let Some(section) = SECTIONS.first() else { return };
     let columns = section.columns();
-    let table = Table { heading: section.heading, columns: &columns, rows: 0, links: false };
+    let table = Table { heading: section.heading, columns: &columns, rows: 0, links: false, link_cells: &[], width: 0.0 };
     let drawn = table.show(ui, egui::Id::new((section.id, id.0)), |_, _| Cell::Muted(""));
     tags.tag_value(section.id, &drawn.heading, section.heading);
     let widths = table.widths(drawn.rect.width());

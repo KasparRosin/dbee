@@ -97,11 +97,47 @@ pub enum Look {
 pub const PRIMARY_KEY: &str = "primary key";
 /// What follows the column a foreign key points at.
 pub const ARROW: &str = "→";
+/// A column widens for its widest text up to this many times its drawn width.
+pub const WIDEN_MAX: f32 = 2.0;
+/// Text past this many bytes is measured no further: far wider than a column ever grows.
+const MEASURE_BYTES: usize = 512;
+
+/// A column `drawn` wide that holds text `content` wide (its widest): as drawn, or wider to hold
+/// the text and its sides' room, at most [`WIDEN_MAX`] times as drawn.
+pub fn widened(drawn: f32, content: f32) -> f32 {
+    drawn.max(content + 2.0 * STRUCTURE_CELL_PAD_X).min(WIDEN_MAX * drawn).max(0.0)
+}
+
+/// A cell as drawn: where its words came out ([`Rect::NOTHING`] for none), and whether they were
+/// cut with `…`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Painted {
+    pub words: Rect,
+    pub cut: bool,
+}
 
 impl Cell<'_> {
     /// Whether it is a link.
     pub fn is_link(&self) -> bool {
         matches!(self, Cell::ForeignKey(_) | Cell::Link(_))
+    }
+
+    /// How wide what it holds draws, its sides' room left out: its words, icon and arrow.
+    pub fn width(&self, ui: &Ui) -> f32 {
+        let text = |s: &str| {
+            let s = s.get(..s.floor_char_boundary(MEASURE_BYTES)).unwrap_or_default();
+            ui.painter().layout_job(Text::Data.job_as_written(s, Color32::PLACEHOLDER)).size().x
+        };
+        let key = Icon::Key.size().x + STRUCTURE_ICON_GAP;
+        let link = |s: &str| text(s) + STRUCTURE_LINK_GAP + text(ARROW);
+        match *self {
+            Cell::Text(s) | Cell::Muted(s) => text(s),
+            Cell::Position(n) => text(&n.to_string()) + STRUCTURE_POSITION_PAD_X - STRUCTURE_CELL_PAD_X,
+            Cell::Nullable => Icon::Check.size().x,
+            Cell::PrimaryKey => key + text(PRIMARY_KEY),
+            Cell::ForeignKey(target) => key + link(target),
+            Cell::Link(target) => link(target),
+        }
     }
 
     /// Draws it into `rect`, a link at rest.
@@ -110,14 +146,18 @@ impl Cell<'_> {
     }
 
     /// Draws it into `rect`, a link as `look` says (other cells look the same whatever it says);
-    /// returns where its words were drawn ([`Rect::NOTHING`] for none).
-    pub fn paint_as(&self, ui: &Ui, rect: Rect, look: Look) -> Rect {
+    /// returns where its words were drawn and whether they were cut.
+    pub fn paint_as(&self, ui: &Ui, rect: Rect, look: Look) -> Painted {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         p.rect_filled(Rect::from_min_max(pos2(rect.left(), rect.bottom() - 1.0), rect.max), CornerRadius::ZERO, t.line);
         let (x, y, end) = (rect.left() + STRUCTURE_CELL_PAD_X, rect.center().y, rect.right() - STRUCTURE_CELL_PAD_X);
         // `s` in `data` from `x` to `end`, cut with `…`; where it came out.
-        let words = |s: &str, x: f32, end: f32, colour: Color32| place(&p, one_line(ui, s, Text::Data, colour, end - x), x, y, colour);
+        let words = |s: &str, x: f32, end: f32, colour: Color32| {
+            let g = one_line(ui, s, Text::Data, colour, end - x);
+            let cut = g.elided;
+            Painted { words: place(&p, g, x, y, colour), cut }
+        };
         // The key's icon at the start; where its words start.
         let key = |colour: Color32| {
             Icon::Key.paint(&p, pos2(x + Icon::Key.size().x / 2.0, y), colour);
@@ -132,7 +172,7 @@ impl Cell<'_> {
         let link = |target: &str, x: f32| {
             let arrow = one_line(ui, ARROW, Text::Data, link_colour, f32::INFINITY);
             let shown = words(target, x, end - STRUCTURE_LINK_GAP - arrow.size().x, link_colour);
-            shown.union(place(&p, arrow, shown.right() + STRUCTURE_LINK_GAP, y, link_colour))
+            Painted { words: shown.words.union(place(&p, arrow, shown.words.right() + STRUCTURE_LINK_GAP, y, link_colour)), ..shown }
         };
         match *self {
             Cell::Text(s) => words(s, x, end, t.text),
@@ -140,7 +180,7 @@ impl Cell<'_> {
             Cell::Position(n) => words(&n.to_string(), rect.left() + STRUCTURE_POSITION_PAD_X, end, t.text_muted),
             Cell::Nullable => {
                 Icon::Check.paint(&p, pos2(x + Icon::Check.size().x / 2.0, y), t.text_muted);
-                Rect::NOTHING
+                Painted { words: Rect::NOTHING, cut: false }
             }
             Cell::PrimaryKey => words(PRIMARY_KEY, key(t.key), end, t.text_muted),
             Cell::ForeignKey(target) => {
@@ -162,8 +202,8 @@ pub struct Column<'a> {
 
 /// A section of the page: its heading, its header and `rows` rows of [`Cell`]s, in columns as
 /// wide as `columns` say, the last taking what is left. No ground, no column lines: the header's
-/// `ink` line and each row's `line` run the table's full width (the view's width, or the columns'
-/// when they are wider).
+/// `ink` line and each row's `line` run the table's full width (the view's width, or `width`, or
+/// the columns' when they are wider).
 #[derive(Clone, Copy, Debug)]
 pub struct Table<'a> {
     pub heading: &'a str,
@@ -171,27 +211,23 @@ pub struct Table<'a> {
     pub rows: usize,
     /// Whether its links are on.
     pub links: bool,
+    /// The cells that are links, by row then column: they take the keyboard also while scrolled
+    /// out of view, and the view scrolls to one that gets it.
+    pub link_cells: &'a [(usize, usize)],
+    /// The least width it runs: the page's widest table, so that every line runs as far.
+    pub width: f32,
 }
 
 /// A section as drawn: where, its heading, its header's cells, and each cell drawn in view with
-/// its row and column (a cell scrolled out of view is neither drawn nor listed).
+/// its row and column and whether its words were cut, then each link out of view (not drawn,
+/// never cut), in row order.
 pub struct TableDrawn {
     pub rect: Rect,
     pub heading: egui::Response,
     pub header: Vec<egui::Response>,
-    pub cells: Vec<(usize, usize, egui::Response)>,
+    pub cells: Vec<(usize, usize, egui::Response, bool)>,
     /// Each column's width, as drawn.
     pub widths: Vec<f32>,
-}
-
-impl TableDrawn {
-    /// Where cell (`row`, `col`) is laid out, in view or not; `None` past the last column.
-    pub fn cell_rect(&self, row: usize, col: usize) -> Option<Rect> {
-        let w = *self.widths.get(col)?;
-        let x = self.rect.left() + self.widths.iter().take(col).sum::<f32>();
-        let top = self.rect.top() + STRUCTURE_HEADING_H + STRUCTURE_HEADER_H + STRUCTURE_ROW_H * row as f32;
-        Some(Rect::from_min_size(pos2(x, top), egui::vec2(w, STRUCTURE_ROW_H)))
-    }
 }
 
 impl Table<'_> {
@@ -208,12 +244,13 @@ impl Table<'_> {
         STRUCTURE_HEADING_H + STRUCTURE_HEADER_H + STRUCTURE_ROW_H * self.rows as f32
     }
 
-    /// Draws it from the top of `ui`'s room, as wide as the room (or the columns, when wider), and
-    /// takes its room. `cell(row, col)` gives what a cell shows; it is asked only for the cells in
-    /// view. Every part senses hover; a link's cell, while links are on, a click too, and takes the
-    /// keyboard (it reads out as a link). `id` keeps their ids apart.
+    /// Draws it from the top of `ui`'s room, as wide as the room or `width` (or the columns, when
+    /// wider), and takes its room. `cell(row, col)` gives what a cell shows; it is asked only for
+    /// the cells in view and the links. Every part senses hover; a link's cell, while links are on,
+    /// a click too, and takes the keyboard (it reads out as a link), in view or not: the view
+    /// scrolls to it when it gets the keyboard. `id` keeps their ids apart.
     pub fn show<'c>(&self, ui: &mut Ui, id: egui::Id, mut cell: impl FnMut(usize, usize) -> Cell<'c>) -> TableDrawn {
-        let room = ui.available_width();
+        let room = ui.available_width().max(self.width);
         let widths = self.widths(room);
         let width = widths.iter().sum::<f32>().max(room);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, self.height()), Sense::hover());
@@ -249,34 +286,64 @@ impl Table<'_> {
         let last = ((clip.bottom() - rows_top) / STRUCTURE_ROW_H).ceil().max(0.0);
         let (first, last) = if first.is_finite() && last.is_finite() { (first as usize, (last as usize).min(self.rows)) } else { (0, 0) };
         let mut cells = Vec::new();
+        // A link's cell senses, reads out, and is scrolled to when it gets the keyboard.
+        let sense_link = |ui: &Ui, c: Cell<'_>, r: Rect, row: usize, col: usize| {
+            let on = self.links;
+            let response = ui.interact(r, id.with((row, col)), if on { Sense::click() } else { Sense::hover() });
+            if let Cell::ForeignKey(target) | Cell::Link(target) = c {
+                response.widget_info(|| WidgetInfo::labeled(WidgetType::Link, on, format!("{target} {ARROW}")));
+            }
+            if on && response.gained_focus() {
+                ui.scroll_to_rect(r, None);
+            }
+            response
+        };
+        let cell_rect = |row: usize, col: usize| {
+            let top = rows_top + STRUCTURE_ROW_H * row as f32;
+            band(top, STRUCTURE_ROW_H).get(col).copied()
+        };
+        // The links above the view, in order (they come before it for the keyboard).
+        let mut links = self.link_cells.iter().copied().filter(|&(row, _)| row < self.rows).peekable();
+        while let Some((row, col)) = links.next_if(|&(row, _)| row < first) {
+            if let Some(r) = cell_rect(row, col) {
+                let c = cell(row, col);
+                cells.push((row, col, sense_link(ui, c, r, row, col), false));
+            }
+        }
         for row in first..last {
             let top = rows_top + STRUCTURE_ROW_H * row as f32;
             for (col, r) in band(top, STRUCTURE_ROW_H).into_iter().enumerate() {
-                if !clip.intersects(r) {
-                    continue;
-                }
                 let c = cell(row, col);
                 let link = c.is_link();
+                if !clip.intersects(r) {
+                    // Out of view sideways: a link still takes the keyboard.
+                    if link {
+                        cells.push((row, col, sense_link(ui, c, r, row, col), false));
+                    }
+                    continue;
+                }
                 let on = link && self.links;
-                let response = ui.interact(r, id.with((row, col)), if on { Sense::click() } else { Sense::hover() });
+                let response = if link { sense_link(ui, c, r, row, col) } else { ui.interact(r, id.with((row, col)), Sense::hover()) };
                 let look = match (link, on) {
                     (true, false) => Look::Off,
                     (true, true) if response.hovered() => Look::Hovered,
                     _ => Look::Rest,
                 };
-                let words = c.paint_as(ui, r, look);
-                if link {
-                    if let Cell::ForeignKey(target) | Cell::Link(target) = c {
-                        response.widget_info(|| WidgetInfo::labeled(WidgetType::Link, on, format!("{target} {ARROW}")));
-                    }
-                    if on && response.hovered() {
-                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-                    }
-                    if on && focus::shown(ui, &response) {
-                        focus::box_around(&painter(ui), words);
-                    }
+                let painted = c.paint_as(ui, r, look);
+                if on && response.hovered() {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 }
-                cells.push((row, col, response));
+                if on && focus::shown(ui, &response) {
+                    focus::box_around(&painter(ui), painted.words);
+                }
+                cells.push((row, col, response, painted.cut));
+            }
+        }
+        // The links below the view.
+        for (row, col) in links.filter(|&(row, _)| row >= last) {
+            if let Some(r) = cell_rect(row, col) {
+                let c = cell(row, col);
+                cells.push((row, col, sense_link(ui, c, r, row, col), false));
             }
         }
         TableDrawn { rect, heading, header, cells, widths }
@@ -437,7 +504,7 @@ mod tests {
             check_cell(theme, &t, link, 284.0, None, &[("shop.customers.id", 8.0, t.text_muted), (ARROW, arrow, t.text_muted)]);
             for (look, colour) in [(Look::Hovered, t.text), (Look::Off, t.text_faint)] {
                 let at = std::cell::Cell::new(Rect::NOTHING);
-                let (shapes, r) = drawn(theme, vec2(284.0, 26.0), |ui, rect| at.set(link.paint_as(ui, rect, look)));
+                let (shapes, r) = drawn(theme, vec2(284.0, 26.0), |ui, rect| at.set(link.paint_as(ui, rect, look).words));
                 let at = at.get();
                 let words = words_in(&shapes, r);
                 let seen: Vec<(&str, Color32)> = words.iter().map(|(w, _, c)| (w.as_str(), *c)).collect();
@@ -447,6 +514,28 @@ mod tests {
                 assert!(close(at.left(), all.left()) && close(at.right(), all.right()), "{theme:?} {look:?}: the words' rect {at:?}, drawn {all:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_column_widens_for_its_text_up_to_twice() {
+        // Brief §2.2: `max(drawn, widest + 16)`, at most twice as drawn.
+        assert_eq!(widened(150.0, 100.0), 150.0);
+        assert_eq!(widened(150.0, 144.0), 160.0);
+        assert_eq!(widened(150.0, 432.0), 300.0);
+        assert_eq!(widened(150.0, f32::INFINITY), 300.0);
+        // A cell says whether its words were cut, and how wide they draw whole.
+        let long = "a_column_name_far_too_long_for_its_cell";
+        let seen = std::cell::Cell::new(None);
+        let _ = painted(Theme::Light, |ui| {
+            ui.add_space(ROOM);
+            let (rect, _) = ui.allocate_exact_size(vec2(120.0, 26.0), Sense::hover());
+            seen.set(Some((Cell::Text(long).paint_as(ui, rect, Look::Rest).cut, Cell::Text("id").paint_as(ui, rect, Look::Rest).cut)));
+            let whole = ui.painter().layout_job(Text::Data.job_as_written(long, Color32::PLACEHOLDER)).size().x;
+            assert!(close(Cell::Text(long).width(ui), whole), "the whole text's width");
+            let arrow = ui.painter().layout_job(Text::Data.job_as_written(ARROW, Color32::PLACEHOLDER)).size().x;
+            assert!(close(Cell::Link(long).width(ui), whole + 4.0 + arrow), "a link's words and arrow");
+        });
+        assert_eq!(seen.get(), Some((true, false)), "the long one cut, the short one whole");
     }
 
     #[test]
@@ -464,7 +553,7 @@ mod tests {
             let mut cells = 0;
             let shapes = painted_in(vec2(1000.0, 400.0), theme, |ui| {
                 ui.add_space(ROOM);
-                let table = Table { heading: "Columns", columns: &columns, rows: 3, links: true };
+                let table = Table { heading: "Columns", columns: &columns, rows: 3, links: true, link_cells: &[], width: 0.0 };
                 let shown = ui
                     .allocate_ui(vec2(900.0, 300.0), |ui| {
                         table.show(ui, egui::Id::new("t"), |row, col| match col {

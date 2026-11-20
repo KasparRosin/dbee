@@ -106,10 +106,14 @@ fn seq(ui: &Ui) -> u64 {
     }
 }
 
-/// `shop.orders` open on pg14 at 1100 × 720, its page loaded, then STRUCTURE clicked and its
+/// The window for `shop.orders`' page: wide enough for COLUMNS whole (its Default widens for
+/// Postgres's `nextval(…)`), REFERENCED BY below the page's bottom.
+const ORDERS_SIZE: egui::Vec2 = egui::vec2(1400.0, 720.0);
+
+/// `shop.orders` open on pg14 at [`ORDERS_SIZE`], its page loaded, then STRUCTURE clicked and its
 /// read landed.
 fn orders_structure(db: &TestDb) -> Ui {
-    let mut ui = Ui::connected_in(db, APP_SIZE);
+    let mut ui = Ui::connected_in(db, ORDERS_SIZE);
     ui.open("shop", "orders");
     ui.until("the page", loaded);
     ui.click("table-view-structure");
@@ -165,9 +169,12 @@ fn structure_shows_sa() {
     assert_eq!(ui.value("structure-columns-8-position"), 9);
     assert!(ui.tag("structure-columns-9-name").is_none(), "nine columns");
 
-    // The header's titles where SA draws them.
+    // The header's titles where SA draws them; Default wider than SA's 150 for Postgres's
+    // `nextval(…)` (up to twice), Keys after it.
+    let default = ui.drawn("structure-columns-0-default").width();
+    assert!((150.0..=300.5).contains(&default), "Default 150 to 300 wide: {default}");
     let header = Rect::from_x_y_ranges(body, heading.bottom()..=heading.bottom() + 30.0);
-    for (title, x) in [("Name", 48.0), ("Type", 198.0), ("Nullable", 338.0), ("Default", 414.0), ("Keys", 564.0)] {
+    for (title, x) in [("Name", 48.0), ("Type", 198.0), ("Nullable", 338.0), ("Default", 414.0), ("Keys", 414.0 + default)] {
         let at = ui.text_in(header, title).map(|(r, _)| r).unwrap_or_else(|| panic!("`{title}` in COLUMNS' header"));
         assert!(close(at.left() - body.min, x), "`{title}` at {x} from the body's left: {}", at.left() - body.min);
     }
@@ -551,7 +558,7 @@ fn a_link_opens_its_table() {
 #[test]
 fn links_are_off_on_a_lost_connection() {
     let db = dbee_testkit::require_testdb!();
-    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, exclusive: true, ..Setup::default() });
+    let mut ui = Ui::connected_with(db, Setup { size: ORDERS_SIZE, exclusive: true, ..Setup::default() });
     structure_of(&mut ui, "shop", "orders");
     let sql = "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = 'dbee'";
     dbee_testkit::psql(db.server("pg14").unwrap(), sql).unwrap();
@@ -612,4 +619,177 @@ fn data_is_never_uppercased() {
         let at = ui.drawn(id);
         assert!(ui.text_in(at, words).is_some(), "`{words}` painted as written in `{id}`");
     }
+}
+
+/// Brief §2.2: a column other than the last takes `max(drawn, widest text + 16)`, up to twice its
+/// drawn width; past that its text is cut with `…` and reads whole on hover.
+#[test]
+fn long_names_widen_their_column_up_to_twice() {
+    let db = dbee_testkit::require_testdb!();
+    let long = "a_column_name_of_sixty_characters_that_is_far_too_long_for_it";
+    let long = &long[..60];
+    let mid = "twenty_chars_name_ab";
+    assert_eq!((long.len(), mid.len()), (60, 20));
+    let schema = SchemaGuard::new(db, |s| {
+        format!("CREATE TABLE {s}.long ({long} int); CREATE TABLE {s}.mid ({mid} int); CREATE TABLE {s}.short (a_short_name int);")
+    });
+    let s = schema.0.as_str();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    let body = ui.tab_x();
+    // Twice the drawn 150, the name cut inside it, Type right after it.
+    structure_of(&mut ui, s, "long");
+    assert_eq!(ui.value("structure-columns-0-name"), long);
+    let name = ui.drawn("structure-columns-0-name");
+    assert!(close(name.width(), 300.0), "Name twice its 150: {name:?}");
+    assert!(close(ui.drawn("structure-columns-0-type").left() - body.min, 40.0 + 300.0), "Type after it");
+    let (at, cut) = ui.text_in(name, long).expect("the name painted");
+    assert!(cut && at.right() <= name.right() - 8.0 + 0.5, "cut with `…` inside its cell: {at:?} in {name:?}");
+    ui.rest(name.center());
+    let whole = ui.texts().into_iter().any(|(r, g)| g.text() == long && !g.elided && !name.contains_rect(r));
+    assert!(whole, "the whole name on hover");
+    ui.hover_away();
+    // A name a little wider than 150 widens Name to its width and 16, uncut.
+    structure_of(&mut ui, s, "mid");
+    let name = ui.drawn("structure-columns-0-name");
+    let (at, cut) = ui.text_in(name, mid).expect("the name painted");
+    assert!(!cut, "whole");
+    assert!(at.width() + 16.0 > 150.0 && close(name.width(), at.width() + 16.0), "Name as wide as its name and 16: {name:?}, the words {at:?}");
+    // A short one leaves Name at 150.
+    structure_of(&mut ui, s, "short");
+    assert!(close(ui.drawn("structure-columns-0-name").width(), 150.0), "Name at its drawn 150");
+}
+
+/// Brief §7: the page keeps its widths and scrolls sideways; the header's `ink` line runs as wide
+/// as the widest table (TRIGGERS: 40 + 240 + 110 + 180 + 100 + 240).
+#[test]
+fn the_page_scrolls_sideways_when_narrow() {
+    const WIDEST: f32 = 910.0;
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, vec2(640.0, 420.0));
+    structure_of(&mut ui, "shop", "orders");
+    let body = ui.tab_x();
+    assert!(body.max - body.min < WIDEST, "the body is narrower than the tables: {body:?}");
+    assert!(!ui.shows("structure-columns-0-keys"), "Keys out of view at first");
+    // The foreign key's link out of view is listed where it is laid out: COLUMNS' Keys runs to
+    // the end of the widest table.
+    let link = ui.laid("structure-columns-1-keys");
+    assert_eq!(ui.tag("structure-columns-1-keys").map(|t| t["visible"].clone()), Some(json!(false)), "out of view");
+    assert!(link.right() - body.min >= WIDEST - 0.5, "COLUMNS as wide as the widest table: {link:?} from {}", body.min);
+    let at = ui.drawn("structure-columns-0-name").center();
+    ui.hover(at);
+    ui.frame_with(vec![egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(-2000.0, 0.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    for _ in 0..12 {
+        ui.frame();
+    }
+    assert!(ui.shows("structure-columns-0-keys"), "Keys reached by scrolling right");
+    let keys = ui.drawn("structure-columns-0-keys");
+    assert!(keys.left() >= body.min - 0.5 && keys.right() <= body.max + 0.5, "Keys inside the body: {keys:?}");
+    assert_eq!(ui.value("structure-columns-0-keys"), "primary key");
+    // Scrolled to the end: COLUMNS' header line runs to the body's right edge, as wide as the
+    // widest table.
+    let t = dbee_ui_egui::theme::LIGHT;
+    let heading = ui.drawn("structure-columns");
+    let y = heading.bottom() + 30.0;
+    let lines: Vec<(Rect, Rect)> = ui
+        .shapes()
+        .into_iter()
+        .filter_map(|(clip, s)| match s {
+            egui::Shape::Rect(r) if r.fill == t.ink && (r.rect.height() - 1.0).abs() < 0.1 && (r.rect.bottom() - y).abs() <= 0.5 => {
+                Some((r.rect.intersect(clip), r.rect))
+            }
+            _ => None,
+        })
+        .collect();
+    let seen = lines.iter().fold(Rect::NOTHING, |a, (r, _)| a.union(*r));
+    let whole = lines.iter().fold(Rect::NOTHING, |a, (_, r)| a.union(*r));
+    assert!(close(seen.left(), body.min) && close(seen.right(), body.max), "the ink line across the body {body:?}: {seen:?}");
+    assert!(close(whole.right(), body.max), "scrolled to the page's end, where the line ends: {whole:?}");
+    assert!(close(heading.left(), body.min) && close(heading.right(), body.max), "the heading across the body: {heading:?}");
+}
+
+/// The window widths Review Focus 5 sweeps, from wide to narrow.
+const SWEEP: [f32; 8] = [1400.0, 1100.0, 900.0, 640.0, 420.0, 300.0, 200.0, 120.0];
+
+/// Every tagged `table-*` and `structure-*` control drawn lies inside the tab's body, and no two
+/// overlap, at each width of [`SWEEP`]; the window back at 1400 × 720 after.
+fn sweep_widths(ui: &mut Ui, state: &str) {
+    for width in SWEEP {
+        ui.harness.set_size(vec2(width, 720.0));
+        ui.frame();
+        ui.frame();
+        let at = format!("{state}, {width} wide");
+        let body = ui.tab_x();
+        let ids: Vec<String> = ui
+            .harness
+            .state()
+            .tags()
+            .ids()
+            .into_iter()
+            .filter(|id| id.starts_with("table-") || id.starts_with("structure-"))
+            .map(str::to_string)
+            .collect();
+        assert!(ids.iter().any(|id| id == "table-view-structure"), "{at}: the bar drawn");
+        let drawn: Vec<(String, Rect)> = ids.into_iter().filter_map(|id| ui.harness.state().tags().rect(&id).map(|r| (id, r))).collect();
+        for (id, r) in &drawn {
+            assert!(r.left() >= body.min - 0.5 && r.right() <= body.max + 0.5 && r.bottom() <= 720.5, "{at}: `{id}` {r:?} inside the body {body:?}");
+        }
+        for (i, (a, ra)) in drawn.iter().enumerate() {
+            for (b, rb) in &drawn[i + 1..] {
+                let o = ra.intersect(*rb);
+                assert!(!o.is_positive() || o.area() <= 0.5, "{at}: `{a}` {ra:?} over `{b}` {rb:?}");
+            }
+        }
+    }
+    ui.harness.set_size(vec2(1400.0, 720.0));
+    ui.frame();
+}
+
+/// Review Focus 5: from 1400 to 120 wide, the page shown and while a read reloads it (after
+/// 300 ms), nothing is drawn over anything else or past the body.
+#[test]
+fn the_structure_view_never_draws_one_thing_over_another() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "t_sweep", |t| {
+        format!("CREATE TABLE scratch.{t} (id int PRIMARY KEY, a_rather_long_column_name_for_a_narrow_window text, b text);")
+    });
+    let mut ui = Ui::connected_with(db, Setup { size: vec2(1400.0, 720.0), step: Some(0.05), ..Setup::default() });
+    panel(&mut ui, false);
+    structure_of(&mut ui, "scratch", &table.0);
+    sweep_widths(&mut ui, "shown");
+    // A reload held behind a page load that waits for a lock.
+    ui.click("table-view-data");
+    ui.until("the rows", |ui| ui.tag("grid-header-0").is_some());
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", table.0)).unwrap();
+    drop(ui.send("engine.execute", json!({ "command": "table.refresh", "params": {}, "wait": false })));
+    ui.until("the held page load", |ui| !ui.table()["loading"].is_null());
+    drop(ui.send("engine.execute", json!({ "command": "table.view", "params": { "view": "structure" }, "wait": false })));
+    ui.frames_while(reading, 0.4, |_, _| {});
+    assert!(ui.shows("table-cancel") && ui.shows("table-loading"), "the read's loading state shows");
+    sweep_widths(&mut ui, "reloading");
+    assert!(reading(&mut ui), "still reading");
+    drop(lock);
+}
+
+/// Tab reaches a link scrolled out of view, and the page scrolls to it.
+#[test]
+fn tab_brings_a_link_out_of_view_into_view() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = orders_structure(db);
+    assert!(!ui.shows("structure-referenced-by-0-from"), "REFERENCED BY's link below the page's bottom");
+    ui.focus("structure-foreign-keys-0-references");
+    ui.key("Tab");
+    ui.frame();
+    ui.frame();
+    assert!(ui.shows("structure-referenced-by-0-from"), "scrolled into view");
+    let from = ui.drawn("structure-referenced-by-0-from");
+    let status = ui.drawn("status-connection");
+    assert!(from.bottom() <= status.top() + 0.5, "whole above the status bar: {from:?}");
+    assert!(ui.focused("structure-referenced-by-0-from"), "it has the keyboard");
+    ui.key("Enter");
+    ui.until("order_items", |ui| ui.table()["name"] == "order_items");
 }

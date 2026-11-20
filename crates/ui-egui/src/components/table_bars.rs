@@ -102,8 +102,9 @@ pub struct TableShown {
 
 /// Which of the table bar's parts show, short of room. They give way in this order (the first
 /// first): the count's range (`1–100 of`), IMPORT and EXPORT, REFRESH's and + ROW's words (their
-/// icons stay), the count's words (COUNT, COUNT ROWS or COUNTING stay), then the facts. Past that
-/// the left group is cut at the bar's end; DATA and STRUCTURE never go.
+/// icons stay), the count's words (COUNT, COUNT ROWS or COUNTING stay), then the facts. The
+/// structure state's facts go first, then REFRESH's word ([`TableFit::STRUCTURE_FORMS`]). Past
+/// that the left group is cut at the bar's end; DATA and STRUCTURE never go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TableFit {
     pub range: bool,
@@ -122,6 +123,14 @@ impl TableFit {
         TableFit { range: false, import_export: false, words: true, count_words: true, count: true },
         TableFit { range: false, import_export: false, words: false, count_words: true, count: true },
         TableFit { range: false, import_export: false, words: false, count_words: false, count: true },
+        TableFit { range: false, import_export: false, words: false, count_words: false, count: false },
+    ];
+
+    /// The structure state's forms (it has no count, IMPORT or EXPORT), from the widest: every
+    /// part; the facts gone; REFRESH's word gone too (CANCEL keeps its word).
+    pub const STRUCTURE_FORMS: [TableFit; 3] = [
+        TableFit { range: true, import_export: true, words: true, count_words: true, count: true },
+        TableFit { range: false, import_export: false, words: true, count_words: false, count: false },
         TableFit { range: false, import_export: false, words: false, count_words: false, count: false },
     ];
 }
@@ -196,9 +205,9 @@ impl TableBar {
         (import, export, self.value.map(|on| BarButton::icon(Icon::Panel).on(on).over_line()))
     }
 
-    /// The first form ([`TableFit::FORMS`]) that fits a bar `room` wide, each form taking room
-    /// only from the steps before it; the narrowest when none does (its left group then cut at
-    /// the bar's end).
+    /// The first form ([`TableFit::FORMS`]; [`TableFit::STRUCTURE_FORMS`] in the structure
+    /// state) that fits a bar `room` wide, each form taking room only from the steps before it;
+    /// the narrowest when none does (its left group then cut at the bar's end).
     pub fn fit(&self, ui: &Ui, room: f32) -> TableFit {
         let mut view = self.view;
         let choices = [(View::Data, "Data"), (View::Structure, "Structure")];
@@ -221,7 +230,9 @@ impl TableBar {
             };
             TABLE_BAR_PAD_X + switch_w + TABLE_BAR_GAP + first + add + facts + right
         };
-        TableFit::FORMS.into_iter().find(|&fit| needs(fit) <= room).unwrap_or(TableFit::FORMS[5])
+        let forms: &[TableFit] = if data { &TableFit::FORMS } else { &TableFit::STRUCTURE_FORMS };
+        let narrowest = forms.last().copied().unwrap_or(TableFit::FORMS[5]);
+        forms.iter().copied().find(|&fit| needs(fit) <= room).unwrap_or(narrowest)
     }
 
     /// Draws it as wide as `ui`, 36 tall, in the first form that fits ([`TableBar::fit`]); short
@@ -915,6 +926,96 @@ mod tests {
         println!("the table bar's form by width (0 all … 5 the count gone): {seen:?}");
         for form in 0..=5 {
             assert!(seen.iter().any(|&(_, f)| f == form), "the sweep passes through form {form}: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn the_structure_bar_gives_way_in_its_order() {
+        // The brief §7, from wide to narrow: everything; the facts gone; REFRESH's word gone too
+        // (its icon stays); then the left group cut at the bar's end. While a read shows its
+        // loading state, LOADING goes first and CANCEL keeps its word. DATA and STRUCTURE are
+        // always drawn; no two parts overlap and nothing is drawn past the bar.
+        let seen_rect = |r: &Response| Some(r.interact_rect).filter(|r| r.is_positive());
+        for loading in [None, Some(Loading { elapsed: Duration::from_millis(800) })] {
+            let mut seen: Vec<(u32, usize)> = Vec::new();
+            for width in (120..=700u32).rev().step_by(10) {
+                let mut h = crate::components::harness_in(
+                    vec2(width as f32 + 40.0, 100.0),
+                    Theme::Light,
+                    (Parts::new(), Rect::NOTHING, 0usize, false),
+                    move |ui, out: &mut (Parts, Rect, usize, bool)| {
+                        ui.allocate_ui(vec2(width as f32, 36.0), |ui| {
+                            let top = ui.cursor().min;
+                            let bar = TableBar {
+                                view: View::Structure,
+                                structure: true,
+                                loading,
+                                count: RowCount::Estimate(25_000),
+                                shown: None,
+                                columns: 9,
+                                can_refresh: true,
+                                can_add: false,
+                                can_count: false,
+                                value: None,
+                                value_off: false,
+                            };
+                            let s = bar.show(ui);
+                            out.1 = Rect::from_min_size(top, vec2(width as f32, 36.0));
+                            out.2 = s.view.len();
+                            out.3 = s.facts.is_some();
+                            let mut parts: Parts = s.view.iter().zip(["data", "structure"]).map(|(r, n)| (n, seen_rect(r))).collect();
+                            parts.extend([
+                                ("refresh", s.refresh.as_ref().and_then(seen_rect)),
+                                ("cancel", s.cancel.as_ref().and_then(seen_rect)),
+                                ("facts", s.facts.as_ref().and_then(seen_rect)),
+                            ]);
+                            out.0 = parts;
+                        });
+                    },
+                );
+                h.run();
+                let (parts, bar, segments, facts) = h.state().clone();
+                let at = format!("{width} wide, loading {}", loading.is_some());
+                let part = |name: &str| parts.iter().find(|(n, _)| *n == name).and_then(|(_, r)| *r);
+                let shapes = &h.output().shapes;
+                let all = texts(shapes);
+                let refresh_word = all.iter().any(|(w, _, _)| w == "REFRESH");
+                let cancel_word = all.iter().any(|(w, _, _)| w == "CANCEL");
+                let first = if loading.is_some() { part("cancel") } else { part("refresh") };
+                // The left group whole: its last part drawn to its full width.
+                let whole = first.is_some_and(|r| r.right() <= bar.right() + 0.5)
+                    && match loading {
+                        Some(_) => cancel_word,
+                        None => true,
+                    };
+                // Each step of the ladder, in its order: shown or given way.
+                let steps = if loading.is_some() { vec![facts, whole] } else { vec![facts, refresh_word, whole] };
+                let form = steps.iter().take_while(|s| !**s).count();
+                assert!(steps[form..].iter().all(|s| *s), "{at}: a later step gave way before an earlier one: {steps:?}");
+                assert!(seen.last().is_none_or(|&(_, last)| form >= last), "{at}: room taken back: {seen:?} then {form}");
+                seen.push((width, form));
+                assert_eq!(segments, 2, "{at}: DATA and STRUCTURE drawn");
+                assert!(part("data").is_some(), "{at}: DATA shows");
+                for (i, (a, ra)) in parts.iter().enumerate() {
+                    let Some(ra) = ra else { continue };
+                    assert!(bar.expand(0.5).contains_rect(*ra), "{at}: `{a}` {ra:?} inside the bar {bar:?}");
+                    for (b, rb) in &parts[i + 1..] {
+                        let Some(rb) = rb else { continue };
+                        let o = ra.intersect(*rb);
+                        assert!(!o.is_positive() || o.area() <= 0.5, "{at}: `{a}` {ra:?} over `{b}` {rb:?}");
+                    }
+                }
+                for s in shapes {
+                    let r = s.shape.visual_bounding_rect().intersect(s.clip_rect);
+                    assert!(!r.is_positive() || bar.expand(0.5).contains_rect(r), "{at}: drawn past the bar {bar:?}: {r:?}");
+                }
+            }
+            let last = if loading.is_some() { 2 } else { 3 };
+            println!("the structure bar's form by width (loading {}): {seen:?}", loading.is_some());
+            assert_eq!(seen.first().map(|s| s.1), Some(0), "at 700 everything shows: {seen:?}");
+            for form in 0..=last {
+                assert!(seen.iter().any(|&(_, f)| f == form), "the sweep passes through form {form}: {seen:?}");
+            }
         }
     }
 
