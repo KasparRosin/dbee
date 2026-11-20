@@ -525,10 +525,16 @@ fn save_password_on_open_while_another_dbee_holds_the_file() {
     let lock = s.home.home.join("config").join(dbee_config::store::LOCK_FILE);
     let other = std::fs::File::options().create(true).truncate(false).write(true).open(lock).unwrap();
     other.lock().unwrap();
+    let start = Instant::now();
     let r = open(&mut s, json!({ "id": id, "password": pw(), "savePassword": true }));
+    let took = start.elapsed();
     other.unlock().unwrap();
     assert_eq!((&r["secretsSaved"], &r["secretsNote"]), (&json!(false), &json!("another dbee window was changing the connections file")), "{r}");
     assert_eq!(s.secrets.get(&id, SecretKind::DbPassword).unwrap(), None);
+    // One wait for the file; the recent list, in the same file, says it once and waits no more.
+    assert!(took < Duration::from_secs(8), "one wait of 5 s for the file, not two: {took:?}");
+    let notices = notices(&mut s);
+    assert_eq!(notices.len(), 1, "one notice: {notices:?}");
 }
 
 #[test]
@@ -612,7 +618,7 @@ fn a_cancelled_open_with_save_saves_nothing() {
 }
 
 /// While another dbee holds the connections file, the open stands and says the connection was not
-/// saved.
+/// saved: once, after one wait for the file (the recent list, in the same file, waits no more).
 #[test]
 fn a_save_that_cannot_write_leaves_the_open_standing() {
     let _db = require_testdb!();
@@ -622,14 +628,17 @@ fn a_save_that_cannot_write_leaves_the_open_standing() {
     std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
     let other = std::fs::File::options().create(true).truncate(false).write(true).open(lock).unwrap();
     other.lock().unwrap();
+    let start = Instant::now();
     let r = open(&mut s, json!({ "config": config_for(&t), "save": true }));
+    let took = start.elapsed();
     other.unlock().unwrap();
     assert_eq!(r["savedNote"], "another dbee window was changing the connections file", "{r}");
     assert_eq!(r["connection"]["saved"], false, "{r}");
     assert_eq!(s.inspect()["connection"]["saved"], false);
     assert!(s.state().store.saved.is_empty());
     let notices = notices(&mut s);
-    assert!(notices.iter().any(|n| n == "The connection was not saved: another dbee window was changing the connections file"), "{notices:?}");
+    assert_eq!(notices, ["The connection was not saved: another dbee window was changing the connections file"], "one notice");
+    assert!(took < Duration::from_secs(8), "one wait of 5 s for the file, not two: {took:?}");
 }
 
 #[test]
