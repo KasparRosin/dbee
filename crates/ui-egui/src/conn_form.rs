@@ -544,12 +544,72 @@ fn strip_in(ui: &mut egui::Ui, m: &Message, tags: &mut Tags) {
     tags.tag_value(tag, &r, m.text.as_str());
 }
 
+/// What the form's bar shows besides SAVE, TEST, CONNECT and CANCEL (which never go): the facts'
+/// word (`CONNECTING`), the timer, `…`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BarFit {
+    pub running_words: bool,
+    pub timer: bool,
+    pub more: bool,
+}
+
+impl BarFit {
+    /// Each form, from the whole bar to the least: the facts' word goes first, then the timer,
+    /// then `…`.
+    const FORMS: [BarFit; 4] = [
+        BarFit { running_words: true, timer: true, more: true },
+        BarFit { running_words: false, timer: true, more: true },
+        BarFit { running_words: false, timer: false, more: true },
+        BarFit { running_words: false, timer: false, more: false },
+    ];
+}
+
+/// How wide the parts of a form's bar are; `None` for a part this bar doesn't have (the facts
+/// before 300 ms, `…` on a form that isn't saved, CANCEL while nothing runs).
+pub(crate) struct FormBar {
+    save: f32,
+    words: Option<f32>,
+    timer: Option<f32>,
+    more: Option<f32>,
+    test: f32,
+    connect: f32,
+    cancel: Option<f32>,
+}
+
+impl FormBar {
+    /// How wide the bar must be for `f`: [`INSET`] at both ends, SAVE, [`CONN_BESIDE_GAP`] to
+    /// what follows; the facts' word and the timer each with [`CONN_RUNNING_GAP`] after it; `…`,
+    /// TEST, CONNECT and CANCEL [`CONN_BESIDE_GAP`] apart.
+    fn width(&self, f: BarFit) -> f32 {
+        let part = |on: bool, w: Option<f32>, gap: f32| if on { w.map_or(0.0, |w| w + gap) } else { 0.0 };
+        INSET
+            + self.save
+            + CONN_BESIDE_GAP
+            + part(f.running_words, self.words, CONN_RUNNING_GAP)
+            + part(f.timer, self.timer, CONN_RUNNING_GAP)
+            + part(f.more, self.more, CONN_BESIDE_GAP)
+            + self.test
+            + CONN_BESIDE_GAP
+            + self.connect
+            + part(true, self.cancel, CONN_BESIDE_GAP)
+            + INSET
+    }
+
+    /// The first of [`BarFit::FORMS`] that fits in `room`, else the least (whose left part is
+    /// then cut off at the bar's edge). A narrower `room` never gets a fuller form.
+    pub(crate) fn fit(&self, room: f32) -> BarFit {
+        BarFit::FORMS.into_iter().find(|f| self.width(*f) <= room).unwrap_or(BarFit::FORMS[3])
+    }
+}
+
 /// The form's bar in `at`, along the pane's bottom on `card` with a 1 px `line` on top: SAVE (a
 /// text button) [`INSET`] in from the left; at the right, ending [`INSET`] from the pane's edge,
 /// `…` (a saved connection's: Duplicate, Delete), TEST and CONNECT, [`CONN_BESIDE_GAP`] apart.
 /// TEST and CONNECT are off while a test or connect runs, with their words. Once it has run
 /// 300 ms (`shown`: what runs and for how long), CANCEL comes after CONNECT, the buttons moving
 /// left for it, and the facts (`CONNECTING` or `TESTING`, then the timer) before the first button.
+/// Short of room it gives way in [`BarFit`]'s order; past that SAVE moves left and is cut off at
+/// the bar's edge. What it showed.
 fn form_bar(
     ui: &mut egui::Ui,
     conn: &ConnScreen,
@@ -558,8 +618,12 @@ fn form_bar(
     tags: &mut Tags,
     acts: &mut Vec<Act>,
     at: egui::Rect,
-) {
+) -> BarFit {
     let t = theme::tokens(ui.ctx());
+    // Nothing drawn past the bar.
+    let mut ui = ui.new_child(UiBuilder::new().max_rect(at));
+    ui.set_clip_rect(at.intersect(ui.clip_rect()));
+    let ui = &mut ui;
     let p = ui.painter();
     p.rect_filled(at, CornerRadius::ZERO, t.card);
     p.rect_filled(egui::Rect::from_min_size(at.min, vec2(at.width(), BAR_LINE)), CornerRadius::ZERO, t.line);
@@ -567,38 +631,55 @@ fn form_bar(
     let busy = conn.running.is_some();
     let place = |x: f32, w: f32| egui::Rect::from_min_size(pos2(x, row.center().y - BUTTON_H / 2.0), vec2(w, BUTTON_H));
 
-    let save = TextButton::new("Save");
-    let save_at = place(row.left() + INSET, save.width(ui));
-    let r = ui.new_child(UiBuilder::new().max_rect(save_at).layout(Layout::left_to_right(Align::Center))).add(save);
-    tags.tag_value("conn-save", &r, "Save");
-    if r.clicked() {
-        acts.push(Act::Save);
-    }
+    let facts = shown.map(|(kind, elapsed)| (if kind == Running::Test { "Testing" } else { "Connecting" }, status::timer(elapsed)));
+    let label_w = |s: &str| ui.painter().layout_job(Text::Label.job(s, t.text_muted)).size().x;
+    let more = BoxButton::outline("…");
+    let sizes = FormBar {
+        save: TextButton::new("Save").width(ui),
+        words: facts.as_ref().map(|(words, _)| label_w(words)),
+        timer: facts.as_ref().map(|(_, timer)| label_w(timer)),
+        more: saved.then(|| more.width(ui)),
+        test: BoxButton::outline("Test").width(ui),
+        connect: BoxButton::primary("Connect").width(ui),
+        cancel: shown.map(|_| BoxButton::primary("Cancel").width(ui)),
+    };
+    let fit = sizes.fit(at.width());
 
-    // From the right: CANCEL (while it shows), CONNECT, TEST, then `…`; drawn left to right so Tab
-    // reads them so.
+    // From the right: CANCEL (while it shows), CONNECT, TEST, `…`, the facts; then SAVE, which
+    // moves left when they need its room.
     let mut right = row.right() - INSET;
-    let cancel_at = shown.map(|_| {
-        let w = BoxButton::primary("Cancel").width(ui);
+    let cancel_at = sizes.cancel.map(|w| {
         let at = place(right - w, w);
         right = at.left() - CONN_BESIDE_GAP;
         at
     });
-    let connect_w = BoxButton::primary("Connect").width(ui);
-    let test_w = BoxButton::outline("Test").width(ui);
-    let connect_at = place(right - connect_w, connect_w);
-    let test_at = place(connect_at.left() - CONN_BESIDE_GAP - test_w, test_w);
-    let more = BoxButton::outline("…");
-    let more_at = saved.then(|| place(test_at.left() - CONN_BESIDE_GAP - more.width(ui), more.width(ui)));
-    if let Some((kind, elapsed)) = shown {
-        let words = if kind == Running::Test { "Testing" } else { "Connecting" };
-        let timer = status::timer(elapsed);
-        let first = more_at.unwrap_or(test_at).left();
+    let connect_at = place(right - sizes.connect, sizes.connect);
+    let test_at = place(connect_at.left() - CONN_BESIDE_GAP - sizes.test, sizes.test);
+    let more_at = sizes.more.filter(|_| fit.more).map(|w| place(test_at.left() - CONN_BESIDE_GAP - w, w));
+    let mut first = more_at.unwrap_or(test_at).left();
+    let mut running = None::<egui::Rect>;
+    if let Some((words, timer)) = &facts {
         let p = ui.painter();
-        let timer_at = Text::Label.paint(p, pos2(first - CONN_RUNNING_GAP, row.center().y), Align2::RIGHT_CENTER, &timer, t.text_muted);
-        let words_at = Text::Label.paint(p, pos2(timer_at.left() - CONN_RUNNING_GAP, row.center().y), Align2::RIGHT_CENTER, words, t.text_muted);
-        let r = ui.interact(words_at.union(timer_at), egui::Id::new("conn-running"), Sense::hover());
+        let mut paint = |on: bool, s: &str| {
+            if on {
+                let r = Text::Label.paint(p, pos2(first - CONN_RUNNING_GAP, row.center().y), Align2::RIGHT_CENTER, s, t.text_muted);
+                first = r.left();
+                running = Some(running.map_or(r, |seen| seen.union(r)));
+            }
+        };
+        paint(fit.timer, timer);
+        paint(fit.running_words, words);
+        // Listed also when neither shows: what runs, at the place the facts would take.
+        let place = running.unwrap_or_else(|| egui::Rect::from_min_size(pos2(first, row.center().y), vec2(0.0, 0.0)));
+        let r = ui.interact(place, egui::Id::new("conn-running"), Sense::hover());
         tags.tag_value("conn-running", &r, serde_json::json!({ "words": words, "timer": timer }));
+    }
+    let save_x = (row.left() + INSET).min(first - CONN_BESIDE_GAP - sizes.save);
+    let save_at = place(save_x, sizes.save);
+    let r = ui.new_child(UiBuilder::new().max_rect(save_at).layout(Layout::left_to_right(Align::Center))).add(TextButton::new("Save"));
+    tags.tag_value("conn-save", &r, "Save");
+    if r.clicked() {
+        acts.push(Act::Save);
     }
     if let Some(more_at) = more_at {
         let r = button_in(ui, more_at, true, more).hint("Duplicate or delete this connection");
@@ -624,6 +705,7 @@ fn form_bar(
             acts.push(Act::Cancel);
         }
     }
+    fit
 }
 
 /// TEST's reason while a test or connect runs.
@@ -1153,6 +1235,71 @@ mod tests {
         assert_eq!(columns(663.0), (1, 480.0));
         assert_eq!(columns(380.0), (1, 356.0));
         assert_eq!(columns(2000.0).1, 480.0);
+    }
+
+    /// Narrowing the bar of a saved connection that is connecting: the facts' word goes first, then
+    /// the timer, then `…`, and a form once gone never comes back; SAVE, TEST, CONNECT and CANCEL
+    /// stay whole, inside the bar while there is room for them, and nothing ever runs past its
+    /// right end.
+    #[test]
+    fn the_form_bar_gives_way_in_its_order() {
+        use crate::components::{harness_in, texts};
+        use dbee_engine::JobId;
+        let forms = [
+            BarFit { running_words: true, timer: true, more: true },
+            BarFit { running_words: false, timer: true, more: true },
+            BarFit { running_words: false, timer: false, more: true },
+            BarFit { running_words: false, timer: false, more: false },
+        ];
+        let rect = |tags: &Tags, id: &str| tags.rect(id).unwrap_or_else(|| panic!("{id} drawn: {}", tags.to_json()));
+        let (mut last, mut whole, mut seen) = (0, None::<[f32; 4]>, [false; 4]);
+        for w in (200..=900).rev().step_by(10).map(|w| w as f32) {
+            let at = egui::Rect::from_min_size(pos2(20.0, 20.0), vec2(w, BAR_H));
+            let mut h = harness_in(vec2(w + 40.0, 80.0), egui::Theme::Light, (Tags::default(), None), move |ui, (tags, fit)| {
+                tags.begin_frame();
+                let mut conn = ConnScreen::new(true);
+                conn.running = Some((JobId(1), Running::Connect));
+                let shown = Some((Running::Connect, Duration::from_millis(1200)));
+                *fit = Some(form_bar(ui, &conn, true, shown, tags, &mut Vec::new(), at));
+            });
+            h.run();
+            let fit = h.state().1.unwrap_or_else(|| panic!("{w}: drawn"));
+            let n = forms.iter().position(|f| *f == fit).unwrap_or_else(|| panic!("{w}: {fit:?} is one of the forms"));
+            assert!(n >= last, "{w}: {fit:?} took room back from {:?}", forms[last]);
+            (last, seen[n]) = (n, true);
+            let tags = &h.state().0;
+            let words = texts(&h.output().shapes).into_iter().map(|(t, ..)| t.to_lowercase()).collect::<Vec<_>>();
+            assert_eq!(words.contains(&"connecting".to_string()), fit.running_words, "{w}: the facts' word as {fit:?}: {words:?}");
+            assert_eq!(words.contains(&"00:01.2".to_string()), fit.timer, "{w}: the timer as {fit:?}: {words:?}");
+            assert_eq!(tags.rect("conn-more").is_some(), fit.more, "{w}: `…` as {fit:?}");
+            let ids = ["conn-save", "conn-test", "conn-connect", "conn-cancel"];
+            // Their widths at 900, where everything shows.
+            let whole = *whole.get_or_insert_with(|| ids.map(|id| rect(tags, id).width()));
+            let room = INSET + whole.iter().sum::<f32>() + CONN_RUNNING_GAP + 2.0 * CONN_BESIDE_GAP + INSET;
+            if w >= room {
+                for (id, want) in ids.into_iter().zip(whole) {
+                    let r = rect(tags, id);
+                    assert!(at.expand(0.5).contains_rect(r), "{w}: {id} {r:?} inside the bar {at:?}");
+                    assert!((r.width() - want).abs() <= 0.5, "{w}: {id} whole: {r:?}");
+                }
+            }
+            for (id, r) in tags.ids().into_iter().filter_map(|id| tags.rect(id).map(|r| (id, r))) {
+                assert!(r.right() <= at.right() + 0.5, "{w}: {id} {r:?} past the bar {at:?}");
+            }
+            let mut drawn: Vec<(&str, egui::Rect)> = tags.ids().into_iter().filter_map(|id| tags.rect(id).map(|r| (id, r))).collect();
+            drawn.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
+            for pair in drawn.windows(2) {
+                assert!(
+                    pair[0].1.right() <= pair[1].1.left() + 0.5 || w < room,
+                    "{w}: {} {:?} over {} {:?}",
+                    pair[0].0,
+                    pair[0].1,
+                    pair[1].0,
+                    pair[1].1
+                );
+            }
+        }
+        assert_eq!(seen, [true; 4], "every form shows somewhere from 900 to 200");
     }
 
     #[test]

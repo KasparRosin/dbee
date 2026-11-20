@@ -2666,3 +2666,143 @@ fn the_form_takes_no_input_while_it_connects() {
     assert_eq!(ui.value("conn-host"), host);
     cancel(&mut ui);
 }
+
+/// `a` holds `b` (or `b` holds `a`): a group and one of its parts, which it draws in its own rect
+/// (a segmented row and its segments, the colour row and its swatches, a list row and its `-kind`
+/// twin, the error band and its heading).
+fn holds((a, ra): (&str, egui::Rect), (b, rb): (&str, egui::Rect)) -> bool {
+    let part = |whole: &str, rw: egui::Rect, of: &str, ro: egui::Rect| of.starts_with(&format!("{whole}-")) && rw.expand(0.5).contains_rect(ro);
+    part(a, ra, b, rb) || part(b, rb, a, ra)
+}
+
+/// Every tagged `conn-*` control of the last frame lies inside the sidebar or the pane, and no two
+/// overlap by more than 0.5 px; the database list's items (over the form) and the pane itself
+/// left out.
+fn nothing_overlaps(ui: &mut Ui, what: &str) {
+    let i = ui.inspect();
+    let pane = rect_of(&tag_in(&i, "conn-card").unwrap_or_else(|| panic!("{what}: no pane")));
+    let side = egui::Rect::from_min_max(egui::pos2(0.0, pane.top()), egui::pos2(pane.left(), pane.bottom()));
+    let shown: Vec<(String, egui::Rect)> = ids(&i)
+        .into_iter()
+        .filter(|id| id.starts_with("conn-") && !["conn-card", "conn-version"].contains(&id.as_str()) && !id.starts_with("conn-database-item-"))
+        .filter_map(|id| {
+            let e = tag_in(&i, &id).unwrap();
+            visible(&Some(e.clone())).then(|| (id, rect_of(&e)))
+        })
+        .filter(|(_, r)| r.width() > 0.0 && r.height() > 0.0)
+        .collect();
+    for (id, r) in &shown {
+        let inside = |area: egui::Rect| area.expand(0.5).contains_rect(*r);
+        assert!(inside(pane) || inside(side), "{what}: {id} {r:?} is in neither the pane {pane:?} nor the sidebar {side:?}");
+    }
+    for (n, (a, ra)) in shown.iter().enumerate() {
+        for (b, rb) in &shown[n + 1..] {
+            let o = ra.intersect(*rb);
+            let overlap = o.width() > 0.5 && o.height() > 0.5;
+            assert!(!overlap || holds((a, *ra), (b, *rb)), "{what}: {a} {ra:?} overlaps {b} {rb:?}");
+        }
+    }
+    let version = rect_of(&tag_in(&i, "conn-version").unwrap());
+    assert!(version.top() >= pane.bottom() - 0.5, "{what}: the version bar {version:?} under the pane {pane:?}");
+}
+
+/// Review Focus 6: at every width from 1920 to the smallest window, tall and short, nothing on the
+/// connection screen is drawn over anything else or past its area: the cards, each form, a saved
+/// connection's, connecting after 300 ms, an error.
+#[test]
+fn no_control_on_the_connection_screen_overlaps() {
+    let sweep = |ui: &mut Ui, what: &str| {
+        for h in [720.0, 420.0] {
+            for w in [1920.0, 1400.0, 1100.0, 900.0, 760.0, 640.0] {
+                ui.harness.set_size(egui::vec2(w, h));
+                ui.frame();
+                ui.frame();
+                nothing_overlaps(ui, &format!("{what} at {w}x{h}"));
+            }
+        }
+    };
+    let mut ui = Ui::fresh(APP_SIZE);
+    sweep(&mut ui, "the cards");
+    ui.harness.set_size(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    ui.click("conn-ssh-on");
+    assert_eq!(ui.value("conn-ssh-on"), true);
+    sweep(&mut ui, "PostgreSQL with SSH");
+    for (kind, what) in [("mysql", "MySQL"), ("sqlite", "SQLite")] {
+        ui.harness.set_size(APP_SIZE);
+        ui.frame();
+        ui.click("conn-change-engine");
+        ui.click(&format!("conn-kind-{kind}"));
+        sweep(&mut ui, what);
+    }
+    // A saved connection's form, with `…`, and its row in the list.
+    ui.harness.set_size(APP_SIZE);
+    ui.frame();
+    let card = ui.save(&ConnectionConfig { name: "A saved connection with a rather long name".into(), ..server_of(DbKind::Postgres, "") }, None);
+    ui.click(&card);
+    assert!(ui.tag("conn-more").is_some());
+    sweep(&mut ui, "a saved connection");
+    // An error band.
+    ui.harness.set_size(APP_SIZE);
+    ui.frame();
+    ui.click("conn-new");
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    ui.click("conn-connect");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    sweep(&mut ui, "an error");
+    // Connecting, after 300 ms.
+    let silent = Silent::start();
+    let (mut ui, _) = silent_form(&silent);
+    frames_while_running(&mut ui, "conn-connect", 0.35, |_, _| {});
+    assert!(ui.tag("conn-cancel").is_some() && ui.tag("conn-running").is_some());
+    sweep(&mut ui, "connecting");
+    assert!(ui.tag("conn-cancel").is_some(), "still connecting");
+    cancel(&mut ui);
+}
+
+/// At the smallest window the form keeps SAVE, TEST and CONNECT whole in the pane, and FILL FROM
+/// URL its words while the title keeps 80; with the sidebar dragged wider, the title's room goes
+/// under 80 and FILL FROM URL shows its icon alone, which still opens the dialog.
+#[test]
+fn at_640_the_form_keeps_its_buttons() {
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    let wide = rect_of(&ui.tag("conn-fill-url").unwrap());
+    ui.harness.set_size(egui::vec2(640.0, 420.0));
+    ui.frame();
+    ui.frame();
+    let i = ui.inspect();
+    let at = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}")));
+    let pane = at("conn-card");
+    for (id, words) in [("conn-save", "SAVE"), ("conn-test", "TEST"), ("conn-connect", "CONNECT"), ("conn-fill-url", "FILL FROM URL")] {
+        let r = at(id);
+        assert!(pane.expand(0.5).contains_rect(r), "{id} {r:?} inside the pane {pane:?}");
+        assert!(ui.text_in(r, words).is_some_and(|(_, cut)| !cut), "{id} draws {words} whole in {r:?}");
+    }
+    assert!(at("conn-title").right() <= at("conn-fill-url").left(), "the title ends before FILL FROM URL");
+    // The sidebar dragged 150 wider: the title's room under 80.
+    let pane_w = pane.width();
+    let press = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    let from = egui::pos2(pane.left(), pane.center().y);
+    let to = from + egui::vec2(150.0, 0.0);
+    ui.frame_with(vec![egui::Event::PointerMoved(from)]);
+    ui.frame_with(vec![press(from, true)]);
+    for n in 1..=8 {
+        ui.frame_with(vec![egui::Event::PointerMoved(from + (to - from) * (n as f32 / 8.0))]);
+    }
+    ui.frame_with(vec![press(to, false)]);
+    ui.frame();
+    let i = ui.inspect();
+    let at = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}")));
+    let pane = at("conn-card");
+    assert!((pane.width() - (pane_w - 150.0)).abs() <= 1.0, "the pane is 150 narrower: {pane:?}");
+    let narrow = at("conn-fill-url");
+    assert!(pane.expand(0.5).contains_rect(narrow), "FILL FROM URL {narrow:?} inside the pane {pane:?}");
+    assert!(narrow.width() < wide.width(), "FILL FROM URL icon only: {narrow:?} (was {wide:?})");
+    assert!(ui.text_in(narrow, "FILL FROM URL").is_none(), "no words");
+    assert!(at("conn-title").right() <= narrow.left(), "the title ends before FILL FROM URL");
+    ui.click("conn-fill-url");
+    assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
+}

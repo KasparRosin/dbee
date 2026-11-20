@@ -663,6 +663,9 @@ fn m2_day_end_to_end() {
     app.text(&db.sshd.user);
     app.until("the key line", |app| app.value("conn-ssh-key").as_str().is_some_and(|t| t.starts_with("Uses ") && t.ends_with("id_ed25519")));
     app.shot(&root, "2-mysql80-0b-form");
+    //    The title row, the engine row and the form's bar stand apart, inside the window.
+    let rows = ["conn-title", "conn-fill-url", "conn-kind", "conn-change-engine", "conn-save", "conn-test", "conn-connect"];
+    app.assert_apart(&rows, "2-mysql80-0b-form");
     //    List…: the server's databases through the tunnel, its own last; `shop` picked.
     app.click("conn-database-list");
     app.until("the list", |app| !app.tags_with("conn-database-item-").is_empty());

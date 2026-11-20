@@ -1,7 +1,8 @@
 //! The segmented control (`segmented`) and its segments (`segmented/segment`): a 28 box holding
 //! 26 tall segments, one of them chosen. Style caps (words in `label` capitals, each segment as
 //! wide as its words) or small (words in `small` as written, the segments sharing the box's
-//! width). Each segment is its own control, reached with Tab and chosen with a click or Space.
+//! width, each one's words cut with "…" when its share is too narrow, whole on hover). Each
+//! segment is its own control, reached with Tab and chosen with a click or Space.
 
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use egui::{
     vec2,
 };
 
+use super::tooltip::Hint;
 use super::{Look, focus, painter};
 use crate::theme::size::{RADIUS_CONTROL, SEGMENT_DIVIDER, SEGMENT_H, SEGMENT_PAD_X, SEGMENTED_H};
 use crate::theme::{Text, tokens};
@@ -67,10 +69,15 @@ impl<'a> Segment<'a> {
             Style::Caps => Text::Label,
             Style::Small => Text::Small,
         };
-        let words = ui.painter().layout_job(match self.style {
+        let mut job = match self.style {
             Style::Caps => text.job(self.words, Color32::PLACEHOLDER),
             Style::Small => text.job_as_written(self.words, Color32::PLACEHOLDER),
-        });
+        };
+        if let (Style::Small, Some(w)) = (self.style, self.width) {
+            // A share too narrow for the words cuts them with "…".
+            job.wrap = egui::text::TextWrapping::truncate_at_width((w - 2.0 * SEGMENT_DIVIDER).max(1.0));
+        }
+        let words = ui.painter().layout_job(job);
         // egui puts the letter spacing after the last letter too; the page's measure has none there.
         let reads = words.size().x - text.spacing();
         let natural = match self.style {
@@ -86,6 +93,12 @@ impl Widget for Segment<'_> {
         let (words, reads, width) = self.parts(ui);
         let (rect, r) = ui.allocate_exact_size(vec2(width, SEGMENT_H), Sense::click());
         r.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), self.selected, self.words));
+        // Cut words read whole on hover.
+        let r = match (words.elided, ui.is_enabled()) {
+            (false, _) => r,
+            (true, true) => r.hint(self.words),
+            (true, false) => r.hint_disabled(self.words),
+        };
         let look = self.look.unwrap_or_else(|| Look::of(ui, &r));
         if !ui.is_rect_visible(rect) {
             return r;
@@ -238,6 +251,40 @@ mod tests {
     /// A segment's cell: all of it but the divider's slot at its right end.
     fn cell(at: Rect) -> Rect {
         Rect::from_min_max(at.min, pos2(at.right() - 1.0, at.bottom()))
+    }
+
+    #[test]
+    fn a_small_segment_short_of_room_is_cut_and_whole_on_hover() {
+        // The SSL modes in a 150 wide box: each share is 29.6, too narrow for `verify-full`.
+        const MODES: [(u8, &str); 5] = [(0, "disable"), (1, "prefer"), (2, "require"), (3, "verify-ca"), (4, "verify-full")];
+        let shown = |shapes: &[egui::epaint::ClippedShape]| -> Vec<String> {
+            crate::components::flat(shapes)
+                .into_iter()
+                .filter_map(|s| match s {
+                    egui::Shape::Text(t) => Some(t.galley.rows.iter().map(|r| r.text()).collect()),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (width, cut) in [(150.0, true), (600.0, false)] {
+            let mut h = crate::components::harness(egui::Theme::Light, Vec::new(), move |ui, at: &mut Vec<Rect>| {
+                ui.add_space(ROOM);
+                let mut chosen = 0u8;
+                let drawn = Segmented::small(&mut chosen, &MODES).width(width).show(ui);
+                *at = drawn.segments.iter().map(|r| r.rect).collect();
+            });
+            h.run();
+            let whole = |h: &egui_kittest::Harness<'_, Vec<Rect>>| shown(&h.output().shapes).iter().filter(|w| *w == "verify-full").count();
+            let drawn = shown(&h.output().shapes);
+            assert_eq!(drawn.iter().any(|w| w.ends_with('…')), cut, "{width}: cut {drawn:?}");
+            let before = whole(&h);
+            assert_eq!(before, usize::from(!cut), "{width}: {drawn:?}");
+            let last = h.state()[4];
+            h.get_by_label("verify-full").hover();
+            h.run();
+            h.run();
+            assert_eq!(whole(&h) > before, cut, "{width}: whole on hover only when cut ({last:?})");
+        }
     }
 
     #[test]

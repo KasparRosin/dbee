@@ -62,12 +62,14 @@ pub(crate) fn painter(ui: &egui::Ui) -> egui::Painter {
 /// Draws `add` in a scope of `ui`. When `on`, at half strength in its normal look, taking no
 /// input: a cover over the scope takes the pointer, and the keyboard leaves any widget in it
 /// (those of `guard`, and any drawn inside the scope), before and after `add` draws, so neither a
-/// click nor Tab nor typing reaches them. The scope is the same whether `on` or not, so what is
-/// in it keeps its ids (a scroll area its offset).
+/// click nor Tab nor typing reaches them. Tab and Shift+Tab step over the scope: the keyboard
+/// goes on to the widget after it, or back to the one before it. The scope is the same whether
+/// `on` or not, so what is in it keeps its ids (a scroll area its offset).
 pub fn dim<R>(ui: &mut egui::Ui, on: bool, guard: &[egui::Id], add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let area = ui.max_rect().intersect(ui.clip_rect());
     if on {
-        let_go(ui.ctx(), guard, area);
+        // Shift+Tab hands the keyboard over a frame late: it arrives here from after the scope.
+        let_go(ui.ctx(), guard, area, egui::FocusDirection::Previous);
     }
     let inner = ui
         .scope_builder(egui::UiBuilder::new(), |ui| {
@@ -78,18 +80,27 @@ pub fn dim<R>(ui: &mut egui::Ui, on: bool, guard: &[egui::Id], add: impl FnOnce(
         })
         .inner;
     if on {
-        let_go(ui.ctx(), guard, area);
-        ui.interact(area, ui.id().with("dbee-dim"), egui::Sense::click_and_drag());
+        // Tab hands it over within the frame: it arrives here from before the scope.
+        let_go(ui.ctx(), guard, area, egui::FocusDirection::Next);
+        // The cover takes the pointer, never the keyboard.
+        ui.interact(area, ui.id().with("dbee-dim"), egui::Sense::CLICK | egui::Sense::DRAG);
     }
     inner
 }
 
-/// The keyboard leaves the widget that has it when it is one of `guard` or lies in `area`.
-fn let_go(ctx: &egui::Context, guard: &[egui::Id], area: egui::Rect) {
+/// The keyboard leaves the widget that has it when it is one of `guard` or lies in `area`. When
+/// it got there this frame (Tab or Shift+Tab), it goes on in `onward` to the next widget outside.
+fn let_go(ctx: &egui::Context, guard: &[egui::Id], area: egui::Rect, onward: egui::FocusDirection) {
     let Some(focused) = ctx.memory(|m| m.focused()) else { return };
     let inside = guard.contains(&focused) || ctx.read_response(focused).is_some_and(|r| area.contains_rect(r.rect));
     if inside {
-        ctx.memory_mut(|m| m.surrender_focus(focused));
+        let arrived = !ctx.memory(|m| m.had_focus_last_frame(focused));
+        ctx.memory_mut(|m| {
+            m.surrender_focus(focused);
+            if arrived {
+                m.move_focus(onward);
+            }
+        });
     }
 }
 
@@ -353,6 +364,34 @@ mod tests {
             assert_eq!(h.state().0, u32::from(!on), "on {on}: clicked only when not dimmed");
         }
         assert!(alpha[1].abs_diff(alpha[0] / 2) <= 1, "half: {alpha:?}");
+    }
+
+    /// Tab and Shift+Tab step over a dimmed area: from the button before it to the one after it,
+    /// and back, the keyboard never landing in it (nor nowhere).
+    #[test]
+    fn tab_steps_over_a_dimmed_area() {
+        let ids = [egui::Id::new("before"), egui::Id::new("in-1"), egui::Id::new("in-2"), egui::Id::new("after")];
+        let mut h = harness(egui::Theme::Light, (), move |ui, _| {
+            let [before, in_1, in_2, after] = ids;
+            let _ = ui.interact(Rect::from_min_size(pos2(0.0, 0.0), vec2(1.0, 1.0)), before, egui::Sense::click());
+            dim(ui, true, &[], |ui| {
+                let _ = ui.add(egui::TextEdit::singleline(&mut String::from("one")).id(in_1));
+                let _ = ui.add(egui::TextEdit::singleline(&mut String::from("two")).id(in_2));
+            });
+            let _ = ui.interact(Rect::from_min_size(pos2(1.0, 0.0), vec2(1.0, 1.0)), after, egui::Sense::click());
+        });
+        h.run();
+        let [before, _, _, after] = ids;
+        let tab = |h: &mut egui_kittest::Harness<'_, ()>, shift: bool| {
+            let modifiers = if shift { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE };
+            h.input_mut().events.push(egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers });
+            h.run();
+            h.ctx.memory(|m| m.focused())
+        };
+        h.ctx.memory_mut(|m| m.request_focus(before));
+        h.run();
+        assert_eq!(tab(&mut h, false), Some(after), "Tab from before the area goes past it");
+        assert_eq!(tab(&mut h, true), Some(before), "Shift+Tab from after it goes back past it");
     }
 
     #[test]
