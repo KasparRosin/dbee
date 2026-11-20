@@ -20,9 +20,17 @@
 //!   shown in the panel, as stored (a selected row as Copy as JSON writes it), on the clipboard →
 //!   `{bytes}`, with no notice (COPY says ✓ COPIED). `Disabled` with `value.copy`'s reason: nothing
 //!   selected, NULL, or more than `COPY_MAX_BYTES`.
+//! - `clipboard.copyName {schema, table}` (the tree's Copy name): puts the relation's name as
+//!   written, without its schema and unquoted, on the clipboard and shows "Copied <name>" →
+//!   `{text, bytes}`. It reads the active connection's catalog, so a lost connection still copies;
+//!   no connection is `Disabled`, a table the catalog doesn't have is `BadParams`.
+
+use std::sync::Arc;
 
 use dbee_config::ThemeChoice;
-use dbee_engine::{CommandInfo, EngineError, Json, Outcome};
+use dbee_core::TableRef;
+use dbee_engine::cmd::{NOT_CONNECTED, connected};
+use dbee_engine::{CommandInfo, EngineError, Json, Outcome, Which};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -42,6 +50,7 @@ pub struct UiCommand {
 
 const COPY: &str = "clipboard.copy";
 const COPY_VALUE: &str = "clipboard.copyValue";
+const COPY_NAME: &str = "clipboard.copyName";
 
 pub const UI_COMMANDS: &[UiCommand] = &[
     UiCommand {
@@ -119,6 +128,16 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params: "{} -> {bytes}; the value panel's value, whole and as stored, goes to the clipboard",
         enabled: |app| app.session.enabled("value.copy"),
         run: copy_value,
+    },
+    UiCommand {
+        id: COPY_NAME,
+        label: "Copy Name",
+        // The tree's Copy name; its Ctrl+C is the tree's while a table row has the keyboard.
+        menu: &[],
+        shortcut: None,
+        params: "{schema, table} -> {text, bytes}; the name goes to the clipboard",
+        enabled: |app| connected(&app.session),
+        run: copy_name,
     },
 ];
 
@@ -242,6 +261,30 @@ fn copy_value(app: &mut DbeeApp, _: Json) -> Result<Outcome, EngineError> {
     Ok(Outcome::Done(json!({ "bytes": bytes })))
 }
 
+fn copy_name(app: &mut DbeeApp, params: Json) -> Result<Outcome, EngineError> {
+    let bad = |msg: String| EngineError::BadParams { id: COPY_NAME.into(), msg };
+    let text = |k: &str| params.get(k).and_then(Json::as_str).map(str::to_string);
+    let (Some(schema), Some(table)) = (text("schema"), text("table")) else {
+        return Err(bad("schema and table are needed".into()));
+    };
+    let catalog = app.session.state().connection(Which::Active).map(|c| Arc::clone(&c.catalog));
+    let catalog = catalog.ok_or_else(|| EngineError::Disabled { id: COPY_NAME.into(), why: NOT_CONNECTED.into() })?;
+    let wanted = TableRef { schema, name: table };
+    let Some(info) = catalog.table(&wanted) else {
+        return Err(bad(format!("no table {}.{} in the catalog: refresh the schema for a new one", wanted.schema, wanted.name)));
+    };
+    let name = info.table.name.clone();
+    let bytes = name.len();
+    app.notice_again(Kind::Success, copied_name_notice(&name));
+    app.copy_text(name.clone());
+    Ok(Outcome::Done(json!({ "text": name, "bytes": bytes })))
+}
+
+/// The notice after a name copy: `Copied orders`, the name in `data` as written.
+pub(crate) fn copied_name_notice(name: &str) -> Words {
+    Words::from("Copied ").name(name)
+}
+
 /// The notice after a grid copy: `Copied 1 row`, `Copied 1,250 rows`.
 pub(crate) fn copied_notice(rows: u64) -> Words {
     let unit = if rows == 1 { "row" } else { "rows" };
@@ -258,5 +301,12 @@ mod tests {
         assert_eq!(copied_notice(0).to_string(), "Copied 0 rows");
         assert_eq!(copied_notice(2).to_string(), "Copied 2 rows");
         assert_eq!(copied_notice(10_000).to_string(), "Copied 10,000 rows");
+    }
+
+    #[test]
+    fn the_copy_name_notice_names_it_as_written() {
+        let words = copied_name_notice("Other Ödd");
+        assert_eq!(words.to_string(), "Copied Other Ödd");
+        assert_eq!(words, Words::from("Copied ").name("Other Ödd"), "the name is a `data` piece");
     }
 }
