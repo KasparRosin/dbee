@@ -845,10 +845,12 @@ impl CatalogReadError {
         matches!(self.0, CatalogLoad::Failed(DbError::Cancelled))
     }
 
-    /// The server's DETAIL and HINT, when a server error ended it and gave them.
+    /// The server's DETAIL and HINT, when a server error ended it and gave them, each kept to
+    /// [`dbee_driver::MAX_MESSAGE`] as a server's message is.
     pub(crate) fn server_fields(&self) -> (Option<String>, Option<String>) {
+        let kept = |s: &Option<String>| s.as_deref().map(|s| dbee_driver::kept_text(s, dbee_driver::MAX_MESSAGE));
         match &self.0 {
-            CatalogLoad::Failed(DbError::Server(e)) => (e.detail.clone(), e.hint.clone()),
+            CatalogLoad::Failed(DbError::Server(e)) => (kept(&e.detail), kept(&e.hint)),
             _ => (None, None),
         }
     }
@@ -1769,6 +1771,36 @@ mod tests {
     use dbee_config::SshConfig;
 
     use super::*;
+
+    /// A structure read's server error keeps its DETAIL and HINT for the tab's band, each at most
+    /// 8 KiB; any other failure has none.
+    #[test]
+    fn a_failed_structure_read_keeps_detail_and_hint() {
+        let server = |detail: String| {
+            CatalogReadError(CatalogLoad::Failed(DbError::Server(Box::new(dbee_driver::ServerError {
+                code: "42501".into(),
+                code_label: Some("SQLSTATE"),
+                message: "permission denied".into(),
+                detail: Some(detail),
+                hint: Some("ask the owner".into()),
+                position: None,
+                meaning: None,
+            }))))
+        };
+        assert_eq!(server("no grant".into()).server_fields(), (Some("no grant".into()), Some("ask the owner".into())));
+        let (detail, _) = server("d".repeat(20_000)).server_fields();
+        let detail = detail.unwrap_or_default();
+        assert!(detail.len() <= dbee_driver::MAX_MESSAGE + '…'.len_utf8() && detail.ends_with('…'), "kept to 8 KiB: {}", detail.len());
+        assert_eq!(CatalogReadError(CatalogLoad::TimedOut).server_fields(), (None, None));
+        assert_eq!(CatalogReadError(CatalogLoad::Failed(DbError::Cancelled)).server_fields(), (None, None));
+        // The tab keeps them beside the error, and a later success clears all three.
+        let mut st = crate::state::TabStructure::default();
+        let (detail, hint) = server("no grant".into()).server_fields();
+        st.failed(Some("permission denied".into()), detail, hint);
+        assert_eq!((st.detail.as_deref(), st.hint.as_deref()), (Some("no grant"), Some("ask the owner")));
+        st.failed(None, None, None);
+        assert_eq!((st.error, st.detail, st.hint), (None, None, None));
+    }
 
     /// [`super::reuse`] for a secret saved for the settings of `saved`.
     fn reuse(saved: &ConnectionConfig, given: &ConnectionConfig) -> Reuse {
