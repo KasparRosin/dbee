@@ -75,6 +75,10 @@ const BUSY_REPAINT: Duration = Duration::from_millis(100);
 
 /// How long a notice shows, in seconds.
 const NOTICE_SECS: f64 = 4.0;
+/// Most toasts on screen at once; another notice waits until one goes.
+const MAX_TOASTS: usize = 3;
+/// The tags of the toasts on screen and of their closes, the oldest first.
+const TOAST_TAGS: [(&str, &str); MAX_TOASTS] = [("notice", "notice-close"), ("notice-2", "notice-close-2"), ("notice-3", "notice-close-3")];
 
 /// Most control requests handled in one frame; the rest wait for the next.
 const REQUESTS_PER_FRAME: usize = 64;
@@ -251,7 +255,7 @@ pub(crate) struct View {
     pub quick_refocus: Option<(egui::Id, (Screen, Option<String>))>,
     /// The dialog on screen ([`crate::dialogs`]).
     pub dialog: Option<Dialog>,
-    /// Notices, oldest first; the first one shows.
+    /// Notices, oldest first; the first [`MAX_TOASTS`] show.
     pub notices: VecDeque<Notice>,
     /// The connection screen's form, lists and jobs.
     pub conn: ConnScreen,
@@ -788,18 +792,15 @@ impl DbeeApp {
         self.notices(ui);
     }
 
-    /// The oldest notice as a toast, bottom right (above the workspace's status bar and a table
-    /// tab's paging bar), for [`NOTICE_SECS`] or until its close is clicked. Tagged `notice` with
-    /// its text, its close `notice-close`.
+    /// The oldest [`MAX_TOASTS`] notices as toasts, bottom right (above the workspace's status bar
+    /// and a table tab's paging bar), the oldest lowest, each for [`NOTICE_SECS`] from when it
+    /// first showed or until its close is clicked. Tagged `notice`, `notice-2` and `notice-3` with
+    /// their texts, their closes `notice-close`, `notice-close-2` and `notice-close-3`.
     fn notices(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
-        while let Some(Notice { until: Some(until), .. }) = self.view.notices.front() {
-            if now < *until {
-                break;
-            }
-            self.view.notices.pop_front();
-        }
+        // Only the notices shown have a clock; each goes when its own runs out.
+        self.view.notices.retain(|n| n.until.is_none_or(|until| now < until));
         // Above the bars at the window's bottom: the status bar, and a table tab's paging bar (its
         // Apply and Reset); on the connection screen the version bar, and the form's bar (its TEST
         // and CONNECT) while the form shows.
@@ -809,21 +810,28 @@ impl DbeeApp {
             (Screen::Connections, _) if self.view.conn.step == connections::Step::Form => theme::size::SLIM_BAR_H + theme::size::BAR_H,
             (Screen::Connections, _) => theme::size::SLIM_BAR_H,
         };
-        let Some(notice) = self.view.notices.front_mut() else { return };
-        let until = *notice.until.get_or_insert(now + NOTICE_SECS);
-        let shown = toast::show(&ctx, &[Toast::new(notice.kind, notice.text.clone())], lift);
-        if let Some(r) = shown.toasts.first() {
-            self.tags.tag_value("notice", r, notice.text.to_string());
+        let mut soonest = f64::INFINITY;
+        let mut toasts = Vec::with_capacity(MAX_TOASTS);
+        for notice in self.view.notices.iter_mut().take(MAX_TOASTS) {
+            soonest = soonest.min(*notice.until.get_or_insert(now + NOTICE_SECS));
+            toasts.push(Toast::new(notice.kind, notice.text.clone()));
         }
-        if let Some(r) = shown.closes.first() {
-            self.tags.tag("notice-close", r);
+        if toasts.is_empty() {
+            return;
         }
-        if let Some((_, Act::Close)) = shown.act {
-            self.view.notices.pop_front();
+        let shown = toast::show(&ctx, &toasts, lift);
+        for (((tag, close_tag), notice), (r, close)) in
+            TOAST_TAGS.iter().zip(self.view.notices.iter()).zip(shown.toasts.iter().zip(shown.closes.iter()))
+        {
+            self.tags.tag_value(tag, r, notice.text.to_string());
+            self.tags.tag(close_tag, close);
+        }
+        if let Some((i, Act::Close)) = shown.act {
+            self.view.notices.remove(i);
             ctx.request_repaint();
             return;
         }
-        let left = Duration::try_from_secs_f64((until - now).clamp(0.05, NOTICE_SECS)).unwrap_or(Duration::from_millis(50));
+        let left = Duration::try_from_secs_f64((soonest - now).clamp(0.05, NOTICE_SECS)).unwrap_or(Duration::from_millis(50));
         ctx.request_repaint_after(left);
     }
 }
@@ -1046,7 +1054,7 @@ mod tests {
     #[test]
     fn a_notice_closes_on_its_close_button() {
         // Decided by the design: a notice can be closed. Its close is tagged `notice-close`, so
-        // an agent can close it too; the next notice shows then.
+        // an agent can close it too; the next notice is the oldest shown then.
         let (mut h, tx, _home) = window();
         h.state_mut().notice(Kind::Error, "The count failed.");
         h.state_mut().notice(Kind::Success, "Copied 2 rows");
@@ -1065,7 +1073,7 @@ mod tests {
         assert_eq!(answer.map(|a| a["ok"].clone()), Some(json!(true)), "the close was clicked");
         frame(&mut h);
         let texts: Vec<String> = h.state().view.notices.iter().map(|n| n.text.to_string()).collect();
-        assert_eq!(texts, ["Copied 2 rows"], "the closed notice is gone, the next one shows");
+        assert_eq!(texts, ["Copied 2 rows"], "the closed notice is gone, the next one is lowest");
         assert_eq!(h.state().tags.value("notice"), Some(&json!("Copied 2 rows")));
     }
 
@@ -1085,6 +1093,83 @@ mod tests {
         h.input_mut().time = Some(until);
         frame(&mut h);
         assert!(h.state().view.notices.is_empty() && h.state().tags.value("notice").is_none(), "gone at four seconds");
+    }
+
+    /// The text each toast's tag says, the oldest first (`notice`, `notice-2`, `notice-3`).
+    fn toasts_shown(h: &Harness<'_, DbeeApp>) -> Vec<String> {
+        ["notice", "notice-2", "notice-3", "notice-4"]
+            .iter()
+            .filter_map(|id| h.state().tags.value(id).and_then(Json::as_str).map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn toasts_stack_and_the_first_stays_where_it_is() {
+        // Two notices in quick succession show at once, 8 apart, the newer above; the one shown
+        // already does not move.
+        let (mut h, _tx, _home) = window();
+        h.state_mut().notice(Kind::Success, "Copied 2 rows");
+        until_shown(&mut h);
+        let first = h.state().tags.rect("notice").unwrap_or_else(|| panic!("the first toast"));
+        h.state_mut().notice(Kind::Error, "The count failed.");
+        for _ in 0..3 {
+            frame(&mut h);
+        }
+        assert_eq!(toasts_shown(&h), ["Copied 2 rows", "The count failed."], "both show at once");
+        assert_eq!(h.state().tags.rect("notice"), Some(first), "the first has not moved");
+        let second = h.state().tags.rect("notice-2").unwrap_or_else(|| panic!("the second toast"));
+        assert_eq!(first.top() - second.bottom(), 8.0, "8 apart, the second above: {first:?} {second:?}");
+        assert_eq!(second.right(), first.right(), "both 12 from the right");
+        assert!(h.state().tags.rect("notice-close-2").is_some(), "the second has its own close");
+    }
+
+    #[test]
+    fn a_fourth_toast_waits_until_one_goes() {
+        // The first a second before the others: it goes first, and the fourth takes its place.
+        let (mut h, _tx, _home) = window();
+        h.state_mut().notice(Kind::Success, "one");
+        until_shown(&mut h);
+        let until = h.state().view.notices.front().and_then(|n| n.until).unwrap_or_else(|| panic!("the first showed"));
+        h.input_mut().time = Some(until - 3.0);
+        for text in ["two", "three", "four"] {
+            h.state_mut().notice(Kind::Success, text);
+        }
+        for _ in 0..3 {
+            frame(&mut h);
+        }
+        assert_eq!(toasts_shown(&h), ["one", "two", "three"], "three at most");
+        assert_eq!(h.state().view.notices.get(3).map(|n| n.until), Some(None), "the fourth's clock has not started");
+        h.input_mut().time = Some(until);
+        for _ in 0..3 {
+            frame(&mut h);
+        }
+        assert_eq!(toasts_shown(&h), ["two", "three", "four"], "the first gone, the fourth shows");
+        let fourth = h.state().view.notices.get(2).and_then(|n| n.until).unwrap_or_else(|| panic!("the fourth showed"));
+        assert!(fourth >= until + 4.0, "its own four seconds from when it showed: {fourth} after {until}");
+    }
+
+    #[test]
+    fn closing_the_second_toast_leaves_the_others() {
+        let (mut h, tx, _home) = window();
+        for text in ["one", "two", "three"] {
+            h.state_mut().notice(Kind::Success, text);
+        }
+        until_shown(&mut h);
+        let (req, reply) = ControlRequest::new("ui.click", json!({ "id": "notice-close-2" }));
+        tx.send(req).unwrap();
+        let mut answer = None;
+        for _ in 0..10 {
+            frame(&mut h);
+            if let Ok(r) = reply.try_recv() {
+                answer = Some(r);
+                break;
+            }
+        }
+        assert_eq!(answer.map(|a| a["ok"].clone()), Some(json!(true)), "the close was clicked");
+        frame(&mut h);
+        let texts: Vec<String> = h.state().view.notices.iter().map(|n| n.text.to_string()).collect();
+        assert_eq!(texts, ["one", "three"], "the second alone is gone");
+        assert_eq!(toasts_shown(&h), ["one", "three"]);
     }
 
     #[test]
