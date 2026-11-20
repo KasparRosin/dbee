@@ -2288,3 +2288,38 @@ fn at_640_without_the_panel_the_table_bar_keeps_its_buttons() {
     let count = ui.drawn("page-count");
     assert!(ui.text_in(count, "COUNT").is_some_and(|(_, cut)| !cut), "`page-count` is COUNT, whole: {count:?}");
 }
+
+/// While a table's first page loads, `Loading <name>…` stands where the grid will be, the name in
+/// the data font as every sentence with a name has it.
+#[test]
+fn loading_names_the_table_in_the_data_font() {
+    let db = dbee_testkit::require_testdb!();
+    let table = Scratch::new(db, "t_loading", |t| format!("CREATE TABLE scratch.{t} (id int)"));
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    // The query session locks the table, so its page load waits.
+    ui.execute("tab.newQuery", json!({ "text": format!("begin; lock table scratch.{} in access exclusive mode", table.0) }));
+    let query = ui.document()["active"].as_u64().unwrap();
+    ui.execute("query.run", json!({}));
+    ui.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": table.0 }, "wait": false }));
+    let name = format!("scratch.{}", table.0);
+    let sentence = format!("Loading {name}…");
+    // Where the grid will be: above the status bar, which says it too.
+    let in_body = |ui: &mut Ui| {
+        let bar = ui.tag("status-connection").map_or(f32::INFINITY, |t| t["rect"][1].as_f64().unwrap_or(0.0) as f32);
+        ui.texts().into_iter().find(|(r, g)| g.text() == sentence && r.center().y < bar)
+    };
+    ui.until("the loading sentence", |ui| in_body(ui).is_some());
+    let (_, drawn) = in_body(&mut ui).unwrap_or_else(|| panic!("drawn"));
+    let fonts: Vec<(String, egui::FontFamily)> = drawn
+        .job
+        .sections
+        .iter()
+        .map(|s| (drawn.job.text.get(s.byte_range.start.0..s.byte_range.end.0).unwrap_or_default().to_owned(), s.format.font_id.family.clone()))
+        .collect();
+    let data = dbee_ui_egui::theme::Text::Data.font().family;
+    assert!(fonts.iter().any(|(s, f)| s == &name && *f == data), "the name in the data font: {fonts:?}");
+    assert!(fonts.iter().any(|(s, f)| s == "Loading " && *f != data), "the words in body: {fonts:?}");
+    ui.click("status-cancel");
+    ui.until("the cancelled load", |ui| ui.table()["loading"].is_null());
+    ui.execute("query.rollback", json!({ "tab": query }));
+}

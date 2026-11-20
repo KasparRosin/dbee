@@ -61,7 +61,7 @@ use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
 use crate::theme::size::{BAR_LINE, NOTE_BAR_H, NOTE_BAR_PAD_X, TABLE_EMPTY_PAD};
-use crate::theme::{self, Text};
+use crate::theme::{self, Text, Words};
 use crate::{DbeeApp, value_panel};
 
 /// The commands that load a page, whose database errors the tab's band shows.
@@ -616,8 +616,10 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     if loading {
                         ui.add(Spinner::new());
                     }
-                    let words = if loading { format!("Loading {}…", tab.table.display()) } else { "No rows are loaded.".to_owned() };
-                    ui.label(Text::Body.rich_as_written(words).color(t.text_muted));
+                    // The table's name in `data`, as every sentence with a name has it.
+                    let words =
+                        if loading { Words::from("Loading ").name(tab.table.display()).plain("…") } else { Words::from("No rows are loaded.") };
+                    ui.label(words.job(t.text_muted));
                 });
             }
         }
