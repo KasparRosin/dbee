@@ -557,6 +557,7 @@ fn a_link_to_its_own_table_shows_data() {
     }
 }
 
+/// Review B3 M4: a cut default thousands of bytes long reads on hover as a definition does: as
 /// written, at most 4 KiB, ending with `…`.
 #[test]
 fn a_huge_default_hovers_at_most_4_kib() {

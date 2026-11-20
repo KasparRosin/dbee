@@ -211,7 +211,7 @@ fn one_line(text: &str) -> String {
     kept(&out, LINE_BYTES)
 }
 
-/// A definition's hover: as written, its first [`STRUCTURE_HOVER_LINES`] lines and
+/// A long text's hover (a definition, or any cut cell): as written, its first [`STRUCTURE_HOVER_LINES`] lines and
 /// [`STRUCTURE_HOVER_BYTES`], then `…` when there is more.
 fn hover_text(text: &str) -> String {
     let text = text.trim_end();
@@ -557,16 +557,17 @@ fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, page: &Page, lost: bo
                     if r.clicked() {
                         asked.push(("table.open", json!({ "schema": to.schema, "table": to.name })));
                     }
-                    let r = if cut { r.hint(words.as_str()) } else { r };
+                    let r = if cut && r.hovered() { r.hint(hover_text(words)) } else { r };
                     tags.tag_value(&tag, &r, shown.value());
                 }
                 Shown::Long { whole, .. } => {
                     let r = r.hint(whole.as_str());
                     tags.tag_value(&tag, &r, shown.value());
                 }
-                // Cut words read whole on hover.
+                // Cut words read whole on hover, as much of them as a definition's hover shows (a
+                // default or an index's parts can run to many KiB).
                 Shown::Text(words) | Shown::Muted(words) if cut => {
-                    let r = r.hint(words.as_str());
+                    let r = if r.hovered() { r.hint(hover_text(words)) } else { r };
                     tags.tag_value(&tag, &r, shown.value());
                 }
                 _ => tags.tag_value(&tag, &r, shown.value()),
