@@ -83,7 +83,7 @@ pub(crate) fn run_text(s: &mut Session, running: &Running, sql: &str, limits: Li
         }
         s.refused.store(0, std::sync::atomic::Ordering::Relaxed);
         let result = statement(s, running, sql, range.start, range.end, limits, columns)
-            .map_err(|e| errors::refused(e, s.refused.load(std::sync::atomic::Ordering::Relaxed)))?;
+            .map_err(|e| interrupted_or(running, errors::refused(e, s.refused.load(std::sync::atomic::Ordering::Relaxed))))?;
         affected = result.rows_affected.or(affected);
         if !result.columns.is_empty() || kept.as_ref().is_none_or(|k| k.columns.is_empty()) {
             // A result with rows outranks one without.
@@ -93,6 +93,14 @@ pub(crate) fn run_text(s: &mut Session, running: &Running, sql: &str, limits: Li
     let mut result = kept.unwrap_or(ResultSet { complete: true, ..ResultSet::default() });
     result.rows_affected = affected;
     Ok(result)
+}
+
+/// `e`, or [`DbError::Cancelled`] when dbee interrupted the call: SQLite does not always say so
+/// with SQLITE_INTERRUPT. An interrupt that lands in dbee's own reads before the step (the schema
+/// names' check reads `pragma_database_list`, a virtual table) comes back as SQLITE_ERROR
+/// `interrupted`.
+fn interrupted_or(running: &Running, e: DbError) -> DbError {
+    if running.interrupted() { DbError::Cancelled } else { e }
 }
 
 /// Prepare and step the statement at bytes `start..end` of `sql`.
@@ -310,5 +318,45 @@ mod tests {
         // SQLite cleared its own interrupt at the prepare: only dbee's mark kept the step from running.
         let made = s.conn.query_row("SELECT count(*) FROM sqlite_schema WHERE name = 'never'", [], |row| row.get::<_, i64>(0)).unwrap();
         assert_eq!(made, 0);
+    }
+
+    /// Whatever error a call dbee interrupted ends with is the cancel: an interrupt inside a virtual
+    /// table's read comes back as SQLITE_ERROR `interrupted`; without the interrupt it stays.
+    #[test]
+    fn an_error_after_dbees_interrupt_is_the_cancel() {
+        let s = Session::new(Connection::open_in_memory().unwrap());
+        let running = Running::new(s.conn.get_interrupt_handle());
+        let error = || {
+            errors::from_sqlite(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR), Some("interrupted".into())))
+        };
+        let _call = running.start();
+        assert_eq!(interrupted_or(&running, error()), error(), "not interrupted: the error stands");
+        assert!(running.interrupt());
+        assert_eq!(interrupted_or(&running, error()), DbError::Cancelled);
+    }
+
+    /// An interrupt sent at any moment of a call ends it as cancelled or lets it finish, never in
+    /// another error: many short runs, each with the interrupt sent over and over from another
+    /// thread from its start.
+    #[test]
+    fn an_interrupt_at_any_moment_is_a_cancel_or_nothing() {
+        for _ in 0..300 {
+            let mut s = Session::new(Connection::open_in_memory().unwrap());
+            let running = Running::new(s.conn.get_interrupt_handle());
+            let done = std::sync::atomic::AtomicBool::new(false);
+            let got = std::thread::scope(|scope| {
+                let _call = running.start();
+                scope.spawn(|| {
+                    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                        running.interrupt();
+                        std::thread::yield_now();
+                    }
+                });
+                let got = run_text(&mut s, &running, "SELECT 1 AS a; SELECT 2 AS b", QUERY_LIMITS, Columns::Typed);
+                done.store(true, std::sync::atomic::Ordering::Relaxed);
+                got
+            });
+            assert!(matches!(got, Ok(_) | Err(DbError::Cancelled)), "{got:?}");
+        }
     }
 }
