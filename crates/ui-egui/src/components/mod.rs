@@ -52,15 +52,22 @@ impl Look {
 }
 
 /// The painter a control draws with: `ui`'s, without the fading egui gives a disabled `Ui`, since
-/// a control that is off draws its own look (`text_faint`).
+/// a control that is off draws its own look (`text_faint`). Inside a [`dim`] it is without the dim
+/// too: a control already off isn't dimmed again, so it reads like the dimmed controls round it,
+/// never fainter.
 pub(crate) fn painter(ui: &egui::Ui) -> egui::Painter {
     let mut p = ui.painter().clone();
     let alpha = ui.visuals().disabled_alpha();
     if !ui.is_enabled() && alpha > 0.0 {
-        p.set_opacity(p.opacity() / alpha);
+        let dims = ui.stack().iter().filter(|s| s.tags().contains(DIMMED)).count();
+        let dimmed = (0..dims).fold(1.0, |o: f32, _| o * crate::theme::DIM);
+        p.set_opacity((p.opacity() / alpha / dimmed).min(1.0));
     }
     p
 }
+
+/// The tag [`dim`] gives the scope it dims, for [`painter`].
+const DIMMED: &str = "dbee-dimmed";
 
 /// Draws `add` in a scope of `ui`. When `on`, at [`crate::theme::DIM`] in its normal look, taking no
 /// input: a cover over the scope takes the pointer, and the keyboard leaves any widget in it
@@ -75,7 +82,7 @@ pub fn dim<R>(ui: &mut egui::Ui, on: bool, guard: &[egui::Id], add: impl FnOnce(
         let_go(ui.ctx(), guard, area, egui::FocusDirection::Previous);
     }
     let inner = ui
-        .scope_builder(egui::UiBuilder::new(), |ui| {
+        .scope_builder(egui::UiBuilder::new().ui_stack_info(dimmed(on)), |ui| {
             if on {
                 ui.multiply_opacity(crate::theme::DIM);
             }
@@ -89,6 +96,12 @@ pub fn dim<R>(ui: &mut egui::Ui, on: bool, guard: &[egui::Id], add: impl FnOnce(
         ui.interact(area, ui.id().with("dbee-dim"), egui::Sense::CLICK | egui::Sense::DRAG);
     }
     inner
+}
+
+/// The stack info of [`dim`]'s scope: tagged [`DIMMED`] when `on`.
+fn dimmed(on: bool) -> egui::UiStackInfo {
+    let info = egui::UiStackInfo::default();
+    if on { info.with_tag(DIMMED) } else { info }
 }
 
 /// The keyboard leaves the widget that has it when it is one of `guard` or lies in `area`. When
@@ -367,6 +380,40 @@ mod tests {
             assert_eq!(h.state().0, u32::from(!on), "on {on}: clicked only when not dimmed");
         }
         assert!(alpha[1].abs_diff(alpha[0] / 2) <= 1, "half: {alpha:?}");
+    }
+
+    /// Review Focus 6: inside a dim, a control that is off keeps the look it has outside any dim
+    /// (`text_faint`, not fainter); an enabled one beside it is at half its own.
+    #[test]
+    fn an_off_control_in_a_dim_keeps_its_own_look() {
+        for (theme, t) in both() {
+            let drawn = |on: bool| {
+                let shapes = painted(theme, |ui| {
+                    ui.add_space(ROOM);
+                    dim(ui, on, &[], |ui| {
+                        ui.add_enabled(false, button::BoxButton::outline("Clear"));
+                        ui.add(button::BoxButton::outline("Choose"));
+                    });
+                });
+                let texts = texts(&shapes);
+                let colour = |words: &str| {
+                    texts
+                        .iter()
+                        .find(|(w, _, _)| w == words)
+                        .map(|(_, _, c)| *c)
+                        .unwrap_or_else(|| panic!("{theme:?} on {on}: {words} drawn: {texts:?}"))
+                };
+                (colour("CLEAR"), colour("CHOOSE"))
+            };
+            let ((off, enabled), (off_dimmed, enabled_dimmed)) = (drawn(false), drawn(true));
+            assert_eq!(off, t.text_faint, "{theme:?}: off outside a dim is text_faint");
+            let near = |a: egui::Color32, b: egui::Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| x.abs_diff(y) <= 2);
+            assert!(near(off_dimmed, off), "{theme:?}: off inside a dim {off_dimmed:?} as outside {off:?}");
+            assert!(
+                near(enabled_dimmed, enabled.gamma_multiply(crate::theme::DIM)),
+                "{theme:?}: on inside a dim {enabled_dimmed:?}, half of {enabled:?}"
+            );
+        }
     }
 
     /// Tab and Shift+Tab step over a dimmed area: from the button before it to the one after it,

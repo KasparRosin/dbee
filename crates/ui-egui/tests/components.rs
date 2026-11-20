@@ -109,7 +109,7 @@ fn every(t: &Tokens) -> Vec<egui::Color32> {
 fn the_showcase_draws_in_both_modes() {
     for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
         let mut ready = false;
-        let h = Harness::builder().with_size(egui::vec2(1240.0, 12400.0)).build_ui(|ui| {
+        let h = Harness::builder().with_size(egui::vec2(1240.0, 13400.0)).build_ui(|ui| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
                 ready = true;
@@ -174,7 +174,7 @@ fn the_showcase_draws_in_both_modes() {
             "FILTER BAR: FILTER ROW FIRST (RAW SQL TOGGLE, COLUMN, OPERATOR, VALUE, REMOVE, ADD, APPLY), THEN AND ROWS; ON CARD, 4 BY 12 INSET, LINE UNDER",
             "PAGING BAR: WITH STAGED CHANGES (1 CHANGE, RESET, APPLY); WITHOUT",
             "SIDEBAR HEADER: THE FILTER (PLACEHOLDER, FILLED, FOCUS) WITH REFRESH; THE COUNT UNDER IT (516 TABLES, 3 OF 516 TABLES, 0 TABLES, LOADING)",
-            "NOT ON THE PAGE YET: THE REFRESH WHILE A REFRESH RUNS AND OFF; THE CONNECTION LIST'S FILTER, NO REFRESH; TYPED TEXT KEEPS ITS CASE",
+            "NOT ON THE PAGE YET: THE REFRESH WHILE A REFRESH RUNS (ITS PLAIN ICON, A CLICK DOES NOTHING) AND OFF; THE CONNECTION LIST'S FILTER, NO REFRESH; TYPED TEXT KEEPS ITS CASE",
             "STATUS BAR: THE CONNECTION COLOUR AS A 2 PX TOP EDGE AND THE NAME BLOCK; NO COLOUR KEEPS A QUIET FOOTER",
             "NEW: ADDRESS AS TYPED, SERVER VERSION, LINK SECURITY (ONLY WHEN WEAKER THAN FULLY CHECKED), READ-ONLY, SAVE CONNECTION; RIGHT: ONE ACTIVITY AT A TIME",
             "NOT ON THE PAGE YET: A COUNT'S JOB WITH ITS TIMER, A TABLE'S NAME KEEPS ITS CASE; RECONNECTING IN ITS FIRST 300 MS, ITS WORDS ALONE; A NAME DBEE MADE, AS WRITTEN, WITH NO ADDRESS; A LONG PATH CUT IN THE MIDDLE",
@@ -191,13 +191,19 @@ fn the_showcase_draws_in_both_modes() {
             "STRIP: A RESULT (A TEST PASSED, A SAVE), A NOTE; NOT DRAWN, THE CONNECTION FORM'S",
             "EDITOR: THE ERROR'S LINE NUMBER IN DANGER, THE TOKEN UNDERLINED IN DANGER; THE CURRENT LINE'S NUMBER IN TEXT",
             "STRUCTURE VIEW (SA): A SECTION HEADING, THE HEADER (INK LINE UNDER IT), ROWS WITH POSITION, NAME, TYPE, NULLABLE CHECK, DEFAULT, KEYS (PRIMARY KEY, FOREIGN KEY LINK)",
+            "LOADING (LC1, LC2): A TABLE'S FIRST LOAD, THE REAL HEADER OVER TEN ROWS OF FILL BARS (NONE IN THE ROW NUMBERS, A NUMBER'S BAR AT THE RIGHT); A RELOAD, THE OLD ROWS AT 50 % UNDER THE HEADER AT FULL STRENGTH",
+            "LOADING (LC4): THE TREE'S COUNT READS LOADING OVER ITS ROWS AT 50 %; WITH NO ROWS TO KEEP, EIGHT ROWS OF BARS",
+            "A DIMMED AREA (THE CONNECTING FORM AT 50 %): CLEAR ON AND OFF, THEN THE SAME DIMMED; THE ONE ALREADY OFF KEEPS ITS OWN LOOK, NEVER FAINTER",
+            "THE ONE GREY PHRASE OF AN EMPTY AREA: AT THE TOP (NO ROWS ARE LOADED.); CENTRED (NO CELL SELECTED)",
         ];
         for caption in captions {
             assert!(words.iter().any(|w| w == caption), "{theme:?}: the section `{caption}`: {words:?}");
         }
+        // A dimmed area's texts (the waiting states) are a token at the dim's strength.
         let tokens = every(&t);
+        let dimmed: Vec<Color32> = tokens.iter().map(|c| c.gamma_multiply(theme::DIM)).collect();
         for c in text_colours(&shapes) {
-            assert!(tokens.contains(&c), "{theme:?}: a text in {c:?}, which is no token of this mode");
+            assert!(tokens.contains(&c) || dimmed.contains(&c), "{theme:?}: a text in {c:?}, which is no token of this mode (nor one dimmed)");
         }
     }
 }
