@@ -1,6 +1,6 @@
 //! Cell editing driven through the control channel, one frame at a time in a kittest harness over
 //! [`DbeeApp::ui`]: the inline editors (double-click, or Enter on the selected cell), their keys
-//! (Enter, Ctrl+Enter, Tab, Escape), the boolean choice, "+ Row", Apply with Ctrl+S, undo and redo,
+//! (Enter, Ctrl+Enter, Tab, Escape), booleans typed as text, "+ Row", Apply with Ctrl+S, undo and redo,
 //! and the card of a failed Apply. Everything goes through control requests and automation ids;
 //! assertions read `ui.inspect`, `document.inspect` and the database itself (psql).
 //!
@@ -581,13 +581,13 @@ fn an_editor_opens_over_its_own_cell_after_a_wider_one() {
     let doc = ui.tag("grid-cell-0-5").unwrap();
     assert!(wide["rect"][0].as_f64().unwrap() < doc["rect"][0].as_f64().unwrap(), "moved left: {wide} {doc}");
     ui.key("Escape");
-    // The boolean choice that follows is drawn over its own cell from its first frame.
+    // The one-line editor that follows is drawn over its own cell from its first frame.
     ui.double_click("grid-cell-1-4");
-    let choice = ui.tag("cell-editor").unwrap();
+    let line = ui.tag("cell-editor").unwrap();
     let flag = ui.tag("grid-cell-1-4").unwrap();
     // egui puts an area on whole points.
-    let near = |i: usize| (choice["rect"][i].as_f64().unwrap() - flag["rect"][i].as_f64().unwrap()).abs() <= 1.0;
-    assert!(near(0) && near(1), "{choice} {flag}");
+    let near = |i: usize| (line["rect"][i].as_f64().unwrap() - flag["rect"][i].as_f64().unwrap()).abs() <= 1.0;
+    assert!(near(0) && near(1), "{line} {flag}");
     ui.key("Escape");
 }
 
@@ -674,7 +674,7 @@ fn edits_changing_under_an_open_editor_discard_it() {
 }
 
 #[test]
-fn the_boolean_choice_lets_undo_and_redo_through_after_committing() {
+fn ctrl_z_in_a_boolean_editor_undoes_its_typing() {
     let db = dbee_testkit::require_testdb!();
     let t = orders(db);
     let mut ui = opened(db, &t);
@@ -682,16 +682,18 @@ fn the_boolean_choice_lets_undo_and_redo_through_after_committing() {
     ui.text("Ann");
     ui.ctrl("Enter");
     assert_eq!(ui.edits()["count"], 1);
-    // With the choice open there is no text to undo in: Ctrl+Z commits it and undoes.
+    // A boolean holds text like any one-line cell: Ctrl+Z is its own undo.
     ui.double_click("grid-cell-1-4");
-    assert!(ui.editor().is_some());
+    ui.text("x");
+    assert_eq!(ui.editor_text(), "x");
     ui.ctrl("Z");
-    assert!(ui.editor().is_none(), "the choice was committed");
-    assert_eq!(ui.edits()["count"], 0, "and the staged name undone");
-    ui.double_click("grid-cell-1-4");
-    ui.ctrl_shift("Z");
+    assert!(ui.editor().is_some(), "the editor is still open");
+    assert_eq!(ui.editor_text(), "f", "Ctrl+Z undid the typing in the editor");
+    assert_eq!(ui.edits()["count"], 1, "the staged name stays");
+    ui.key("Escape");
     assert!(ui.editor().is_none());
-    assert_eq!(ui.staged(0, 1), Some(json!("Ann")), "Ctrl+Shift+Z redid it");
+    ui.ctrl("Z");
+    assert_eq!(ui.edits()["count"], 0, "outside the editor Ctrl+Z undoes the staged name");
 }
 
 #[test]
@@ -750,40 +752,86 @@ fn shift_tab_commits_and_moves_left() {
 }
 
 #[test]
-fn booleans_choose_true_false_or_null() {
+fn booleans_are_typed_true_false_or_emptied() {
     let db = dbee_testkit::require_testdb!();
     let t = orders(db);
     let mut ui = opened(db, &t);
     ui.double_click("grid-cell-0-4");
-    assert_eq!(ui.editor(), Some(json!({ "choice": "true" })), "the choice opens on the value");
-    for id in ["cell-editor-true", "cell-editor-false", "cell-editor-null"] {
-        assert!(ui.tag(id).is_some(), "{id}");
-    }
-    ui.click("cell-editor-null");
+    assert_eq!(ui.editor(), Some(json!({ "text": "t", "multiline": false })), "the cell's text, as Postgres prints it");
+    assert!(ui.tag("cell-editor-true").is_none(), "no choice");
+    // Emptied: NULL.
+    ui.ctrl("A");
+    ui.key("Delete");
+    ui.key("Enter");
     assert!(ui.editor().is_none());
-    assert_eq!(ui.staged(0, 4), Some(Json::Null), "NULL sets NULL");
-    // The same choice again changes nothing.
+    assert_eq!(ui.staged(0, 4), Some(Json::Null), "an emptied boolean is NULL");
+    // The same text again changes nothing.
     ui.double_click("grid-cell-1-4");
-    assert_eq!(ui.editor(), Some(json!({ "choice": "false" })));
-    ui.click("cell-editor-false");
+    assert_eq!(ui.editor_text(), "f");
+    ui.key("Enter");
     assert_eq!(ui.staged(1, 4), None);
-    // By keyboard: a NULL cell, up to false, Enter.
+    // A NULL cell opens empty; a typed word is staged as Postgres prints a bool.
     ui.double_click("grid-cell-2-4");
-    assert_eq!(ui.editor(), Some(json!({ "choice": "null" })));
-    ui.key("ArrowUp");
-    assert_eq!(ui.editor(), Some(json!({ "choice": "false" })));
+    assert_eq!(ui.editor_text(), "");
+    ui.text("false");
     ui.key("Enter");
     assert_eq!(ui.staged(2, 4), Some(json!("f")), "staged as Postgres prints a bool");
     ui.double_click("grid-cell-1-4");
-    ui.click("cell-editor-true");
+    ui.text("TRUE");
+    ui.key("Enter");
     assert_eq!(ui.staged(1, 4), Some(json!("t")));
     ui.ctrl("S");
     ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
     assert_eq!(q(db, &format!("SELECT string_agg(coalesce(flag::text, 'null'), ',' ORDER BY id) FROM scratch.{}", t.0)), "null,true,false");
 }
 
-/// A MySQL `BOOLEAN` is a `TINYINT(1)`, printed `1` and `0`: the boolean choice opens on it, and
-/// false chosen there writes `0`.
+/// Review Focus 2: a boolean is one line of text on every engine. It opens on the cell's text as
+/// the database prints it, all selected; a typed word is staged in the database's spelling; NULL
+/// opens empty, an emptied editor stages NULL; Ctrl+S writes them.
+#[test]
+fn a_boolean_is_edited_as_text_on_every_engine() {
+    let db = dbee_testkit::require_testdb!();
+    let mut targets: Vec<dbee_testkit::TestTarget> =
+        ["pg14", "mysql80", "mariadbnew"].into_iter().map(|n| dbee_testkit::target(db.server(n).unwrap())).collect();
+    targets.extend(dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]));
+    for t in &targets {
+        let at = t.name();
+        let (schema, name) = (t.schema("scratch"), unique("t_bool_text"));
+        t.sql(&format!(
+            "CREATE TABLE {schema}.{name} (id int PRIMARY KEY, flag boolean); INSERT INTO {schema}.{name} VALUES (1, true), (2, false), (3, NULL), (4, true);"
+        ))
+        .unwrap();
+        let _drop = t.server().map(|s| ScratchOn(s, name.clone()));
+        let (yes, no) = if t.kind() == dbee_testkit::Kind::Postgres { ("t", "f") } else { ("1", "0") };
+        let mut ui = Ui::connected_with(db, Setup { step: Some(0.25), config: Some(config_of(t)), ..Setup::default() });
+        ui.open(schema, &name);
+        ui.until("the page", |ui| ui.table()["rows"] == 4);
+        ui.double_click("grid-cell-0-1");
+        assert_eq!(ui.editor(), Some(json!({ "text": yes, "multiline": false })), "{at}: the cell's text");
+        assert!(ui.tag("cell-editor-true").is_none(), "{at}: no choice");
+        // All selected: typing replaces it.
+        ui.text("false");
+        ui.key("Enter");
+        assert!(ui.editor().is_none(), "{at}");
+        assert_eq!(ui.staged(0, 1), Some(json!(no)), "{at}: staged in the database's spelling");
+        ui.double_click("grid-cell-2-1");
+        assert_eq!(ui.editor_text(), "", "{at}: NULL opens empty");
+        ui.key("Escape");
+        ui.double_click("grid-cell-3-1");
+        ui.ctrl("A");
+        ui.key("Delete");
+        ui.key("Enter");
+        assert_eq!(ui.staged(3, 1), Some(Json::Null), "{at}: emptied is NULL");
+        ui.ctrl("S");
+        ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
+        let flag = "CASE WHEN flag IS NULL THEN 'null' WHEN flag THEN 'true' ELSE 'false' END";
+        let held = t.sql(&format!("SELECT {flag} FROM {schema}.{name} ORDER BY id")).unwrap();
+        assert_eq!(held.lines().map(str::trim).collect::<Vec<_>>().join(","), "false,false,null,null", "{at}");
+    }
+}
+
+/// A MySQL `BOOLEAN` is a `TINYINT(1)`, printed `1` and `0`: the editor opens on the `1`, and
+/// `false` typed there writes `0`.
 #[test]
 fn a_mysql_boolean_set_to_false_in_the_editor_writes_0() {
     let db = dbee_testkit::require_testdb!();
@@ -800,15 +848,16 @@ fn a_mysql_boolean_set_to_false_in_the_editor_writes_0() {
     ui.open("scratch", &name);
     ui.until("the page", |ui| ui.table()["rows"] == 1);
     ui.double_click("grid-cell-0-1");
-    assert_eq!(ui.editor(), Some(json!({ "choice": "true" })), "the choice opens on the 1 MySQL prints");
-    ui.click("cell-editor-false");
+    assert_eq!(ui.editor(), Some(json!({ "text": "1", "multiline": false })), "one line, on the 1 MySQL prints");
+    ui.text("false");
+    ui.key("Enter");
     assert_eq!(ui.staged(0, 1), Some(json!("0")), "staged as MySQL prints a false BOOLEAN");
     ui.ctrl("S");
     ui.until("the Apply", |ui| ui.table()["applying"].is_null() && ui.table()["edits"]["count"] == 0);
     assert_eq!(dbee_testkit::mysql(server, &format!("SELECT flag FROM scratch.{name}")).unwrap().trim(), "0");
 }
 
-/// A MySQL `BOOLEAN` holding 5 is no choice: the cell opens as one line on the 5, and Enter
+/// A MySQL `BOOLEAN` holding 5 opens as one line on the 5, as every boolean does, and Enter
 /// alone writes nothing over it.
 #[test]
 fn a_mysql_boolean_holding_another_number_opens_as_one_line() {

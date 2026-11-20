@@ -20,9 +20,9 @@
 //!
 //! **Kinds** ([`Kind`], from the column's catalog entry): one line, where Enter commits; several
 //! lines for `text`, `json`, `jsonb` and `xml` (`ColumnInfo::multiline`), where Enter is a newline
-//! and Ctrl+Enter commits; and a true / false / NULL choice for booleans (class `Bool`), moved
-//! with the arrow keys or clicked. A boolean holding a value that is no choice (MySQL's
-//! `TINYINT(1)` holding 5) opens as one line instead.
+//! and Ctrl+Enter commits. Booleans are one line of text like the rest: the cell's text as the
+//! database prints it (`t`, `1`; MySQL's `TINYINT(1)` holding 5 as `5`), and an emptied editor
+//! is NULL. The engine's `cell.edit` stages a typed boolean word in the database's spelling.
 //!
 //! **Keys.** While an editor is open it has the keyboard: Enter or Ctrl+Enter commits, Tab
 //! commits and selects the next cell to the right, then the start of the next row (Shift+Tab goes
@@ -31,58 +31,50 @@
 //! global Ctrl+Enter does not run too, and act once the editor has drawn ([`after_draw`]): text
 //! typed earlier in the same frame is in the value, and keys typed after one wait for the next
 //! frame (`DbeeApp::feed_input`). Ctrl+Z and Ctrl+Shift+Z are the editor's own undo and redo (see
-//! [`crate::shortcuts`]) while text is edited; the boolean choice has no text, so there they and
-//! Ctrl+C commit it and run. Any other shortcut commits the editor before it runs, so Ctrl+S
-//! writes the value being typed.
+//! [`crate::shortcuts`]). Any other shortcut commits the editor before it runs, so Ctrl+S writes
+//! the value being typed.
 //!
-//! **Committing** ([`CellEditor::command`]): an unchanged value (the text it opened with, or the
-//! same choice) sends nothing; empty text sends `cell.clear` (`''` for string types, NULL for
-//! the others); other text sends `cell.edit`; true and false send `cell.edit`, NULL
-//! `cell.setNull`. A press anywhere outside the editor commits it before anything else sees the
+//! **Committing** ([`CellEditor::command`]): an unchanged value (the text it opened with) sends
+//! nothing; empty text sends `cell.clear` (`''` for string types, NULL for the others, booleans
+//! included); other text sends `cell.edit`. A press anywhere outside the editor commits it before anything else sees the
 //! press, so clicking another cell commits and selects that cell. An editor whose tab, page or
 //! cell is gone, or that can no longer stage, closes without committing; so does one whose tab's
 //! staged edits changed under it (`Edits::revision`: an agent's `row.delete` can move the row
 //! it points at), with a notice that the edit was discarded. When its cell leaves the rows and
 //! columns in view (scrolled away either way), it commits, as a click elsewhere would.
 //!
-//! Automation id: `cell-editor` (value `{text, multiline}` for text, the text cut to
-//! [`TAG_CHARS`] characters; `{choice}` for a boolean, `true`, `false` or `null`), and the
-//! choices `cell-editor-true`, `cell-editor-false` and `cell-editor-null`. The editor's text never
-//! reaches the logs: its `Debug` leaves it out.
+//! Automation id: `cell-editor` (value `{text, multiline}`, the text cut to [`TAG_CHARS`]
+//! characters). The editor's text never reaches the logs: its `Debug` leaves it out.
 
 use std::sync::{Arc, Weak};
 
-use dbee_core::{ColumnInfo, ResultSet, TypeClass};
+use dbee_core::{ColumnInfo, ResultSet};
 use dbee_engine::cmd::edit::can_edit;
 use dbee_engine::{EngineError, Json, Screen, Session, Tab, TabId, Which};
-use egui::text::{CCursor, CCursorRange, LayoutJob, TextFormat};
+use egui::text::{CCursor, CCursorRange};
 use egui::widgets::text_edit::TextEditState;
-use egui::{
-    Area, CornerRadius, Event, EventFilter, Frame, Id, Key, KeyboardShortcut, Margin, Modifiers, Order, Rect, ScrollArea, Sense, Stroke, TextEdit,
-    pos2, vec2,
-};
+use egui::{Area, Event, EventFilter, Frame, Id, Key, KeyboardShortcut, Margin, Modifiers, Order, Rect, ScrollArea, Stroke, TextEdit, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
 use crate::components::toast;
-use crate::grid::{CELL, GridSource, ROW_H};
+use crate::grid::{CELL, GridSource};
 use crate::shortcuts;
 use crate::theme::{self, Text, Words};
 
 /// The longest value an editor opens inline, in bytes of text (see the module docs).
 pub const MAX_INLINE_BYTES: usize = 32 * 1024;
 
-/// The editor's automation id; its choices add `-true`, `-false` and `-null`.
+/// The editor's automation id.
 pub const EDITOR: &str = "cell-editor";
 
 /// How much of the text the `cell-editor` tag shows.
 pub const TAG_CHARS: usize = 200;
 
-/// The narrowest a several-lines editor or a boolean choice is.
+/// The narrowest a several-lines editor is.
 const LINES_W: f32 = 320.0;
-const CHOICE_W: f32 = 120.0;
 /// The tallest a several-lines editor grows before it scrolls.
 const LINES_MAX_H: f32 = 180.0;
 /// The editor's edge, `ink` on `card` as the page's `editing` cell (the grid's outline), and the
@@ -98,11 +90,6 @@ fn text_id() -> Id {
     Id::new("dbee-cell-editor-text")
 }
 
-/// The boolean choice's id, which holds the keyboard while it is open.
-fn choice_id() -> Id {
-    Id::new("dbee-cell-editor-choice")
-}
-
 /// How a cell's value is edited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -110,66 +97,15 @@ pub enum Kind {
     Line,
     /// Several lines: Enter is a newline, Ctrl+Enter commits.
     Lines,
-    /// True, false or NULL.
-    Bool,
 }
 
 impl Kind {
     /// The kind for `column` (its catalog entry; one line when it is unknown).
     pub fn of(column: Option<&ColumnInfo>) -> Kind {
         match column {
-            Some(c) if c.class == TypeClass::Bool => Kind::Bool,
             Some(c) if c.multiline() => Kind::Lines,
             _ => Kind::Line,
         }
-    }
-}
-
-/// A boolean editor's choices, in the order it lists them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Choice {
-    True,
-    False,
-    Null,
-}
-
-impl Choice {
-    pub const ALL: [Choice; 3] = [Choice::True, Choice::False, Choice::Null];
-
-    /// Its name in automation ids and values.
-    pub fn id(self) -> &'static str {
-        match self {
-            Choice::True => "true",
-            Choice::False => "false",
-            Choice::Null => "null",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Choice::True => "true",
-            Choice::False => "false",
-            Choice::Null => "NULL",
-        }
-    }
-
-    /// The choice a boolean cell's value is. Postgres prints `t` and `f`, the other engines `1` and
-    /// `0`; a staged value is as it was typed, in any of the spellings Postgres reads. Other text is
-    /// no choice.
-    pub fn of(value: Option<&str>) -> Option<Choice> {
-        let Some(v) = value else { return Some(Choice::Null) };
-        match v.trim().to_ascii_lowercase().as_str() {
-            "t" | "true" | "y" | "yes" | "on" | "1" => Some(Choice::True),
-            "f" | "false" | "n" | "no" | "off" | "0" => Some(Choice::False),
-            _ => None,
-        }
-    }
-
-    /// The choice one step up (`-1`) or down (`1`) the list, stopping at its ends.
-    fn step(self, down: bool) -> Choice {
-        let at = Choice::ALL.iter().position(|c| *c == self).unwrap_or(0);
-        let to = if down { at.saturating_add(1).min(Choice::ALL.len() - 1) } else { at.saturating_sub(1) };
-        Choice::ALL.get(to).copied().unwrap_or(self)
     }
 }
 
@@ -182,11 +118,6 @@ pub enum EditorKey {
         back: bool,
     },
     Cancel,
-    /// The boolean choice moves up or down.
-    Up,
-    Down,
-    /// A boolean choice was clicked: take it and commit.
-    Pick(Choice),
 }
 
 /// The editor key `event` is for an editor of `kind`, if any. Modifiers must match exactly.
@@ -199,8 +130,6 @@ pub fn editor_key(event: &Event, kind: Kind) -> Option<EditorKey> {
         Key::Tab if is(Modifiers::SHIFT) => Some(EditorKey::Move { back: true }),
         Key::Enter if is(Modifiers::COMMAND) => Some(EditorKey::Commit),
         Key::Enter if kind != Kind::Lines && (is(Modifiers::NONE) || is(Modifiers::SHIFT)) => Some(EditorKey::Commit),
-        Key::ArrowUp if kind == Kind::Bool && is(Modifiers::NONE) => Some(EditorKey::Up),
-        Key::ArrowDown if kind == Kind::Bool && is(Modifiers::NONE) => Some(EditorKey::Down),
         _ => None,
     }
 }
@@ -259,10 +188,6 @@ pub struct CellEditor {
     /// The text it opened with (NULL as empty), and the text now.
     opened: String,
     pub text: String,
-    /// For a boolean: the choice it opened with (`None` for text that is no choice), and the
-    /// choice now.
-    opened_choice: Option<Choice>,
-    pub choice: Choice,
     /// The page it opened on, and the tab's staged edits then (`Edits::revision`): another page,
     /// or other edits, close it.
     page: Weak<ResultSet>,
@@ -292,11 +217,9 @@ impl std::fmt::Debug for CellEditor {
 
 impl CellEditor {
     /// An editor of `kind` on cell `(row, col)` of tab `tab`, holding `value` (`None`: NULL), on
-    /// `page`; a boolean whose value is no choice as one line.
+    /// `page`.
     pub fn new(tab: TabId, (row, col): (usize, usize), kind: Kind, value: Option<&str>, page: &Arc<ResultSet>, revision: u64) -> CellEditor {
         let text = value.unwrap_or_default().to_string();
-        let opened_choice = Choice::of(value);
-        let kind = if kind == Kind::Bool && opened_choice.is_none() { Kind::Line } else { kind };
         CellEditor {
             tab,
             row,
@@ -304,8 +227,6 @@ impl CellEditor {
             kind,
             opened: text.clone(),
             text,
-            opened_choice,
-            choice: opened_choice.unwrap_or(Choice::True),
             page: Arc::downgrade(page),
             revision,
             rect: None,
@@ -323,41 +244,22 @@ impl CellEditor {
     /// The command that commits it, or `None` when nothing changed (see the module docs).
     pub fn command(&self) -> Option<(&'static str, Json)> {
         let (row, column) = (self.row, self.col);
-        match self.kind {
-            Kind::Bool => {
-                if self.opened_choice == Some(self.choice) {
-                    return None;
-                }
-                Some(match self.choice {
-                    Choice::True => ("cell.edit", json!({ "row": row, "column": column, "value": true })),
-                    Choice::False => ("cell.edit", json!({ "row": row, "column": column, "value": false })),
-                    Choice::Null => ("cell.setNull", json!({ "row": row, "column": column })),
-                })
-            }
-            Kind::Line | Kind::Lines => {
-                if self.text == self.opened {
-                    None
-                } else if self.text.is_empty() {
-                    Some(("cell.clear", json!({ "row": row, "column": column })))
-                } else {
-                    Some(("cell.edit", json!({ "row": row, "column": column, "value": self.text })))
-                }
-            }
+        if self.text == self.opened {
+            None
+        } else if self.text.is_empty() {
+            Some(("cell.clear", json!({ "row": row, "column": column })))
+        } else {
+            Some(("cell.edit", json!({ "row": row, "column": column, "value": self.text })))
         }
     }
 
     /// What the `cell-editor` tag shows.
     fn tag_value(&self) -> Json {
-        match self.kind {
-            Kind::Bool => json!({ "choice": self.choice.id() }),
-            Kind::Line | Kind::Lines => {
-                let mut text: String = self.text.chars().take(TAG_CHARS).collect();
-                if self.text.chars().nth(TAG_CHARS).is_some() {
-                    text.push('…');
-                }
-                json!({ "text": text, "multiline": self.kind == Kind::Lines })
-            }
+        let mut text: String = self.text.chars().take(TAG_CHARS).collect();
+        if self.text.chars().nth(TAG_CHARS).is_some() {
+            text.push('…');
         }
+        json!({ "text": text, "multiline": self.kind == Kind::Lines })
     }
 }
 
@@ -466,10 +368,7 @@ fn discarded(ed: &CellEditor, why: Unfit) -> Option<&'static str> {
 /// Removes the open editor (its text state and the keyboard go with it) and returns it.
 fn take(app: &mut DbeeApp, ctx: &egui::Context) -> Option<CellEditor> {
     let ed = app.view.work.editor.take()?;
-    ctx.memory_mut(|m| {
-        m.surrender_focus(text_id());
-        m.surrender_focus(choice_id());
-    });
+    ctx.memory_mut(|m| m.surrender_focus(text_id()));
     ctx.data_mut(|d| d.remove::<TextEditState>(text_id()));
     Some(ed)
 }
@@ -596,19 +495,11 @@ fn open_on_enter(app: &mut DbeeApp, ctx: &egui::Context) {
     }
 }
 
-/// After step 5 (drawing): does what the editor's key, or a click on a choice, asked for.
+/// After step 5 (drawing): does what the editor's key asked for.
 pub(crate) fn after_draw(app: &mut DbeeApp, ctx: &egui::Context) {
     let Some(ed) = app.view.work.editor.as_mut() else { return };
     let Some(key) = ed.pending.take() else { return };
     match key {
-        EditorKey::Up | EditorKey::Down => {
-            ed.choice = ed.choice.step(key == EditorKey::Down);
-            ctx.request_repaint();
-        }
-        EditorKey::Pick(choice) => {
-            ed.choice = choice;
-            commit(app, ctx);
-        }
         EditorKey::Commit => commit(app, ctx),
         EditorKey::Cancel => {
             take(app, ctx);
@@ -638,7 +529,6 @@ pub(crate) fn show(ctx: &egui::Context, ed: &mut CellEditor, cell: Rect, view: R
     let width = match ed.kind {
         Kind::Line => cell.width(),
         Kind::Lines => cell.width().max(LINES_W),
-        Kind::Bool => cell.width().max(CHOICE_W),
     };
     let inner_w = (width - 2.0 * BORDER).max(1.0);
     let inner_h = (cell.height() - 2.0 * BORDER).max(1.0);
@@ -647,7 +537,6 @@ pub(crate) fn show(ctx: &egui::Context, ed: &mut CellEditor, cell: Rect, view: R
     // editor's own from its last frame.
     let height = match ed.kind {
         Kind::Line => cell.height(),
-        Kind::Bool => ROW_H * Choice::ALL.len() as f32 + 2.0 * BORDER,
         Kind::Lines => ed.rect.map_or(cell.height(), |r| r.height()),
     };
     let at = place(cell.min, vec2(width, height), view);
@@ -657,10 +546,7 @@ pub(crate) fn show(ctx: &egui::Context, ed: &mut CellEditor, cell: Rect, view: R
             Frame::new().fill(t.card).stroke(Stroke::new(BORDER, t.ink)).show(ui, |ui| {
                 ui.set_width(inner_w);
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                match ed.kind {
-                    Kind::Bool => choices(ui, ed, inner_w, tags),
-                    Kind::Line | Kind::Lines => text_box(ui, ed, vec2(inner_w, inner_h)),
-                }
+                text_box(ui, ed, vec2(inner_w, inner_h));
             })
         })
         .response;
@@ -738,44 +624,10 @@ fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
     }
 }
 
-/// The boolean choice: three rows, the current one highlighted.
-fn choices(ui: &mut egui::Ui, ed: &mut CellEditor, width: f32, tags: &mut Tags) {
-    let t = theme::tokens(ui.ctx());
-    let id = choice_id();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, ROW_H * Choice::ALL.len() as f32), Sense::hover());
-    // Holds the keyboard (so Tab and the arrows do not move it elsewhere) without taking clicks.
-    let holder = ui.interact(rect, id, Sense::focusable_noninteractive());
-    if !holder.has_focus() {
-        holder.request_focus();
-    }
-    ui.memory_mut(|m| m.set_focus_lock_filter(id, KEYS_KEPT));
-    ed.fresh = false;
-    for (i, choice) in Choice::ALL.iter().copied().enumerate() {
-        let row = Rect::from_min_size(pos2(rect.left(), rect.top() + ROW_H * i as f32), vec2(width, ROW_H));
-        let r = ui.interact(row, id.with(i), Sense::click());
-        let fill = if choice == ed.choice {
-            t.selection
-        } else if r.hovered() {
-            t.hover
-        } else {
-            t.card
-        };
-        ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
-        let null = choice == Choice::Null;
-        let colour = if null { t.text_muted } else { t.text };
-        let format = TextFormat { italics: null, ..Text::Data.format(colour) };
-        let galley = ui.painter().layout_job(LayoutJob::single_section(choice.label().to_string(), format));
-        ui.painter().galley(pos2(row.left() + PAD - BORDER, row.center().y - galley.size().y / 2.0), galley, colour);
-        tags.tag_value(&format!("{EDITOR}-{}", choice.id()), &r, choice.label());
-        if r.clicked() && ed.pending.is_none() {
-            ed.pending = Some(EditorKey::Pick(choice));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use dbee_core::Column;
+    use dbee_core::{Column, TypeClass};
+    use egui::CornerRadius;
 
     use super::*;
 
@@ -883,11 +735,6 @@ mod tests {
                     assert!(ground.is_empty(), "{at_}: nothing selected: {ground:?}");
                 }
             }
-            // The boolean choice: the same edge round its three rows.
-            let shapes = drawn(theme, editor(Kind::Bool, Some("t")), cell, false);
-            let choice = Rect::from_min_size(cell.min, vec2(150.0, 3.0 * ROW_H + 4.0));
-            let edge = Edge { outer: choice, width: 2.0, colour: t.ink, radius: CornerRadius::ZERO };
-            assert!(edges_in(&shapes, choice, 0.0).contains(&edge), "{theme:?}: the choice's edge: {:?}", edges_in(&shapes, choice, 0.0));
         }
     }
 
@@ -906,29 +753,6 @@ mod tests {
         assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": "a\nb" }))));
         e.text.clear();
         assert_eq!(e.command(), None);
-    }
-
-    #[test]
-    fn booleans_send_true_false_or_set_null() {
-        let mut e = editor(Kind::Bool, Some("t"));
-        assert_eq!((e.choice, e.command()), (Choice::True, None));
-        e.choice = Choice::False;
-        assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": false }))));
-        e.choice = Choice::Null;
-        assert_eq!(e.command(), Some(("cell.setNull", json!({ "row": 2, "column": 3 }))));
-        let mut e = editor(Kind::Bool, None);
-        assert_eq!((e.choice, e.command()), (Choice::Null, None));
-        e.choice = Choice::True;
-        assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": true }))));
-        // Text that is no boolean opens as one line: Enter alone changes nothing.
-        let mut e = editor(Kind::Bool, Some("5"));
-        assert_eq!((e.kind, e.text.as_str(), e.command()), (Kind::Line, "5", None));
-        e.text = "1".into();
-        assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": "1" }))));
-        for (text, choice) in [("TRUE", Some(Choice::True)), ("off", Some(Choice::False)), (" yes ", Some(Choice::True)), ("2", None)] {
-            assert_eq!(Choice::of(Some(text)), choice, "{text}");
-        }
-        assert_eq!((Choice::True.step(false), Choice::True.step(true), Choice::Null.step(true)), (Choice::True, Choice::False, Choice::Null));
     }
 
     #[test]
@@ -952,13 +776,11 @@ mod tests {
         let enter = key(Key::Enter, Modifiers::NONE);
         assert_eq!(editor_key(&enter, Kind::Line), Some(EditorKey::Commit));
         assert_eq!(editor_key(&enter, Kind::Lines), None, "a newline in several lines");
-        assert_eq!(editor_key(&enter, Kind::Bool), Some(EditorKey::Commit));
         assert_eq!(editor_key(&key(Key::Enter, ctrl), Kind::Lines), Some(EditorKey::Commit));
         assert_eq!(editor_key(&key(Key::Enter, ctrl | Modifiers::SHIFT), Kind::Line), None, "Ctrl+Shift+Enter is no editor key");
         assert_eq!(editor_key(&key(Key::Tab, Modifiers::NONE), Kind::Lines), Some(EditorKey::Move { back: false }));
         assert_eq!(editor_key(&key(Key::Tab, Modifiers::SHIFT), Kind::Line), Some(EditorKey::Move { back: true }));
-        assert_eq!(editor_key(&key(Key::Escape, Modifiers::NONE), Kind::Bool), Some(EditorKey::Cancel));
-        assert_eq!(editor_key(&key(Key::ArrowUp, Modifiers::NONE), Kind::Bool), Some(EditorKey::Up));
+        assert_eq!(editor_key(&key(Key::Escape, Modifiers::NONE), Kind::Line), Some(EditorKey::Cancel));
         assert_eq!(editor_key(&key(Key::ArrowUp, Modifiers::NONE), Kind::Line), None, "the caret's");
         assert_eq!(editor_key(&key(Key::Z, ctrl), Kind::Line), None);
         assert_eq!(editor_key(&Event::Text("a".into()), Kind::Line), None);
@@ -1033,9 +855,9 @@ mod tests {
         assert_eq!(place(pos2(200.0, 100.0), vec2(900.0, 24.0), view), pos2(100.0, 100.0), "wider than the view: from its left");
     }
 
-    #[test]
-    fn kinds_follow_the_catalog() {
-        let mut c = ColumnInfo {
+    /// A boolean column, as the catalog lists one.
+    fn bool_column() -> ColumnInfo {
+        ColumnInfo {
             name: "c".into(),
             type_sql: "boolean".into(),
             base_type: "bool".into(),
@@ -1046,8 +868,32 @@ mod tests {
             hidden: false,
             type_label: String::new(),
             operators: dbee_core::Operators::Unnamed,
-        };
-        assert_eq!(Kind::of(Some(&c)), Kind::Bool);
+        }
+    }
+
+    #[test]
+    fn a_boolean_column_opens_one_line() {
+        // Booleans are plain text: the cell's text as the database prints it, Enter commits, an
+        // emptied editor is NULL (`cell.clear`), and the engine spells a boolean word.
+        let kind = Kind::of(Some(&bool_column()));
+        assert_eq!(kind, Kind::Line);
+        let mut e = editor(kind, Some("t"));
+        assert_eq!((e.kind, e.text.as_str(), e.command()), (Kind::Line, "t", None), "unchanged: nothing");
+        assert_eq!(e.tag_value(), json!({ "text": "t", "multiline": false }));
+        assert_eq!(editor_key(&key(Key::Enter, Modifiers::NONE), kind), Some(EditorKey::Commit));
+        e.text = "false".into();
+        assert_eq!(e.command(), Some(("cell.edit", json!({ "row": 2, "column": 3, "value": "false" }))));
+        e.text.clear();
+        assert_eq!(e.command(), Some(("cell.clear", json!({ "row": 2, "column": 3 }))));
+        // NULL opens empty; a MySQL BOOLEAN holding 5 opens on the 5.
+        assert_eq!(editor(kind, None).text, "");
+        assert_eq!(editor(kind, Some("5")).text, "5");
+    }
+
+    #[test]
+    fn kinds_follow_the_catalog() {
+        let mut c = bool_column();
+        assert_eq!(Kind::of(Some(&c)), Kind::Line, "a boolean is one line");
         c.class = TypeClass::Json;
         assert_eq!(Kind::of(Some(&c)), Kind::Lines);
         c.class = TypeClass::LongText;
