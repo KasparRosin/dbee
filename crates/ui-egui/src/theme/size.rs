@@ -267,6 +267,21 @@ pub const CONN_COLOUR_EDGE: f32 = 2.0;
 pub const CONN_TITLE_MIN_W: f32 = 80.0;
 pub const ENGINE_ROW_LOGO: f32 = 16.0;
 pub const ENGINE_ROW_GAP: f32 = SPACE_8;
+/// The connection form: two columns when the pane is at least this wide, one below; a column at
+/// least this wide (two of them, the gap and the pane's insets make the two-column width) and at
+/// most this wide, the second this far right of the first. The first section starts this far
+/// under the engine row's line; a section this far under the field above it, a field this far
+/// under the one above (and under its section's label); a port field this wide; a button this
+/// far beside its field and the next button.
+pub const CONN_TWO_COLUMNS_MIN: f32 = 664.0;
+pub const CONN_COLUMN_MIN_W: f32 = 300.0;
+pub const CONN_COLUMN_MAX_W: f32 = 480.0;
+pub const CONN_COLUMN_GAP: f32 = 24.0;
+pub const CONN_FIELDS_TOP: f32 = SPACE_16;
+pub const CONN_SECTION_GAP: f32 = 20.0;
+pub const CONN_FIELD_GAP: f32 = SPACE_12;
+pub const CONN_PORT_W: f32 = 110.0;
+pub const CONN_BESIDE_GAP: f32 = SPACE_8;
 /// The engine cards (K2): `Choose a database` this far under the title row, the cards this far
 /// under it; a card this tall, at least this wide, its logo this big, this far in from the card's
 /// left and top, the name this far under the logo; the UPCOMING chip this far in from the corner.

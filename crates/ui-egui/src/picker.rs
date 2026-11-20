@@ -1,7 +1,7 @@
-//! The file pickers of the connection form ("Change…" for the SSH key, "Choose…" for the CA
-//! file, "Choose…" and "New file…" for a database file): rfd runs on a thread of its own and sends
+//! The file pickers of the connection form (CHOOSE for the SSH key and for the CA
+//! file, CHOOSE and NEW FILE for a database file): rfd runs on a thread of its own and sends
 //! the chosen path back over a channel, so the UI thread never waits for it. A database file's
-//! pickers list the type's extensions first, then all files; New file… is a save dialog, and the
+//! pickers list the type's extensions first, then all files; NEW FILE is a save dialog, and the
 //! file it names is made by the next test or connect.
 //!
 //! One picker at a time: while its thread runs, the form starts no other. "Stop" only stops

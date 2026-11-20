@@ -43,10 +43,10 @@
 //! - Ctrl+P (the quick search) finds the saved connections here too; choosing one connects as a
 //!   double-click on its card does. Chosen over the workspace, it does so once the open
 //!   connection has closed through `connection.close` and its questions ([`switch_to`]).
-//! - The file pickers ("Change…" for the key, "Choose…" for the CA file, "Choose…" and "New file…"
-//!   for a database file) run rfd on a thread of their own and send the path back; a picker that
-//!   cannot open leaves a note in its row ([`crate::picker`]). After New file…, every test and
-//!   connect asks for the file to be made (`createFile`) until a connect succeeds; Choose…,
+//! - The file pickers (CHOOSE for the key and the CA file, CHOOSE and NEW FILE for a database
+//!   file) run rfd on a thread of their own and send the path back; a picker that cannot open
+//!   leaves a note in its row ([`crate::picker`]). After NEW FILE, every test and connect asks
+//!   for the file to be made (`createFile`) until a connect succeeds; CHOOSE,
 //!   another connection or another type forget it.
 //!
 //! The form (its fields, their validation, and drawing it) is [`crate::conn_form`]; this module
@@ -85,9 +85,9 @@ use crate::picker::{self, Pick, Picker};
 use crate::theme::{
     self, Text, connection_color,
     size::{
-        BAR_H, BAR_LINE, CONN_COLOUR_EDGE, CONN_WARNING_PAD_Y, CONNECTION_ROW_H, ENGINE_CARD_CHIP_INSET, ENGINE_CARD_H, ENGINE_CARD_LOGO,
-        ENGINE_CARD_MIN_W, ENGINE_CARD_NAME_GAP, ENGINE_CARD_PAD, ENGINE_CARDS_TOP, ENGINE_HEADING_TOP, INSET, RADIUS_CONTROL, SIDEBAR_MAX_W,
-        SIDEBAR_MIN_W, SIDEBAR_PAD_X, SIDEBAR_W, SLIM_BAR_H, TABLE_EMPTY_PAD,
+        BAR_H, BAR_LINE, CONN_COLOUR_EDGE, CONN_FIELDS_TOP, CONN_WARNING_PAD_Y, CONNECTION_ROW_H, ENGINE_CARD_CHIP_INSET, ENGINE_CARD_H,
+        ENGINE_CARD_LOGO, ENGINE_CARD_MIN_W, ENGINE_CARD_NAME_GAP, ENGINE_CARD_PAD, ENGINE_CARDS_TOP, ENGINE_HEADING_TOP, INSET, RADIUS_CONTROL,
+        SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_PAD_X, SIDEBAR_W, SLIM_BAR_H, TABLE_EMPTY_PAD,
     },
 };
 
@@ -919,9 +919,6 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, sele
     });
 }
 
-/// Room for the fields' scroll bar, right of them.
-const SCROLL_GAP: f32 = 12.0;
-
 /// The right pane, everything right of the sidebar between the menu bar and the version bar, on
 /// `card` (tagged `conn-card`): the title row, with the connection's colour as an edge along its
 /// top; then the engine cards, or the engine row and the form.
@@ -941,11 +938,11 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
             Step::Engines => engines(ui, kinds, tags, acts),
             Step::Form => {
                 conn_form::engine_row(ui, conn, tags, acts);
-                let inset = Margin { left: INSET as i8, right: 0, top: INSET as i8, bottom: INSET as i8 };
+                // The fields start 12 in; their scroll bar runs along the pane's right edge.
+                let inset = Margin { left: INSET as i8, right: 0, top: CONN_FIELDS_TOP as i8, bottom: INSET as i8 };
                 Frame::NONE.inner_margin(inset).show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::Spacing::default().item_spacing;
-                    let w = (ui.available_width() - SCROLL_GAP).max(1.0);
-                    ui.with_layout(Layout::top_down(Align::Min), |ui| conn_form::fields_and_footer(ui, conn, tags, acts, w));
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| conn_form::fields_and_footer(ui, conn, tags, acts, pane.width()));
                 });
             }
         }
@@ -1202,7 +1199,7 @@ mod tests {
             assert!(app.view.conn.picker.is_none());
         };
         let asks = |app: &DbeeApp| app.view.conn.form.create_file;
-        // Choose… takes a file as it is; New file… asks for it to be made; another type forgets it.
+        // CHOOSE takes a file as it is; NEW FILE asks for it to be made; another type forgets it.
         pick(&mut app, Pick::NewFile);
         pick(&mut app, Pick::File);
         assert_eq!((app.view.conn.form.file.as_deref(), asks(&app)), (Some(file.as_path()), false));

@@ -193,6 +193,21 @@ fn m1_day_end_to_end() {
     assert!(app.tags_with("conn-recent-").is_empty(), "the saved connection isn't listed twice");
     app.shot(&root, "0-connections");
 
+    // 0b. A click on the card shows its form, in two columns: its engine fixed, the tunnel on, the
+    //     key it will use under KEY FILE, SHOW ending with its column as PORT does.
+    app.click(&card);
+    app.until("the form", |app| app.tag("conn-host").is_some());
+    assert_eq!(app.value("conn-kind"), "postgres");
+    assert!(app.tag("conn-change-engine").is_none(), "a saved connection's engine is fixed");
+    assert_eq!(app.value("conn-ssh-on"), true);
+    app.until("the key line", |app| app.value("conn-ssh-key").as_str().is_some_and(|t| t.starts_with("Uses ")));
+    let (show, port) = (app.rect("conn-password-show"), app.rect("conn-port"));
+    assert!(((show[0] + show[2]) - (port[0] + port[2])).abs() <= 0.5, "SHOW {show:?} ends where PORT {port:?} does");
+    app.shot(&root, "0b-edit-form");
+    // egui counts clicks less than 0.6 s apart as one double or triple click: the card's click
+    // above would make the double-click below a triple one.
+    std::thread::sleep(std::time::Duration::from_millis(700));
+
     // 1. A double-click on the card reaches the workspace: no key to pick, no host key to trust,
     //    no password to type.
     app.double_click(&card);

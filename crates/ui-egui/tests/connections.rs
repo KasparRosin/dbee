@@ -270,6 +270,134 @@ fn every_row_of_a_server_form_is_in_view_at_the_default_window() {
             let tag = tag_in(&i, &id).unwrap_or_else(|| panic!("{kind:?}: no {id}"));
             assert!(tag.get("visible").is_none() && rect(&tag)[3] == whole, "{kind:?}: {id} is not whole in view: {tag}");
         }
+        if !ssh {
+            continue;
+        }
+        // With the tunnel on too: its rows are in the second column, every one whole in view. Until
+        // the form's bar takes the place of the buttons and their message slot, they need a
+        // window 60 taller than the app's first.
+        let mut ui = Ui::fresh(egui::vec2(1100.0, 780.0));
+        ui.click(&format!("conn-kind-{}", kind.id()));
+        ui.click("conn-ssh-on");
+        let i = ui.inspect();
+        for id in ["conn-ssh-host", "conn-ssh-port", "conn-ssh-user", "conn-ssh-auth", "conn-ssh-key"] {
+            let tag = tag_in(&i, id).unwrap_or_else(|| panic!("{kind:?}: no {id}"));
+            assert!(tag.get("visible").is_none() && rect(&tag)[3] == 28.0, "{kind:?}, SSH on: {id} is not whole in view: {tag}");
+        }
+    }
+}
+
+/// At 1100 × 720 the pane is 840 wide: two columns of 396, 12 in from the pane's left, 24 apart;
+/// CONNECTION and AUTHENTICATION in the first, SECURITY and SSH TUNNEL in the second; COLOUR on
+/// a row of its own under NAME.
+#[test]
+fn the_form_matches_the_drawn_columns() {
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    let i = ui.inspect();
+    let at = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}")));
+    let pane = at("conn-card");
+    let first = pane.left() + 12.0;
+    for id in ["conn-name", "conn-host", "conn-database", "conn-user", "conn-password"] {
+        assert!((at(id).left() - first).abs() <= 1.0, "{id} starts the first column at {first}: {:?}", at(id));
+    }
+    let name = at("conn-name");
+    // The app's 840 wide pane gives two of 396; kittest's frame takes 16 of the window.
+    let column = (pane.width() - 2.0 * 12.0 - 24.0) / 2.0;
+    assert!((name.width() - column).abs() <= 1.0, "a column is {column} wide: {name:?}");
+    let second = name.right() + 24.0;
+    for id in ["conn-ssl", "conn-ca", "conn-readonly", "conn-ssh-on"] {
+        assert!((at(id).left() - second).abs() <= 1.0, "{id} starts the second column at {second}: {:?}", at(id));
+    }
+    let colour = at("conn-color");
+    assert!(colour.top() >= name.bottom(), "COLOUR under NAME: {colour:?} {name:?}");
+    for swatch in ["none", "red", "orange", "yellow", "green", "blue", "purple", "gray"] {
+        let s = at(&format!("conn-color-{swatch}"));
+        assert!(!s.intersects(name), "conn-color-{swatch} {s:?} overlaps NAME {name:?}");
+    }
+    for words in ["CONNECTION", "AUTHENTICATION", "SECURITY", "SSH TUNNEL"] {
+        assert!(ui.text_in(pane, words).is_some(), "the section {words} is drawn");
+    }
+}
+
+/// SHOW ends where its column ends: in line with PORT's and LIST…'s right edges.
+#[test]
+fn the_show_button_ends_with_its_column() {
+    for size in [APP_SIZE, egui::vec2(640.0, 420.0), egui::vec2(1920.0, 1080.0)] {
+        let mut ui = Ui::fresh(size);
+        ui.click("conn-kind-postgres");
+        let i = ui.inspect();
+        let right = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}"))).right();
+        let show = right("conn-password-show");
+        assert!((show - right("conn-port")).abs() <= 0.5, "{size:?}: SHOW {show} and PORT {}", right("conn-port"));
+        assert!((show - right("conn-database-list")).abs() <= 0.5, "{size:?}: SHOW {show} and LIST… {}", right("conn-database-list"));
+        assert!((show - right("conn-name")).abs() <= 0.5, "{size:?}: SHOW {show} and the column {}", right("conn-name"));
+    }
+}
+
+/// The SSH login's row keeps its place and height whatever the login: KEY FILE with its box,
+/// CHOOSE and CLEAR for a key, USES and the key line for the agent and a password. CLEAR is on
+/// only while a key file is chosen, and forgets it.
+#[test]
+fn the_ssh_login_row_keeps_its_height() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ui_in(temp_home(Some(&db.keys.plain), None), true);
+    ui.click("conn-kind-postgres");
+    ui.click("conn-ssh-on");
+    ui.until("the key line", |ui| ui.value("conn-ssh-key").as_str().is_some_and(|t| t.starts_with("Uses ")));
+    let below = |ui: &mut Ui| -> (egui::Rect, Vec<(String, [f64; 4])>) {
+        let i = ui.inspect();
+        let auth = rect_of(&tag_in(&i, "conn-ssh-auth").unwrap());
+        let varies = ["conn-ssh-key", "conn-ssh-change", "conn-ssh-auto"];
+        let rest = ids(&i)
+            .into_iter()
+            .filter(|id| id.starts_with("conn-") && !varies.contains(&id.as_str()))
+            .map(|id| (id.clone(), rect(&tag_in(&i, &id).unwrap())))
+            .filter(|(_, r)| r[1] >= f64::from(auth.bottom()))
+            .collect();
+        (rect_of(&tag_in(&i, "conn-ssh-key").unwrap()), rest)
+    };
+    let (key, rest) = below(&mut ui);
+    assert_eq!(key.height(), 28.0, "the key file's box: {key:?}");
+    assert!(ui.text_in(key.expand2(egui::vec2(0.0, 24.0)), "KEY FILE").is_some(), "KEY FILE over the box");
+    for auth in ["agent", "password", "key"] {
+        ui.click(&format!("conn-ssh-auth-{auth}"));
+        ui.frame();
+        let (line, now) = below(&mut ui);
+        assert_eq!((line.top(), line.height()), (key.top(), key.height()), "{auth}: the login's row moved");
+        assert_eq!(now, rest, "{auth}: what is under the login moved");
+        if auth != "key" {
+            assert!(ui.tag("conn-ssh-change").is_none(), "{auth}: no CHOOSE");
+            assert!(ui.text_in(line.expand2(egui::vec2(0.0, 24.0)), "USES").is_some(), "{auth}: USES over the line");
+        }
+    }
+    assert!(ui.value("conn-ssh-key").as_str().unwrap().starts_with("Uses "), "no file chosen: the key line");
+    assert_eq!(ui.tag("conn-ssh-auto").unwrap()["enabled"], false, "CLEAR is off with no file chosen");
+
+    // A key file chosen: CLEAR is on, and forgets it.
+    let file = "/nonexistent/dbee-test-key";
+    let card = ui.save(&via_ssh(db, SshAuth::Key { path: Some(file.into()) }), None);
+    ui.click(&card);
+    ui.frame();
+    let auto = ui.tag("conn-ssh-auto").unwrap();
+    assert!(auto.get("enabled").is_none(), "CLEAR is on with a file chosen: {auto}");
+    ui.click("conn-ssh-auto");
+    ui.frame();
+    assert_eq!(ui.tag("conn-ssh-auto").unwrap()["enabled"], false, "CLEAR forgot the file");
+}
+
+/// Below 664 the form is one column: SECURITY under AUTHENTICATION, nothing past the pane.
+#[test]
+fn one_column_at_the_smallest_window() {
+    let mut ui = Ui::fresh(egui::vec2(640.0, 420.0));
+    ui.click("conn-kind-postgres");
+    let i = ui.inspect();
+    let at = |id: &str| rect_of(&tag_in(&i, id).unwrap_or_else(|| panic!("no {id}")));
+    let pane = at("conn-card");
+    assert!(at("conn-ssl").top() > at("conn-save-secrets").bottom(), "SECURITY under AUTHENTICATION");
+    assert!((at("conn-ssl").left() - at("conn-name").left()).abs() <= 0.5, "one column");
+    for id in ids(&i).into_iter().filter(|id| id.starts_with("conn-")) {
+        assert!(at(&id).right() <= pane.right() + 0.5, "{id} {:?} runs past the pane {pane:?}", at(&id));
     }
 }
 
@@ -1209,9 +1337,10 @@ fn typing_and_errors_do_not_move_the_layout() {
     let mut ui = ui();
     ui.click("conn-ssh-on");
     // Every widget of the form and the side bar, but the message under the buttons, the cards and
-    // the key file buttons, which only the Key login shows (in its fixed slot).
+    // the login's row: the key file box and its buttons for a key, the line under USES otherwise
+    // (one fixed slot, as wide as each needs; `the_ssh_login_row_keeps_its_height`).
     let fixed = |i: &Json| -> Vec<(String, [f64; 4])> {
-        let varies = ["conn-error", "conn-result", "conn-ssh-change", "conn-ssh-auto"];
+        let varies = ["conn-error", "conn-result", "conn-ssh-key", "conn-ssh-change", "conn-ssh-auto"];
         ids(i)
             .into_iter()
             .filter(|id| {
@@ -1224,7 +1353,7 @@ fn typing_and_errors_do_not_move_the_layout() {
             .collect()
     };
     let before = fixed(&ui.inspect());
-    assert!(before.iter().any(|(id, _)| id == "conn-ssh-host") && before.iter().any(|(id, _)| id == "conn-ssh-key"), "{before:?}");
+    assert!(before.iter().any(|(id, _)| id == "conn-ssh-host") && before.iter().any(|(id, _)| id == "conn-ssh-auth"), "{before:?}");
     ui.click("conn-name");
     ui.text("A very long connection name that goes on and on and on to see whether the title grows");
     ui.click("conn-ssh-host");
@@ -1634,7 +1763,7 @@ fn moved_buttons_keep_their_ids_values_and_flags() {
     ui.frame();
     let form: [Moved<'_>; 6] = [
         ("conn-password-show", Some(json!(false)), true, "SHOW"),
-        ("conn-ca-choose", None, true, "CHOOSE…"),
+        ("conn-ca-choose", None, true, "CHOOSE"),
         ("conn-ca-clear", None, false, "CLEAR"),
         ("conn-save", Some(json!("Save")), true, "SAVE"),
         ("conn-test", Some(json!("Test")), true, "TEST"),
@@ -1690,8 +1819,8 @@ fn moved_inputs_keep_their_ids_values_and_secrets() {
         ("conn-user", "Ann", "USER"),
         ("conn-database", "Shop", "DATABASE"),
         ("conn-ssh-host", "Bastion.Example.com", "SSH HOST"),
-        ("conn-ssh-port", "2222", "SSH PORT"),
-        ("conn-ssh-user", "Deploy", "SSH USER"),
+        ("conn-ssh-port", "2222", "PORT"),
+        ("conn-ssh-user", "Deploy", "USER"),
     ];
     for (id, typed, _) in fields {
         ui.replace(id, typed);
@@ -1839,7 +1968,7 @@ fn moved_choices_keep_their_ids_and_values() {
     let i = ui.inspect();
     assert_checkbox(&ui, &i, "conn-save-secrets", true, true, "Save passwords in the keyring");
     assert_checkbox(&ui, &i, "conn-readonly", false, true, "Read-only");
-    assert_checkbox(&ui, &i, "conn-ssh-on", true, true, "SSH tunnel");
+    assert_checkbox(&ui, &i, "conn-ssh-on", true, true, "Connect through an SSH tunnel");
 
     // SSL mode: the box, then a segment for each mode, its words as written.
     let ssl = tag_in(&i, "conn-ssl").expect("SSL mode is drawn");
@@ -1878,7 +2007,7 @@ fn moved_choices_keep_their_ids_and_values() {
     assert_eq!(login["value"], "key", "{login}");
     let row = rect_of(&login);
     assert_eq!((row.height(), edges_on(&ui, row)), (28.0, vec![(1.0, t.line_strong)]), "the login's box");
-    for (name, words) in [("key", "Key"), ("agent", "Agent"), ("password", "Password")] {
+    for (name, words) in [("key", "key"), ("agent", "agent"), ("password", "password")] {
         let e = tag_in(&i, &format!("conn-ssh-auth-{name}")).unwrap_or_else(|| panic!("`conn-ssh-auth-{name}` is drawn"));
         assert_eq!(e["value"], name == "key", "{e}");
         assert!(e.get("enabled").is_none(), "{e}");
