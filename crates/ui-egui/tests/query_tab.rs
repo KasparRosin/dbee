@@ -1444,6 +1444,45 @@ fn the_editor_runs_edge_to_edge() {
     }
 }
 
+/// A line longer than the editor, scrolled sideways to its end: its text is clipped 12 after the
+/// line numbers, so nothing of it is drawn in that gap or over the numbers.
+#[test]
+fn a_line_scrolled_sideways_keeps_clear_of_the_line_numbers() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    ui.ctrl("T");
+    ui.frame();
+    let line = format!("SELECT {}", (0..60).map(|i| format!("c{i:03}")).collect::<Vec<_>>().join(", "));
+    ui.text(&line);
+    let ed = as_rect(ui.rect("query-editor"));
+    let number = ui.text_in(ed, "1").unwrap_or_else(|| panic!("the line number")).0;
+    let edge = number.right() + 12.0;
+    // The line's text shapes: where each was drawn and the rect it was clipped to.
+    let drawn = |ui: &Ui| -> Vec<(egui::Pos2, egui::Rect)> {
+        ui.shapes()
+            .into_iter()
+            .filter_map(|(clip, shape)| match shape {
+                egui::Shape::Text(t) if t.galley.text() == line => Some((t.pos, clip)),
+                _ => None,
+            })
+            .collect()
+    };
+    // The wheel sideways over the text, as a trackpad does.
+    ui.hover(ed.center());
+    ui.until("the line scrolled sideways", |ui| {
+        ui.frame_with(vec![Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(-400.0, 0.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        }]);
+        drawn(ui).iter().any(|(pos, _)| pos.x < number.left())
+    });
+    for (_, clip) in drawn(&ui) {
+        assert!(clip.left() >= edge - 1.0, "the text is clipped 12 after the numbers ({edge}), not at {}", clip.left());
+    }
+}
+
 /// The split is the run row's top line: dragged, it moves the run row with it.
 #[test]
 fn the_split_is_the_run_rows_top_line() {

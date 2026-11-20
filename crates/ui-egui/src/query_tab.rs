@@ -772,7 +772,9 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Optio
         pos2((rect.left() + EDITOR_INSET).min(rect.right()), rect.top()),
         pos2((rect.left() + gutter_w).min(rect.right()), rect.bottom()),
     );
-    let text_rect = Rect::from_min_max(pos2(gutter.right(), rect.top()), rect.max);
+    // The 12 between the numbers and the text stay put: the scroll area starts after them, so a
+    // line scrolled sideways is cut there, not under the numbers.
+    let text_rect = Rect::from_min_max(pos2((gutter.right() + EDITOR_INSET).min(rect.right()), rect.top()), rect.max);
     let mut text_ui = ui.new_child(UiBuilder::new().id_salt(id.with("dbee-editor-area")).max_rect(text_rect).layout(Layout::top_down(Align::Min)));
     let (out, view, offset) = {
         let EditorState { text, highlight, view, .. } = &mut *ed;
@@ -788,7 +790,7 @@ pub fn editor(ui: &mut egui::Ui, id: Id, ed: &mut EditorState, error_line: Optio
                 .id(id)
                 .code_editor()
                 .font(Text::Code.font())
-                .frame(Frame::NONE.inner_margin(Margin::same(EDITOR_INSET as i8)))
+                .frame(Frame::NONE.inner_margin(Margin { left: 0, ..Margin::same(EDITOR_INSET as i8) }))
                 .hint_text("Write or paste SQL here.")
                 .desired_width(f32::INFINITY)
                 .min_size(size)
