@@ -269,6 +269,65 @@ fn ctrl_c_copies_what_has_the_keyboard() {
     assert_eq!(ui.copied().as_deref(), Some("ord"), "the field's own copy");
 }
 
+/// The tree row tagged `id`'s focus box, 2 px `ink` 2 px inside it, is drawn.
+fn outlined(ui: &Ui, id: &str) -> bool {
+    let row = ui.drawn(id);
+    outlines_in(ui, row.expand(0.5), dbee_ui_egui::theme::LIGHT.ink) == [(row.shrink(2.0), 2.0)]
+}
+
+/// The `tree-table-*` row that has the keyboard, if one has.
+fn focused_table(ui: &mut Ui) -> Option<String> {
+    let rows: Vec<String> = ids(&ui.inspect()).into_iter().filter(|id| id.starts_with("tree-table-")).collect();
+    rows.into_iter().find(|id| ui.focused(id))
+}
+
+#[test]
+fn a_click_on_a_tree_row_gives_it_the_focus_and_its_outline() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = shop_open(db, Setup::default());
+    ui.open("shop", "customers");
+    ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.tag("grid-cell-0-1").is_some());
+    // A click on a table row: it has the keyboard and shows it, as Tab would; Ctrl+C copies it.
+    ui.click("tree-table-shop.orders");
+    ui.frame();
+    assert!(ui.focused("tree-table-shop.orders"), "the clicked row has the keyboard");
+    assert!(outlined(&ui, "tree-table-shop.orders"), "and its focus box");
+    assert_eq!(ui.value("tree-table-shop.orders"), json!("table"), "the row is still a table row");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("orders"), "Ctrl+C copies the outlined row's name");
+    assert!(outlined(&ui, "tree-table-shop.orders"), "the box stays after the copy");
+    // Tab moves on from that row: its chevron, then the next table row, which shows the box.
+    ui.key("Tab");
+    ui.frame();
+    assert!(ui.focused("tree-expand-shop.orders"), "Tab goes on to the row's chevron");
+    assert!(!outlined(&ui, "tree-table-shop.orders"), "the row's box goes with the keyboard");
+    ui.key("Tab");
+    ui.frame();
+    let next = focused_table(&mut ui).unwrap_or_default();
+    assert!(!next.is_empty() && next != "tree-table-shop.orders", "Tab reached the next table row, not {next:?}");
+    assert!(outlined(&ui, &next), "the next row shows the box");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), next.strip_prefix("tree-table-shop."), "Ctrl+C copies the row Tab reached");
+    // A click on the grid takes the keyboard and the box away.
+    ui.click("tree-table-shop.orders");
+    ui.frame();
+    ui.click("grid-cell-0-1");
+    ui.frame();
+    assert!(!ui.focused("tree-table-shop.orders"), "the grid took the keyboard");
+    assert!(!outlined(&ui, "tree-table-shop.orders"), "and the row's box went");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("Customer 1"), "Ctrl+C is the grid's again");
+    // A click on a schema row gives it the keyboard and the box too, and still closes it.
+    ui.click("tree-schema-shop");
+    ui.frame();
+    assert!(ui.focused("tree-schema-shop"), "the clicked schema row has the keyboard");
+    assert!(outlined(&ui, "tree-schema-shop"), "and its focus box");
+    assert_eq!(ui.value("tree-schema-shop")["open"], json!(false), "the click closed the schema, as before");
+}
+
 #[test]
 fn ctrl_c_in_the_open_menu_copies_its_row() {
     let db = dbee_testkit::require_testdb!();
