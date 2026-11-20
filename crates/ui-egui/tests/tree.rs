@@ -192,3 +192,108 @@ fn the_menu_acts_on_its_own_row() {
     ui.until("the table tab", |ui| ui.table()["name"].is_string());
     assert_eq!((ui.table()["schema"].clone(), ui.table()["name"].clone()), (json!("shop"), json!("orders")), "never the row that took its place");
 }
+
+/// The number of tabs open.
+fn tab_count(ui: &mut Ui) -> usize {
+    ui.document()["tabs"].as_array().map_or(0, Vec::len)
+}
+
+#[test]
+fn enter_opens_a_focused_table_once() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = shop_open(db, Setup::default());
+    let t = dbee_ui_egui::theme::LIGHT;
+    let left = |ui: &mut Ui, id: &str| {
+        let r = ui.drawn(id);
+        egui::pos2(r.left() + 4.0, r.center().y)
+    };
+    // Space stays a click: it selects, and opens nothing.
+    ui.focus("tree-table-shop.orders");
+    ui.key("Space");
+    ui.frame();
+    ui.hover_away();
+    let at = left(&mut ui, "tree-table-shop.orders");
+    assert_eq!(colour_at(&ui, at), Some(t.selection), "Space selects the row");
+    assert_eq!(tab_count(&mut ui), 0, "Space opens nothing");
+    // Enter opens it, once.
+    ui.key("Enter");
+    ui.until("the table tab", |ui| ui.table()["name"] == "orders");
+    for _ in 0..3 {
+        ui.frame();
+    }
+    assert_eq!(tab_count(&mut ui), 1, "one Enter, one tab");
+    assert_eq!(ui.table()["schema"], json!("shop"));
+    // On a schema row Enter opens or closes it, as before.
+    ui.focus("tree-schema-shop");
+    ui.key("Enter");
+    ui.frame();
+    assert_eq!(ui.value("tree-schema-shop")["open"], json!(false), "Enter closes the schema");
+    assert_eq!(tab_count(&mut ui), 1, "and opens nothing");
+}
+
+#[test]
+fn ctrl_c_copies_what_has_the_keyboard() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = shop_open(db, Setup::default());
+    ui.open("shop", "customers");
+    ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.tag("grid-cell-0-1").is_some());
+    ui.click("grid-cell-0-1");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("Customer 1"), "with the grid's cell clicked, the grid's copy");
+    // A click on a table row gives it the keyboard: Ctrl+C copies its name.
+    ui.click("tree-table-shop.orders");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("orders"), "the focused row's name");
+    // Ctrl+Shift+C stays the grid's copy with its header.
+    ui.ctrl_shift("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("name\nCustomer 1"), "the grid's copy with its header");
+    // Back on the grid, Ctrl+C is the grid's again.
+    ui.click("grid-cell-1-1");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("Customer 2"), "a row that lost the keyboard copies nothing");
+    // A schema row with the keyboard is not a table: the grid's copy.
+    ui.focus("tree-schema-shop");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("Customer 2"), "a schema row leaves Ctrl+C to the grid");
+    // The filter field keeps its own.
+    ui.click("tree-filter");
+    ui.text("ord");
+    ui.ctrl("A");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("ord"), "the field's own copy");
+}
+
+#[test]
+fn ctrl_c_in_the_open_menu_copies_its_row() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = shop_open(db, Setup::default());
+    ui.click("tree-table-shop.customers");
+    ui.frame();
+    menu_on(&mut ui, "tree-table-shop.orders");
+    ui.ctrl("C");
+    ui.frame();
+    assert_eq!(ui.copied().as_deref(), Some("orders"), "the menu's row, not the focused one");
+    ui.frame();
+    assert!(menu_items(&mut ui).is_empty(), "the menu closed");
+}
+
+#[test]
+fn enter_in_the_open_menu_runs_one_item() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = shop_open(db, Setup::default());
+    menu_on(&mut ui, "tree-table-shop.orders");
+    ui.focus("tree-menu-copy-name");
+    ui.key("Enter");
+    ui.frame();
+    for _ in 0..3 {
+        ui.frame();
+    }
+    assert_eq!(ui.copied().as_deref(), Some("orders"), "Enter chose Copy name");
+    assert_eq!(tab_count(&mut ui), 0, "and opened nothing");
+}

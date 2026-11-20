@@ -28,6 +28,12 @@
 //! is open; the row keeps the `hover` ground while its menu is open, and the menu closes when its
 //! row is no longer drawn. Schema rows, the system group and column rows have no menu.
 //!
+//! **Keys.** Enter on a table row that has the keyboard opens it, as a double-click does (and
+//! selects it); Space stays a click (select). Ctrl+C copies a table's name ([`take_keys`], before
+//! the shortcuts): the open menu's row while a menu is open, else the table row that has the
+//! keyboard. Anywhere else Ctrl+C is the shortcuts' (the grid's copy), and Ctrl+Shift+C always is.
+//! No key opens a row's menu yet.
+//!
 //! **Speed.** A catalog can hold thousands of tables, and the tree must stay within a frame. The
 //! rows are built once per catalog, filter and open/closed state ([`Tree`] caches them, keyed by
 //! the catalog's identity, so a refresh rebuilds them), and the lowercased names the filter
@@ -46,10 +52,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
+use dbee_engine::Screen;
 use dbee_sql::Dialect;
-use egui::{Align, Rect, Response, ScrollArea, Sense, pos2, vec2};
+use egui::{Align, Modifiers, Rect, Response, ScrollArea, Sense, pos2, vec2};
 use serde_json::json;
 
+use crate::DbeeApp;
 use crate::automation::Tags;
 use crate::components::grid_cell::Key;
 use crate::components::menu::{self, Item};
@@ -57,6 +65,7 @@ use crate::components::rows::{TreeKind, TreeRow};
 use crate::components::sidebar::{self, Count};
 use crate::components::tooltip::Hint;
 use crate::components::{Look, focus};
+use crate::shortcuts;
 use crate::theme;
 use crate::theme::size::{SIDEBAR_PAD_X, TREE_ROW_H};
 
@@ -104,6 +113,8 @@ pub struct Tree {
     pub menu: MenuState,
     /// The table whose menu showed in the last frame.
     menu_row: Option<TableRef>,
+    /// The table row that had the keyboard when the tree was last drawn, and its widget id.
+    focused: Option<(egui::Id, TableRef)>,
     /// User schemas the user opened or closed, and how they are now ([`default_open`] for the
     /// others).
     user_open: HashMap<String, bool>,
@@ -455,6 +466,8 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     let pending = tags.scroll_pending().map(str::to_owned);
     let fresh = !tree.drawn;
     let mut menu = Menu { state: tree.menu.clone(), last: tree.menu_row.take(), now: None, acts: Vec::new() };
+    tree.focused = None;
+    let mut focused = None;
     let rows = tree.rows(catalog);
     if rows.list.is_empty() {
         let text = if filtering { "No table matches the filter.".to_owned() } else { format!("This connection has no {many} dbee can show.") };
@@ -477,7 +490,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         for (i, ((row, id), expander)) in rows.list.iter().zip(&rows.ids).zip(&rows.expanders).enumerate() {
             let rect = Rect::from_min_size(pos2(frame.left(), frame.top() + TREE_ROW_H * i as f32), vec2(frame.width(), TREE_ROW_H));
             if i >= first && i < last {
-                let c = draw_row(ui, rect, *row, id, expander, &rows.catalog, &system_label, selected.as_ref(), &mut menu, tags);
+                let c = draw_row(ui, rect, *row, id, expander, &rows.catalog, &system_label, selected.as_ref(), &mut menu, &mut focused, tags);
                 if !matches!(c, Click::None) {
                     click = c;
                 }
@@ -495,6 +508,7 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     });
     tree.drawn = true;
     tree.menu_row = menu.now;
+    tree.focused = focused;
     acts.extend(menu.acts);
     let table_ref = |s: usize, t: usize| catalog.schemas.get(s).and_then(|x| x.tables.get(t)).map(|x| x.table.clone());
     match click {
@@ -574,7 +588,7 @@ impl Menu {
 }
 
 /// Draws one row in view and tags it (a table row's chevron as `expander`), with a table row's
-/// menu. The system group reads `system_label`.
+/// menu. The system group reads `system_label`. A table row with the keyboard is put in `focused`.
 #[allow(clippy::too_many_arguments, reason = "one row's data, borrowed from the tree's cache and the frame")]
 fn draw_row(
     ui: &mut egui::Ui,
@@ -586,6 +600,7 @@ fn draw_row(
     system_label: &str,
     selected: Option<&Selected>,
     menu: &mut Menu,
+    focused: &mut Option<(egui::Id, TableRef)>,
     tags: &mut Tags,
 ) -> Click {
     let level = level(row);
@@ -645,6 +660,17 @@ fn draw_row(
             let r = r.hint(hover);
             tags.tag_value(id, &r, kind_name(info.kind));
             menu.show(&r, &info.table, tags);
+            // Egui's memory, not `Response::has_focus`, which is false while the window itself
+            // lacks the system's focus: `take_keys` asks the memory too.
+            if ui.memory(|m| m.has_focus(r.id)) {
+                *focused = Some((r.id, info.table.clone()));
+                // Enter opens it (egui's click from the same Enter is then not read); not while a
+                // menu is open, where Enter is the menu's.
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none());
+                if enter && menu.last.is_none() {
+                    return Click::Open(s, ti);
+                }
+            }
             if let Some(expand) = expand {
                 tags.tag_value(expander, &expand, open);
                 if expand.clicked() {
@@ -655,6 +681,10 @@ fn draw_row(
                 return Click::Open(s, ti);
             }
             if r.clicked() {
+                // A click gives the row the keyboard (no focus box for a pointer's focus), so
+                // Ctrl+C copies its name from then on.
+                r.request_focus();
+                *focused = Some((r.id, info.table.clone()));
                 return Click::Select(s, ti);
             }
         }
@@ -677,6 +707,40 @@ fn draw_row(
         }
     }
     Click::None
+}
+
+/// Step 4 of the frame, before the shortcuts, unless a text field or a text editor has the
+/// keyboard: Ctrl+C (and the keyboard's copy) copies a table's name, the open menu's row's (the
+/// menu then closes), else the table row's that has the keyboard. Ctrl+Shift+C is left to the
+/// shortcuts.
+pub(crate) fn take_keys(app: &mut DbeeApp, ctx: &egui::Context) {
+    if app.session.state().screen != Screen::Workspace {
+        return;
+    }
+    let tree = &app.view.work.tree;
+    let target = match (&tree.menu_row, &tree.focused) {
+        (Some(table), _) => Some((table.clone(), true)),
+        (None, Some((id, table))) if ctx.memory(|m| m.has_focus(*id)) => Some((table.clone(), false)),
+        _ => None,
+    };
+    let Some((table, in_menu)) = target else { return };
+    let copy = ctx.input_mut(|i| {
+        let held = i.modifiers;
+        let mut taken = false;
+        // One press can come as both a key and a copy event: take them all.
+        while shortcuts::take(&mut i.events, Modifiers::COMMAND, egui::Key::C, held) {
+            taken = true;
+        }
+        taken
+    });
+    if !copy {
+        return;
+    }
+    if in_menu {
+        egui::Popup::close_all(ctx);
+        app.view.work.tree.menu_row = None;
+    }
+    app.run_from_ui("clipboard.copyName", json!({ "schema": table.schema, "table": table.name }));
 }
 
 #[cfg(test)]

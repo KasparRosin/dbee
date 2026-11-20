@@ -558,6 +558,23 @@ fn m1_day_end_to_end() {
     let t = app.settled("the order_items page");
     assert_eq!((t["schema"].clone(), t["name"].clone()), (json!("shop"), json!("order_items")), "{t}");
     app.shot(&root, "8b-tree-opened");
+    //     The keys the menu names: a click gives the row the keyboard, Ctrl+C copies its name (a
+    //     grid copy first, so the name is new on the clipboard), and Enter opens it.
+    app.click("grid-cell-0-0");
+    app.ctrl("C");
+    app.until("the grid's copy", |app| app.document()["clipboard"] != "order_items");
+    app.click("tree-table-shop.order_items");
+    app.ctrl("C");
+    app.until("the name copied by Ctrl+C", |app| app.document()["clipboard"] == "order_items");
+    let tabs = app.document()["tabs"].as_array().map_or(0, Vec::len);
+    app.ctrl("W");
+    app.until("the tab closed", |app| app.document()["tabs"].as_array().map_or(0, Vec::len) + 1 == tabs);
+    app.click("tree-table-shop.order_items");
+    app.key("Enter");
+    let t = app.settled("the order_items page from Enter");
+    assert_eq!((t["schema"].clone(), t["name"].clone()), (json!("shop"), json!("order_items")), "{t}");
+    assert_eq!(app.document()["tabs"].as_array().map_or(0, Vec::len), tabs, "Enter opened one tab");
+    app.shot(&root, "8c-tree-enter");
 
     // No seed row changed, and once the app and the day's rows are gone the counts are as before.
     assert_eq!(day.seed_digest(), seed, "the seed's customers and orders are unchanged");

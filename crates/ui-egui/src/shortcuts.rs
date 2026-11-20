@@ -22,13 +22,17 @@
 //! editor has the keyboard: with text selected in it, the copy is its own (Ctrl+C copies that
 //! text and `clipboard.copy` does not run), and while it has the keyboard Ctrl+A selects its
 //! text, not the grid's cells.
+//!
+//! The tree ([`crate::tree::take_keys`]) comes next, under the same rule: while its menu is open,
+//! Ctrl+C copies the menu's table's name, and while a table row has the keyboard, that table's;
+//! `clipboard.copy` does not run. Ctrl+Shift+C stays the grid's.
 
 use std::sync::LazyLock;
 
 use egui::{Event, Key, Modifiers};
 use serde_json::{Value as Json, json};
 
-use crate::{DbeeApp, editors, value_panel};
+use crate::{DbeeApp, editors, tree, value_panel};
 
 /// `(keys, command id, params)`.
 pub static SHORTCUTS: LazyLock<Vec<(&'static str, &'static str, Json)>> = LazyLock::new(|| {
@@ -106,6 +110,7 @@ pub(crate) fn handle(app: &mut DbeeApp, ctx: &egui::Context) {
     let editing = editors::open_kind(app).is_some();
     if !text_focused && !editing {
         value_panel::take_keys(app, ctx);
+        tree::take_keys(app, ctx);
     }
     let mut fired: Vec<(&'static str, Json)> = Vec::new();
     ctx.input_mut(|i| {
