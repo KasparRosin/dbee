@@ -13,7 +13,11 @@
 //! - The texts name schemas with the engine's word (`Dialect::schema_word`): on MySQL the group
 //!   reads "System databases".
 //! - The filter keeps the tables whose name or `schema.name` contains it, ignoring case; while it
-//!   is typed every schema with a match shows open, the system group too.
+//!   is typed every schema with a match shows open, the system group too. The count over the rows
+//!   says how many tables match (`3 OF 516 TABLES`); with no match it reads `0 TABLES` over an
+//!   empty tree. A catalog with nothing to show says so under the count.
+//! - A schema's, the system group's or a column's name or type cut with `…` reads whole on hover
+//!   (a foreign key's hover names its target after them); a table's hover names it whole already.
 //! - A click selects a table, a double-click opens it ([`TreeAct::Open`]); a click on a schema
 //!   selects it and opens or closes it; a click on the system group opens or closes it. A new
 //!   query tab opens on the selection's schema ([`Tree::selected_schema`]). A selection the
@@ -46,7 +50,9 @@
 //! out of view too, like the table rows) and `tree-column-<schema>.<table>.<column>` (value:
 //! `{type, key}`, `key` being `primary`, `foreign` or null; drawn rows only); while a row's menu is
 //! open, `tree-menu-open`, `tree-menu-new-query` and `tree-menu-copy-name` (value
-//! `{label, shortcut, why?}`).
+//! `{label, shortcut, why?}`); `tree-count` (the count's words as written: `516 tables`,
+//! `3 of 516 tables`, `0 tables`) and, when the catalog has nothing to show, `tree-empty` (its
+//! sentence).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -54,7 +60,7 @@ use std::sync::Arc;
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
 use dbee_engine::Screen;
 use dbee_sql::Dialect;
-use egui::{Align, Modifiers, Rect, Response, ScrollArea, Sense, pos2, vec2};
+use egui::{Align, Label, Modifiers, Rect, Response, ScrollArea, Sense, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -67,7 +73,8 @@ use crate::components::tooltip::Hint;
 use crate::components::{Look, focus};
 use crate::shortcuts;
 use crate::theme;
-use crate::theme::size::{SIDEBAR_PAD_X, TREE_ROW_H};
+use crate::theme::Text;
+use crate::theme::size::{SIDEBAR_PAD_X, TABLE_EMPTY_PAD, TREE_ROW_H};
 
 /// What the user asked of the tree in a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -459,8 +466,16 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
         (rows.matching as u64, rows.total as u64)
     };
     let word = ["table", "tables"];
-    let count = if filtering { Count::Some(matching, total, word) } else { Count::All(total, word) };
-    count.show(ui);
+    // A filter with no match reads `0 TABLES` over an empty tree (E3), not `0 OF 516 TABLES`.
+    let count = if !filtering {
+        Count::All(total, word)
+    } else if matching == 0 {
+        Count::All(0, word)
+    } else {
+        Count::Some(matching, total, word)
+    };
+    let r = count.show(ui);
+    tags.tag_value("tree-count", &r, count.words());
     let mut click = Click::None;
     let selected = tree.selected.clone();
     let pending = tags.scroll_pending().map(str::to_owned);
@@ -470,9 +485,16 @@ pub fn show(ui: &mut egui::Ui, catalog: &Arc<Catalog>, dialect: Dialect, tree: &
     let mut focused = None;
     let rows = tree.rows(catalog);
     if rows.list.is_empty() {
-        let text = if filtering { "No table matches the filter.".to_owned() } else { format!("This connection has no {many} dbee can show.") };
-        let inset = egui::Margin::symmetric(SIDEBAR_PAD_X as i8, 0);
-        egui::Frame::NONE.inner_margin(inset).show(ui, |ui| ui.label(egui::RichText::new(text).color(t.text_muted)));
+        // A filter with no match: the count says it, no phrase (E3). A catalog with nothing to
+        // show: its sentence 12 in and 12 under the count, as the table tab's empty words sit.
+        if !filtering {
+            let text = format!("This connection has no {many} dbee can show.");
+            let inset = egui::Margin { left: SIDEBAR_PAD_X as i8, right: SIDEBAR_PAD_X as i8, top: TABLE_EMPTY_PAD as i8, bottom: 0 };
+            let shown = egui::Frame::NONE
+                .inner_margin(inset)
+                .show(ui, |ui| ui.add(Label::new(Text::Body.rich_as_written(text.as_str()).color(t.text_muted)).wrap()));
+            tags.tag_value("tree-empty", &shown.inner, text);
+        }
         return acts;
     }
     let system_label = format!("System {many}");
@@ -629,22 +651,31 @@ fn draw_row(
     let chevron_focused = expand.as_ref().is_some_and(|e| focus::shown(ui, e));
     let draw = |kind: TreeKind, name: &str, right: Option<&str>, open: Option<bool>| {
         let drawn = TreeRow { level, kind, name, right, open, selected: is_selected, focused: look.focused, chevron_focused, hovered };
-        drawn.paint(ui, rect);
+        let cut = drawn.paint(ui, rect);
         r.widget_info(|| drawn.widget_info());
         if let Some(e) = &expand {
             e.widget_info(|| drawn.chevron_info());
         }
+        cut
     };
     match row {
         Row::System { open, .. } => {
-            draw(TreeKind::System, system_label, None, Some(open));
+            let cut = draw(TreeKind::System, system_label, None, Some(open));
+            let r = match cut {
+                Some(whole) => r.hint(whole),
+                None => r,
+            };
             tags.tag_value(id, &r, json!({ "open": open }));
             if r.clicked() {
                 return Click::ToggleSystem;
             }
         }
         Row::Schema { s, open, tables, system } => {
-            draw(TreeKind::Schema, catalog.schemas.get(s).map_or("", |x| x.name.as_str()), None, Some(open));
+            let cut = draw(TreeKind::Schema, catalog.schemas.get(s).map_or("", |x| x.name.as_str()), None, Some(open));
+            let r = match cut {
+                Some(whole) => r.hint(whole),
+                None => r,
+            };
             tags.tag_value(id, &r, json!({ "open": open, "tables": tables }));
             if r.clicked() {
                 return Click::ToggleSchema(s, system);
@@ -698,10 +729,14 @@ fn draw_row(
             } else {
                 None
             };
-            draw(TreeKind::Column(key), &col.name, Some(col.label()), None);
-            let r = match info.fk_for(&col.name) {
-                Some(fk) => r.hint(format!("{} → {}", col.name, fk.target.display())),
-                None => r,
+            // Cut: the whole name and type; a foreign key names its target, after the name alone
+            // when nothing is cut.
+            let cut = draw(TreeKind::Column(key), &col.name, Some(col.label()), None);
+            let r = match (info.fk_for(&col.name), cut) {
+                (Some(fk), Some(whole)) => r.hint(format!("{whole} → {}", fk.target.display())),
+                (Some(fk), None) => r.hint(format!("{} → {}", col.name, fk.target.display())),
+                (None, Some(whole)) => r.hint(whole),
+                (None, None) => r,
             };
             tags.tag_value(id, &r, json!({ "type": col.label(), "key": key.map(Key::id) }));
         }

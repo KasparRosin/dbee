@@ -534,9 +534,15 @@ fn m1_day_end_to_end() {
     app.until("its toast", |app| app.tag("notice").is_some_and(|t| t["value"].as_str().is_some_and(|v| v.starts_with("Rolled back on"))));
     app.until("ROLLBACK gone", |app| app.tag("query-rollback").is_none());
 
-    // 8. The tree's right-click menu: filtered to order_items, Copy name, then Open.
+    // 8. The tree's right-click menu: filtered to order_items, Copy name, then Open. The count
+    //    says how many of the tables match.
+    let all = app.value("tree-count");
+    let n = all.as_str().and_then(|w| w.strip_suffix(" tables")).unwrap_or_else(|| panic!("the unfiltered count: {all}")).to_owned();
     app.replace("tree-filter", "order_it");
     app.until("the filtered row", |app| app.tag("tree-table-shop.order_items").is_some_and(|t| t["visible"] != false));
+    let some = app.value("tree-count");
+    let m = some.as_str().and_then(|w| w.strip_suffix(&format!(" of {n} tables"))).and_then(|m| m.parse::<u64>().ok());
+    assert!(m.is_some_and(|m| m >= 1), "`<m> of {n} tables`: {some}");
     app.right_click("tree-table-shop.order_items");
     app.until("the tree's menu", |app| app.tag("tree-menu-open").is_some());
     let items: Vec<Json> = app.tags_with("tree-menu-").into_iter().map(|t| t["value"].clone()).collect();
@@ -575,6 +581,16 @@ fn m1_day_end_to_end() {
     assert_eq!((t["schema"].clone(), t["name"].clone()), (json!("shop"), json!("order_items")), "{t}");
     assert_eq!(app.document()["tabs"].as_array().map_or(0, Vec::len), tabs, "Enter opened one tab");
     app.shot(&root, "8c-tree-enter");
+    //     A filter with no match reads `0 TABLES` over an empty tree; cleared, the whole count.
+    app.replace("tree-filter", "zzz");
+    app.until("no match", |app| app.tag("tree-count").is_some_and(|t| t["value"] == "0 tables"));
+    assert!(app.tags_with("tree-table-").is_empty(), "an empty tree: {:?}", app.tags_with("tree-table-"));
+    assert!(app.tag("tree-empty").is_none(), "no sentence under it");
+    app.shot(&root, "8d-tree-no-match");
+    app.click("tree-filter");
+    app.ctrl("A");
+    app.key("Backspace");
+    app.until("the whole count again", |app| app.tag("tree-count").is_some_and(|t| t["value"] == format!("{n} tables")));
 
     // No seed row changed, and once the app and the day's rows are gone the counts are as before.
     assert_eq!(day.seed_digest(), seed, "the seed's customers and orders are unchanged");

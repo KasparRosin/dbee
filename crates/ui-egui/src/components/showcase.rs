@@ -360,7 +360,11 @@ fn sidebar_rows(ui: &mut Ui) {
         ui,
         "tree/row: schema open, table, table open with its columns (primary key, plain, foreign key), view, materialized view, hover, selected, focus (inferred), schema",
         SPACE_8,
-        |ui| list(ui, SIDEBAR_W, TREE_ROW_H, tree.len(), |ui, i, rect| tree[i].paint(ui, rect)),
+        |ui| {
+            list(ui, SIDEBAR_W, TREE_ROW_H, tree.len(), |ui, i, rect| {
+                tree[i].paint(ui, rect);
+            })
+        },
     );
     let connection = |name, engine: DbKind, line: &str, colour| ConnectionRow {
         name,

@@ -83,8 +83,10 @@ pub struct TreeRow<'a> {
 const RIGHT_SHARE: f32 = 0.45;
 
 impl TreeRow<'_> {
-    /// Draws it into `rect`.
-    pub fn paint(&self, ui: &Ui, rect: Rect) {
+    /// Draws it into `rect`. When its name or the words at its right end were cut: the whole
+    /// words as written (the name, then a space and the right end's), for the tree to show on
+    /// hover.
+    pub fn paint(&self, ui: &Ui, rect: Rect) -> Option<String> {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         p.rect_filled(rect, CornerRadius::ZERO, ground(t, self.selected, self.hovered));
@@ -107,6 +109,7 @@ impl TreeRow<'_> {
         });
         let name_end = right.as_ref().map_or(end, |g| end - g.size().x - TREE_GAP);
         let name = one_line(ui, self.name, Text::Body, t.text, name_end - left);
+        let cut = name.elided || right.as_ref().is_some_and(|g| g.elided);
         let height = name.size().y;
         p.galley(pos2(left, y - height / 2.0), name, t.text);
         if let Some(g) = right {
@@ -119,6 +122,10 @@ impl TreeRow<'_> {
         if self.chevron_focused {
             focus::box_inside(&p, TreeRow::expander(rect, self.level));
         }
+        cut.then(|| match self.right {
+            Some(right) => format!("{} {right}", self.name),
+            None => self.name.to_owned(),
+        })
     }
 
     /// What it reads out: its name as written, and whether it is selected.
@@ -280,7 +287,9 @@ mod tests {
     /// chevron and `icon` in their squares, the name and the type.
     fn check_tree_row(theme: Theme, t: &Tokens, state: &str, row: TreeRow<'_>, ground: Color32, focus: bool, icon: Option<(Icon, Color32)>) {
         let at_ = format!("{theme:?} {state}");
-        let (shapes, r) = drawn(theme, vec2(TREE_W, 26.0), |ui, rect| row.paint(ui, rect));
+        let (shapes, r) = drawn(theme, vec2(TREE_W, 26.0), |ui, rect| {
+            row.paint(ui, rect);
+        });
         let chevron = Rect::from_min_size(pos2(r.left() + 12.0 + 16.0 * row.level as f32, r.center().y - 6.0), vec2(12.0, 12.0));
         let slot = Rect::from_min_size(pos2(chevron.right() + 6.0, r.center().y - 7.0), vec2(14.0, 14.0));
         // The table icon's header band is a fill of its own, in its square.
@@ -583,16 +592,22 @@ mod tests {
     /// A tree drawn every frame, with what it asked for.
     struct Shown {
         catalog: Arc<Catalog>,
+        dialect: Dialect,
         tree: Tree,
         tags: Tags,
         acts: Vec<TreeAct>,
     }
 
     fn tree_harness(size: Vec2, catalog: Catalog) -> egui_kittest::Harness<'static, Shown> {
-        let shown = Shown { catalog: Arc::new(catalog), tree: Tree::default(), tags: Tags::default(), acts: Vec::new() };
+        tree_harness_in(size, catalog, Dialect::Postgres)
+    }
+
+    /// [`tree_harness`] read in `dialect`.
+    fn tree_harness_in(size: Vec2, catalog: Catalog, dialect: Dialect) -> egui_kittest::Harness<'static, Shown> {
+        let shown = Shown { catalog: Arc::new(catalog), dialect, tree: Tree::default(), tags: Tags::default(), acts: Vec::new() };
         harness_in(size, Theme::Light, shown, |ui, s: &mut Shown| {
             s.tags.begin_frame();
-            let acts = crate::tree::show(ui, &s.catalog, Dialect::Postgres, &mut s.tree, &mut s.tags);
+            let acts = crate::tree::show(ui, &s.catalog, s.dialect, &mut s.tree, &mut s.tags);
             s.acts.extend(acts);
         })
     }
@@ -625,7 +640,9 @@ mod tests {
             let orders = tree_row(1, TreeKind::Relation(RelKind::Table), "Orders", None, Some(false));
             let mood = tree_row(2, TreeKind::Column(None), "Mood", Some("enum('small','Large')"), None);
             for (row, want) in [(orders, vec!["Orders"]), (mood, vec!["Mood", "enum('small','Large')"])] {
-                let (shapes, r) = drawn(theme, vec2(340.0, 26.0), |ui, rect| row.paint(ui, rect));
+                let (shapes, r) = drawn(theme, vec2(340.0, 26.0), |ui, rect| {
+                    row.paint(ui, rect);
+                });
                 let words: Vec<String> = words_in(&shapes, r).into_iter().map(|w| w.0).collect();
                 assert_eq!(words, want, "{theme:?}: as written");
             }
@@ -757,6 +774,132 @@ mod tests {
         h.run();
         let id = rect_of(&h, "tree-column-shop.orders.id");
         assert_eq!(edges_in(&h.output().shapes, id, 0.0), [ring(id)], "the next row's focus box");
+    }
+
+    #[test]
+    fn a_cut_tree_row_says_its_whole_words() {
+        // Gap 67: a row whose name or type is cut says the whole words, as written, for the tree to
+        // show on hover: a column's name and type, a schema's name; a row that fits says nothing.
+        const NAME: &str = "created_at_in_the_customers_time_zone";
+        const TYPE: &str = "timestamp with time zone";
+        let said = |row: TreeRow<'_>, width: f32| {
+            let mut said = None;
+            drawn(Theme::Light, vec2(width, 26.0), |ui, rect| said = row.paint(ui, rect));
+            said
+        };
+        let column = tree_row(2, TreeKind::Column(None), NAME, Some(TYPE), None);
+        assert_eq!(said(column, 200.0), Some(format!("{NAME} {TYPE}")), "cut at 200");
+        assert_eq!(said(column, 600.0), None, "whole at 600");
+        const SCHEMA: &str = "a_very_long_schema_name_that_is_cut_for_sure";
+        assert_eq!(said(tree_row(0, TreeKind::Schema, SCHEMA, None, Some(false)), 120.0), Some(SCHEMA.to_owned()), "a schema cut");
+        let mood = tree_row(2, TreeKind::Column(None), "Mood_Of_The_Customer_At_Checkout", Some("enum('small','Large')"), None);
+        assert_eq!(said(mood, 200.0), Some("Mood_Of_The_Customer_At_Checkout enum('small','Large')".to_owned()), "as written");
+        assert_eq!(said(tree_row(1, TreeKind::Relation(RelKind::Table), "orders", None, Some(false)), 200.0), None, "a short table");
+    }
+
+    /// Five tables in `shop`: two hold `ord`.
+    fn five_tables() -> Catalog {
+        let tables = ["orders", "order_items", "customers", "products", "payments"].map(|n| table("shop", n, RelKind::Table, vec![]));
+        Catalog { schemas: vec![schema("shop", false, tables.into())], default_schema: Some("shop".into()) }
+    }
+
+    fn words_of(h: &egui_kittest::Harness<'static, Shown>) -> Vec<(String, Rect, Color32)> {
+        texts(&h.output().shapes)
+    }
+
+    #[test]
+    fn a_filter_with_no_match_reads_0_tables() {
+        // E3: a filter with no match reads `0 TABLES` over an empty tree, no phrase under it.
+        let mut h = tree_harness(vec2(260.0, 400.0), five_tables());
+        h.run();
+        assert_eq!(h.state().tags.value("tree-count"), Some(&json!("5 tables")), "unfiltered");
+        h.state_mut().tree.filter = "zzz".into();
+        h.run();
+        h.run();
+        assert_eq!(h.state().tags.value("tree-count"), Some(&json!("0 tables")), "no match");
+        let words: Vec<String> = words_of(&h).into_iter().map(|w| w.0).collect();
+        assert!(words.iter().any(|w| w == "0 TABLES"), "`0 TABLES` drawn: {words:?}");
+        assert!(!words.iter().any(|w| w.contains("No table matches")), "no phrase: {words:?}");
+        assert!(!h.state().tags.ids().iter().any(|id| id.starts_with("tree-table-") || id.starts_with("tree-schema-")), "an empty tree");
+        assert!(h.state().tags.value("tree-empty").is_none(), "no sentence");
+        h.state_mut().tree.filter = "ord".into();
+        h.run();
+        h.run();
+        assert_eq!(h.state().tags.value("tree-count"), Some(&json!("2 of 5 tables")), "two match");
+    }
+
+    #[test]
+    fn an_empty_catalog_keeps_its_sentence_restyled() {
+        // Not drawn; restyled: under `0 TABLES`, the sentence in `body` `text_muted`, 12 in from
+        // the sidebar's left (where the count's words start) and 12 under the count's row.
+        for (dialect, word) in [(Dialect::Postgres, "schemas"), (Dialect::MySql, "databases")] {
+            let catalog = Catalog { schemas: vec![], default_schema: None };
+            let mut h = tree_harness_in(vec2(260.0, 400.0), catalog, dialect);
+            h.run();
+            h.run();
+            let sentence = format!("This connection has no {word} dbee can show.");
+            assert_eq!(h.state().tags.value("tree-count"), Some(&json!("0 tables")), "{dialect:?}");
+            assert_eq!(h.state().tags.value("tree-empty"), Some(&json!(sentence)), "{dialect:?}");
+            let count = rect_of(&h, "tree-count");
+            let row_bottom = count.center().y + crate::theme::size::SIDEBAR_COUNT_H / 2.0;
+            let words = words_of(&h);
+            let Some((_, at, colour)) = words.iter().find(|w| w.0 == sentence) else { panic!("{dialect:?}: the sentence drawn: {words:?}") };
+            assert_eq!(*colour, crate::theme::LIGHT.text_muted, "{dialect:?}: text_muted");
+            assert_eq!(sections(&h.output().shapes, &sentence).first().map(|s| s.1.clone()), Some(Text::Body.font()), "{dialect:?}: body");
+            assert!((at.left() - count.left()).abs() <= 1.0, "{dialect:?}: 12 in, as the count: {at:?} vs {count:?}");
+            assert!((at.top() - (row_bottom + 12.0)).abs() <= 1.0, "{dialect:?}: 12 under the count's row ({row_bottom}): {at:?}");
+        }
+    }
+
+    #[test]
+    fn a_cut_tree_row_reads_whole_on_hover() {
+        // Gap 67: in a 200 wide tree, a cut column reads whole on hover, a cut foreign key with its
+        // target; a column that fits has no hover; a foreign key that fits keeps today's (`cid`: at
+        // 200 `customer_id int8` is cut).
+        let mut orders = table(
+            "shop",
+            "orders",
+            RelKind::Table,
+            vec![
+                column("id", "int8"),
+                column("created_at_in_the_customers_time_zone", "timestamp with time zone"),
+                column("long_customer_reference_id", "int8"),
+                column("customer_id", "int8"),
+                column("cid", "int8"),
+                column("note", "text"),
+            ],
+        );
+        let fk = |col: &str| ForeignKey {
+            name: format!("fk_{col}"),
+            columns: vec![col.into()],
+            target: TableRef { schema: "shop".into(), name: "customers".into() },
+            target_columns: vec!["id".into()],
+        };
+        orders.foreign_keys = vec![fk("long_customer_reference_id"), fk("customer_id"), fk("cid")];
+        let catalog = Catalog { schemas: vec![schema("shop", false, vec![orders])], default_schema: Some("shop".into()) };
+        let mut h = tree_harness(vec2(200.0, 500.0), catalog);
+        h.run();
+        let at = rect_of(&h, "tree-expand-shop.orders").center();
+        click(&mut h, at, 1);
+        let hover = |h: &mut egui_kittest::Harness<'static, Shown>, id: &str| -> Vec<String> {
+            let at = rect_of(h, id).center();
+            h.event(Event::PointerMoved(at));
+            h.run();
+            h.run();
+            let row = rect_of(h, id);
+            words_of(h).into_iter().filter(|(w, r, _)| !w.is_empty() && !row.contains_rect(*r)).map(|w| w.0).collect()
+        };
+        let long = hover(&mut h, "tree-column-shop.orders.created_at_in_the_customers_time_zone");
+        assert!(long.iter().any(|w| w == "created_at_in_the_customers_time_zone timestamp with time zone"), "the whole column: {long:?}");
+        let fk_cut = hover(&mut h, "tree-column-shop.orders.long_customer_reference_id");
+        assert!(fk_cut.iter().any(|w| w == "long_customer_reference_id int8 → shop.customers"), "a cut foreign key: {fk_cut:?}");
+        let plain = hover(&mut h, "tree-column-shop.orders.note");
+        assert!(!plain.iter().any(|w| w.contains("note")), "a short column has no hover: {plain:?}");
+        // At 200, `customer_id` and `int8` don't both fit either.
+        let fk_cut = hover(&mut h, "tree-column-shop.orders.customer_id");
+        assert!(fk_cut.iter().any(|w| w == "customer_id int8 → shop.customers"), "customer_id cut at 200: {fk_cut:?}");
+        let short_fk = hover(&mut h, "tree-column-shop.orders.cid");
+        assert!(short_fk.iter().any(|w| w == "cid → shop.customers"), "a short foreign key keeps today's: {short_fk:?}");
     }
 
     /// A right-click at `at`, the pointer there first, and a frame for the menu to settle.
