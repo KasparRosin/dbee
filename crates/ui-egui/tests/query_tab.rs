@@ -1253,6 +1253,23 @@ fn close(a: f32, b: f32) -> bool {
 /// Light then dark: the command that switches to each, and its tokens.
 const MODES: [(&str, dbee_ui_egui::theme::Tokens); 2] = [("ui.themeLight", dbee_ui_egui::theme::LIGHT), ("ui.themeDark", dbee_ui_egui::theme::DARK)];
 
+/// A row's number scrolled out of view sideways (after a click far right) is scrolled back into
+/// view by `ui.click {id: "grid-row-<n>"}`, as a cell's is, and the click selects the row.
+#[test]
+fn a_click_on_a_row_number_out_of_view_scrolls_it_in() {
+    let db = dbee_testkit::require_testdb!();
+    let cells: Vec<String> = (0..40).map(|i| format!("'a rather long value number {i}' AS column_{i:02}")).collect();
+    let mut ui = results_of(db, &format!("SELECT {}", cells.join(", ")));
+    ui.click("grid-cell-0-39");
+    ui.frame();
+    let shows = |ui: &mut Ui| ui.tag("grid-row-0").is_some_and(|t| t["visible"] != false);
+    assert!(!shows(&mut ui), "the row's number out of view after a click far right");
+    ui.click("grid-row-0");
+    ui.frame();
+    assert!(shows(&mut ui), "scrolled back into view");
+    assert_eq!(ui.value("grid-row-0")["selected"], true, "the click selected the row");
+}
+
 /// A query tab showing the rows of `sql`, the pointer off the grid.
 fn results_of(db: &TestDb, sql: &str) -> Ui {
     let mut ui = Ui::connected(db);

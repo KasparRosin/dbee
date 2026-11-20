@@ -241,8 +241,12 @@ impl GridState {
 }
 
 /// The cell `id` names when it is a cell (`grid-cell-<row>-<col>`) or a foreign key link
-/// (`fk-link-<row>-<col>`) of a grid of `rows` × `cols`.
+/// (`fk-link-<row>-<col>`) of a grid of `rows` × `cols`; a row's number (`grid-row-<row>`) names
+/// its row's first cell, so scrolling to it brings the numbers back in from the side.
 fn cell_named(id: &str, rows: usize, cols: usize) -> Option<(usize, usize)> {
+    if let Some(row) = id.strip_prefix(ROW).and_then(|r| r.parse::<usize>().ok()) {
+        return (row < rows && cols > 0).then_some((row, 0));
+    }
     let rest = id.strip_prefix(CELL).or_else(|| id.strip_prefix(LINK))?;
     let (row, col) = rest.split_once('-')?;
     let (row, col) = (row.parse::<usize>().ok()?, col.parse::<usize>().ok()?);
