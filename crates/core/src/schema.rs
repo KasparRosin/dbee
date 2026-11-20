@@ -254,6 +254,20 @@ pub struct TableStructure {
     pub actions: Vec<ForeignKeyActions>,
 }
 
+impl TableStructure {
+    /// The actions of the foreign key on `columns` that points at `schema.name`: the key whose
+    /// target is spelled the same, else one spelled the same ignoring ASCII case (SQLite keeps a
+    /// key's REFERENCES as written, the catalog the table's own name).
+    pub fn actions_of(&self, columns: &[&str], schema: &str, name: &str) -> Option<&ForeignKeyActions> {
+        let same = |a: &&ForeignKeyActions| a.columns.iter().map(String::as_str).eq(columns.iter().copied()) && a.target.schema == schema;
+        self.actions
+            .iter()
+            .filter(same)
+            .find(|a| a.target.name == name)
+            .or_else(|| self.actions.iter().filter(same).find(|a| a.target.name.eq_ignore_ascii_case(name)))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableInfo {

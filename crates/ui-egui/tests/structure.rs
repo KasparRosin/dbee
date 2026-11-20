@@ -521,6 +521,63 @@ fn a_huge_trigger_definition_draws_on_one_line() {
     }
 }
 
+/// Review B3 M1: on SQLite a key whose REFERENCES spells the table in another case still shows
+/// its ON DELETE, as `table.structure` gives it (the catalog names the table its own way).
+#[test]
+fn on_delete_shows_when_references_spells_the_table_in_another_case() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite copy");
+    sqlite
+        .sql("CREATE TABLE customers_c (id INTEGER PRIMARY KEY); CREATE TABLE orders_c (id INTEGER PRIMARY KEY, customer_id int REFERENCES Customers_C(id) ON DELETE CASCADE);")
+        .unwrap();
+    let mut ui = connected_to_target(db, &sqlite, None, vec2(1400.0, 900.0));
+    structure_of(&mut ui, "main", "orders_c");
+    assert_eq!(ui.value("structure-foreign-keys-0-references"), "main.customers_c.id");
+    assert_eq!(ui.value("structure-foreign-keys-0-onDelete"), "cascade");
+}
+
+/// tab's DATA, opening no other tab.
+#[test]
+fn a_link_to_its_own_table_shows_data() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite copy");
+    sqlite.sql("CREATE TABLE staff (id INTEGER PRIMARY KEY, manager_id int REFERENCES staff(id));").unwrap();
+    let mut ui = connected_to_target(db, &sqlite, None, vec2(1400.0, 900.0));
+    structure_of(&mut ui, "main", "staff");
+    let tabs = ui.document()["tabs"].as_array().map(Vec::len);
+    for link in ["structure-foreign-keys-0-references", "structure-referenced-by-0-from", "structure-columns-1-keys"] {
+        assert_eq!(ui.value("table-view-structure"), true, "{link}: in STRUCTURE");
+        ui.click(link);
+        ui.until("DATA", |ui| ui.value("table-view-data") == true);
+        assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), tabs, "{link}: no other tab");
+        ui.click("table-view-structure");
+        ui.until("the structure", |ui| ui.tag(link).is_some());
+        ui.hover_away();
+    }
+}
+
+/// written, at most 4 KiB, ending with `…`.
+#[test]
+fn a_huge_default_hovers_at_most_4_kib() {
+    let db = dbee_testkit::require_testdb!();
+    let sqlite = dbee_testkit::targets_of(&[dbee_testkit::Kind::Sqlite]).pop().expect("the SQLite copy");
+    let long = "x".repeat(7000);
+    sqlite.sql(&format!("CREATE TABLE t_def (id INTEGER PRIMARY KEY, note text DEFAULT '{long}');")).unwrap();
+    let mut ui = connected_to_target(db, &sqlite, None, vec2(1400.0, 900.0));
+    structure_of(&mut ui, "main", "t_def");
+    let default = ui.value("structure-columns-1-default").as_str().unwrap_or_default().to_string();
+    assert!(default.len() > 4096, "the default as the engine keeps it: {} bytes", default.len());
+    let cell = ui.drawn("structure-columns-1-default");
+    ui.rest(cell.center());
+    let hover = ui
+        .texts()
+        .into_iter()
+        .find(|(r, g)| g.text().starts_with("'xxxx") && !cell.contains_rect(*r))
+        .map(|(_, g)| g.text().to_string())
+        .expect("the hover");
+    assert!(hover.ends_with('…') && hover.len() <= 4096 + '…'.len_utf8(), "at most 4 KiB, cut with `…`: {} bytes", hover.len());
+}
+
 /// Brief §3.7: a foreign key's link opens its table, by a click or by Enter with the keyboard;
 /// an open tab is reused.
 #[test]

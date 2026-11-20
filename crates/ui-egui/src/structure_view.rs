@@ -326,7 +326,9 @@ fn rows_of(read: &StructureRead) -> [Vec<Vec<Shown>>; 5] {
         .foreign_keys
         .iter()
         .map(|fk| {
-            let actions = st.actions.iter().find(|a| a.columns == fk.columns && a.target == fk.target);
+            // Matched as the engine matches them: SQLite may spell the target another way.
+            let columns: Vec<&str> = fk.columns.iter().map(String::as_str).collect();
+            let actions = st.actions_of(&columns, &fk.target.schema, &fk.target.name);
             let on_delete = actions.and_then(|a| a.on_delete).map_or("", action);
             vec![
                 Shown::Empty,

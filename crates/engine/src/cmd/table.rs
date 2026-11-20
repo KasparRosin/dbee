@@ -1275,14 +1275,7 @@ fn with_keys(result: &mut Json, structure: &TableStructure) {
             let target = key.get("target");
             let field = |k: &str| target.and_then(|t| t.get(k)).and_then(Json::as_str).unwrap_or_default();
             let (schema, name) = (field("schema"), field("name"));
-            let same =
-                |a: &&dbee_core::ForeignKeyActions| a.columns.iter().map(String::as_str).eq(columns.iter().copied()) && a.target.schema == schema;
-            let found = structure
-                .actions
-                .iter()
-                .filter(same)
-                .find(|a| a.target.name == name)
-                .or_else(|| structure.actions.iter().filter(same).find(|a| a.target.name.eq_ignore_ascii_case(name)));
+            let found = structure.actions_of(&columns, schema, name);
             if let Some(map) = key.as_object_mut() {
                 map.insert("onDelete".into(), json!(found.and_then(|a| a.on_delete)));
                 map.insert("onUpdate".into(), json!(found.and_then(|a| a.on_update)));
