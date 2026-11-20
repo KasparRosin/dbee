@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use dbee_config::Settings;
 
 use crate::conn_form::Auth;
-use crate::connections::{ConnScreen, Kind, Message};
+use crate::connections::{ConnScreen, Message};
 
 /// A picker that answers "nothing" faster than this most likely never showed (no portal, no
 /// zenity): a person takes longer to cancel one.
@@ -115,7 +115,7 @@ impl Picker {
 }
 
 fn note(text: impl Into<String>) -> Option<Message> {
-    Some(Message { kind: Kind::Note, text: text.into() })
+    Some(Message::note(text))
 }
 
 /// Takes the running picker's answer, if it has one, into the form (step 5 of the frame, before
@@ -151,7 +151,7 @@ pub(crate) fn poll(conn: &mut ConnScreen, ctx: &egui::Context) {
             conn.message = note(NO_PICKER)
         }
         Answer::Nothing { .. } => {}
-        Answer::Failed if !stopped => conn.message = Some(Message { kind: Kind::Error, text: "The file picker stopped without an answer.".into() }),
+        Answer::Failed if !stopped => conn.message = note("The file picker stopped without an answer."),
         Answer::Failed => {}
     }
 }
@@ -186,7 +186,7 @@ pub(crate) fn start(conn: &mut ConnScreen, target: Pick, ctx: &egui::Context) {
     };
     match Picker::spawn(target, conn.generation, ask, ctx) {
         Ok(p) => conn.picker = Some(p),
-        Err(e) => conn.message = Some(Message { kind: Kind::Error, text: format!("The file picker could not be started: {e}") }),
+        Err(e) => conn.message = note(format!("The file picker could not be started: {e}")),
     }
 }
 

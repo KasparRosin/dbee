@@ -20,17 +20,20 @@
 //!   connection opened from the saved list or Recent opens straight into the form, its type fixed;
 //!   Fill from URL then takes that type's URLs only. One saved during the edit, or a Duplicate,
 //!   keeps Change engine.
-//! - The form ([`crate::conn_form`]) has the rows of the type's settings, then Save · Test ·
-//!   Connect at the bottom, and under them a reserved slot for the error or the test result.
+//! - The form ([`crate::conn_form`]) has the rows of the type's settings, then the form's bar
+//!   along the pane's bottom: SAVE, `…` (a saved connection's Duplicate and Delete), TEST and
+//!   CONNECT; above it the strip shows what came of the last command (an error band under a
+//!   heading naming what failed, a result or a note), taking its room from the fields' view.
 //!   Every row has a fixed height, so typing, a message or another login choice never moves the
 //!   form; only turning the SSH tunnel on or off does. The right side is as tall with the cards
-//!   as with the form. In a short window only the fields scroll: the title row, the buttons and
-//!   the message slot stay in view. At the app's first size (1100 × 720) every row of a server
-//!   form is in view while the SSH tunnel is off.
+//!   as with the form. In a short window only the fields scroll: the title row, the engine row,
+//!   the strip and the bar stay in view. At the app's first size (1100 × 720) every row of a
+//!   server form is in view, the SSH tunnel's too.
 //! - Test and Connect run as jobs (`connection.test`, `connection.open`); while one runs both
-//!   buttons are disabled and say so, and a double-click on a card does nothing. A `needs…`
-//!   answer opens a dialog ([`crate::dialogs`]) that runs the command again; other errors show
-//!   under the buttons with the server's message.
+//!   buttons are disabled and say so, and a double-click on a card does nothing. CONNECT saves a
+//!   connection that isn't saved yet once it connects (`save: true`); a saved one keeps its saved
+//!   settings until SAVE. A `needs…` answer opens a dialog ([`crate::dialogs`]) that runs the
+//!   command again; other errors show in the strip with the server's message.
 //! - A server type's Database field has a list button: it runs `connection.listDatabases` with
 //!   the form's settings, as Test runs, and says so while it lists (disabled then, and while a
 //!   test or connect runs). The names open under the field; a click or Enter on the highlighted
@@ -85,9 +88,9 @@ use crate::picker::{self, Pick, Picker};
 use crate::theme::{
     self, Text, connection_color,
     size::{
-        BAR_H, BAR_LINE, CONN_COLOUR_EDGE, CONN_FIELDS_TOP, CONN_WARNING_PAD_Y, CONNECTION_ROW_H, ENGINE_CARD_CHIP_INSET, ENGINE_CARD_H,
-        ENGINE_CARD_LOGO, ENGINE_CARD_MIN_W, ENGINE_CARD_NAME_GAP, ENGINE_CARD_PAD, ENGINE_CARDS_TOP, ENGINE_HEADING_TOP, INSET, RADIUS_CONTROL,
-        SIDEBAR_MAX_W, SIDEBAR_MIN_W, SIDEBAR_PAD_X, SIDEBAR_W, SLIM_BAR_H, TABLE_EMPTY_PAD,
+        BAR_H, BAR_LINE, CONN_COLOUR_EDGE, CONN_WARNING_PAD_Y, CONNECTION_ROW_H, ENGINE_CARD_CHIP_INSET, ENGINE_CARD_H, ENGINE_CARD_LOGO,
+        ENGINE_CARD_MIN_W, ENGINE_CARD_NAME_GAP, ENGINE_CARD_PAD, ENGINE_CARDS_TOP, ENGINE_HEADING_TOP, INSET, RADIUS_CONTROL, SIDEBAR_MAX_W,
+        SIDEBAR_MIN_W, SIDEBAR_PAD_X, SIDEBAR_W, SLIM_BAR_H, TABLE_EMPTY_PAD,
     },
 };
 
@@ -108,7 +111,7 @@ pub(crate) enum Running {
     Connect,
 }
 
-/// What a message under the buttons is.
+/// What the strip above the form's bar is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     /// Something failed (`conn-error`).
@@ -119,11 +122,38 @@ pub(crate) enum Kind {
     Note,
 }
 
-/// What the slot under the buttons shows.
+/// What the strip above the form's bar shows: an error band under its heading, or a result or a
+/// note.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Message {
     pub kind: Kind,
+    /// An error's heading: what failed ([`heading`]); empty for a result or a note.
+    pub heading: &'static str,
     pub text: String,
+}
+
+impl Message {
+    pub(crate) fn error(command: &str, text: impl Into<String>) -> Message {
+        Message { kind: Kind::Error, heading: heading(command), text: text.into() }
+    }
+
+    pub(crate) fn result(text: impl Into<String>) -> Message {
+        Message { kind: Kind::Result, heading: "", text: text.into() }
+    }
+
+    pub(crate) fn note(text: impl Into<String>) -> Message {
+        Message { kind: Kind::Note, heading: "", text: text.into() }
+    }
+}
+
+/// An error band's heading by the command that failed.
+fn heading(command: &str) -> &'static str {
+    match command {
+        TEST => "The test failed",
+        SAVE => "The connection was not saved",
+        LIST_DATABASES => "The databases could not be listed",
+        _ => "The connection failed",
+    }
 }
 
 /// The line under the SSH login choice: what the login will use.
@@ -371,9 +401,9 @@ pub(crate) fn form_done(
                 if let Some(id) = v.get("id").and_then(Json::as_str) {
                     conn.form.id = id.to_string();
                 }
-                conn.message = Some(Message { kind: Kind::Result, text: "Saved.".into() });
+                conn.message = Some(Message::result("Saved."));
             }
-            TEST => conn.message = Some(Message { kind: Kind::Result, text: test_text(&v) }),
+            TEST => conn.message = Some(Message::result(test_text(&v))),
             LIST_DATABASES => {
                 let names: Vec<String> = v
                     .get("databases")
@@ -381,7 +411,7 @@ pub(crate) fn form_done(
                     .map(|a| a.iter().filter_map(Json::as_str).map(str::to_owned).collect())
                     .unwrap_or_default();
                 if names.is_empty() {
-                    conn.message = Some(Message { kind: Kind::Note, text: "No databases to list.".into() });
+                    conn.message = Some(Message::note("No databases to list."));
                 }
                 let list = &mut conn.databases;
                 list.highlight = names.iter().position(|n| *n == conn.form.database).unwrap_or(0);
@@ -394,6 +424,15 @@ pub(crate) fn form_done(
                 conn.message = None;
                 // The file is there now.
                 conn.form.create_file = false;
+                // Saved as it connected: the form is that saved connection now, so the next
+                // CONNECT doesn't save it again. (A file that could not be written says so in a
+                // notice of the engine's.)
+                let connection = v.get("connection");
+                if connection.and_then(|c| c.get("saved")).and_then(Json::as_bool) == Some(true)
+                    && let Some(id) = connection.and_then(|c| c.get("id")).and_then(Json::as_str)
+                {
+                    conn.form.id = id.to_string();
+                }
                 if let Some(note) = v.get("secretsNote").and_then(Json::as_str) {
                     app.notice(toast::Kind::Error, sentence(&format!("The password was not saved: {note}")));
                 }
@@ -403,7 +442,7 @@ pub(crate) fn form_done(
         Err(e) => {
             let rerun = dialogs::Rerun { command, params, origin: Origin::Form(generation) };
             if !dialogs::ask(app, &e, rerun) {
-                app.view.conn.message = Some(Message { kind: Kind::Error, text: error_text(&e) });
+                app.view.conn.message = Some(Message::error(command, error_text(&e)));
             }
         }
     }
@@ -631,8 +670,9 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
     {
         let DbeeApp { session, view, tags, .. } = app;
         let kinds = session.kinds();
+        let saved = !view.conn.form.id.is_empty() && session.state().store.is_saved(&view.conn.form.id);
         side(ui, session.state(), &mut view.conn, tags, &mut acts);
-        main(ui, &mut view.conn, &kinds, tags, &mut acts);
+        main(ui, &mut view.conn, &kinds, saved, tags, &mut acts);
     }
     for act in acts {
         apply(app, act, &ctx);
@@ -729,7 +769,7 @@ fn run_form(app: &mut DbeeApp, command: &'static str) {
     let config = match conn.form.to_config() {
         Ok(c) => c,
         Err(why) => {
-            conn.message = Some(Message { kind: Kind::Error, text: why });
+            conn.message = Some(Message::error(command, why));
             return;
         }
     };
@@ -737,7 +777,7 @@ fn run_form(app: &mut DbeeApp, command: &'static str) {
     let password = if config.kind.uses_file() { String::new() } else { conn.form.password.clone() };
     let typed = !password.is_empty();
     let create_file = conn.form.create_file && config.kind.uses_file() && command != SAVE;
-    let saved = !config.id.is_empty() && app.session.state().store.saved.iter().any(|c| c.id == config.id);
+    let saved = !config.id.is_empty() && app.session.state().store.is_saved(&config.id);
     let conn = &app.view.conn;
     let mut params = json!({ "config": config });
     let keep = conn.has_store && conn.form.save_secrets;
@@ -752,6 +792,11 @@ fn run_form(app: &mut DbeeApp, command: &'static str) {
         // "Save passwords": a password typed for a saved connection is kept when it connects.
         if command == OPEN && keep && typed && saved {
             p.insert("savePassword".into(), json!(true));
+        }
+        // CONNECT saves a connection that isn't saved yet, once it connects; a saved one keeps
+        // its saved settings (SAVE changes them).
+        if command == OPEN && !saved {
+            p.insert("save".into(), json!(true));
         }
         if create_file {
             p.insert("createFile".into(), json!(true));
@@ -921,8 +966,8 @@ fn card(ui: &mut egui::Ui, tags: &mut Tags, id: &str, c: &ConnectionConfig, sele
 
 /// The right pane, everything right of the sidebar between the menu bar and the version bar, on
 /// `card` (tagged `conn-card`): the title row, with the connection's colour as an edge along its
-/// top; then the engine cards, or the engine row and the form.
-fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut Tags, acts: &mut Vec<Act>) {
+/// top; then the engine cards, or the engine row and the form (`saved`: a saved connection's).
+fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], saved: bool, tags: &mut Tags, acts: &mut Vec<Act>) {
     let t = theme::tokens(ui.ctx());
     egui::CentralPanel::default().frame(Frame::new().fill(t.card)).show(ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -938,12 +983,7 @@ fn main(ui: &mut egui::Ui, conn: &mut ConnScreen, kinds: &[DbKind], tags: &mut T
             Step::Engines => engines(ui, kinds, tags, acts),
             Step::Form => {
                 conn_form::engine_row(ui, conn, tags, acts);
-                // The fields start 12 in; their scroll bar runs along the pane's right edge.
-                let inset = Margin { left: INSET as i8, right: 0, top: CONN_FIELDS_TOP as i8, bottom: INSET as i8 };
-                Frame::NONE.inner_margin(inset).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = egui::Spacing::default().item_spacing;
-                    ui.with_layout(Layout::top_down(Align::Min), |ui| conn_form::fields_and_footer(ui, conn, tags, acts, pane.width()));
-                });
+                conn_form::body(ui, conn, saved, tags, acts);
             }
         }
     });
@@ -1330,7 +1370,7 @@ mod tests {
         let (params, generation) = listing(&mut app, 1);
         form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(1)), listed(&[]));
         assert!(!app.view.conn.databases.open);
-        assert_eq!(app.view.conn.message, Some(Message { kind: Kind::Note, text: "No databases to list.".into() }));
+        assert_eq!(app.view.conn.message, Some(Message::note("No databases to list.")));
         // A choice fills the field and closes the list.
         let (params, generation) = listing(&mut app, 2);
         form_done(&mut app, LIST_DATABASES, params, generation, Some(dbee_engine::JobId(2)), listed(&["shop"]));
@@ -1513,7 +1553,7 @@ mod tests {
         assert_eq!(app.view.conn.form.kind, DbKind::MySql);
         // Another type forgets what showed under the buttons and the run it came from.
         app.view.conn.form.engine_fixed = false;
-        app.view.conn.message = Some(Message { kind: Kind::Error, text: "MySQL said no".into() });
+        app.view.conn.message = Some(Message::error(OPEN, "MySQL said no"));
         let generation = app.view.conn.generation;
         apply(&mut app, Act::ChooseKind(DbKind::Postgres), &ctx);
         assert_eq!((app.view.conn.form.kind, &app.view.conn.message), (DbKind::Postgres, &None));

@@ -1,8 +1,8 @@
 //! The connection form: its fields as typed ([`Form`]), turning them into a [`ConnectionConfig`]
 //! (port numbers, validation), and drawing it in parts, each of fixed height but the fields: the
 //! pane's title row ([`title_row`]), the engine row with the database type ([`engine_row`]), then
-//! the fields in one or two [`columns`], which scroll, and Save · Test · Connect with the message slot under them at the
-//! bottom ([`fields_and_footer`]).
+//! the fields in one or two [`columns`], which scroll, then the strip (an error band, a result or
+//! a note) and the form's bar along the pane's bottom: SAVE, `…`, TEST and CONNECT ([`body`]).
 //! The screen around it, with the engine cards a new connection starts with, is
 //! [`crate::connections`].
 //!
@@ -18,32 +18,30 @@ use std::path::{Path, PathBuf};
 use dbee_config::{ConnectionColor, ConnectionConfig, DbKind, Settings, SshAuth, SshConfig, SslMode};
 use dbee_engine::Json;
 use egui::{
-    Align, CornerRadius, Key, Label, Layout, Modifiers, Popup, PopupCloseBehavior, RectAlign, RichText, ScrollArea, Sense, Stroke, UiBuilder, pos2,
-    vec2,
+    Align, CornerRadius, Key, Label, Layout, Modifiers, Popup, PopupCloseBehavior, RectAlign, ScrollArea, Sense, Stroke, UiBuilder, pos2, vec2,
 };
 
 use crate::automation::Tags;
 use crate::components::button::{BarButton, BoxButton, TextButton};
 use crate::components::checkbox::Checkbox;
+use crate::components::error_band::Band;
 use crate::components::icon::Icon;
 use crate::components::input::{self, Field, Input};
 use crate::components::logo::Logo;
 use crate::components::menu::{self, Item};
 use crate::components::segmented::Segmented;
+use crate::components::strip::{self, Strip, Tone};
 use crate::components::swatch::{self, Swatch};
 use crate::components::tooltip::Hint;
-use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Running, line_galley, tilde};
+use crate::connections::{Act, ConnScreen, DatabaseList, Kind, Message, Running, line_galley, tilde};
 use crate::picker::Pick;
 use crate::theme::size::{
-    BAR_H, BAR_LINE, CONN_BESIDE_GAP, CONN_COLUMN_GAP, CONN_COLUMN_MAX_W, CONN_FIELD_GAP, CONN_PORT_W, CONN_SECTION_GAP, CONN_TITLE_MIN_W,
-    CONN_TWO_COLUMNS_MIN, ENGINE_ROW_GAP, ENGINE_ROW_LOGO, FIELD_GAP, INPUT_H, INPUT_PAD_X, INSET, MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP,
+    BAR_H, BAR_LINE, BUTTON_H, CONN_BESIDE_GAP, CONN_COLUMN_GAP, CONN_COLUMN_MAX_W, CONN_FIELD_GAP, CONN_FIELDS_TOP, CONN_PORT_W, CONN_SECTION_GAP,
+    CONN_TITLE_MIN_W, CONN_TWO_COLUMNS_MIN, ENGINE_ROW_GAP, ENGINE_ROW_LOGO, ERROR_BAND_EDGE, ERROR_BAND_GAP, ERROR_BAND_PAD, FIELD_GAP, INPUT_H,
+    INPUT_PAD_X, INSET, MENU_ITEM_H, RADIUS_CONTROL, SWATCH, SWATCH_GAP,
 };
 use crate::theme::{self, Text};
 
-/// The slot under the buttons for an error or a test result.
-const MESSAGE_H: f32 = 52.0;
-/// Save · Test · Connect and the message slot under them, with the space between.
-const FOOTER_H: f32 = 32.0 + 6.0 + 6.0 + MESSAGE_H;
 /// The most of the Database field's list that shows; more names scroll.
 const LIST_H: f32 = 240.0;
 
@@ -429,10 +427,12 @@ pub(crate) fn columns(pane_w: f32) -> (usize, f32) {
     }
 }
 
-/// The fields of a pane `pane_w` wide, in [`columns`] (one column holds the second's sections
-/// under the first's), then the footer at the bottom of the room left: the fields scroll when
-/// they need more. Enter in one of them connects.
-pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, pane_w: f32) {
+/// What is under the engine row, across the pane: the fields in [`columns`] (one column holds the
+/// second's sections under the first's), which scroll when they need more room; then the strip
+/// (an error, a result or a note), and the form's bar along the bottom. The strip takes its room
+/// from the fields' view, so neither the fields nor the bar move. `saved`: the form shows a saved
+/// connection (its bar has `…`). Enter in a field connects.
+pub(crate) fn body(ui: &mut egui::Ui, conn: &mut ConnScreen, saved: bool, tags: &mut Tags, acts: &mut Vec<Act>) {
     if conn.databases.open && keyboard_left(ui, &conn.databases) {
         conn.databases.open = false;
     }
@@ -443,10 +443,27 @@ pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: 
     if in_field && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         acts.push(Act::ConnectForm);
     }
-    let (n, w) = columns(pane_w);
-    let gap = 8.0 + 2.0 * ui.spacing().item_spacing.y;
-    let fields_h = (ui.available_height() - FOOTER_H - gap).max(60.0);
-    ScrollArea::vertical().id_salt("conn-form-scroll").max_height(fields_h).auto_shrink([false, true]).show(ui, |ui| {
+    let area = ui.available_rect_before_wrap();
+    let bar = egui::Rect::from_min_max(pos2(area.left(), (area.bottom() - BAR_H).max(area.top())), area.max);
+    let strip_h = conn.message.as_ref().map_or(0.0, |m| strip_h(ui, m, area.width()));
+    let strip = egui::Rect::from_min_max(pos2(area.left(), (bar.top() - strip_h).max(area.top())), pos2(area.right(), bar.top()));
+    let fields = egui::Rect::from_min_max(area.min, pos2(area.right(), strip.top()));
+    fields_in(ui, conn, tags, acts, fields);
+    if let Some(m) = &conn.message {
+        strip_in(&mut cell_ui(ui, strip), m, tags);
+    }
+    form_bar(ui, conn, saved, tags, acts, bar);
+    ui.advance_cursor_after_rect(area);
+}
+
+/// The fields in `at`, [`INSET`] in from its left and [`CONN_FIELDS_TOP`] under its top; their
+/// scroll bar runs along its right edge.
+fn fields_in(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, at: egui::Rect) {
+    let (n, w) = columns(at.width());
+    let room = egui::Rect::from_min_max(pos2(at.left() + INSET, (at.top() + CONN_FIELDS_TOP).min(at.bottom())), at.max);
+    let mut ui = ui.new_child(UiBuilder::new().id_salt("conn-fields").max_rect(room).layout(Layout::top_down(Align::Min)));
+    ui.set_clip_rect(at.intersect(ui.clip_rect()));
+    ScrollArea::vertical().id_salt("conn-form-scroll").max_height(room.height()).auto_shrink([false, false]).show(&mut ui, |ui| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         if n == 2 {
             ui.horizontal_top(|ui| {
@@ -461,14 +478,126 @@ pub(crate) fn fields_and_footer(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: 
                 second_column(ui, conn, tags, acts, w);
             });
         }
+        ui.add_space(INSET);
     });
-    ui.add_space(8.0);
-    // The footer keeps its place at the bottom, however tall the fields are.
-    let above = ui.available_height() - FOOTER_H - ui.spacing().item_spacing.y;
-    if above > 0.0 {
-        ui.add_space(above);
+}
+
+/// How tall the strip for `m` is across `w`: an error band's heading and up to three lines of its
+/// message, or a [`Strip`]'s.
+fn strip_h(ui: &egui::Ui, m: &Message, w: f32) -> f32 {
+    match m.kind {
+        Kind::Error => {
+            let words_w = w - ERROR_BAND_EDGE - 2.0 * ERROR_BAND_PAD;
+            2.0 * ERROR_BAND_PAD + Text::Subtitle.line() + ERROR_BAND_GAP + strip::lines_h(ui, Text::Body, &m.text, words_w)
+        }
+        Kind::Result | Kind::Note => strip_of(m).height(ui, w),
     }
-    footer(ui, conn, tags, acts, (pane_w - 2.0 * INSET).max(1.0));
+}
+
+/// A result or a note as a [`Strip`].
+fn strip_of(m: &Message) -> Strip<'_> {
+    let tone = if m.kind == Kind::Result { Tone::Success } else { Tone::Neutral };
+    Strip { tone, text: &m.text }
+}
+
+/// The strip across `ui`: an error as the error band under its heading (`conn-error`, and
+/// `conn-error-heading`), a result (`conn-result`) or a note (`conn-note`) as a [`Strip`]; each
+/// tagged with its words. A long error scrolls inside it.
+fn strip_in(ui: &mut egui::Ui, m: &Message, tags: &mut Tags) {
+    let height = ui.max_rect().height();
+    let id = egui::Id::new("conn-strip");
+    let r = match m.kind {
+        Kind::Error => {
+            ScrollArea::vertical()
+                .id_salt("conn-band")
+                .max_height(height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let band = Band { heading: m.heading, message: &m.text, ..Band::default() };
+                    band.show(ui, id).response
+                })
+                .inner
+        }
+        Kind::Result | Kind::Note => strip_of(m).show(ui, id),
+    };
+    // The strip's place, also when its band scrolls.
+    let r = r.with_new_rect(ui.max_rect());
+    let tag = match m.kind {
+        Kind::Error => {
+            tags.tag_value("conn-error-heading", &r, m.heading);
+            "conn-error"
+        }
+        Kind::Result => "conn-result",
+        Kind::Note => "conn-note",
+    };
+    tags.tag_value(tag, &r, m.text.as_str());
+}
+
+/// The form's bar in `at`, along the pane's bottom on `card` with a 1 px `line` on top: SAVE (a
+/// text button) [`INSET`] in from the left; at the right, ending [`INSET`] from the pane's edge,
+/// `…` (a saved connection's: Duplicate, Delete), TEST and CONNECT, [`CONN_BESIDE_GAP`] apart.
+/// TEST and CONNECT are off while a test or connect runs, and as wide for both their words.
+fn form_bar(ui: &mut egui::Ui, conn: &ConnScreen, saved: bool, tags: &mut Tags, acts: &mut Vec<Act>, at: egui::Rect) {
+    let t = theme::tokens(ui.ctx());
+    let p = ui.painter();
+    p.rect_filled(at, CornerRadius::ZERO, t.card);
+    p.rect_filled(egui::Rect::from_min_size(at.min, vec2(at.width(), BAR_LINE)), CornerRadius::ZERO, t.line);
+    let row = egui::Rect::from_min_max(pos2(at.left(), at.top() + BAR_LINE), at.max);
+    let running = conn.running.map(|(_, kind)| kind);
+    let place = |x: f32, w: f32| egui::Rect::from_min_size(pos2(x, row.center().y - BUTTON_H / 2.0), vec2(w, BUTTON_H));
+
+    let save = TextButton::new("Save");
+    let save_at = place(row.left() + INSET, save.width(ui));
+    let r = ui.new_child(UiBuilder::new().max_rect(save_at).layout(Layout::left_to_right(Align::Center))).add(save);
+    tags.tag_value("conn-save", &r, "Save");
+    if r.clicked() {
+        acts.push(Act::Save);
+    }
+
+    // From the right: CONNECT, TEST, then `…`; drawn left to right so Tab reads them so.
+    let connect_w = BoxButton::primary("Connect").width(ui).max(BoxButton::primary("Connecting…").width(ui));
+    let test_w = BoxButton::outline("Test").width(ui).max(BoxButton::outline("Testing…").width(ui));
+    let connect_at = place(row.right() - INSET - connect_w, connect_w);
+    let test_at = place(connect_at.left() - CONN_BESIDE_GAP - test_w, test_w);
+    if saved {
+        let more = BoxButton::outline("…");
+        let more_at = place(test_at.left() - CONN_BESIDE_GAP - more.width(ui), more.width(ui));
+        let r = button_in(ui, more_at, true, more).hint("Duplicate or delete this connection");
+        tags.tag("conn-more", &r);
+        more_menu(&r, conn, tags, acts);
+    }
+    let label = if running == Some(Running::Test) { "Testing…" } else { "Test" };
+    let r = button_in(ui, test_at, running.is_none(), BoxButton::outline(label));
+    tags.tag_value("conn-test", &r, label);
+    if r.clicked() {
+        acts.push(Act::Test);
+    }
+    let label = if running == Some(Running::Connect) { "Connecting…" } else { "Connect" };
+    let r = button_in(ui, connect_at, running.is_none(), BoxButton::primary(label));
+    tags.tag_value("conn-connect", &r, label);
+    if r.clicked() {
+        acts.push(Act::ConnectForm);
+    }
+}
+
+/// `…`'s menu, under it and right-aligned: Duplicate, then Delete (which asks first), as the
+/// row's menu has them.
+fn more_menu(button: &egui::Response, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>) {
+    let id = conn.form.id.clone();
+    Popup::menu(button).align(RectAlign::BOTTOM_END).style(menu::style(&button.ctx)).show(|ui| {
+        for (label, item, destructive) in [("Duplicate", "conn-more-duplicate", false), ("Delete", "conn-more-delete", true)] {
+            if destructive {
+                menu::separator(ui);
+            }
+            let r = ui.add(Item::new(label).destructive(destructive));
+            // The menu's first frame is a sizing pass, which reads every widget as disabled.
+            tags.tag_value_as(item, &r, label, true);
+            if r.clicked() {
+                acts.push(if destructive { Act::AskDelete { id: id.clone(), name: conn.form.title() } } else { Act::Duplicate(id.clone()) });
+                ui.close();
+            }
+        }
+    });
 }
 
 /// A column `w` wide of what `add` draws, top to bottom.
@@ -621,8 +750,7 @@ fn field_in(
 }
 
 /// Host and port, the database, then AUTHENTICATION: user, password with SHOW, "Save passwords".
-/// The database's row is drawn last, in the place kept for it, so Tab keeps the order it had
-/// before the columns: host, port, user, password, SHOW, Save passwords, then the database.
+/// Tab reaches them in that order, as they read.
 fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
     let t = theme::tokens(ui.ctx());
     let has_store = conn.has_store;
@@ -632,6 +760,8 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
     field_in(ui, port, tags, "Port", "conn-port", Input::data, &mut f.port, &default_port(f.kind));
     ui.add_space(CONN_FIELD_GAP);
     let (database, _) = ui.allocate_exact_size(vec2(w, field_h()), Sense::hover());
+    database_row(&mut cell_ui(ui, database), conn, tags, acts, w);
+    let f = &mut conn.form;
 
     ui.add_space(CONN_SECTION_GAP);
     section(ui, "Authentication");
@@ -668,8 +798,6 @@ fn server_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: 
             tags.tag_value("conn-no-keyring", &r, note);
         }
     });
-
-    database_row(&mut cell_ui(ui, database), conn, tags, acts, w);
 }
 
 /// The keyboard is on a widget other than the Database field and the list's button. On none at
@@ -963,53 +1091,6 @@ fn ssh_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mu
             acts.push(Act::AutoKey);
         }
     });
-}
-
-/// Save · Test · Connect, `w` wide, then the reserved slot under them for an error, a result or
-/// a note.
-fn footer(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Vec<Act>, w: f32) {
-    let t = theme::tokens(ui.ctx());
-    let running = conn.running.map(|(_, kind)| kind);
-    ui.allocate_ui_with_layout(vec2(w, 32.0), Layout::left_to_right(Align::Center), |ui| {
-        let save = ui.add(TextButton::new("Save"));
-        tags.tag_value("conn-save", &save, "Save");
-        if save.clicked() {
-            acts.push(Act::Save);
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // Connect and Test are as wide while they say they run, so neither moves.
-            let label = if running == Some(Running::Connect) { "Connecting…" } else { "Connect" };
-            let connect = BoxButton::primary(label).min_width(BoxButton::primary("Connecting…").width(ui));
-            let connect = ui.add_enabled(running.is_none(), connect);
-            tags.tag_value("conn-connect", &connect, label);
-            if connect.clicked() {
-                acts.push(Act::ConnectForm);
-            }
-            let label = if running == Some(Running::Test) { "Testing…" } else { "Test" };
-            let test = BoxButton::outline(label).min_width(BoxButton::outline("Testing…").width(ui));
-            let test = ui.add_enabled(running.is_none(), test);
-            tags.tag_value("conn-test", &test, label);
-            if test.clicked() {
-                acts.push(Act::Test);
-            }
-        });
-    });
-    ui.add_space(6.0);
-
-    let (rect, slot) = ui.allocate_exact_size(vec2(w, MESSAGE_H), Sense::hover());
-    if let Some(m) = &conn.message {
-        let (color, tint, id) = match m.kind {
-            Kind::Error => (t.danger, t.danger.gamma_multiply(0.08), "conn-error"),
-            Kind::Result => (t.success, t.success.gamma_multiply(0.08), "conn-result"),
-            Kind::Note => (t.text_muted, t.bg, "conn-note"),
-        };
-        ui.painter().rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), tint);
-        let mut inner = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 6.0))).layout(Layout::top_down(Align::Min)));
-        ScrollArea::vertical().id_salt("conn-message").max_height(MESSAGE_H - 12.0).auto_shrink([false, true]).show(&mut inner, |ui| {
-            ui.add(Label::new(RichText::new(m.text.as_str()).color(color)).wrap().selectable(true));
-        });
-        tags.tag_value(id, &slot, m.text.as_str());
-    }
 }
 
 #[cfg(test)]

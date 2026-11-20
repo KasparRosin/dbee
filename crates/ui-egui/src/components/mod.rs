@@ -23,6 +23,7 @@ pub mod showcase;
 pub mod sidebar;
 pub mod spinner;
 pub mod status;
+pub mod strip;
 pub mod structure;
 pub mod swatch;
 pub mod tab;

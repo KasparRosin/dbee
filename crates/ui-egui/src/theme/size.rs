@@ -342,6 +342,12 @@ pub const ERROR_BAND_HEAD_GAP: f32 = 12.0;
 pub const ERROR_BAND_ACTIONS_GAP: f32 = 12.0;
 pub const ERROR_BAND_ACTION_GAP: f32 = 8.0;
 pub const ERROR_BAND_HEADING_MIN: f32 = 120.0;
+/// The strip (a result or a note, as the connection form shows one above its bar): its edge down
+/// the left this wide; its words this far under its top line and over its bottom; at most this
+/// many lines of them in view, the rest scrolling.
+pub const STRIP_EDGE: f32 = 2.0;
+pub const STRIP_PAD_Y: f32 = SPACE_8;
+pub const STRIP_MAX_LINES: usize = 3;
 /// The editor (`editor/line number`, `editor/error token`): a line number's box is this wide, the
 /// number flush with its right; an error's underline is this thick, this far down its line.
 pub const LINE_NUMBER_W: f32 = 36.0;

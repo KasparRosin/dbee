@@ -339,11 +339,13 @@ fn the_connection_form_paints_no_fade() {
     let mut ui = Ui::fresh(egui::vec2(1100.0, 420.0));
     ui.click("conn-kind-postgres");
     ui.frame();
-    // Opening the SSH tunnel scrolls the form to it, part way: fields hidden above and below.
+    // Opening the SSH tunnel and clicking its host scrolls the form to it, part way: fields
+    // hidden above and below.
     ui.click("conn-ssh-on");
+    ui.click("conn-ssh-host");
     ui.frame();
     let hidden = |ui: &mut Ui, id: &str| ui.tag(id).is_some_and(|e| e["visible"] == false);
-    assert!(hidden(&mut ui, "conn-name") && hidden(&mut ui, "conn-ssh-user"), "the form is scrolled part way");
+    assert!(hidden(&mut ui, "conn-name") && hidden(&mut ui, "conn-ssh-key"), "the form is scrolled part way");
     assert_eq!(fades(&ui), [], "the connection form");
 }
 

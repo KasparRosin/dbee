@@ -29,6 +29,7 @@ use super::rows::{ConnectionRow, TreeKind, TreeRow};
 use super::segmented::{Segment, Segmented};
 use super::sidebar::{self, Count};
 use super::status::{self, Activity, Connection, Facts};
+use super::strip::{Strip, Tone};
 use super::structure::{self, HeaderCell, Heading};
 use super::swatch::{COLOURS, Swatch};
 use super::tab::{self, ListButton, NewTab, Tab};
@@ -182,6 +183,7 @@ pub fn show(ui: &mut Ui) {
         sidebar_rows(ui);
         value_panels(ui);
         error_bands(ui);
+        strips(ui);
         editor_sample(ui);
         structure_sample(ui);
     });
@@ -608,6 +610,23 @@ fn bands(ui: &mut Ui, salt: &str, bands: &[Band<'_>]) {
         for (i, band) in bands.iter().enumerate() {
             band.show(ui, egui::Id::new(("showcase-band", salt, i)));
         }
+    });
+}
+
+/// The strip in both tones, as the connection form shows a result and a note above its bar.
+fn strips(ui: &mut Ui) {
+    section(ui, "strip: a result (a test passed, a save), a note; not drawn, the connection form's", SPACE_8, |ui| {
+        ui.vertical(|ui| {
+            ui.set_max_width(BAND_W);
+            ui.spacing_mut().item_spacing.y = BANDS_APART;
+            let shown = [
+                (Tone::Success, "Test passed: PostgreSQL 14.12, through bastion.example.com with ~/.ssh/id_ed25519."),
+                (Tone::Neutral, "No databases to list."),
+            ];
+            for (i, (tone, text)) in shown.into_iter().enumerate() {
+                Strip { tone, text }.show(ui, egui::Id::new(("showcase-strip", i)));
+            }
+        });
     });
 }
 

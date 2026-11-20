@@ -273,10 +273,8 @@ fn every_row_of_a_server_form_is_in_view_at_the_default_window() {
         if !ssh {
             continue;
         }
-        // With the tunnel on too: its rows are in the second column, every one whole in view. Until
-        // the form's bar takes the place of the buttons and their message slot, they need a
-        // window 60 taller than the app's first.
-        let mut ui = Ui::fresh(egui::vec2(1100.0, 780.0));
+        // With the tunnel on too: its rows are in the second column, every one whole in view.
+        let mut ui = Ui::fresh(egui::vec2(1100.0, 720.0));
         ui.click(&format!("conn-kind-{}", kind.id()));
         ui.click("conn-ssh-on");
         let i = ui.inspect();
@@ -857,7 +855,7 @@ fn dialog_widgets_are_in_place_from_their_first_frame() {
 fn clicking_a_field_out_of_view_scrolls_to_it() {
     let mut ui = ui();
     // A short window: with the SSH tunnel on, the form's fields scroll.
-    ui.harness.set_size(egui::vec2(1100.0, 560.0));
+    ui.harness.set_size(egui::vec2(1100.0, 480.0));
     ui.frame();
     ui.click("conn-ssh-on");
     let user = ui.tag("conn-ssh-user").unwrap();
@@ -929,9 +927,9 @@ fn inline_error_on_refused_port() {
     let i = ui.inspect();
     let error = tag_in(&i, "conn-error").unwrap();
     assert!(error["value"].as_str().unwrap().contains("could not connect"), "{error}");
-    let [_, ey, _, _] = rect(&error);
-    let [_, cy, _, ch] = rect(&tag_in(&i, "conn-connect").unwrap());
-    assert!(ey >= cy + ch && ey - (cy + ch) < 60.0, "the error shows right under the buttons: {error}");
+    let [_, ey, _, eh] = rect(&error);
+    let [_, cy, _, _] = rect(&tag_in(&i, "conn-connect").unwrap());
+    assert!(ey + eh <= cy && cy - (ey + eh) < 36.0, "the error shows right above the form's bar: {error}");
     assert_eq!(i["screen"], "connections");
     // A port that is no number is caught before anything runs.
     ui.replace("conn-port", "54x");
@@ -1340,7 +1338,7 @@ fn typing_and_errors_do_not_move_the_layout() {
     // the login's row: the key file box and its buttons for a key, the line under USES otherwise
     // (one fixed slot, as wide as each needs; `the_ssh_login_row_keeps_its_height`).
     let fixed = |i: &Json| -> Vec<(String, [f64; 4])> {
-        let varies = ["conn-error", "conn-result", "conn-ssh-key", "conn-ssh-change", "conn-ssh-auto"];
+        let varies = ["conn-error", "conn-error-heading", "conn-result", "conn-ssh-key", "conn-ssh-change", "conn-ssh-auto"];
         ids(i)
             .into_iter()
             .filter(|id| {
@@ -1394,7 +1392,7 @@ fn confirm_dialog_closes_anyway() {
 }
 
 #[test]
-fn password_dialog_for_an_unsaved_connection_keeps_nothing() {
+fn password_dialog_for_an_unsaved_connection_offers_no_keep() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = ui();
     let pg = pg14(db);
@@ -1411,11 +1409,12 @@ fn password_dialog_for_an_unsaved_connection_keeps_nothing() {
     ui.text(&db.password);
     ui.click("dialog-ok");
     ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    // CONNECT saved it once it connected, as SAVE would: with the password, since the form's
+    // "Save passwords in the keyring" is ticked.
     let list = ui.execute("connection.list", json!({}));
-    assert_eq!(list["saved"], json!([]), "{list}");
-    let id = list["recent"][0]["config"]["id"].as_str().unwrap().to_string();
-    let store = ui.secrets.clone().unwrap();
-    assert_eq!(store.get(&id, SecretKind::DbPassword).unwrap(), None);
+    assert_eq!(list["saved"].as_array().unwrap().len(), 1, "{list}");
+    let id = list["saved"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(stored(&ui, &id, SecretKind::DbPassword).as_deref(), Some(db.password.as_str()));
     let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
     assert!(!everything.contains(&db.password), "{everything}");
 }
@@ -1481,6 +1480,19 @@ fn typed_password_stays_out_of_inspect_and_journal() {
     assert!(!everything.contains("typed-secret-1"), "{everything}");
     let file = std::fs::read_to_string(ui.home.home.join("config").join("connections.json")).unwrap();
     assert!(!file.contains("typed-secret-1"), "{file}");
+    // A CONNECT that would save a new connection: `save` in the journal, the password not.
+    ui.click("conn-new");
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    ui.click("conn-password");
+    ui.text("typed-secret-2");
+    ui.click("conn-connect");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    let opens = journaled_opens(&mut ui);
+    assert_eq!(opens.last().map(|p| p["save"].clone()), Some(json!(true)), "{opens:?}");
+    let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
+    assert!(!everything.contains("typed-secret-2"), "{everything}");
 }
 
 #[test]
@@ -1729,11 +1741,11 @@ fn tab_takes_the_keyboard_out_of_the_list() {
     ui.frame();
     assert!(!listed(&ui.inspect()).is_empty(), "on its button the list stays");
     ui.key("Tab");
-    ui.key("Enter");
     ui.frame();
     assert!(listed(&ui.inspect()).is_empty(), "the list closed");
+    assert!(ui.focused("conn-user"), "Tab went on to USER, under the database row");
     assert_eq!(ui.value("conn-database"), "", "nothing was picked");
-    assert_ne!(ui.value("conn-ssl"), before, "Enter pressed the first SSL choice, where Tab went");
+    assert_eq!(ui.value("conn-ssl"), before);
     assert_eq!((ui.document()["screen"].clone(), ui.document()["jobs"].clone()), (json!("connections"), json!([])));
 }
 
@@ -2268,4 +2280,211 @@ fn the_address_never_holds_the_password() {
     ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
     assert!(ui.tag("status-address").is_none(), "the name block already is the address");
     nowhere(&mut ui, "a made-up name");
+}
+
+/// The `connection.open` params the journal holds, in order.
+fn journaled_opens(ui: &mut Ui) -> Vec<Json> {
+    let journal = ui.ok("engine.journal", json!({}));
+    journal.as_array().unwrap().iter().filter(|e| e["command"] == "connection.open").map(|e| e["params"].clone()).collect()
+}
+
+/// The saved connections named `name`.
+fn saved_named(ui: &mut Ui, name: &str) -> Vec<Json> {
+    let list = ui.execute("connection.list", json!({}));
+    list["saved"].as_array().unwrap().iter().filter(|c| c["name"] == name).cloned().collect()
+}
+
+/// Review Focus 1 and 2: CONNECT on a new connection saves it once it connects, with its password
+/// in the keyring (Save passwords ticked), never in the file, `ui.inspect` or the journal.
+#[test]
+fn connect_saves_a_new_connection_once() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = form_for(db, pg14_server(db));
+    ui.click("conn-name");
+    ui.text("Day new");
+    assert_eq!(ui.value("conn-save-secrets"), true);
+    ui.click("conn-connect");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    let d = ui.document();
+    let saved = saved_named(&mut ui, "Day new");
+    assert_eq!(saved.len(), 1, "saved once: {saved:?}");
+    assert_eq!(saved[0]["id"], d["connection"]["id"], "{d}");
+    assert_eq!(d["connection"]["saved"], true, "{d}");
+    assert!(ui.tag("status-save").is_none(), "nothing left to save");
+    let id = saved[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(stored(&ui, &id, SecretKind::DbPassword).as_deref(), Some(db.password.as_str()), "the password in the keyring");
+    let opens = journaled_opens(&mut ui);
+    assert!(opens.iter().any(|p| p["save"] == true), "{opens:?}");
+    let everything = format!("{} {} {}", ui.inspect(), ui.document(), ui.ok("engine.journal", json!({})));
+    assert!(!everything.contains(&db.password), "the password stays out of inspect and the journal");
+    let file = std::fs::read_to_string(ui.home.home.join("config").join("connections.json")).unwrap();
+    assert!(!file.contains(&db.password), "the password stays out of the file");
+    // Back on the screen the form is the saved connection: CONNECT again saves nothing more.
+    ui.execute("connection.close", json!({}));
+    ui.frame();
+    assert!(ui.tag("conn-more").is_some(), "the form shows the saved connection");
+    ui.click("conn-connect");
+    ui.until("the workspace again", |ui| ui.document()["screen"] == "workspace");
+    assert_eq!(saved_named(&mut ui, "Day new").len(), 1);
+    assert_eq!(journaled_opens(&mut ui).last().unwrap().get("save"), None, "a saved connection is not saved again");
+}
+
+/// A connect that fails saves nothing; the band names what failed.
+#[test]
+fn a_failed_connect_saves_nothing() {
+    let mut ui = ui();
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    ui.click("conn-connect");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    assert_eq!(ui.value("conn-error-heading"), "The connection failed");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"], json!([]));
+    // Each command's heading: Test, and a form that isn't usable under the button pressed.
+    ui.click("conn-test");
+    ui.until("the test's error", |ui| ui.tag("conn-error-heading").is_some_and(|h| h["value"] == "The test failed"));
+    ui.replace("conn-port", "54x");
+    ui.click("conn-save");
+    assert_eq!(ui.value("conn-error-heading"), "The connection was not saved");
+    ui.click("conn-connect");
+    assert_eq!(ui.value("conn-error-heading"), "The connection failed");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"], json!([]));
+}
+
+/// Calls 2: CONNECT on a saved connection whose fields changed connects with them and leaves the
+/// saved entry as it was.
+#[test]
+fn connect_leaves_an_edited_saved_connection_as_saved() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = ui();
+    let card = ui.save(&ConnectionConfig { name: "Shop".into(), database: "dbee".into(), ..pg14(db) }, Some(&db.password));
+    ui.click(&card);
+    ui.replace("conn-database", "postgres");
+    ui.click("conn-connect");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    assert_eq!(ui.document()["connection"]["database"], "postgres");
+    let saved = saved_named(&mut ui, "Shop");
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(saved[0]["database"], "dbee", "the saved entry is unchanged");
+    assert_eq!(journaled_opens(&mut ui).last().unwrap().get("save"), None);
+}
+
+/// An unsaved recent connection is saved once it connects, and moves to the saved part.
+#[test]
+fn connecting_a_recent_row_saves_it() {
+    let home = temp_home(None, None);
+    let file = home.home.join("scratch.sqlite");
+    std::fs::write(&file, b"").unwrap();
+    let recent = ConnectionConfig { id: "R".into(), ..file_of(file.to_str().unwrap(), "Scratch") };
+    write_store(&home, &[], &[&recent]);
+    let mut ui = ui_in(home, true);
+    assert!(ui.tag("conn-recent-0").is_some());
+    ui.double_click("conn-recent-0");
+    ui.until("the workspace", |ui| ui.document()["screen"] == "workspace");
+    assert_eq!(saved_named(&mut ui, "Scratch").len(), 1);
+    ui.execute("connection.close", json!({}));
+    ui.frame();
+    let i = ui.inspect();
+    assert!(tag_in(&i, "conn-saved-R").is_some(), "{}", ids(&i).join(" "));
+    assert!(tag_in(&i, "conn-recent-0").is_none(), "{}", ids(&i).join(" "));
+}
+
+/// The strip sits right above the form's bar, across the pane, and moves nothing else: an error,
+/// a test passed and `Saved.` alike.
+#[test]
+fn the_strip_sits_above_the_bar_and_moves_nothing() {
+    let others = |i: &Json| -> Vec<(String, [f64; 4])> {
+        let varies = ["conn-error", "conn-error-heading", "conn-result", "conn-note"];
+        ids(i)
+            .into_iter()
+            .filter(|id| id.starts_with("conn-") && !varies.contains(&id.as_str()))
+            .map(|id| (id.clone(), rect(&tag_in(i, &id).unwrap())))
+            .collect()
+    };
+    let above_the_bar = |i: &Json, id: &str| {
+        let strip = rect_of(&tag_in(i, id).unwrap_or_else(|| panic!("no {id}")));
+        let connect = rect_of(&tag_in(i, "conn-connect").unwrap());
+        let pane = rect_of(&tag_in(i, "conn-card").unwrap());
+        assert!(strip.bottom() <= connect.top() && strip.bottom() >= connect.top() - 36.0, "{id} right above the bar: {strip:?} {connect:?}");
+        assert!((strip.left() - pane.left()).abs() <= 0.5 && (strip.right() - pane.right()).abs() <= 0.5, "{id} across the pane: {strip:?} {pane:?}");
+    };
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    let before = others(&ui.inspect());
+    ui.click("conn-connect");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    let i = ui.inspect();
+    above_the_bar(&i, "conn-error");
+    assert_eq!(others(&i), before, "the error moved something");
+    ui.click("conn-save");
+    ui.until("Saved.", |ui| ui.tag("conn-result").is_some());
+    let i = ui.inspect();
+    assert_eq!(tag_in(&i, "conn-result").unwrap()["value"], "Saved.");
+    above_the_bar(&i, "conn-result");
+    // A test passed, on a SQLite file.
+    let file = ui.home.home.join("strip.sqlite");
+    std::fs::write(&file, b"").unwrap();
+    let card = ui.save(&file_of(file.to_str().unwrap(), "Strip"), None);
+    ui.click(&card);
+    let before = others(&ui.inspect());
+    ui.click("conn-test");
+    ui.until("the test passed", |ui| ui.tag("conn-result").is_some());
+    let i = ui.inspect();
+    assert!(tag_in(&i, "conn-result").unwrap()["value"].as_str().unwrap().starts_with("Test passed"), "{i}");
+    above_the_bar(&i, "conn-result");
+    assert_eq!(others(&i), before, "the result moved something");
+}
+
+/// `…` on a saved connection's form: Duplicate and Delete, as the row's menu has them.
+#[test]
+fn more_offers_duplicate_and_delete() {
+    let mut ui = ui();
+    assert!(ui.tag("conn-more").is_none(), "a new connection has no `…`");
+    let card = ui.save(&silent_config(1), None);
+    ui.click(&card);
+    let more = rect_of(&ui.tag("conn-more").expect("`…` on a saved connection"));
+    let test = rect_of(&ui.tag("conn-test").unwrap());
+    assert!(more.right() <= test.left() && (test.left() - more.right() - 8.0).abs() <= 0.5, "`…` 8 left of TEST: {more:?} {test:?}");
+    ui.click("conn-more");
+    ui.click("conn-more-delete");
+    let i = ui.inspect();
+    assert_eq!(i["dialog"], "deleteConnection", "{i}");
+    ui.click("dialog-cancel");
+    ui.click("conn-more");
+    ui.click("conn-more-duplicate");
+    assert_eq!(ui.value("conn-name"), "silent (copy)");
+    assert!(ui.tag("conn-change-engine").is_some(), "a copy can change its engine");
+    assert_eq!(ui.execute("connection.list", json!({}))["saved"].as_array().unwrap().len(), 2);
+}
+
+/// File > Connect runs the form's CONNECT; on the engine cards it is off.
+#[test]
+fn file_connect_from_the_menu_runs_the_form() {
+    let mut ui = cards();
+    ui.click("menu-File");
+    assert_eq!(ui.tag("menu-connection.open").expect("File > Connect")["enabled"], false, "off on the cards");
+    ui.key("Escape");
+    ui.click("conn-kind-postgres");
+    ui.replace("conn-host", "127.0.0.1");
+    ui.replace("conn-port", "1");
+    ui.click("menu-File");
+    ui.click("menu-connection.open");
+    ui.until("the inline error", |ui| ui.tag("conn-error").is_some());
+    let opens = journaled_opens(&mut ui);
+    assert_eq!(opens.len(), 1, "{opens:?}");
+    assert_eq!((opens[0]["config"]["host"].clone(), opens[0]["config"]["port"].clone()), (json!("127.0.0.1"), json!(1)));
+}
+
+/// Tab moves through the form in reading order: the database row comes under HOST, before USER.
+#[test]
+fn tab_follows_the_reading_order() {
+    let mut ui = Ui::fresh(APP_SIZE);
+    ui.click("conn-kind-postgres");
+    ui.focus("conn-host");
+    for next in ["conn-port", "conn-database", "conn-database-list", "conn-user", "conn-password", "conn-password-show", "conn-save-secrets"] {
+        ui.key("Tab");
+        ui.frame();
+        assert!(ui.focused(next), "Tab reaches {next}");
+    }
 }

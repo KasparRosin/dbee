@@ -675,10 +675,12 @@ fn m2_day_end_to_end() {
     app.click(shop_item["id"].as_str().unwrap());
     assert_eq!(app.value("conn-database"), "shop");
     assert!(app.tags_with("conn-database-item-").is_empty(), "picking closes the list");
-    app.click("conn-save");
-    app.until("the save", |app| app.tag("conn-result").is_some());
+    //    CONNECT saves it once it connects: no SAVE first.
     app.click("conn-connect");
     app.until("the MySQL workspace", |app| app.document()["screen"] == "workspace");
+    let saved = app.execute("connection.list", json!({}))["saved"].clone();
+    let named = saved.as_array().unwrap().iter().filter(|c| c["name"] == "Shop mysql80").count();
+    assert_eq!(named, 1, "CONNECT saved it once: {saved}");
     let d = app.document();
     let c = &d["connection"];
     assert_eq!(

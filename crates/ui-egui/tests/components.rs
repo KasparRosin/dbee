@@ -109,7 +109,7 @@ fn every(t: &Tokens) -> Vec<egui::Color32> {
 fn the_showcase_draws_in_both_modes() {
     for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
         let mut ready = false;
-        let h = Harness::builder().with_size(egui::vec2(1240.0, 11200.0)).build_ui(|ui| {
+        let h = Harness::builder().with_size(egui::vec2(1240.0, 11400.0)).build_ui(|ui| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
                 ready = true;
@@ -187,6 +187,7 @@ fn the_showcase_draws_in_both_modes() {
             "VALUE PANEL: FORMATTED AS JSON (K2), A CUT VALUE (N2), 240 WIDE WITH A LONG NAME AND TYPE",
             "ERROR BAND (EC1): POSTGRES, HINT AND POSITION; POSTGRES, DETAIL AND NO POSITION; MYSQL, THE MESSAGE ONLY; SQLITE, A POSITION; STATEMENT 2 FAILED",
             "NOT IN THE ERROR BAND FRAME: ROLLBACK UNDER A FAILED TRANSACTION (R2); THE TABLE TAB'S HEADINGS AND NOTES; A SERVER'S DETAIL AND HINT BOTH, THE DETAIL FIRST",
+            "STRIP: A RESULT (A TEST PASSED, A SAVE), A NOTE; NOT DRAWN, THE CONNECTION FORM'S",
             "EDITOR: THE ERROR'S LINE NUMBER IN DANGER, THE TOKEN UNDERLINED IN DANGER; THE CURRENT LINE'S NUMBER IN TEXT",
             "STRUCTURE VIEW (SA): A SECTION HEADING, THE HEADER (INK LINE UNDER IT), ROWS WITH POSITION, NAME, TYPE, NULLABLE CHECK, DEFAULT, KEYS (PRIMARY KEY, FOREIGN KEY LINK)",
         ];
