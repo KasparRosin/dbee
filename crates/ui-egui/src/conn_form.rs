@@ -433,9 +433,10 @@ pub(crate) fn columns(pane_w: f32) -> (usize, f32) {
 /// What is under the engine row, across the pane: the fields in [`columns`] (one column holds the
 /// second's sections under the first's), which scroll when they need more room; then the strip
 /// (an error, a result or a note), and the form's bar along the bottom. The strip takes its room
-/// from the fields' view, so neither the fields nor the bar move. `saved`: the form shows a saved
+/// from the fields' view, so neither the fields nor the bar move. `shown`: the test or connect
+/// that has run 300 ms, and how long ([`crate::quiet`]). `saved`: the form shows a saved
 /// connection (its bar has `…`). Enter in a field connects.
-pub(crate) fn body(ui: &mut egui::Ui, conn: &mut ConnScreen, saved: bool, tags: &mut Tags, acts: &mut Vec<Act>) {
+pub(crate) fn body(ui: &mut egui::Ui, conn: &mut ConnScreen, shown: Option<(Running, Duration)>, saved: bool, tags: &mut Tags, acts: &mut Vec<Act>) {
     if conn.databases.open && keyboard_left(ui, &conn.databases) {
         conn.databases.open = false;
     }
@@ -446,7 +447,6 @@ pub(crate) fn body(ui: &mut egui::Ui, conn: &mut ConnScreen, saved: bool, tags: 
     if in_field && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
         acts.push(Act::ConnectForm);
     }
-    let shown = conn.running_for(ui.ctx().input(|i| i.time));
     let area = ui.available_rect_before_wrap();
     let bar = egui::Rect::from_min_max(pos2(area.left(), (area.bottom() - BAR_H).max(area.top())), area.max);
     let strip_h = conn.message.as_ref().map_or(0.0, |m| strip_h(ui, m, area.width()));

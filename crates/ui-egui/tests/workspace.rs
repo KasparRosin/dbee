@@ -45,11 +45,19 @@ impl Ui {
         self.document()["active"].as_u64().expect("a tab is active")
     }
 
-    /// Ctrl+P, `query` typed, and Enter on the best match.
-    fn quick_choose(&mut self, query: &str) {
+    /// Ctrl+P, `query` typed, and Enter on the saved connection `name`: the arrows down to its
+    /// row, wherever its group stands in the list.
+    fn quick_switch(&mut self, query: &str, name: &str) {
         self.ctrl("P");
         self.text(query);
         self.frame();
+        let i = self.inspect();
+        let n = (0..64)
+            .find(|n| tag_in(&i, &format!("qs-item-{n}")).is_some_and(|t| t["value"] == name))
+            .unwrap_or_else(|| panic!("`{name}` is listed for `{query}`: {:?}", ids(&i)));
+        for _ in 0..n {
+            self.key("ArrowDown");
+        }
         self.key("Enter");
     }
 
@@ -87,7 +95,7 @@ fn the_tree_starts_at_its_top_after_a_switch() {
     ui.click("tree-table-many.t_300");
     ui.frame();
     assert!(!visible(&ui.tag("tree-schema-public")), "scrolled down to `many`'s last table");
-    ui.quick_choose("seed file");
+    ui.quick_switch("seed file", "seed file");
     ui.until("the file's workspace", |ui| ui.document()["connection"]["kind"] == "sqlite" && ui.document()["screen"] == "workspace");
     ui.frame();
     assert!(visible(&ui.tag("tree-schema-main")), "the first schema row shows: {:?}", ui.tag("tree-schema-main"));
@@ -191,24 +199,25 @@ fn ctrl_p_switches_connection() {
     ui.ctrl("P");
     ui.text("pg");
     ui.frame();
-    // Tables and connections in one list of twenty rows, every row as high and as wide as the
-    // others. At this size not all twenty fit: the list scrolls, the rows in view are whole and
-    // inside the window, and the others are listed out of view.
+    // Twenty tables under the open connection's heading, then pgnew under OTHER CONNECTIONS:
+    // twenty-one rows, every row as high and as wide as the others. At this size not all fit: the
+    // list scrolls, the rows in view are whole and inside the window, and the others are listed
+    // out of view.
     let i = ui.inspect();
-    let rows: Vec<Json> = (0..20).filter_map(|n| tag_in(&i, &format!("qs-item-{n}"))).collect();
-    assert_eq!(rows.len(), 20, "{rows:?}");
+    let rows: Vec<Json> = (0..40).filter_map(|n| tag_in(&i, &format!("qs-item-{n}"))).collect();
+    assert_eq!(rows.len(), 21, "{rows:?}");
     let rect = |row: &Json| -> Vec<f64> { row["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect() };
     let x = rect(&rows[0])[0];
     // A row in view is whole, but for the list's top edge rounded to a pixel.
-    let whole = |r: &[f64]| r[3] > 27.0 && r[3] <= 28.0;
+    let whole = |r: &[f64]| r[3] > 31.0 && r[3] <= 32.0;
     for row in &rows {
         let r = rect(row);
-        assert!(r[0] == x && r[2] == 560.0 && whole(&r), "{rows:?}");
+        assert!(r[0] == x && r[2] == 616.0 && whole(&r), "{rows:?}");
         assert!(!visible(&Some(row.clone())) || r[1] + r[3] <= f64::from(APP_SIZE.y), "{row}");
     }
-    assert!(!visible(&Some(rows[19].clone())), "the twentieth row waits below the list: {rows:?}");
+    assert!(!visible(&Some(rows[20].clone())), "the last row waits below the list: {rows:?}");
     let pgnew_row = (0..rows.len()).find(|n| tag_in(&i, &format!("qs-item-{n}-kind")).is_some()).expect("a connection hit");
-    assert_eq!(rows[pgnew_row]["value"], "pgnew");
+    assert_eq!((pgnew_row, rows[pgnew_row]["value"].clone()), (20, json!("pgnew")), "the connection comes last: {rows:?}");
     assert_eq!(tag_in(&i, &format!("qs-item-{pgnew_row}-kind")).unwrap()["value"], "PostgreSQL");
     assert!(rows.iter().any(|r| r["value"].as_str().is_some_and(|v| v.starts_with("pg_catalog."))), "table hits too: {rows:?}");
     assert!(!rows.iter().any(|r| r["value"] == "pg14"), "the open connection is left out");
@@ -219,30 +228,338 @@ fn ctrl_p_switches_connection() {
         let r = rect(row.as_ref().unwrap());
         assert!(whole(&r) && r[1] + r[3] <= f64::from(APP_SIZE.y), "row {n}: {r:?}");
     };
-    for _ in 0..19 {
+    for _ in 0..20 {
         ui.key("ArrowDown");
     }
-    in_view(&mut ui, 19);
+    in_view(&mut ui, 20);
     assert!(!visible(&ui.tag("qs-item-0")), "the first row scrolled away");
     ui.key("ArrowDown");
-    in_view(&mut ui, 19);
+    in_view(&mut ui, 20);
     assert!(!visible(&ui.tag("qs-item-0")), "Down at the last row stays there");
     // Up to the first row: it scrolls back into view, whole. Up once more stays there.
-    for _ in 0..19 {
+    for _ in 0..20 {
         ui.key("ArrowUp");
     }
     in_view(&mut ui, 0);
-    assert!(!visible(&ui.tag("qs-item-19")), "the last row scrolled away");
+    assert!(!visible(&ui.tag("qs-item-20")), "the last row scrolled away");
     ui.key("ArrowUp");
     in_view(&mut ui, 0);
-    assert!(!visible(&ui.tag("qs-item-19")), "Up at the first row stays there");
+    assert!(!visible(&ui.tag("qs-item-20")), "Up at the first row stays there");
     ui.key("Escape");
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
     assert!(ui.tag("qs-input").is_none(), "the search closed");
     // And back, which now lists pg14.
-    ui.quick_choose("pg14");
+    ui.quick_switch("pg14", "pg14");
     ui.until("connected to pg14", |ui| ui.connection_id().as_deref() == Some(pg14.as_str()) && ui.document()["screen"] == "workspace");
+}
+
+/// `[x, y, width, height]` of the automation entry `id` in a `ui.inspect` result.
+fn rect_in(i: &Json, id: &str) -> [f64; 4] {
+    let e = tag_in(i, id).unwrap_or_else(|| panic!("`{id}` is listed: {:?}", ids(i)));
+    let r: Vec<f64> = e["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    [r[0], r[1], r[2], r[3]]
+}
+
+/// `got` is `want`, each to half a point.
+fn assert_rect(got: [f64; 4], want: [f64; 4], what: &str) {
+    assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 0.5), "{what}: {got:?}, not {want:?}");
+}
+
+/// A window at the app's first size connected to pg14, with pgnew saved red as `Orders replica`.
+fn with_replica(db: &TestDb) -> Ui {
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let replica = ConnectionConfig { name: "Orders replica".into(), color: ConnectionColor::Red, ..server_config(db.server("pgnew").unwrap()) };
+    ui.execute("connection.save", json!({ "config": replica, "password": db.password }));
+    ui.frame();
+    ui
+}
+
+/// The number of `qs-item-<n>` rows listed, and how many of them are tables (they come first).
+fn rows_and_tables(i: &Json) -> (usize, usize) {
+    let rows = (0..64).take_while(|n| tag_in(i, &format!("qs-item-{n}")).is_some()).count();
+    let tables = (0..rows).take_while(|n| tag_in(i, &format!("qs-item-{n}-kind")).is_none()).count();
+    (rows, tables)
+}
+
+/// QC with R4's rows at 1100 × 720: the box 640 wide at 56 over the scrim, on `raised` with the
+/// shadow and no edge; the field 40 tall; the open connection's heading over its tables, then
+/// OTHER CONNECTIONS over the saved one, every item 32 tall, one after the other.
+#[test]
+fn the_quick_search_is_drawn_as_qc() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = with_replica(db);
+    let open = ui.document()["connection"]["name"].as_str().unwrap().to_string();
+    ui.ctrl("P");
+    ui.text("ord");
+    ui.frame();
+    let i = ui.inspect();
+    let (left, top, w) = (230.0, 56.0, 640.0);
+    assert_rect(rect_in(&i, "qs-input"), [left + 12.0, top + 12.0, 616.0, 40.0], "the field");
+    let list = top + 12.0 + 40.0 + 4.0;
+    assert_eq!(tag_in(&i, "qs-group-0").unwrap()["value"], json!(open), "the open connection's heading");
+    assert_rect(rect_in(&i, "qs-group-0"), [left + 12.0, list, 616.0, 32.0], "the first heading");
+    assert_eq!(tag_in(&i, "qs-item-0").unwrap()["value"], "shop.orders");
+    assert_rect(rect_in(&i, "qs-item-0"), [left + 12.0, list + 32.0, 616.0, 32.0], "the first row");
+    let (rows, k) = rows_and_tables(&i);
+    assert!(k >= 1 && rows == k + 1, "the tables, then one connection: {:?}", ids(&i));
+    for n in 1..k {
+        let (a, b) = (rect_in(&i, &format!("qs-item-{}", n - 1)), rect_in(&i, &format!("qs-item-{n}")));
+        assert!((b[1] - a[1] - 32.0).abs() <= 0.5, "row {n} 32 under the one before: {a:?} {b:?}");
+    }
+    let last_table = rect_in(&i, &format!("qs-item-{}", k - 1));
+    assert_eq!(tag_in(&i, "qs-group-1").unwrap()["value"], "Other connections");
+    let others = rect_in(&i, "qs-group-1");
+    assert!((others[1] - last_table[1] - 32.0).abs() <= 0.5 && others[3] == 32.0, "OTHER CONNECTIONS after the last table: {others:?}");
+    assert_eq!(tag_in(&i, &format!("qs-item-{k}")).unwrap()["value"], "Orders replica");
+    let replica = rect_in(&i, &format!("qs-item-{k}"));
+    assert!((replica[1] - others[1] - 32.0).abs() <= 0.5, "the connection under its heading: {replica:?}");
+    assert!(tag_in(&i, "qs-group-2").is_none());
+    // Painted: the scrim over the window, then the box's shadow and its `raised` ground, no edge.
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let shapes = ui.shapes();
+    let window = egui::Rect::from_min_size(egui::Pos2::ZERO, APP_SIZE);
+    let scrim = shapes
+        .iter()
+        .position(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.fill == t.scrim && r.rect.contains_rect(window)))
+        .expect("the scrim covers the window");
+    let over = &shapes[scrim + 1..];
+    let boxed = over
+        .iter()
+        .find_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.fill == t.raised && r.blur_width == 0.0 && (r.rect.left() - left as f32).abs() <= 0.5 => Some(r.rect),
+            _ => None,
+        })
+        .expect("the box on raised");
+    assert!((boxed.top() - top as f32).abs() <= 0.5 && (boxed.width() - w as f32).abs() <= 0.5, "{boxed:?}");
+    assert!(
+        over.iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.blur_width > 0.0 && r.rect.intersects(boxed))),
+        "the shadow under the box"
+    );
+    assert!(
+        !over.iter().any(|(_, s)| matches!(s, egui::Shape::Rect(r) if r.rect == boxed && r.stroke.width > 0.0 && r.stroke.color.a() > 0)),
+        "no edge round the box"
+    );
+    // A view's icon may hold a circle; the headings and the connection's row hold none.
+    let marked: Vec<egui::Rect> = [rect_in(&i, "qs-group-0"), others, replica]
+        .iter()
+        .map(|r| egui::Rect::from_min_size(egui::pos2(r[0] as f32, r[1] as f32), egui::vec2(r[2] as f32, r[3] as f32)))
+        .collect();
+    assert!(
+        !over.iter().any(|(_, s)| matches!(s, egui::Shape::Circle(c) if marked.iter().any(|m| m.contains(c.center)))),
+        "marks are squares, never circles"
+    );
+    let muted = |words: &str| {
+        let drawn: Vec<(egui::Rect, egui::Shape)> =
+            over.iter().filter(|(_, s)| matches!(s, egui::Shape::Text(x) if x.galley.text() == words)).cloned().collect();
+        let colours = text_colours(&drawn);
+        !colours.is_empty() && colours.iter().all(|c| *c == t.text_muted)
+    };
+    assert!(muted(&open.to_uppercase()), "the open connection's name in grey capitals");
+    assert!(muted("OTHER CONNECTIONS"), "OTHER CONNECTIONS in grey capitals");
+    // The field has the keyboard: its edge is 2 px `ink`.
+    let field = egui::Rect::from_min_size(egui::pos2(left as f32 + 12.0, top as f32 + 12.0), egui::vec2(616.0, 40.0));
+    assert!(outlines_in(&ui, field.expand(0.5), t.ink).iter().any(|(r, w)| *w == 2.0 && r.width() >= 615.5), "the field's ink edge");
+}
+
+/// The highlight moves over rows only: from the last table, ArrowDown lands on the first
+/// connection, not on OTHER CONNECTIONS; Enter opens the row highlighted; a heading's click does
+/// nothing.
+#[test]
+fn arrows_skip_the_headings_and_enter_opens_the_highlighted_row() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = with_replica(db);
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    ui.ctrl("P");
+    ui.text("ord");
+    ui.frame();
+    ui.click("qs-group-0");
+    ui.frame();
+    assert!(ui.tag("qs-input").is_some(), "a heading's click leaves the search open");
+    assert_eq!(ui.document()["tabs"], json!([]), "and opens nothing");
+    let (_, k) = rows_and_tables(&ui.inspect());
+    // The colour drawn 4 in from an item's left, at its middle.
+    let ground = |ui: &mut Ui, id: &str| {
+        let r = rect_in(&ui.inspect(), id);
+        colour_at(ui, egui::pos2(r[0] as f32 + 4.0, (r[1] + r[3] / 2.0) as f32))
+    };
+    assert_eq!(ground(&mut ui, "qs-item-0"), Some(t.raised_hover), "the first row starts highlighted");
+    for _ in 0..k {
+        ui.key("ArrowDown");
+    }
+    assert_eq!(ui.value(&format!("qs-item-{k}")), "Orders replica");
+    assert!(visible(&ui.tag("qs-group-1")), "its heading in view above it");
+    assert_eq!(ground(&mut ui, &format!("qs-item-{k}")), Some(t.raised_hover), "the connection is highlighted");
+    assert_ne!(ground(&mut ui, "qs-group-1"), Some(t.raised_hover), "the heading never is");
+    ui.key("ArrowUp");
+    let table = ui.value(&format!("qs-item-{}", k - 1));
+    assert_eq!(ground(&mut ui, &format!("qs-item-{}", k - 1)), Some(t.raised_hover), "back on the last table");
+    ui.key("Enter");
+    ui.until("the table tab", |ui| ui.document()["table"].is_object());
+    let d = ui.document();
+    assert_eq!(json!(format!("{}.{}", d["table"]["schema"].as_str().unwrap(), d["table"]["name"].as_str().unwrap())), table, "{d}");
+}
+
+/// The list scrolls by whole items, headings among them: whatever the arrows did, every item in
+/// view is whole and inside the window less 12, and the highlighted row's heading comes with it.
+#[test]
+fn the_list_scrolls_by_whole_items_past_the_headings() {
+    let db = dbee_testkit::require_testdb!();
+    let (mut ui, _) = with_pgnew(db);
+    ui.ctrl("P");
+    ui.text("pg");
+    ui.frame();
+    let whole_in_view = |ui: &mut Ui, at: &str| {
+        let i = ui.inspect();
+        let items: Vec<Json> = (0..64)
+            .flat_map(|n| [format!("qs-item-{n}"), format!("qs-group-{n}")])
+            .filter_map(|id| tag_in(&i, &id))
+            .filter(|e| visible(&Some(e.clone())))
+            .collect();
+        assert!(!items.is_empty(), "{at}: items in view");
+        for e in &items {
+            let r: Vec<f64> = e["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+            assert!(r[3] > 31.0 && r[3] <= 32.0 && r[1] + r[3] <= f64::from(APP_SIZE.y) - 12.0, "{at}: {e}");
+        }
+    };
+    whole_in_view(&mut ui, "at the top");
+    assert_eq!((ui.value("qs-item-20"), ui.value("qs-group-1")), (json!("pgnew"), json!("Other connections")));
+    for _ in 0..20 {
+        ui.key("ArrowDown");
+    }
+    whole_in_view(&mut ui, "at the end");
+    assert!(visible(&ui.tag("qs-item-20")) && visible(&ui.tag("qs-group-1")), "the connection and its heading in view");
+    assert!(!visible(&ui.tag("qs-item-0")), "the first row scrolled away");
+    for _ in 0..20 {
+        ui.key("ArrowUp");
+    }
+    whole_in_view(&mut ui, "back at the top");
+    assert!(visible(&ui.tag("qs-group-0")) && visible(&ui.tag("qs-item-0")), "the first row and its heading in view");
+}
+
+/// The `raised` ground of the quick search's box, its left edge at `left`, as last painted.
+fn box_drawn(ui: &Ui, left: f32) -> egui::Rect {
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    ui.shapes()
+        .iter()
+        .find_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.fill == t.raised && r.blur_width == 0.0 && (r.rect.left() - left).abs() <= 0.5 => Some(r.rect),
+            _ => None,
+        })
+        .expect("the box on raised")
+}
+
+/// With nothing typed the box holds the field alone: no row, no heading, no note, no gap; Enter
+/// does nothing; Escape closes.
+#[test]
+fn nothing_typed_shows_the_field_alone() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let alone = |ui: &mut Ui, at: &str| {
+        let i = ui.inspect();
+        assert!(visible(&tag_in(&i, "qs-input")), "{at}: the field");
+        for id in ["qs-item-0", "qs-group-0", "qs-none", "qs-error"] {
+            assert!(tag_in(&i, id).is_none(), "{at}: no `{id}`: {:?}", ids(&i));
+        }
+        let boxed = box_drawn(ui, 230.0);
+        assert!((boxed.height() - 64.0).abs() <= 0.5, "{at}: 12 + 40 + 12: {boxed:?}");
+    };
+    ui.ctrl("P");
+    ui.frame();
+    alone(&mut ui, "opened");
+    ui.text("   ");
+    ui.frame();
+    alone(&mut ui, "only spaces");
+    ui.key("Enter");
+    ui.frame();
+    assert!(ui.tag("qs-input").is_some(), "Enter leaves it open");
+    assert_eq!(ui.document()["tabs"], json!([]), "and opens nothing");
+    ui.text("ord");
+    ui.frame();
+    assert_eq!(ui.value("qs-item-0"), "shop.orders");
+    ui.ctrl("A");
+    ui.key("Backspace");
+    ui.frame();
+    alone(&mut ui, "typed and deleted");
+    ui.key("Escape");
+    assert!(ui.tag("qs-input").is_none(), "Escape closes");
+}
+
+/// `No match` in one grey line in place of the list, the same on the workspace and the
+/// connection screen.
+#[test]
+fn no_match_is_one_grey_line() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let one_grey_line = |ui: &mut Ui, at: &str| {
+        ui.ctrl("P");
+        ui.text("zzz");
+        ui.frame();
+        let i = ui.inspect();
+        assert_eq!(tag_in(&i, "qs-none").map(|e| e["value"].clone()), Some(json!("No match")), "{at}: {:?}", ids(&i));
+        assert!(tag_in(&i, "qs-item-0").is_none() && tag_in(&i, "qs-group-0").is_none(), "{at}");
+        let r = rect_in(&i, "qs-none");
+        assert_rect(r, [242.0, 56.0 + 12.0 + 40.0 + 4.0, 616.0, 32.0], at);
+        let row = egui::Rect::from_min_size(egui::pos2(r[0] as f32, r[1] as f32), egui::vec2(r[2] as f32, r[3] as f32));
+        let drawn: Vec<(egui::Rect, egui::Shape)> = ui
+            .shapes()
+            .into_iter()
+            .filter(|(_, s)| matches!(s, egui::Shape::Text(x) if x.galley.text() == "No match" && row.contains(x.pos)))
+            .collect();
+        assert_eq!(text_colours(&drawn), [t.text_muted], "{at}: grey");
+        let (at_x, _) = ui.text_in(row, "No match").expect("the words in the row");
+        assert!((at_x.left() - row.left() - 30.0).abs() <= 0.5, "{at}: 30 in: {at_x:?}");
+        ui.key("Escape");
+    };
+    one_grey_line(&mut ui, "the workspace");
+    ui.execute("connection.close", json!({ "force": true }));
+    ui.until("the connection screen", |ui| ui.document()["screen"] == "connections");
+    one_grey_line(&mut ui, "the connection screen");
+}
+
+/// At the smallest window the box is 616 wide, 12 from each side, 42 from the top; every item in
+/// view lies inside it, whole, above the window's bottom less 12; a long name is cut with `…`.
+#[test]
+fn the_quick_search_fits_640_by_420() {
+    let db = dbee_testkit::require_testdb!();
+    let size = egui::vec2(640.0, 420.0);
+    let mut ui = Ui::connected_with(db, Setup { size, ..Setup::default() });
+    let long = "pgnew, the newest Postgres server, saved under a name far too long for the row";
+    let pgnew = ConnectionConfig { name: long.into(), ..server_config(db.server("pgnew").unwrap()) };
+    ui.execute("connection.save", json!({ "config": pgnew, "password": db.password }));
+    ui.frame();
+    ui.ctrl("P");
+    ui.text("pg");
+    ui.frame();
+    assert_rect(rect_in(&ui.inspect(), "qs-input"), [24.0, 42.0 + 12.0, 592.0, 40.0], "the field");
+    let boxed = box_drawn(&ui, 12.0);
+    assert!((boxed.width() - 616.0).abs() <= 0.5 && (boxed.top() - 42.0).abs() <= 0.5, "{boxed:?}");
+    let inside = |ui: &mut Ui, at: &str| {
+        let i = ui.inspect();
+        let items: Vec<Json> = (0..64)
+            .flat_map(|n| [format!("qs-item-{n}"), format!("qs-group-{n}")])
+            .filter_map(|id| tag_in(&i, &id))
+            .filter(|e| visible(&Some(e.clone())))
+            .collect();
+        assert!(!items.is_empty(), "{at}: items in view");
+        for e in &items {
+            let r: Vec<f64> = e["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+            assert!(r[0] >= 23.5 && r[0] + r[2] <= 616.5, "{at}: inside the box: {e}");
+            assert!(r[3] > 31.0 && r[3] <= 32.0 && r[1] + r[3] <= 420.0 - 12.0 - 12.0 + 0.5, "{at}: whole, above the bottom: {e}");
+        }
+    };
+    inside(&mut ui, "at the top");
+    let (rows, k) = rows_and_tables(&ui.inspect());
+    assert_eq!((rows, ui.value(&format!("qs-item-{k}"))), (k + 1, json!(long)), "the tables, then the connection");
+    for _ in 0..k {
+        ui.key("ArrowDown");
+    }
+    inside(&mut ui, "at the connection");
+    let row = ui.tag(&format!("qs-item-{k}"));
+    assert!(visible(&row), "the connection in view: {row:?}");
+    let drawn = ui.drawn(&format!("qs-item-{k}"));
+    assert_eq!(ui.text_in(drawn, long).map(|(_, cut)| cut), Some(true), "the long name cut with …");
 }
 
 #[test]
@@ -252,7 +569,7 @@ fn switching_with_unsaved_query_text_asks_first() {
     let pg14 = ui.connection_id().unwrap();
     ui.ctrl("T");
     ui.execute("query.setText", json!({ "text": "select 1" }));
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     assert_eq!(ui.inspect()["dialog"], "confirm", "the query text would be lost");
     assert_eq!(ui.value("dialog-text"), "Disconnect from pg14? The text of 1 query tab will be lost.");
     ui.click("dialog-cancel");
@@ -263,7 +580,7 @@ fn switching_with_unsaved_query_text_asks_first() {
     assert_eq!((d["screen"].clone(), d["connection"]["id"].clone()), (json!("workspace"), json!(pg14)), "Cancel keeps pg14 open: {d}");
     assert_eq!((d["tabs"].as_array().map(Vec::len), d["query"]["text"].clone()), (Some(1), json!("select 1")), "{d}");
     // Close anyway closes pg14 and connects to pgnew.
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     assert_eq!(ui.inspect()["dialog"], "confirm");
     ui.click("dialog-ok");
     ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
@@ -277,7 +594,7 @@ fn switching_with_staged_edits_asks_first_and_cancel_keeps_them() {
     let pg14 = ui.connection_id().unwrap();
     ui.open("shop", "customers");
     ui.execute("cell.edit", json!({ "row": 0, "column": "name", "value": "Switched" }));
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     assert_eq!(ui.inspect()["dialog"], "confirm", "the staged edits would be lost");
     assert_eq!(ui.value("dialog-text"), "Disconnect from pg14? The staged changes of 1 table tab will be lost.");
     ui.click("dialog-cancel");
@@ -308,7 +625,7 @@ fn ctrl_p_without_a_stored_password_asks_as_a_double_click_does() {
         (d["screen"].clone(), d["connection"].clone(), ui.value("dialog-text"), ui.value("dialog-save"), ui.value("conn-name"), ui.value("conn-host"))
     };
     // From the workspace: pg14 closes, and the form connects.
-    ui.quick_choose("no password");
+    ui.quick_switch("no password", "pg14 no password");
     let by_search = asked(&mut ui);
     assert_eq!((by_search.0.clone(), by_search.4.clone()), (json!("connections"), json!("pg14 no password")), "{by_search:?}");
     ui.click("dialog-cancel");
@@ -316,7 +633,7 @@ fn ctrl_p_without_a_stored_password_asks_as_a_double_click_does() {
     assert_eq!(asked(&mut ui), by_search, "a double-click on the card asks the same");
     ui.click("dialog-cancel");
     // On the connection screen.
-    ui.quick_choose("no password");
+    ui.quick_switch("no password", "pg14 no password");
     assert_eq!(asked(&mut ui), by_search);
     ui.text(&db.password);
     ui.click("dialog-ok");
@@ -333,16 +650,24 @@ fn ctrl_p_on_the_connection_screen_lists_and_opens_connections() {
     ui.ctrl("P");
     assert!(visible(&ui.tag("qs-input")), "Ctrl+P opens the quick search on the connection screen");
     ui.frame();
-    // Every saved connection, connections only, in the saved list's order.
-    let saved: Vec<Json> = ui.execute("connection.list", json!({}))["saved"].as_array().unwrap().iter().map(|c| c["name"].clone()).collect();
-    assert_eq!(saved, [json!("Shop live"), json!("pg14")]);
-    assert_eq!(vec![ui.value("qs-item-0"), ui.value("qs-item-1")], saved);
+    // Nothing typed lists nothing.
+    assert!(ui.tag("qs-item-0").is_none() && ui.tag("qs-none").is_none(), "{:?}", ids(&ui.inspect()));
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == "Find a connection"), "the placeholder");
+    // `p` is in both names: both saved connections, best first, with no heading.
+    ui.text("p");
+    ui.frame();
+    let found: Vec<Json> =
+        ui.execute("quickSearch.find", json!({ "query": "p", "grouped": true })).as_array().unwrap().iter().map(|h| h["name"].clone()).collect();
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(vec![ui.value("qs-item-0"), ui.value("qs-item-1")], found);
     assert!(ui.tag("qs-item-2").is_none());
+    assert!(ui.tag("qs-group-0").is_none(), "no heading on the connection screen");
+    ui.ctrl("A");
     ui.text("zzz");
     ui.frame();
-    assert!(ui.texts().iter().any(|(_, g)| g.text() == "No connection matches."));
+    assert_eq!(ui.value("qs-none"), "No match");
     ui.key("Escape");
-    ui.quick_choose("pg14");
+    ui.quick_switch("pg14", "pg14");
     ui.until("connected to pg14", |ui| ui.connection_id().as_deref() == Some(id.as_str()) && ui.document()["screen"] == "workspace");
 }
 
@@ -354,7 +679,7 @@ fn a_failed_switch_ends_on_the_form_with_its_error() {
     // Nothing listens on port 1: the server refuses.
     ui.execute("connection.save", json!({ "config": ConnectionConfig { name: "nowhere".into(), port: 1, ..pg14(db) } }));
     ui.frame();
-    ui.quick_choose("nowhere");
+    ui.quick_switch("nowhere", "nowhere");
     ui.until("the connect's error", |ui| ui.tag("conn-error").is_some());
     let d = ui.document();
     assert_eq!(
@@ -376,15 +701,19 @@ fn ctrl_p_leaves_a_lost_connection() {
     // The next database action finds the connection gone.
     ui.click("tree-refresh");
     ui.until("the lost mark", |ui| ui.document()["connection"]["lost"] == true);
-    // While lost, only connections are found.
+    // While lost, only connections are found: OTHER CONNECTIONS alone.
     ui.ctrl("P");
+    ui.frame();
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == "Find a connection"), "the placeholder");
     ui.text("pg");
     ui.frame();
     let i = ui.inspect();
     let rows: Vec<usize> = (0..20).filter(|n| tag_in(&i, &format!("qs-item-{n}")).is_some()).collect();
     assert!(!rows.is_empty() && rows.iter().all(|n| tag_in(&i, &format!("qs-item-{n}-kind")).is_some()), "{:?}", ids(&i));
+    assert_eq!(tag_in(&i, "qs-group-0").map(|g| g["value"].clone()), Some(json!("Other connections")), "{:?}", ids(&i));
+    assert!(tag_in(&i, "qs-group-1").is_none(), "{:?}", ids(&i));
     ui.key("Escape");
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");
     let d = ui.document();
     assert_eq!((d["connection"]["lost"].clone(), d["tabs"].clone()), (json!(false), json!([])), "{d}");
@@ -816,7 +1145,7 @@ fn a_switch_waits_for_the_end_then_switches() {
     let on = |ui: &mut Ui, id: &str| ui.connection_id().as_deref() == Some(id) && ui.document()["screen"] == "workspace";
     in_transaction(&mut ui, &update);
     // CANCEL: no switch.
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     assert_eq!(ui.inspect()["dialog"], "transactionEnd", "switching asks about the connection's transaction");
     assert_eq!(ui.value("dialog-text"), "pg14 has a transaction that isn't committed yet. The text of 1 query tab will be lost.");
     assert_three_buttons(&mut ui);
@@ -828,12 +1157,12 @@ fn a_switch_waits_for_the_end_then_switches() {
     assert_eq!((d["screen"].clone(), d["connection"]["id"].clone()), (json!("workspace"), json!(pg14.clone())), "Cancel keeps pg14: {d}");
     assert_eq!(d["connection"]["transaction"]["state"], "open", "{d}");
     // COMMIT: the switch waits while the end runs, and choosing again meanwhile asks nothing more.
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     assert_eq!(ui.inspect()["dialog"], "transactionEnd");
     ui.click("dialog-ok");
     held.until_committing().unwrap();
     ui.still_ending(&pg14, "connection.close");
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     ui.still_ending(&pg14, "connection.close");
     // Once the COMMIT is through, pg14 closes and pgnew opens. The toast shows as the end
     // applies, while pgnew connects (it goes after 4 s).
@@ -843,7 +1172,7 @@ fn a_switch_waits_for_the_end_then_switches() {
     assert_eq!(ids(), "2", "committed");
     // ROLLBACK, back to pg14.
     in_transaction(&mut ui, "BEGIN");
-    ui.quick_choose("pg14");
+    ui.quick_switch("pg14", "pg14");
     assert_eq!(ui.inspect()["dialog"], "transactionEnd");
     ui.click("dialog-rollback");
     assert_eq!(toast_text(&mut ui), "Rolled back on pgnew");
@@ -857,7 +1186,7 @@ fn a_switch_waits_for_the_end_then_switches() {
     assert_eq!(ui.inspect()["dialog"], "transactionEnd");
     ui.click("dialog-ok");
     held.until_committing().unwrap();
-    ui.quick_choose("pgnew");
+    ui.quick_switch("pgnew", "pgnew");
     ui.still_ending(&pg14, "tab.close");
     drop(held);
     assert_eq!(toast_text(&mut ui), "Committed on pg14");
@@ -1441,7 +1770,7 @@ fn status_bar_lists_only_live_jobs() {
     ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
     let tab = ui.active();
     ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
-    ui.frame();
+    ui.until("the job", |ui| ui.tag("status-job").is_some());
     assert!(ui.value("status-job").as_str().is_some_and(|s| s.contains("Query 1")), "the running query shows");
     assert!(ui.tag("status-cancel").is_some());
     ui.click("status-cancel");
@@ -1450,11 +1779,84 @@ fn status_bar_lists_only_live_jobs() {
     assert!(ui.tag("status-job").is_none(), "no spinner once the run ended");
     // A tab closed while its job runs leaves no spinner behind.
     ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
-    ui.frame();
-    assert!(ui.tag("status-job").is_some());
+    ui.until("the job", |ui| ui.tag("status-job").is_some());
     ui.execute("tab.close", json!({ "tab": tab, "force": true }));
     ui.frame();
     assert!(ui.tag("status-job").is_none(), "{:?}", ids(&ui.inspect()));
+}
+
+/// What the footer showed in the last frame, read without running another: the job's words, its
+/// timer's words and whether CANCEL was drawn.
+fn footer(ui: &Ui) -> (Option<String>, Option<String>, bool) {
+    let tags = ui.harness.state().tags();
+    let words = |id: &str| tags.rect(id).and(tags.value(id)).and_then(|v| v.as_str().map(str::to_string));
+    (words("status-job"), words("status-timer"), tags.rect("status-cancel").is_some())
+}
+
+/// Whether the active query tab runs, as the window saw it in the last frame.
+fn query_runs(ui: &mut Ui) -> bool {
+    matches!(ui.harness.state().session().state().active_tab(), Some(dbee_engine::Tab::Query(q)) if q.running.is_some())
+}
+
+/// Review Focus 2: the footer's job, its timer and CANCEL show only once a run has gone 300 ms,
+/// and each run counts its own 300 ms and its timer from `00:00.`.
+#[test]
+fn the_footer_job_and_its_timer_wait_300_ms_and_restart() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: egui::vec2(1200.0, 800.0), step: Some(0.05), ..Setup::default() });
+    ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
+    for run in ["first", "second"] {
+        ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
+        let mut shown = false;
+        ui.frames_while(query_runs, 0.45, |ui, gone| {
+            let (job, timer, cancel) = footer(ui);
+            if gone <= 0.25 {
+                assert!(job.is_none() && timer.is_none() && !cancel, "{run} run at {gone:.2} s: nothing in the footer yet: {job:?} {timer:?}");
+            }
+            if gone >= 0.35 {
+                assert_eq!(job.as_deref(), Some("Running Query 1…"), "{run} run at {gone:.2} s");
+                assert!(timer.as_deref().is_some_and(|t| t.starts_with("00:00.")), "{run} run at {gone:.2} s: the timer from 00:00.: {timer:?}");
+                assert!(cancel, "{run} run at {gone:.2} s: CANCEL");
+                shown = true;
+            }
+        });
+        assert!(shown, "{run} run: the job showed");
+        ui.click("status-cancel");
+        ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+        ui.frame();
+        assert_eq!(footer(&ui), (None, None, false), "{run} run: the job and its timer went with it");
+    }
+}
+
+/// A page load is the table bar's (LOADING, CANCEL), not the footer's; a count on the same table
+/// is the footer's, with its timer.
+#[test]
+fn a_page_load_is_not_a_footer_job() {
+    let db = dbee_testkit::require_testdb!();
+    let table =
+        Scratch::new(db, "footer_load", |t| format!("CREATE TABLE scratch.{t} (id int); INSERT INTO scratch.{t} SELECT generate_series(1, 150)"));
+    let mut ui = Ui::connected_with(db, Setup { size: egui::vec2(1200.0, 800.0), step: Some(0.05), ..Setup::default() });
+    ui.open("scratch", &table.0);
+    ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", table.0)).unwrap();
+    let loading = |ui: &mut Ui| matches!(ui.harness.state().session().state().active_tab(), Some(dbee_engine::Tab::Table(t)) if t.loading.is_some());
+    ui.ok("engine.execute", json!({ "command": "table.refresh", "params": {}, "wait": false }));
+    ui.frames_while(loading, 0.5, |ui, _| assert_eq!(footer(ui), (None, None, false), "no footer job for a page load"));
+    let tags = ui.harness.state().tags();
+    assert!(tags.rect("table-loading").is_some() && tags.rect("table-cancel").is_some(), "the table bar's LOADING and CANCEL");
+    ui.execute("table.cancel", json!({}));
+    ui.until("the cancelled load", |ui| ui.table()["loading"].is_null());
+    let counting =
+        |ui: &mut Ui| matches!(ui.harness.state().session().state().active_tab(), Some(dbee_engine::Tab::Table(t)) if t.counting.is_some());
+    ui.ok("engine.execute", json!({ "command": "table.count", "params": {}, "wait": false }));
+    ui.frames_while(counting, 0.5, |_, _| {});
+    let (job, timer, cancel) = footer(&ui);
+    assert_eq!(job, Some(format!("Counting the rows of {}…", table.0)));
+    assert!(timer.as_deref().is_some_and(|t| t.starts_with("00:00.")), "the count's timer: {timer:?}");
+    assert!(cancel, "the count's CANCEL");
+    ui.click("status-cancel");
+    ui.until("the cancelled count", |ui| ui.table()["counting"].is_null());
+    drop(lock);
 }
 
 #[test]
@@ -1617,13 +2019,17 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
         if size == APP_SIZE {
             continue;
         }
-        // The query session locks the table, so its page load waits.
+        // The table opens, then the query session locks it, so its count waits.
+        ui.execute("table.open", json!({ "schema": "scratch", "table": long.0 }));
+        let opened = ui.active();
+        ui.until("the page", |ui| ui.table()["loading"].is_null());
         ui.execute("tab.newQuery", json!({ "text": format!("begin; lock table scratch.{} in access exclusive mode", long.0) }));
         let query = ui.active();
         ui.execute("query.run", json!({}));
-        ui.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": long.0 }, "wait": false }));
-        ui.until("the load", |ui| ui.tag("status-job").is_some_and(|e| e["value"].as_str().is_some_and(|v| v.starts_with("Loading "))));
-        let at = format!("{at}, loading a table with a 63-letter name");
+        ui.execute("tab.activate", json!({ "tab": opened }));
+        ui.ok("engine.execute", json!({ "command": "table.count", "params": {}, "wait": false }));
+        ui.until("the count", |ui| ui.tag("status-job").is_some_and(|e| e["value"].as_str().is_some_and(|v| v.starts_with("Counting the rows of "))));
+        let at = format!("{at}, counting a table with a 63-letter name");
         status_gives_way(&mut ui, size, &at);
         let block = rect_of(&ui.tag("status-connection").unwrap());
         let name: String = ui
@@ -1634,7 +2040,7 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
             .collect();
         assert!(name.chars().filter(|c| c.is_alphabetic()).count() >= 3, "{at}: the connection's name keeps letters: `{name}`");
         ui.click("status-cancel");
-        ui.until("the cancelled load", |ui| ui.table()["loading"].is_null());
+        ui.until("the cancelled count", |ui| ui.table()["counting"].is_null());
         ui.execute("query.rollback", json!({ "tab": query }));
     }
 }
@@ -1643,8 +2049,17 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
 /// none over another, and the name, SAVE CONNECTION, the job and its CANCEL shown (the value
 /// toggle is the tab's, not the bar's). The parts drawn, with their rects.
 fn status_gives_way(ui: &mut Ui, size: egui::Vec2, at: &str) -> Vec<(&'static str, egui::Rect)> {
-    let parts =
-        ["status-connection", "status-address", "status-server", "status-tls", "status-read-only", "status-save", "status-job", "status-cancel"];
+    let parts = [
+        "status-connection",
+        "status-address",
+        "status-server",
+        "status-tls",
+        "status-read-only",
+        "status-save",
+        "status-job",
+        "status-timer",
+        "status-cancel",
+    ];
     let drawn: Vec<(&str, egui::Rect)> = parts.iter().filter_map(|id| shown_rect(ui, id).map(|r| (*id, r))).collect();
     for (id, r) in &drawn {
         assert!(r.left() >= 0.0 && r.right() <= size.x, "{at}: `{id}` {r:?} inside the window");

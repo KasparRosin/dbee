@@ -1,6 +1,7 @@
 //! The one spinner: something runs. A [`size::SPINNER`] square in `text_muted`, as the app drew
-//! it before the redesign; it shows at once (the design's 300 ms delay belongs to the empty and
-//! loading states screen).
+//! it before the redesign. The one place it shows is the tab's running mark, once the tab's job
+//! has run 300 ms (and, until they go too, the tree's refresh while one runs and the words before a
+//! table's first page); every bar shows a timer instead.
 
 use egui::{Pos2, Rect, Response, Ui, Vec2, Widget};
 

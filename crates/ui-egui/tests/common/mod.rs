@@ -155,6 +155,32 @@ impl Ui {
         ui
     }
 
+    /// Egui's clock in the last frame, in seconds.
+    pub fn clock(&self) -> f64 {
+        self.harness.ctx.input(|i| i.time)
+    }
+
+    /// Runs frames until `running` holds (the first frame that sees the job), then on until egui's
+    /// clock is `secs` past that frame, `running` still holding; `check` sees each of those frames
+    /// with the time gone.
+    pub fn frames_while(&mut self, running: impl Fn(&mut Ui) -> bool, secs: f64, mut check: impl FnMut(&mut Ui, f64)) {
+        let start = Instant::now();
+        while !running(self) {
+            assert!(start.elapsed() < WAIT, "it runs");
+            self.frame();
+        }
+        let first = self.clock();
+        loop {
+            self.frame();
+            let gone = self.clock() - first;
+            assert!(running(self), "still running at {gone:.2} s");
+            check(self, gone);
+            if gone >= secs {
+                return;
+            }
+        }
+    }
+
     /// One frame, with the app's synthetic input fed in first. Keeps the frame's time in
     /// [`Ui::slowest`], what it copied in [`Ui::copied`] and what it sent the window in
     /// [`Ui::sent`].

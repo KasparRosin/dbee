@@ -1,13 +1,21 @@
-//! The quick search (Ctrl+P, `ui.quickSearch`): a modal near the top of the window with a query
-//! field and up to [`LIMIT`] results, best first, from `quickSearch.find` (the engine's fuzzy
-//! ranking): the open connection's tables and the saved connections but the open one, or only
-//! the saved connections on the connection screen. A table shows its kind's icon and
-//! `schema.name`; a connection its colour as a dot, its name and its database type's label.
+//! The quick search (Ctrl+P, `ui.quickSearch`): a box near the top of the window, over the
+//! `scrim`, with a query field and the results from `quickSearch.find {grouped: true}` (the
+//! engine's fuzzy ranking), grouped: on the workspace the open connection's tables under its
+//! heading (its colour's square mark and its name), then the saved connections but the open one
+//! under OTHER CONNECTIONS, each group best first and at most [`LIMIT`] long, a group with no
+//! match left out; on the connection screen the saved connections alone, with no heading. The
+//! parts are drawn by [`components::quick_search`].
+//!
+//! With nothing typed (or only spaces) the box holds the field alone and nothing is asked for;
+//! when nothing matches, one grey `No match` row; when the search fails, its message as one red
+//! row.
 //!
 //! The field has the keyboard while it is open: typing narrows the list, ArrowDown and ArrowUp
-//! move the highlighted result, Enter or a click chooses it, and Escape or a click outside closes
-//! the search. The list shows as many whole rows as fit above the window's bottom edge and scrolls
-//! the rest, keeping the highlighted row in view. A table opens in a table tab (`table.open`,
+//! move the highlighted row (over rows only, skipping the headings; the first row is highlighted
+//! as the list changes), Enter or a click chooses it, and Escape or a click outside closes the
+//! search. Headings and rows are one height, so the list shows as many whole items as fit above the
+//! window's bottom edge and scrolls the rest by whole items, keeping the highlighted row (with its
+//! heading, when it is its group's first) in view. A table opens in a table tab (`table.open`,
 //! through [`DbeeApp::start`]); a connection connects as a double-click on its card does
 //! ([`connections::switch_to`]), after the open connection closes through `connection.close` with
 //! its questions. It counts as a dialog for the app's other shortcuts, which do not fire while it
@@ -20,42 +28,33 @@
 //! the search never takes a dialog's Enter or Escape. The window draws it over the screen it
 //! opened on, and it closes when the window shows another screen or another connection.
 //!
-//! Automation ids: `qs-input` (value: the query) and `qs-item-<n>` (value: `schema.table`, or a
-//! connection's name), `n` from 0, best first, with `qs-item-<n>-kind` (value: the database
-//! type's label) on a connection's row.
+//! Automation ids: `qs-input` (value: the query); `qs-item-<n>` (value: `schema.table`, or a
+//! connection's name), `n` from 0 over the rows in the list's order, with `qs-item-<n>-kind`
+//! (value: the database type's label) on a connection's row; `qs-group-<g>` (value: the heading's
+//! words as written, before capitals), `g` from 0 top to bottom; `qs-none` (value `No match`)
+//! and `qs-error` (value: the search's message), the note row in place of the list.
 
 use std::sync::Arc;
 
 use dbee_config::{ConnectionColor, ConnectionConfig};
 use dbee_core::{Catalog, RelKind, TableRef};
 use dbee_engine::{Json, Outcome, Screen, State, Which};
-use egui::{Align2, Color32, CornerRadius, Frame, Key, Margin, Modifiers, ScrollArea, Sense, Stroke, TextEdit, pos2, vec2};
+use egui::{Align2, Key, Modifiers, ScrollArea, Sense, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
-use crate::components::rows::relation_icon;
-use crate::connections::{self, line_galley};
+use crate::components::quick_search::{self as parts, Field, Heading, Note, Row};
+use crate::components::tooltip::Hint;
+use crate::connections;
 use crate::theme::{
-    self, Text, connection_color,
-    size::{RADIUS_CONTROL, RADIUS_FLOAT},
+    self, connection_color,
+    size::{QS_LIST_GAP, QS_MARGIN, QS_PAD, QS_ROW_H, QS_TOP, QS_W},
 };
 
-/// The most results shown.
+/// The most results shown in each group.
 pub const LIMIT: usize = 20;
-/// The modal's content width.
-const WIDTH: f32 = 560.0;
-/// How far below the top of the window it sits.
-const TOP: f32 = 56.0;
-/// A result row.
-const ITEM_H: f32 = 28.0;
-/// The radius of a connection's colour dot, where a table's icon is.
-const DOT_R: f32 = 5.0;
-/// The space inside the modal's border.
-const PAD: i8 = 12;
-/// The least space between the modal and the window's bottom edge.
-const BOTTOM: f32 = 12.0;
 
 /// One result.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +96,45 @@ impl Hit {
             Hit::Connection { name, .. } => name.clone(),
         }
     }
+}
+
+/// A group's heading.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Group {
+    /// The open connection's tables: its display name and colour.
+    Open { name: String, color: ConnectionColor },
+    /// The saved connections.
+    Others,
+}
+
+/// One item of the drawn list, every one [`QS_ROW_H`] tall.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Item {
+    Heading(Group),
+    /// The hit `hits[n]`.
+    Row(usize),
+}
+
+/// The list drawn for `hits`: with `headings` (the workspace), each group's heading before its
+/// first hit (`open`: the open connection's name and colour, for its tables' heading); else the
+/// rows alone.
+fn items_of(hits: &[Hit], open: Option<(String, ConnectionColor)>, headings: bool) -> Vec<Item> {
+    let mut items = Vec::with_capacity(hits.len() + 2);
+    let mut last = None;
+    for (n, hit) in hits.iter().enumerate() {
+        let group = match hit {
+            Hit::Table { .. } => open.as_ref().map(|(name, color)| Group::Open { name: name.clone(), color: *color }),
+            Hit::Connection { .. } => Some(Group::Others),
+        };
+        if headings && group != last {
+            if let Some(g) = &group {
+                items.push(Item::Heading(g.clone()));
+            }
+            last = group;
+        }
+        items.push(Item::Row(n));
+    }
+    items
 }
 
 /// What results were found for: the catalog searched (none while not connected or lost), the
@@ -155,6 +193,8 @@ pub(crate) struct QuickSearch {
     restore: Option<egui::Id>,
     remembered: bool,
     hits: Vec<Hit>,
+    /// The list drawn for `hits`: headings and rows.
+    items: Vec<Item>,
     /// Why there are no results to show (the command failed), if it failed.
     error: Option<String>,
     /// What `hits` were found for.
@@ -216,11 +256,12 @@ enum Act {
     Enter,
 }
 
-/// The scroll offset that brings row `n` of the list into a view `view_h` tall, scrolled to
-/// `offset`, moving it as little as it can; rows are `pitch` apart.
-fn reveal_offset(n: usize, offset: f32, view_h: f32, pitch: f32) -> f32 {
-    let top = n as f32 * pitch;
-    let bottom = top + ITEM_H;
+/// The scroll offset that brings items `first..=last` of the list into a view `view_h` tall,
+/// scrolled to `offset`, moving it as little as it can; items are `pitch` tall, one after the
+/// other. When they don't all fit, `last` alone.
+fn reveal_offset(first: usize, last: usize, offset: f32, view_h: f32, pitch: f32) -> f32 {
+    let bottom = (last as f32 + 1.0) * pitch;
+    let top = if bottom - first as f32 * pitch > view_h { last as f32 * pitch } else { first as f32 * pitch };
     if top < offset {
         top
     } else if bottom > offset + view_h {
@@ -231,13 +272,28 @@ fn reveal_offset(n: usize, offset: f32, view_h: f32, pitch: f32) -> f32 {
 }
 
 /// Asks `quickSearch.find` for the query when it, the catalog or the saved connections changed.
+/// A blank query (nothing typed, or only spaces) asks nothing and lists nothing.
 fn find(app: &mut DbeeApp) {
+    if app.view.quick.query.trim().is_empty() {
+        let tables = app.session.state().connection(Which::Active).is_some_and(|c| !c.lost);
+        let qs = &mut app.view.quick;
+        qs.tables = tables;
+        qs.found_for = None;
+        qs.hits.clear();
+        qs.items.clear();
+        qs.error = None;
+        qs.selected = 0;
+        return;
+    }
     let qs = &app.view.quick;
     if qs.found_for.as_ref().is_some_and(|f| f.holds(app.session.state(), &qs.query)) {
         return;
     }
     let found_for = FoundFor::now(app.session.state(), &qs.query);
-    let result = app.run("quickSearch.find", json!({ "query": found_for.query, "limit": LIMIT }));
+    let result = app.run("quickSearch.find", json!({ "query": found_for.query, "limit": LIMIT, "grouped": true }));
+    let state = app.session.state();
+    let headings = state.screen == Screen::Workspace;
+    let open = state.connection(Which::Active).map(|c| (c.config.display_name(), c.config.color));
     let qs = &mut app.view.quick;
     qs.tables = found_for.tables.is_some();
     qs.found_for = Some(found_for);
@@ -248,6 +304,7 @@ fn find(app: &mut DbeeApp) {
         Ok(_) => qs.error = Some("The search gave no list.".into()),
         Err(e) => qs.error = Some(crate::app::notice_text(&e)),
     }
+    qs.items = items_of(&qs.hits, open, headings);
     qs.selected = qs.selected.min(qs.hits.len().saturating_sub(1));
 }
 
@@ -330,26 +387,17 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
     }
     let id = egui::Id::new("dbee-quick-search");
     let screen = ctx.content_rect();
-    let outer = WIDTH + 2.0 * f32::from(PAD) + 2.0;
+    let w = QS_W.min(screen.width() - 2.0 * QS_MARGIN).max(0.0);
+    let inner = (w - 2.0 * f32::from(QS_PAD)).max(0.0);
     // A fixed corner, so the first frame puts every widget where the next ones do.
-    let offset = vec2(((screen.width() - outer) / 2.0).max(0.0), TOP.min(screen.height() * 0.1));
-    let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, offset).fade_in(false);
-    let frame = Frame::new()
-        .fill(t.raised)
-        .stroke(Stroke::new(1.0, t.raised_line))
-        .corner_radius(CornerRadius::same(RADIUS_FLOAT))
-        .inner_margin(Margin::same(PAD));
+    let corner = vec2(((screen.width() - w) / 2.0).max(0.0), QS_TOP.min(screen.height() * 0.1));
+    let area = egui::Modal::default_area(id).anchor(Align2::LEFT_TOP, corner).fade_in(false);
     let mut act = Act::None;
-    let modal = egui::Modal::new(id).area(area).frame(frame).backdrop_color(t.scrim).show(ctx, |ui| {
-        ui.set_width(WIDTH);
-        let field = ui.add(
-            TextEdit::singleline(&mut qs.query)
-                .id(egui::Id::new(INPUT))
-                .hint_text(if qs.tables { "Find a table or connection by name" } else { "Find a connection by name" })
-                .desired_width(WIDTH)
-                .font(Text::Body.font())
-                .margin(Margin::symmetric(8, 6)),
-        );
+    let modal = egui::Modal::new(id).area(area).frame(parts::frame(t)).backdrop_color(t.scrim).show(ctx, |ui| {
+        ui.set_width(inner);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let placeholder = if qs.tables { "Find a table or connection" } else { "Find a connection" };
+        let field = Field { text: &mut qs.query, placeholder, id: egui::Id::new(INPUT) }.show(ui, inner);
         tags.tag_value_as(INPUT, &field, qs.query.as_str(), true);
         if !qs.focused {
             field.request_focus();
@@ -359,61 +407,81 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
             qs.selected = 0;
             qs.reveal = true;
         }
-        ui.add_space(6.0);
-        if let Some(e) = &qs.error {
-            ui.label(egui::RichText::new(e.as_str()).color(t.danger));
-        } else if qs.hits.is_empty() {
-            let none = if qs.tables { "No table or connection matches." } else { "No connection matches." };
-            ui.label(egui::RichText::new(none).color(t.text_muted));
+        let note = match &qs.error {
+            Some(e) => Some((Note::Error(e.as_str()), "qs-error")),
+            None if qs.hits.is_empty() && !qs.query.trim().is_empty() => Some((Note::NoMatch, "qs-none")),
+            None => None,
+        };
+        if note.is_none() && qs.items.is_empty() {
+            // Nothing typed: the field alone.
+            return;
         }
-        let gap = ui.spacing().item_spacing.y;
-        let pitch = ITEM_H + gap;
-        let room = screen.bottom() - ui.cursor().top() - f32::from(PAD) - 1.0 - BOTTOM;
-        // Whole rows only, so moving the highlight scrolls by whole rows.
-        let list_h = ((room + gap) / pitch).floor().max(1.0) * pitch - gap;
+        ui.add_space(QS_LIST_GAP);
+        if let Some((note, tag)) = note {
+            let (rect, r) = ui.allocate_exact_size(vec2(inner, QS_ROW_H), Sense::hover());
+            let cut = note.paint(ui, rect);
+            tags.tag_value_as(tag, &r, note.words(), true);
+            if let Some(whole) = cut {
+                r.hint(whole);
+            }
+            return;
+        }
+        let room = screen.bottom() - QS_MARGIN - f32::from(QS_PAD) - ui.cursor().top();
+        // Whole items only, so moving the highlight scrolls by whole items.
+        let list_h = (room / QS_ROW_H).floor().max(1.0) * QS_ROW_H;
         // The modal's room is last frame's size: the minimum lets the list grow past it.
         let mut list = ScrollArea::vertical().id_salt("qs-list").max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, true]);
-        if std::mem::take(&mut qs.reveal) {
-            list = list.vertical_scroll_offset(reveal_offset(qs.selected, qs.offset, list_h, pitch));
+        if std::mem::take(&mut qs.reveal)
+            && let Some(at) = qs.items.iter().position(|i| *i == Item::Row(qs.selected))
+        {
+            // A group's first row comes into view with its heading.
+            let first = if at > 0 && matches!(qs.items.get(at - 1), Some(Item::Heading(_))) { at - 1 } else { at };
+            list = list.vertical_scroll_offset(reveal_offset(first, at, qs.offset, list_h, QS_ROW_H));
         }
         let shown = list.show(ui, |ui| {
-            for (n, hit) in qs.hits.iter().enumerate() {
-                let (rect, r) = ui.allocate_exact_size(vec2(WIDTH, ITEM_H), Sense::click());
-                let fill = if n == qs.selected || r.hovered() { t.raised_hover } else { Color32::TRANSPARENT };
-                let p = ui.painter();
-                p.rect_filled(rect, CornerRadius::same(RADIUS_CONTROL), fill);
-                let mark = pos2(rect.left() + 16.0, rect.center().y);
-                let x = rect.left() + 32.0;
-                match hit {
-                    Hit::Table { table, kind } => {
-                        relation_icon(*kind).paint(p, mark, t.text_muted);
-                        let schema = line_galley(ui, &format!("{}.", table.schema), Text::Body, t.text_muted, WIDTH * 0.4);
-                        let schema_w = schema.size().x;
-                        p.galley(pos2(x, rect.center().y - schema.size().y / 2.0), schema, t.text_muted);
-                        let name = line_galley(ui, &table.name, Text::Body, t.text, (rect.right() - 8.0 - x - schema_w).max(1.0));
-                        p.galley(pos2(x + schema_w, rect.center().y - name.size().y / 2.0), name, t.text);
-                    }
-                    Hit::Connection { name, label, color, .. } => {
-                        match connection_color(*color) {
-                            Some(c) => {
-                                p.circle_filled(mark, DOT_R, c);
-                            }
-                            // No colour: a ring, as in the form, dark enough for the highlight.
-                            None => {
-                                p.circle_stroke(mark, DOT_R - 0.75, Stroke::new(1.5, t.text_muted));
-                            }
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let mut group = 0;
+            for item in &qs.items {
+                match item {
+                    Item::Heading(g) => {
+                        let (rect, r) = ui.allocate_exact_size(vec2(inner, QS_ROW_H), Sense::hover());
+                        let heading = match g {
+                            Group::Open { name, color } => Heading::Connection { name, colour: connection_color(*color) },
+                            Group::Others => Heading::Others,
+                        };
+                        let cut = heading.paint(ui, rect);
+                        tags.tag_value_as(&format!("qs-group-{group}"), &r, heading.words(), true);
+                        if let Some(whole) = cut {
+                            r.hint(whole);
                         }
-                        let kind = line_galley(ui, label, Text::Body, t.text_muted, WIDTH * 0.3);
-                        let kind_x = rect.right() - 8.0 - kind.size().x;
-                        let name = line_galley(ui, name, Text::Body, t.text, (kind_x - 12.0 - x).max(1.0));
-                        p.galley(pos2(x, rect.center().y - name.size().y / 2.0), name, t.text);
-                        p.galley(pos2(kind_x, rect.center().y - kind.size().y / 2.0), kind, t.text_muted);
-                        tags.tag_value_as(&format!("qs-item-{n}-kind"), &r, label.as_str(), true);
+                        group += 1;
                     }
-                }
-                tags.tag_value_as(&format!("qs-item-{n}"), &r, hit.value(), true);
-                if r.clicked() {
-                    act = Act::Open(hit.clone());
+                    Item::Row(n) => {
+                        let Some(hit) = qs.hits.get(*n) else { continue };
+                        let (rect, r) = ui.allocate_exact_size(vec2(inner, QS_ROW_H), Sense::click());
+                        let row = Row {
+                            hit: match hit {
+                                Hit::Table { table, kind } => parts::Hit::Table { schema: &table.schema, name: &table.name, kind: *kind },
+                                Hit::Connection { name, label, color, .. } => {
+                                    parts::Hit::Connection { name, label, colour: connection_color(*color) }
+                                }
+                            },
+                            highlighted: *n == qs.selected,
+                            hovered: r.hovered(),
+                        };
+                        let cut = row.paint(ui, rect);
+                        r.widget_info(|| row.widget_info());
+                        if let Hit::Connection { label, .. } = hit {
+                            tags.tag_value_as(&format!("qs-item-{n}-kind"), &r, label.as_str(), true);
+                        }
+                        tags.tag_value_as(&format!("qs-item-{n}"), &r, hit.value(), true);
+                        if r.clicked() {
+                            act = Act::Open(hit.clone());
+                        }
+                        if let Some(whole) = cut {
+                            r.hint(whole);
+                        }
+                    }
                 }
             }
         });
@@ -441,6 +509,28 @@ mod tests {
     }
 
     #[test]
+    fn each_group_gets_its_heading_on_the_workspace_only() {
+        let table = |name: &str| Hit::Table { table: TableRef { schema: "shop".into(), name: name.into() }, kind: RelKind::Table };
+        let conn = |name: &str| Hit::Connection { id: name.into(), name: name.into(), label: "MySQL".into(), color: ConnectionColor::None };
+        let open = Some(("Shop live".to_owned(), ConnectionColor::Red));
+        let hits = [table("orders"), table("order_items"), conn("Orders replica")];
+        let shop = Item::Heading(Group::Open { name: "Shop live".into(), color: ConnectionColor::Red });
+        assert_eq!(items_of(&hits, open.clone(), true), [shop, Item::Row(0), Item::Row(1), Item::Heading(Group::Others), Item::Row(2)]);
+        assert_eq!(items_of(&hits[2..], open, true), [Item::Heading(Group::Others), Item::Row(0)], "a group with no match is left out");
+        assert_eq!(items_of(&hits[2..], None, false), [Item::Row(0)], "no heading on the connection screen");
+    }
+
+    #[test]
+    fn a_reveal_brings_the_heading_along_when_it_fits() {
+        // Item 5 below a view of 3 items at the top: scrolled so it is the last in view.
+        assert_eq!(reveal_offset(4, 5, 0.0, 96.0, 32.0), 96.0);
+        // Item 1 above a view scrolled to item 4: its heading (item 0) comes too.
+        assert_eq!(reveal_offset(0, 1, 128.0, 96.0, 32.0), 0.0);
+        // A view of one item: the row alone.
+        assert_eq!(reveal_offset(0, 1, 128.0, 32.0, 32.0), 32.0);
+    }
+
+    #[test]
     fn a_dialog_closes_the_search_and_keeps_its_keys() {
         let home = dbee_testkit::temp_home(None, None);
         let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
@@ -464,5 +554,61 @@ mod tests {
         assert!(!app.view.quick.open, "a dialog closes the search");
         frame(&mut app, vec![key(Key::Escape)]);
         assert!(app.view.dialog.is_none(), "Escape reached the dialog");
+    }
+
+    /// An app on a throwaway home (the connection screen, nothing saved), with the search open,
+    /// and a context with dbee's theme.
+    fn searching() -> (dbee_testkit::TempHome, DbeeApp, egui::Context) {
+        let home = dbee_testkit::temp_home(None, None);
+        let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
+        let mut app = DbeeApp::new(session, None);
+        app.view.quick.show_new(app.session.state());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        (home, app, ctx)
+    }
+
+    /// One frame of the search: its shapes.
+    fn search_frame(app: &mut DbeeApp, ctx: &egui::Context) -> Vec<egui::epaint::ClippedShape> {
+        app.tags.begin_frame();
+        let mut out = ctx.run_ui(RawInput::default(), |ui| show(app, ui.ctx()));
+        let shapes = std::mem::take(&mut out.shapes);
+        out.drop_without_applying_deltas();
+        shapes
+    }
+
+    #[test]
+    fn a_blank_query_asks_nothing() {
+        let (_home, mut app, ctx) = searching();
+        app.view.quick.query = "   ".into();
+        for _ in 0..3 {
+            search_frame(&mut app, &ctx);
+        }
+        let qs = &app.view.quick;
+        assert!(qs.open, "still open");
+        assert!(qs.found_for.is_none() && qs.hits.is_empty() && qs.items.is_empty(), "nothing asked: {qs:?}");
+        assert!(app.tags.value("qs-none").is_none() && app.tags.value("qs-item-0").is_none(), "nothing listed: {:?}", app.tags.ids());
+    }
+
+    #[test]
+    fn the_search_failing_shows_its_error_row() {
+        let (_home, mut app, ctx) = searching();
+        app.view.quick.query = "ord".into();
+        search_frame(&mut app, &ctx);
+        assert!(app.view.quick.found_for.is_some());
+        app.view.quick.error = Some("The search gave no list.".into());
+        app.view.quick.hits.clear();
+        app.view.quick.items.clear();
+        let shapes = search_frame(&mut app, &ctx);
+        assert_eq!(app.tags.value("qs-error"), Some(&json!("The search gave no list.")), "{:?}", app.tags.ids());
+        assert!(app.tags.value("qs-item-0").is_none() && app.tags.value("qs-none").is_none());
+        let row = app.tags.rect("qs-error").unwrap_or(egui::Rect::NOTHING);
+        assert!((row.height() - QS_ROW_H).abs() <= 0.5, "one row: {row:?}");
+        let t = theme::tokens(&ctx);
+        let drawn: Vec<_> = crate::components::texts(&shapes).into_iter().filter(|(w, _, _)| w == "The search gave no list.").collect();
+        assert_eq!(drawn.len(), 1, "drawn once: {drawn:?}");
+        let (_, at, colour) = &drawn[0];
+        assert_eq!(*colour, t.danger);
+        assert!((at.left() - row.left() - crate::theme::size::QS_TEXT_X).abs() <= 0.5, "from the text column: {at:?} in {row:?}");
     }
 }

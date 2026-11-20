@@ -24,6 +24,7 @@ use super::input::{Field, Input};
 use super::keycap::Keycap;
 use super::logo::Logo;
 use super::menu::{self, BarTitle, Item};
+use super::quick_search::{self, Field as SearchField, Heading as SearchHeading, Hit, Note, Row as SearchRow};
 use super::results::{ResultBar, ResultTab, RowCount, RunRow, RunState};
 use super::rows::{ConnectionRow, TreeKind, TreeRow};
 use super::segmented::{Segment, Segmented};
@@ -38,8 +39,9 @@ use super::toast::Toast;
 use super::tooltip;
 use super::value::{self, CopyButton, Facts as ValueFacts, Panel, State as ValueState};
 use crate::theme::size::{
-    BAR_H, CONNECTION_LOGO, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8,
-    SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_ROW_H, TAB_H, TAB_LIST_GAP, TREE_ROW_H,
+    BAR_H, CONNECTION_LOGO, CONNECTION_ROW_H, GRID_HEADER_H, KEYCAP_GAP, LINE_NUMBER_W, MENU_PAD, QS_LIST_GAP, QS_PAD, QS_ROW_H, QS_W,
+    RADIUS_CONTROL, ROW_H, SLIM_BAR_H, SPACE_8, SPACE_12, SPACE_16, SPACE_24, SPACE_32, STRUCTURE_HEADER_H, STRUCTURE_HEADING_H, STRUCTURE_ROW_H,
+    TAB_H, TAB_LIST_GAP, TREE_ROW_H,
 };
 use crate::theme::{Text, Tokens, Words, connection_color, tokens};
 
@@ -181,6 +183,7 @@ pub fn show(ui: &mut Ui) {
         bars(ui);
         grid(ui);
         sidebar_rows(ui);
+        quick_searches(ui);
         value_panels(ui);
         error_bands(ui);
         strips(ui);
@@ -395,6 +398,78 @@ fn sidebar_rows(ui: &mut Ui) {
             })
         },
     );
+}
+
+/// The quick search's narrow box, for a cut row: this wide.
+const QS_NARROW_W: f32 = 300.0;
+
+/// One item of a quick search box in the showcase.
+enum SearchItem<'a> {
+    Heading(SearchHeading<'a>),
+    Row(SearchRow<'a>),
+    Note(Note<'a>),
+}
+
+/// The quick search as the screen draws it (QC with R4's rows), and its states.
+fn quick_searches(ui: &mut Ui) {
+    let row = |hit| SearchItem::Row(SearchRow { hit, highlighted: false, hovered: false });
+    let table = |schema, name, kind| Hit::Table { schema, name, kind };
+    let connection = |name, label, colour| Hit::Connection { name, label, colour: connection_color(colour) };
+    let found = [
+        SearchItem::Heading(SearchHeading::Connection { name: "Shop live", colour: connection_color(ConnectionColor::Red) }),
+        SearchItem::Row(SearchRow { hit: table("shop", "orders", RelKind::Table), highlighted: true, hovered: false }),
+        row(table("shop", "order_items", RelKind::Table)),
+        row(table("public", "orders_archive", RelKind::View)),
+        row(table("reporting", "order_totals", RelKind::MaterializedView)),
+        SearchItem::Heading(SearchHeading::Others),
+        row(connection("Orders replica", "PostgreSQL", ConnectionColor::Blue)),
+        SearchItem::Row(SearchRow { hit: connection("Orders staging", "MySQL", ConnectionColor::Orange), highlighted: false, hovered: true }),
+        row(connection("Plain", "SQLite", ConnectionColor::None)),
+    ];
+    section(
+        ui,
+        "quick search: ord; the open connection's heading and tables (highlighted, view, materialized view), other connections (hover, no colour)",
+        SPACE_8,
+        |ui| search_box(ui, 0, QS_W, "ord", &found),
+    );
+    let cut = [
+        row(table("reporting", "order_totals_by_customer_and_month", RelKind::MaterializedView)),
+        row(connection("Reporting replica for the Customer Success team", "PostgreSQL", ConnectionColor::Green)),
+    ];
+    section(ui, "quick search: nothing typed, the placeholder; no match; the search's error (not drawn); cut rows", SPACE_8, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = SPACE_24;
+            search_box(ui, 1, QS_W, "", &[]);
+            search_box(ui, 2, QS_W, "zzz", &[SearchItem::Note(Note::NoMatch)]);
+            search_box(ui, 3, QS_W, "ord", &[SearchItem::Note(Note::Error("The search gave no list."))]);
+            search_box(ui, 4, QS_NARROW_W, "order", &cut);
+        });
+    });
+}
+
+/// A quick search box `width` wide with `query` typed, listing `items`.
+fn search_box(ui: &mut Ui, salt: usize, width: f32, query: &str, items: &[SearchItem<'_>]) {
+    let t = tokens(ui.ctx());
+    let inner = width - 2.0 * f32::from(QS_PAD);
+    quick_search::frame(t).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.vertical(|ui| {
+            let mut text = query.to_owned();
+            SearchField { text: &mut text, placeholder: "Find a table or connection", id: egui::Id::new(("showcase-quick-search", salt)) }
+                .show(ui, inner);
+            if !items.is_empty() {
+                ui.add_space(QS_LIST_GAP);
+            }
+            for item in items {
+                let (rect, _) = ui.allocate_exact_size(vec2(inner, QS_ROW_H), Sense::hover());
+                match item {
+                    SearchItem::Heading(h) => h.paint(ui, rect),
+                    SearchItem::Row(r) => r.paint(ui, rect),
+                    SearchItem::Note(n) => n.paint(ui, rect),
+                };
+            }
+        });
+    });
 }
 
 /// The value panel's frame on the page: 340 by 372, three to a row, 16 apart.
@@ -796,17 +871,21 @@ fn bars(ui: &mut Ui) {
                         Some(Activity::Exporting { elapsed: Some(s(12_400)) }),
                     ),
                     (red, at(&TUNNEL), Some(Activity::Importing { elapsed: Some(s(3900)) })),
-                    (red, at(&SHOP_FILE), Some(Activity::Job { text: Words::from("Counting rows"), elapsed: Some(s(1200)), cancel: true })),
+                    (red, at(&SHOP_FILE), Some(Activity::Job { text: Words::from("Counting rows"), elapsed: s(1200), cancel: true })),
                 ],
             );
         },
     );
     section(
         ui,
-        "not on the page yet: a job before the app gives timers, today's spinner in the timer's place; a table's name keeps its case; a name dbee made, as written, with no address; a long path cut in the middle",
+        "not on the page yet: a count's job with its timer, a table's name keeps its case; reconnecting in its first 300 ms, its words alone; a name dbee made, as written, with no address; a long path cut in the middle",
         SPACE_8,
         |ui| {
-            let job = Activity::Job { text: Words::from("Loading ").name("Orders").plain("…"), elapsed: None, cancel: true };
+            let job = Activity::Job {
+                text: Words::from("Counting the rows of ").name("Orders").plain("…"),
+                elapsed: Duration::from_millis(1200),
+                cancel: true,
+            };
             let made = Connection { name: "postgres@pg14.internal/Shop", colour: ConnectionColor::None, own: false };
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = STATUS_APART;
@@ -814,6 +893,7 @@ fn bars(ui: &mut Ui) {
                     ui,
                     vec![
                         (shop(ConnectionColor::Blue), Facts { address: pg14, ..Facts::default() }, Some(job)),
+                        (shop(ConnectionColor::Blue), Facts { address: pg14, ..Facts::default() }, Some(Activity::Reconnecting { elapsed: None })),
                         (made, Facts { server: Some("PostgreSQL 14.24"), ..Facts::default() }, None),
                     ],
                 );
@@ -827,7 +907,7 @@ fn bars(ui: &mut Ui) {
 }
 
 /// The run row, the result tabs, the result bar and the row count, as the page's Tabs and bars
-/// frame shows them, and their states before the app gives timers.
+/// frame shows them, and their first states.
 fn results(ui: &mut Ui) {
     let hovered = Look { hovered: true, ..Look::default() };
     let focused = Look { focused: true, ..Look::default() };
@@ -878,7 +958,7 @@ fn results(ui: &mut Ui) {
                 ResultBar { tabs: two(), state: done, first_of: None, export: true, value: Some(false), time_hover: None, value_off: false },
                 ResultBar {
                     tabs: two(),
-                    state: RunState::Running { elapsed: Some(s(2400)) },
+                    state: RunState::Running { elapsed: s(2400) },
                     first_of: None,
                     export: true,
                     value: Some(false),
@@ -948,7 +1028,7 @@ fn results(ui: &mut Ui) {
     );
     section(
         ui,
-        "not on the page yet: before the app gives timers, today's spinner in the timer's place; a count's first 300 ms, its words alone; a result's name keeps its case",
+        "not on the page yet: a run as it first shows, at 00:00.3; a count's first 300 ms, its words alone; a result's name keeps its case",
         SPACE_8,
         |ui| {
             stack(ui, &mut |ui| {
@@ -956,7 +1036,7 @@ fn results(ui: &mut Ui) {
                     let tabs = vec![ResultTab::new("select … Orders").active(true), ResultTab::new("select … Line_Items")];
                     ResultBar {
                         tabs,
-                        state: RunState::Running { elapsed: None },
+                        state: RunState::Running { elapsed: Duration::from_millis(300) },
                         first_of: None,
                         export: true,
                         value: Some(false),
@@ -976,7 +1056,7 @@ fn results(ui: &mut Ui) {
 }
 
 /// The table bar, the filter bar and the paging bar, as the page's Tabs and bars frame shows
-/// them, and a page loading before the app gives timers.
+/// them.
 fn table_tab_bars(ui: &mut Ui) {
     let stack = |ui: &mut Ui, rows: &mut dyn FnMut(&mut Ui)| {
         ui.vertical(|ui| {
@@ -1010,7 +1090,7 @@ fn table_tab_bars(ui: &mut Ui) {
             let rows = [
                 table(View::Data, None, RowCount::Exact(25_000)),
                 table(View::Structure, None, RowCount::Estimate(25_000)),
-                table(View::Data, Some(Loading { elapsed: Some(s(800)) }), RowCount::Exact(25_000)),
+                table(View::Data, Some(Loading { elapsed: s(800) }), RowCount::Exact(25_000)),
                 table(View::Data, None, RowCount::Estimate(100_000)),
                 table(View::Data, None, RowCount::Unknown),
                 table(View::Data, None, RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }),
@@ -1025,11 +1105,6 @@ fn table_tab_bars(ui: &mut Ui) {
             });
         },
     );
-    section(ui, "not on the page yet: a page loading before the app gives timers, today's spinner in the timer's place", SPACE_8, |ui| {
-        bar(ui, &mut |ui| {
-            table(View::Data, Some(Loading { elapsed: None }), RowCount::Exact(25_000)).show(ui);
-        });
-    });
     section(
         ui,
         "filter bar: filter row first (raw SQL toggle, column, operator, value, remove, add, APPLY), then AND rows; on card, 4 by 12 inset, line under",

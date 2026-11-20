@@ -351,9 +351,32 @@ pub const ERROR_BAND_HEADING_MIN: f32 = 120.0;
 pub const STRIP_EDGE: f32 = 2.0;
 pub const STRIP_PAD_Y: f32 = SPACE_8;
 pub const STRIP_MAX_LINES: usize = 3;
-/// What is dimmed (the connection form's fields while a test or connect runs, LC3) is drawn at
-/// this opacity.
-pub const DIM_OPACITY: f32 = 0.5;
+/// The quick search (QC with R4's rows): a box this wide (less where the window is narrower,
+/// keeping this margin from its sides and its bottom), this far below the window's top, its
+/// content this far inside; a field this tall, then this gap before the list, whose headings and
+/// rows are all this tall. In a row and in the field, an icon's or a mark's centre sits this far
+/// from the left and the words start this far in, ending this far from the right; a connection's
+/// name stops this far before its database type's label; a table's schema takes at most this
+/// share of the room. A connection's mark is a square of this side in a row, of this side in a
+/// heading; a heading's mark (or its words, with none) starts this far in, its words this far
+/// after the mark, their line's centre this far below the heading's top.
+pub const QS_W: f32 = 640.0;
+pub const QS_TOP: f32 = 56.0;
+pub const QS_PAD: i8 = 12;
+pub const QS_MARGIN: f32 = 12.0;
+pub const QS_FIELD_H: f32 = 40.0;
+pub const QS_LIST_GAP: f32 = 4.0;
+pub const QS_ROW_H: f32 = 32.0;
+pub const QS_ICON_X: f32 = 15.0;
+pub const QS_TEXT_X: f32 = 30.0;
+pub const QS_END_PAD: f32 = 8.0;
+pub const QS_KIND_GAP: f32 = 12.0;
+pub const QS_MARK: f32 = 8.0;
+pub const QS_HEADING_MARK: f32 = 6.0;
+pub const QS_HEADING_X: f32 = 8.0;
+pub const QS_HEADING_MARK_GAP: f32 = 10.0;
+pub const QS_HEADING_LINE_Y: f32 = 19.0;
+pub const QS_SCHEMA_SHARE: f32 = 0.4;
 /// The editor (`editor/line number`, `editor/error token`): a line number's box is this wide, the
 /// number flush with its right; an error's underline is this thick, this far down its line.
 pub const LINE_NUMBER_W: f32 = 36.0;

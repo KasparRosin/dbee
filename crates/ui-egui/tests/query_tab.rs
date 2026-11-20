@@ -1538,31 +1538,12 @@ fn the_run_row_matches_the_page() {
     assert_eq!(under, Vec::<String>::new(), "nothing tagged under the run row");
 }
 
-/// Egui's clock in the last frame, in seconds.
-fn clock(ui: &Ui) -> f64 {
-    ui.harness.ctx.input(|i| i.time)
-}
-
 /// Runs `select pg_sleep(30)` with Run; frames until the run goes, then on until the window's
 /// clock has gone `secs` past the frame that first showed it, `check` on each frame with the time
 /// gone so far.
-fn held_run(ui: &mut Ui, secs: f64, mut check: impl FnMut(&mut Ui, f64)) {
+fn held_run(ui: &mut Ui, secs: f64, check: impl FnMut(&mut Ui, f64)) {
     ui.click("query-run");
-    let start = Instant::now();
-    while ui.query()["running"].is_null() {
-        assert!(start.elapsed() < Duration::from_secs(20), "the run starts");
-        ui.frame();
-    }
-    let first = clock(ui);
-    loop {
-        ui.frame();
-        let gone = clock(ui) - first;
-        assert!(!ui.query()["running"].is_null(), "still running at {gone:.2} s");
-        check(ui, gone);
-        if gone >= secs {
-            return;
-        }
-    }
+    ui.frames_while(|ui| !ui.query()["running"].is_null(), secs, check);
 }
 
 /// Review Focus 2: CANCEL shows, and RUN goes off, only once the run has gone 300 ms, counted
