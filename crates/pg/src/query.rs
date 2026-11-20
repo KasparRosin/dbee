@@ -182,10 +182,11 @@ fn class_of_type(ty: &Type) -> TypeClass {
     crate::catalog::class_for(ty.name(), category)
 }
 
-/// Whether the last statement of `sql` is a command Postgres counts rows for (its tag ends in a
-/// count: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT`, `COPY`, `MOVE`, `FETCH`, and what reads
-/// as `SELECT`: `WITH`, `TABLE`, `VALUES`). tokio-postgres hides the tag and says 0 for the others
-/// (`BEGIN`, `SET`, `CREATE TABLE`), which have no count.
+/// Whether the last statement of `sql` is a command Postgres always counts rows for (its tag ends
+/// in a count: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT`, `COPY`, `MOVE`, `FETCH`, and what
+/// reads as `SELECT`: `WITH`, `TABLE`, `VALUES`). tokio-postgres hides the tag and gives 0 both for
+/// a count of 0 and for a tag with no count (`BEGIN`, `SET`, `CREATE TABLE`): a 0 is a count only
+/// for these. Any other count above 0 came from the tag (`CREATE TABLE … AS`, `EXECUTE`).
 fn counts_rows(sql: &str) -> bool {
     use dbee_sql::lexer::{TokenKind, statements, tokenize};
     let d = dbee_sql::Dialect::Postgres;
@@ -206,7 +207,8 @@ fn counts_rows(sql: &str) -> bool {
 /// ones when the counts match.
 pub async fn run(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
     let mut result = run_untyped(conn, sql, limits).await?;
-    if !counts_rows(sql) {
+    // A count above 0 is the tag's; a 0 is one only for a command that always counts.
+    if result.rows_affected == Some(0) && !counts_rows(sql) {
         result.rows_affected = None;
     }
     if !result.columns.is_empty()

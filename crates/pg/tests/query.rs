@@ -136,8 +136,9 @@ async fn update_reports_rows_affected() {
     }
 }
 
-/// A statement whose command Postgres never counts (`BEGIN`, `SET`, `CREATE TABLE`) has no rows
-/// affected, where tokio-postgres says 0; the ones it counts keep their count, 0 included.
+/// A statement whose command Postgres never counts (`BEGIN`, `SET`, `CREATE TABLE`, `PREPARE`) has
+/// no rows affected, where tokio-postgres says 0; one whose tag carries a count keeps it: a counted
+/// command's 0 included, and `CREATE TABLE … AS` and `EXECUTE` with the rows they touched.
 #[tokio::test]
 async fn only_counted_commands_report_rows_affected() {
     let db = require_testdb!();
@@ -150,6 +151,12 @@ async fn only_counted_commands_report_rows_affected() {
             (format!("/* first */ INSERT INTO \"{t}\" VALUES (1)"), Some(1)),
             (format!("WITH d AS (DELETE FROM \"{t}\" WHERE a = 2 RETURNING a) SELECT count(*) FROM d"), Some(1)),
             (format!("update \"{t}\" SET a = 2 WHERE false"), Some(0)),
+            // Commands whose tag carries a count the statement's first word doesn't tell: CREATE
+            // TABLE … AS (`SELECT 3`), EXECUTE of a prepared INSERT (`INSERT 0 2`).
+            (format!("CREATE TEMP TABLE \"{t}_as\" AS SELECT g FROM generate_series(1, 3) g"), Some(3)),
+            (format!("PREPARE \"{t}_p\" AS INSERT INTO \"{t}\" VALUES (5), (6)"), None),
+            (format!("EXECUTE \"{t}_p\""), Some(2)),
+            ("SET LOCAL work_mem = '4MB'".to_owned(), None),
             ("ROLLBACK".to_owned(), None),
         ];
         for (sql, affected) in cases {
