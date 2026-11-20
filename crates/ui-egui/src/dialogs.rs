@@ -476,10 +476,11 @@ fn saves(params: &Json) -> bool {
 
 /// `params` of an open whose secret dialog's "Save in keyring" says `keep`: an open that saves
 /// the connection keeps its secrets as its `saveSecrets` says, so that is set to `keep`, and with
-/// it off nothing goes to the secret store; another keeps the secrets given with `savePassword`.
+/// it off nothing goes to the secret store; another keeps the secrets given with `savePassword`,
+/// set to `keep` either way, so an untick undoes the form's "Save passwords" asking for it.
 fn kept(params: Json, keep: bool) -> Json {
     if !saves(&params) {
-        return if keep { with(params, "savePassword", json!(true)) } else { params };
+        return with(params, "savePassword", json!(keep));
     }
     let mut params = params;
     if let Some(config) = params.get_mut("config").and_then(Json::as_object_mut) {
@@ -961,6 +962,16 @@ mod tests {
     fn type_in(h: &mut Harness<'_, Open>, text: &str) {
         h.event(Event::Text(text.into()));
         h.run();
+    }
+
+    /// The box decides for a saved connection too: unticked, the `savePassword` the form's "Save
+    /// passwords" asked for (with a database password typed) is off when the open runs again.
+    #[test]
+    fn an_unticked_save_box_takes_back_the_forms_save_password() {
+        let asked = json!({ "id": "c1", "password": "p", "savePassword": true, "sshPassword": "sp" });
+        assert_eq!(kept(asked.clone(), false)["savePassword"], false, "unticked");
+        assert_eq!(kept(asked, true)["savePassword"], true, "ticked");
+        assert_eq!(kept(json!({ "id": "c1", "sshPassword": "sp" }), true)["savePassword"], true, "ticked, the form asked nothing");
     }
 
     #[test]
