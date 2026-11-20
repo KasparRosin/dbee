@@ -406,7 +406,8 @@ fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         page_ui.set_clip_rect(clip.intersect(page));
         let kept = view.work.structures.entry(id).or_default();
         let asked = structure_view::show(&mut page_ui, tags, id, tab, kept, loading, lost);
-        // A link opens its table's tab when one is open on this connection, else a new one.
+        // A link opens its table's tab when one is open on this connection, else a new one; a
+        // link to this tab's own table (a key that references it) shows its DATA.
         runs.extend(asked.into_iter().map(|(command, params)| {
             let open = session.state().tabs.iter().find_map(|t| match t {
                 Tab::Table(t) if t.connection == tab.connection && t.table.schema == params["schema"] && t.table.name == params["table"] => {
@@ -415,6 +416,7 @@ fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 _ => None,
             });
             match open {
+                Some(t) if command == "table.open" && t == id => ("table.view", json!({ "view": "data" })),
                 Some(t) if command == "table.open" => ("tab.activate", json!({ "tab": t.0 })),
                 _ => (command, params),
             }

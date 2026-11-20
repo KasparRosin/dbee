@@ -536,6 +536,7 @@ fn on_delete_shows_when_references_spells_the_table_in_another_case() {
     assert_eq!(ui.value("structure-foreign-keys-0-onDelete"), "cascade");
 }
 
+/// Review B3 M2, brief §3.4: a link to the tab's own table (a key that references it) shows that
 /// tab's DATA, opening no other tab.
 #[test]
 fn a_link_to_its_own_table_shows_data() {
