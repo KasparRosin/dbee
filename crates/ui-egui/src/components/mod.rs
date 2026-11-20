@@ -16,6 +16,7 @@ pub mod input;
 pub mod keycap;
 pub mod logo;
 pub mod menu;
+pub mod quick_search;
 pub mod results;
 pub mod rows;
 pub mod segmented;

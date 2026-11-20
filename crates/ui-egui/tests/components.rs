@@ -109,7 +109,7 @@ fn every(t: &Tokens) -> Vec<egui::Color32> {
 fn the_showcase_draws_in_both_modes() {
     for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
         let mut ready = false;
-        let h = Harness::builder().with_size(egui::vec2(1240.0, 11400.0)).build_ui(|ui| {
+        let h = Harness::builder().with_size(egui::vec2(1240.0, 12400.0)).build_ui(|ui| {
             if !ready {
                 showcase::prepare(ui.ctx(), theme);
                 ready = true;
@@ -183,6 +183,8 @@ fn the_showcase_draws_in_both_modes() {
             "ICON/FOLLOW, ICON/LINE-BREAK: THE GRID'S FOLLOW LINK AND A LINE BREAK IN A CELL",
             "TREE/ROW: SCHEMA OPEN, TABLE, TABLE OPEN WITH ITS COLUMNS (PRIMARY KEY, PLAIN, FOREIGN KEY), VIEW, MATERIALIZED VIEW, HOVER, SELECTED, FOCUS (INFERRED), SCHEMA",
             "SIDEBAR/CONNECTION: DEFAULT, SELECTED, HOVER, FOCUS (INFERRED), NO COLOUR, OTHER ENGINES (LOGO/MYSQL, LOGO/SQLITE)",
+            "QUICK SEARCH: ORD; THE OPEN CONNECTION'S HEADING AND TABLES (HIGHLIGHTED, VIEW, MATERIALIZED VIEW), OTHER CONNECTIONS (HOVER, NO COLOUR)",
+            "QUICK SEARCH: NOTHING TYPED, THE PLACEHOLDER; NO MATCH; THE SEARCH'S ERROR (NOT DRAWN); CUT ROWS",
             "VALUE PANEL: JSON, TEXT, NULL, EMPTY (INFERRED), NO CELL SELECTED (B4), COPIED, EDITING SEVERAL LINES (MC+), #17 A ROW AS JSON (INFERRED)",
             "VALUE PANEL: FORMATTED AS JSON (K2), A CUT VALUE (N2), 240 WIDE WITH A LONG NAME AND TYPE",
             "ERROR BAND (EC1): POSTGRES, HINT AND POSITION; POSTGRES, DETAIL AND NO POSITION; MYSQL, THE MESSAGE ONLY; SQLITE, A POSITION; STATEMENT 2 FAILED",
