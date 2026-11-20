@@ -1190,6 +1190,37 @@ fn a_failed_transaction_says_a_rollback_ends_it() {
     assert!(ui.tag("query-error").is_none(), "after the ROLLBACK statements run again");
 }
 
+/// While another tab's run goes on the same connection, the band's ROLLBACK is off and says
+/// which tab runs; once that run ends, it is on again.
+#[test]
+fn rollback_is_off_while_another_tab_runs_on_the_connection() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = query_tab(db);
+    ui.text("BEGIN; SELECT 1 / 0;");
+    ui.ctrl("Enter");
+    ui.ran();
+    assert_eq!(ui.value("query-error")["rollback"], true, "the transaction failed");
+    assert!(ui.enabled("query-rollback"), "ROLLBACK on while nothing runs");
+    let first = ui.document()["tabs"][0]["id"].as_u64().unwrap();
+    // The transaction stays failed in the engine's eyes until the other run ends: its state is
+    // read when a run ends.
+    ui.execute("tab.newQuery", json!({ "text": "ROLLBACK; SELECT pg_sleep(30)" }));
+    let other = ui.document()["tabs"][1].clone();
+    ui.ok("engine.execute", json!({ "command": "query.run", "params": {}, "wait": false }));
+    ui.execute("tab.activate", json!({ "tab": first }));
+    ui.until("ROLLBACK off", |ui| ui.tag("query-rollback").is_some_and(|t| t["enabled"] == false));
+    let why = format!("Roll back the transaction: not now, a query is running in {}", other["title"].as_str().unwrap());
+    let at = ui.drawn("query-rollback").center();
+    ui.rest(at);
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == why), "ROLLBACK says why: {why}");
+    ui.hover_away();
+    ui.execute("tab.activate", json!({ "tab": other["id"] }));
+    ui.execute("query.cancel", json!({}));
+    ui.execute("tab.activate", json!({ "tab": first }));
+    ui.until("the other run to end", |ui| ui.document()["jobs"] == json!([]));
+    assert!(ui.tag("query-rollback").is_none_or(|t| t["enabled"] != false), "not off once nothing runs");
+}
+
 /// The toolbar's buttons, moved to `components::button`, say in `ui.inspect` what they said
 /// before: ids, values, enabled flags. Cancel, off, says why on hover.
 #[test]
