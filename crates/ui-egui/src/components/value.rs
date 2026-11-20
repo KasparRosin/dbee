@@ -22,6 +22,7 @@ use egui::text::{CCursor, LayoutJob};
 use egui::{Align2, Color32, CornerRadius, Rect, Response, Sense, Ui, pos2, vec2};
 
 use super::button::{BarButton, BoxButton};
+use super::empty::{Phrase, Place};
 use super::grid_cell::one_line;
 use super::icon::Icon;
 use super::painter;
@@ -250,7 +251,7 @@ impl Panel<'_> {
                 p.galley(at, galley, t.text_muted);
             }
             State::NoCell => {
-                Text::Body.paint(&p, body.center(), Align2::CENTER_CENTER, "No cell selected", t.text_muted);
+                Phrase::new("No cell selected", Place::Centre).show(ui, body);
             }
             _ => {}
         }

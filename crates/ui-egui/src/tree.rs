@@ -69,11 +69,12 @@ use std::time::Duration;
 use dbee_core::{Catalog, RelKind, SchemaInfo, TableInfo, TableRef};
 use dbee_engine::Screen;
 use dbee_sql::Dialect;
-use egui::{Align, Label, Modifiers, Rect, Response, ScrollArea, Sense, pos2, vec2};
+use egui::{Align, Modifiers, Rect, Response, ScrollArea, Sense, pos2, vec2};
 use serde_json::json;
 
 use crate::DbeeApp;
 use crate::automation::Tags;
+use crate::components::empty::{Phrase, Place};
 use crate::components::grid_cell::Key;
 use crate::components::menu::{self, Item};
 use crate::components::rows::{TreeKind, TreeRow};
@@ -83,8 +84,7 @@ use crate::components::tooltip::Hint;
 use crate::components::{Look, focus};
 use crate::shortcuts;
 use crate::theme;
-use crate::theme::Text;
-use crate::theme::size::{SIDEBAR_PAD_X, TABLE_EMPTY_PAD, TREE_ROW_H};
+use crate::theme::size::TREE_ROW_H;
 
 /// What the user asked of the tree in a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -455,7 +455,6 @@ pub fn show(
     loading: Option<Duration>,
     tags: &mut Tags,
 ) -> Vec<TreeAct> {
-    let t = theme::tokens(ui.ctx());
     let mut acts = Vec::new();
     let many = dialect.schema_word().1.to_lowercase();
     // The header (`sidebar/filter`, `sidebar/count`), the rows straight under it.
@@ -515,11 +514,8 @@ pub fn show(
         // show: its sentence 12 in and 12 under the count, as the table tab's empty words sit.
         if !filtering {
             let text = format!("This connection has no {many} dbee can show.");
-            let inset = egui::Margin { left: SIDEBAR_PAD_X as i8, right: SIDEBAR_PAD_X as i8, top: TABLE_EMPTY_PAD as i8, bottom: 0 };
-            let shown = egui::Frame::NONE
-                .inner_margin(inset)
-                .show(ui, |ui| ui.add(Label::new(Text::Body.rich_as_written(text.as_str()).color(t.text_muted)).wrap()));
-            tags.tag_value("tree-empty", &shown.inner, text);
+            let shown = Phrase::new(&text, Place::Top).show(ui, ui.available_rect_before_wrap());
+            tags.tag_value("tree-empty", &shown, text);
         }
         return acts;
     }

@@ -205,9 +205,9 @@ pub const PAGING_NOTE_MIN: f32 = 24.0;
 /// bottom included), its sentence this far in from either side.
 pub const NOTE_BAR_H: f32 = 28.0;
 pub const NOTE_BAR_PAD_X: f32 = 12.0;
-/// The table tab's words where the grid would be (`No rows are loaded.`): this far in
-/// from the grid area's left and down from its top.
-pub const TABLE_EMPTY_PAD: f32 = 12.0;
+/// The one grey phrase of an empty area (`components::empty`): this far in from the area's left
+/// and down from its top, and clear of either side when it wraps.
+pub const EMPTY_INSET: f32 = 12.0;
 /// The sidebar's header (`sidebar/filter`, `sidebar/count`): the filter is a bar with its line
 /// along the bottom, its words this far in from the left, the refresh this far from its right end;
 /// the count's row is this tall, its words this far in.
