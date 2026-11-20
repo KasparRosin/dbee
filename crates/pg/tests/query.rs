@@ -136,6 +136,29 @@ async fn update_reports_rows_affected() {
     }
 }
 
+/// A statement whose command Postgres never counts (`BEGIN`, `SET`, `CREATE TABLE`) has no rows
+/// affected, where tokio-postgres says 0; the ones it counts keep their count, 0 included.
+#[tokio::test]
+async fn only_counted_commands_report_rows_affected() {
+    let db = require_testdb!();
+    for (major, c) in conns(db).await {
+        let t = unique("t_count");
+        let cases = [
+            ("BEGIN".to_owned(), None),
+            ("SET LOCAL statement_timeout = 0".to_owned(), None),
+            (format!("CREATE TEMP TABLE \"{t}\" (a int)"), None),
+            (format!("/* first */ INSERT INTO \"{t}\" VALUES (1)"), Some(1)),
+            (format!("WITH d AS (DELETE FROM \"{t}\" WHERE a = 2 RETURNING a) SELECT count(*) FROM d"), Some(1)),
+            (format!("update \"{t}\" SET a = 2 WHERE false"), Some(0)),
+            ("ROLLBACK".to_owned(), None),
+        ];
+        for (sql, affected) in cases {
+            let r = ok(&c, &sql, QUERY_LIMITS).await;
+            assert_eq!(r.rows_affected, affected, "pg{major}: {sql}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn describe_failure_falls_back_to_names() {
     let db = require_testdb!();

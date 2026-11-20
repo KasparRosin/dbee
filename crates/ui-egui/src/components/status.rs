@@ -307,8 +307,8 @@ pub(super) fn piece(ui: &Ui, id: Id, piece: &Piece, at: egui::Pos2, colour: Colo
 /// keeps the file's name (with the `/` before it) whole while the start keeps [`CUT_KEEP`]. Past
 /// that the folders go: the name alone, then the name cut in its own middle. `None` when that
 /// would keep fewer than [`CUT_KEEP`] at either end. The status bar's address and a connection
-/// row's line cut a path so.
-pub(super) fn cut_middle(whole: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
+/// row's line and the connection form's file boxes cut a path so.
+pub(crate) fn cut_middle(whole: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
     let letters: Vec<char> = whole.chars().collect();
     // Where the file's name starts, after its folder's mark.
     let start = letters.iter().rposition(|c| matches!(c, '/' | '\\')).map_or(0, |i| i + 1);

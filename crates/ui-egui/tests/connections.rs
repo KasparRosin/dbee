@@ -2835,3 +2835,24 @@ fn at_640_the_form_keeps_its_buttons() {
     ui.click("conn-fill-url");
     assert_eq!(ui.inspect()["dialog"], "fillFromUrl");
 }
+
+/// A chosen file's path in the form is data: drawn in the data font and, when long, cut in the
+/// middle so its file name stays whole; the whole path is the box's value.
+#[test]
+fn a_chosen_files_path_is_data_cut_in_the_middle() {
+    let mut ui = ui();
+    let long = "/srv/backups/clients/northwind-traders/archive/2026/november/nightly/orders-and-invoices.sqlite";
+    let card = ui.save(&file_of(long, "Archive"), None);
+    ui.click(&card);
+    ui.until("the file box", |ui| ui.tag("conn-file").is_some());
+    assert_eq!(ui.value("conn-file"), long);
+    let r = ui.tag("conn-file").unwrap()["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect::<Vec<_>>();
+    let boxed = egui::Rect::from_min_size(egui::pos2(r[0], r[1]), egui::vec2(r[2], r[3]));
+    let texts = ui.texts();
+    let (_, drawn) = texts.iter().find(|(at, _)| boxed.contains(at.center())).unwrap_or_else(|| panic!("the path drawn"));
+    // What the box shows, cut or not (a galley's text is the whole job's).
+    let words: String = drawn.rows.iter().map(|r| r.text()).collect();
+    assert!(words.contains('…') && words.ends_with("/orders-and-invoices.sqlite"), "cut in the middle, the name whole: {words}");
+    let family = drawn.job.sections.first().map(|s| s.format.font_id.family.clone());
+    assert_eq!(family, Some(dbee_ui_egui::theme::Text::Data.font().family), "the data font");
+}

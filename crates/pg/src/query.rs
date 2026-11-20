@@ -182,12 +182,33 @@ fn class_of_type(ty: &Type) -> TypeClass {
     crate::catalog::class_for(ty.name(), category)
 }
 
+/// Whether the last statement of `sql` is a command Postgres counts rows for (its tag ends in a
+/// count: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT`, `COPY`, `MOVE`, `FETCH`, and what reads
+/// as `SELECT`: `WITH`, `TABLE`, `VALUES`). tokio-postgres hides the tag and says 0 for the others
+/// (`BEGIN`, `SET`, `CREATE TABLE`), which have no count.
+fn counts_rows(sql: &str) -> bool {
+    use dbee_sql::lexer::{TokenKind, statements, tokenize};
+    let d = dbee_sql::Dialect::Postgres;
+    let Some(last) = statements(d, sql).pop() else { return true };
+    let text = sql.get(last).unwrap_or_default();
+    let first = tokenize(d, text).into_iter().find(|t| !matches!(t.kind, TokenKind::Whitespace | TokenKind::Comment));
+    let Some(word) = first.and_then(|t| text.get(t.range)) else { return true };
+    ["INSERT", "UPDATE", "DELETE", "MERGE", "SELECT", "COPY", "MOVE", "FETCH", "WITH", "TABLE", "VALUES"]
+        .iter()
+        .any(|w| w.eq_ignore_ascii_case(word))
+        // A statement in parentheses, `(SELECT 1)`, reads rows too.
+        || word == "("
+}
+
 /// [`run_untyped`], then (for a single statement that returned columns) [`describe`] to type
 /// them. Running comes first so the user always sees the statement's own error and a failed
 /// prepare cannot abort a transaction they opened; the described columns replace the untyped
 /// ones when the counts match.
 pub async fn run(conn: &PgConnection, sql: &str, limits: Limits) -> Result<ResultSet, DbError> {
     let mut result = run_untyped(conn, sql, limits).await?;
+    if !counts_rows(sql) {
+        result.rows_affected = None;
+    }
     if !result.columns.is_empty()
         && dbee_sql::lexer::statements(dbee_sql::Dialect::Postgres, sql).len() == 1
         && let Some(columns) = describe(conn, sql).await
