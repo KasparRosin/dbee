@@ -182,15 +182,22 @@ impl Drop for DayRows<'_> {
     }
 }
 
-/// Opens the editor of cell `(row, column)`, types `text` over its value and commits it.
-fn edit_cell(app: &mut App, row: usize, column: usize, text: &str) {
+/// Opens the editor of cell `(row, column)`, types `text` over its value and commits it: a
+/// several-line one (in the value panel) with SAVE when `save`, else with Ctrl+Enter.
+fn edit_cell(app: &mut App, row: usize, column: usize, text: &str, save: bool) {
     app.double_click(&format!("grid-cell-{row}-{column}"));
     let editor = app.value("cell-editor");
     app.ctrl("A");
     app.text(text);
-    // A multi-line editor takes Enter as a newline.
+    // A multi-line editor is the value panel's and takes Enter as a newline.
     if editor["multiline"] == true {
-        app.ctrl("Enter");
+        assert!(app.inside("cell-editor", "value-panel"), "several lines are edited in the value panel");
+        if save {
+            app.click("value-save");
+        } else {
+            app.ctrl("Enter");
+        }
+        assert!(app.tag("cell-editor").is_none(), "the editor closed");
     } else {
         app.key("Enter");
     }
@@ -391,14 +398,17 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let t = app.settled("the day's customers");
     assert_eq!(t["rows"], 2, "{name}: {t}");
     assert_eq!((app.cell(0, 0)["text"].clone(), app.cell(1, 0)["text"].clone()), (json!(day.customer), json!(day.extra)), "{name}");
-    edit_cell(app, 0, 1, &day.fixed);
+    // Several lines are saved with SAVE on Postgres and with Ctrl+Enter on the others, so both
+    // ways run each day.
+    let save = e.t.kind() == Kind::Postgres;
+    edit_cell(app, 0, 1, &day.fixed, save);
     app.right_click("grid-cell-1-1");
     app.click("grid-menu-delete");
     assert_eq!(app.cell(1, 1)["deleted"], true);
     app.click("row-add");
     assert_eq!(app.cell(2, 0)["state"], "new");
-    edit_cell(app, 2, 1, &day.added);
-    edit_cell(app, 2, 4, MARK);
+    edit_cell(app, 2, 1, &day.added, save);
+    edit_cell(app, 2, 4, MARK, save);
     assert_eq!(app.table()["edits"]["count"], 3, "{name}: a changed cell, a row to delete and a new row");
     app.click("grid-cell-0-1");
     // The paging bar counts them; paging and REFRESH wait for them.

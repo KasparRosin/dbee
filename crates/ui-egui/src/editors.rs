@@ -18,9 +18,9 @@
 //! costs far less, as each paragraph is cached. 32 KiB keeps a keystroke within about a frame in
 //! the worst case (`keystroke_frame_with_a_value_at_the_cap`, docs/testing.md §6).
 //!
-//! **Kinds** ([`Kind`], from the column's catalog entry): one line, where Enter commits; several
-//! lines for `text`, `json`, `jsonb` and `xml` (`ColumnInfo::multiline`), where Enter is a newline
-//! and Ctrl+Enter commits. Booleans are one line of text like the rest: the cell's text as the
+//! **Kinds** ([`Kind`], from the column's catalog entry): one line, edited in its cell, where Enter
+//! commits; several lines for `text`, `json`, `jsonb` and `xml` (`ColumnInfo::multiline`), edited
+//! in the value panel ([`Place`]), where Enter is a newline and Ctrl+Enter commits. Booleans are one line of text like the rest: the cell's text as the
 //! database prints it (`t`, `1`; MySQL's `TINYINT(1)` holding 5 as `5`), and an emptied editor
 //! is NULL. The engine's `cell.edit` stages a typed boolean word in the database's spelling.
 //!
@@ -36,24 +36,42 @@
 //!
 //! **Committing** ([`CellEditor::command`]): an unchanged value (the text it opened with) sends
 //! nothing; empty text sends `cell.clear` (`''` for string types, NULL for the others, booleans
-//! included); other text sends `cell.edit`. A press anywhere outside the editor commits it before anything else sees the
-//! press, so clicking another cell commits and selects that cell. An editor whose tab, page or
-//! cell is gone, or that can no longer stage, closes without committing; so does one whose tab's
-//! staged edits changed under it (`Edits::revision`: an agent's `row.delete` can move the row
-//! it points at), with a notice that the edit was discarded. When its cell leaves the rows and
-//! columns in view (scrolled away either way), it commits, as a click elsewhere would.
+//! included); other text sends `cell.edit`. A press anywhere outside the editor (in the panel:
+//! outside the panel) commits it before anything else sees the press, so clicking another cell
+//! commits and selects that cell. An editor whose tab, page or cell is gone, or that can no longer
+//! stage, closes without committing; so does one whose tab's staged edits changed under it
+//! (`Edits::revision`: an agent's `row.delete` can move the row it points at), with a notice that
+//! the edit was discarded. When the cell of an editor drawn over it leaves the rows and columns in
+//! view (scrolled away either way), it commits, as a click elsewhere would; an editor in the panel
+//! stays open.
+//!
+//! **In the panel** ([`show_in_panel`], MC+). Several lines are edited in the value panel when
+//! the table tab has room for it ([`crate::value_panel::has_room`]); opening one shows a hidden
+//! panel (`View::value_panel`, which then stays on). The panel's bar keeps the column's name and
+//! type and puts CANCEL (as Escape) and SAVE (as Ctrl+Enter) at its right, its foot counts the text's
+//! lines and bytes as they are typed; the text is the value as stored, in `code`, wrapped as WRAP
+//! says, coloured as JSON when the column is JSON or the value opened as JSON, up to the first spot
+//! that does not parse (plain `text` after it). The panel takes no edge: the caret shows it. The
+//! cell keeps its text as before the edit, in the `editing` look. Every key, the paste guard and
+//! the cap work as in the cell. With no room for the panel the editor floats over its cell as
+//! before (320 wide, up to 180 tall); one whose panel goes away while open floats from then on.
 //!
 //! Automation id: `cell-editor` (value `{text, multiline}`, the text cut to [`TAG_CHARS`]
-//! characters). The editor's text never reaches the logs: its `Debug` leaves it out.
+//! characters; in the panel its rect is the panel's text). The editor's text never reaches the
+//! logs: its `Debug` leaves it out.
 
 use std::sync::{Arc, Weak};
 
+use dbee_core::json::{self, JsonKind};
 use dbee_core::{ColumnInfo, ResultSet};
 use dbee_engine::cmd::edit::can_edit;
 use dbee_engine::{EngineError, Json, Screen, Session, Tab, TabId, Which};
 use egui::text::{CCursor, CCursorRange};
 use egui::widgets::text_edit::TextEditState;
-use egui::{Area, Event, EventFilter, Frame, Id, Key, KeyboardShortcut, Margin, Modifiers, Order, Rect, ScrollArea, Stroke, TextEdit, pos2, vec2};
+use egui::{
+    Align, Area, Event, EventFilter, Frame, Id, Key, KeyboardShortcut, Layout, Margin, Modifiers, Order, Rect, ScrollArea, Stroke, TextEdit,
+    UiBuilder, pos2, vec2,
+};
 use serde_json::json;
 
 use crate::DbeeApp;
@@ -107,6 +125,15 @@ impl Kind {
             _ => Kind::Line,
         }
     }
+}
+
+/// Where an editor is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// Over its cell: one line always, several lines with no room for the value panel.
+    Cell,
+    /// In the value panel (several lines).
+    Panel,
 }
 
 /// What the editor does once it has drawn this frame.
@@ -185,6 +212,10 @@ pub struct CellEditor {
     pub row: usize,
     pub col: usize,
     pub kind: Kind,
+    /// Where it is drawn: chosen as it opens ([`open`]).
+    pub place: Place,
+    /// Its text gets JSON colours in the panel: a JSON column, or a value that opened as JSON.
+    pub(crate) json: bool,
     /// The text it opened with (NULL as empty), and the text now.
     opened: String,
     pub text: String,
@@ -210,6 +241,7 @@ impl std::fmt::Debug for CellEditor {
             .field("row", &self.row)
             .field("col", &self.col)
             .field("kind", &self.kind)
+            .field("place", &self.place)
             .field("pending", &self.pending)
             .finish_non_exhaustive()
     }
@@ -225,6 +257,8 @@ impl CellEditor {
             row,
             col,
             kind,
+            place: Place::Cell,
+            json: false,
             opened: text.clone(),
             text,
             page: Arc::downgrade(page),
@@ -239,6 +273,11 @@ impl CellEditor {
     /// The cell it edits, for `ui.inspect`: `{row, column}`.
     pub(crate) fn tag_cell(&self) -> Json {
         json!({ "row": self.row, "column": self.col })
+    }
+
+    /// Asks it to do `key` once it has drawn this frame (the panel's CANCEL and SAVE).
+    pub(crate) fn ask(&mut self, key: EditorKey) {
+        self.pending = Some(key);
     }
 
     /// The command that commits it, or `None` when nothing changed (see the module docs).
@@ -305,7 +344,9 @@ pub fn opening(s: &Session, row: usize, col: usize) -> Result<Option<CellEditor>
     if let Some(why) = info.and_then(|i| i.not_editable()) {
         return Err(crate::app::notice_text(&EngineError::Disabled { id: "cell.edit".into(), why: why.into() }).into());
     }
-    Ok(Some(CellEditor::new(t.id, (row, col), Kind::of(info), value, data, t.edits.revision())))
+    let mut editor = CellEditor::new(t.id, (row, col), Kind::of(info), value, data, t.edits.revision());
+    editor.json = data.columns.get(col).is_some_and(|c| json::classify(c, value.unwrap_or_default()) != JsonKind::NotJson);
+    Ok(Some(editor))
 }
 
 /// Opens an editor on cell `(row, col)` of the active tab, or says why it cannot.
@@ -313,7 +354,12 @@ pub(crate) fn open(app: &mut DbeeApp, ctx: &egui::Context, row: usize, col: usiz
     // One open already is committed first (and then the new one sees its edit).
     commit(app, ctx);
     match opening(&app.session, row, col) {
-        Ok(Some(editor)) => {
+        Ok(Some(mut editor)) => {
+            // Several lines go in the value panel while the tab has room for it, which shows.
+            if editor.kind == Kind::Lines && app.view.panel.room {
+                editor.place = Place::Panel;
+                app.view.value_panel = true;
+            }
             app.view.work.editor = Some(editor);
             // A selection scrolled away: bring its cell into view, where the editor shows.
             let id = format!("{CELL}{row}-{col}");
@@ -571,11 +617,15 @@ pub fn in_view(cell: Rect, view: Rect) -> bool {
 /// How long (egui's clock, in seconds) a fresh editor waits for its cell to scroll into view.
 pub const FRESH_WAIT: f64 = 1.0;
 
-/// Its cell left the rows and columns in view: it is not drawn, and commits once this frame is
+/// Its cell left the rows and columns in view: one drawn over it is not drawn, and commits once this frame is
 /// drawn, as a click elsewhere would. One not drawn yet waits for its cell to scroll in, up to
 /// [`FRESH_WAIT`]: past that (a grid with no room for a row, say) it closes unchanged, so an
 /// editor nobody sees does not go on taking Enter and Escape. `now` is egui's clock.
 pub(crate) fn left_view(ed: &mut CellEditor, now: f64) {
+    // In the panel it is not over its cell.
+    if ed.place == Place::Panel {
+        return;
+    }
     ed.rect = None;
     if ed.pending.is_some() {
         return;
@@ -587,8 +637,9 @@ pub(crate) fn left_view(ed: &mut CellEditor, now: f64) {
     }
 }
 
-/// The text editor, at least `size`.
-fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
+/// Gives the text editor the keyboard; a fresh one also gets a new state with all of its text
+/// selected.
+fn take_keyboard(ui: &egui::Ui, ed: &mut CellEditor) {
     let id = text_id();
     if ed.fresh {
         ed.fresh = false;
@@ -601,6 +652,12 @@ fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
     } else if !ui.memory(|m| m.has_focus(id)) {
         ui.memory_mut(|m| m.request_focus(id));
     }
+}
+
+/// The text editor, at least `size`.
+fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
+    let id = text_id();
+    take_keyboard(ui, ed);
     let lines = ed.kind == Kind::Lines;
     let edit = if lines {
         TextEdit::multiline(&mut ed.text).desired_rows(1)
@@ -622,6 +679,70 @@ fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
     } else {
         ui.add(edit);
     }
+}
+
+/// Draws `ed` in the value panel (see the module docs): its text in `area`, the panel's value box
+/// ([`crate::components::value::Shown::text`]), wrapped at the box's width when `wrap`, else
+/// scrolling sideways. `panel` is the whole panel, its resize edge included: a press there does
+/// not commit it.
+pub(crate) fn show_in_panel(ui: &mut egui::Ui, ed: &mut CellEditor, area: Rect, panel: Rect, wrap: bool, tags: &mut Tags) {
+    let t = *theme::tokens(ui.ctx());
+    take_keyboard(ui, ed);
+    let json = ed.json;
+    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+        let mut job = panel_job(buf.as_str(), json, &t);
+        job.wrap.max_width = if wrap { wrap_width } else { f32::INFINITY };
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+    let mut inner = ui.new_child(UiBuilder::new().id_salt("dbee-cell-editor-panel").max_rect(area).layout(Layout::top_down(Align::Min)));
+    inner.set_clip_rect(area.intersect(ui.clip_rect()));
+    let scroll = if wrap { ScrollArea::vertical() } else { ScrollArea::both() };
+    let inset = PANEL_PAD as i8;
+    let out = scroll.id_salt("dbee-cell-editor-panel-scroll").auto_shrink([false, false]).show(&mut inner, |ui| {
+        let size = ui.available_size();
+        TextEdit::multiline(&mut ed.text)
+            .id(text_id())
+            // The text starts where the panel's value does: [`PANEL_PAD`] in, at the box's top.
+            .frame(Frame::NONE.inner_margin(Margin { left: inset, right: inset, top: 0, bottom: 0 }))
+            .font(Text::Code.font())
+            .desired_width(f32::INFINITY)
+            .min_size(size)
+            .layouter(&mut layouter)
+            .event_filter(KEYS_KEPT)
+            .show(ui)
+            .response
+    });
+    let mut r = out.inner;
+    // Its tag's rect is the text's box, not the text scrolled past it.
+    r.rect = out.inner_rect;
+    r.interact_rect = out.inner_rect;
+    ed.rect = Some(panel);
+    tags.tag_value(EDITOR, &r, ed.tag_value());
+}
+
+/// The panel's value inset, as the panel draws a value.
+const PANEL_PAD: f32 = crate::components::value::PAD;
+
+/// The layout of `text` being edited in the panel, in `code`: with `json`, coloured as JSON up to
+/// the first spot `json::highlight` stops at (punctuation `text_muted`), and plain `text` from
+/// there on; else all in `text`. Unwrapped: the caller sets the width.
+pub fn panel_job(text: &str, json: bool, t: &theme::Tokens) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let mut add = |range: std::ops::Range<usize>, colour: egui::Color32| {
+        if let Some(s) = text.get(range).filter(|s| !s.is_empty()) {
+            job.append(s, 0.0, Text::Code.format(colour));
+        }
+    };
+    let mut at = 0;
+    if json {
+        for (range, token) in json::highlight(text) {
+            add(at..range.start, t.text_muted);
+            add(range.clone(), crate::components::value::token_colour(token, t));
+            at = range.end;
+        }
+    }
+    add(at..text.len(), t.text);
+    job
 }
 
 #[cfg(test)]
@@ -832,6 +953,24 @@ mod tests {
         // Bytes, not characters: `é` is two.
         assert_eq!(selected_bytes("aébc", 1..3), 3);
         assert_eq!((selected_bytes("abc", 2..2), selected_bytes("abc", 1..9), selected_bytes("", 0..1)), (0, 2, 0));
+    }
+
+    #[test]
+    fn a_panel_editor_is_not_committed_by_scrolling() {
+        // In the value panel the editor is not over its cell: its cell scrolled away leaves it
+        // open. Over its cell (no room for the panel) it commits, as before.
+        let mut e = editor(Kind::Lines, Some("a"));
+        e.place = Place::Panel;
+        e.fresh = false;
+        left_view(&mut e, 10.0);
+        assert_eq!(e.pending, None, "in the panel: still open");
+        left_view(&mut e, 20.0);
+        assert_eq!(e.pending, None, "and later too");
+        let mut e = editor(Kind::Lines, Some("a"));
+        assert_eq!(e.place, Place::Cell, "over its cell unless placed in the panel");
+        e.fresh = false;
+        left_view(&mut e, 10.0);
+        assert_eq!(e.pending, Some(EditorKey::Commit), "over its cell: it commits");
     }
 
     #[test]

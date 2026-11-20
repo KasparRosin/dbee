@@ -524,9 +524,10 @@ fn an_editor_whose_cell_never_comes_into_view_closes() {
     let mut ui = connected_sized(db, 0.25, egui::vec2(1400.0, 150.0));
     ui.open("scratch", &t.0);
     ui.until("the page", |ui| ui.table()["rows"] == 3);
-    ui.execute("selection.set", json!({ "anchor": [2, 1], "focus": [2, 1] }));
+    // A one-line cell: its editor is drawn over the cell (several lines go in the value panel).
+    ui.execute("selection.set", json!({ "anchor": [2, 2], "focus": [2, 2] }));
     ui.key("Enter");
-    assert_eq!(ui.inspect()["editor"], json!({ "row": 2, "column": 1 }), "Enter opened an editor");
+    assert_eq!(ui.inspect()["editor"], json!({ "row": 2, "column": 2 }), "Enter opened an editor");
     assert!(ui.editor().is_none(), "which is not drawn");
     // A second of egui's clock (frames 0.25 s apart), and it is gone, unchanged.
     for _ in 0..6 {
@@ -571,9 +572,9 @@ fn quick_double_clicks_on_two_cells_both_open() {
 fn an_editor_opens_over_its_own_cell_after_a_wider_one() {
     let db = dbee_testkit::require_testdb!();
     let t = orders(db);
-    // As narrow as the app's first window: a several-lines editor on the last column is moved
-    // left to stay in view.
-    let mut ui = connected_at(db, 0.25, 1100.0);
+    // A window with no room for the value panel: a several-lines editor floats over its cell,
+    // and one on the last column is moved left to stay in view.
+    let mut ui = connected_sized(db, 0.25, egui::vec2(640.0, 420.0));
     ui.open("scratch", &t.0);
     ui.until("the page", |ui| ui.table()["rows"] == 3);
     ui.double_click("grid-cell-0-5");
@@ -594,9 +595,10 @@ fn an_editor_opens_over_its_own_cell_after_a_wider_one() {
 #[test]
 fn an_editor_scrolled_out_of_view_sideways_commits() {
     let db = dbee_testkit::require_testdb!();
-    // Ten wide columns: far wider than the window.
+    // Ten wide one-line columns: far wider than the window. (A several-line editor is in the
+    // value panel, which its cell scrolling away leaves open.)
     let name = unique("t_edit_wide");
-    let columns: Vec<String> = (1..=10).map(|c| format!("c{c} text")).collect();
+    let columns: Vec<String> = (1..=10).map(|c| format!("c{c} varchar(200)")).collect();
     let values: Vec<String> = (1..=10).map(|c| format!("repeat('{c}', 60)")).collect();
     dbee_testkit::psql(
         pg14_server(db),
@@ -1319,4 +1321,291 @@ fn a_failed_apply_shows_the_band_with_its_detail() {
     assert!(tops.windows(2).all(|w| w[0] < w[1]), "the heading, the message, DETAIL, the detail, top to bottom: {tops:?}");
     assert!(ui.texts().iter().all(|(_, g)| !g.text().contains("Detail: ")), "the detail shows once, as a field");
     assert_eq!(ui.value("grid-cell-0-0")["state"], "failed", "the failed row stays marked");
+}
+
+// ---- several lines in the value panel (MC+) -------------------------------------------------------
+
+/// The orders table open in a window of `size`, its 3 rows shown.
+fn opened_in(db: &TestDb, t: &Scratch, size: egui::Vec2) -> Ui {
+    let mut ui = connected_sized(db, 0.25, size);
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui
+}
+
+/// `inner` lies inside `outer` (to half a point).
+fn inside(inner: egui::Rect, outer: egui::Rect) -> bool {
+    outer.expand(0.5).contains_rect(inner)
+}
+
+/// A text cell opens its editor in the value panel: the cell keeps its old text in the `editing`
+/// look, the panel's bar has CANCEL and SAVE, its facts follow the typing, and SAVE stages.
+#[test]
+fn several_lines_are_edited_in_the_panel() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened_in(db, &t, APP_SIZE);
+    let tokens = *dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    ui.double_click("grid-cell-0-1");
+    let editor = ui.editor().expect("an editor is open");
+    assert_eq!(editor, json!({ "text": "Alice", "multiline": true }));
+    let (at, panel, cell) = (rect_of(&mut ui, "cell-editor"), rect_of(&mut ui, "value-panel"), rect_of(&mut ui, "grid-cell-0-1"));
+    assert!(inside(at, panel), "the editor is the panel's text: {at:?} in {panel:?}");
+    assert!(!at.intersects(cell), "not over the cell: {at:?} {cell:?}");
+    assert!(ui.tag("value-save").is_some() && ui.tag("value-cancel").is_some(), "CANCEL and SAVE in the bar");
+    for id in ["value-copy", "value-wrap", "value-text"] {
+        assert!(ui.tag(id).is_none(), "no `{id}` while the panel edits");
+    }
+    assert_eq!(ui.value("value-panel")["editing"], true);
+    // The cell: `card`, a 2 px `ink` edge inside it, its old text.
+    let edges = outlines_in(&ui, cell.expand(0.5), tokens.ink);
+    assert!(edges.iter().any(|(r, w)| *w == 2.0 && (r.width() - cell.width()).abs() <= 1.0), "a 2 px ink edge: {edges:?}");
+    assert_eq!(colour_at(&ui, cell.center()), Some(tokens.card), "on `card`");
+    assert!(ui.text_in(cell, "Alice").is_some(), "its old text");
+    // No edge round the panel or its text: the caret shows it is edited.
+    for colour in [tokens.ink, tokens.line_strong] {
+        let round = outlines_in(&ui, panel.expand(2.0), colour);
+        assert!(round.iter().all(|(r, _)| r.width() < panel.width() / 2.0), "no edge round the panel: {round:?}");
+    }
+    // Typing: the facts follow it; the cell keeps its old text.
+    ui.text("a");
+    ui.key("Enter");
+    ui.text("b");
+    assert_eq!(ui.editor_text(), "a\nb");
+    ui.frame();
+    assert_eq!(ui.value("value-panel")["facts"], "2 lines 3 B");
+    assert!(ui.text_in(cell, "Alice").is_some(), "the cell still shows its old text");
+    ui.click("value-save");
+    assert!(ui.editor().is_none(), "SAVE closed the editor");
+    assert_eq!(ui.staged(0, 1), Some(json!("a\nb")));
+    ui.frame();
+    assert_eq!(ui.value("value-panel")["editing"], false);
+    assert_eq!(ui.value("value-text")["text"], "a\nb", "the panel shows the staged value");
+}
+
+/// Every way a panel editor closes stages what the floating editor staged in the same case.
+#[test]
+fn the_panel_editor_commits_and_cancels_as_the_floating_one_did() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened_in(db, &t, APP_SIZE);
+    let open = |ui: &mut Ui, cell: &str| {
+        ui.double_click(cell);
+        assert_eq!(ui.editor().map(|e| e["multiline"].clone()), Some(json!(true)), "{cell} edits in the panel");
+        assert_eq!(ui.value("value-panel")["editing"], true);
+    };
+    // Escape, and CANCEL: nothing.
+    open(&mut ui, "grid-cell-0-1");
+    ui.text("x");
+    ui.key("Escape");
+    assert!(ui.editor().is_none());
+    open(&mut ui, "grid-cell-0-1");
+    ui.text("x");
+    ui.click("value-cancel");
+    assert!(ui.editor().is_none(), "CANCEL closed it");
+    assert_eq!(ui.edits()["count"], 0, "nothing staged");
+    // Ctrl+Enter stages.
+    open(&mut ui, "grid-cell-0-1");
+    ui.text("A1");
+    ui.ctrl("Enter");
+    assert_eq!(ui.staged(0, 1), Some(json!("A1")));
+    // A click on another cell stages and selects it.
+    open(&mut ui, "grid-cell-1-1");
+    ui.text("B1");
+    ui.click("grid-cell-0-0");
+    assert!(ui.editor().is_none());
+    assert_eq!(ui.staged(1, 1), Some(json!("B1")));
+    assert_eq!(ui.selection(), json!({ "anchor": [0, 0], "focus": [0, 0], "whole": false }));
+    // A click on the toggle stages, then hides the panel.
+    open(&mut ui, "grid-cell-2-1");
+    ui.text("C1");
+    ui.click("value-toggle");
+    assert!(ui.editor().is_none());
+    assert_eq!(ui.staged(2, 1), Some(json!("C1")));
+    ui.click("value-toggle");
+    // Ctrl+S stages, then applies everything.
+    open(&mut ui, "grid-cell-0-1");
+    ui.text("S1");
+    ui.ctrl("S");
+    ui.until("the Apply", |ui| ui.edits()["count"] == 0);
+    let names = format!("SELECT string_agg(name, ',' ORDER BY id) FROM scratch.{}", t.0);
+    ui.until("the names written", |_| q(db, &names) == "S1,B1,C1");
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    // Ctrl+W stages, then asks.
+    open(&mut ui, "grid-cell-0-1");
+    ui.text("W1");
+    ui.ctrl("W");
+    assert!(ui.editor().is_none());
+    assert_eq!(ui.staged(0, 1), Some(json!("W1")));
+    assert!(ui.ok("ui.inspect", json!({}))["dialog"].is_string(), "closing with a staged change asks");
+    ui.click("dialog-cancel");
+    // An agent's `row.delete` under it: discarded, with today's notice.
+    for _ in 0..3 {
+        ui.execute("row.add", json!({}));
+    }
+    open(&mut ui, "grid-cell-4-1");
+    ui.text("Zed");
+    ui.execute("row.delete", json!({ "rows": [3] }));
+    ui.frame();
+    assert!(ui.editor().is_none(), "the editor closed");
+    let notice = ui.notice();
+    assert!(notice.contains("discarded"), "{notice}");
+    assert_eq!(ui.staged(0, 1), Some(json!("W1")), "the earlier change stays, nothing else was written");
+}
+
+/// A panel editor stays open while its cell is scrolled out of view: it is not over the cell.
+#[test]
+fn a_panel_editor_stays_open_when_its_cell_scrolls_away() {
+    let db = dbee_testkit::require_testdb!();
+    let name = unique("t_edit_wide_text");
+    let columns: Vec<String> = (1..=10).map(|c| format!("c{c} text")).collect();
+    let values: Vec<String> = (1..=10).map(|c| format!("repeat('{c}', 60)")).collect();
+    dbee_testkit::psql(
+        pg14_server(db),
+        &format!(
+            "CREATE TABLE scratch.{name} (id int PRIMARY KEY, {}); INSERT INTO scratch.{name} SELECT g, {} FROM generate_series(1, 5) AS g;",
+            columns.join(", "),
+            values.join(", ")
+        ),
+    )
+    .unwrap();
+    let t = Scratch(name);
+    let mut ui = opened_rows(db, &t, 5);
+    ui.double_click("grid-cell-0-1");
+    ui.ctrl("A");
+    ui.text("abc");
+    ui.wheel("grid-cell-3-2", egui::vec2(-2000.0, 0.0));
+    let cell = ui.tag("grid-cell-0-1").unwrap();
+    assert_eq!(cell["visible"], false, "c1 is out of view: {cell}");
+    assert_eq!(ui.editor_text(), "abc", "the editor is still open in the panel");
+    assert_eq!(ui.edits()["count"], 0, "nothing staged yet");
+    ui.ctrl("Enter");
+    assert_eq!(ui.staged(0, 1), Some(json!("abc")));
+}
+
+/// Keys in the panel editor are its own: Ctrl+C copies its selection, Ctrl+A selects its text,
+/// Ctrl+Enter saves (no query runs), Tab commits and moves, Ctrl+Z undoes typing. After it closes
+/// the grid has its keys back.
+#[test]
+fn keys_in_the_panel_editor_stay_in_it() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = connected_sized(db, 0.25, APP_SIZE);
+    // A query tab behind, with a statement Ctrl+Enter would run.
+    ui.ctrl("T");
+    ui.frame();
+    let query_tab = ui.document()["active"].clone();
+    ui.text("SELECT 1");
+    ui.open("scratch", &t.0);
+    ui.until("the page", |ui| ui.table()["rows"] == 3);
+    ui.double_click("grid-cell-0-1");
+    ui.key("End");
+    for _ in 0..3 {
+        ui.key_with("ArrowLeft", json!({ "shift": true }));
+    }
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some("ice"), "the editor's selection");
+    ui.ctrl("A");
+    assert!(ui.editor().is_some(), "Ctrl+A kept the editor open");
+    assert_eq!(ui.selection(), json!({ "anchor": [0, 1], "focus": [0, 1], "whole": false }), "the grid's selection is unchanged");
+    ui.text("Z");
+    assert_eq!(ui.editor_text(), "Z", "Ctrl+A selected all of the editor's text");
+    ui.ctrl("Z");
+    assert_eq!(ui.editor_text(), "Alice", "Ctrl+Z undid the typing");
+    ui.text("Q");
+    ui.ctrl("Enter");
+    assert!(ui.editor().is_none(), "Ctrl+Enter saved");
+    assert_eq!(ui.staged(0, 1), Some(json!("Q")));
+    ui.no_notice();
+    // Tab commits and selects the next cell.
+    ui.double_click("grid-cell-1-1");
+    ui.text("T");
+    ui.key("Tab");
+    assert!(ui.editor().is_none());
+    assert_eq!(ui.staged(1, 1), Some(json!("T")));
+    assert_eq!(ui.selection(), json!({ "anchor": [1, 2], "focus": [1, 2], "whole": false }));
+    // The grid has its keys back: Ctrl+C copies its cell.
+    ui.ctrl("C");
+    assert_eq!(ui.copied().as_deref(), Some("20.00"));
+    // The query tab ran nothing.
+    ui.click(&format!("tab-{query_tab}"));
+    assert_eq!(ui.document()["query"]["results"], json!([]), "no statement ran");
+}
+
+/// With the panel hidden, a several-line edit shows it, and it stays shown.
+#[test]
+fn a_hidden_panel_opens_for_a_several_line_edit() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened_in(db, &t, APP_SIZE);
+    assert_eq!(ui.execute("ui.toggleValuePanel", json!({}))["visible"], false);
+    ui.frame();
+    assert!(ui.tag("value-panel").is_none(), "hidden");
+    ui.double_click("grid-cell-0-1");
+    ui.frame();
+    assert_eq!(ui.value("value-panel")["editing"], true, "the panel shows, editing");
+    assert_eq!(ui.value("value-toggle"), true);
+    assert!(inside(rect_of(&mut ui, "cell-editor"), rect_of(&mut ui, "value-panel")));
+    ui.text("P");
+    ui.click("value-save");
+    assert_eq!(ui.staged(0, 1), Some(json!("P")));
+    ui.frame();
+    assert_eq!(ui.value("value-panel")["editing"], false, "the panel stays");
+    assert_eq!(ui.value("value-toggle"), true);
+}
+
+/// With no room for the panel (640 × 420), several lines are edited over the cell, as before.
+#[test]
+fn with_no_room_for_the_panel_text_is_edited_over_the_cell() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened_in(db, &t, egui::vec2(640.0, 420.0));
+    ui.double_click("grid-cell-0-1");
+    assert_eq!(ui.editor(), Some(json!({ "text": "Alice", "multiline": true })));
+    assert!(ui.tag("value-panel").is_none(), "no panel");
+    let (at, cell) = (rect_of(&mut ui, "cell-editor"), rect_of(&mut ui, "grid-cell-0-1"));
+    // Over the cell (moved left as far as it must to stay in view, as before).
+    assert!(
+        at.left() <= cell.left() + 1.0 && at.right() >= cell.right() - 1.0 && (at.top() - cell.top()).abs() <= 1.0,
+        "over the cell: {at:?} {cell:?}"
+    );
+    assert!((at.width() - 320.0).abs() <= 1.0, "320 wide: {at:?}");
+    ui.ctrl("A");
+    ui.text("N");
+    ui.ctrl("Enter");
+    assert_eq!(ui.staged(0, 1), Some(json!("N")));
+}
+
+/// The colour of the text drawn for byte range `bytes` of the galley reading `text` inside `at`.
+fn colour_of(ui: &Ui, at: egui::Rect, text: &str, bytes: std::ops::Range<usize>) -> Option<egui::Color32> {
+    let (_, galley) = ui.texts().into_iter().find(|(r, g)| g.text() == text && at.expand(1.0).intersects(*r))?;
+    galley
+        .job
+        .sections
+        .iter()
+        .find(|s| usize::from(s.byte_range.start) <= bytes.start && bytes.end <= usize::from(s.byte_range.end))
+        .map(|s| s.format.color)
+}
+
+/// JSON being edited keeps its colours up to the first spot that doesn't parse; after it the text
+/// is plain `text`.
+#[test]
+fn json_is_coloured_while_it_is_edited() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened_in(db, &t, APP_SIZE);
+    let tokens = *dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    ui.double_click("grid-cell-0-5");
+    let text = ui.editor_text();
+    assert_eq!(text, "{\"a\": 1}", "the value as stored");
+    let at = rect_of(&mut ui, "cell-editor");
+    assert_eq!(colour_of(&ui, at, &text, 1..4), Some(tokens.syn_keyword), "the key");
+    assert_eq!(colour_of(&ui, at, &text, 6..7), Some(tokens.syn_number), "the number");
+    ui.key("End");
+    ui.text("{");
+    let text = ui.editor_text();
+    assert_eq!(text, "{\"a\": 1}{");
+    assert_eq!(colour_of(&ui, at, &text, 1..4), Some(tokens.syn_keyword), "the key still");
+    assert_eq!(colour_of(&ui, at, &text, 8..9), Some(tokens.text), "after the broken spot: `text`");
+    ui.key("Escape");
 }

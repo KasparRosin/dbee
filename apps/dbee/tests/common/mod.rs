@@ -183,6 +183,12 @@ impl App {
         self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"))["value"].clone()
     }
 
+    /// Widget `inner` lies inside widget `outer` (to half a point).
+    pub fn inside(&mut self, inner: &str, outer: &str) -> bool {
+        let ([x, y, w, h], [ox, oy, ow, oh]) = (self.rect(inner), self.rect(outer));
+        x >= ox - 0.5 && y >= oy - 0.5 && x + w <= ox + ow + 0.5 && y + h <= oy + oh + 0.5
+    }
+
     /// `[x, y, width, height]` of widget `id`, in window points.
     pub fn rect(&mut self, id: &str) -> [f64; 4] {
         let tag = self.tag(id).unwrap_or_else(|| panic!("no widget `{id}` was drawn"));

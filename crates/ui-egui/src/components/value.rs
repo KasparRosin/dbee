@@ -112,6 +112,9 @@ pub fn fact_size(n: usize) -> String {
 /// COPY's hover while it can copy a cell's value, and a row's.
 pub const COPY_HOVER: &str = "Copy the whole value";
 pub const COPY_ROW_HOVER: &str = "Copy the row as JSON";
+/// CANCEL's and SAVE's hovers while a value is edited in the panel.
+pub const CANCEL_HOVER: &str = "Leave the value as it was (Esc)";
+pub const SAVE_HOVER: &str = "Stage the new value (Ctrl+Enter)";
 /// WRAP's hover while it is off, and on.
 pub const WRAP_HOVER: &str = "Wrap long lines";
 pub const UNWRAP_HOVER: &str = "Stop wrapping long lines";
@@ -353,8 +356,8 @@ impl Panel<'_> {
             let y = bar.center().y - BUTTON_H / 2.0;
             let save_at = Rect::from_min_size(pos2(right - VALUE_INSET - save_w, y), vec2(save_w, BUTTON_H));
             let cancel_at = Rect::from_min_size(pos2(save_at.left() - VALUE_EDIT_GAP - cancel_w, y), vec2(cancel_w, BUTTON_H));
-            shown.cancel = Some(ui.put(cancel_at, cancel));
-            shown.save = Some(ui.put(save_at, save));
+            shown.cancel = Some(ui.put(cancel_at, cancel).hint(CANCEL_HOVER));
+            shown.save = Some(ui.put(save_at, save).hint(SAVE_HOVER));
             return cancel_at.left();
         }
         let words = fit.words();
@@ -816,11 +819,11 @@ mod tests {
         let json_view = view("billing", "jsonb", Some(raw));
         let h = app(Theme::Light, size, Some(json_view.clone()));
         let head = h.state().tags.value("value-panel").unwrap().clone();
-        assert_eq!(keys(&head), ["bytes", "column", "facts", "label", "note", "null", "row", "truncated", "type", "wrap"]);
+        assert_eq!(keys(&head), ["bytes", "column", "editing", "facts", "label", "note", "null", "row", "truncated", "type", "wrap"]);
         let lines = json_view.text.split('\n').count();
         assert_eq!(
             head,
-            json!({ "column": "billing", "row": null, "type": "jsonb", "label": "jsonb", "null": false, "bytes": raw.len(), "truncated": false, "note": null, "facts": format!("{lines} lines {} B", raw.len()), "wrap": true })
+            json!({ "column": "billing", "row": null, "type": "jsonb", "label": "jsonb", "null": false, "bytes": raw.len(), "truncated": false, "note": null, "facts": format!("{lines} lines {} B", raw.len()), "wrap": true, "editing": false })
         );
         let v = h.state().tags.value("value-text").unwrap().clone();
         assert_eq!(keys(&v), ["cut", "firstColumn", "firstRow", "highlighted", "rows", "selection", "text"]);
@@ -865,7 +868,7 @@ mod tests {
         let lines = 6;
         assert_eq!(
             head,
-            json!({ "column": "", "row": 1_203, "type": "", "label": null, "null": false, "bytes": len, "truncated": false, "note": null, "facts": format!("{lines} lines {len} B"), "wrap": true })
+            json!({ "column": "", "row": 1_203, "type": "", "label": null, "null": false, "bytes": len, "truncated": false, "note": null, "facts": format!("{lines} lines {len} B"), "wrap": true, "editing": false })
         );
         let v = h.state().tags.value("value-text").unwrap();
         assert_eq!((v["text"].as_str(), v["highlighted"].clone()), (Some("{\n  \"id\": 3,\n  \"doc\": {\n    \"a\": 1\n  }\n}"), json!(true)));

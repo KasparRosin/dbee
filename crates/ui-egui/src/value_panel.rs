@@ -62,11 +62,16 @@
 //! the session, in memory only, one for every tab. It is drawn after the tab's grid ([`reserve`],
 //! then [`fill`]), so a click on a cell shows its value in the same frame.
 //!
+//! **Editing.** While the open cell editor is the panel's (several lines, [`crate::editors`]),
+//! the panel is that editor: its bar names the column, CANCEL and SAVE at its right in place of
+//! COPY and WRAP, the editor's text in the value's box, the facts counting the text as typed.
+//!
 //! Automation ids: `value-panel` (value `{column, row, type, label, null, bytes, truncated,
-//! note, facts, wrap}`, `row` the number of a whole selected row (`column` and `type` then empty) or
+//! note, facts, wrap, editing}`, `row` the number of a whole selected row (`column` and `type` then empty) or
 //! null, `label` the JSON label or null, `bytes` the whole value's length, `note` what a cut value
 //! says (not drawn), `facts` the facts as written before capitals or null with no facts strip;
-//! `wrap` whether WRAP is on; `null` when no cell is selected), `value-copy` (COPY; value
+//! `wrap` whether WRAP is on; `editing` whether the panel is the cell editor; `null` when no cell
+//! is selected), `value-cancel` and `value-save` (CANCEL and SAVE while editing), `value-copy` (COPY; value
 //! `{label, why}`, `label` `Copy` or `Copied`, `why` while it is off), `value-wrap` (WRAP; value
 //! whether it is on), `value-text` (value `{text, cut, selection, highlighted, rows, firstRow,
 //! firstColumn}`: the text's first [`TAG_BYTES`] bytes and whether there is more, the selection
@@ -92,7 +97,7 @@ use crate::automation::Tags;
 use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
 use crate::components::value::{self, COPY_HOVER, COPY_ROW_HOVER, CopyButton, Facts, Panel, Shown, State};
-use crate::editors::size_text;
+use crate::editors::{self, EditorKey, Place, size_text};
 use crate::shortcuts;
 use crate::theme::{
     self, Text,
@@ -105,6 +110,8 @@ pub const TEXT: &str = "value-text";
 pub const TOGGLE: &str = "value-toggle";
 pub const COPY: &str = "value-copy";
 pub const WRAP: &str = "value-wrap";
+pub const CANCEL: &str = "value-cancel";
+pub const SAVE: &str = "value-save";
 
 /// How long COPY reads ✓ COPIED after a copy, in seconds.
 pub const COPIED_FOR: f64 = 1.5;
@@ -610,6 +617,9 @@ pub struct PanelState {
     holding_rows: bool,
     /// COPY copied the value shown: it reads ✓ COPIED until then, on egui's clock.
     copied_until: Option<f64>,
+    /// The table tab drawn last has room for the panel ([`has_room`]): a several-line editor
+    /// opening now goes in it ([`crate::editors`]).
+    pub(crate) room: bool,
 }
 
 /// Leaves the value out: it is a cell's.
@@ -775,6 +785,11 @@ fn panel_id() -> Id {
 /// After the tab's body: the panel's contents in `rect`, for the value the session shows now;
 /// COPY as `value.copy` allows, running `clipboard.copyValue` when pressed.
 pub(crate) fn fill(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
+    let active = app.session.state().active;
+    if app.view.work.editor.as_ref().is_some_and(|e| e.place == Place::Panel && Some(e.tab) == active) {
+        editing(app, ui, rect);
+        return;
+    }
     let view = app.session.value_view_shared();
     let now = ui.ctx().input(|i| i.time);
     let why = app.session.enabled("value.copy").err();
@@ -812,6 +827,64 @@ pub(crate) fn fill(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
             Err(e) => app.notice(Kind::Error, crate::app::notice_text(&e)),
         }
     }
+}
+
+/// The facts of text being edited: its lines and bytes, counted as it is typed.
+fn live_facts(text: &str) -> Facts {
+    Facts { lines: text.bytes().filter(|&b| b == b'\n').count().saturating_add(1), bytes: text.len(), formatted: false, whole: None }
+}
+
+/// [`fill`] while the open cell editor is the panel's (MC+): the bar names the column, CANCEL and
+/// SAVE at its right; the editor's text in the value's box; the live facts at the foot. No COPY,
+/// WRAP or `value-text`; CANCEL and SAVE act once the frame has drawn, as the editor's keys do.
+fn editing(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
+    // The value view names the column and its type (the editor's cell is the selection's focus).
+    let view = app.session.value_view_shared();
+    let DbeeApp { view: v, tags, .. } = app;
+    let wrap = v.value_wrap;
+    let Some(ed) = v.work.editor.as_mut() else { return };
+    let mut child = ui.new_child(UiBuilder::new().id_salt("dbee-value-contents").max_rect(rect).layout(Layout::top_down(Align::Min)));
+    let full = child.max_rect();
+    let panel = child.interact(full, child.id().with("dbee-value-panel"), Sense::hover());
+    let before = live_facts(&ed.text);
+    let (title, ty) = view.as_ref().map(|v| (v.title(), v.type_label.clone())).unwrap_or_default();
+    let look = Panel { state: State::Editing, title: &title, ty: &ty, facts: Some(before), buttons: true, copy: CopyButton::ON, wrap, edge: false };
+    let shown = look.show(&mut child, full);
+    // A press on the panel, its resize edge included, leaves the editor open.
+    let grab = child.style().interaction.resize_grab_radius_side;
+    let whole = Rect::from_min_max(pos2(full.left() - grab, full.top()), full.max);
+    editors::show_in_panel(&mut child, ed, shown.text, whole, wrap, tags);
+    // The facts were drawn before this frame's typing went in: the next frame shows it.
+    let facts = live_facts(&ed.text);
+    if facts != before {
+        ui.ctx().request_repaint();
+    }
+    if let Some(r) = &shown.cancel {
+        tags.tag_value(CANCEL, r, "Cancel");
+        if r.clicked() {
+            ed.ask(EditorKey::Cancel);
+        }
+    }
+    if let Some(r) = &shown.save {
+        tags.tag_value(SAVE, r, "Save");
+        if r.clicked() {
+            ed.ask(EditorKey::Commit);
+        }
+    }
+    let head = json!({
+        "column": view.as_ref().map(|v| v.column.clone()),
+        "row": view.as_ref().and_then(|v| v.row),
+        "type": ty,
+        "label": view.as_ref().map(|v| v.kind_label.clone()).filter(|l| !l.is_empty()),
+        "null": view.as_ref().is_some_and(|v| v.is_null),
+        "bytes": view.as_ref().map_or(0, |v| v.byte_len),
+        "truncated": view.as_ref().is_some_and(|v| v.truncated),
+        "note": view.as_ref().and_then(|v| note(v)),
+        "facts": facts.words().join(" "),
+        "wrap": wrap,
+        "editing": true,
+    });
+    tags.tag_value(PANEL, &panel, head);
 }
 
 /// Step 4 of the frame, before the shortcuts, unless a text field or a text editor has the
@@ -955,6 +1028,7 @@ fn show(
         "note": note,
         "facts": facts.map(|f| f.words().join(" ")),
         "wrap": wrap,
+        "editing": false,
     });
     tags.tag_value(PANEL, &panel, head);
     pressed

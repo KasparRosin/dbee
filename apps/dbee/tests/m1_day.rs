@@ -385,9 +385,14 @@ fn m1_day_end_to_end() {
     app.double_click("grid-cell-0-1");
     let editor = app.value("cell-editor");
     assert_eq!((editor["text"].as_str(), editor["multiline"].as_bool()), (Some(day.typo.as_str()), Some(true)), "{editor}");
+    // Several lines: the value panel is the editor, with CANCEL and SAVE in its bar.
+    assert!(app.inside("cell-editor", "value-panel"), "the name is edited in the value panel");
+    assert!(app.tag("value-save").is_some(), "SAVE in the panel's bar");
     app.ctrl("A");
     app.text(&day.fixed);
-    app.ctrl("Enter");
+    app.shot(&root, "6a0-name-editing");
+    app.click("value-save");
+    assert!(app.tag("cell-editor").is_none(), "SAVE closed the editor");
     let cell = app.cell(0, 1);
     assert_eq!((cell["text"].as_str(), cell["state"].as_str()), (Some(day.fixed.as_str()), Some("staged")), "{cell}");
     assert_eq!(app.table()["edits"]["count"], 1);

@@ -264,6 +264,9 @@ pub struct Grid<'a> {
     pub first_number: u64,
     /// The cell an editor is open on, if any.
     pub editing: Option<(usize, usize)>,
+    /// That editor is not over its cell (it is in the value panel): the cell draws the `editing`
+    /// look itself, with its text as before the edit.
+    pub edited_elsewhere: bool,
     /// How strongly the cells the source marks [`Mark::Saved`] show it, from 1 at full to 0, when
     /// they are drawn and named as if unmarked ([`GridState::saved_strength`]).
     pub saved: f32,
@@ -620,6 +623,7 @@ impl Grid<'_> {
             row_selected: focus.is_some_and(|f| f.0 == row),
             hovered,
             strength: if mark == Some(Mark::Saved) { self.saved } else { 1.0 },
+            editing: self.edited_elsewhere && self.editing == Some((row, col)),
         };
         let link = cell.show(ui, rect, ui.id().with(("dbee-fk-link", row, col)));
         Drawn { text, null, resp, link }

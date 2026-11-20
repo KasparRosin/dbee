@@ -304,6 +304,7 @@ fn grid(ui: &mut Ui) {
                         row_selected: row.focus.is_some(),
                         hovered: row.hovered,
                         strength: 1.0,
+                        editing: false,
                     };
                     let at = Rect::from_min_size(pos2(x, top), vec2(w, ROW_H));
                     cell.show(ui, at, ui.id().with(("showcase-grid-link", r, c)));

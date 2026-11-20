@@ -56,7 +56,7 @@ use crate::components::spinner::Spinner;
 use crate::components::table_bars::{Loading, PagingAsked, PagingBar, PagingShown, TableAsked, TableBar, TableShown, View};
 use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
-use crate::editors;
+use crate::editors::{self, Place};
 use crate::filter_bar::{self, Bar};
 use crate::grid::{CELL, Grid, GridAct, GridSource, GridState, Key, Mark, RowEdits};
 use crate::paging::{BAR_H, Paging, count_text, cut_note, edits_text, page_text};
@@ -463,6 +463,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         let split = (body.bottom() - BAR_H).max(body.top());
         // The panel gives way before the grid does: with no room beside it, its toggle is off.
         let narrow = open && !value_panel::has_room(body.width());
+        // Whether a several-line editor opening now goes in the panel.
+        view.panel.room = value_panel::has_room(body.width());
         // Every bar is cut at the body's edges: nothing is drawn past them at any width.
         let clip = ui.clip_rect().intersect(body);
         let mut top = ui.new_child(
@@ -531,6 +533,13 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         // at their right while it shows.
         let below = top.available_rect_before_wrap().top().min(split);
         panel = value_panel::reserve(open, ui, Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), split)));
+        // An editor in a panel that went away (hidden by an agent, or no room left) floats over
+        // its cell from now on.
+        if panel.is_none()
+            && let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id && e.place == Place::Panel)
+        {
+            editor.place = Place::Cell;
+        }
         let right = panel.map_or(body.right(), |p| p.left);
         let results = Rect::from_min_max(pos2(body.left(), below), pos2(right, split));
         let mut top = ui.new_child(UiBuilder::new().id_salt("dbee-table-results").max_rect(results).layout(Layout::top_down(Align::Min)));
@@ -562,6 +571,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     links: !lost,
                     first_number: tab.shown.page.saturating_mul(PAGE_SIZE).saturating_add(1),
                     editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),
+                    edited_elsewhere: view.work.editor.as_ref().is_some_and(|e| e.tab == id && e.place == Place::Panel),
                     saved,
                 };
                 // The body's width, even when a row above it is wider (the filter bar in a narrow
@@ -575,7 +585,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     }
                     runs.extend(command(act, Some(data)));
                 }
-                if let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id) {
+                // One in the value panel is drawn there ([`value_panel::fill`]).
+                if let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id && e.place == Place::Cell) {
                     // egui lays out every column of a row in view, also those scrolled away to the
                     // side: whether the cell shows is whether it meets the rows in view.
                     match state.editing_rect().filter(|(cell, rows)| editors::in_view(*cell, *rows)) {
