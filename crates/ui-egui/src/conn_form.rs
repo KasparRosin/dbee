@@ -36,7 +36,7 @@ use crate::components::strip::{self, Strip, Tone};
 use crate::components::swatch::{self, Swatch};
 use crate::components::tooltip::Hint;
 use crate::components::{self, status};
-use crate::connections::{Act, BUSY_CONNECT, ConnScreen, DatabaseList, Kind, Message, Running, line_galley, tilde};
+use crate::connections::{Act, BUSY_CONNECT, ConnScreen, DatabaseList, Kind, Message, Running, line_galley, line_job, tilde};
 use crate::picker::Pick;
 use crate::theme::size::{
     BAR_H, BAR_LINE, BUTTON_H, CONN_BESIDE_GAP, CONN_COLUMN_GAP, CONN_COLUMN_MAX_W, CONN_FIELD_GAP, CONN_FIELDS_TOP, CONN_PORT_W, CONN_RUNNING_GAP,
@@ -779,14 +779,24 @@ fn either_w(ui: &egui::Ui, a: &str, b: &str) -> f32 {
     BoxButton::outline(a).width(ui).max(BoxButton::outline(b).width(ui))
 }
 
-/// A read-only box in `at` showing `text` in `color` on one line, cut with "…" (the whole text on
-/// hover); its response, as `id`.
-fn path_box(ui: &mut egui::Ui, at: egui::Rect, id: &str, text: &str, color: egui::Color32) -> egui::Response {
+/// A read-only box in `at` showing `text` in `color` on one line (the whole text on hover when
+/// cut); its response, as `id`. A chosen path (`path`) is data, cut in the middle keeping its
+/// file's name as the status bar cuts one; other words are `body`, cut at the end with "…".
+fn path_box(ui: &mut egui::Ui, at: egui::Rect, id: &str, text: &str, color: egui::Color32, path: bool) -> egui::Response {
     let t = theme::tokens(ui.ctx());
     let p = ui.painter();
     p.rect(at, CornerRadius::same(RADIUS_CONTROL), t.bg, Stroke::new(1.0, t.line_strong), egui::StrokeKind::Inside);
-    let galley = line_galley(ui, text, Text::Body, color, at.width() - 2.0 * (INPUT_PAD_X + 1.0));
-    let elided = galley.elided;
+    let room = at.width() - 2.0 * (INPUT_PAD_X + 1.0);
+    let (galley, cut) = if path {
+        let data = |text: &str| line_job(ui, Text::Data.job_as_written(text, color), f32::INFINITY);
+        match (data(text).size().x > room).then(|| status::cut_middle(text, |cut| data(cut).size().x <= room)).flatten() {
+            Some(cut) => (data(&cut), true),
+            None => (line_job(ui, Text::Data.job_as_written(text, color), room), false),
+        }
+    } else {
+        (line_galley(ui, text, Text::Body, color, room), false)
+    };
+    let elided = galley.elided || cut;
     ui.painter().galley(pos2(at.left() + INPUT_PAD_X + 1.0, at.center().y - galley.size().y / 2.0), galley, color);
     let r = ui.interact(at, egui::Id::new(("dbee-form-box", id)), Sense::hover());
     if elided { r.hint(text) } else { r }
@@ -1081,7 +1091,7 @@ fn tls_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mu
         let waiting = picking == Some(Pick::Ca);
         let (cell, [choose, clear]) = cells(ui, w, INPUT_H, CONN_BESIDE_GAP, [either_w(ui, "Choose", "Stop"), BoxButton::outline("Clear").width(ui)]);
         let (text, color) = path_words(f.ca_file.as_deref(), waiting, t);
-        let r = path_box(ui, cell, "conn-ca", &text, color);
+        let r = path_box(ui, cell, "conn-ca", &text, color, f.ca_file.is_some() && !waiting);
         tags.tag_value("conn-ca", &r, f.ca_file.as_ref().map_or(Json::Null, |p| Json::from(tilde(&p.display().to_string()))));
         let label = if waiting { "Stop" } else { "Choose" };
         let b = button_in(ui, choose, picking.is_none() || waiting, BoxButton::outline(label));
@@ -1107,7 +1117,7 @@ fn file_row(ui: &mut egui::Ui, conn: &ConnScreen, tags: &mut Tags, acts: &mut Ve
         let waiting = picking.filter(|p| matches!(p, Pick::File | Pick::NewFile));
         let (cell, buttons) = cells(ui, w, INPUT_H, CONN_BESIDE_GAP, [either_w(ui, "Choose", "Stop"), either_w(ui, "New file", "Stop")]);
         let (text, color) = path_words(f.file.as_deref(), waiting.is_some(), t);
-        let r = path_box(ui, cell, "conn-file", &text, color);
+        let r = path_box(ui, cell, "conn-file", &text, color, f.file.is_some() && waiting.is_none());
         tags.tag_value("conn-file", &r, f.file.as_ref().map_or(Json::Null, |p| Json::from(tilde(&p.display().to_string()))));
         for ((pick, id, label), at) in
             [(Pick::File, "conn-file-choose", "Choose"), (Pick::NewFile, "conn-file-new", "New file")].into_iter().zip(buttons)
@@ -1202,11 +1212,11 @@ fn ssh_rows(ui: &mut egui::Ui, conn: &mut ConnScreen, tags: &mut Tags, acts: &mu
     column(ui, w, "Key file", |ui| {
         let (cell, [choose, clear]) = cells(ui, w, INPUT_H, CONN_BESIDE_GAP, [either_w(ui, "Choose", "Stop"), BoxButton::outline("Clear").width(ui)]);
         // The chosen file as it is; with none chosen, the key that will be found.
-        let (text, color) = match (&f.ssh_key, waiting) {
-            (Some(p), false) => (tilde(&p.display().to_string()), t.text),
-            _ => (line.clone(), t.text_muted),
+        let (text, color, path) = match (&f.ssh_key, waiting) {
+            (Some(p), false) => (tilde(&p.display().to_string()), t.text, true),
+            _ => (line.clone(), t.text_muted, false),
         };
-        let r = path_box(ui, cell, "conn-ssh-key", &text, color);
+        let r = path_box(ui, cell, "conn-ssh-key", &text, color, path);
         tags.tag_value("conn-ssh-key", &r, line.as_str());
         let b = button_in(ui, choose, picking.is_none() || waiting, BoxButton::outline(if waiting { "Stop" } else { "Choose" }));
         tags.tag("conn-ssh-change", &b);
