@@ -6,7 +6,8 @@
 //!   version, the link's security while it is weaker than fully checked, READ-ONLY when the
 //!   session is, SAVE CONNECTION while the saved list doesn't hold the connection (one opened
 //!   from a file, say), and at the right one activity ([`activity`]): a reconnect, the lost
-//!   connection with RECONNECT, the active tab's running job with CANCEL, or IN TRANSACTION;
+//!   connection with RECONNECT, the active tab's running job with its timer and CANCEL, or IN
+//!   TRANSACTION;
 //! - the schema tree on the left ([`crate::tree`]);
 //! - the tabs strip, then the active tab, both from the tree's line to the window's right edge;
 //!   the value panel stands inside the tab, beside its results, with its toggle in the tab's
@@ -30,6 +31,9 @@
 //! **Running jobs.** The status bar and the tabs show only live jobs: those a tab's markers name
 //! (a page load, a count, an Apply, a query run) and a reconnect. A tab that closed, or whose
 //! markers a reconnect cleared, shows none, even while the engine lets its job run to its end.
+//! Each shows only once it has run 300 ms ([`Quiet`]): the status bar's job then with its timer,
+//! RECONNECTING at once (the click's answer) and its timer from 300 ms. A page load is the table
+//! bar's (LOADING, its CANCEL), not the status bar's.
 //!
 //! **Tab bodies.** A table tab shows its page ([`crate::table_tab`]), a query tab its editor and
 //! results ([`crate::query_tab`]), across the whole width under the strip: the grid runs edge to
@@ -43,8 +47,8 @@
 //! `status-connection` (value: the name), `status-address` (value: the address, whole),
 //! `status-server`, `status-tls` (value: what
 //! protects the link, while it is weaker than fully checked), `status-read-only`, `status-save`,
-//! `status-job` (value: what runs, or `Reconnecting…`), `status-cancel`, `status-lost`,
-//! `status-reconnect`, `status-transaction`.
+//! `status-job` (value: what runs, or `Reconnecting…`), `status-timer` (value: its words,
+//! `00:01.2`), `status-cancel`, `status-lost`, `status-reconnect`, `status-transaction`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -72,6 +76,9 @@ use crate::{DbeeApp, menu};
 
 /// The status bar's height.
 pub(crate) const STATUS_H: f32 = SLIM_BAR_H;
+
+/// The reconnect's command: the status bar shows it while it runs.
+const RECONNECT: &str = "connection.reconnect";
 
 /// What only the workspace keeps.
 #[derive(Debug, Default)]
@@ -161,30 +168,28 @@ fn busy(quiet: &mut Quiet, ctx: &egui::Context, tab: &Tab) -> bool {
     past.contains(&true)
 }
 
-/// A live job the status bar shows: what runs, and the command that cancels it.
+/// A live job the status bar shows: what runs, the command that cancels it, and its marker.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LiveJob {
     pub text: Words,
     pub cancel: Option<&'static str>,
+    pub job: JobId,
 }
 
-/// The active tab's live job, by its markers.
+/// The active tab's live job, by its markers: an Apply, else a count; a query tab's run. A page
+/// load is none: the table bar shows it.
 pub fn live_job(session: &Session) -> Option<LiveJob> {
-    let job = |doing: &str, name: &str, cancel| Some(LiveJob { text: Words::from(doing).name(name).plain("…"), cancel: Some(cancel) });
+    let job = |doing: &str, name: &str, cancel, job| LiveJob { text: Words::from(doing).name(name).plain("…"), cancel: Some(cancel), job };
     match session.state().active_tab()? {
         Tab::Table(t) => {
             let name = &t.table.name;
-            if t.applying.is_some() {
-                job("Applying the changes to ", name, "table.cancel")
-            } else if t.loading.is_some() {
-                job("Loading ", name, "table.cancel")
-            } else if t.counting.is_some() {
-                job("Counting the rows of ", name, "table.cancel")
-            } else {
-                None
+            match (t.applying, t.counting) {
+                (Some(j), _) => Some(job("Applying the changes to ", name, "table.cancel", j)),
+                (None, Some(j)) => Some(job("Counting the rows of ", name, "table.cancel", j)),
+                (None, None) => None,
             }
         }
-        Tab::Query(q) => q.running.and_then(|_| job("Running ", &q.title, "query.cancel")),
+        Tab::Query(q) => q.running.map(|j| job("Running ", &q.title, "query.cancel", j)),
     }
 }
 
@@ -213,19 +218,22 @@ pub(crate) fn address(config: &ConnectionConfig, home: Option<&Path>) -> Option<
 }
 
 /// What the status bar shows at its right, one at a time, the first that holds: a reconnect
-/// running, the connection lost, the active tab's live job (with the command that cancels it), a
+/// running (at once, its timer once it has gone 300 ms), the connection lost, the active tab's
+/// live job once it has gone 300 ms (with its timer and the command that cancels it), a
 /// transaction open or failed on the connection's query session. The job comes before the
 /// transaction, which lasts, so its CANCEL is never hidden.
-fn activity(session: &Session) -> Option<(Activity, Option<&'static str>)> {
+fn activity(session: &Session, quiet: &mut Quiet, ctx: &egui::Context) -> Option<(Activity, Option<&'static str>)> {
     let c = session.state().connection(Which::Active)?;
-    if session.running("connection.reconnect") {
-        return Some((Activity::Reconnecting { elapsed: None }, None));
+    if session.running(RECONNECT) {
+        return Some((Activity::Reconnecting { elapsed: quiet.past(ctx, Watch::Command(RECONNECT)) }, None));
     }
     if c.lost {
         return Some((Activity::Disconnected, None));
     }
-    if let Some(job) = live_job(session) {
-        return Some((Activity::Job { text: job.text, elapsed: None, cancel: job.cancel.is_some() }, job.cancel));
+    let tab = session.state().active_tab().map(Tab::id);
+    let shown = live_job(session).zip(tab).and_then(|(job, tab)| quiet.past(ctx, Watch::Tab(tab, job.job)).map(|e| (job, e)));
+    if let Some((job, elapsed)) = shown {
+        return Some((Activity::Job { text: job.text, elapsed, cancel: job.cancel.is_some() }, job.cancel));
     }
     c.transaction().filter(|t| matches!(t.state, TransactionState::Open | TransactionState::Failed)).map(|_| (Activity::InTransaction, None))
 }
@@ -292,7 +300,7 @@ pub(crate) fn screen(app: &mut DbeeApp, ui: &mut egui::Ui) {
                 app.start(command, json!({}), Origin::Menu);
             }
             Act::Reconnect => {
-                app.start("connection.reconnect", json!({}), Origin::Menu);
+                app.start(RECONNECT, json!({}), Origin::Menu);
             }
             Act::SaveOpen => {
                 app.start("connection.saveOpen", json!({}), Origin::Menu);
@@ -313,7 +321,7 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect, acts: &mut Vec<A
     // The link is named only while it is weaker than fully checked (#9).
     let link = dbee_engine::state::tls_text(&c.info, c.config.ssh.is_some()).filter(|_| c.info.tls != Some(TlsState::Checked));
     let unsaved = !app.session.state().store.is_saved(&c.config.id);
-    let activity = activity(&app.session);
+    let activity = activity(&app.session, &mut app.view.quiet, ui.ctx());
     let tags = &mut app.tags;
     let mut bar = ui.new_child(UiBuilder::new().id_salt("dbee-status").max_rect(rect).layout(Layout::top_down(Align::Min)));
     bar.set_clip_rect(rect);
@@ -336,6 +344,9 @@ fn status_bar(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect, acts: &mut Vec<A
     if let Some(r) = shown.save {
         let r = r.hint("Add this connection to the saved ones");
         tags.tag_value("status-save", &r, "Save connection");
+    }
+    if let (Some((Activity::Job { elapsed, .. } | Activity::Reconnecting { elapsed: Some(elapsed) }, _)), Some(r)) = (&activity, &shown.timer) {
+        tags.tag_value("status-timer", r, status::timer(*elapsed));
     }
     let words = shown.activity.as_ref();
     match (activity.as_ref(), words) {

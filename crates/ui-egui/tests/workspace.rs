@@ -1441,7 +1441,7 @@ fn status_bar_lists_only_live_jobs() {
     ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
     let tab = ui.active();
     ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
-    ui.frame();
+    ui.until("the job", |ui| ui.tag("status-job").is_some());
     assert!(ui.value("status-job").as_str().is_some_and(|s| s.contains("Query 1")), "the running query shows");
     assert!(ui.tag("status-cancel").is_some());
     ui.click("status-cancel");
@@ -1450,11 +1450,84 @@ fn status_bar_lists_only_live_jobs() {
     assert!(ui.tag("status-job").is_none(), "no spinner once the run ended");
     // A tab closed while its job runs leaves no spinner behind.
     ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
-    ui.frame();
-    assert!(ui.tag("status-job").is_some());
+    ui.until("the job", |ui| ui.tag("status-job").is_some());
     ui.execute("tab.close", json!({ "tab": tab, "force": true }));
     ui.frame();
     assert!(ui.tag("status-job").is_none(), "{:?}", ids(&ui.inspect()));
+}
+
+/// What the footer showed in the last frame, read without running another: the job's words, its
+/// timer's words and whether CANCEL was drawn.
+fn footer(ui: &Ui) -> (Option<String>, Option<String>, bool) {
+    let tags = ui.harness.state().tags();
+    let words = |id: &str| tags.rect(id).and(tags.value(id)).and_then(|v| v.as_str().map(str::to_string));
+    (words("status-job"), words("status-timer"), tags.rect("status-cancel").is_some())
+}
+
+/// Whether the active query tab runs, as the window saw it in the last frame.
+fn query_runs(ui: &mut Ui) -> bool {
+    matches!(ui.harness.state().session().state().active_tab(), Some(dbee_engine::Tab::Query(q)) if q.running.is_some())
+}
+
+/// Review Focus 2: the footer's job, its timer and CANCEL show only once a run has gone 300 ms,
+/// and each run counts its own 300 ms and its timer from `00:00.`.
+#[test]
+fn the_footer_job_and_its_timer_wait_300_ms_and_restart() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: egui::vec2(1200.0, 800.0), step: Some(0.05), ..Setup::default() });
+    ui.execute("tab.newQuery", json!({ "text": "select pg_sleep(30)" }));
+    for run in ["first", "second"] {
+        ui.ok("engine.execute", json!({ "command": "query.run", "wait": false }));
+        let mut shown = false;
+        ui.frames_while(query_runs, 0.45, |ui, gone| {
+            let (job, timer, cancel) = footer(ui);
+            if gone <= 0.25 {
+                assert!(job.is_none() && timer.is_none() && !cancel, "{run} run at {gone:.2} s: nothing in the footer yet: {job:?} {timer:?}");
+            }
+            if gone >= 0.35 {
+                assert_eq!(job.as_deref(), Some("Running Query 1…"), "{run} run at {gone:.2} s");
+                assert!(timer.as_deref().is_some_and(|t| t.starts_with("00:00.")), "{run} run at {gone:.2} s: the timer from 00:00.: {timer:?}");
+                assert!(cancel, "{run} run at {gone:.2} s: CANCEL");
+                shown = true;
+            }
+        });
+        assert!(shown, "{run} run: the job showed");
+        ui.click("status-cancel");
+        ui.until("the cancel", |ui| ui.document()["query"]["running"].is_null());
+        ui.frame();
+        assert_eq!(footer(&ui), (None, None, false), "{run} run: the job and its timer went with it");
+    }
+}
+
+/// A page load is the table bar's (LOADING, CANCEL), not the footer's; a count on the same table
+/// is the footer's, with its timer.
+#[test]
+fn a_page_load_is_not_a_footer_job() {
+    let db = dbee_testkit::require_testdb!();
+    let table =
+        Scratch::new(db, "footer_load", |t| format!("CREATE TABLE scratch.{t} (id int); INSERT INTO scratch.{t} SELECT generate_series(1, 150)"));
+    let mut ui = Ui::connected_with(db, Setup { size: egui::vec2(1200.0, 800.0), step: Some(0.05), ..Setup::default() });
+    ui.open("scratch", &table.0);
+    ui.until("the page", |ui| ui.table()["loading"].is_null() && ui.table()["rows"].as_u64().is_some_and(|n| n > 0));
+    let lock = dbee_testkit::hold(pg14_server(db), &format!("LOCK TABLE scratch.{} IN ACCESS EXCLUSIVE MODE", table.0)).unwrap();
+    let loading = |ui: &mut Ui| matches!(ui.harness.state().session().state().active_tab(), Some(dbee_engine::Tab::Table(t)) if t.loading.is_some());
+    ui.ok("engine.execute", json!({ "command": "table.refresh", "params": {}, "wait": false }));
+    ui.frames_while(loading, 0.5, |ui, _| assert_eq!(footer(ui), (None, None, false), "no footer job for a page load"));
+    let tags = ui.harness.state().tags();
+    assert!(tags.rect("table-loading").is_some() && tags.rect("table-cancel").is_some(), "the table bar's LOADING and CANCEL");
+    ui.execute("table.cancel", json!({}));
+    ui.until("the cancelled load", |ui| ui.table()["loading"].is_null());
+    let counting =
+        |ui: &mut Ui| matches!(ui.harness.state().session().state().active_tab(), Some(dbee_engine::Tab::Table(t)) if t.counting.is_some());
+    ui.ok("engine.execute", json!({ "command": "table.count", "params": {}, "wait": false }));
+    ui.frames_while(counting, 0.5, |_, _| {});
+    let (job, timer, cancel) = footer(&ui);
+    assert_eq!(job, Some(format!("Counting the rows of {}…", table.0)));
+    assert!(timer.as_deref().is_some_and(|t| t.starts_with("00:00.")), "the count's timer: {timer:?}");
+    assert!(cancel, "the count's CANCEL");
+    ui.click("status-cancel");
+    ui.until("the cancelled count", |ui| ui.table()["counting"].is_null());
+    drop(lock);
 }
 
 #[test]
@@ -1617,13 +1690,17 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
         if size == APP_SIZE {
             continue;
         }
-        // The query session locks the table, so its page load waits.
+        // The table opens, then the query session locks it, so its count waits.
+        ui.execute("table.open", json!({ "schema": "scratch", "table": long.0 }));
+        let opened = ui.active();
+        ui.until("the page", |ui| ui.table()["loading"].is_null());
         ui.execute("tab.newQuery", json!({ "text": format!("begin; lock table scratch.{} in access exclusive mode", long.0) }));
         let query = ui.active();
         ui.execute("query.run", json!({}));
-        ui.ok("engine.execute", json!({ "command": "table.open", "params": { "schema": "scratch", "table": long.0 }, "wait": false }));
-        ui.until("the load", |ui| ui.tag("status-job").is_some_and(|e| e["value"].as_str().is_some_and(|v| v.starts_with("Loading "))));
-        let at = format!("{at}, loading a table with a 63-letter name");
+        ui.execute("tab.activate", json!({ "tab": opened }));
+        ui.ok("engine.execute", json!({ "command": "table.count", "params": {}, "wait": false }));
+        ui.until("the count", |ui| ui.tag("status-job").is_some_and(|e| e["value"].as_str().is_some_and(|v| v.starts_with("Counting the rows of "))));
+        let at = format!("{at}, counting a table with a 63-letter name");
         status_gives_way(&mut ui, size, &at);
         let block = rect_of(&ui.tag("status-connection").unwrap());
         let name: String = ui
@@ -1634,7 +1711,7 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
             .collect();
         assert!(name.chars().filter(|c| c.is_alphabetic()).count() >= 3, "{at}: the connection's name keeps letters: `{name}`");
         ui.click("status-cancel");
-        ui.until("the cancelled load", |ui| ui.table()["loading"].is_null());
+        ui.until("the cancelled count", |ui| ui.table()["counting"].is_null());
         ui.execute("query.rollback", json!({ "tab": query }));
     }
 }
@@ -1643,8 +1720,17 @@ fn the_status_bar_gives_way_at_the_smallest_window() {
 /// none over another, and the name, SAVE CONNECTION, the job and its CANCEL shown (the value
 /// toggle is the tab's, not the bar's). The parts drawn, with their rects.
 fn status_gives_way(ui: &mut Ui, size: egui::Vec2, at: &str) -> Vec<(&'static str, egui::Rect)> {
-    let parts =
-        ["status-connection", "status-address", "status-server", "status-tls", "status-read-only", "status-save", "status-job", "status-cancel"];
+    let parts = [
+        "status-connection",
+        "status-address",
+        "status-server",
+        "status-tls",
+        "status-read-only",
+        "status-save",
+        "status-job",
+        "status-timer",
+        "status-cancel",
+    ];
     let drawn: Vec<(&str, egui::Rect)> = parts.iter().filter_map(|id| shown_rect(ui, id).map(|r| (*id, r))).collect();
     for (id, r) in &drawn {
         assert!(r.left() >= 0.0 && r.right() <= size.x, "{at}: `{id}` {r:?} inside the window");

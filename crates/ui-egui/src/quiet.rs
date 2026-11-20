@@ -25,6 +25,8 @@ pub(crate) enum Watch {
     Tab(TabId, JobId),
     /// The connection form's test or connect (`ConnScreen.running`'s job).
     Form(JobId),
+    /// A job no tab owns, by its command's label: `connection.reconnect`.
+    Command(&'static str),
 }
 
 /// When the window first saw each job it watches, in seconds on egui's clock.

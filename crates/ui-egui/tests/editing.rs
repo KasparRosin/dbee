@@ -389,7 +389,7 @@ fn the_status_bar_cancels_an_apply_that_waits_for_a_lock() {
         t.0
     );
     ui.until("the Apply to wait for the lock", |_| q(db, &waiting) == "1");
-    ui.frame();
+    ui.until("the Apply's job", |ui| ui.tag("status-job").is_some());
     assert_eq!(ui.value("status-job"), format!("Applying the changes to {}…", t.0));
     ui.click("status-cancel");
     ui.until("the cancelled Apply", |ui| ui.table()["failed"].is_object());

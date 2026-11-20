@@ -757,13 +757,15 @@ impl DbeeApp {
     }
 
     /// [`crate::quiet::Quiet::keep`]: a tab's job lives while the tab has it as a marker
-    /// (`loading`, `counting`, `applying`, `running`), the form's while the form runs it.
+    /// (`loading`, `counting`, `applying`, `running`), the form's while the form runs it, a
+    /// command's while the session runs it.
     fn forget_ended_jobs(&mut self) {
         let state = self.session.state();
         let form = self.view.conn.running.map(|(job, _)| job);
         self.view.quiet.keep(|watch| match *watch {
             Watch::Tab(id, job) => state.tabs.iter().find(|t| t.id() == id).is_some_and(|tab| workspace::jobs(tab).contains(&job)),
             Watch::Form(job) => form == Some(job),
+            Watch::Command(label) => self.session.running(label),
         });
     }
 

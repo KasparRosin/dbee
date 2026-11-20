@@ -1079,7 +1079,7 @@ pub(crate) fn band(
 /// result before it; else what the shown result holds.
 fn run_state(q: &dbee_engine::QueryTab, elapsed: Option<std::time::Duration>) -> Option<RunState> {
     if let Some(elapsed) = elapsed {
-        return Some(RunState::Running { elapsed: Some(elapsed) });
+        return Some(RunState::Running { elapsed });
     }
     if let Some(e) = &q.error {
         if e.code == "cancelled" {

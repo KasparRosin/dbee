@@ -27,11 +27,10 @@ use egui::{Align, Color32, CornerRadius, Galley, Id, Layout, Rect, Response, Sen
 
 use super::button::TextButton;
 use super::icon::Icon;
-use super::spinner::Spinner;
 use super::tooltip::Hint;
 use crate::theme::size::{
-    SLIM_BAR_H, SPINNER, STATUS_AFTER_BLOCK, STATUS_BLOCK_H, STATUS_BLOCK_PAD_X, STATUS_EDGE, STATUS_FACT_GAP, STATUS_GAP, STATUS_NAME_MAX,
-    STATUS_PAD_X, TRANSACTION_MARK,
+    SLIM_BAR_H, STATUS_AFTER_BLOCK, STATUS_BLOCK_H, STATUS_BLOCK_PAD_X, STATUS_EDGE, STATUS_FACT_GAP, STATUS_GAP, STATUS_NAME_MAX, STATUS_PAD_X,
+    TRANSACTION_MARK,
 };
 use crate::theme::{Text, Tokens, Words, connection_color, on_connection_color, tokens};
 
@@ -96,23 +95,15 @@ pub enum Activity {
     InTransaction,
     /// The connection is lost: RECONNECT.
     Disconnected,
-    Reconnecting {
-        elapsed: Option<Duration>,
-    },
+    /// A reconnect runs: the words at once, the timer once it has gone 300 ms (`None` before).
+    Reconnecting { elapsed: Option<Duration> },
     /// For M4 and the showcase.
-    Exporting {
-        elapsed: Option<Duration>,
-    },
+    Exporting { elapsed: Option<Duration> },
     /// For M4 and the showcase.
-    Importing {
-        elapsed: Option<Duration>,
-    },
-    /// What runs, and whether it can be cancelled: CANCEL.
-    Job {
-        text: Words,
-        elapsed: Option<Duration>,
-        cancel: bool,
-    },
+    Importing { elapsed: Option<Duration> },
+    /// What runs, for `elapsed` so far, and whether it can be cancelled: CANCEL. The window shows
+    /// a job only once it has gone 300 ms, so it always has its timer.
+    Job { text: Words, elapsed: Duration, cancel: bool },
 }
 
 /// What a click in the bar asked for.
@@ -133,6 +124,8 @@ pub struct Shown {
     pub save: Option<Response>,
     /// The activity's words.
     pub activity: Option<Response>,
+    /// Its timer, when one is drawn.
+    pub timer: Option<Response>,
     /// Its button: RECONNECT or CANCEL.
     pub button: Option<Response>,
     pub act: Option<Act>,
@@ -214,14 +207,16 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
     // The activity, in the room left once the block keeps its fewest letters and SAVE CONNECTION
     // stays.
     let mut shown_activity = None;
+    let mut timer = None;
     let mut button = None;
     let mut act = None;
     if let Some(activity) = activity {
         let fewest: String = connection.name.chars().take(NAME_KEEP).chain(['…']).collect();
         let fewest_w = Piece::new(ui, named(&fewest), "").width().min(name.width());
         let most = x - under.left() - used(&pieces, &[false; 4], fewest_w) - STATUS_GAP;
-        let (words, b, a, left) = show_activity(ui, t, id, activity, x, most, mid);
+        let (words, clock, b, a, left) = show_activity(ui, t, id, activity, x, most, mid);
         shown_activity = Some(words);
+        timer = clock;
         if let Some(b) = b {
             if b.clicked() {
                 act = a;
@@ -292,7 +287,7 @@ pub fn bar(ui: &mut Ui, connection: &Connection<'_>, facts: &Facts<'_>, activity
         }
         r
     });
-    Shown { connection: shown_connection, address, server, link, read_only, save, activity: shown_activity, button, act }
+    Shown { connection: shown_connection, address, server, link, read_only, save, activity: shown_activity, timer, button, act }
 }
 
 /// Draws `piece` from `left`, centred on `mid`, in `colour`; it answers to hover as a label.
@@ -356,8 +351,8 @@ pub fn timer(elapsed: Duration) -> String {
     format!("{:02}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
 }
 
-/// Draws `activity` ending at `right`, centred on `mid`: its words, its button and what a click on
-/// that asks for, and where it starts. A job wider than `most` has its name cut, and reads whole
+/// Draws `activity` ending at `right`, centred on `mid`: its words, its timer, its button and what a
+/// click on that asks for, and where it starts. A job wider than `most` has its name cut, and reads whole
 /// on hover.
 fn show_activity(
     ui: &mut Ui,
@@ -367,14 +362,14 @@ fn show_activity(
     right: f32,
     most: f32,
     mid: f32,
-) -> (Response, Option<Response>, Option<Act>, f32) {
-    // Each part, left to right: a mark, words, a timer (or today's spinner), a button; with the gap
-    // before each.
+) -> (Response, Option<Response>, Option<Response>, Option<Act>, f32) {
+    // Each part, left to right: a mark, words, a timer, a button; with the gap before each. No
+    // timer yet takes no room.
     enum Part {
         Mark,
         Icon(Icon),
         Words(Piece, Color32),
-        Timer(Option<Piece>),
+        Timer(Piece),
         Button(&'static str, Act),
     }
     fn width_of(ui: &Ui, part: &Part) -> f32 {
@@ -382,8 +377,7 @@ fn show_activity(
             Part::Mark => TRANSACTION_MARK,
             Part::Icon(icon) => icon.size().x,
             Part::Words(p, _) => p.width(),
-            Part::Timer(Some(p)) => p.width(),
-            Part::Timer(None) => SPINNER,
+            Part::Timer(p) => p.width(),
             Part::Button(label, _) => TextButton::new(label).width(ui),
         }
     }
@@ -392,19 +386,23 @@ fn show_activity(
     }
     let mut cut = false;
     let words = |ui: &Ui, s: &str, c: Color32| Part::Words(Piece::new(ui, Text::Label.job(s, c), s), c);
-    let clock = |ui: &Ui, e: &Option<Duration>| Part::Timer(e.map(|e| Piece::new(ui, Text::Data.job_as_written(&timer(e), t.text_muted), timer(e))));
+    let clock = |ui: &Ui, e: Duration| Part::Timer(Piece::new(ui, Text::Data.job_as_written(&timer(e), t.text_muted), timer(e)));
+    // The timer and the gap before it, once there is one.
+    let timed = |ui: &Ui, gap: f32, e: &Option<Duration>| e.map(|e| (gap, clock(ui, e)));
     let parts: Vec<(f32, Part)> = match activity {
         Activity::InTransaction => vec![(0.0, Part::Mark), (STATUS_GAP, words(ui, "In transaction", t.text))],
         Activity::Disconnected => vec![(0.0, words(ui, "Disconnected", t.danger)), (STATUS_GAP, Part::Button("Reconnect", Act::Reconnect))],
-        Activity::Reconnecting { elapsed } => vec![(0.0, words(ui, "Reconnecting", t.text_muted)), (STATUS_FACT_GAP, clock(ui, elapsed))],
+        Activity::Reconnecting { elapsed } => {
+            [(0.0, words(ui, "Reconnecting", t.text_muted))].into_iter().chain(timed(ui, STATUS_FACT_GAP, elapsed)).collect()
+        }
         Activity::Exporting { elapsed } | Activity::Importing { elapsed } => {
             let (icon, says) = if matches!(activity, Activity::Exporting { .. }) { (Icon::Export, "Exporting") } else { (Icon::Import, "Importing") };
-            vec![(0.0, Part::Icon(icon)), (STATUS_GAP, words(ui, says, t.text)), (STATUS_GAP, clock(ui, elapsed))]
+            [(0.0, Part::Icon(icon)), (STATUS_GAP, words(ui, says, t.text))].into_iter().chain(timed(ui, STATUS_GAP, elapsed)).collect()
         }
         Activity::Job { text, elapsed, cancel } => {
             let job = |words: &Words| {
                 let mut parts = vec![(0.0, Part::Words(Piece::new(ui, words.caps_job(t.text_muted), text.to_string()), t.text_muted))];
-                parts.push((STATUS_FACT_GAP, clock(ui, elapsed)));
+                parts.push((STATUS_FACT_GAP, clock(ui, *elapsed)));
                 if *cancel {
                     parts.push((STATUS_FACT_GAP, Part::Button("Cancel", Act::Cancel)));
                 }
@@ -429,6 +427,7 @@ fn show_activity(
     let left = right - total;
     let mut x = left;
     let mut said = None;
+    let mut clocked = None;
     let mut button = None;
     let mut asked = None;
     for (gap, part) in parts {
@@ -441,10 +440,7 @@ fn show_activity(
             }
             Part::Icon(icon) => icon.paint(ui.painter(), pos2(x + w / 2.0, mid), t.text),
             Part::Words(p, c) => said = Some(piece(ui, id.with("activity"), &p, pos2(x, mid), c)),
-            Part::Timer(Some(p)) => {
-                ui.painter().galley(pos2(x, mid - p.galley.size().y / 2.0), p.galley, t.text_muted);
-            }
-            Part::Timer(None) => Spinner::new().paint(ui, pos2(x + w / 2.0, mid)),
+            Part::Timer(p) => clocked = Some(piece(ui, id.with("timer"), &p, pos2(x, mid), t.text_muted)),
             Part::Button(label, a) => {
                 button = Some(ui.put(Rect::from_min_size(pos2(x, mid - STATUS_BLOCK_H / 2.0), vec2(w, STATUS_BLOCK_H)), TextButton::new(label)));
                 asked = Some(a);
@@ -457,7 +453,7 @@ fn show_activity(
         Activity::Job { text, .. } if cut => said.hint(text.to_string()),
         _ => said,
     };
-    (said, button, asked, left)
+    (said, clocked, button, asked, left)
 }
 
 #[cfg(test)]
@@ -556,7 +552,7 @@ mod tests {
                 (Activity::Exporting { elapsed: Some(s(12_400)) }, vec![("EXPORTING", t.text), ("00:12.4", t.text_muted)], vec![8.0]),
                 (Activity::Importing { elapsed: Some(s(3900)) }, vec![("IMPORTING", t.text), ("00:03.9", t.text_muted)], vec![8.0]),
                 (
-                    Activity::Job { text: Words::from("Counting rows"), elapsed: Some(s(1200)), cancel: true },
+                    Activity::Job { text: Words::from("Counting rows"), elapsed: s(1200), cancel: true },
                     vec![("COUNTING ROWS", t.text_muted), ("00:01.2", t.text_muted), ("CANCEL", t.text)],
                     vec![12.0, 12.0 + 10.0],
                 ),
@@ -596,19 +592,60 @@ mod tests {
         }
     }
 
+    /// The paths drawn (a spinner's arc is one; nothing else in the bar is).
+    fn arcs(shapes: &[egui::epaint::ClippedShape]) -> usize {
+        crate::components::flat(shapes).iter().filter(|s| matches!(s, egui::Shape::Path(_))).count()
+    }
+
     #[test]
-    fn a_job_with_no_timer_shows_todays_spinner_and_keeps_a_names_case() {
-        let job = Activity::Job { text: Words::from("Loading ").name("Orders").plain("…"), elapsed: None, cancel: true };
-        let (shapes, at) =
-            drawn(Theme::Light, Connection { name: "Shop live", colour: ConnectionColor::None, own: true }, Facts::default(), Some(job));
-        let all = texts(&shapes);
-        let words: Vec<&str> = all.iter().map(|(w, _, _)| w.as_str()).collect();
-        assert!(words.contains(&"LOADING ") && words.contains(&"Orders") && words.contains(&"…"), "{words:?}");
-        let (cancel, _) = word(&shapes, "CANCEL");
-        // The spinner: a 14 px slot 12 before CANCEL's button.
-        let slot = Rect::from_min_max(pos2(cancel.left() - 10.0 - 12.0 - SPINNER, at.top()), pos2(cancel.left() - 10.0 - 12.0, at.bottom()));
-        let (colours, _) = icon_in(&shapes, slot.expand(1.0));
-        assert_eq!(colours, [crate::theme::LIGHT.text_muted], "the spinner in {slot:?}");
+    fn a_job_draws_its_timer_and_no_spinner() {
+        // A job: its words, 12, its timer in `data` `text_muted`, 12, CANCEL (its words 10 inside
+        // the button). Reconnecting before its 300 ms: the words alone; after, the timer 12 after
+        // them. No spinner anywhere in the bar.
+        let s = Duration::from_millis;
+        let red = || Connection { name: "Shop live", colour: ConnectionColor::Red, own: true };
+        for (theme, t) in both() {
+            let job = Activity::Job { text: Words::from("Counting the rows of ").name("orders").plain("…"), elapsed: s(1200), cancel: true };
+            let (shapes, _) = drawn(theme, red(), Facts::default(), Some(job));
+            let all = texts(&shapes);
+            let words: Vec<&str> = all.iter().map(|(w, _, _)| w.as_str()).collect();
+            assert!(words.contains(&"COUNTING THE ROWS OF ") && words.contains(&"orders"), "{theme:?}: the name as written: {words:?}");
+            let (dots, _) = word(&shapes, "…");
+            let (clock, c) = word(&shapes, "00:01.2");
+            let (cancel, _) = word(&shapes, "CANCEL");
+            assert_eq!(c, t.text_muted, "{theme:?}: the timer in text_muted");
+            assert!(close(clock.left() - dots.right(), 12.0), "{theme:?}: the timer {clock:?} 12 after the words {dots:?}");
+            assert!(close(cancel.left() - clock.right(), 12.0 + 10.0), "{theme:?}: CANCEL {cancel:?} 12 after the timer {clock:?}");
+            assert_eq!(arcs(&shapes), 0, "{theme:?}: no spinner");
+
+            let (shapes, at) = drawn(theme, red(), Facts::default(), Some(Activity::Reconnecting { elapsed: None }));
+            let (words, c) = word(&shapes, "RECONNECTING");
+            assert_eq!(c, t.text_muted, "{theme:?}: RECONNECTING in text_muted");
+            assert!(close(at.right() - words.right(), 12.0), "{theme:?}: the words alone, at the end: {words:?}");
+            assert_eq!(arcs(&shapes), 0, "{theme:?}: no spinner before the timer");
+            assert_eq!(texts(&shapes).len(), 2, "{theme:?}: the name and RECONNECTING: {:?}", texts(&shapes));
+
+            let (shapes, _) = drawn(theme, red(), Facts::default(), Some(Activity::Reconnecting { elapsed: Some(s(4100)) }));
+            let (words, _) = word(&shapes, "RECONNECTING");
+            let (clock, _) = word(&shapes, "00:04.1");
+            assert!(close(clock.left() - words.right(), 12.0), "{theme:?}: the timer {clock:?} 12 after {words:?}");
+            assert_eq!(arcs(&shapes), 0, "{theme:?}: no spinner");
+        }
+    }
+
+    #[test]
+    fn the_timer_is_read_out_on_its_own() {
+        // The window tags the timer by the response the bar gives for it.
+        let job = Activity::Job { text: Words::from("Running ").name("Query 1").plain("…"), elapsed: Duration::from_millis(2400), cancel: true };
+        let mut h = crate::components::harness(Theme::Light, (), move |ui, _| {
+            ui.allocate_ui(vec2(W, SLIM_BAR_H), |ui| {
+                let shown =
+                    bar(ui, &Connection { name: "Shop live", colour: ConnectionColor::Red, own: true }, &Facts::default(), Some(&job), |_| {});
+                assert!(shown.timer.is_some_and(|r| r.rect.width() > 0.0), "the timer's piece");
+            });
+        });
+        h.run();
+        assert!(h.query_by_label("00:02.4").is_some(), "the timer reads out as its words");
     }
 
     #[test]
@@ -619,7 +656,7 @@ mod tests {
         let address = Address::Server("postgres@pg14:5432/dbee".into());
         let facts =
             Facts { address: Some(&address), server: Some("PostgreSQL 14.24"), link: Some(("Not encrypted", "")), read_only: true, unsaved: true };
-        let job = Activity::Job { text: Words::from("Counting rows"), elapsed: None, cancel: true };
+        let job = Activity::Job { text: Words::from("Counting rows"), elapsed: Duration::from_millis(1200), cancel: true };
         let shown_at = |width: f32| {
             let mut seen = Vec::new();
             let shapes = painted_in(vec2(1200.0, 100.0), Theme::Light, |ui| {
@@ -799,9 +836,9 @@ mod tests {
         const TABLE: &str = "rev1_customer_success_quarterly_revenue_reconciliation_2026_abc";
         const WIDTH: f32 = 600.0;
         assert_eq!(TABLE.len(), 63);
-        let words = Words::from("Loading ").name(TABLE).plain("…");
+        let words = Words::from("Counting the rows of ").name(TABLE).plain("…");
         let whole = words.to_string();
-        let job = Activity::Job { text: words, elapsed: None, cancel: true };
+        let job = Activity::Job { text: words, elapsed: Duration::from_millis(1200), cancel: true };
         let facts = Facts { unsaved: true, ..Facts::default() };
         let mut h = crate::components::harness_in(vec2(WIDTH + 100.0, 120.0), Theme::Light, (), move |ui, _| {
             ui.allocate_ui(vec2(WIDTH, SLIM_BAR_H), |ui| {
@@ -822,8 +859,11 @@ mod tests {
             |start: &str| seen.iter().find(|(w, _)| w.starts_with(start)).map(|(w, _)| w.clone()).unwrap_or_else(|| panic!("`{start}…`: {seen:?}"));
         let name = text("SHO");
         assert!(name.trim_end_matches('…').len() >= 3, "the name keeps letters: `{name}`");
-        let cut = text("LOADING ");
-        assert!(cut.ends_with('…') && cut.len() < "LOADING ".len() + TABLE.len() && cut.contains("rev1_"), "the job's name cut: `{cut}`");
+        let cut = text("COUNTING THE ROWS OF ");
+        assert!(
+            cut.ends_with('…') && cut.len() < "COUNTING THE ROWS OF ".len() + TABLE.len() && cut.contains("rev1_"),
+            "the job's name cut: `{cut}`"
+        );
         for w in ["SAVE CONNECTION", "CANCEL"] {
             assert!(seen.iter().any(|(s, _)| s == w), "`{w}` stays: {seen:?}");
         }

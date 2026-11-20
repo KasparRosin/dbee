@@ -38,10 +38,10 @@ pub enum View {
     Structure,
 }
 
-/// A page on its way, for `elapsed` so far (today's spinner while the app gives no timer).
+/// A page on its way, for `elapsed` so far (the tab shows it only once it has gone 300 ms).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Loading {
-    pub elapsed: Option<Duration>,
+    pub elapsed: Duration,
 }
 
 /// The table bar: the view switch, REFRESH (CANCEL while a page loads), + ROW, the rows' count,
@@ -162,10 +162,7 @@ impl TableBar {
     fn facts(&self, ui: &Ui) -> Facts {
         let t = tokens(ui.ctx());
         match self.loading {
-            Some(l) => Facts::Loading(
-                Piece::new(ui, Text::Label.job("Loading", t.text_muted), "Loading"),
-                l.elapsed.map_or(Time::Spinner, |e| Time::timer(ui, t, e)),
-            ),
+            Some(l) => Facts::Loading(Piece::new(ui, Text::Label.job("Loading", t.text_muted), "Loading"), Time::timer(ui, t, l.elapsed)),
             None if self.view == View::Data => Facts::Count,
             None => {
                 let words = self.structure_words();
@@ -652,7 +649,7 @@ mod tests {
             for (state, b) in [
                 ("data", bar(View::Data, None)),
                 ("structure", bar(View::Structure, None)),
-                ("loading", bar(View::Data, Some(Loading { elapsed: Some(s(800)) }))),
+                ("loading", bar(View::Data, Some(Loading { elapsed: s(800) }))),
             ] {
                 let at_ = format!("{theme:?} {state}");
                 let (shapes, at) = drawn(theme, |ui| {

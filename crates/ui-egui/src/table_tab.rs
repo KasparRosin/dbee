@@ -493,7 +493,7 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         let table_bar = TableBar {
             view: View::Data,
             structure: false,
-            loading: loading.map(|elapsed| Loading { elapsed: Some(elapsed) }),
+            loading: loading.map(|elapsed| Loading { elapsed }),
             count,
             shown,
             columns: tab.data.as_ref().map_or(0, |d| d.columns()),
