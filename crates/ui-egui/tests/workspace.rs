@@ -437,6 +437,131 @@ fn the_list_scrolls_by_whole_items_past_the_headings() {
     assert!(visible(&ui.tag("qs-group-0")) && visible(&ui.tag("qs-item-0")), "the first row and its heading in view");
 }
 
+/// The `raised` ground of the quick search's box, its left edge at `left`, as last painted.
+fn box_drawn(ui: &Ui, left: f32) -> egui::Rect {
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    ui.shapes()
+        .iter()
+        .find_map(|(_, s)| match s {
+            egui::Shape::Rect(r) if r.fill == t.raised && r.blur_width == 0.0 && (r.rect.left() - left).abs() <= 0.5 => Some(r.rect),
+            _ => None,
+        })
+        .expect("the box on raised")
+}
+
+/// With nothing typed the box holds the field alone: no row, no heading, no note, no gap; Enter
+/// does nothing; Escape closes.
+#[test]
+fn nothing_typed_shows_the_field_alone() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let alone = |ui: &mut Ui, at: &str| {
+        let i = ui.inspect();
+        assert!(visible(&tag_in(&i, "qs-input")), "{at}: the field");
+        for id in ["qs-item-0", "qs-group-0", "qs-none", "qs-error"] {
+            assert!(tag_in(&i, id).is_none(), "{at}: no `{id}`: {:?}", ids(&i));
+        }
+        let boxed = box_drawn(ui, 230.0);
+        assert!((boxed.height() - 64.0).abs() <= 0.5, "{at}: 12 + 40 + 12: {boxed:?}");
+    };
+    ui.ctrl("P");
+    ui.frame();
+    alone(&mut ui, "opened");
+    ui.text("   ");
+    ui.frame();
+    alone(&mut ui, "only spaces");
+    ui.key("Enter");
+    ui.frame();
+    assert!(ui.tag("qs-input").is_some(), "Enter leaves it open");
+    assert_eq!(ui.document()["tabs"], json!([]), "and opens nothing");
+    ui.text("ord");
+    ui.frame();
+    assert_eq!(ui.value("qs-item-0"), "shop.orders");
+    ui.ctrl("A");
+    ui.key("Backspace");
+    ui.frame();
+    alone(&mut ui, "typed and deleted");
+    ui.key("Escape");
+    assert!(ui.tag("qs-input").is_none(), "Escape closes");
+}
+
+/// `No match` in one grey line in place of the list, the same on the workspace and the
+/// connection screen.
+#[test]
+fn no_match_is_one_grey_line() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_with(db, Setup { size: APP_SIZE, ..Setup::default() });
+    let t = dbee_ui_egui::theme::tokens(&ui.harness.ctx);
+    let one_grey_line = |ui: &mut Ui, at: &str| {
+        ui.ctrl("P");
+        ui.text("zzz");
+        ui.frame();
+        let i = ui.inspect();
+        assert_eq!(tag_in(&i, "qs-none").map(|e| e["value"].clone()), Some(json!("No match")), "{at}: {:?}", ids(&i));
+        assert!(tag_in(&i, "qs-item-0").is_none() && tag_in(&i, "qs-group-0").is_none(), "{at}");
+        let r = rect_in(&i, "qs-none");
+        assert_rect(r, [242.0, 56.0 + 12.0 + 40.0 + 4.0, 616.0, 32.0], at);
+        let row = egui::Rect::from_min_size(egui::pos2(r[0] as f32, r[1] as f32), egui::vec2(r[2] as f32, r[3] as f32));
+        let drawn: Vec<(egui::Rect, egui::Shape)> = ui
+            .shapes()
+            .into_iter()
+            .filter(|(_, s)| matches!(s, egui::Shape::Text(x) if x.galley.text() == "No match" && row.contains(x.pos)))
+            .collect();
+        assert_eq!(text_colours(&drawn), [t.text_muted], "{at}: grey");
+        let (at_x, _) = ui.text_in(row, "No match").expect("the words in the row");
+        assert!((at_x.left() - row.left() - 30.0).abs() <= 0.5, "{at}: 30 in: {at_x:?}");
+        ui.key("Escape");
+    };
+    one_grey_line(&mut ui, "the workspace");
+    ui.execute("connection.close", json!({ "force": true }));
+    ui.until("the connection screen", |ui| ui.document()["screen"] == "connections");
+    one_grey_line(&mut ui, "the connection screen");
+}
+
+/// At the smallest window the box is 616 wide, 12 from each side, 42 from the top; every item in
+/// view lies inside it, whole, above the window's bottom less 12; a long name is cut with `…`.
+#[test]
+fn the_quick_search_fits_640_by_420() {
+    let db = dbee_testkit::require_testdb!();
+    let size = egui::vec2(640.0, 420.0);
+    let mut ui = Ui::connected_with(db, Setup { size, ..Setup::default() });
+    let long = "pgnew, the newest Postgres server, saved under a name far too long for the row";
+    let pgnew = ConnectionConfig { name: long.into(), ..server_config(db.server("pgnew").unwrap()) };
+    ui.execute("connection.save", json!({ "config": pgnew, "password": db.password }));
+    ui.frame();
+    ui.ctrl("P");
+    ui.text("pg");
+    ui.frame();
+    assert_rect(rect_in(&ui.inspect(), "qs-input"), [24.0, 42.0 + 12.0, 592.0, 40.0], "the field");
+    let boxed = box_drawn(&ui, 12.0);
+    assert!((boxed.width() - 616.0).abs() <= 0.5 && (boxed.top() - 42.0).abs() <= 0.5, "{boxed:?}");
+    let inside = |ui: &mut Ui, at: &str| {
+        let i = ui.inspect();
+        let items: Vec<Json> = (0..64)
+            .flat_map(|n| [format!("qs-item-{n}"), format!("qs-group-{n}")])
+            .filter_map(|id| tag_in(&i, &id))
+            .filter(|e| visible(&Some(e.clone())))
+            .collect();
+        assert!(!items.is_empty(), "{at}: items in view");
+        for e in &items {
+            let r: Vec<f64> = e["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+            assert!(r[0] >= 23.5 && r[0] + r[2] <= 616.5, "{at}: inside the box: {e}");
+            assert!(r[3] > 31.0 && r[3] <= 32.0 && r[1] + r[3] <= 420.0 - 12.0 - 12.0 + 0.5, "{at}: whole, above the bottom: {e}");
+        }
+    };
+    inside(&mut ui, "at the top");
+    let (rows, k) = rows_and_tables(&ui.inspect());
+    assert_eq!((rows, ui.value(&format!("qs-item-{k}"))), (k + 1, json!(long)), "the tables, then the connection");
+    for _ in 0..k {
+        ui.key("ArrowDown");
+    }
+    inside(&mut ui, "at the connection");
+    let row = ui.tag(&format!("qs-item-{k}"));
+    assert!(visible(&row), "the connection in view: {row:?}");
+    let drawn = ui.drawn(&format!("qs-item-{k}"));
+    assert_eq!(ui.text_in(drawn, long).map(|(_, cut)| cut), Some(true), "the long name cut with …");
+}
+
 #[test]
 fn switching_with_unsaved_query_text_asks_first() {
     let db = dbee_testkit::require_testdb!();
@@ -525,14 +650,22 @@ fn ctrl_p_on_the_connection_screen_lists_and_opens_connections() {
     ui.ctrl("P");
     assert!(visible(&ui.tag("qs-input")), "Ctrl+P opens the quick search on the connection screen");
     ui.frame();
-    // Every saved connection, connections only, in the saved list's order.
-    let saved: Vec<Json> = ui.execute("connection.list", json!({}))["saved"].as_array().unwrap().iter().map(|c| c["name"].clone()).collect();
-    assert_eq!(saved, [json!("Shop live"), json!("pg14")]);
-    assert_eq!(vec![ui.value("qs-item-0"), ui.value("qs-item-1")], saved);
+    // Nothing typed lists nothing.
+    assert!(ui.tag("qs-item-0").is_none() && ui.tag("qs-none").is_none(), "{:?}", ids(&ui.inspect()));
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == "Find a connection"), "the placeholder");
+    // `p` is in both names: both saved connections, best first, with no heading.
+    ui.text("p");
+    ui.frame();
+    let found: Vec<Json> =
+        ui.execute("quickSearch.find", json!({ "query": "p", "grouped": true })).as_array().unwrap().iter().map(|h| h["name"].clone()).collect();
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(vec![ui.value("qs-item-0"), ui.value("qs-item-1")], found);
     assert!(ui.tag("qs-item-2").is_none());
+    assert!(ui.tag("qs-group-0").is_none(), "no heading on the connection screen");
+    ui.ctrl("A");
     ui.text("zzz");
     ui.frame();
-    assert!(ui.texts().iter().any(|(_, g)| g.text() == "No connection matches."));
+    assert_eq!(ui.value("qs-none"), "No match");
     ui.key("Escape");
     ui.quick_switch("pg14", "pg14");
     ui.until("connected to pg14", |ui| ui.connection_id().as_deref() == Some(id.as_str()) && ui.document()["screen"] == "workspace");
@@ -568,13 +701,17 @@ fn ctrl_p_leaves_a_lost_connection() {
     // The next database action finds the connection gone.
     ui.click("tree-refresh");
     ui.until("the lost mark", |ui| ui.document()["connection"]["lost"] == true);
-    // While lost, only connections are found.
+    // While lost, only connections are found: OTHER CONNECTIONS alone.
     ui.ctrl("P");
+    ui.frame();
+    assert!(ui.texts().iter().any(|(_, g)| g.text() == "Find a connection"), "the placeholder");
     ui.text("pg");
     ui.frame();
     let i = ui.inspect();
     let rows: Vec<usize> = (0..20).filter(|n| tag_in(&i, &format!("qs-item-{n}")).is_some()).collect();
     assert!(!rows.is_empty() && rows.iter().all(|n| tag_in(&i, &format!("qs-item-{n}-kind")).is_some()), "{:?}", ids(&i));
+    assert_eq!(tag_in(&i, "qs-group-0").map(|g| g["value"].clone()), Some(json!("Other connections")), "{:?}", ids(&i));
+    assert!(tag_in(&i, "qs-group-1").is_none(), "{:?}", ids(&i));
     ui.key("Escape");
     ui.quick_switch("pgnew", "pgnew");
     ui.until("connected to pgnew", |ui| ui.connection_id().as_deref() == Some(pgnew.as_str()) && ui.document()["screen"] == "workspace");

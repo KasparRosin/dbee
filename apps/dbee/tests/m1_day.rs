@@ -257,6 +257,13 @@ fn m1_day_end_to_end() {
 
     // 2. Ctrl+P, `ord`, Enter: the orders tab.
     app.ctrl("P");
+    app.until("the quick search", |app| app.tag("qs-input").is_some());
+    // Nothing typed: the field alone.
+    assert!(app.tag("qs-item-0").is_none() && app.tag("qs-group-0").is_none(), "nothing listed before typing");
+    app.shot(&root, "2a0-quick-search-empty");
+    app.text("zzz");
+    app.until("No match", |app| app.tag("qs-none").is_some_and(|t| t["value"] == "No match"));
+    app.ctrl("A");
     app.text("ord");
     app.until("the quick search's hits", |app| app.tag("qs-item-0").is_some_and(|t| t["value"] == "shop.orders"));
     // Grouped under the open connection's heading; the field 40 tall, rows 32, 616 wide.

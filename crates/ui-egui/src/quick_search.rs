@@ -6,6 +6,10 @@
 //! match left out; on the connection screen the saved connections alone, with no heading. The
 //! parts are drawn by [`components::quick_search`].
 //!
+//! With nothing typed (or only spaces) the box holds the field alone and nothing is asked for;
+//! when nothing matches, one grey `No match` row; when the search fails, its message as one red
+//! row.
+//!
 //! The field has the keyboard while it is open: typing narrows the list, ArrowDown and ArrowUp
 //! move the highlighted row (over rows only, skipping the headings; the first row is highlighted
 //! as the list changes), Enter or a click chooses it, and Escape or a click outside closes the
@@ -27,7 +31,8 @@
 //! Automation ids: `qs-input` (value: the query); `qs-item-<n>` (value: `schema.table`, or a
 //! connection's name), `n` from 0 over the rows in the list's order, with `qs-item-<n>-kind`
 //! (value: the database type's label) on a connection's row; `qs-group-<g>` (value: the heading's
-//! words as written, before capitals), `g` from 0 top to bottom.
+//! words as written, before capitals), `g` from 0 top to bottom; `qs-none` (value `No match`)
+//! and `qs-error` (value: the search's message), the note row in place of the list.
 
 use std::sync::Arc;
 
@@ -40,7 +45,7 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
-use crate::components::quick_search::{self as parts, Field, Heading, Row};
+use crate::components::quick_search::{self as parts, Field, Heading, Note, Row};
 use crate::components::tooltip::Hint;
 use crate::connections;
 use crate::theme::{
@@ -267,7 +272,19 @@ fn reveal_offset(first: usize, last: usize, offset: f32, view_h: f32, pitch: f32
 }
 
 /// Asks `quickSearch.find` for the query when it, the catalog or the saved connections changed.
+/// A blank query (nothing typed, or only spaces) asks nothing and lists nothing.
 fn find(app: &mut DbeeApp) {
+    if app.view.quick.query.trim().is_empty() {
+        let tables = app.session.state().connection(Which::Active).is_some_and(|c| !c.lost);
+        let qs = &mut app.view.quick;
+        qs.tables = tables;
+        qs.found_for = None;
+        qs.hits.clear();
+        qs.items.clear();
+        qs.error = None;
+        qs.selected = 0;
+        return;
+    }
     let qs = &app.view.quick;
     if qs.found_for.as_ref().is_some_and(|f| f.holds(app.session.state(), &qs.query)) {
         return;
@@ -390,12 +407,24 @@ fn draw(ctx: &egui::Context, qs: &mut QuickSearch, tags: &mut Tags) -> Act {
             qs.selected = 0;
             qs.reveal = true;
         }
+        let note = match &qs.error {
+            Some(e) => Some((Note::Error(e.as_str()), "qs-error")),
+            None if qs.hits.is_empty() && !qs.query.trim().is_empty() => Some((Note::NoMatch, "qs-none")),
+            None => None,
+        };
+        if note.is_none() && qs.items.is_empty() {
+            // Nothing typed: the field alone.
+            return;
+        }
         ui.add_space(QS_LIST_GAP);
-        if let Some(e) = &qs.error {
-            ui.label(egui::RichText::new(e.as_str()).color(t.danger));
-        } else if qs.hits.is_empty() {
-            let none = if qs.tables { "No table or connection matches." } else { "No connection matches." };
-            ui.label(egui::RichText::new(none).color(t.text_muted));
+        if let Some((note, tag)) = note {
+            let (rect, r) = ui.allocate_exact_size(vec2(inner, QS_ROW_H), Sense::hover());
+            let cut = note.paint(ui, rect);
+            tags.tag_value_as(tag, &r, note.words(), true);
+            if let Some(whole) = cut {
+                r.hint(whole);
+            }
+            return;
         }
         let room = screen.bottom() - QS_MARGIN - f32::from(QS_PAD) - ui.cursor().top();
         // Whole items only, so moving the highlight scrolls by whole items.
@@ -525,5 +554,61 @@ mod tests {
         assert!(!app.view.quick.open, "a dialog closes the search");
         frame(&mut app, vec![key(Key::Escape)]);
         assert!(app.view.dialog.is_none(), "Escape reached the dialog");
+    }
+
+    /// An app on a throwaway home (the connection screen, nothing saved), with the search open,
+    /// and a context with dbee's theme.
+    fn searching() -> (dbee_testkit::TempHome, DbeeApp, egui::Context) {
+        let home = dbee_testkit::temp_home(None, None);
+        let session = Session::new(SessionOptions { config_dir: Some(home.home.join("config")), ..SessionOptions::default() }).unwrap();
+        let mut app = DbeeApp::new(session, None);
+        app.view.quick.show_new(app.session.state());
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        (home, app, ctx)
+    }
+
+    /// One frame of the search: its shapes.
+    fn search_frame(app: &mut DbeeApp, ctx: &egui::Context) -> Vec<egui::epaint::ClippedShape> {
+        app.tags.begin_frame();
+        let mut out = ctx.run_ui(RawInput::default(), |ui| show(app, ui.ctx()));
+        let shapes = std::mem::take(&mut out.shapes);
+        out.drop_without_applying_deltas();
+        shapes
+    }
+
+    #[test]
+    fn a_blank_query_asks_nothing() {
+        let (_home, mut app, ctx) = searching();
+        app.view.quick.query = "   ".into();
+        for _ in 0..3 {
+            search_frame(&mut app, &ctx);
+        }
+        let qs = &app.view.quick;
+        assert!(qs.open, "still open");
+        assert!(qs.found_for.is_none() && qs.hits.is_empty() && qs.items.is_empty(), "nothing asked: {qs:?}");
+        assert!(app.tags.value("qs-none").is_none() && app.tags.value("qs-item-0").is_none(), "nothing listed: {:?}", app.tags.ids());
+    }
+
+    #[test]
+    fn the_search_failing_shows_its_error_row() {
+        let (_home, mut app, ctx) = searching();
+        app.view.quick.query = "ord".into();
+        search_frame(&mut app, &ctx);
+        assert!(app.view.quick.found_for.is_some());
+        app.view.quick.error = Some("The search gave no list.".into());
+        app.view.quick.hits.clear();
+        app.view.quick.items.clear();
+        let shapes = search_frame(&mut app, &ctx);
+        assert_eq!(app.tags.value("qs-error"), Some(&json!("The search gave no list.")), "{:?}", app.tags.ids());
+        assert!(app.tags.value("qs-item-0").is_none() && app.tags.value("qs-none").is_none());
+        let row = app.tags.rect("qs-error").unwrap_or(egui::Rect::NOTHING);
+        assert!((row.height() - QS_ROW_H).abs() <= 0.5, "one row: {row:?}");
+        let t = theme::tokens(&ctx);
+        let drawn: Vec<_> = crate::components::texts(&shapes).into_iter().filter(|(w, _, _)| w == "The search gave no list.").collect();
+        assert_eq!(drawn.len(), 1, "drawn once: {drawn:?}");
+        let (_, at, colour) = &drawn[0];
+        assert_eq!(*colour, t.danger);
+        assert!((at.left() - row.left() - crate::theme::size::QS_TEXT_X).abs() <= 0.5, "from the text column: {at:?} in {row:?}");
     }
 }
