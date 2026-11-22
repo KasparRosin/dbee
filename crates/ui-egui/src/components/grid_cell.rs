@@ -21,7 +21,7 @@ pub use dbee_sql::filter::SortDir as Sort;
 use super::icon::Icon;
 use super::painter;
 use crate::theme::size::{
-    GRID_CELL_PAD_X, GRID_FAILED_MARK, GRID_HEADER_GAP, GRID_LINK_GAP, GRID_OUTLINE_W, GRID_ROW_NUMBER_MIN_W, GRID_SORT_HINT_GAP,
+    GRID_CELL_PAD_X, GRID_FAILED_MARK, GRID_HEADER_GAP, GRID_LINK_GAP, GRID_OUTLINE_W, GRID_ROW_NUMBER_MIN_W, GRID_SORT_EDGE, GRID_SORT_HINT_GAP,
 };
 use crate::theme::{Text, Tokens, tokens};
 use crate::tree::thousands;
@@ -141,8 +141,15 @@ pub struct Header<'a> {
 }
 
 impl Header<'_> {
-    /// Draws it into `rect`.
-    pub fn paint(&self, ui: &Ui, rect: Rect) {
+    /// Draws it into `rect`; `true` when the name or the type did not fit and was cut with `…`
+    /// (or the type left out).
+    ///
+    /// The sort mark always has its room: where a click sorts (or the column is sorted), the name
+    /// and type are cut to leave room for both hover arrows after them, hovered or not, so
+    /// nothing moves or is cut anew on hover and the mark is never covered or pushed out of the
+    /// cell. As on the page, a left header's mark may run into the cell's right padding, up to
+    /// [`GRID_SORT_EDGE`] from its edge.
+    pub fn paint(&self, ui: &Ui, rect: Rect) -> bool {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         head_ground(&p, rect, t);
@@ -151,17 +158,30 @@ impl Header<'_> {
         let arrow = Icon::SortAscending.size().x;
         let hint = self.sortable && self.hovered && self.sort.is_none();
         let to_right = self.align == Align::Right && self.key.is_none();
+        let hint_w = 2.0 * arrow + GRID_SORT_HINT_GAP;
         // As on the page: a number's hint takes its room in the run, moving the name; elsewhere it
-        // follows the type, into the padding if it must, and the name and type stay put.
+        // follows the type, and the name and type stay put.
         let sort_w = match (self.sort, hint) {
             (Some(_), _) => gap + arrow,
-            (None, true) if to_right => gap + 2.0 * arrow + GRID_SORT_HINT_GAP,
+            (None, true) if to_right => gap + hint_w,
             _ => 0.0,
         };
+        // What the mark may come to need, kept free whatever shows now.
+        let kept = if self.sortable {
+            gap + hint_w
+        } else if self.sort.is_some() {
+            gap + arrow
+        } else {
+            0.0
+        };
         let room = (rect.width() - 2.0 * pad).max(0.0);
-        let name = one_line(ui, self.name, Text::Header, t.text, room - key_w - sort_w);
-        let left = room - key_w - sort_w - name.size().x - gap;
+        let words =
+            if to_right || kept == 0.0 { room - key_w - kept } else { (rect.width() - pad - key_w - kept - GRID_SORT_EDGE).min(room - key_w) }
+                .max(0.0);
+        let name = one_line(ui, self.name, Text::Header, t.text, words);
+        let left = words - name.size().x - gap;
         let ty = (left > 12.0).then(|| one_line(ui, self.ty, Text::Data, t.text_muted, left));
+        let cut = name.elided || ty.as_ref().map_or(!self.ty.is_empty(), |g| g.elided);
         let used = key_w + name.size().x + ty.as_ref().map_or(0.0, |g| gap + g.size().x) + sort_w;
         let right = to_right && used <= room;
         let mut x = if right { rect.right() - pad - used } else { rect.left() + pad };
@@ -171,23 +191,30 @@ impl Header<'_> {
             Icon::Key.paint(&p, pos2(x + Icon::Key.size().x / 2.0, y), colour);
             x += key_w;
         }
-        x += place(&p, name, x, y, t.text);
+        // A cell too narrow for even a cut name: its `…` stops where the words' room does.
+        let words_p = p.with_clip_rect(p.clip_rect().intersect(Rect::everything_left_of((x + words).max(x))));
+        x += place(&words_p, name, x, y, t.text);
         if let Some(ty) = ty {
             x += gap;
-            x += place(&p, ty, x, y, t.text_muted);
+            x += place(&words_p, ty, x, y, t.text_muted);
         }
         x += gap;
+        // The mark stays inside the cell, whatever the words took.
+        let within = |w: f32| x.min(rect.right() - GRID_SORT_EDGE - w).max(rect.left());
         match self.sort {
             Some(dir) => {
+                let x = within(arrow);
                 let icon = if dir == Sort::Asc { Icon::SortAscending } else { Icon::SortDescending };
                 icon.paint(&p, pos2(x + arrow / 2.0, y), t.ink);
             }
             None if hint => {
+                let x = within(hint_w);
                 Icon::SortAscending.paint(&p, pos2(x + arrow / 2.0, y), t.text_muted);
                 Icon::SortDescending.paint(&p, pos2(x + arrow * 1.5 + GRID_SORT_HINT_GAP, y), t.text_muted);
             }
             None => {}
         }
+        cut
     }
 }
 
@@ -800,6 +827,84 @@ mod tests {
         }
     }
 
+    /// A header too narrow for its name and type cuts them with `…` and keeps the sort mark whole
+    /// inside the cell, clear of the words, at rest, hovered and sorted, down to the narrowest
+    /// column; hovering cuts nothing anew.
+    #[test]
+    fn a_narrow_header_cuts_its_words_and_keeps_its_sort_mark() {
+        let head = |name, ty| Header { name, ty, key: None, sort: None, align: Align::Left, sortable: true, hovered: false };
+        let long = head("a_rather_long_column_name", "timestamp(3)[]");
+        for (theme, t) in both() {
+            for (kind, h) in [
+                ("left", long),
+                ("primary", Header { key: Some(Key::Primary), ..long }),
+                ("foreign", Header { key: Some(Key::Foreign), ..head("customer_id", "varchar(255)") }),
+                ("number", Header { align: Align::Right, ..head("total_amount_with_tax", "numeric(12,2)") }),
+                ("short name", head("at", "timestamptz(3)[]")),
+            ] {
+                for w in [56.0, 64.0, 80.0, 100.0, 130.0, 160.0, 200.0, 240.0] {
+                    let at_ = format!("{theme:?} {kind} at {w}");
+                    let words = |shapes: &[ClippedShape], r: Rect| -> Vec<(String, Rect)> {
+                        texts(shapes)
+                            .into_iter()
+                            .filter(|(w, at, _)| !w.is_empty() && r.expand(40.0).contains_rect(*at))
+                            .map(|(w, at, _)| (w, at))
+                            .collect()
+                    };
+                    // Where the words end, as clipped: a `…` in a sliver of room is cut there.
+                    let words_end = |shapes: &[ClippedShape], r: Rect| -> f32 {
+                        shapes
+                            .iter()
+                            .filter_map(|c| match &c.shape {
+                                Shape::Text(text) => Some(text.galley.rect.translate(text.pos.to_vec2()).intersect(c.clip_rect).right()),
+                                _ => None,
+                            })
+                            .fold(r.left(), f32::max)
+                    };
+                    let mut cut = false;
+                    let mut at = Rect::NOTHING;
+                    let rest = painted(theme, |ui| {
+                        ui.add_space(ROOM);
+                        let (rect, _) = ui.allocate_exact_size(vec2(w, 30.0), Sense::hover());
+                        at = rect;
+                        cut = h.paint(ui, rect);
+                    });
+                    let r = at;
+                    assert!(cut || w > 100.0, "{at_}: said to be cut");
+                    let resting = words(&rest, r);
+                    assert!(resting.iter().all(|(_, at)| at.left() >= r.left() + 8.0 - 0.5), "{at_}: the words start 8 in: {resting:?}");
+                    // The mark's room: right of the words (and the key).
+                    let key_w = if h.key.is_some() { 9.5 + 6.0 } else { 0.0 };
+                    for (state, shown, colour) in [
+                        ("hovered", Header { hovered: true, ..h }, t.text_muted),
+                        ("ascending", Header { sort: Some(Sort::Asc), ..h }, t.ink),
+                        ("descending, hovered", Header { sort: Some(Sort::Desc), hovered: true, ..h }, t.ink),
+                    ] {
+                        let (shapes, r) = head_drawn(theme, shown, w);
+                        let drawn = words(&shapes, r);
+                        if h.align == Align::Left || h.key.is_some() {
+                            assert_eq!(drawn, resting, "{at_} {state}: the words stay as at rest");
+                        } else {
+                            let cuts = |list: &[(String, Rect)]| list.iter().map(|(w, at)| (w.clone(), at.width())).collect::<Vec<_>>();
+                            assert_eq!(cuts(&drawn), cuts(&resting), "{at_} {state}: the words are cut as at rest");
+                        }
+                        let end = words_end(&shapes, r).max(r.left() + 8.0 + key_w - 6.0);
+                        let room = Rect::from_min_max(pos2(end, r.top()), r.max);
+                        let (colours, mark) =
+                            icon_in(&shapes, Rect::from_min_max(pos2(r.left() + 8.0 + key_w - 6.0, r.top()), pos2(r.right() + 60.0, r.bottom())));
+                        assert!(!colours.is_empty() && colours.iter().all(|c| *c == colour), "{at_} {state}: the mark, in its colour: {colours:?}");
+                        let want = if shown.sort.is_some() { 6.0 } else { 13.0 };
+                        assert!(mark.width() >= want - 1.5, "{at_} {state}: the whole mark: {mark:?}");
+                        assert!(
+                            mark.left() >= room.left() - 0.75 && mark.right() <= r.right() - 1.0,
+                            "{at_} {state}: the mark {mark:?} right of the words (ending {end}) and inside the cell {r:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_row_number_matches_the_page() {
         // Node 167565: 26 tall, at least 36 wide, on `card` with a 1 px `line` at its right and
@@ -970,9 +1075,15 @@ mod tests {
         let tags = &h.state().tags;
         let value = |id: &str| tags.value(id).cloned().unwrap_or_else(|| panic!("`{id}` tagged: {:?}", tags.ids()));
         use serde_json::json;
-        assert_eq!(value("grid-header-0"), json!({ "name": "id", "type": "int8", "key": "primary", "sort": "asc" }));
-        assert_eq!(value("grid-header-1"), json!({ "name": "Note", "type": "enum('small','Large')", "key": null, "sort": null }));
-        assert_eq!(value("grid-header-2"), json!({ "name": "customer_id", "type": "int4", "key": "foreign", "sort": null }));
+        assert_eq!(value("grid-header-0"), json!({ "name": "id", "type": "int8", "shown": "int8", "cut": false, "key": "primary", "sort": "asc" }));
+        assert_eq!(
+            value("grid-header-1"),
+            json!({ "name": "Note", "type": "enum('small','Large')", "shown": "enum('small','Large')", "cut": false, "key": null, "sort": null })
+        );
+        assert_eq!(
+            value("grid-header-2"),
+            json!({ "name": "customer_id", "type": "int4", "shown": "int4", "cut": false, "key": "foreign", "sort": null })
+        );
         assert_eq!(value("grid-cell-0-0"), json!({ "text": "1", "null": false }));
         assert_eq!(value("grid-cell-0-1"), json!({ "text": "Large", "null": false, "state": "staged" }));
         assert_eq!(value("grid-cell-1-1"), json!({ "text": "NULL", "null": true }));

@@ -297,6 +297,19 @@ fn m1_day_end_to_end() {
     assert_eq!(n.to_string(), psql(pg14(db), "SELECT count(*) FROM shop.orders").unwrap().trim(), "psql's count");
     assert_eq!(app.value("table-rows"), format!("1–100 of {} rows", thousands(n)));
     app.shot(&root, "2c-counted");
+    // 2c2. Whole rows: a click on a row's number, Shift+ArrowDown twice, and Ctrl+C copies the
+    //      three rows.
+    app.click("grid-row-0");
+    for _ in 0..2 {
+        app.ok("ui.key", json!({ "key": "ArrowDown", "shift": true }));
+    }
+    assert_eq!(app.document()["selection"], json!({ "anchor": [0, 0], "focus": [2, 8], "whole": true }));
+    assert!((0..3).all(|r| app.value(&format!("grid-row-{r}"))["selected"] == true), "three row numbers selected");
+    app.ctrl("C");
+    app.until("the copy's notice", |app| app.tag("notice").is_some_and(|t| t["value"] == "Copied 3 rows"));
+    assert!(app.document()["clipboardBytes"].as_u64().is_some_and(|n| n > 0), "the rows are on the clipboard");
+    app.shot(&root, "2c2-rows");
+    app.until("the notice gone", |app| app.tag("notice").is_none());
     // 2d. STRUCTURE: the page reads the orders' structure (COLUMNS as the server has them, the
     //     facts with the count from 2c), and DATA comes back with its rows and filters.
     let switch = app.rect("table-view-data");
@@ -524,11 +537,14 @@ fn m1_day_end_to_end() {
     app.double_click("grid-cell-0-1");
     let editor = app.value("cell-editor");
     assert_eq!((editor["text"].as_str(), editor["multiline"].as_bool()), (Some(day.typo.as_str()), Some(true)), "{editor}");
-    // Several lines: the value panel is the editor, with CANCEL and SAVE in its bar.
-    assert!(app.inside("cell-editor", "value-panel"), "the name is edited in the value panel");
+    // In its cell, as every value is; the value panel shows the same draft, with CANCEL and
+    // SAVE in its bar.
+    assert!(!app.inside("cell-editor", "value-panel"), "the name is edited in its cell");
+    assert_eq!(app.value("value-editor")["focused"], false, "the panel shows the draft, the keyboard in the cell");
     assert!(app.tag("value-save").is_some(), "SAVE in the panel's bar");
     app.ctrl("A");
     app.text(&day.fixed);
+    assert_eq!(app.value("value-editor")["text"].as_str(), Some(day.fixed.as_str()), "the panel follows the typing");
     app.shot(&root, "6a0-name-editing");
     app.click("value-save");
     assert!(app.tag("cell-editor").is_none(), "SAVE closed the editor");

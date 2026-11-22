@@ -18,47 +18,67 @@
 //! costs far less, as each paragraph is cached. 32 KiB keeps a keystroke within about a frame in
 //! the worst case (`keystroke_frame_with_a_value_at_the_cap`, docs/testing.md §6).
 //!
-//! **Kinds** ([`Kind`], from the column's catalog entry): one line, edited in its cell, where Enter
-//! commits; several lines for `text`, `json`, `jsonb` and `xml` (`ColumnInfo::multiline`), edited
-//! in the value panel ([`Place`]), where Enter is a newline and Ctrl+Enter commits. Booleans are one line of text like the rest: the cell's text as the
-//! database prints it (`t`, `1`; MySQL's `TINYINT(1)` holding 5 as `5`), and an emptied editor
-//! is NULL. The engine's `cell.edit` stages a typed boolean word in the database's spelling.
+//! **One draft, two views.** The editor always opens over its cell, whatever the column's type
+//! and whether or not the value panel shows, with the keyboard and the caret there
+//! ([`Place::Cell`]). It is one line, the cell's own size, with the grid's `ink` outline, and
+//! scrolls sideways with the caret. While the value panel shows, the panel shows the same draft
+//! live ([`show_in_panel`]): the column's name and type in its bar with CANCEL (as Escape) and
+//! SAVE (as Ctrl+Enter) at its right, its foot counting the draft's lines and bytes, the text in
+//! `code`, wrapped as WRAP says, coloured as JSON when the column is JSON or the value opened as
+//! JSON, up to the first spot that does not parse (plain `text` after it), with no edge. A press
+//! in the panel's text moves the keyboard and the caret there ([`Place::Panel`]), a press in the
+//! cell's editor moves them back; neither commits, and there is one caret at a time. Each view
+//! keeps its own caret and its own undo steps. Opening an editor does not show a hidden panel.
 //!
-//! **Keys.** While an editor is open it has the keyboard: Enter or Ctrl+Enter commits, Tab
-//! commits and selects the next cell to the right, then the start of the next row (Shift+Tab goes
-//! back; at the grid's last cell the selection stays), Escape cancels. These keys are taken from
-//! the frame's input before the shortcuts and the widgets see it ([`before_frame`]), so the
-//! global Ctrl+Enter does not run too, and act once the editor has drawn ([`after_draw`]): text
-//! typed earlier in the same frame is in the value, and keys typed after one wait for the next
-//! frame (`DbeeApp::feed_input`). Ctrl+Z and Ctrl+Shift+Z are the editor's own undo and redo (see
+//! **Line breaks.** The cell's editor is one line, so a line break in the value is one character
+//! of that line: drawn as the grid's line-break mark where the data font has it, else as a gap
+//! one character wide ([`break_mark`]; the bundled font has no such glyph, so today it is the
+//! gap). The caret steps over it, it can be selected and deleted like any character, and it
+//! stays when it is not: a value of several lines edited in its cell keeps them. A paste keeps
+//! its line breaks too ([`paste_whole`]: egui's own one-line field would turn them into spaces).
+//! A new line break is typed in the panel.
+//!
+//! **Kinds** ([`Kind`], from the column's catalog entry): several lines for `text`, `json`,
+//! `jsonb` and `xml` (`ColumnInfo::multiline`), one line for the rest. The kind decides one
+//! thing: what Enter does while the keyboard is in the panel (below). Booleans are one line of
+//! text like the rest: the cell's text as the database prints it (`t`, `1`; MySQL's `TINYINT(1)`
+//! holding 5 as `5`), and an emptied editor is NULL. The engine's `cell.edit` stages a typed
+//! boolean word in the database's spelling.
+//!
+//! **Keys.** While an editor is open it has the keyboard. In the cell, Enter (or Shift+Enter, or
+//! Ctrl+Enter) commits, for every kind. In the panel, Ctrl+Enter commits, and Enter is a newline
+//! in a several-line kind and commits a one-line kind. In both, Tab commits and selects the next
+//! cell to the right, then the start of the next row (Shift+Tab goes back; at the grid's last
+//! cell the selection stays), and Escape cancels. These keys are taken from the frame's input
+//! before the shortcuts and the widgets see it ([`before_frame`]), so the global Ctrl+Enter does
+//! not run too, and act once the editor has drawn ([`after_draw`]): text typed earlier in the
+//! same frame is in the value, and keys typed after one wait for the next frame
+//! (`DbeeApp::feed_input`). Ctrl+Z and Ctrl+Shift+Z are the editor's own undo and redo (see
 //! [`crate::shortcuts`]). Any other shortcut commits the editor before it runs, so Ctrl+S writes
 //! the value being typed.
 //!
+//! **The grid's arrows.** With no editor open, this module also gives the grid its arrow keys
+//! ([`move_on_arrows`]): they move the selection, and Shift with them extends it.
+//!
 //! **Committing** ([`CellEditor::command`]): an unchanged value (the text it opened with) sends
 //! nothing; empty text sends `cell.clear` (`''` for string types, NULL for the others, booleans
-//! included); other text sends `cell.edit`. A press anywhere outside the editor (in the panel:
-//! outside the panel) commits it before anything else sees the press, so clicking another cell
-//! commits and selects that cell. An editor whose tab, page or cell is gone, or that can no longer
-//! stage, closes without committing; so does one whose tab's staged edits changed under it
+//! included); other text sends `cell.edit`. A press outside the cell's editor and outside the
+//! panel commits it before anything else sees the press, so clicking another cell commits and
+//! selects that cell; a press in the panel outside its text (its bar, its foot, its resize edge)
+//! changes nothing. An editor whose tab, page or cell is gone, or that can no longer stage,
+//! closes without committing; so does one whose tab's staged edits changed under it
 //! (`Edits::revision`: an agent's `row.delete` can move the row it points at), with a notice that
-//! the edit was discarded. When the cell of an editor drawn over it leaves the rows and columns in
-//! view (scrolled away either way), it commits, as a click elsewhere would; an editor in the panel
-//! stays open.
+//! the edit was discarded. When the cell leaves the rows and columns in view (scrolled away
+//! either way) while the keyboard is in the cell's editor, it commits, as a click elsewhere
+//! would; while the keyboard is in the panel it stays open there, and nothing is drawn over the
+//! cell until it is back in view. When the panel goes away (hidden, or no room left) while it
+//! has the keyboard, the keyboard goes back to the cell's editor.
 //!
-//! **In the panel** ([`show_in_panel`], MC+). Several lines are edited in the value panel when
-//! the table tab has room for it ([`crate::value_panel::has_room`]); opening one shows a hidden
-//! panel (`View::value_panel`, which then stays on). The panel's bar keeps the column's name and
-//! type and puts CANCEL (as Escape) and SAVE (as Ctrl+Enter) at its right, its foot counts the text's
-//! lines and bytes as they are typed; the text is the value as stored, in `code`, wrapped as WRAP
-//! says, coloured as JSON when the column is JSON or the value opened as JSON, up to the first spot
-//! that does not parse (plain `text` after it). The panel takes no edge: the caret shows it. The
-//! cell keeps its text as before the edit, in the `editing` look. Every key, the paste guard and
-//! the cap work as in the cell. With no room for the panel the editor floats over its cell as
-//! before (320 wide, up to 180 tall); one whose panel goes away while open floats from then on.
-//!
-//! Automation id: `cell-editor` (value `{text, multiline}`, the text cut to [`TAG_CHARS`]
-//! characters; in the panel its rect is the panel's text). The editor's text never reaches the
-//! logs: its `Debug` leaves it out.
+//! Automation ids: `cell-editor` (the editor over its cell; value `{text, multiline}`, the text
+//! cut to [`TAG_CHARS`] characters, `multiline` whether its kind is several lines) and, while the
+//! value panel shows it, `value-editor` (the panel's text; value `{text, multiline, focused}`,
+//! `focused` whether the keyboard is the panel's). The editor's text never reaches the logs: its
+//! `Debug` leaves it out.
 
 use std::sync::{Arc, Weak};
 
@@ -77,6 +97,7 @@ use serde_json::json;
 use crate::DbeeApp;
 use crate::app::Origin;
 use crate::automation::Tags;
+use crate::components::grid_cell::BREAK;
 use crate::components::toast;
 use crate::grid::{CELL, GridSource};
 use crate::shortcuts;
@@ -91,10 +112,9 @@ pub const EDITOR: &str = "cell-editor";
 /// How much of the text the `cell-editor` tag shows.
 pub const TAG_CHARS: usize = 200;
 
-/// The narrowest a several-lines editor is.
-const LINES_W: f32 = 320.0;
-/// The tallest a several-lines editor grows before it scrolls.
-const LINES_MAX_H: f32 = 180.0;
+/// The value panel's view of the editor: its automation id.
+pub const PANEL_EDITOR: &str = "value-editor";
+
 /// The editor's edge, `ink` on `card` as the page's `editing` cell (the grid's outline), and the
 /// text's inset as in the grid.
 const BORDER: f32 = crate::theme::size::GRID_OUTLINE_W;
@@ -103,17 +123,31 @@ const PAD: f32 = crate::theme::size::GRID_CELL_PAD_X;
 /// The keys an open editor keeps from focus moves: Tab, the arrows and Escape are its own.
 const KEYS_KEPT: EventFilter = EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true };
 
-/// The text editor's id (one editor at a time).
+/// The id of the editor's text in the cell (one editor at a time).
 fn text_id() -> Id {
     Id::new("dbee-cell-editor-text")
 }
 
-/// How a cell's value is edited.
+/// The id of the same text in the value panel.
+fn panel_text_id() -> Id {
+    Id::new("dbee-cell-editor-panel-text")
+}
+
+/// The id of the text that has the keyboard while the editor's focus is in `place`.
+fn id_in(place: Place) -> Id {
+    match place {
+        Place::Cell => text_id(),
+        Place::Panel => panel_text_id(),
+    }
+}
+
+/// What a cell's value can hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// One line: Enter commits.
+    /// One line: Enter commits, in the cell and in the panel.
     Line,
-    /// Several lines: Enter is a newline, Ctrl+Enter commits.
+    /// Several lines: in the panel Enter is a newline and Ctrl+Enter commits; in the cell Enter
+    /// commits.
     Lines,
 }
 
@@ -127,12 +161,12 @@ impl Kind {
     }
 }
 
-/// Where an editor is drawn.
+/// Which of the editor's two views has the keyboard and the caret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
-    /// Over its cell: one line always, several lines with no room for the value panel.
+    /// The one over its cell: where every editor opens.
     Cell,
-    /// In the value panel (several lines).
+    /// The one in the value panel, after a press in its text.
     Panel,
 }
 
@@ -212,7 +246,8 @@ pub struct CellEditor {
     pub row: usize,
     pub col: usize,
     pub kind: Kind,
-    /// Where it is drawn: chosen as it opens ([`open`]).
+    /// Which of its views has the keyboard: the cell's as it opens, the panel's after a press in
+    /// the panel's text, the cell's again after a press in the cell's.
     pub place: Place,
     /// Its text gets JSON colours in the panel: a JSON column, or a value that opened as JSON.
     pub(crate) json: bool,
@@ -223,8 +258,12 @@ pub struct CellEditor {
     /// or other edits, close it.
     page: Weak<ResultSet>,
     revision: u64,
-    /// Where it was drawn in the last frame that drew it: a press outside commits it.
+    /// Where it was drawn over its cell in the last frame that drew it.
     rect: Option<Rect>,
+    /// Where the value panel showed it in the last frame: the whole panel, its resize edge
+    /// included, and the text's box in it. A press outside the cell's editor and the panel
+    /// commits it; one in the text's box moves the keyboard there.
+    panel: Option<(Rect, Rect)>,
     /// Not drawn yet: it takes the keyboard and selects its text when first drawn.
     fresh: bool,
     /// When (egui's clock) a fresh editor first found its cell out of view.
@@ -264,6 +303,7 @@ impl CellEditor {
             page: Arc::downgrade(page),
             revision,
             rect: None,
+            panel: None,
             fresh: true,
             unseen_since: None,
             pending: None,
@@ -292,13 +332,18 @@ impl CellEditor {
         }
     }
 
-    /// What the `cell-editor` tag shows.
+    /// What the `cell-editor` and `value-editor` tags show.
     fn tag_value(&self) -> Json {
         let mut text: String = self.text.chars().take(TAG_CHARS).collect();
         if self.text.chars().nth(TAG_CHARS).is_some() {
             text.push('…');
         }
         json!({ "text": text, "multiline": self.kind == Kind::Lines })
+    }
+
+    /// How its keys read now: several lines only while the keyboard is in the panel.
+    fn keys(&self) -> Kind {
+        if self.place == Place::Panel { self.kind } else { Kind::Line }
     }
 }
 
@@ -354,12 +399,7 @@ pub(crate) fn open(app: &mut DbeeApp, ctx: &egui::Context, row: usize, col: usiz
     // One open already is committed first (and then the new one sees its edit).
     commit(app, ctx);
     match opening(&app.session, row, col) {
-        Ok(Some(mut editor)) => {
-            // Several lines go in the value panel while the tab has room for it, which shows.
-            if editor.kind == Kind::Lines && app.view.panel.room {
-                editor.place = Place::Panel;
-                app.view.value_panel = true;
-            }
+        Ok(Some(editor)) => {
             app.view.work.editor = Some(editor);
             // A selection scrolled away: bring its cell into view, where the editor shows.
             let id = format!("{CELL}{row}-{col}");
@@ -414,14 +454,16 @@ fn discarded(ed: &CellEditor, why: Unfit) -> Option<&'static str> {
 /// Removes the open editor (its text state and the keyboard go with it) and returns it.
 fn take(app: &mut DbeeApp, ctx: &egui::Context) -> Option<CellEditor> {
     let ed = app.view.work.editor.take()?;
-    ctx.memory_mut(|m| m.surrender_focus(text_id()));
-    ctx.data_mut(|d| d.remove::<TextEditState>(text_id()));
+    for id in [text_id(), panel_text_id()] {
+        ctx.memory_mut(|m| m.surrender_focus(id));
+        ctx.data_mut(|d| d.remove::<TextEditState>(id));
+    }
     Some(ed)
 }
 
-/// The open editor's kind, if one is open: it has the keyboard.
+/// How the open editor's keys read now, if one is open: it has the keyboard.
 pub(crate) fn open_kind(app: &DbeeApp) -> Option<Kind> {
-    app.view.work.editor.as_ref().map(|e| e.kind)
+    app.view.work.editor.as_ref().map(CellEditor::keys)
 }
 
 /// Commits the open editor, if any, and closes it.
@@ -442,8 +484,12 @@ pub(crate) fn commit(app: &mut DbeeApp, ctx: &egui::Context) {
 pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
     if app.view.work.editor.is_none() {
         // The text of an editor that went with its workspace.
-        ctx.data_mut(|d| d.remove::<TextEditState>(text_id()));
+        ctx.data_mut(|d| {
+            d.remove::<TextEditState>(text_id());
+            d.remove::<TextEditState>(panel_text_id());
+        });
         open_on_enter(app, ctx);
+        move_on_arrows(app, ctx);
         return;
     }
     if let Err(why) = still_fits(app) {
@@ -458,34 +504,100 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
         commit(app, ctx);
         return;
     }
-    let rect = app.view.work.editor.as_ref().and_then(|e| e.rect);
-    let outside = ctx
-        .input(|i| i.events.iter().any(|e| matches!(e, Event::PointerButton { pressed: true, pos, .. } if !rect.is_some_and(|r| r.contains(*pos)))));
-    if outside {
-        commit(app, ctx);
-        return;
+    // This frame's presses: one in the cell's editor or in the panel's text moves the keyboard
+    // there, one elsewhere in the panel changes nothing, and one outside both commits.
+    let Some(ed) = app.view.work.editor.as_mut() else { return };
+    let (cell, panel) = (ed.rect, ed.panel.take());
+    let presses: Vec<egui::Pos2> = ctx.input(|i| {
+        let pressed = |e: &Event| match e {
+            Event::PointerButton { pressed: true, pos, .. } => Some(*pos),
+            _ => None,
+        };
+        i.events.iter().filter_map(pressed).collect()
+    });
+    for pos in presses {
+        if cell.is_some_and(|r| r.contains(pos)) {
+            ed.place = Place::Cell;
+        } else if panel.is_some_and(|(_, text)| text.contains(pos)) {
+            ed.place = Place::Panel;
+        } else if !panel.is_some_and(|(whole, _)| whole.contains(pos)) {
+            commit(app, ctx);
+            return;
+        }
     }
     let Some(ed) = app.view.work.editor.as_ref() else { return };
-    let kind = ed.kind;
+    let (kind, place) = (ed.keys(), ed.place);
     // The bytes the next paste replaces: the selection (all of the text until it is drawn).
     let selected = if ed.fresh {
         ed.text.len()
     } else {
-        let range = TextEditState::load(ctx, text_id()).and_then(|s| s.cursor.char_range()).map(|r| r.as_sorted_char_range());
+        let range = TextEditState::load(ctx, id_in(place)).and_then(|s| s.cursor.char_range()).map(|r| r.as_sorted_char_range());
         range.map_or(0, |r| selected_bytes(&ed.text, r.start.0..r.end.0))
     };
     let length = ed.text.len();
-    let (key, wait, dropped) = ctx.input_mut(|i| {
+    let (key, wait, dropped, broken) = ctx.input_mut(|i| {
         let (key, wait) = split_at_key(&mut i.events, kind);
-        (key, wait, take_large_pastes(&mut i.events, length, selected))
+        let dropped = take_large_pastes(&mut i.events, length, selected);
+        // egui's one-line field would turn a paste's line breaks into spaces: the cell's editor
+        // takes such a paste itself.
+        let broken = if place == Place::Cell { take_broken_pastes(&mut i.events) } else { Vec::new() };
+        (key, wait, dropped, broken)
     });
     if let Some(ed) = app.view.work.editor.as_mut() {
         ed.pending = key;
+        for paste in broken {
+            paste_whole(ctx, ed, &paste);
+        }
     }
     app.carry.extend(wait);
     if let Some(n) = dropped {
         app.notice(toast::Kind::Error, pasted_too_large(n));
     }
+}
+
+/// Takes the pastes that hold a line break out of `events`, in order.
+pub fn take_broken_pastes(events: &mut Vec<Event>) -> Vec<String> {
+    let mut taken = Vec::new();
+    events.retain(|e| match e {
+        Event::Paste(text) if text.contains(['\n', '\r']) => {
+            taken.push(text.clone());
+            false
+        }
+        _ => true,
+    });
+    taken
+}
+
+/// `text` with `paste` in place of the characters `selected` (a range of character indices,
+/// brought inside the text): the new text, and the character index just after the paste.
+pub fn pasted_over(text: &str, selected: std::ops::Range<usize>, paste: &str) -> (String, usize) {
+    let byte = |c: usize| text.char_indices().nth(c).map_or(text.len(), |(b, _)| b);
+    let (from, to) = (byte(selected.start), byte(selected.end.max(selected.start)));
+    let mut out = String::with_capacity(text.len().saturating_add(paste.len()));
+    out.push_str(text.get(..from).unwrap_or_default());
+    out.push_str(paste);
+    out.push_str(text.get(to..).unwrap_or_default());
+    let at = text.get(..from).unwrap_or_default().chars().count().saturating_add(paste.chars().count());
+    (out, at)
+}
+
+/// Puts `paste` into the cell's text as written, line breaks and all, over the selection (all of
+/// the text in an editor not drawn yet), and the caret after it. The field's own undo sees the
+/// change as it sees any other.
+fn paste_whole(ctx: &egui::Context, ed: &mut CellEditor, paste: &str) {
+    let mut state = TextEditState::load(ctx, text_id()).unwrap_or_default();
+    let chars = ed.text.chars().count();
+    let selected = if ed.fresh {
+        0..chars
+    } else {
+        state.cursor.char_range().map(|r| r.as_sorted_char_range()).map_or(chars..chars, |r| r.start.0.min(chars)..r.end.0.min(chars))
+    };
+    let (text, at) = pasted_over(&ed.text, selected, paste);
+    ed.text = text;
+    // It has its selection now: the first frame's select-all would undo it.
+    ed.fresh = false;
+    state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(at))));
+    TextEdit::store_state(ctx, text_id(), state);
 }
 
 /// The bytes of `text` the characters `chars` (a range of character indices) take.
@@ -541,6 +653,61 @@ fn open_on_enter(app: &mut DbeeApp, ctx: &egui::Context) {
     }
 }
 
+/// The grid's arrow keys: with a selection in the active tab's grid and nothing holding the
+/// keyboard (no widget, dialog, quick search, menu or list), an arrow moves the selection one
+/// cell, and with Shift extends it (`selection.move`); a row selection moves and extends by whole
+/// rows. A focus cell out of view is scrolled to.
+fn move_on_arrows(app: &mut DbeeApp, ctx: &egui::Context) {
+    let st = app.session.state();
+    let selected = match st.active_tab() {
+        Some(Tab::Table(t)) => t.selection.is_some() && !shortcuts::grid_unseen(app),
+        Some(Tab::Query(q)) => q.selection.is_some(),
+        None => false,
+    };
+    if !selected
+        || st.screen != Screen::Workspace
+        || app.view.dialog.is_some()
+        || app.view.quick.open
+        || ctx.memory(|m| m.focused()).is_some()
+        || egui::Popup::is_any_open(ctx)
+    {
+        return;
+    }
+    const ARROWS: [(Key, i64, i64); 4] = [(Key::ArrowUp, -1, 0), (Key::ArrowDown, 1, 0), (Key::ArrowLeft, 0, -1), (Key::ArrowRight, 0, 1)];
+    let mut steps = Vec::new();
+    ctx.input_mut(|i| {
+        let held = i.modifiers;
+        for (key, rows, columns) in ARROWS {
+            for (pattern, extend) in [(Modifiers::NONE, false), (Modifiers::SHIFT, true)] {
+                while shortcuts::take(&mut i.events, pattern, key, held) {
+                    steps.push((rows, columns, extend));
+                }
+            }
+        }
+    });
+    if steps.is_empty() {
+        return;
+    }
+    for (rows, columns, extend) in steps {
+        app.start("selection.move", json!({ "rows": rows, "columns": columns, "extend": extend }), Origin::Menu);
+    }
+    let selection = match app.session.state().active_tab() {
+        Some(Tab::Table(t)) => t.selection,
+        Some(Tab::Query(q)) => q.selection,
+        None => None,
+    };
+    if let Some(sel) = selection {
+        let (row, col) = sel.focus;
+        // Whole rows scroll up and down only: to the row's cell in the first column in view.
+        let col = if sel.whole { (0..=col).find(|c| !app.tags.hidden(&format!("grid-header-{c}"))).unwrap_or(0) } else { col };
+        let id = format!("{CELL}{row}-{col}");
+        if app.tags.hidden(&id) {
+            app.tags.scroll_to(&id);
+        }
+    }
+    ctx.request_repaint();
+}
+
 /// After step 5 (drawing): does what the editor's key asked for.
 pub(crate) fn after_draw(app: &mut DbeeApp, ctx: &egui::Context) {
     let Some(ed) = app.view.work.editor.as_mut() else { return };
@@ -572,19 +739,12 @@ pub(crate) fn after_draw(app: &mut DbeeApp, ctx: &egui::Context) {
 /// Draws `ed` over its cell, whose rect is `cell`, kept inside `view` (the grid's rows in view).
 pub(crate) fn show(ctx: &egui::Context, ed: &mut CellEditor, cell: Rect, view: Rect, tags: &mut Tags) {
     let t = theme::tokens(ctx);
-    let width = match ed.kind {
-        Kind::Line => cell.width(),
-        Kind::Lines => cell.width().max(LINES_W),
-    };
+    // One line, the cell's own size, whatever the value holds.
+    let (width, height) = (cell.width(), cell.height());
     let inner_w = (width - 2.0 * BORDER).max(1.0);
-    let inner_h = (cell.height() - 2.0 * BORDER).max(1.0);
+    let inner_h = (height - 2.0 * BORDER).max(1.0);
     // Placed here rather than by egui's constraint, which goes by the size the area had last:
-    // the last editor's, in an editor's first frame. Several lines grow: their height is this
-    // editor's own from its last frame.
-    let height = match ed.kind {
-        Kind::Line => cell.height(),
-        Kind::Lines => ed.rect.map_or(cell.height(), |r| r.height()),
-    };
+    // the last editor's, in an editor's first frame.
     let at = place(cell.min, vec2(width, height), view);
     let area = Area::new(Id::new("dbee-cell-editor")).order(Order::Foreground).fixed_pos(at).constrain(false).movable(false).fade_in(false);
     let r = area
@@ -622,11 +782,11 @@ pub const FRESH_WAIT: f64 = 1.0;
 /// [`FRESH_WAIT`]: past that (a grid with no room for a row, say) it closes unchanged, so an
 /// editor nobody sees does not go on taking Enter and Escape. `now` is egui's clock.
 pub(crate) fn left_view(ed: &mut CellEditor, now: f64) {
-    // In the panel it is not over its cell.
+    ed.rect = None;
+    // While the keyboard is in the panel, the editor stays open there.
     if ed.place == Place::Panel {
         return;
     }
-    ed.rect = None;
     if ed.pending.is_some() {
         return;
     }
@@ -637,11 +797,14 @@ pub(crate) fn left_view(ed: &mut CellEditor, now: f64) {
     }
 }
 
-/// Gives the text editor the keyboard; a fresh one also gets a new state with all of its text
-/// selected.
-fn take_keyboard(ui: &egui::Ui, ed: &mut CellEditor) {
-    let id = text_id();
-    if ed.fresh {
+/// Gives the editor's text in `view` the keyboard when that is where its focus is; a fresh
+/// editor's cell text also gets a new state with all of it selected.
+fn take_keyboard(ui: &egui::Ui, ed: &mut CellEditor, view: Place) {
+    if ed.place != view {
+        return;
+    }
+    let id = id_in(view);
+    if ed.fresh && view == Place::Cell {
         ed.fresh = false;
         ui.memory_mut(|m| m.request_focus(id));
         // A new state: all of the text selected, and no undo history from another cell.
@@ -654,18 +817,38 @@ fn take_keyboard(ui: &egui::Ui, ed: &mut CellEditor) {
     }
 }
 
-/// The text editor, at least `size`.
+/// What the cell's one line draws for a line break: the grid's mark where the font has it, else
+/// a space.
+fn break_mark(ui: &egui::Ui) -> char {
+    if ui.fonts_mut(|f| f.has_glyph(&Text::Data.font(), BREAK)) { BREAK } else { ' ' }
+}
+
+/// The cell's text editor, at least `size`: one line in `data`, scrolling sideways with the
+/// caret. A line break in the value is a character of the line like any other, drawn as
+/// [`break_mark`], so the caret steps over it, it can be selected and deleted, and it stays when
+/// it is not; one in pasted text is kept too ([`paste_whole`]).
 fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
-    let id = text_id();
-    take_keyboard(ui, ed);
-    let lines = ed.kind == Kind::Lines;
-    let edit = if lines {
-        TextEdit::multiline(&mut ed.text).desired_rows(1)
-    } else {
-        TextEdit::singleline(&mut ed.text).return_key(None::<KeyboardShortcut>)
+    take_keyboard(ui, ed, Place::Cell);
+    let (mark, ink) = (break_mark(ui), theme::tokens(ui.ctx()).text);
+    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap_width: f32| {
+        // A character for a character: the caret's place in the line is its place in the value.
+        let shown: String = buf
+            .as_str()
+            .chars()
+            .map(|c| match c {
+                '\n' | '\r' => mark,
+                c => c,
+            })
+            .collect();
+        let mut job = Text::Data.job_as_written(&shown, ink);
+        job.wrap.max_width = f32::INFINITY;
+        job.break_on_newline = false;
+        job.keep_trailing_whitespace = true;
+        ui.fonts_mut(|f| f.layout_job(job))
     };
-    let edit = edit
-        .id(id)
+    let edit = TextEdit::singleline(&mut ed.text)
+        .return_key(None::<KeyboardShortcut>)
+        .id(text_id())
         // The text sits where the grid draws it (the frame's margin is the text's; `margin` is
         // not used with a frame of one's own).
         .frame(Frame::NONE.inner_margin(Margin::symmetric((PAD - BORDER) as i8, 2)))
@@ -673,21 +856,19 @@ fn text_box(ui: &mut egui::Ui, ed: &mut CellEditor, size: egui::Vec2) {
         .desired_width(f32::INFINITY)
         .min_size(size)
         .vertical_align(egui::Align::Center)
+        .layouter(&mut layouter)
         .event_filter(KEYS_KEPT);
-    if lines {
-        ScrollArea::vertical().id_salt("dbee-cell-editor-scroll").max_height(LINES_MAX_H).auto_shrink([false, true]).show(ui, |ui| ui.add(edit));
-    } else {
-        ui.add(edit);
-    }
+    ui.add(edit);
 }
 
-/// Draws `ed` in the value panel (see the module docs): its text in `area`, the panel's value box
-/// ([`crate::components::value::Shown::text`]), wrapped at the box's width when `wrap`, else
-/// scrolling sideways. `panel` is the whole panel, its resize edge included: a press there does
-/// not commit it.
+/// Draws `ed`'s text in the value panel (see the module docs), the same draft the cell's editor
+/// holds: in `area`, the panel's value box ([`crate::components::value::Shown::text`]), wrapped
+/// at the box's width when `wrap`, else scrolling sideways. It has the caret only while the
+/// editor's focus is the panel's. `panel` is the whole panel, its resize edge included: a press
+/// there does not commit the editor, and one in `area` moves the keyboard here.
 pub(crate) fn show_in_panel(ui: &mut egui::Ui, ed: &mut CellEditor, area: Rect, panel: Rect, wrap: bool, tags: &mut Tags) {
     let t = *theme::tokens(ui.ctx());
-    take_keyboard(ui, ed);
+    take_keyboard(ui, ed, Place::Panel);
     let json = ed.json;
     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
         let mut job = panel_job(buf.as_str(), json, &t);
@@ -701,7 +882,7 @@ pub(crate) fn show_in_panel(ui: &mut egui::Ui, ed: &mut CellEditor, area: Rect, 
     let out = scroll.id_salt("dbee-cell-editor-panel-scroll").auto_shrink([false, false]).show(&mut inner, |ui| {
         let size = ui.available_size();
         TextEdit::multiline(&mut ed.text)
-            .id(text_id())
+            .id(panel_text_id())
             // The text starts where the panel's value does: [`PANEL_PAD`] in, at the box's top.
             .frame(Frame::NONE.inner_margin(Margin { left: inset, right: inset, top: 0, bottom: 0 }))
             .font(Text::Code.font())
@@ -716,8 +897,10 @@ pub(crate) fn show_in_panel(ui: &mut egui::Ui, ed: &mut CellEditor, area: Rect, 
     // Its tag's rect is the text's box, not the text scrolled past it.
     r.rect = out.inner_rect;
     r.interact_rect = out.inner_rect;
-    ed.rect = Some(panel);
-    tags.tag_value(EDITOR, &r, ed.tag_value());
+    ed.panel = Some((panel, out.inner_rect));
+    let mut value = ed.tag_value();
+    value["focused"] = json!(ed.place == Place::Panel);
+    tags.tag_value(PANEL_EDITOR, &r, value);
 }
 
 /// The panel's value inset, as the panel draws a value.
@@ -872,6 +1055,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_paste_with_line_breaks_goes_in_as_written() {
+        // Taken out of the frame's input, in order; one-line pastes stay for the field.
+        let mut events = vec![Event::Paste("a\nb".into()), Event::Text("x".into()), Event::Paste("plain".into()), Event::Paste("c\r\nd".into())];
+        assert_eq!(take_broken_pastes(&mut events), ["a\nb", "c\r\nd"]);
+        assert_eq!(events, [Event::Text("x".into()), Event::Paste("plain".into())]);
+        // Over a selection counted in characters, the caret after it.
+        assert_eq!(pasted_over("héllo", 1..3, "A\nB"), ("hA\nBlo".to_string(), 4));
+        assert_eq!(pasted_over("one\ntwo", 7..7, "\r\n3"), ("one\ntwo\r\n3".to_string(), 10));
+        assert_eq!(pasted_over("abc", 0..3, "x\ny"), ("x\ny".to_string(), 3));
+        assert_eq!(pasted_over("", 0..0, "\n"), ("\n".to_string(), 1));
+        // A selection past the text, or the wrong way round, is brought inside it.
+        assert_eq!(pasted_over("ab", 5..9, "\n"), ("ab\n".to_string(), 3));
+        let backwards = std::ops::Range { start: 1, end: 0 };
+        assert_eq!(pasted_over("ab", backwards, "\n"), ("a\nb".to_string(), 2));
+    }
+
+    #[test]
+    fn enter_is_a_newline_only_for_several_lines_with_the_keyboard_in_the_panel() {
+        let mut e = editor(Kind::Lines, Some("a"));
+        assert_eq!((e.place, e.keys()), (Place::Cell, Kind::Line), "it opens in its cell, where Enter commits");
+        e.place = Place::Panel;
+        assert_eq!(e.keys(), Kind::Lines);
+        let mut one = editor(Kind::Line, Some("1"));
+        one.place = Place::Panel;
+        assert_eq!(one.keys(), Kind::Line, "a one-line kind commits on Enter in the panel too");
     }
 
     #[test]

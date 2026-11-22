@@ -788,7 +788,11 @@ fn draw_row(
             };
             // Cut: the whole name and type; a foreign key names its target, after the name alone
             // when nothing is cut.
-            let cut = draw(TreeKind::Column(key), &col.name, Some(col.label()), None);
+            // The type in its short spelling (`display::short_type`); the whole one on hover.
+            let short = dbee_core::display::short_type(col.label());
+            let shortened = short != col.label();
+            let cut = draw(TreeKind::Column(key), &col.name, Some(&short), None);
+            let cut = (cut.is_some() || shortened).then(|| format!("{} {}", col.name, col.label()));
             let r = match (info.fk_for(&col.name), cut) {
                 (Some(fk), Some(whole)) => r.hint(format!("{whole} → {}", fk.target.display())),
                 (Some(fk), None) => r.hint(format!("{} → {}", col.name, fk.target.display())),
