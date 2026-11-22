@@ -1,7 +1,9 @@
 //! The table tab's bars: the table bar over the rows (`table bar`), the filter bar over it
-//! (`filter row`), and the paging bar under the rows (`paging bar`).
+//! (`filter row`), and the bottom bar under the rows or the structure's sections (`paging bar`):
+//! the DATA / STRUCTURE switch at its left end, in the same place in both views, the paging in
+//! its middle and the staged changes at its right end.
 //!
-//! The table bar and the paging bar are views: they take what to show and say what was clicked;
+//! The table bar and the bottom bar are views: they take what to show and say what was clicked;
 //! the screen tags what they drew, says on hover why something is off, and acts. The table tab
 //! ([`crate::table_tab`]) draws the table bar in its data or structure state, and
 //! its Value cell (drawn last, so Tab reaches it after the count). The filter bar is a frame the screen's filter
@@ -21,8 +23,7 @@ use super::status::{Piece, piece};
 use super::tooltip::Hint;
 use crate::theme::size::{
     BAR_CELL_H, BAR_H, BAR_LINE, CHANGES_GAP, FILTER_BAR_PAD_X, FILTER_BAR_PAD_Y, FILTER_GAP, FILTER_ROW_H, ICON_BUTTON, PAGING_GAP, PAGING_NOTE_GAP,
-    PAGING_NOTE_MIN, PAGING_PAD_LEFT, PAGING_PAD_RIGHT, STAGED_MARK, STAGED_MARK_GAP, TABLE_BAR_GAP, TABLE_BAR_PAD_X, TABLE_CANCEL_PAD_X,
-    TABLE_LOADING_GAP,
+    PAGING_NOTE_MIN, PAGING_PAD_RIGHT, STAGED_MARK, STAGED_MARK_GAP, TABLE_BAR_GAP, TABLE_BAR_PAD_X, TABLE_CANCEL_PAD_X, TABLE_LOADING_GAP,
 };
 use crate::theme::{Text, tokens};
 
@@ -44,13 +45,13 @@ pub struct Loading {
     pub elapsed: Duration,
 }
 
-/// The table bar: the view switch, REFRESH (CANCEL while a page loads), + ROW, the rows' count,
-/// IMPORT, EXPORT and the value panel's toggle. The structure view has REFRESH and its facts only.
+/// The table bar: REFRESH (CANCEL while a page loads), + ROW, the rows' count, IMPORT, EXPORT and
+/// the value panel's toggle. The structure view has REFRESH and its facts only. The view switch
+/// is the bottom bar's ([`PagingBar`]).
 #[derive(Clone, Copy, Debug)]
 pub struct TableBar {
+    /// The view it is the bar of: its state.
     pub view: View,
-    /// STRUCTURE is on; off, it is drawn faint and a click on it asks nothing.
-    pub structure: bool,
     /// A page loads: CANCEL in REFRESH's place, LOADING and its timer in the count's.
     pub loading: Option<Loading>,
     /// The rows' count, with the rows shown (`1–100`).
@@ -74,7 +75,6 @@ pub struct TableBar {
 /// What a click in the table bar asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableAsked {
-    View(View),
     Refresh,
     Cancel,
     AddRow,
@@ -85,8 +85,6 @@ pub enum TableAsked {
 /// The table bar as drawn: each part shown, the form it took for its room, and what a click
 /// asked for.
 pub struct TableShown {
-    /// The view switch's segments: DATA, STRUCTURE.
-    pub view: Vec<Response>,
     pub refresh: Option<Response>,
     pub cancel: Option<Response>,
     pub add: Option<Response>,
@@ -104,7 +102,7 @@ pub struct TableShown {
 /// first): the count's range (`1–100 of`), IMPORT and EXPORT, REFRESH's and + ROW's words (their
 /// icons stay), the count's words (COUNT, COUNT ROWS or COUNTING stay), then the facts. The
 /// structure state's facts go first, then REFRESH's word ([`TableFit::STRUCTURE_FORMS`]). Past
-/// that the left group is cut at the bar's end; DATA and STRUCTURE never go.
+/// that the left group is cut at the bar's end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TableFit {
     pub range: bool,
@@ -153,14 +151,10 @@ impl TableBar {
         }
     }
 
-    /// The view switch as drawn, `view` being the one chosen.
-    fn switch<'a>(&self, view: &'a mut View, choices: &'a [(View, &'a str)]) -> Segmented<'a, View> {
-        Segmented::caps(view, choices).off((!self.structure).then_some(View::Structure))
-    }
-
-    /// REFRESH and + ROW, with their words or without.
+    /// REFRESH and + ROW, with their words or without. REFRESH is the bar's first cell: no
+    /// divider before it, its icon the cell's own 12 from the bar's left end.
     fn refresh_button(words: bool) -> BarButton<'static> {
-        BarButton::label(Icon::Refresh, "Refresh").over_line().words(words)
+        BarButton::label(Icon::Refresh, "Refresh").over_line().words(words).divider(false)
     }
 
     fn add_button(words: bool) -> BarButton<'static> {
@@ -209,9 +203,6 @@ impl TableBar {
     /// state) that fits a bar `room` wide, each form taking room only from the steps before it;
     /// the narrowest when none does (its left group then cut at the bar's end).
     pub fn fit(&self, ui: &Ui, room: f32) -> TableFit {
-        let mut view = self.view;
-        let choices = [(View::Data, "Data"), (View::Structure, "Structure")];
-        let switch_w = self.switch(&mut view, &choices).drawn_width(ui);
         let facts = self.facts(ui);
         let data = self.view == View::Data;
         let (import, export, toggle) = self.right_buttons();
@@ -228,7 +219,7 @@ impl TableBar {
                 w if w > 0.0 => w + 2.0 * TABLE_BAR_GAP,
                 _ => 0.0,
             };
-            TABLE_BAR_PAD_X + switch_w + TABLE_BAR_GAP + first + add + facts + right
+            first + add + facts + right
         };
         let forms: &[TableFit] = if data { &TableFit::FORMS } else { &TableFit::STRUCTURE_FORMS };
         let narrowest = forms.last().copied().unwrap_or(TableFit::FORMS[5]);
@@ -245,18 +236,10 @@ impl TableBar {
         let data = self.view == View::Data;
         let fit = self.fit(ui, cell.width());
         let mut asked = None;
-        // The left: the view switch, then REFRESH (or CANCEL's cell) and + ROW.
+        // The left, from the bar's end: REFRESH (or CANCEL's cell) and + ROW.
         let mut left = ui.new_child(UiBuilder::new().id_salt(bar.id.with("left")).max_rect(cell).layout(Layout::left_to_right(Align::Center)));
         left.set_clip_rect(clip);
         left.spacing_mut().item_spacing.x = 0.0;
-        left.add_space(TABLE_BAR_PAD_X);
-        let mut view = self.view;
-        let choices = [(View::Data, "Data"), (View::Structure, "Structure")];
-        let switch = self.switch(&mut view, &choices).show(&mut left);
-        if switch.row.changed() {
-            asked = Some(TableAsked::View(view));
-        }
-        left.add_space(TABLE_BAR_GAP);
         let (refresh, cancel) = match self.loading {
             Some(_) => (None, Some(cancel_cell(&mut left))),
             None => (Some(left.add_enabled(self.can_refresh, Self::refresh_button(fit.words))), None),
@@ -337,33 +320,27 @@ impl TableBar {
         } else if clicked(&value) {
             asked = Some(TableAsked::Value);
         }
-        TableShown { view: switch.segments, refresh, cancel, add, count, facts: shown_facts, import, export, value, fit, asked }
+        TableShown { refresh, cancel, add, count, facts: shown_facts, import, export, value, fit, asked }
     }
 }
 
 /// How wide CANCEL's cell draws in `ui`.
 fn cancel_width(ui: &Ui) -> f32 {
-    BAR_LINE_W + 2.0 * TABLE_CANCEL_PAD_X + BoxButton::primary("Cancel").width(ui)
+    2.0 * TABLE_CANCEL_PAD_X + BoxButton::primary("Cancel").width(ui)
 }
 
-/// CANCEL in its cell, in REFRESH's place while a page loads: a divider, then `button/box`
-/// primary 12 in from either side.
+/// CANCEL in its cell, in REFRESH's place while a page loads: the bar's first cell, with no
+/// divider before it, `button/box` primary 12 in from either side.
 fn cancel_cell(ui: &mut Ui) -> Response {
-    let t = tokens(ui.ctx());
     let button = BoxButton::primary("Cancel");
     let size = vec2(cancel_width(ui), BAR_CELL_H);
     ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
         ui.set_min_size(size);
-        let cell = ui.max_rect();
-        ui.painter().rect_filled(Rect::from_min_size(cell.min, vec2(BAR_LINE_W, cell.height())), CornerRadius::ZERO, t.line);
-        ui.add_space(BAR_LINE_W + TABLE_CANCEL_PAD_X);
+        ui.add_space(TABLE_CANCEL_PAD_X);
         ui.add(button)
     })
     .inner
 }
-
-/// A cell's divider: as thick as a bar's line.
-const BAR_LINE_W: f32 = BAR_LINE;
 
 /// Where a bar's line runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -390,11 +367,19 @@ fn bar_ground(ui: &mut Ui, line: Line) -> (Response, Rect) {
     (r, room)
 }
 
-/// The paging bar: FIRST, PREVIOUS, the page, NEXT, LAST, then a cut page's note; and with staged
-/// changes the staged mark and their count, RESET and APPLY. The page's words and the count are
-/// facts, drawn grey.
+/// The bottom bar of a table tab, in both of its views: the DATA / STRUCTURE switch at its left
+/// end; in its middle the paging (FIRST, PREVIOUS, the page, NEXT, LAST, then a cut page's note);
+/// and with staged changes, at its right end, the staged mark and their count, RESET and APPLY.
+/// The page's words and the count are facts, drawn grey. Without [`PagingBar::pages`] (the
+/// structure view, or no page loaded) it holds the switch alone, in the same place.
 #[derive(Clone, Copy, Debug)]
 pub struct PagingBar<'a> {
+    /// The view that shows: the switch's chosen segment.
+    pub view: View,
+    /// STRUCTURE is on; off, it is drawn faint and a click on it asks nothing.
+    pub structure: bool,
+    /// The paging and the staged changes are drawn.
+    pub pages: bool,
     /// The page's words: `Page 3`, `Page 1 of 250`.
     pub page: &'a str,
     /// FIRST and PREVIOUS are on: not the first page, and nothing blocks paging.
@@ -410,9 +395,10 @@ pub struct PagingBar<'a> {
     pub note: Option<&'a str>,
 }
 
-/// What a click in the paging bar asked for.
+/// What a click in the bottom bar asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PagingAsked {
+    View(View),
     First,
     Previous,
     Next,
@@ -421,18 +407,36 @@ pub enum PagingAsked {
     Apply,
 }
 
-/// The paging bar as drawn: each part shown, and what a click asked for.
-pub struct PagingShown {
+/// The paging's parts as drawn.
+pub struct PagesShown {
     pub first: Response,
     pub previous: Response,
     pub page: Response,
     pub next: Response,
     pub last: Response,
+}
+
+/// The bottom bar as drawn: each part shown, and what a click asked for.
+pub struct PagingShown {
+    /// The view switch's segments: DATA, STRUCTURE.
+    pub view: Vec<Response>,
+    /// The paging, when it is drawn and has room.
+    pub pages: Option<PagesShown>,
     pub note: Option<Response>,
     pub changes: Option<Response>,
     pub reset: Option<Response>,
     pub apply: Option<Response>,
     pub asked: Option<PagingAsked>,
+}
+
+/// Which of the bottom bar's parts show, short of room. They give way in this order: the cut
+/// page's note, the count of changes (APPLY's hover says it), the paging, RESET. The switch and
+/// APPLY stay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PagingFit {
+    pages: bool,
+    count: bool,
+    reset: bool,
 }
 
 impl PagingBar<'_> {
@@ -441,51 +445,105 @@ impl PagingBar<'_> {
         if self.changes == 1 { "1 change".into() } else { format!("{} changes", self.changes) }
     }
 
-    /// Draws it as wide as `ui`, 36 tall. Short of room the note goes first, then the count of
-    /// changes (APPLY's hover says it); then the right group follows the left one, cut at the
-    /// bar's end. No part is drawn over another, and none past the bar.
+    /// Draws it as wide as `ui`, 36 tall, its line along the top. The switch stands
+    /// [`TABLE_BAR_PAD_X`] from the left end and the changes end [`PAGING_PAD_RIGHT`] from the
+    /// right end, whatever else shows. The paging is centred on the bar's width; with too little
+    /// room for that it moves off centre, kept [`CHANGES_GAP`] clear of the switch and of the
+    /// changes. Short of room for all, the note goes first, then the count of changes, then the
+    /// paging, then RESET; the switch and APPLY are cut only by a bar narrower than the two. No
+    /// part is drawn over another, and none past the bar. Tab goes switch, paging, changes.
     pub fn show(self, ui: &mut Ui) -> PagingShown {
         let t = tokens(ui.ctx());
         let (bar, cell) = bar_ground(ui, Line::Top);
         let mid = cell.center().y;
-        let inner = Rect::from_min_max(pos2(cell.left() + PAGING_PAD_LEFT, cell.top()), pos2(cell.right() - PAGING_PAD_RIGHT, cell.bottom()));
-        let clip = ui.clip_rect().intersect(inner);
-        let mut left = ui.new_child(UiBuilder::new().id_salt(bar.id.with("left")).max_rect(inner).layout(Layout::left_to_right(Align::Center)));
-        left.spacing_mut().item_spacing.x = 0.0;
-        left.set_clip_rect(clip);
-        let first = left.add_enabled(self.back, IconButton::plain(Icon::First));
-        let previous = left.add_enabled(self.back, IconButton::plain(Icon::Previous));
-        let words = Piece::new(&left, Text::Label.job(self.page, t.text_muted), self.page);
-        let (at, _) = left.allocate_exact_size(vec2(words.width(), ICON_BUTTON), Sense::hover());
-        // As `piece` draws it, but only as wide as its letters: the spacing egui puts after the
-        // last one runs into NEXT.
-        let size = words.galley.size();
-        left.painter().galley(pos2(at.left(), mid - size.y / 2.0), Arc::clone(&words.galley), t.text_muted);
-        let page =
-            left.interact(Rect::from_min_size(pos2(at.left(), mid - size.y / 2.0), vec2(words.width(), size.y)), bar.id.with("page"), Sense::hover());
-        let says = self.page.to_owned();
-        page.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, says.clone()));
-        let next = left.add_enabled(self.forward, IconButton::plain(Icon::Next));
-        let last = left.add_enabled(self.forward, IconButton::plain(Icon::Last));
-        let left_end = left.min_rect().right();
+        let inner = Rect::from_min_max(pos2(cell.left() + TABLE_BAR_PAD_X, cell.top()), pos2(cell.right() - PAGING_PAD_RIGHT, cell.bottom()));
+        let clip = ui.clip_rect().intersect(cell);
+        let lane = |ui: &mut Ui, salt: &str, at: Rect| {
+            let mut c = ui.new_child(UiBuilder::new().id_salt(bar.id.with(salt)).max_rect(at).layout(Layout::left_to_right(Align::Center)));
+            c.spacing_mut().item_spacing.x = 0.0;
+            c.set_clip_rect(clip);
+            c
+        };
+        let mut asked = None;
+        // The switch, first: Tab reaches it after what is above the bar and before the paging.
+        let mut left = lane(ui, "view", inner);
+        let mut view = self.view;
+        let choices = [(View::Data, "Data"), (View::Structure, "Structure")];
+        let switch = Segmented::caps(&mut view, &choices).off((!self.structure).then_some(View::Structure)).show(&mut left);
+        if switch.row.changed() {
+            asked = Some(PagingAsked::View(view));
+        }
+        let shown =
+            |pages, note, changes, reset, apply, asked| PagingShown { view: switch.segments.clone(), pages, note, changes, reset, apply, asked };
+        if !self.pages {
+            return shown(None, None, None, None, None, asked);
+        }
+        // What the rest needs, and the form that fits between the switch and the bar's end.
+        let (lo, hi) = (switch.row.rect.right() + CHANGES_GAP, inner.right());
+        let words = Piece::new(ui, Text::Label.job(self.page, t.text_muted), self.page);
+        let pages_w = 4.0 * ICON_BUTTON + words.width();
+        let reset_b = TextButton::new("Reset");
+        let apply_b = BoxButton::primary("Apply");
+        let (reset_w, apply_w) = (reset_b.width(ui) + PAGING_GAP, apply_b.width(ui));
+        let says = self.changes_words();
+        let count = Piece::new(ui, Text::Label.job(&says, t.text_muted), says);
+        let count_w = STAGED_MARK + STAGED_MARK_GAP + count.width() + CHANGES_GAP;
+        let staged = self.changes > 0;
+        let right_w =
+            |fit: PagingFit| if staged { apply_w + if fit.reset { reset_w } else { 0.0 } + if fit.count { count_w } else { 0.0 } } else { 0.0 };
+        let needs = |fit: PagingFit| right_w(fit) + if fit.pages { pages_w + if staged { CHANGES_GAP } else { 0.0 } } else { 0.0 };
+        let forms = [
+            PagingFit { pages: true, count: true, reset: true },
+            PagingFit { pages: true, count: false, reset: true },
+            PagingFit { pages: false, count: false, reset: true },
+            PagingFit { pages: false, count: false, reset: false },
+        ];
+        let narrowest = PagingFit { pages: false, count: false, reset: false };
+        let fit = forms.into_iter().find(|f| needs(*f) <= hi - lo).unwrap_or(narrowest);
+        let right_x = (hi - right_w(fit)).max(lo);
+        // The paging, centred on the bar, or as near to that as the switch and the changes leave.
+        let pages_end = if staged { right_x - CHANGES_GAP } else { hi };
+        let pages_x = (cell.center().x - pages_w / 2.0).min(pages_end - pages_w).max(lo);
+        let pages = fit.pages.then(|| {
+            let mut c = lane(ui, "pages", Rect::from_min_max(pos2(pages_x, inner.top()), pos2(pages_x + pages_w, inner.bottom())));
+            let first = c.add_enabled(self.back, IconButton::plain(Icon::First));
+            let previous = c.add_enabled(self.back, IconButton::plain(Icon::Previous));
+            let (at, _) = c.allocate_exact_size(vec2(words.width(), ICON_BUTTON), Sense::hover());
+            // As `piece` draws it, but only as wide as its letters: the spacing egui puts after the
+            // last one runs into NEXT.
+            let size = words.galley.size();
+            c.painter().galley(pos2(at.left(), mid - size.y / 2.0), Arc::clone(&words.galley), t.text_muted);
+            let page = c.interact(
+                Rect::from_min_size(pos2(at.left(), mid - size.y / 2.0), vec2(words.width(), size.y)),
+                bar.id.with("page"),
+                Sense::hover(),
+            );
+            let says = self.page.to_owned();
+            page.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, says.clone()));
+            let next = c.add_enabled(self.forward, IconButton::plain(Icon::Next));
+            let last = c.add_enabled(self.forward, IconButton::plain(Icon::Last));
+            PagesShown { first, previous, page, next, last }
+        });
+        if pages.is_none() {
+            // The paging's lane's place, so what follows keeps its ids.
+            ui.skip_ahead_auto_ids(1);
+        }
+        // The note, after the paging, only while the count of changes has its room. Without it,
+        // its lane's place is skipped, so what follows keeps its ids.
+        let note_room = Rect::from_min_max(pos2(pages_x + pages_w + PAGING_NOTE_GAP, inner.top()), pos2(right_x - CHANGES_GAP, inner.bottom()));
+        let note = self.note.filter(|_| fit.pages && (fit.count || !staged) && note_room.width() >= PAGING_NOTE_MIN);
+        if note.is_none() {
+            ui.skip_ahead_auto_ids(1);
+        }
+        let note = note.map(|note| {
+            let mut n = lane(ui, "note", note_room);
+            n.set_clip_rect(clip.intersect(note_room));
+            n.add(egui::Label::new(Text::Small.rich(note).color(t.text_muted)).truncate())
+        });
         let (mut changes, mut reset, mut apply) = (None, None, None);
-        // Where the right group starts, and whether it has its count of changes.
-        let (mut right_x, mut with_count) = (inner.right(), true);
-        if self.changes > 0 {
-            let reset_b = TextButton::new("Reset");
-            let apply_b = BoxButton::primary("Apply");
-            let buttons_w = reset_b.width(ui) + PAGING_GAP + apply_b.width(ui);
-            let says = self.changes_words();
-            let count = Piece::new(ui, Text::Label.job(&says, t.text_muted), says);
-            let count_w = STAGED_MARK + STAGED_MARK_GAP + count.width() + CHANGES_GAP;
-            with_count = inner.right() - buttons_w - count_w >= left_end + CHANGES_GAP;
-            let w = buttons_w + if with_count { count_w } else { 0.0 };
-            right_x = (inner.right() - w).max(left_end + CHANGES_GAP);
-            let lane = Rect::from_min_max(pos2(right_x, inner.top()), pos2(right_x + w, inner.bottom()));
-            let mut right = ui.new_child(UiBuilder::new().id_salt(bar.id.with("right")).max_rect(lane).layout(Layout::left_to_right(Align::Center)));
-            right.spacing_mut().item_spacing.x = 0.0;
-            right.set_clip_rect(clip);
-            if with_count {
+        if staged {
+            let mut right = lane(ui, "right", Rect::from_min_max(pos2(right_x, inner.top()), pos2(right_x + right_w(fit), inner.bottom())));
+            if fit.count {
                 let (mark, _) = right.allocate_exact_size(vec2(STAGED_MARK, STAGED_MARK), Sense::hover());
                 right.painter().rect_filled(mark, CornerRadius::ZERO, t.staged_strong);
                 right.add_space(STAGED_MARK_GAP);
@@ -496,36 +554,30 @@ impl PagingBar<'_> {
                 // The mark's and the count's places, so RESET and APPLY keep their ids.
                 right.skip_ahead_auto_ids(2);
             }
-            reset = Some(right.add(reset_b));
-            right.add_space(PAGING_GAP);
-            apply = Some(right.add_enabled(self.can_apply, apply_b));
+            if fit.reset {
+                reset = Some(right.add(reset_b));
+            }
+            // In a lane of its own, at the bar's end: its id is the same whatever stands before it.
+            let end = right_x + right_w(fit);
+            let mut last = lane(ui, "apply", Rect::from_min_max(pos2(end - apply_w, inner.top()), pos2(end, inner.bottom())));
+            apply = Some(last.add_enabled(self.can_apply, apply_b));
         }
-        // The note, between the groups, only while the count of changes has its room.
-        let note = self.note.filter(|_| with_count).and_then(|note| {
-            let room = Rect::from_min_max(pos2(left_end + PAGING_NOTE_GAP, inner.top()), pos2(right_x - CHANGES_GAP, inner.bottom()));
-            (room.width() >= PAGING_NOTE_MIN).then(|| {
-                let mut n = ui.new_child(UiBuilder::new().id_salt(bar.id.with("note")).max_rect(room).layout(Layout::left_to_right(Align::Center)));
-                n.set_clip_rect(clip.intersect(room));
-                n.add(egui::Label::new(Text::Small.rich(note).color(t.text_muted)).truncate())
-            })
-        });
         let clicked = |r: &Option<Response>| r.as_ref().is_some_and(Response::clicked);
-        let asked = if first.clicked() {
-            Some(PagingAsked::First)
-        } else if previous.clicked() {
-            Some(PagingAsked::Previous)
-        } else if next.clicked() {
-            Some(PagingAsked::Next)
-        } else if last.clicked() {
-            Some(PagingAsked::Last)
+        let page = |f: fn(&PagesShown) -> &Response| pages.as_ref().is_some_and(|p| f(p).clicked());
+        if page(|p| &p.first) {
+            asked = Some(PagingAsked::First);
+        } else if page(|p| &p.previous) {
+            asked = Some(PagingAsked::Previous);
+        } else if page(|p| &p.next) {
+            asked = Some(PagingAsked::Next);
+        } else if page(|p| &p.last) {
+            asked = Some(PagingAsked::Last);
         } else if clicked(&reset) {
-            Some(PagingAsked::Reset)
+            asked = Some(PagingAsked::Reset);
         } else if clicked(&apply) {
-            Some(PagingAsked::Apply)
-        } else {
-            None
-        };
-        PagingShown { first, previous, page, next, last, note, changes, reset, apply, asked }
+            asked = Some(PagingAsked::Apply);
+        }
+        shown(pages, note, changes, reset, apply, asked)
     }
 }
 
@@ -634,13 +686,14 @@ mod tests {
 
     #[test]
     fn the_table_bar_matches_the_page() {
-        // Node 164278: 36 tall on `card`, a 1 px `line` along its bottom; from 12 in, the view
-        // switch (caps segments, 28 tall, centred above the line), 12, then REFRESH and + ROW as
-        // bar cells with their dividers (90 and 63 wide); at the right end IMPORT and EXPORT (83
-        // each, EXPORT without a divider) and the value panel's toggle (36); the count ends 12
-        // before IMPORT. Structure: REFRESH only, then `8 COLUMNS  ~25,000 ROWS` 12 from the end.
-        // Loading: CANCEL (`button/box` primary) in a 92 cell with a divider in REFRESH's place,
-        // + ROW after it, LOADING 12 before its timer (`data`) in the count's place.
+        // Node 164278, without the view switch and the divider after it (they moved to the bottom
+        // bar): 36 tall on `card`, a 1 px `line` along its bottom; from its left end REFRESH, with
+        // no divider before it and its icon 12 in, then + ROW with its divider; at the right end
+        // IMPORT and EXPORT (83 each, EXPORT without a divider) and the value panel's toggle (36);
+        // the count ends 12 before IMPORT. Structure: REFRESH only, then
+        // `8 COLUMNS  ~25,000 ROWS` 12 from the end. Loading: CANCEL (`button/box` primary) 12 in,
+        // in REFRESH's place, + ROW after it, LOADING 12 before its timer (`data`) in the count's
+        // place.
         let s = Duration::from_millis;
         for (theme, t) in both() {
             let bar = |view, loading| TableBar {
@@ -655,7 +708,6 @@ mod tests {
                 can_count: true,
                 value: Some(false),
                 value_off: false,
-                structure: true,
             };
             for (state, b) in [
                 ("data", bar(View::Data, None)),
@@ -672,28 +724,22 @@ mod tests {
                 let line = Rect::from_min_max(pos2(at.left(), at.bottom() - 1.0), at.max);
                 assert!(fills.contains(&(line, t.line)), "{at_}: the line along its bottom: {fills:?}");
                 let mid = at.top() + 17.5;
-                // The view switch.
-                let switch = Rect::from_min_size(pos2(at.left() + 12.0, mid - 14.0), vec2(139.0, 28.0));
-                let edges = edges_in(&shapes, switch.expand(1.5), 0.0);
-                let edge = edges.iter().find(|e| e.colour == t.line_strong).unwrap_or_else(|| panic!("{at_}: the switch's edge: {edges:?}"));
-                assert!(
-                    close(edge.outer.left(), switch.left()) && close(edge.outer.top(), switch.top()) && (edge.outer.width() - 139.0).abs() <= 2.0,
-                    "{at_}: the switch {edge:?}"
-                );
-                let selected = if state == "structure" { "STRUCTURE" } else { "DATA" };
-                let other = if state == "structure" { "DATA" } else { "STRUCTURE" };
-                assert_eq!(word(&shapes, selected, &at_).1, t.on_ink, "{at_}: {selected} chosen");
-                assert_eq!(word(&shapes, other, &at_).1, t.text, "{at_}: {other} not");
-                let cells_from = edge.outer.right() + 12.0;
+                // No view switch: the bar starts with its first cell, and nothing divides it from
+                // the bar's end.
+                for w in ["DATA", "STRUCTURE"] {
+                    assert!(texts(&shapes).iter().all(|(s, _, _)| s != w), "{at_}: no `{w}` in the table bar");
+                }
+                assert_eq!(edges_in(&shapes, at, 0.0).iter().filter(|e| e.colour == t.line_strong).count(), 0, "{at_}: no switch's edge");
+                let cells_from = at.left();
+                assert!(!divider(&shapes, &t, cells_from, at.top(), 35.0), "{at_}: no divider at the bar's left end");
                 let first_cell = |w: &str| word(&shapes, w, &at_).0;
                 match state {
                     "loading" => {
-                        assert!(divider(&shapes, &t, cells_from, at.top(), 35.0), "{at_}: CANCEL's cell has a divider at {cells_from}");
                         let (cancel, c) = word(&shapes, "CANCEL", &at_);
                         assert_eq!(c, t.on_ink, "{at_}: CANCEL on ink");
                         let button = fills.iter().find(|(r, c)| *c == t.ink && r.contains_rect(cancel)).map(|(r, _)| *r).unwrap_or(Rect::NOTHING);
-                        assert!(close(button.left(), cells_from + 13.0) && close(button.height(), 28.0), "{at_}: CANCEL's button {button:?}");
-                        assert!((button.right() + 12.0 - (cells_from + 92.0)).abs() <= 1.5, "{at_}: its cell 92 wide");
+                        assert!(close(button.left(), cells_from + 12.0) && close(button.height(), 28.0), "{at_}: CANCEL's button {button:?}");
+                        assert!((button.right() + 12.0 - (cells_from + 91.0)).abs() <= 1.5, "{at_}: its cell 91 wide");
                         assert!(texts(&shapes).iter().all(|(w, _, _)| w != "REFRESH"), "{at_}: no REFRESH while loading");
                         let row = first_cell("ROW");
                         assert!(divider(&shapes, &t, button.right() + 12.0, at.top(), 35.0), "{at_}: + ROW's divider 12 after CANCEL");
@@ -709,9 +755,8 @@ mod tests {
                     }
                     _ => {
                         let refresh = first_cell("REFRESH");
-                        assert!(divider(&shapes, &t, cells_from, at.top(), 35.0), "{at_}: REFRESH's divider at {cells_from}");
                         assert!(close(refresh.left(), cells_from + 30.0), "{at_}: REFRESH's words 30 into its cell: {refresh:?}");
-                        let (icons, _) = icon_in(&shapes, Rect::from_min_size(pos2(cells_from + 11.0, mid - 7.0), vec2(12.0, 14.0)));
+                        let (icons, _) = icon_in(&shapes, Rect::from_min_size(pos2(cells_from + 11.0, mid - 7.0), vec2(14.0, 14.0)));
                         assert_eq!(icons, [t.text], "{at_}: the refresh icon");
                     }
                 }
@@ -754,7 +799,6 @@ mod tests {
         let mut h = crate::components::harness_in(vec2(900.0, 200.0), Theme::Light, Vec::new(), |ui, seen: &mut Vec<TableAsked>| {
             let b = TableBar {
                 view: View::Data,
-                structure: true,
                 loading: None,
                 count: RowCount::Unknown,
                 shown: Some((1, 100)),
@@ -769,27 +813,21 @@ mod tests {
         });
         h.run();
         use egui_kittest::kittest::Queryable;
-        for label in ["Structure", "Refresh", "Row", "Count rows", "panel", "Import", "Export"] {
+        for label in ["Refresh", "Row", "Count rows", "panel", "Import", "Export"] {
             h.get_by_label(label).click();
             h.run();
         }
-        assert_eq!(
-            *h.state(),
-            [TableAsked::View(View::Structure), TableAsked::Refresh, TableAsked::AddRow, TableAsked::Count, TableAsked::Value],
-            "IMPORT and EXPORT ask nothing"
-        );
+        assert_eq!(*h.state(), [TableAsked::Refresh, TableAsked::AddRow, TableAsked::Count, TableAsked::Value], "IMPORT and EXPORT ask nothing");
         h.get_by_label("Import").hover();
         h.run();
         h.run();
         assert!(texts(&h.output().shapes).iter().any(|(w, _, _)| w == IMPORT_LATER), "IMPORT's hover says why");
     }
 
-    /// The table bar as the table tab draws it until the structure view and the query tab screen:
-    /// STRUCTURE off, no Value cell.
+    /// The table bar with no Value cell.
     fn screen_bar(count: RowCount) -> TableBar {
         TableBar {
             view: View::Data,
-            structure: false,
             loading: None,
             count,
             shown: Some((1, 100)),
@@ -800,28 +838,6 @@ mod tests {
             value: None,
             value_off: false,
         }
-    }
-
-    #[test]
-    fn structure_off_is_drawn_faint_and_asks_nothing() {
-        for (theme, t) in both() {
-            let at_ = format!("{theme:?}");
-            let (shapes, _) = drawn(theme, |ui| {
-                screen_bar(RowCount::Exact(25_000)).show(ui);
-            });
-            assert_eq!(word(&shapes, "STRUCTURE", &at_).1, t.text_faint, "{at_}: STRUCTURE off");
-            assert_eq!(word(&shapes, "DATA", &at_).1, t.on_ink, "{at_}: DATA chosen");
-        }
-        let mut h = crate::components::harness_in(vec2(900.0, 200.0), Theme::Light, Vec::new(), |ui, seen: &mut Vec<TableAsked>| {
-            ui.allocate_ui(vec2(840.0, 36.0), |ui| seen.extend(screen_bar(RowCount::Exact(3)).show(ui).asked));
-        });
-        h.run();
-        use egui_kittest::kittest::Queryable;
-        for label in ["Structure", "Data"] {
-            h.get_by_label(label).click();
-            h.run();
-        }
-        assert_eq!(*h.state(), [], "neither STRUCTURE off nor DATA chosen asks anything");
     }
 
     #[test]
@@ -857,24 +873,23 @@ mod tests {
     fn the_table_bar_gives_way_in_its_order() {
         // From wide to narrow (the brief §7): everything; the count without its range; IMPORT and
         // EXPORT gone too; REFRESH and + ROW without their words; the count without its words,
-        // COUNT kept; the count gone; then the left group cut at the bar's end. DATA and STRUCTURE
-        // are always drawn; no two parts overlap and nothing is drawn past the bar.
+        // COUNT kept; the count gone; then the left group cut at the bar's end. No two parts
+        // overlap and nothing is drawn past the bar.
         let seen_rect = |r: &Response| Some(r.interact_rect).filter(|r| r.is_positive());
         let mut seen: Vec<(u32, usize)> = Vec::new();
-        for width in (160..=900u32).rev().step_by(10) {
+        for width in (40..=900u32).rev().step_by(10) {
             let mut h = crate::components::harness_in(
                 vec2(width as f32 + 40.0, 100.0),
                 Theme::Light,
-                (Parts::new(), Rect::NOTHING, 0usize),
-                move |ui, out: &mut (Parts, Rect, usize)| {
+                (Parts::new(), Rect::NOTHING),
+                move |ui, out: &mut (Parts, Rect)| {
                     ui.allocate_ui(vec2(width as f32, 36.0), |ui| {
                         let top = ui.cursor().min;
                         let s = screen_bar(RowCount::Estimate(100_000)).show(ui);
                         out.1 = Rect::from_min_size(top, vec2(width as f32, 36.0));
-                        out.2 = s.view.len();
                         let words = s.count.as_ref().and_then(|c| c.words.as_ref().and_then(seen_rect));
                         let count = s.count.as_ref().and_then(|c| c.count.as_ref().and_then(seen_rect));
-                        let mut parts: Parts = s.view.iter().zip(["data", "structure"]).map(|(r, n)| (n, seen_rect(r))).collect();
+                        let mut parts = Parts::new();
                         parts.extend([
                             ("refresh", s.refresh.as_ref().and_then(seen_rect)),
                             ("add", s.add.as_ref().and_then(seen_rect)),
@@ -888,7 +903,7 @@ mod tests {
                 },
             );
             h.run();
-            let (parts, bar, segments) = h.state().clone();
+            let (parts, bar) = h.state().clone();
             let at = format!("{width} wide");
             let part = |name: &str| parts.iter().find(|(n, _)| *n == name).and_then(|(_, r)| *r);
             let shapes = &h.output().shapes;
@@ -901,8 +916,6 @@ mod tests {
             assert!(steps[form..].iter().all(|s| *s), "{at}: a later step gave way before an earlier one: {steps:?}");
             assert!(seen.last().is_none_or(|&(_, last)| form >= last), "{at}: room taken back: {seen:?} then {form}");
             seen.push((width, form));
-            assert_eq!(segments, 2, "{at}: DATA and STRUCTURE drawn");
-            assert!(part("data").is_some(), "{at}: DATA shows");
             for (i, (a, ra)) in parts.iter().enumerate() {
                 let Some(ra) = ra else { continue };
                 assert!(bar.expand(0.5).contains_rect(*ra), "{at}: `{a}` {ra:?} inside the bar {bar:?}");
@@ -933,22 +946,21 @@ mod tests {
     fn the_structure_bar_gives_way_in_its_order() {
         // The brief §7, from wide to narrow: everything; the facts gone; REFRESH's word gone too
         // (its icon stays); then the left group cut at the bar's end. While a read shows its
-        // loading state, LOADING goes first and CANCEL keeps its word. DATA and STRUCTURE are
-        // always drawn; no two parts overlap and nothing is drawn past the bar.
+        // loading state, LOADING goes first and CANCEL keeps its word. No two parts overlap and
+        // nothing is drawn past the bar.
         let seen_rect = |r: &Response| Some(r.interact_rect).filter(|r| r.is_positive());
         for loading in [None, Some(Loading { elapsed: Duration::from_millis(800) })] {
             let mut seen: Vec<(u32, usize)> = Vec::new();
-            for width in (120..=700u32).rev().step_by(10) {
+            for width in (20..=700u32).rev().step_by(10) {
                 let mut h = crate::components::harness_in(
                     vec2(width as f32 + 40.0, 100.0),
                     Theme::Light,
-                    (Parts::new(), Rect::NOTHING, 0usize, false),
-                    move |ui, out: &mut (Parts, Rect, usize, bool)| {
+                    (Parts::new(), Rect::NOTHING, false, false),
+                    move |ui, out: &mut (Parts, Rect, bool, bool)| {
                         ui.allocate_ui(vec2(width as f32, 36.0), |ui| {
                             let top = ui.cursor().min;
                             let bar = TableBar {
                                 view: View::Structure,
-                                structure: true,
                                 loading,
                                 count: RowCount::Estimate(25_000),
                                 shown: None,
@@ -961,9 +973,10 @@ mod tests {
                             };
                             let s = bar.show(ui);
                             out.1 = Rect::from_min_size(top, vec2(width as f32, 36.0));
-                            out.2 = s.view.len();
-                            out.3 = s.facts.is_some();
-                            let mut parts: Parts = s.view.iter().zip(["data", "structure"]).map(|(r, n)| (n, seen_rect(r))).collect();
+                            out.2 = s.facts.is_some();
+                            // The first cell whole: all of it can be reached.
+                            out.3 = s.refresh.iter().chain(&s.cancel).all(|r| r.interact_rect.width() >= r.rect.width() - 0.5);
+                            let mut parts = Parts::new();
                             parts.extend([
                                 ("refresh", s.refresh.as_ref().and_then(seen_rect)),
                                 ("cancel", s.cancel.as_ref().and_then(seen_rect)),
@@ -974,7 +987,7 @@ mod tests {
                     },
                 );
                 h.run();
-                let (parts, bar, segments, facts) = h.state().clone();
+                let (parts, bar, facts, first_whole) = h.state().clone();
                 let at = format!("{width} wide, loading {}", loading.is_some());
                 let part = |name: &str| parts.iter().find(|(n, _)| *n == name).and_then(|(_, r)| *r);
                 let shapes = &h.output().shapes;
@@ -983,7 +996,8 @@ mod tests {
                 let cancel_word = all.iter().any(|(w, _, _)| w == "CANCEL");
                 let first = if loading.is_some() { part("cancel") } else { part("refresh") };
                 // The left group whole: its last part drawn to its full width.
-                let whole = first.is_some_and(|r| r.right() <= bar.right() + 0.5)
+                let whole = first.is_some()
+                    && first_whole
                     && match loading {
                         Some(_) => cancel_word,
                         None => true,
@@ -994,8 +1008,6 @@ mod tests {
                 assert!(steps[form..].iter().all(|s| *s), "{at}: a later step gave way before an earlier one: {steps:?}");
                 assert!(seen.last().is_none_or(|&(_, last)| form >= last), "{at}: room taken back: {seen:?} then {form}");
                 seen.push((width, form));
-                assert_eq!(segments, 2, "{at}: DATA and STRUCTURE drawn");
-                assert!(part("data").is_some(), "{at}: DATA shows");
                 for (i, (a, ra)) in parts.iter().enumerate() {
                     let Some(ra) = ra else { continue };
                     assert!(bar.expand(0.5).contains_rect(*ra), "{at}: `{a}` {ra:?} inside the bar {bar:?}");
@@ -1019,29 +1031,60 @@ mod tests {
         }
     }
 
+    /// DATA's bottom bar: the switch, the paging and `changes` staged changes.
+    fn pages<'a>(page: &'a str, changes: usize, note: Option<&'a str>) -> PagingBar<'a> {
+        PagingBar { view: View::Data, structure: true, pages: true, page, back: false, forward: true, changes, can_apply: true, note }
+    }
+
+    /// A drawn bottom bar's switch (its two segments together) and, when drawn, its paging from
+    /// FIRST to LAST.
+    fn switch_and_pages(s: &PagingShown) -> (Rect, Option<Rect>) {
+        let switch = s.view.iter().fold(Rect::NOTHING, |a, r| a.union(r.rect));
+        (switch, s.pages.as_ref().map(|p| p.first.rect.union(p.last.rect)))
+    }
+
     #[test]
     fn the_paging_bar_matches_the_page() {
-        // Node 164453: 36 tall on `card`, a 1 px `line` along its top; from 8 in, the plain arrows
-        // (28) and `PAGE 1 OF 250` in `label`, `text_muted`, side by side; at the right end, 12 in,
-        // APPLY (`button/box` primary), 4 before it RESET (`button/text`), 12 before that the
+        // Node 164453 with the view switch in it: 36 tall on `card`, a 1 px `line` along its top.
+        // At the left end, 12 in and centred under the line, the switch (caps segments in a 28
+        // box, 139 wide). In the bar's middle the plain arrows (28) and `PAGE 1 OF 250` in
+        // `label`, `text_muted`, side by side, centred on the bar's width. At the right end, 12
+        // in, APPLY (`button/box` primary), 4 before it RESET (`button/text`), 12 before that the
         // count of changes in `label`, `text_muted`, 8 after an 8 px `staged_strong` square.
         for (theme, t) in both() {
             for changes in [1, 0] {
                 let at_ = format!("{theme:?} changes {changes}");
-                let (shapes, at) = drawn(theme, |ui| {
-                    PagingBar { page: "Page 1 of 250", back: false, forward: true, changes, can_apply: true, note: None }.show(ui);
-                });
+                let mut seen = (Rect::NOTHING, None);
+                let (shapes, at) = drawn(theme, |ui| seen = switch_and_pages(&pages("Page 1 of 250", changes, None).show(ui)));
                 assert_eq!(at.height(), 36.0, "{at_}: 36 tall");
                 let fills = fills_in(&shapes, at);
                 assert_eq!(fills.first(), Some(&(at, t.card)), "{at_}: on card");
                 assert!(fills.contains(&(Rect::from_min_size(at.min, vec2(W, 1.0)), t.line)), "{at_}: the line along its top: {fills:?}");
                 let mid = at.top() + 1.0 + 17.5;
+                // The switch: its box 12 in, 28 tall, centred; DATA chosen.
+                let (segments, group) = seen;
+                let switch = segments.expand(1.0);
+                assert!(close(switch.left(), at.left() + 12.0) && close(switch.center().y, mid), "{at_}: the switch 12 in, centred: {switch:?}");
+                assert!(close(switch.height(), 28.0) && (switch.width() - 139.0).abs() <= 2.0, "{at_}: its box: {switch:?}");
+                let edges = edges_in(&shapes, switch.expand(0.5), 0.0);
+                assert!(
+                    edges.iter().any(|e| e.colour == t.line_strong && close(e.outer.left(), switch.left())),
+                    "{at_}: the switch's edge: {edges:?}"
+                );
+                assert_eq!(word(&shapes, "DATA", &at_).1, t.on_ink, "{at_}: DATA chosen");
+                assert_eq!(word(&shapes, "STRUCTURE", &at_).1, t.text, "{at_}: STRUCTURE not");
+                // The paging, centred on the bar.
+                let group = group.unwrap_or_else(|| panic!("{at_}: the paging drawn"));
+                assert!(
+                    close(group.center().x, at.center().x) && close(group.center().y, mid),
+                    "{at_}: the paging centred on the bar {at:?}: {group:?}"
+                );
                 let (page, c) = word(&shapes, "PAGE 1 OF 250", &at_);
                 assert_eq!(c, t.text_muted, "{at_}: the page grey: a fact");
-                assert!(close(page.left(), at.left() + 8.0 + 56.0) && close(page.center().y, mid), "{at_}: the page {page:?}");
+                assert!(close(page.left(), group.left() + 56.0) && close(page.center().y, mid), "{at_}: the page after two arrows: {page:?}");
                 // The arrows: first and previous off on the first page, next and last on.
                 for (k, colour) in [(0.0, t.text_faint), (1.0, t.text_faint)] {
-                    let cell = Rect::from_min_size(pos2(at.left() + 8.0 + 28.0 * k, mid - 14.0), vec2(28.0, 28.0));
+                    let cell = Rect::from_min_size(pos2(group.left() + 28.0 * k, mid - 14.0), vec2(28.0, 28.0));
                     assert_eq!(icon_in(&shapes, cell).0, [colour], "{at_}: arrow {k} off");
                 }
                 let next = Rect::from_min_size(pos2(page.right() - Text::Label.spacing(), mid - 14.0), vec2(28.0, 28.0));
@@ -1083,20 +1126,96 @@ mod tests {
     }
 
     #[test]
+    fn the_switch_stands_in_the_same_place_in_both_views() {
+        // STRUCTURE's bottom bar holds the switch alone, and DATA's too while no page is loaded:
+        // the switch where DATA's bar with its paging and changes has it, to the pixel; the
+        // chosen view on `ink`.
+        for (theme, t) in both() {
+            let mut data = Rect::NOTHING;
+            let _ = drawn(theme, |ui| data = switch_and_pages(&pages("Page 1 of 250", 1, None).show(ui)).0);
+            for (view, chosen, other) in [(View::Structure, "STRUCTURE", "DATA"), (View::Data, "DATA", "STRUCTURE")] {
+                let at_ = format!("{theme:?} {view:?} alone");
+                let mut seen = (Rect::NOTHING, None);
+                let (shapes, at) = drawn(theme, |ui| {
+                    seen = switch_and_pages(&PagingBar { view, pages: false, ..pages("", 0, None) }.show(ui));
+                });
+                assert_eq!(seen, (data, None), "{at_}: the switch where DATA's bar has it, and no paging");
+                assert_eq!(at.height(), 36.0, "{at_}: 36 tall");
+                assert_eq!(fills_in(&shapes, at).first(), Some(&(at, t.card)), "{at_}: on card");
+                assert_eq!(word(&shapes, chosen, &at_).1, t.on_ink, "{at_}: {chosen} chosen");
+                assert_eq!(word(&shapes, other, &at_).1, t.text, "{at_}: {other} not");
+                let words: Vec<String> = texts(&shapes).into_iter().map(|(w, _, _)| w).filter(|w| !w.is_empty()).collect();
+                assert_eq!(words.len(), 2, "{at_}: the switch alone: {words:?}");
+            }
+        }
+    }
+
+    #[test]
     fn the_paging_bar_says_what_was_asked() {
-        let mut h = crate::components::harness(Theme::Light, Vec::new(), |ui, seen: &mut Vec<PagingAsked>| {
-            ui.allocate_ui(vec2(580.0, 36.0), |ui| {
-                seen.extend(PagingBar { page: "Page 2", back: true, forward: true, changes: 3, can_apply: true, note: None }.show(ui).asked)
-            });
+        let mut h = crate::components::harness_in(vec2(900.0, 200.0), Theme::Light, Vec::new(), |ui, seen: &mut Vec<PagingAsked>| {
+            ui.allocate_ui(vec2(840.0, 36.0), |ui| seen.extend(PagingBar { back: true, ..pages("Page 2", 3, None) }.show(ui).asked));
         });
         h.run();
         use egui_kittest::kittest::Queryable;
-        for label in ["first", "previous", "next", "last", "Reset", "Apply"] {
+        for label in ["Data", "Structure", "first", "previous", "next", "last", "Reset", "Apply"] {
             h.get_by_label(label).click();
             h.run();
         }
-        let all = [PagingAsked::First, PagingAsked::Previous, PagingAsked::Next, PagingAsked::Last, PagingAsked::Reset, PagingAsked::Apply];
-        assert_eq!(*h.state(), all);
+        let all = [
+            PagingAsked::View(View::Structure),
+            PagingAsked::First,
+            PagingAsked::Previous,
+            PagingAsked::Next,
+            PagingAsked::Last,
+            PagingAsked::Reset,
+            PagingAsked::Apply,
+        ];
+        assert_eq!(*h.state(), all, "the chosen DATA asks nothing");
+    }
+
+    #[test]
+    fn tab_goes_from_the_switch_to_the_paging_to_the_changes() {
+        // Reading order: DATA, STRUCTURE, the arrows, RESET, APPLY.
+        let mut h = crate::components::harness_in(vec2(900.0, 200.0), Theme::Light, (), |ui, _| {
+            ui.allocate_ui(vec2(840.0, 36.0), |ui| {
+                PagingBar { back: true, ..pages("Page 2", 3, None) }.show(ui);
+            });
+        });
+        h.run();
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let mut order = Vec::new();
+        for _ in 0..8 {
+            h.key_press(egui::Key::Tab);
+            h.run();
+            let focused = ["Data", "Structure", "first", "previous", "next", "last", "Reset", "Apply"]
+                .into_iter()
+                .find(|label| h.get_by_label(label).accesskit_node().is_focused());
+            order.extend(focused);
+        }
+        assert_eq!(order, ["Data", "Structure", "first", "previous", "next", "last", "Reset", "Apply"]);
+    }
+
+    #[test]
+    fn structure_off_is_drawn_faint_and_asks_nothing() {
+        let off = |page| PagingBar { structure: false, ..pages(page, 0, None) };
+        for (theme, t) in both() {
+            let at_ = format!("{theme:?}");
+            let (shapes, _) = drawn(theme, |ui| {
+                off("Page 1").show(ui);
+            });
+            assert_eq!(word(&shapes, "STRUCTURE", &at_).1, t.text_faint, "{at_}: STRUCTURE off");
+            assert_eq!(word(&shapes, "DATA", &at_).1, t.on_ink, "{at_}: DATA chosen");
+        }
+        let mut h = crate::components::harness_in(vec2(900.0, 200.0), Theme::Light, Vec::new(), move |ui, seen: &mut Vec<PagingAsked>| {
+            ui.allocate_ui(vec2(840.0, 36.0), |ui| seen.extend(off("Page 1").show(ui).asked));
+        });
+        h.run();
+        use egui_kittest::kittest::Queryable;
+        for label in ["Structure", "Data"] {
+            h.get_by_label(label).click();
+            h.run();
+        }
+        assert_eq!(*h.state(), [], "neither STRUCTURE off nor DATA chosen asks anything");
     }
 
     /// A cut page's note, as the screen writes it.
@@ -1109,7 +1228,7 @@ mod tests {
         for (theme, t) in both() {
             let at_ = format!("{theme:?}");
             let (shapes, at) = drawn(theme, |ui| {
-                PagingBar { page: "Page 1 of 250", back: false, forward: true, changes: 1, can_apply: true, note: None }.show(ui);
+                pages("Page 1 of 250", 1, None).show(ui);
             });
             assert_eq!(word(&shapes, "PAGE 1 OF 250", &at_).1, t.text_muted, "{at_}: the page's words grey");
             assert_eq!(word(&shapes, "1 CHANGE", &at_).1, t.text_muted, "{at_}: the count of changes grey");
@@ -1121,24 +1240,26 @@ mod tests {
         }
     }
 
-    /// The paging bar `width` wide with three changes staged and a cut page's note: where each
-    /// part was drawn (the part a click can reach, `None` when not drawn or wholly cut), in the
-    /// bar's order, and the bar.
-    fn paging_parts(width: f32) -> (Vec<(&'static str, Option<Rect>)>, Rect) {
+    /// The bottom bar `width` wide with `changes` staged and a cut page's note: where each part
+    /// was drawn (the part a click can reach, `None` when not drawn or wholly cut), in the bar's
+    /// order, and the bar.
+    fn paging_parts(width: f32, changes: usize) -> (Vec<(&'static str, Option<Rect>)>, Rect) {
         type Out = Option<(Vec<(&'static str, Option<Rect>)>, Rect)>;
         let mut h = crate::components::harness_in(vec2(width + 20.0, 100.0), Theme::Light, None, move |ui, out: &mut Out| {
             ui.allocate_ui(vec2(width, 36.0), |ui| {
                 let bar = ui.max_rect();
-                let s =
-                    PagingBar { page: "Page 10,000 of 10,000", back: true, forward: false, changes: 3, can_apply: true, note: Some(NOTE) }.show(ui);
+                let s = PagingBar { back: true, forward: false, ..pages("Page 10,000 of 10,000", changes, Some(NOTE)) }.show(ui);
                 let seen = |r: &Response| Some(r.interact_rect).filter(|r| r.width() > 0.0 && r.height() > 0.0);
                 let opt = |r: &Option<Response>| r.as_ref().and_then(seen);
+                let page = |f: fn(&PagesShown) -> &Response| s.pages.as_ref().and_then(|p| seen(f(p)));
                 let parts = vec![
-                    ("first", seen(&s.first)),
-                    ("previous", seen(&s.previous)),
-                    ("page", seen(&s.page)),
-                    ("next", seen(&s.next)),
-                    ("last", seen(&s.last)),
+                    ("data", s.view.first().and_then(seen)),
+                    ("structure", s.view.get(1).and_then(seen)),
+                    ("first", page(|p| &p.first)),
+                    ("previous", page(|p| &p.previous)),
+                    ("page", page(|p| &p.page)),
+                    ("next", page(|p| &p.next)),
+                    ("last", page(|p| &p.last)),
                     ("note", opt(&s.note)),
                     ("changes", opt(&s.changes)),
                     ("reset", opt(&s.reset)),
@@ -1152,12 +1273,16 @@ mod tests {
     }
 
     #[test]
-    fn the_cut_note_goes_first_then_the_changes_words() {
-        // From wide to narrow: everything; no note; no count of changes either; the right group
-        // cut at the bar's end. Never two parts over each other, nothing past the bar.
+    fn the_bottom_bar_gives_way_in_its_order() {
+        // From wide to narrow, with changes staged: everything; no note; no count of changes
+        // either; no paging; no RESET. The switch and APPLY are whole at every width that holds
+        // the two; the paging is centred on the bar while it has the room, then moves off centre,
+        // 12 clear of the switch and of the changes. Never two parts over each other, nothing
+        // past the bar.
         let mut seen: Vec<u8> = Vec::new();
-        for width in (200..=900).rev().step_by(10) {
-            let (parts, bar) = paging_parts(width as f32);
+        let mut centred = (0, 0);
+        for width in (250..=1000).rev().step_by(10) {
+            let (parts, bar) = paging_parts(width as f32, 3);
             let at = format!("{width} wide");
             let shown: Vec<(&str, Rect)> = parts.iter().filter_map(|(id, r)| r.map(|r| (*id, r))).collect();
             for (i, (a, ra)) in shown.iter().enumerate() {
@@ -1168,23 +1293,60 @@ mod tests {
                 }
             }
             let get = |id: &str| parts.iter().find(|(i, _)| *i == id).and_then(|(_, r)| *r);
-            let (note, changes) = (get("note").is_some(), get("changes").is_some());
-            // APPLY whole is 60 wide: 12, APPLY, 12.
-            let cut = get("apply").is_none_or(|r| r.width() < 59.5);
-            assert!(!note || changes, "{at}: the note shows while the count of changes is gone");
-            assert!(!changes || !cut, "{at}: the right group is cut while the count of changes could give room up");
-            let form = match (note, changes, cut) {
-                (true, _, _) => 0,
-                (false, true, _) => 1,
-                (false, false, false) => 2,
-                (false, false, true) => 3,
-            };
-            assert!(seen.last().is_none_or(|&last| form >= last), "{at}: room taken back while narrowing: {seen:?} then {form}");
-            seen.push(form);
+            // The switch whole, 12 in; APPLY whole (60 wide: 12, APPLY, 12), 12 from the end.
+            let (data, structure, apply) = (get("data"), get("structure"), get("apply"));
+            let switch = data.zip(structure).map(|(d, s)| d.union(s)).unwrap_or(Rect::NOTHING);
+            assert!(close(switch.left(), bar.left() + 13.0) && (switch.width() - 137.0).abs() <= 2.0, "{at}: the switch whole, 12 in: {switch:?}");
+            assert!(
+                apply.is_some_and(|r| r.width() >= 59.5 && close(r.right(), bar.right() - 12.0)),
+                "{at}: APPLY whole, 12 from the end: {apply:?}"
+            );
+            let (note, changes, paging, reset) = (get("note").is_some(), get("changes").is_some(), get("first").is_some(), get("reset").is_some());
+            for id in ["previous", "page", "next", "last"] {
+                assert_eq!(get(id).is_some(), paging, "{at}: the paging shows whole or not at all: `{id}`");
+            }
+            let steps = [note, changes, paging, reset];
+            let form = steps.iter().take_while(|s| !**s).count();
+            assert!(steps[form..].iter().all(|s| *s), "{at}: a later step gave way before an earlier one: {steps:?}");
+            assert!(seen.last().is_none_or(|&last| form as u8 >= last), "{at}: room taken back while narrowing: {seen:?} then {form}");
+            seen.push(form as u8);
+            if let (Some(first), Some(last)) = (get("first"), get("last")) {
+                let group = first.union(last);
+                let right = get("changes").or(get("reset")).map_or(bar.right(), |r| r.left());
+                assert!(group.left() >= switch.right() + 1.0 + 12.0 - 0.5, "{at}: the paging 12 clear of the switch: {group:?}");
+                assert!(group.right() <= right - 12.0 + 0.5, "{at}: and of the changes: {group:?}, {right}");
+                if close(group.center().x, bar.center().x) {
+                    centred.0 += 1;
+                } else {
+                    centred.1 += 1;
+                }
+            }
         }
-        assert_eq!(seen.first(), Some(&0), "900 wide, everything shows");
-        for form in 0..=3 {
+        assert_eq!(seen.first(), Some(&0), "1000 wide, everything shows");
+        for form in 0..=4 {
             assert!(seen.contains(&form), "the sweep passes through form {form}: {seen:?}");
+        }
+        assert!(centred.0 > 0 && centred.1 > 0, "the paging centred while it can be, then off centre: {centred:?}");
+        // Without changes the paging stays centred down to the switch, then moves off centre, then goes.
+        let mut forms: Vec<u8> = Vec::new();
+        for width in (150..=1000).rev().step_by(10) {
+            let (parts, bar) = paging_parts(width as f32, 0);
+            let get = |id: &str| parts.iter().find(|(i, _)| *i == id).and_then(|(_, r)| *r);
+            let group = get("first").zip(get("last")).map(|(f, l)| f.union(l));
+            let form = match group {
+                Some(g) if close(g.center().x, bar.center().x) => 0,
+                Some(g) => {
+                    assert!(g.right() <= bar.right() - 12.0 + 0.5, "{width}: the paging inside the bar: {g:?}");
+                    1
+                }
+                None => 2,
+            };
+            assert!(forms.last().is_none_or(|&last| form >= last), "{width}: room taken back: {forms:?} then {form}");
+            forms.push(form);
+            assert!(get("data").is_some_and(|d| close(d.left(), bar.left() + 13.0)), "{width}: the switch 12 in");
+        }
+        for form in 0..=2 {
+            assert!(forms.contains(&form), "without changes the sweep passes through form {form}: {forms:?}");
         }
     }
 
@@ -1193,7 +1355,7 @@ mod tests {
         for (theme, t) in both() {
             let at_ = format!("{theme:?}");
             let (shapes, _) = drawn(theme, |ui| {
-                PagingBar { page: "Page 1", back: false, forward: true, changes: 2, can_apply: true, note: Some(NOTE) }.show(ui);
+                pages("Page 1", 2, Some(NOTE)).show(ui);
             });
             let all = texts(&shapes);
             let (note, c) = all
@@ -1220,27 +1382,25 @@ mod tests {
                 vec2(width + 20.0, 100.0),
                 Theme::Light,
                 None,
-                move |ui, out: &mut Option<(bool, egui::Id, egui::Id)>| {
+                move |ui, out: &mut Option<(bool, Option<egui::Id>, egui::Id)>| {
                     ui.allocate_ui(vec2(width, 36.0), |ui| {
-                        let s = PagingBar { page: "Page 2", back: true, forward: true, changes: 2, can_apply: true, note: None }.show(ui);
-                        if let (Some(reset), Some(apply)) = (s.reset, s.apply) {
-                            *out = Some((s.changes.is_some(), reset.id, apply.id));
+                        let s = PagingBar { back: true, ..pages("Page 2", 2, None) }.show(ui);
+                        if let Some(apply) = s.apply {
+                            *out = Some((s.changes.is_some(), s.reset.map(|r| r.id), apply.id));
                         }
                     });
                 },
             );
             h.run();
-            (*h.state()).unwrap_or_else(|| panic!("{width}: Reset and Apply drawn"))
+            (*h.state()).unwrap_or_else(|| panic!("{width}: Apply drawn"))
         };
         let wide = ids(840.0);
-        assert!(wide.0, "840 wide: the count shows");
-        let bare = (300..840)
-            .rev()
-            .step_by(5)
-            .map(|w| ids(w as f32))
-            .find(|(changes, _, _)| !changes)
-            .unwrap_or_else(|| panic!("a width without the count"));
+        assert!(wide.0 && wide.1.is_some(), "840 wide: the count and RESET show");
+        let all: Vec<_> = (250..840).rev().step_by(5).map(|w| ids(w as f32)).collect();
+        let bare = all.iter().find(|(changes, reset, _)| !changes && reset.is_some()).unwrap_or_else(|| panic!("a width without the count"));
         assert_eq!((bare.1, bare.2), (wide.1, wide.2), "Reset and Apply keep their ids");
+        let alone = all.iter().find(|(_, reset, _)| reset.is_none()).unwrap_or_else(|| panic!("a width without RESET"));
+        assert_eq!(alone.2, wide.2, "Apply keeps its id without RESET");
     }
 
     /// The filter bar as the table tab draws it, `W` wide, with `filters` on `columns`: its tags.

@@ -545,8 +545,8 @@ pub struct Pixels {
 }
 
 impl Pixels {
-    /// The pixel whose top left corner is at `(x, y)` (whole points, ppp 1); outside the region,
-    /// transparent.
+    /// The pixel whose top left corner is at `(x, y)`, in pixels (points times the scale, so whole
+    /// points at ppp 1); outside the region, transparent.
     pub fn at(&self, x: i32, y: i32) -> egui::Color32 {
         let (dx, dy) = (x - self.x0, y - self.y0);
         if dx < 0 || dy < 0 || dx as usize >= self.w || dy as usize >= self.h {
@@ -586,15 +586,14 @@ fn owns(a: Pos2, b: Pos2) -> bool {
 }
 
 impl Ui {
-    /// The last frame's pixels in `region` (ppp 1) as egui-wgpu draws them: the shapes tessellated
+    /// The last frame's pixels in `region` (given in points, at the window's scale) as egui-wgpu draws them: the shapes tessellated
     /// as egui does (thin rects and lines snapped to whole pixels, edges feathered), each mesh cut to
     /// its clip rect rounded to whole pixels, blended in paint order over transparent black. Only
     /// plain fills count: text and images are left out.
     pub fn pixels(&self, region: egui::Rect) -> Pixels {
         let ppp = self.harness.ctx.pixels_per_point();
-        assert_eq!(ppp, 1.0, "pixels are points");
-        let (x0, y0) = (region.min.x.floor() as i32, region.min.y.floor() as i32);
-        let (x1, y1) = (region.max.x.ceil() as i32, region.max.y.ceil() as i32);
+        let (x0, y0) = ((region.min.x * ppp).floor() as i32, (region.min.y * ppp).floor() as i32);
+        let (x1, y1) = ((region.max.x * ppp).ceil() as i32, (region.max.y * ppp).ceil() as i32);
         let (w, h) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
         let mut rgba = vec![[0.0f32; 4]; w * h];
         for prim in self.harness.ctx.tessellate(self.harness.output().shapes.clone(), ppp) {
@@ -602,11 +601,14 @@ impl Ui {
             if mesh.texture_id != egui::TextureId::default() {
                 continue;
             }
-            let clip = prim.clip_rect;
+            let clip = prim.clip_rect * ppp;
             let (cx0, cy0) = ((clip.min.x.round() as i32).max(x0), (clip.min.y.round() as i32).max(y0));
             let (cx1, cy1) = ((clip.max.x.round() as i32).min(x1), (clip.max.y.round() as i32).min(y1));
             for tri in mesh.indices.as_chunks::<3>().0 {
                 let mut v = tri.map(|i| mesh.vertices[i as usize]);
+                for v in &mut v {
+                    v.pos = (v.pos.to_vec2() * ppp).to_pos2();
+                }
                 if v.iter().any(|v| v.uv != egui::epaint::WHITE_UV) {
                     continue;
                 }

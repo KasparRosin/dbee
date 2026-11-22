@@ -1,5 +1,6 @@
-//! A table tab's STRUCTURE view ([`show`]), under the table bar in its structure state (drawn by
-//! [`crate::table_tab`]), each area the body's full width (SA):
+//! A table tab's STRUCTURE view ([`show`]), between the table bar in its structure state and the
+//! tab's bottom bar with the view switch (both drawn by [`crate::table_tab`]), each area the
+//! body's full width (SA):
 //!
 //! - the error band (`structure-error`, [`crate::components::error_band`]) when the last read
 //!   failed: `The structure did not load`, the reason, and a note when the page from before still
@@ -14,9 +15,22 @@
 //!   TRIGGERS: name, when, events, for each, the definition on one line (its first lines on
 //!   hover). An empty section keeps its heading and header. Everything the engine wrote is drawn
 //!   as written, never in capitals; the cells' words are worked out once per read ([`Kept`]).
-//!   A section's Name column widens for its widest name, up to twice its drawn width (measured
-//!   once per read); the other columns keep their drawn widths; every table runs as wide as the widest, and the page
-//!   scrolls sideways when that is wider than the body. Cut words read whole on hover.
+//!   Cut words read whole on hover.
+//!
+//! **Widths.** Each column has a least width: its drawn one, a section's Name column widened for
+//! its widest name up to twice that. Every table runs as wide as the widest table's least widths,
+//! or the body when that is wider; narrower than that the page scrolls sideways. Room the body
+//! has past a section's least widths goes to the section's columns whose content is cut (a long
+//! default, type, index or reference), shared evenly until each shows whole ([`spread`]); the
+//! last column takes what is then left, and gives up what its own content doesn't need of its
+//! least width before another column stays cut. A column never widens past the body's edge by
+//! itself: nothing in view is pushed out of it. Content is measured once per read.
+//!
+//! A titled column's right edge is dragged to resize it, and double-clicked to fit it to its
+//! content, as in the data grid (`structure-<section>-edge-<key>`, value the column's width).
+//! From the first resize in a section its columns keep the widths they have (the last still takes
+//! the rest), so only the dragged one changes; the widths last as long as the tab ([`Kept`]),
+//! through its reloads.
 //!
 //! A foreign key, a reference and a referencing table are links: a click, or Enter or Space with
 //! the keyboard, opens that table (`table.open`; the table tab switches to its tab when one is
@@ -28,7 +42,7 @@
 //! loaded.` where the page would be.
 //!
 //! It reads the tab's [`TabStructure`](dbee_engine::TabStructure) each frame and starts nothing
-//! itself but the links' commands: the table bar's STRUCTURE (`table.view`), REFRESH (`table.refresh`) and CANCEL
+//! itself but the links' commands: the bottom bar's STRUCTURE (`table.view`) and the table bar's REFRESH (`table.refresh`) and CANCEL
 //! (`table.cancel`) are the table tab's. Nothing on the page is selectable.
 
 use std::sync::Arc;
@@ -43,14 +57,19 @@ use serde_json::{Value as Json, json};
 use crate::automation::Tags;
 use crate::components::error_band::Band;
 use crate::components::skeleton::GridRows;
-use crate::components::structure::{Cell, Column, PRIMARY_KEY, Table, widened};
+use crate::components::structure::{Cell, Column, PRIMARY_KEY, Resized, Table, widened};
 use crate::components::tooltip::Hint;
 use crate::theme::size::{
-    BAR_LINE, STRUCTURE_COLUMNS_LAST_MIN, STRUCTURE_COLUMNS_W, STRUCTURE_EMPTY_PAD, STRUCTURE_FOREIGN_KEYS_LAST_MIN, STRUCTURE_FOREIGN_KEYS_W,
-    STRUCTURE_INDEXES_LAST_MIN, STRUCTURE_INDEXES_W, STRUCTURE_POSITION_W, STRUCTURE_REFERENCED_BY_LAST_MIN, STRUCTURE_REFERENCED_BY_W,
-    STRUCTURE_SECTION_GAP, STRUCTURE_TRIGGERS_LAST_MIN, STRUCTURE_TRIGGERS_W,
+    BAR_LINE, STRUCTURE_CELL_PAD_X, STRUCTURE_COLUMNS_LAST_MIN, STRUCTURE_COLUMNS_W, STRUCTURE_EMPTY_PAD, STRUCTURE_FOREIGN_KEYS_LAST_MIN,
+    STRUCTURE_FOREIGN_KEYS_W, STRUCTURE_INDEXES_LAST_MIN, STRUCTURE_INDEXES_W, STRUCTURE_POSITION_W, STRUCTURE_REFERENCED_BY_LAST_MIN,
+    STRUCTURE_REFERENCED_BY_W, STRUCTURE_SECTION_GAP, STRUCTURE_TRIGGERS_LAST_MIN, STRUCTURE_TRIGGERS_W,
 };
 use crate::theme::{self, Text};
+
+/// A resized column is at least as wide as the data grid lets its columns get…
+const RESIZE_MIN: f32 = crate::grid::MIN_WIDTH;
+/// …and at most this wide: past anything a drag can ask for on a screen.
+const RESIZE_MAX: f32 = 8000.0;
 
 /// What the page says after a first read was cancelled.
 pub const EMPTY: &str = "The structure is not loaded.";
@@ -389,12 +408,15 @@ fn rows_of(read: &StructureRead) -> [Vec<Vec<Shown>>; 5] {
     [column_rows(read), indexes, foreign_keys, referenced_by, triggers]
 }
 
-/// The page for one read: each section's rows, its columns' widths and its links' cells, and
-/// the widest table's width.
+/// The page for one read: each section's rows, its columns' least widths and the widths their
+/// content needs, and its links' cells; the widest table's least width.
 #[derive(Debug, Default)]
 struct Page {
     rows: [Vec<Vec<Shown>>; 5],
-    widths: [Vec<f32>; 5],
+    /// Each column's least width: as drawn, the Name column widened for its widest name.
+    least: [Vec<f32>; 5],
+    /// The width each column needs to show its title and its widest content whole.
+    needs: [Vec<f32>; 5],
     links: [Vec<(usize, usize)>; 5],
     width: f32,
 }
@@ -402,37 +424,80 @@ struct Page {
 /// Each section's Name column, after the position's.
 const NAME_COLUMN: usize = 1;
 
-/// A section's column `col`, drawn `drawn` wide, whose widest text is `widest()` wide: the Name
-/// column widens for a long name ([`widened`]); every other keeps its drawn width, its words cut
-/// with … and whole on hover.
-fn column_width(col: usize, drawn: f32, widest: impl FnOnce() -> f32) -> f32 {
-    if col == NAME_COLUMN { widened(drawn, widest()) } else { drawn }
+/// The least width of a section's column `col`, drawn `drawn` wide, whose widest text is `widest`
+/// wide: the Name column widens for a long name ([`widened`]); every other starts as drawn.
+fn least_width(col: usize, drawn: f32, widest: f32) -> f32 {
+    if col == NAME_COLUMN { widened(drawn, widest) } else { drawn }
+}
+
+/// A section's columns' widths in `room`: each one's set width, or else its least (`least`), and
+/// what room is left past those shared among the columns that are not set and need more (`needs`)
+/// to show their content whole, evenly, none getting more than it needs. Never wider in all than
+/// `room` unless the set and least widths already are.
+///
+/// The last column takes the rest of the table when it is drawn, so its width here is only what
+/// it must keep: its least, or less when its content needs less. What it can spare that way is
+/// room for the columns that are cut, before the table has any to spare.
+fn spread(least: &[f32], needs: &[f32], set: &[Option<f32>], room: f32) -> Vec<f32> {
+    let last = least.len().saturating_sub(1);
+    let kept = |i: usize, w: f32| if i == last { needs.get(i).map_or(w, |n| w.min(*n)) } else { w };
+    let mut widths: Vec<f32> = least.iter().enumerate().map(|(i, w)| set.get(i).copied().flatten().unwrap_or(kept(i, *w)).max(0.0)).collect();
+    let mut free = room - widths.iter().sum::<f32>();
+    // Each round gives every column still short an even share, or all it still needs when that
+    // is less: at least one column is filled per round, so the rounds are at most the columns.
+    for _ in 0..widths.len() {
+        let short: Vec<(usize, f32)> = widths
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| set.get(*i).copied().flatten().is_none())
+            .filter_map(|(i, w)| needs.get(i).map(|n| (i, n - w)).filter(|(_, d)| *d > 0.0))
+            .collect();
+        if short.is_empty() || !free.is_finite() || free <= 0.0 {
+            break;
+        }
+        let share = free / short.len() as f32;
+        for (i, lack) in short {
+            let give = lack.min(share);
+            if let Some(w) = widths.get_mut(i) {
+                *w += give;
+                free -= give;
+            }
+        }
+    }
+    widths
 }
 
 impl Page {
-    /// The page for `read`, measured in `ui`: each section's Name column widens for its widest
-    /// name ([`column_width`]); the others keep their drawn widths.
+    /// The page for `read`, measured in `ui`.
     fn of(ui: &egui::Ui, read: &StructureRead) -> Page {
         let rows = rows_of(read);
         let mut page = Page::default();
+        let pad = 2.0 * STRUCTURE_CELL_PAD_X;
         for (n, (section, rows)) in SECTIONS.iter().zip(&rows).enumerate() {
             let columns = section.columns();
-            let widths: Vec<f32> = columns
-                .iter()
-                .enumerate()
-                .map(|(col, c)| {
-                    let widest = || rows.iter().filter_map(|r| r.get(col)).map(|s| s.cell().width(ui)).fold(0.0, f32::max);
-                    column_width(col, c.width, widest)
-                })
-                .collect();
+            let widest = |col: usize| rows.iter().filter_map(|r| r.get(col)).map(|s| s.cell().width(ui)).fold(0.0, f32::max);
+            let mut least = Vec::with_capacity(columns.len());
+            let mut needs = Vec::with_capacity(columns.len());
+            for (col, c) in columns.iter().enumerate() {
+                let content = widest(col);
+                let title = if c.title.is_empty() {
+                    0.0
+                } else {
+                    ui.painter().layout_job(Text::Header.job_as_written(c.title, egui::Color32::PLACEHOLDER)).size().x
+                };
+                least.push(least_width(col, c.width, content));
+                // The position's column keeps its width: it has no title and no edge to drag.
+                needs.push(if c.title.is_empty() { c.width } else { (content.max(title) + pad).ceil() });
+            }
             let links = rows
                 .iter()
                 .enumerate()
                 .flat_map(|(row, cells)| cells.iter().enumerate().filter(|(_, s)| matches!(s, Shown::Link { .. })).map(move |(col, _)| (row, col)))
                 .collect();
-            page.width = page.width.max(widths.iter().sum());
-            if let (Some(w), Some(l)) = (page.widths.get_mut(n), page.links.get_mut(n)) {
-                *w = widths;
+            page.width = page.width.max(least.iter().sum());
+            if let (Some(w), Some(d), Some(l)) = (page.least.get_mut(n), page.needs.get_mut(n), page.links.get_mut(n)) {
+                *w = least;
+                *d = needs;
                 *l = links;
             }
         }
@@ -442,22 +507,59 @@ impl Page {
 }
 
 /// What the window keeps for a table tab's page: the page worked out from the last read shown
-/// (a definition's one line and its hover built once, the widths measured once), dropped with
-/// the tab.
+/// (a definition's one line and its hover built once, the widths measured once), and the widths
+/// its columns were resized to; dropped with the tab.
 #[derive(Debug, Default)]
 pub(crate) struct Kept {
     read: Option<Arc<StructureRead>>,
     page: Page,
+    /// Each section's columns' set widths: none until a column of the section is resized, then
+    /// every column's but the last's (which is set only when it is resized itself).
+    set: [Vec<Option<f32>>; 5],
 }
 
 impl Kept {
-    /// The page for `read`, worked out again only when it is another read.
-    fn page(&mut self, ui: &egui::Ui, read: &Arc<StructureRead>) -> &Page {
+    /// Works the page out for `read` when it is another read than the one kept.
+    fn read(&mut self, ui: &egui::Ui, read: &Arc<StructureRead>) {
         if !self.read.as_ref().is_some_and(|r| Arc::ptr_eq(r, read)) {
             self.page = Page::of(ui, read);
             self.read = Some(Arc::clone(read));
         }
-        &self.page
+    }
+
+    /// Section `n`'s columns' widths in a body `body` wide ([`spread`]): in the body's width, or
+    /// in the section's least widths when those are wider. A page wider than the body (another
+    /// section's table is) gives the section no room of its own: what is out of view to the side
+    /// is the last column's rest, so that widening a cut column pushes nothing out of view.
+    fn widths(&self, n: usize, body: f32) -> Vec<f32> {
+        let least = self.page.least.get(n).map_or(&[][..], Vec::as_slice);
+        let needs = self.page.needs.get(n).map_or(&[][..], Vec::as_slice);
+        let set = self.set.get(n).map_or(&[][..], Vec::as_slice);
+        spread(least, needs, set, body.max(least.iter().sum()))
+    }
+
+    /// Takes what a handle of section `n` asked for column `col`, the section drawn with `drawn`
+    /// widths: every column but the last keeps the width it has, and `col` gets the one asked.
+    fn resize(&mut self, n: usize, col: usize, asked: Resized, drawn: &[f32]) {
+        let need = self.page.needs.get(n).and_then(|d| d.get(col)).copied();
+        let Some(set) = self.set.get_mut(n) else { return };
+        let last = drawn.len().saturating_sub(1);
+        if col == 0 || col > last {
+            return;
+        }
+        set.resize(drawn.len(), None);
+        for (i, (kept, now)) in set.iter_mut().zip(drawn).enumerate() {
+            if i < last && kept.is_none() {
+                *kept = Some(*now);
+            }
+        }
+        let width = match asked {
+            Resized::To(w) => Some(w),
+            Resized::Fit => need,
+        };
+        if let (Some(w), Some(kept)) = (width.filter(|w| w.is_finite()), set.get_mut(col)) {
+            *kept = Some(w.clamp(RESIZE_MIN, RESIZE_MAX));
+        }
     }
 }
 
@@ -502,10 +604,10 @@ pub(crate) fn show(
             if loading.is_some() {
                 page.multiply_opacity(theme::DIM);
             }
-            let shown = kept.page(&page, read);
+            kept.read(&page, read);
             ScrollArea::both().id_salt(("dbee-structure", id.0)).auto_shrink([false, false]).show(&mut page, |ui| {
                 ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-                asked = sections(ui, tags, id, shown, lost);
+                asked = sections(ui, tags, id, kept, lost);
             });
         }
         // A first read on its way: from 300 ms, COLUMNS' heading and header over rows of bars.
@@ -529,21 +631,36 @@ pub(crate) fn show(
     asked
 }
 
-/// The page's sections from `page`, top to bottom, every table as wide as the widest; the
-/// commands a link's click asked for. A link out of view is listed where it is laid out, and
-/// scrolled to when a click asks for it (as the tree's rows are) or the keyboard reaches it.
-fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, page: &Page, lost: bool) -> Vec<(&'static str, Json)> {
+/// The page's sections from what `kept` keeps, top to bottom, every table as wide as the widest;
+/// the commands a link's click asked for. A link out of view is listed where it is laid out, and
+/// scrolled to when a click asks for it (as the tree's rows are) or the keyboard reaches it. What
+/// a column's edge asked is kept for the next frame.
+fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, kept: &mut Kept, lost: bool) -> Vec<(&'static str, Json)> {
     let mut asked = Vec::new();
-    let parts = SECTIONS.iter().zip(&page.rows).zip(&page.widths).zip(&page.links).zip(KEYS);
+    // Every table as wide as the body, or as the widest table when that is wider.
+    let body = ui.available_width();
+    let all: Vec<Vec<f32>> = (0..SECTIONS.len()).map(|n| kept.widths(n, body)).collect();
+    let width = all.iter().map(|w| w.iter().sum::<f32>()).fold(body.max(kept.page.width), f32::max);
+    let mut resized = None;
+    let page = &kept.page;
+    let parts = SECTIONS.iter().zip(&page.rows).zip(&all).zip(&page.links).zip(KEYS);
     for (n, ((((section, rows), widths), links), keys)) in parts.enumerate() {
         if n > 0 {
             ui.add_space(STRUCTURE_SECTION_GAP);
         }
         let columns: Vec<Column<'_>> = section.columns().into_iter().zip(widths).map(|(c, w)| Column { width: *w, ..c }).collect();
-        let table = Table { heading: section.heading, columns: &columns, rows: rows.len(), links: !lost, link_cells: links, width: page.width };
+        let table = Table { heading: section.heading, columns: &columns, rows: rows.len(), links: !lost, link_cells: links, width, resize: true };
         let drawn =
             table.show(ui, egui::Id::new((section.id, id.0)), |row, col| rows.get(row).and_then(|r| r.get(col)).map_or(Cell::Muted(""), Shown::cell));
         tags.tag_value(section.id, &drawn.heading, section.heading);
+        for (col, r) in &drawn.handles {
+            if let (Some(key), Some(w)) = (keys.get(*col).filter(|k| !k.is_empty()), drawn.widths.get(*col)) {
+                tags.tag_value(&format!("{}-edge-{key}", section.id), r, json!(w));
+            }
+        }
+        if let Some((col, what)) = drawn.resized {
+            resized = Some((n, col, what, drawn.widths.clone()));
+        }
         for (row, col, r, cut) in drawn.cells {
             let (Some(shown), Some(key)) = (rows.get(row).and_then(|r| r.get(col)), keys.get(col).filter(|k| !k.is_empty())) else { continue };
             let tag = format!("{}-{row}-{key}", section.id);
@@ -574,6 +691,9 @@ fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, page: &Page, lost: bo
             }
         }
     }
+    if let Some((n, col, what, drawn)) = resized {
+        kept.resize(n, col, what, &drawn);
+    }
     asked
 }
 
@@ -582,7 +702,7 @@ fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, page: &Page, lost: bo
 fn skeleton(ui: &mut egui::Ui, tags: &mut Tags, id: TabId) {
     let Some(section) = SECTIONS.first() else { return };
     let columns = section.columns();
-    let table = Table { heading: section.heading, columns: &columns, rows: 0, links: false, link_cells: &[], width: 0.0 };
+    let table = Table { heading: section.heading, columns: &columns, rows: 0, links: false, link_cells: &[], width: 0.0, resize: false };
     let drawn = table.show(ui, egui::Id::new((section.id, id.0)), |_, _| Cell::Muted(""));
     tags.tag_value(section.id, &drawn.heading, section.heading);
     let widths = table.widths(drawn.rect.width());
@@ -630,15 +750,84 @@ mod tests {
         assert_eq!(tags.value("structure-error"), Some(&serde_json::json!(whole)));
     }
 
-    /// Only a section's Name column widens for a long name (up to twice as drawn); a long default,
-    /// type or definition keeps its column as drawn, cut with … and whole on hover.
+    /// A column's least width: a section's Name column widens for a long name (up to twice as
+    /// drawn); a long default, type or definition starts as drawn.
     #[test]
-    fn only_the_name_column_widens() {
-        let long = || 297.0;
-        assert_eq!(column_width(NAME_COLUMN, 150.0, long), widened(150.0, 297.0), "a long name widens its column");
-        assert_eq!(column_width(NAME_COLUMN, 150.0, || 60.0), 150.0, "a short one keeps it");
+    fn only_the_name_column_has_a_wider_least() {
+        assert_eq!(least_width(NAME_COLUMN, 150.0, 297.0), widened(150.0, 297.0), "a long name widens its column");
+        assert_eq!(least_width(NAME_COLUMN, 150.0, 60.0), 150.0, "a short one keeps it");
         for col in [0, 2, 3, 4, 5] {
-            assert_eq!(column_width(col, 140.0, long), 140.0, "column {col} keeps its drawn width");
+            assert_eq!(least_width(col, 140.0, 297.0), 140.0, "column {col} starts at its drawn width");
         }
+    }
+
+    /// Room past the least widths goes to the columns whose content is cut, evenly, none past what
+    /// it needs; with no room to spare every column keeps its least, and a set column its width.
+    #[test]
+    fn spare_room_goes_to_the_columns_that_are_cut() {
+        // COLUMNS as drawn: the position, Name, Type, Nullable, Default, Keys.
+        let least = [40.0, 150.0, 140.0, 76.0, 150.0, 240.0];
+        let fits = [40.0, 60.0, 80.0, 30.0, 100.0, 120.0];
+        let cut = [40.0, 60.0, 200.0, 30.0, 400.0, 120.0];
+        let none = [None; 6];
+        let sum = |w: &[f32]| w.iter().sum::<f32>();
+        // The last column (Keys) is given what it must keep, 120 for its content: the table draws
+        // it with the rest of the room.
+        let (drawn, keys) = ([40.0, 150.0, 140.0, 76.0, 150.0], 120.0);
+        let with = |name_to_default: [f32; 5]| name_to_default.into_iter().chain([keys]).collect::<Vec<f32>>();
+        assert_eq!(spread(&least, &fits, &none, 1200.0), with(drawn), "nothing cut: as drawn");
+        assert_eq!(spread(&least, &cut, &none, 600.0), with(drawn), "no room at all: as drawn");
+        // A table at its least widths, 796: the 120 Keys can spare go to Type and Default, 60 each.
+        assert_eq!(spread(&least, &cut, &none, sum(&least)), with([40.0, 150.0, 200.0, 76.0, 210.0]));
+        // 100 more: Type is whole, Default takes them.
+        assert_eq!(spread(&least, &cut, &none, 896.0), with([40.0, 150.0, 200.0, 76.0, 310.0]));
+        // Room for all: each as wide as it needs and no wider.
+        assert_eq!(spread(&least, &cut, &none, 996.0), with([40.0, 150.0, 200.0, 76.0, 400.0]));
+        assert_eq!(spread(&least, &cut, &none, 2000.0), with([40.0, 150.0, 200.0, 76.0, 400.0]));
+        // A last column whose own content is cut keeps its least, and shares the spare room.
+        let long_keys = [40.0, 60.0, 80.0, 30.0, 100.0, 300.0];
+        assert_eq!(spread(&least, &long_keys, &none, 826.0), [40.0, 150.0, 140.0, 76.0, 150.0, 270.0]);
+        // A set column keeps its width, cut or not, and leaves its room to the others.
+        let set = [None, None, Some(100.0), None, None, None];
+        assert_eq!(spread(&least, &cut, &set, 796.0), with([40.0, 150.0, 100.0, 76.0, 310.0]));
+        // Hostile numbers stay finite.
+        for room in [f32::NAN, f32::INFINITY, -1.0] {
+            assert!(spread(&least, &cut, &none, room).iter().all(|w| w.is_finite()), "{room}");
+        }
+        let endless = spread(&least, &[f32::INFINITY; 6], &none, 996.0).iter().sum::<f32>();
+        assert!((endless - 996.0).abs() < 0.01, "endless needs share the room and no more: {endless}");
+    }
+
+    /// A resize in a section sets every column of it but the last at the width it has, and the
+    /// column asked at the width asked, within the bounds; a fit takes the content's width.
+    #[test]
+    fn a_resize_keeps_the_other_columns_where_they_are() {
+        let mut kept = Kept::default();
+        kept.page.least[0] = vec![40.0, 150.0, 140.0, 76.0, 150.0, 240.0];
+        kept.page.needs[0] = vec![40.0, 60.0, 200.0, 30.0, 400.0, 120.0];
+        // As the table draws them 996 wide: Keys with the rest.
+        assert_eq!(kept.widths(0, 996.0), [40.0, 150.0, 200.0, 76.0, 400.0, 120.0]);
+        let drawn = [40.0, 150.0, 200.0, 76.0, 400.0, 130.0];
+        kept.resize(0, 4, Resized::To(180.0), &drawn);
+        assert_eq!(kept.set[0], [Some(40.0), Some(150.0), Some(200.0), Some(76.0), Some(180.0), None]);
+        assert_eq!(kept.widths(0, 2000.0), [40.0, 150.0, 200.0, 76.0, 180.0, 120.0], "more room changes none of them");
+        kept.resize(0, 4, Resized::Fit, &kept.widths(0, 996.0));
+        assert_eq!(kept.set[0][4], Some(400.0), "fit: as wide as the content needs");
+        kept.resize(0, 3, Resized::Fit, &kept.widths(0, 996.0));
+        assert_eq!(kept.set[0][3], Some(RESIZE_MIN), "never narrower than the grid's least");
+        kept.resize(0, 2, Resized::To(f32::INFINITY), &kept.widths(0, 996.0));
+        kept.resize(0, 2, Resized::To(f32::NAN), &kept.widths(0, 996.0));
+        assert_eq!(kept.set[0][2], Some(200.0), "a width that is no number changes nothing");
+        kept.resize(0, 2, Resized::To(1e9), &kept.widths(0, 996.0));
+        assert_eq!(kept.set[0][2], Some(RESIZE_MAX));
+        // The last column's set width is its least: it still takes the rest.
+        kept.resize(0, 5, Resized::To(300.0), &kept.widths(0, 996.0));
+        assert_eq!(kept.set[0][5], Some(300.0));
+        // The position's column and a column that isn't there take nothing.
+        let before = kept.set.clone();
+        kept.resize(0, 0, Resized::To(90.0), &kept.widths(0, 996.0));
+        kept.resize(0, 9, Resized::To(90.0), &kept.widths(0, 996.0));
+        kept.resize(7, 1, Resized::To(90.0), &[]);
+        assert_eq!(kept.set, before);
     }
 }

@@ -175,9 +175,9 @@ pub const RESULT_FACT_GAP: f32 = 12.0;
 /// its words, COUNTING and the timer.
 pub const ROW_COUNT_GAP: f32 = 8.0;
 pub const ROW_COUNT_COUNTING_GAP: f32 = 12.0;
-/// The table bar (`table bar`): its view switch this far in from its left end; this between the
-/// switch and the first cell, and between the count and IMPORT; CANCEL this far in its cell, either
-/// side; LOADING this far before its timer.
+/// The view switch this far in from the left end of the bar it stands in (the table tab's bottom
+/// bar); in the table bar (`table bar`), this between the count and IMPORT; CANCEL this far in its
+/// cell, either side; LOADING this far before its timer.
 pub const TABLE_BAR_PAD_X: f32 = 12.0;
 pub const TABLE_BAR_GAP: f32 = 12.0;
 pub const TABLE_CANCEL_PAD_X: f32 = 12.0;
@@ -188,9 +188,11 @@ pub const FILTER_BAR_PAD_Y: f32 = 4.0;
 pub const FILTER_BAR_PAD_X: f32 = 12.0;
 pub const FILTER_ROW_H: f32 = 36.0;
 pub const FILTER_GAP: f32 = 8.0;
-/// The paging bar (`paging bar`, its line along the top): its arrows this far in from its left
-/// end, its last button this far from its right end, its parts this far apart; the staged mark
-/// this big and this far before the count of changes, which ends this far before RESET.
+/// The table tab's bottom bar (`paging bar`, its line along the top): its last button this far
+/// from its right end, its parts this far apart; the staged mark this big and this far before the
+/// count of changes, which ends this far before RESET and stays as far from the paging, as the
+/// paging does from the view switch. ([`PAGING_PAD_LEFT`] was the arrows' place at the left end,
+/// before the switch took it.)
 pub const PAGING_PAD_LEFT: f32 = 8.0;
 pub const PAGING_PAD_RIGHT: f32 = 12.0;
 pub const PAGING_GAP: f32 = 4.0;

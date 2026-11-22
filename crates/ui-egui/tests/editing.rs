@@ -1384,7 +1384,7 @@ fn a_failed_apply_shows_the_band_with_its_detail() {
     let band = ui.drawn("table-error");
     let body = ui.body_x();
     assert!((band.left() - body.min).abs() <= 0.5 && (band.right() - body.max).abs() <= 0.5, "full width {body:?}: {band:?}");
-    assert!(band.top() > ui.drawn("table-view-data").bottom(), "under the table bar: {band:?}");
+    assert!(band.top() > ui.drawn("table-refresh").bottom(), "under the table bar: {band:?}");
     assert!(band.bottom() < ui.drawn("grid-header-0").top(), "over the grid, its line between: {band:?}");
     let top = |words: &str| ui.texts().into_iter().find(|(r, g)| g.text() == words && band.contains(r.center())).map_or(f32::NAN, |(r, _)| r.top());
     // The message as the band draws it: the server's words, without the engine's `change 1

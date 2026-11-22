@@ -269,10 +269,10 @@ fn ctrl_c_copies_what_has_the_keyboard() {
     assert_eq!(ui.copied().as_deref(), Some("ord"), "the field's own copy");
 }
 
-/// The tree row tagged `id`'s focus box, 2 px `ink` 2 px inside it, is drawn.
+/// The tree row tagged `id`'s focus box, 2 px `ink` along the row's own edges, is drawn.
 fn outlined(ui: &Ui, id: &str) -> bool {
     let row = ui.drawn(id);
-    outlines_in(ui, row.expand(0.5), dbee_ui_egui::theme::LIGHT.ink) == [(row.shrink(2.0), 2.0)]
+    outlines_in(ui, row.expand(0.5), dbee_ui_egui::theme::LIGHT.ink) == [(row, 2.0)]
 }
 
 /// The `tree-table-*` row that has the keyboard, if one has.

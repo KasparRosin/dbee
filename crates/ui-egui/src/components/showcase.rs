@@ -1236,7 +1236,6 @@ fn table_tab_bars(ui: &mut Ui) {
     let first = Some((1, 100));
     let table = |view, loading, count| TableBar {
         view,
-        structure: true,
         loading,
         count,
         shown: first,
@@ -1249,7 +1248,7 @@ fn table_tab_bars(ui: &mut Ui) {
     };
     section(
         ui,
-        "table bar: data, structure, loading; the row count: estimate with COUNT, unknown with COUNT ROWS, counting (its CANCEL is the footer job); as the table tab draws it, STRUCTURE off and no Value cell",
+        "table bar: data, structure, loading; the row count: estimate with COUNT, unknown with COUNT ROWS, counting (its CANCEL is the footer job); with no Value cell",
         SPACE_8,
         |ui| {
             let rows = [
@@ -1259,7 +1258,7 @@ fn table_tab_bars(ui: &mut Ui) {
                 table(View::Data, None, RowCount::Estimate(100_000)),
                 table(View::Data, None, RowCount::Unknown),
                 table(View::Data, None, RowCount::Counting { estimate: Some(100_000), elapsed: Some(s(1200)) }),
-                TableBar { structure: false, value: None, ..table(View::Data, None, RowCount::Estimate(100_000)) },
+                TableBar { value: None, ..table(View::Data, None, RowCount::Estimate(100_000)) },
             ];
             stack(ui, &mut |ui| {
                 for row in rows {
@@ -1301,15 +1300,37 @@ fn table_tab_bars(ui: &mut Ui) {
             });
         },
     );
-    section(ui, "paging bar: with staged changes (1 CHANGE, RESET, APPLY); without", SPACE_8, |ui| {
-        stack(ui, &mut |ui| {
-            for changes in [1, 0] {
-                bar(ui, &mut |ui| {
-                    PagingBar { page: "Page 1 of 250", back: false, forward: true, changes, can_apply: true, note: None }.show(ui);
-                });
-            }
-        });
-    });
+    section(
+        ui,
+        "bottom bar: the view switch, the paging in the middle, the staged changes (1 CHANGE, RESET, APPLY); without changes; STRUCTURE's, the switch alone; STRUCTURE off",
+        SPACE_8,
+        |ui| {
+            let pages = PagingBar {
+                view: View::Data,
+                structure: true,
+                pages: true,
+                page: "Page 1 of 250",
+                back: false,
+                forward: true,
+                changes: 1,
+                can_apply: true,
+                note: None,
+            };
+            let rows = [
+                pages,
+                PagingBar { changes: 0, ..pages },
+                PagingBar { view: View::Structure, pages: false, ..pages },
+                PagingBar { structure: false, changes: 0, ..pages },
+            ];
+            stack(ui, &mut |ui| {
+                for row in rows {
+                    bar(ui, &mut |ui| {
+                        row.show(ui);
+                    });
+                }
+            });
+        },
+    );
 }
 
 /// The sidebar's filter and count, as the page's Tabs and bars frame shows them, and the
