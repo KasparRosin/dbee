@@ -14,8 +14,8 @@
 //! A table's columns can be resized ([`Table::resize`]) as the data grid's are: the right edge of
 //! a titled column, from the header down to the last row, is a handle with the grid's grab room,
 //! cursor and line (the theme's hovered and dragged edges). A drag asks for the width under the
-//! pointer, a double click for the width the column's content needs ([`Resized`]); the view keeps
-//! the widths.
+//! pointer, a double click (or a triple one) for the width the column's content needs
+//! ([`Resized`]); the view keeps the widths.
 
 use std::sync::Arc;
 
@@ -381,7 +381,9 @@ impl Table<'_> {
                 let line = Rect::from_min_max(pos2(x, r.top()), pos2(x, r.bottom()));
                 // The pointer's alone: Tab goes from link to link, past the handles.
                 let response = ui.interact(line.expand2(egui::vec2(grab, 0.0)), id.with(("resize", col)), Sense::CLICK | Sense::DRAG);
-                if response.double_clicked() {
+                // A third click too, as the grid's header takes it: egui counts a click made just
+                // before the two towards a triple one.
+                if response.double_clicked() || response.triple_clicked() {
                     resized = Some((col, Resized::Fit));
                 } else if response.dragged()
                     && let Some(pointer) = ui.ctx().pointer_latest_pos()

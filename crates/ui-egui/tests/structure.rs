@@ -106,9 +106,9 @@ fn seq(ui: &Ui) -> u64 {
     }
 }
 
-/// The window for `shop.orders`' page: narrower than the page's widest table (TRIGGERS, 910), which
-/// leaves COLUMNS 114 past its least widths: too little for Postgres's `nextval(…)`, so Default
-/// still cuts it. REFERENCED BY is below the page's bottom.
+/// The window for `shop.orders`' page: narrower than the page's widest table (TRIGGERS, 910), with
+/// little past COLUMNS' least widths: too little for Postgres's `nextval(…)`, so Default still
+/// cuts it. REFERENCED BY is below the page's bottom.
 const ORDERS_SIZE: egui::Vec2 = APP_SIZE;
 
 /// `shop.orders` open on pg14 at [`ORDERS_SIZE`], its page loaded, then STRUCTURE clicked and its
@@ -170,17 +170,19 @@ fn structure_shows_sa() {
     assert_eq!(ui.value("structure-columns-8-position"), 9);
     assert!(ui.tag("structure-columns-9-name").is_none(), "nine columns");
 
-    // The header's titles where SA draws them: Name and Nullable as drawn; the page's 114 past
-    // COLUMNS' least widths go to the columns whose content is cut, and Default still cuts
-    // Postgres's `nextval(…)`, whole on hover; Keys after it, in view.
+    // The header's titles where SA draws them: Name, Type and Nullable as drawn. Default, whose
+    // `nextval(…)` is longer than its drawn 150, takes the little the body has past COLUMNS'
+    // least widths (796) and what Keys can spare of its 240, its foreign key staying whole and in
+    // view; that is not enough here, so Default still cuts it, whole on hover.
     let cell = ui.drawn("structure-columns-0-default");
     let default = cell.width();
     let kind = ui.drawn("structure-columns-0-type").width();
-    // The page is as wide as its widest table, TRIGGERS' 910: wider than the body here.
-    assert!(body.max - body.min < 910.0, "the body is narrower than TRIGGERS: {body:?}");
-    let spare = 910.0 - 796.0;
-    assert!(kind >= 140.0 - 0.5 && default > 150.5, "Type and Default take the spare room: {kind}, {default}");
-    assert!(close(kind + default, 140.0 + 150.0 + spare), "all of it, and no more: {kind} + {default}, {spare} spare");
+    assert!(body.max - body.min < 910.0, "the body is narrower than the page's widest table: {body:?}");
+    assert!(close(kind, 140.0) && default > 150.0 + 30.0, "Type as drawn, Default wider than drawn: {kind}, {default}");
+    let keys = ui.drawn("structure-columns-1-keys");
+    let link = ui.value("structure-columns-1-keys").as_str().unwrap_or_default().to_string();
+    assert!(ui.text_in(keys, &link).is_some_and(|(at, cut)| !cut && at.right() <= body.max), "the foreign key whole and in view: {keys:?}");
+    assert!(keys.width() < 240.0 - 30.0, "Keys gave up what its content doesn't need: {keys:?}");
     let words = ui.value("structure-columns-0-default").as_str().unwrap_or_default().to_string();
     let (_, cut) = ui.text_in(cell, &words).expect("the default painted");
     assert!(cut, "a long default is cut with …");
@@ -205,11 +207,13 @@ fn structure_shows_sa() {
         }
         let section = id.trim_start_matches("structure-");
         let cells: Vec<String> = ids(&ui.inspect()).into_iter().filter(|c| c.starts_with(&format!("{id}-")) && !c.contains("-edge-")).collect();
-        let drawn = cells.iter().map(|c| ui.laid(c).bottom()).fold(at.bottom() + 30.0, f32::max);
+        // From the heading's top: a heading cut by the page's bottom is listed by its part in view.
+        let header = at.top() + 36.0 + 30.0;
+        let drawn = cells.iter().map(|c| ui.laid(c).bottom()).fold(header, f32::max);
         assert!(cells.iter().all(|c| c.trim_start_matches(&format!("structure-{section}-")).starts_with(char::is_numeric)), "{cells:?}");
         // Its last row's line, drawn or below the page's bottom.
         let rows = shown[count].as_u64().unwrap_or_else(|| panic!("{count} counted: {shown}"));
-        let last = at.bottom() + 30.0 + 26.0 * rows as f32;
+        let last = header + 26.0 * rows as f32;
         assert!(drawn <= last + 0.5, "`{id}`'s rows end at {last}: {drawn}");
         bottom = Some(last);
     }
@@ -696,9 +700,9 @@ fn data_is_never_uppercased() {
 }
 
 /// Brief §2.2, call 6: a section's Name column is at least `max(drawn, widest name + 16)`, up to
-/// twice its drawn width; in a body no wider than the tables that is its width, and past it the
-/// name is cut with `…` and reads whole on hover. In a body with room to spare the name shows
-/// whole.
+/// twice its drawn width; in a body no wider than the tables it gets no more than the last column
+/// can spare, and a name longer than that is cut with `…` and reads whole on hover. In a body
+/// with room to spare the name shows whole.
 #[test]
 fn long_names_widen_their_column_up_to_twice() {
     let db = dbee_testkit::require_testdb!();
@@ -707,19 +711,20 @@ fn long_names_widen_their_column_up_to_twice() {
     let mid = "twenty_chars_name_ab";
     assert_eq!((long.len(), mid.len()), (60, 20));
     let schema = SchemaGuard::new(db, |s| {
-        format!("CREATE TABLE {s}.long ({long} int); CREATE TABLE {s}.mid ({mid} int); CREATE TABLE {s}.short (a_short_name int);")
+        format!("CREATE TABLE {s}.long ({long} int PRIMARY KEY); CREATE TABLE {s}.mid ({mid} int); CREATE TABLE {s}.short (a_short_name int);")
     });
     let s = schema.0.as_str();
     // A body narrower than the tables: every column at its least width.
     let mut ui = Ui::connected_in(db, vec2(900.0, 720.0));
     let body = ui.tab_x();
     assert!(body.max - body.min < 796.0, "the body is narrower than COLUMNS: {body:?}");
-    // Twice the drawn 150, the name cut inside it, Type right after it.
+    // At least twice the drawn 150, and what Keys can spare beside its `primary key`: still too
+    // little, so the name is cut inside it; Type right after it.
     structure_of(&mut ui, s, "long");
     assert_eq!(ui.value("structure-columns-0-name"), long);
     let name = ui.drawn("structure-columns-0-name");
-    assert!(close(name.width(), 300.0), "Name twice its 150: {name:?}");
-    assert!(close(ui.drawn("structure-columns-0-type").left() - body.min, 40.0 + 300.0), "Type after it");
+    assert!(name.width() >= 300.0 - 0.5 && name.width() < 300.0 + 240.0, "Name at least twice its 150: {name:?}");
+    assert!(close(ui.drawn("structure-columns-0-type").left() - body.min, 40.0 + name.width()), "Type after it");
     let (at, cut) = ui.text_in(name, long).expect("the name painted");
     assert!(cut && at.right() <= name.right() - 8.0 + 0.5, "cut with `…` inside its cell: {at:?} in {name:?}");
     ui.rest(name.center());
@@ -995,11 +1000,23 @@ fn a_column_is_resized_at_its_edge() {
         "fitted: {:?}, the words {at:?}",
         fitted[3]
     );
+    // A click made just before the two counts them as a triple click: it fits all the same. Name,
+    // 150 as drawn, to its longest name.
+    ui.click_with("structure-columns-edge-name", json!({ "count": 3 }));
+    ui.frame();
+    ui.hover_away();
+    let name = ui.laid("structure-columns-8-name");
+    let (at, cut) = ui.text_in(name, "raw_json_text").expect("the longest name painted");
+    assert!(
+        !cut && name.width() < 150.0 - 1.0 && (name.width() - (at.width() + 16.0)).abs() <= 1.0,
+        "Name fitted to its longest: {name:?}, the words {at:?}"
+    );
+    let fitted = columns_row(&mut ui);
     // The widths last: DATA and back, then a reload.
     ui.click("table-view-data");
     ui.until("the grid", |ui| ui.tag("grid-cell-0-0").is_some());
     ui.click("table-view-structure");
-    ui.until("the structure", |ui| ui.tag("structure-columns-0-name").is_some());
+    ui.until("the structure", |ui| ui.tag("structure-columns-0-name").is_some() && ui.table()["structure"]["loading"].is_null());
     ui.hover_away();
     let back = columns_row(&mut ui);
     assert!((0..5).all(|i| close(back[i].width(), fitted[i].width())), "the widths after DATA and back: {back:?}, {fitted:?}");

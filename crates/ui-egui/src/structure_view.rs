@@ -18,10 +18,12 @@
 //!
 //! **Widths.** Each column has a least width: its drawn one, a section's Name column widened for
 //! its widest name up to twice that. Every table runs as wide as the widest table's least widths,
-//! or the body when that is wider; narrower than that the page scrolls sideways. Room a section
-//! has past its least widths goes to its columns whose content is cut (a long default, type,
-//! index or reference), shared evenly until each shows whole ([`spread`]); the last column takes
-//! what is then left. Content is measured once per read.
+//! or the body when that is wider; narrower than that the page scrolls sideways. Room the body
+//! has past a section's least widths goes to the section's columns whose content is cut (a long
+//! default, type, index or reference), shared evenly until each shows whole ([`spread`]); the
+//! last column takes what is then left, and gives up what its own content doesn't need of its
+//! least width before another column stays cut. A column never widens past the body's edge by
+//! itself: nothing in view is pushed out of it. Content is measured once per read.
 //!
 //! A titled column's right edge is dragged to resize it, and double-clicked to fit it to its
 //! content, as in the data grid (`structure-<section>-edge-<key>`, value the column's width).
@@ -431,8 +433,14 @@ fn least_width(col: usize, drawn: f32, widest: f32) -> f32 {
 /// what room is left past those shared among the columns that are not set and need more (`needs`)
 /// to show their content whole, evenly, none getting more than it needs. Never wider in all than
 /// `room` unless the set and least widths already are.
+///
+/// The last column takes the rest of the table when it is drawn, so its width here is only what
+/// it must keep: its least, or less when its content needs less. What it can spare that way is
+/// room for the columns that are cut, before the table has any to spare.
 fn spread(least: &[f32], needs: &[f32], set: &[Option<f32>], room: f32) -> Vec<f32> {
-    let mut widths: Vec<f32> = least.iter().enumerate().map(|(i, w)| set.get(i).copied().flatten().unwrap_or(*w).max(0.0)).collect();
+    let last = least.len().saturating_sub(1);
+    let kept = |i: usize, w: f32| if i == last { needs.get(i).map_or(w, |n| w.min(*n)) } else { w };
+    let mut widths: Vec<f32> = least.iter().enumerate().map(|(i, w)| set.get(i).copied().flatten().unwrap_or(kept(i, *w)).max(0.0)).collect();
     let mut free = room - widths.iter().sum::<f32>();
     // Each round gives every column still short an even share, or all it still needs when that
     // is less: at least one column is filled per round, so the rounds are at most the columns.
@@ -518,11 +526,15 @@ impl Kept {
         }
     }
 
-    /// Section `n`'s columns' widths in `room` ([`spread`]).
-    fn widths(&self, n: usize, room: f32) -> Vec<f32> {
-        let (least, needs) = (self.page.least.get(n), self.page.needs.get(n));
+    /// Section `n`'s columns' widths in a body `body` wide ([`spread`]): in the body's width, or
+    /// in the section's least widths when those are wider. A page wider than the body (another
+    /// section's table is) gives the section no room of its own: what is out of view to the side
+    /// is the last column's rest, so that widening a cut column pushes nothing out of view.
+    fn widths(&self, n: usize, body: f32) -> Vec<f32> {
+        let least = self.page.least.get(n).map_or(&[][..], Vec::as_slice);
+        let needs = self.page.needs.get(n).map_or(&[][..], Vec::as_slice);
         let set = self.set.get(n).map_or(&[][..], Vec::as_slice);
-        spread(least.map_or(&[], Vec::as_slice), needs.map_or(&[], Vec::as_slice), set, room)
+        spread(least, needs, set, body.max(least.iter().sum()))
     }
 
     /// Takes what a handle of section `n` asked for column `col`, the section drawn with `drawn`
@@ -625,9 +637,9 @@ pub(crate) fn show(
 fn sections(ui: &mut egui::Ui, tags: &mut Tags, id: TabId, kept: &mut Kept, lost: bool) -> Vec<(&'static str, Json)> {
     let mut asked = Vec::new();
     // Every table as wide as the body, or as the widest table when that is wider.
-    let room = ui.available_width().max(kept.page.width);
-    let all: Vec<Vec<f32>> = (0..SECTIONS.len()).map(|n| kept.widths(n, room)).collect();
-    let width = all.iter().map(|w| w.iter().sum::<f32>()).fold(room, f32::max);
+    let body = ui.available_width();
+    let all: Vec<Vec<f32>> = (0..SECTIONS.len()).map(|n| kept.widths(n, body)).collect();
+    let width = all.iter().map(|w| w.iter().sum::<f32>()).fold(body.max(kept.page.width), f32::max);
     let mut resized = None;
     let page = &kept.page;
     let parts = SECTIONS.iter().zip(&page.rows).zip(&all).zip(&page.links).zip(KEYS);
@@ -758,18 +770,25 @@ mod tests {
         let cut = [40.0, 60.0, 200.0, 30.0, 400.0, 120.0];
         let none = [None; 6];
         let sum = |w: &[f32]| w.iter().sum::<f32>();
-        assert_eq!(spread(&least, &fits, &none, 1200.0), least, "nothing cut: as drawn, the last takes the rest later");
-        assert_eq!(spread(&least, &cut, &none, 600.0), least, "no room past the least widths: as drawn");
-        assert_eq!(spread(&least, &cut, &none, sum(&least)), least, "exactly the least widths");
-        // 100 to spare: Type and Default 50 each.
-        assert_eq!(spread(&least, &cut, &none, 896.0), [40.0, 150.0, 190.0, 76.0, 200.0, 240.0]);
-        // 200 to spare: Type is whole at 60 more, Default takes the other 140.
-        assert_eq!(spread(&least, &cut, &none, 996.0), [40.0, 150.0, 200.0, 76.0, 290.0, 240.0]);
+        // The last column (Keys) is given what it must keep, 120 for its content: the table draws
+        // it with the rest of the room.
+        let (drawn, keys) = ([40.0, 150.0, 140.0, 76.0, 150.0], 120.0);
+        let with = |name_to_default: [f32; 5]| name_to_default.into_iter().chain([keys]).collect::<Vec<f32>>();
+        assert_eq!(spread(&least, &fits, &none, 1200.0), with(drawn), "nothing cut: as drawn");
+        assert_eq!(spread(&least, &cut, &none, 600.0), with(drawn), "no room at all: as drawn");
+        // A table at its least widths, 796: the 120 Keys can spare go to Type and Default, 60 each.
+        assert_eq!(spread(&least, &cut, &none, sum(&least)), with([40.0, 150.0, 200.0, 76.0, 210.0]));
+        // 100 more: Type is whole, Default takes them.
+        assert_eq!(spread(&least, &cut, &none, 896.0), with([40.0, 150.0, 200.0, 76.0, 310.0]));
         // Room for all: each as wide as it needs and no wider.
-        assert_eq!(spread(&least, &cut, &none, 2000.0), [40.0, 150.0, 200.0, 76.0, 400.0, 240.0]);
-        // A set column keeps its width, cut or not, and takes its room from the others.
+        assert_eq!(spread(&least, &cut, &none, 996.0), with([40.0, 150.0, 200.0, 76.0, 400.0]));
+        assert_eq!(spread(&least, &cut, &none, 2000.0), with([40.0, 150.0, 200.0, 76.0, 400.0]));
+        // A last column whose own content is cut keeps its least, and shares the spare room.
+        let long_keys = [40.0, 60.0, 80.0, 30.0, 100.0, 300.0];
+        assert_eq!(spread(&least, &long_keys, &none, 826.0), [40.0, 150.0, 140.0, 76.0, 150.0, 270.0]);
+        // A set column keeps its width, cut or not, and leaves its room to the others.
         let set = [None, None, Some(100.0), None, None, None];
-        assert_eq!(spread(&least, &cut, &set, 896.0), [40.0, 150.0, 100.0, 76.0, 290.0, 240.0]);
+        assert_eq!(spread(&least, &cut, &set, 796.0), with([40.0, 150.0, 100.0, 76.0, 310.0]));
         // Hostile numbers stay finite.
         for room in [f32::NAN, f32::INFINITY, -1.0] {
             assert!(spread(&least, &cut, &none, room).iter().all(|w| w.is_finite()), "{room}");
@@ -785,11 +804,12 @@ mod tests {
         let mut kept = Kept::default();
         kept.page.least[0] = vec![40.0, 150.0, 140.0, 76.0, 150.0, 240.0];
         kept.page.needs[0] = vec![40.0, 60.0, 200.0, 30.0, 400.0, 120.0];
-        let drawn = kept.widths(0, 996.0);
-        assert_eq!(drawn, [40.0, 150.0, 200.0, 76.0, 290.0, 240.0]);
+        // As the table draws them 996 wide: Keys with the rest.
+        assert_eq!(kept.widths(0, 996.0), [40.0, 150.0, 200.0, 76.0, 400.0, 120.0]);
+        let drawn = [40.0, 150.0, 200.0, 76.0, 400.0, 130.0];
         kept.resize(0, 4, Resized::To(180.0), &drawn);
         assert_eq!(kept.set[0], [Some(40.0), Some(150.0), Some(200.0), Some(76.0), Some(180.0), None]);
-        assert_eq!(kept.widths(0, 2000.0), [40.0, 150.0, 200.0, 76.0, 180.0, 240.0], "more room changes none of them");
+        assert_eq!(kept.widths(0, 2000.0), [40.0, 150.0, 200.0, 76.0, 180.0, 120.0], "more room changes none of them");
         kept.resize(0, 4, Resized::Fit, &kept.widths(0, 996.0));
         assert_eq!(kept.set[0][4], Some(400.0), "fit: as wide as the content needs");
         kept.resize(0, 3, Resized::Fit, &kept.widths(0, 996.0));
