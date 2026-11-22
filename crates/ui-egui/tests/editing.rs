@@ -179,6 +179,78 @@ fn enter_commits_in_number_cell_and_newlines_in_text() {
     assert_eq!(cell["state"], "staged", "{cell}");
 }
 
+/// The carets drawn in the last frame inside `within`: 1 px upright lines in `ink`.
+fn carets(ui: &Ui, within: egui::Rect, ink: egui::Color32) -> Vec<[egui::Pos2; 2]> {
+    ui.shapes()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            egui::Shape::LineSegment { points, stroke } if stroke == egui::Stroke::new(1.0, ink) && points[0].x == points[1].x => Some(points),
+            _ => None,
+        })
+        .filter(|p| within.expand(2.0).contains(p[0]) && within.expand(2.0).contains(p[1]))
+        .collect()
+}
+
+/// A double-click, or Enter on the selected cell, opens the editor with the keyboard and its
+/// caret showing from its first frame, in light and in dark: in the cell for one line; in the
+/// value panel for a text of several lines, whose cell keeps the `editing` outline and has no
+/// caret of its own. What is typed next goes into it.
+#[test]
+fn the_editors_caret_shows_from_its_first_frame() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    let mut ui = opened(db, &t);
+    for (mode, command, tokens) in [("light", "ui.themeLight", dbee_ui_egui::theme::LIGHT), ("dark", "ui.themeDark", dbee_ui_egui::theme::DARK)] {
+        ui.execute(command, json!({}));
+        ui.frame();
+        for (n, (cell, value, in_cell)) in
+            [("grid-cell-0-2", "10.50", true), ("grid-cell-1-3", "2025-02-03", true), ("grid-cell-0-1", "Alice", false)]
+                .into_iter()
+                .cycle()
+                .take(12)
+                .enumerate()
+        {
+            let at = format!("{mode}, opening {n} on {cell}");
+            // Every other opening is by the keyboard, where no click falls on the new editor.
+            if n % 2 == 0 {
+                ui.click(cell);
+            }
+            for _ in 0..n % 4 {
+                ui.frame();
+            }
+            if n % 2 == 0 {
+                ui.key("Enter");
+            } else {
+                ui.double_click(cell);
+            }
+            if ui.editor().is_none() {
+                ui.frame();
+            }
+            assert_eq!(ui.editor_text(), value, "{at}");
+            let (editor, cell_at) = (ui.drawn("cell-editor"), ui.drawn(cell));
+            let seen = carets(&ui, editor, tokens.ink);
+            assert_eq!(seen.len(), 1, "{at}: one caret in the editor {editor:?} in its first frame: {seen:?}");
+            if in_cell {
+                assert!(cell_at.expand(1.0).contains_rect(editor), "{at}: the editor {editor:?} over its cell {cell_at:?}");
+            } else {
+                assert!(!cell_at.intersects(editor), "{at}: several lines are edited in the panel: {editor:?}, the cell {cell_at:?}");
+                assert_eq!(carets(&ui, cell_at, tokens.ink), [] as [[egui::Pos2; 2]; 0], "{at}: the cell has no caret of its own");
+            }
+            ui.frame();
+            assert_eq!(carets(&ui, editor, tokens.ink).len(), 1, "{at}: a frame later");
+            ui.text("7");
+            assert_eq!(ui.editor_text(), "7", "{at}: typing replaces the value");
+            assert_eq!(carets(&ui, editor, tokens.ink).len(), 1, "{at}: the caret after typing");
+            ui.key("Escape");
+            assert!(ui.editor().is_none(), "{at}");
+            // Past egui's double-click time, so the next opening is no triple click.
+            for _ in 0..3 {
+                ui.frame();
+            }
+        }
+    }
+}
+
 #[test]
 fn clearing_a_date_stages_null() {
     let db = dbee_testkit::require_testdb!();
