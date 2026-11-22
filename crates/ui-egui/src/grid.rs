@@ -23,8 +23,12 @@
 //!
 //! **Selection** is the engine's (`selection.set`, `selection.rows`, `selection.all`): a click
 //! selects a cell, shift-click extends from the anchor, a drag selects from where it started to
-//! the cell under the pointer. A click on a row's number selects the whole row (issue #17), and
-//! shift-click on one the rows from the anchor's row to it. One selected cell lights its whole row
+//! the cell under the pointer. A click on a row's number selects the whole row (issue #17),
+//! shift-click on one the rows from the anchor's row to it, and a drag over the numbers the rows
+//! from where it started to the row the pointer is level with. With nothing else holding the
+//! keyboard, the arrow keys move the selection and Shift with them extends it
+//! (`selection.move`, [`crate::editors`]): a row selection by whole rows. The selection is one
+//! rectangle: rows apart from each other cannot be selected together. One selected cell lights its whole row
 //! in `selection` (its number and the filler too) and takes the `ink` outline; a selection over
 //! every column lights each of its rows the same way, with no outline, and whole rows also draw
 //! their numbers in `text` ([`RowNumber::whole`]); any other rectangle lights its own cells only.
@@ -202,6 +206,9 @@ pub struct GridState {
     widths: Option<Vec<f32>>,
     /// While a drag selects: where it started and the cell it last selected to.
     drag: Option<((usize, usize), (usize, usize))>,
+    /// While a drag over the row numbers selects rows: the row it started from (or the
+    /// selection's anchor row, with Shift) and the row it last selected to.
+    drag_rows: Option<(usize, usize)>,
     /// Last frame's columns (left and right, from the left of the scrolled content), how far
     /// the content was scrolled sideways and how wide the view was.
     columns_x: Vec<(f32, f32)>,
@@ -405,12 +412,15 @@ impl Grid<'_> {
         let (pointer, primary_down, shift) = ui.input(|i| (i.pointer.latest_pos(), i.pointer.primary_down(), i.modifiers.shift));
         if !primary_down {
             state.drag = None;
+            state.drag_rows = None;
         }
         let mut acts = Vec::new();
         let mut heads = vec![(0.0, 0.0); cols];
         let mut first_drawn: Option<(usize, f32)> = None;
         let mut drag_over: Option<(usize, usize)> = None;
         let mut drag_start: Option<(usize, usize)> = None;
+        let mut rows_over: Option<usize> = None;
+        let mut rows_start: Option<usize> = None;
         let mut edit_cell: Option<Rect> = None;
         let rect = ui.available_rect_before_wrap();
         let mut grid_ui = ui.new_child(UiBuilder::new().id(self.id).max_rect(rect).layout(Layout::top_down(Align::Min)));
@@ -486,8 +496,16 @@ impl Grid<'_> {
                         } else if resp.secondary_clicked() && !self.spans(r) {
                             acts.push(GridAct::SelectRows { first: r, last: r });
                         }
-                        if resp.clicked() || resp.secondary_clicked() {
+                        if resp.drag_started_by(egui::PointerButton::Primary) {
+                            rows_start = Some(r);
+                        }
+                        if resp.clicked() || resp.secondary_clicked() || resp.drag_started() {
                             resp.ctx.memory_mut(|m| m.stop_text_input());
+                        }
+                        // A drag that began on a number selects to the row the pointer is level
+                        // with, wherever on that row it has wandered.
+                        if primary_down && pointer.is_some_and(|p| resp.rect.y_range().contains(p.y)) {
+                            rows_over = Some(r);
                         }
                         egui::Popup::context_menu(resp).style(menu::style(&resp.ctx)).show(|ui| self.menu(ui, (r, None), tags, &mut acts));
                     }
@@ -571,6 +589,21 @@ impl Grid<'_> {
         {
             state.drag = Some((anchor, over));
             acts.push(GridAct::Select { anchor, focus: over });
+        }
+        // A drag over the row numbers selects whole rows, from where it started to the row the
+        // pointer is level with.
+        if let Some(start) = rows_start {
+            let first = match self.selection {
+                Some(sel) if shift => sel.anchor.0,
+                _ => start,
+            };
+            state.drag_rows = Some((first, start));
+            acts.push(GridAct::SelectRows { first, last: start });
+        } else if let (Some((first, last)), Some(over)) = (state.drag_rows, rows_over)
+            && over != last
+        {
+            state.drag_rows = Some((first, over));
+            acts.push(GridAct::SelectRows { first, last: over });
         }
         state.columns_x = heads.iter().map(|&(l, r)| (l - content_left, r - content_left)).collect();
         state.offset_x = out.state.offset.x;
@@ -685,7 +718,7 @@ impl Grid<'_> {
     fn draw_gutter(&self, ui: &mut egui::Ui, row: usize, hovered: bool) -> Response {
         let src = self.source;
         let rect = ui.max_rect();
-        let resp = ui.interact(rect, ui.id().with("dbee-row"), Sense::click());
+        let resp = ui.interact(rect, ui.id().with("dbee-row"), Sense::click_and_drag());
         let number = RowNumber {
             n: self.first_number.saturating_add(row as u64),
             new: src.columns() > 0 && src.mark(row, 0) == Some(Mark::New),

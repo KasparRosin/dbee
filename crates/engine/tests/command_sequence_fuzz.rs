@@ -95,6 +95,7 @@ const PARAM_HINTS: &[(&str, &[(&str, Hint)])] = &[
     ("edit.redo", &[]),
     ("selection.set", &[("anchor", CELL), ("focus", CELL)]),
     ("selection.rows", &[("first", GRID_ROW), ("last", GRID_ROW)]),
+    ("selection.move", &[("rows", Hint::Count), ("columns", Hint::Count), ("extend", Hint::Bool)]),
     ("selection.all", &[]),
     ("copy.selection", &[("format", Hint::OneOf(&["tsv", "tsvHeader", "csv", "json", "markdown", "xml", ""]))]),
     ("value.show", &[]),

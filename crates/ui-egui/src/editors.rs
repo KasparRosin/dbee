@@ -34,6 +34,9 @@
 //! [`crate::shortcuts`]). Any other shortcut commits the editor before it runs, so Ctrl+S writes
 //! the value being typed.
 //!
+//! **The grid's arrows.** With no editor open, this module also gives the grid its arrow keys
+//! ([`move_on_arrows`]): they move the selection, and Shift with them extends it.
+//!
 //! **Committing** ([`CellEditor::command`]): an unchanged value (the text it opened with) sends
 //! nothing; empty text sends `cell.clear` (`''` for string types, NULL for the others, booleans
 //! included); other text sends `cell.edit`. A press anywhere outside the editor (in the panel:
@@ -444,6 +447,7 @@ pub(crate) fn before_frame(app: &mut DbeeApp, ctx: &egui::Context) {
         // The text of an editor that went with its workspace.
         ctx.data_mut(|d| d.remove::<TextEditState>(text_id()));
         open_on_enter(app, ctx);
+        move_on_arrows(app, ctx);
         return;
     }
     if let Err(why) = still_fits(app) {
@@ -539,6 +543,61 @@ fn open_on_enter(app: &mut DbeeApp, ctx: &egui::Context) {
     }) {
         open(app, ctx, sel.focus.0, sel.focus.1);
     }
+}
+
+/// The grid's arrow keys: with a selection in the active tab's grid and nothing holding the
+/// keyboard (no widget, dialog, quick search, menu or list), an arrow moves the selection one
+/// cell, and with Shift extends it (`selection.move`); a row selection moves and extends by whole
+/// rows. A focus cell out of view is scrolled to.
+fn move_on_arrows(app: &mut DbeeApp, ctx: &egui::Context) {
+    let st = app.session.state();
+    let selected = match st.active_tab() {
+        Some(Tab::Table(t)) => t.selection.is_some() && !shortcuts::grid_unseen(app),
+        Some(Tab::Query(q)) => q.selection.is_some(),
+        None => false,
+    };
+    if !selected
+        || st.screen != Screen::Workspace
+        || app.view.dialog.is_some()
+        || app.view.quick.open
+        || ctx.memory(|m| m.focused()).is_some()
+        || egui::Popup::is_any_open(ctx)
+    {
+        return;
+    }
+    const ARROWS: [(Key, i64, i64); 4] = [(Key::ArrowUp, -1, 0), (Key::ArrowDown, 1, 0), (Key::ArrowLeft, 0, -1), (Key::ArrowRight, 0, 1)];
+    let mut steps = Vec::new();
+    ctx.input_mut(|i| {
+        let held = i.modifiers;
+        for (key, rows, columns) in ARROWS {
+            for (pattern, extend) in [(Modifiers::NONE, false), (Modifiers::SHIFT, true)] {
+                while shortcuts::take(&mut i.events, pattern, key, held) {
+                    steps.push((rows, columns, extend));
+                }
+            }
+        }
+    });
+    if steps.is_empty() {
+        return;
+    }
+    for (rows, columns, extend) in steps {
+        app.start("selection.move", json!({ "rows": rows, "columns": columns, "extend": extend }), Origin::Menu);
+    }
+    let selection = match app.session.state().active_tab() {
+        Some(Tab::Table(t)) => t.selection,
+        Some(Tab::Query(q)) => q.selection,
+        None => None,
+    };
+    if let Some(sel) = selection {
+        let (row, col) = sel.focus;
+        // Whole rows scroll up and down only: to the row's cell in the first column in view.
+        let col = if sel.whole { (0..=col).find(|c| !app.tags.hidden(&format!("grid-header-{c}"))).unwrap_or(0) } else { col };
+        let id = format!("{CELL}{row}-{col}");
+        if app.tags.hidden(&id) {
+            app.tags.scroll_to(&id);
+        }
+    }
+    ctx.request_repaint();
 }
 
 /// After step 5 (drawing): does what the editor's key asked for.

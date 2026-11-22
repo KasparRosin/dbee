@@ -1,5 +1,5 @@
 //! The grid selection, copy and the value view: `selection.set`, `selection.rows`,
-//! `selection.all`, `copy.selection`, `value.show` and `value.copy`.
+//! `selection.move`, `selection.all`, `copy.selection`, `value.show` and `value.copy`.
 //!
 //! They act on the active tab's grid: on a table tab the loaded page followed by its new rows, on
 //! a query tab the shown result (see [`crate::view`]). A selection is the rectangle between an
@@ -7,8 +7,11 @@
 //! lie in the grid (`BadParams` otherwise, and nothing changes) and clamps the focus to the edge,
 //! so a drag past the last row selects to it. `selection.rows` selects whole rows (issue #17), as
 //! a click on a row's number does: the rectangle across every column, marked `whole`, which keeps
-//! it across every column the grid has ([`Selection::kept`], [`Grid::fit`]). The other commands
-//! clear the mark. A selection that stops fitting (a new row undone, a shorter page) is dropped
+//! it across every column the grid has ([`Selection::kept`], [`Grid::fit`]). `selection.move` is
+//! the arrow keys: it moves the focus by rows and columns, stopping at the grid's edges, and the
+//! anchor with it unless it extends (Shift); whole rows stay whole rows, moved or extended by
+//! rows only. `selection.set` and `selection.all` clear the mark. A selection is one rectangle:
+//! there is no selection of rows or cells apart from each other. A selection that stops fitting (a new row undone, a shorter page) is dropped
 //! when it is read.
 //!
 //! `copy.selection` renders the rectangle in grid order with the staged values, as text for the
@@ -39,6 +42,7 @@ use crate::{EngineError, Json, Outcome, Session, TabId};
 
 const SET: &str = "selection.set";
 const ROWS: &str = "selection.rows";
+const MOVE: &str = "selection.move";
 const ALL: &str = "selection.all";
 const COPY: &str = "copy.selection";
 const SHOW: &str = "value.show";
@@ -75,6 +79,17 @@ pub(crate) const SPECS: &[CommandSpec] = &[
         params: "{first: row, last?: row = first} -> {anchor, focus, whole: true}",
         enabled: has_grid,
         run: rows,
+        journal: false,
+        undoable: false,
+    },
+    CommandSpec {
+        id: MOVE,
+        label: "Move Selection",
+        menu: &[],
+        shortcut: None,
+        params: "{rows?: whole number = 0, columns?: whole number = 0, extend?: bool = false} -> {anchor, focus, whole}: the focus moved that many rows down and columns right (negative: up, left), stopping at the grid's edges; the anchor stays when `extend`, else the selection is the moved focus alone. Whole rows stay whole rows and take `rows` only",
+        enabled: has_selection,
+        run: moved,
         journal: false,
         undoable: false,
     },
@@ -193,6 +208,40 @@ fn rows(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
     let sel = g
         .fit(Selection { anchor: (first, 0), focus: (last, 0), whole: true })
         .ok_or_else(|| bad(format!("`first` {first} is outside the grid ({} rows, {} columns)", g.rows(), g.columns())))?;
+    let tab = g.tab;
+    store(s, tab, Some(sel));
+    Ok(Outcome::Done(sel.to_json()))
+}
+
+/// A whole-number param that may be negative; missing or null is 0.
+fn steps(params: &Json, key: &str) -> Result<i64, EngineError> {
+    match params.get(key).filter(|v| !v.is_null()) {
+        None => Ok(0),
+        Some(v) => v.as_i64().ok_or_else(|| bad(format!("`{key}` must be a whole number"))),
+    }
+}
+
+/// `at` moved `by` steps within `0..len`, stopping at either end.
+fn step(at: usize, by: i64, len: usize) -> usize {
+    let far = usize::try_from(by.unsigned_abs()).unwrap_or(usize::MAX);
+    let to = if by < 0 { at.saturating_sub(far) } else { at.saturating_add(far) };
+    to.min(len.saturating_sub(1))
+}
+
+/// `{rows?, columns?, extend?}` → `{anchor, focus, whole}` as stored.
+fn moved(s: &mut Session, params: &Json) -> Result<Outcome, EngineError> {
+    let (rows, columns) = (steps(params, "rows")?, steps(params, "columns")?);
+    let extend = p::bool_or(params, "extend", false)?;
+    let g = grid(s).ok_or_else(|| disabled(NO_GRID))?;
+    let sel = g.selection().ok_or_else(|| disabled(NOTHING_SELECTED))?;
+    let row = step(sel.focus.0, rows, g.rows());
+    let moved = if sel.whole {
+        Selection { anchor: if extend { sel.anchor } else { (row, 0) }, focus: (row, sel.focus.1), whole: true }
+    } else {
+        let focus = (row, step(sel.focus.1, columns, g.columns()));
+        Selection { anchor: if extend { sel.anchor } else { focus }, focus, whole: false }
+    };
+    let sel = g.fit(moved).ok_or_else(|| disabled(NOTHING_SELECTED))?;
     let tab = g.tab;
     store(s, tab, Some(sel));
     Ok(Outcome::Done(sel.to_json()))
@@ -408,6 +457,42 @@ mod tests {
             assert_eq!(s.execute(ROWS, p.clone()).unwrap_err().code(), "badParams", "{p}");
         }
         assert_eq!(s.inspect()["selection"], json!({ "anchor": [0, 0], "focus": [0, 2], "whole": true }));
+    }
+
+    #[test]
+    fn selection_move_moves_and_extends_within_the_grid() {
+        let mut s = showing(&[(4, 3)]);
+        let sel = |a: [usize; 2], f: [usize; 2], whole: bool| json!({ "anchor": a, "focus": f, "whole": whole });
+        // Nothing selected: nothing to move.
+        assert_eq!(s.execute(MOVE, json!({ "rows": 1 })).unwrap_err().code(), "disabled");
+        // A cell: the arrows move it, and stop at the edges.
+        done(&mut s, SET, json!({ "anchor": [1, 1] }));
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": 1 })), sel([2, 1], [2, 1], false));
+        assert_eq!(done(&mut s, MOVE, json!({ "columns": -1 })), sel([2, 0], [2, 0], false));
+        assert_eq!(done(&mut s, MOVE, json!({ "columns": -1 })), sel([2, 0], [2, 0], false), "the left edge");
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": 99, "columns": 99 })), sel([3, 2], [3, 2], false), "the last cell");
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": i64::MIN, "columns": i64::MAX })), sel([0, 2], [0, 2], false));
+        assert_eq!(done(&mut s, MOVE, json!({})), sel([0, 2], [0, 2], false), "no steps");
+        // Extending keeps the anchor; moving again without it collapses to the moved focus.
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": 2, "extend": true })), sel([0, 2], [2, 2], false));
+        assert_eq!(done(&mut s, MOVE, json!({ "columns": -1, "extend": true })), sel([0, 2], [2, 1], false));
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": -1, "extend": true })), sel([0, 2], [1, 1], false), "and shrinks");
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": 1 })), sel([2, 1], [2, 1], false));
+        // Whole rows stay whole rows: moved and extended by rows, columns ignored.
+        done(&mut s, ROWS, json!({ "first": 1 }));
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": 1, "extend": true })), sel([1, 0], [2, 2], true));
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": 5, "columns": -2, "extend": true })), sel([1, 0], [3, 2], true));
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": -3, "extend": true })), sel([1, 0], [0, 2], true), "past the anchor, upwards");
+        assert_eq!(done(&mut s, MOVE, json!({ "rows": 2 })), sel([2, 0], [2, 2], true), "one row again");
+        assert_eq!(done(&mut s, MOVE, json!({ "columns": 1 })), sel([2, 0], [2, 2], true));
+        // The extended rows copy as rows.
+        done(&mut s, MOVE, json!({ "rows": 1, "extend": true }));
+        assert_eq!(done(&mut s, COPY, json!({ "format": "tsv" }))["text"], "2.0\t2.1\t2.2\n3.0\t3.1\t3.2");
+        // Steps that are no whole numbers are refused and change nothing.
+        for p in [json!({ "rows": 1.5 }), json!({ "rows": "1" }), json!({ "columns": [1] }), json!({ "extend": 1 }), json!({ "rows": u64::MAX })] {
+            assert_eq!(s.execute(MOVE, p.clone()).unwrap_err().code(), "badParams", "{p}");
+        }
+        assert_eq!(s.inspect()["selection"], sel([2, 0], [3, 2], true));
     }
 
     #[test]
