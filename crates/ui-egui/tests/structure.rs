@@ -106,8 +106,9 @@ fn seq(ui: &Ui) -> u64 {
     }
 }
 
-/// The window for `shop.orders`' page: COLUMNS whole (its Default keeps its 150 and cuts
-/// Postgres's `nextval(…)`), REFERENCED BY below the page's bottom.
+/// The window for `shop.orders`' page: narrower than the page's widest table (TRIGGERS, 910), which
+/// leaves COLUMNS 114 past its least widths: too little for Postgres's `nextval(…)`, so Default
+/// still cuts it. REFERENCED BY is below the page's bottom.
 const ORDERS_SIZE: egui::Vec2 = APP_SIZE;
 
 /// `shop.orders` open on pg14 at [`ORDERS_SIZE`], its page loaded, then STRUCTURE clicked and its
@@ -169,11 +170,17 @@ fn structure_shows_sa() {
     assert_eq!(ui.value("structure-columns-8-position"), 9);
     assert!(ui.tag("structure-columns-9-name").is_none(), "nine columns");
 
-    // The header's titles where SA draws them: only Name widens for a long name, so Default keeps
-    // SA's 150 and cuts Postgres's `nextval(…)`, whole on hover; Keys after it, in view.
+    // The header's titles where SA draws them: Name and Nullable as drawn; the page's 114 past
+    // COLUMNS' least widths go to the columns whose content is cut, and Default still cuts
+    // Postgres's `nextval(…)`, whole on hover; Keys after it, in view.
     let cell = ui.drawn("structure-columns-0-default");
     let default = cell.width();
-    assert!(close(default, 150.0), "Default as drawn, 150: {default}");
+    let kind = ui.drawn("structure-columns-0-type").width();
+    // The page is as wide as its widest table, TRIGGERS' 910: wider than the body here.
+    assert!(body.max - body.min < 910.0, "the body is narrower than TRIGGERS: {body:?}");
+    let spare = 910.0 - 796.0;
+    assert!(kind >= 140.0 - 0.5 && default > 150.5, "Type and Default take the spare room: {kind}, {default}");
+    assert!(close(kind + default, 140.0 + 150.0 + spare), "all of it, and no more: {kind} + {default}, {spare} spare");
     let words = ui.value("structure-columns-0-default").as_str().unwrap_or_default().to_string();
     let (_, cut) = ui.text_in(cell, &words).expect("the default painted");
     assert!(cut, "a long default is cut with …");
@@ -182,7 +189,7 @@ fn structure_shows_sa() {
     ui.hover_away();
     assert!(ui.shows("structure-columns-0-keys"), "Keys in view at {ORDERS_SIZE:?}");
     let header = Rect::from_x_y_ranges(body, heading.bottom()..=heading.bottom() + 30.0);
-    for (title, x) in [("Name", 48.0), ("Type", 198.0), ("Nullable", 338.0), ("Default", 414.0), ("Keys", 414.0 + default)] {
+    for (title, x) in [("Name", 48.0), ("Type", 198.0), ("Nullable", 198.0 + kind), ("Default", 274.0 + kind), ("Keys", 274.0 + kind + default)] {
         let at = ui.text_in(header, title).map(|(r, _)| r).unwrap_or_else(|| panic!("`{title}` in COLUMNS' header"));
         assert!(close(at.left() - body.min, x), "`{title}` at {x} from the body's left: {}", at.left() - body.min);
     }
@@ -197,7 +204,7 @@ fn structure_shows_sa() {
             assert!(close(at.top(), above + 12.0), "`{id}` 12 under the section above's last line {above}: {at:?}");
         }
         let section = id.trim_start_matches("structure-");
-        let cells: Vec<String> = ids(&ui.inspect()).into_iter().filter(|c| c.starts_with(&format!("{id}-"))).collect();
+        let cells: Vec<String> = ids(&ui.inspect()).into_iter().filter(|c| c.starts_with(&format!("{id}-")) && !c.contains("-edge-")).collect();
         let drawn = cells.iter().map(|c| ui.laid(c).bottom()).fold(at.bottom() + 30.0, f32::max);
         assert!(cells.iter().all(|c| c.trim_start_matches(&format!("structure-{section}-")).starts_with(char::is_numeric)), "{cells:?}");
         // Its last row's line, drawn or below the page's bottom.
@@ -688,9 +695,10 @@ fn data_is_never_uppercased() {
     }
 }
 
-/// Brief §2.2, call 6: a section's Name column takes `max(drawn, widest name + 16)`, up to twice
-/// its drawn width; past that the name is cut with `…` and reads whole on hover. The other columns
-/// keep their drawn widths.
+/// Brief §2.2, call 6: a section's Name column is at least `max(drawn, widest name + 16)`, up to
+/// twice its drawn width; in a body no wider than the tables that is its width, and past it the
+/// name is cut with `…` and reads whole on hover. In a body with room to spare the name shows
+/// whole.
 #[test]
 fn long_names_widen_their_column_up_to_twice() {
     let db = dbee_testkit::require_testdb!();
@@ -702,8 +710,10 @@ fn long_names_widen_their_column_up_to_twice() {
         format!("CREATE TABLE {s}.long ({long} int); CREATE TABLE {s}.mid ({mid} int); CREATE TABLE {s}.short (a_short_name int);")
     });
     let s = schema.0.as_str();
-    let mut ui = Ui::connected_in(db, APP_SIZE);
+    // A body narrower than the tables: every column at its least width.
+    let mut ui = Ui::connected_in(db, vec2(900.0, 720.0));
     let body = ui.tab_x();
+    assert!(body.max - body.min < 796.0, "the body is narrower than COLUMNS: {body:?}");
     // Twice the drawn 150, the name cut inside it, Type right after it.
     structure_of(&mut ui, s, "long");
     assert_eq!(ui.value("structure-columns-0-name"), long);
@@ -725,6 +735,13 @@ fn long_names_widen_their_column_up_to_twice() {
     // A short one leaves Name at 150.
     structure_of(&mut ui, s, "short");
     assert!(close(ui.drawn("structure-columns-0-name").width(), 150.0), "Name at its drawn 150");
+    // With room to spare the long name shows whole, in a column as wide as it needs.
+    ui.harness.set_size(vec2(1600.0, 720.0));
+    ui.frame();
+    structure_of(&mut ui, s, "long");
+    let name = ui.drawn("structure-columns-0-name");
+    let (at, cut) = ui.text_in(name, long).expect("the name painted");
+    assert!(!cut && name.width() > 300.5 && name.width() <= at.width() + 16.0 + 1.0, "the long name whole: {name:?}, the words {at:?}");
 }
 
 /// Brief §7: the page keeps its widths and scrolls sideways; the header's `ink` line runs as wide
@@ -784,7 +801,8 @@ fn the_page_scrolls_sideways_when_narrow() {
 const SWEEP: [f32; 8] = [1400.0, 1100.0, 900.0, 640.0, 420.0, 300.0, 200.0, 120.0];
 
 /// Every tagged `table-*` and `structure-*` control drawn lies inside the tab's body, and no two
-/// overlap, at each width of [`SWEEP`]; the window back at 1400 × 720 after.
+/// overlap (but a column's resize handle, which lies on the edge between two columns' cells), at
+/// each width of [`SWEEP`]; the window back at 1400 × 720 after.
 fn sweep_widths(ui: &mut Ui, state: &str) {
     for width in SWEEP {
         ui.harness.set_size(vec2(width, 720.0));
@@ -806,8 +824,9 @@ fn sweep_widths(ui: &mut Ui, state: &str) {
         for (id, r) in &drawn {
             assert!(r.left() >= body.min - 0.5 && r.right() <= body.max + 0.5 && r.bottom() <= 720.5, "{at}: `{id}` {r:?} inside the body {body:?}");
         }
-        for (i, (a, ra)) in drawn.iter().enumerate() {
-            for (b, rb) in &drawn[i + 1..] {
+        let cells: Vec<&(String, Rect)> = drawn.iter().filter(|(id, _)| !id.contains("-edge-")).collect();
+        for (i, (a, ra)) in cells.iter().enumerate() {
+            for (b, rb) in &cells[i + 1..] {
                 let o = ra.intersect(*rb);
                 assert!(!o.is_positive() || o.area() <= 0.5, "{at}: `{a}` {ra:?} over `{b}` {rb:?}");
             }
@@ -860,4 +879,142 @@ fn tab_brings_a_link_out_of_view_into_view() {
     assert!(ui.focused("structure-referenced-by-0-from"), "it has the keyboard");
     ui.key("Enter");
     ui.until("order_items", |ui| ui.table()["name"] == "order_items");
+}
+
+/// The pointer pressed at `from`, moved to `to` and let go there: a drag, a frame for each step.
+fn drag(ui: &mut Ui, from: egui::Pos2, to: egui::Pos2) {
+    let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+    ui.frame_with(vec![egui::Event::PointerMoved(from)]);
+    ui.frame_with(vec![button(from, true)]);
+    ui.frame_with(vec![egui::Event::PointerMoved(to)]);
+    ui.frame();
+    ui.frame_with(vec![button(to, false)]);
+    ui.frame();
+}
+
+/// COLUMNS' cells of row 0 after the position, by key: where each is laid out.
+fn columns_row(ui: &mut Ui) -> [Rect; 5] {
+    ["name", "type", "nullable", "default", "keys"].map(|key| ui.laid(&format!("structure-columns-0-{key}")))
+}
+
+/// A page wider than its tables gives the room to the columns whose content is cut: in a 1400
+/// wide window `shop.orders`' long default and its longest type show whole, in columns as wide as
+/// they need and no wider; the columns with nothing cut keep their drawn widths, the last takes
+/// the rest, and every section runs the body's width with no sideways scroll.
+#[test]
+fn spare_room_shows_cut_columns_whole() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, vec2(1400.0, 720.0));
+    structure_of(&mut ui, "shop", "orders");
+    let body = ui.tab_x();
+    let [name, kind, nullable, default, keys] = columns_row(&mut ui);
+    let words = ui.value("structure-columns-0-default").as_str().unwrap_or_default().to_string();
+    assert!(words.starts_with("nextval("), "id's default: {words}");
+    let (at, cut) = ui.text_in(default, &words).expect("the default painted");
+    assert!(!cut, "the default whole in a wide window: {at:?} in {default:?}");
+    assert!(default.width() > 150.5, "Default wider than its drawn 150: {default:?}");
+    assert!(default.width() <= at.width() + 16.0 + 1.0, "and no wider than its words and their 16: {default:?}, the words {at:?}");
+    for row in 0..9 {
+        for key in ["name", "type", "default"] {
+            let id = format!("structure-columns-{row}-{key}");
+            let (cell, words) = (ui.laid(&id), ui.value(&id).as_str().unwrap_or_default().to_string());
+            assert!(words.is_empty() || ui.text_in(cell, &words).is_some_and(|(_, cut)| !cut), "`{id}` whole: {words}");
+        }
+    }
+    assert!(close(name.width(), 150.0) && close(nullable.width(), 76.0), "nothing cut in Name and Nullable: as drawn, {name:?} {nullable:?}");
+    assert!(kind.width() >= 140.0 - 0.5, "Type at least as drawn: {kind:?}");
+    assert!(close(name.left(), body.min + 40.0) && close(keys.right(), body.max), "COLUMNS from the body's left to its right: {body:?}");
+    assert!(keys.width() >= 240.0 - 0.5, "Keys takes the rest, at least its 240: {keys:?}");
+    for (id, _) in SECTIONS {
+        let heading = ui.laid(id);
+        assert!(close(heading.left(), body.min) && close(heading.right(), body.max), "`{id}` the body's width {body:?}: {heading:?}");
+    }
+}
+
+/// A titled column's right edge is a handle, as in the data grid: the resize cursor and the
+/// theme's hovered edge under the pointer; a drag moves the edge with the pointer, the other
+/// columns keeping their widths and the last taking the rest; a double click fits the column to
+/// its content. The widths last through DATA and back and through a reload.
+#[test]
+fn a_column_is_resized_at_its_edge() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, vec2(1400.0, 720.0));
+    structure_of(&mut ui, "shop", "orders");
+    let body = ui.tab_x();
+    let before = columns_row(&mut ui);
+    let words = ui.value("structure-columns-0-default").as_str().unwrap_or_default().to_string();
+    // The handle is on Default's right edge, from the header to the last row.
+    let edge = ui.drawn("structure-columns-edge-default");
+    assert!(close(edge.center().x, before[3].right()), "the handle on Default's right edge: {edge:?}, {:?}", before[3]);
+    assert!(ui.tag("structure-columns-edge-position").is_none(), "the position's column has none");
+    let at = pos2(edge.center().x, before[3].center().y);
+    ui.hover(at);
+    ui.frame();
+    assert_eq!(ui.harness.output().platform_output.cursor_icon, egui::CursorIcon::ResizeColumn, "the grid's resize cursor on the edge");
+    let hovered = ui.harness.ctx.global_style().visuals.widgets.hovered.bg_stroke;
+    let line = |ui: &Ui, x: f32, stroke: egui::Stroke| {
+        ui.shapes().into_iter().any(
+            |(_, s)| matches!(s, egui::Shape::LineSegment { points, stroke: st } if st == stroke && points.iter().all(|p| (p.x - x).abs() <= 0.5)),
+        )
+    };
+    assert!(line(&ui, at.x, hovered), "the hovered edge's line, as the grid's");
+    // A drag 120 to the left: Default 120 narrower and cut, whole on hover; Name, Type and
+    // Nullable as they were; Keys starts 120 further left and still ends at the body's right.
+    drag(&mut ui, at, at - vec2(120.0, 0.0));
+    ui.hover_away();
+    let after = columns_row(&mut ui);
+    assert!(close(after[3].width(), before[3].width() - 120.0), "Default 120 narrower: {:?}, before {:?}", after[3], before[3]);
+    for i in 0..3 {
+        assert!(close(after[i].width(), before[i].width()) && close(after[i].left(), before[i].left()), "column {i} as it was: {:?}", after[i]);
+    }
+    assert!(close(after[4].left(), before[4].left() - 120.0) && close(after[4].right(), body.max), "Keys takes the room: {:?}", after[4]);
+    assert!(
+        (ui.value("structure-columns-edge-default").as_f64().unwrap_or_default() as f32 - after[3].width()).abs() <= 0.5,
+        "the edge's value is the width"
+    );
+    let (_, cut) = ui.text_in(after[3], &words).expect("the default painted");
+    assert!(cut, "the narrowed default is cut");
+    ui.rest(after[3].center());
+    assert!(ui.texts().into_iter().any(|(r, g)| g.text() == words && !g.elided && !after[3].contains_rect(r)), "the whole default on hover");
+    ui.hover_away();
+    // Never narrower than the grid's least width.
+    let edge = ui.drawn("structure-columns-edge-nullable");
+    let at = pos2(edge.center().x, after[2].center().y);
+    drag(&mut ui, at, at - vec2(400.0, 0.0));
+    ui.hover_away();
+    let least = dbee_ui_egui::grid::MIN_WIDTH;
+    assert!(close(columns_row(&mut ui)[2].width(), least), "Nullable at the least width {least}");
+    // A double click on the edge fits Default to its content.
+    ui.double_click("structure-columns-edge-default");
+    ui.frame();
+    ui.hover_away();
+    let fitted = columns_row(&mut ui);
+    let (at, cut) = ui.text_in(fitted[3], &words).expect("the default painted");
+    assert!(
+        !cut && fitted[3].width() >= at.width() + 16.0 - 0.5 && fitted[3].width() <= at.width() + 16.0 + 1.0,
+        "fitted: {:?}, the words {at:?}",
+        fitted[3]
+    );
+    // The widths last: DATA and back, then a reload.
+    ui.click("table-view-data");
+    ui.until("the grid", |ui| ui.tag("grid-cell-0-0").is_some());
+    ui.click("table-view-structure");
+    ui.until("the structure", |ui| ui.tag("structure-columns-0-name").is_some());
+    ui.hover_away();
+    let back = columns_row(&mut ui);
+    assert!((0..5).all(|i| close(back[i].width(), fitted[i].width())), "the widths after DATA and back: {back:?}, {fitted:?}");
+    ui.click("table-refresh");
+    ui.frame();
+    ui.until("the reload", |ui| ui.table()["structure"]["loading"].is_null() && ui.tag("structure-columns-0-name").is_some());
+    ui.hover_away();
+    let again = columns_row(&mut ui);
+    assert!((0..5).all(|i| close(again[i].width(), fitted[i].width())), "the widths after a reload: {again:?}, {fitted:?}");
+    // Another section's columns are its own: INDEXES' Name is untouched, and resizes alone.
+    let index = ui.laid("structure-indexes-0-name");
+    let edge = ui.drawn("structure-indexes-edge-name");
+    let at = pos2(edge.center().x, index.center().y);
+    drag(&mut ui, at, at + vec2(60.0, 0.0));
+    ui.hover_away();
+    assert!(close(ui.laid("structure-indexes-0-name").width(), index.width() + 60.0), "INDEXES' Name 60 wider");
+    assert!((0..5).all(|i| close(columns_row(&mut ui)[i].width(), fitted[i].width())), "COLUMNS as it was");
 }

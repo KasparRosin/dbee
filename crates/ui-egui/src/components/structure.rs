@@ -10,6 +10,12 @@
 //! `text` under the pointer with the pointing hand, `text_faint` while off; a click, or Enter or
 //! Space with the keyboard, is the view's to act on, and keyboard focus draws a 2 px `ink` box
 //! 4 around the words.
+//!
+//! A table's columns can be resized ([`Table::resize`]) as the data grid's are: the right edge of
+//! a titled column, from the header down to the last row, is a handle with the grid's grab room,
+//! cursor and line (the theme's hovered and dragged edges). A drag asks for the width under the
+//! pointer, a double click for the width the column's content needs ([`Resized`]); the view keeps
+//! the widths.
 
 use std::sync::Arc;
 
@@ -216,6 +222,17 @@ pub struct Table<'a> {
     pub link_cells: &'a [(usize, usize)],
     /// The least width it runs: the page's widest table, so that every line runs as far.
     pub width: f32,
+    /// Whether the right edge of each titled column is a resize handle.
+    pub resize: bool,
+}
+
+/// What a resize handle asked for its column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Resized {
+    /// A drag: this wide (the edge under the pointer); the view keeps it within its bounds.
+    To(f32),
+    /// A double click: as wide as the column's content needs.
+    Fit,
 }
 
 /// A section as drawn: where, its heading, its header's cells, and each cell drawn in view with
@@ -228,6 +245,10 @@ pub struct TableDrawn {
     pub cells: Vec<(usize, usize, egui::Response, bool)>,
     /// Each column's width, as drawn.
     pub widths: Vec<f32>,
+    /// Each resize handle drawn, with its column.
+    pub handles: Vec<(usize, egui::Response)>,
+    /// What a handle asked this frame, with its column.
+    pub resized: Option<(usize, Resized)>,
 }
 
 impl Table<'_> {
@@ -346,7 +367,38 @@ impl Table<'_> {
                 cells.push((row, col, sense_link(ui, c, r, row, col), false));
             }
         }
-        TableDrawn { rect, heading, header, cells, widths }
+        // The resize handles, after the cells so that they take the pointer on a column's edge.
+        let mut handles = Vec::new();
+        let mut resized = None;
+        if self.resize {
+            let grab = ui.style().interaction.resize_grab_radius_side;
+            let pressed_elsewhere = ui.input(|i| i.pointer.any_down() || i.pointer.any_pressed());
+            for (col, (c, r)) in self.columns.iter().zip(band(header_top, rect.bottom() - header_top)).enumerate() {
+                if c.title.is_empty() {
+                    continue;
+                }
+                let x = r.right();
+                let line = Rect::from_min_max(pos2(x, r.top()), pos2(x, r.bottom()));
+                // The pointer's alone: Tab goes from link to link, past the handles.
+                let response = ui.interact(line.expand2(egui::vec2(grab, 0.0)), id.with(("resize", col)), Sense::CLICK | Sense::DRAG);
+                if response.double_clicked() {
+                    resized = Some((col, Resized::Fit));
+                } else if response.dragged()
+                    && let Some(pointer) = ui.ctx().pointer_latest_pos()
+                {
+                    resized = Some((col, Resized::To(r.width() + pointer.x - x)));
+                }
+                let hovered = response.hovered() && !pressed_elsewhere;
+                if hovered || response.dragged() {
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeColumn);
+                    let widgets = &ui.style().visuals.widgets;
+                    let stroke = if response.dragged() { widgets.active.bg_stroke } else { widgets.hovered.bg_stroke };
+                    painter(ui).line_segment([line.min, line.max], stroke);
+                }
+                handles.push((col, response));
+            }
+        }
+        TableDrawn { rect, heading, header, cells, widths, handles, resized }
     }
 }
 
@@ -553,7 +605,7 @@ mod tests {
             let mut cells = 0;
             let shapes = painted_in(vec2(1000.0, 400.0), theme, |ui| {
                 ui.add_space(ROOM);
-                let table = Table { heading: "Columns", columns: &columns, rows: 3, links: true, link_cells: &[], width: 0.0 };
+                let table = Table { heading: "Columns", columns: &columns, rows: 3, links: true, link_cells: &[], width: 0.0, resize: false };
                 let shown = ui
                     .allocate_ui(vec2(900.0, 300.0), |ui| {
                         table.show(ui, egui::Id::new("t"), |row, col| match col {
