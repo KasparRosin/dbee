@@ -1754,8 +1754,8 @@ fn hover_says(ui: &mut Ui, id: &str, words: &str) -> bool {
 }
 
 /// The tab's body from top to bottom in TA's order: the filter bar, the table bar, the grid, the
-/// paging bar; the bars' grounds run the body's full width, and the table bar's view switch
-/// starts 12 in.
+/// bottom bar; the bars' grounds run the body's full width; the table bar starts with REFRESH at
+/// the body's left, and the bottom bar's view switch starts 12 in.
 #[test]
 fn the_table_tab_runs_in_tas_order_edge_to_edge() {
     let db = dbee_testkit::require_testdb!();
@@ -1764,10 +1764,11 @@ fn the_table_tab_runs_in_tas_order_edge_to_edge() {
     ui.until("the page", loaded);
     ui.hover_away();
     let body = ui.tab_x();
-    let order = ["filter-0-column", "table-view-data", "grid-header-0", "page-first"];
+    let order = ["filter-0-column", "table-refresh", "grid-header-0", "table-view-data"];
     let tops: Vec<f32> = order.iter().map(|id| ui.drawn(id).top()).collect();
     assert!(tops.windows(2).all(|w| w[0] < w[1]), "{order:?} top to bottom: {tops:?}");
-    for id in ["filter-0-column", "table-view-data", "page-first"] {
+    assert!(close(ui.drawn("page-first").center().y, ui.drawn("table-view-data").center().y), "the paging in the switch's bar");
+    for id in ["filter-0-column", "table-refresh", "page-first"] {
         let y = ui.drawn(id).center().y;
         let ground = painted_at(&ui, egui::pos2(body.min + 2.0, y)).map(|(_, r)| r);
         assert!(
@@ -1779,6 +1780,78 @@ fn the_table_tab_runs_in_tas_order_edge_to_edge() {
     }
     let data = ui.drawn("table-view-data");
     assert!((data.left() - (body.min + 12.0)).abs() <= 1.0, "DATA 12 in from {}: {data:?}", body.min);
+    let refresh = ui.drawn("table-refresh");
+    assert!(close(refresh.left(), body.min), "REFRESH's cell at the body's left {}: {refresh:?}", body.min);
+}
+
+/// The view switch's place: the two segments' rects.
+fn switch_at(ui: &Ui) -> (egui::Rect, egui::Rect) {
+    (ui.drawn("table-view-data"), ui.drawn("table-view-structure"))
+}
+
+/// The view switch stands in the tab's bottom bar in every state of a table tab, at the same
+/// pixels in DATA and in STRUCTURE: with one filter row and with three, with the read-only note,
+/// with no page loaded, and on a lost connection.
+#[test]
+fn the_view_switch_stands_in_the_same_place_in_both_views() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = Ui::connected_in(db, APP_SIZE);
+    let body = ui.tab_x();
+    // The bottom bar's ground, found at the body's right end on the switch's row.
+    let foot = |ui: &Ui, switch: egui::Rect| painted_at(ui, egui::pos2(body.max - 2.0, switch.center().y)).expect("the bottom bar's ground").1;
+    // Chooses `view` and waits for it to show.
+    let choose = |ui: &mut Ui, view: &str| {
+        let id = format!("table-view-{view}");
+        ui.click(&id);
+        ui.until("the view", |ui| ui.value(&id) == true && ui.table()["structure"]["loading"].is_null() && ui.table()["loading"].is_null());
+        ui.hover_away();
+        ui.frame();
+    };
+    let mut places = Vec::new();
+    // A table with one filter row, then with three; a view, with the read-only note.
+    for (table, filters, note) in [("orders", 1, false), ("orders", 3, false), ("order_totals", 1, true)] {
+        ui.open("shop", table);
+        ui.until("the page", loaded);
+        while (0..filters).any(|n| ui.tag(&format!("filter-{n}-column")).is_none()) {
+            ui.click("filter-add");
+        }
+        choose(&mut ui, "data");
+        let at = format!("{table}, {filters} filter rows");
+        assert_eq!(ui.tag("table-note").is_some(), note, "{at}: the read-only note");
+        let data = switch_at(&ui);
+        let top = ui.drawn("table-refresh").top();
+        choose(&mut ui, "structure");
+        let structure = switch_at(&ui);
+        assert_eq!(data, structure, "{at}: the switch at the same pixels in DATA and STRUCTURE");
+        assert!(ui.drawn("table-refresh").top() < top, "{at}: the table bar itself moved up by the filters' height");
+        let switch = data.0.union(data.1);
+        assert!(close(switch.left(), body.min + 13.0), "{at}: 12 in from the body's left: {switch:?}");
+        let bar = foot(&ui, switch);
+        assert!(
+            close(bar.height(), 36.0) && close(switch.center().y, bar.top() + 18.5),
+            "{at}: centred under the line of the bottom bar {bar:?}: {switch:?}"
+        );
+        assert!(close(bar.left(), body.min) && close(bar.right(), body.max), "{at}: the bottom bar the body's width: {bar:?}");
+        places.push(data);
+        choose(&mut ui, "data");
+        assert_eq!(switch_at(&ui), data, "{at}: and back in DATA");
+    }
+    assert!(places.windows(2).all(|w| w[0] == w[1]), "the same place on every tab: {places:?}");
+    // Reading order: Tab goes from the switch on to the paging, and Shift+Tab from the switch
+    // back to what is above the bar.
+    ui.open("shop", "orders");
+    choose(&mut ui, "data");
+    ui.focus("table-view-structure");
+    ui.key("Tab");
+    ui.frame();
+    let paging = ["page-first", "page-prev", "page-next", "page-last"];
+    assert!(paging.iter().any(|id| ui.focused(id)), "Tab from STRUCTURE reaches the paging");
+    ui.focus("table-view-data");
+    ui.key_with("Tab", json!({ "shift": true }));
+    ui.frame();
+    let in_bar = ["table-view-data", "table-view-structure", "page-first", "page-prev", "page-next", "page-last"];
+    let still: Vec<&str> = in_bar.into_iter().filter(|id| ui.focused(id)).collect();
+    assert!(still.is_empty(), "Shift+Tab from DATA leaves the bottom bar, for what is above it: {still:?}");
 }
 
 /// The table bar as TA draws it: DATA chosen, STRUCTURE on, IMPORT and EXPORT off, REFRESH and
@@ -2161,8 +2234,11 @@ fn the_paging_bar_matches_the_page() {
     let left = ["page-first", "page-prev", "page-number", "page-next", "page-last"];
     let xs: Vec<f32> = left.iter().map(|id| ui.drawn(id).left()).collect();
     assert!(xs.windows(2).all(|w| w[0] < w[1]), "{left:?} left to right: {xs:?}");
-    let first = ui.drawn("page-first");
-    assert!((first.left() - (body.min + 8.0)).abs() <= 1.0, "FIRST 8 in from {}: {first:?}", body.min);
+    // The paging in the bar's middle, centred on the body's width, right of the view switch.
+    let (first, last) = (ui.drawn("page-first"), ui.drawn("page-last"));
+    let centre = (first.left() + last.right()) / 2.0;
+    assert!((centre - (body.min + body.max) / 2.0).abs() <= 1.0, "the paging centred on the body {body:?}: {first:?} to {last:?}");
+    assert!(first.left() > ui.drawn("table-view-structure").right() + 12.0, "right of the view switch: {first:?}");
     for id in ["page-first", "page-prev", "page-next", "page-last"] {
         assert_eq!(ui.drawn(id).size(), egui::vec2(28.0, 28.0), "`{id}` 28 square");
     }
@@ -2252,12 +2328,27 @@ fn no_rows_are_loaded_is_restyled() {
     // The grid's area starts under the band's line, or else under the table bar.
     let top = match ui.tag("table-error") {
         Some(_) => ui.drawn("table-error").bottom() + 1.0,
-        None => painted_at(&ui, egui::pos2(body.min + 2.0, ui.drawn("table-view-data").center().y)).expect("the table bar").1.bottom(),
+        None => painted_at(&ui, egui::pos2(body.min + 2.0, ui.drawn("table-refresh").center().y)).expect("the table bar").1.bottom(),
     };
     assert!((at.top() - (top + 12.0)).abs() <= 1.0, "12 down from the grid area's top {top}: {at:?}");
     assert_eq!(ui.value("table-empty"), "No rows are loaded.", "tagged");
     let tagged = ui.drawn("table-empty");
     assert!((tagged.left() - at.left()).abs() <= 1.0 && (tagged.top() - at.top()).abs() <= 1.0, "the tag on the words: {tagged:?} {at:?}");
+    // With no page loaded the bottom bar still stands, with the view switch alone, where it is
+    // with a page: 12 in, centred in the 36 over the status bar.
+    let whole = ui.tab_x();
+    let switch = ui.drawn("table-view-data").union(ui.drawn("table-view-structure"));
+    assert!((switch.left() - (whole.min + 13.0)).abs() <= 1.0, "the switch 12 in: {switch:?}");
+    let foot = painted_at(&ui, egui::pos2(whole.max - 2.0, switch.center().y)).expect("the bottom bar's ground").1;
+    assert!(
+        (foot.height() - 36.0).abs() <= 0.5 && (switch.center().y - (foot.top() + 18.5)).abs() <= 1.0,
+        "centred in the bottom bar {foot:?}: {switch:?}"
+    );
+    assert!((foot.left() - whole.min).abs() <= 1.0 && (foot.right() - whole.max).abs() <= 1.0, "the bottom bar the body's width: {foot:?}");
+    for id in ["page-first", "page-number", "edit-apply"] {
+        assert!(ui.tag(id).is_none(), "no `{id}` without a page");
+    }
+    assert!(enabled(&mut ui, "table-view-structure"), "STRUCTURE can be chosen");
 }
 
 /// The value panel open or shut (through the View menu's command: a narrow bar may leave its

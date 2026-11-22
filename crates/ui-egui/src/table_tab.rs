@@ -4,8 +4,7 @@
 //!   view, no row key, a read-only connection, or the table's own reason as the driver writes it),
 //!   on one line: a longer one is cut short, and reads whole on hover;
 //! - the filter bar ([`crate::filter_bar`]);
-//! - the table bar ([`TableBar`]): DATA / STRUCTURE (`table.view`; STRUCTURE shows the
-//!   table's structure instead, [`crate::structure_view`], and DATA's state waits unchanged), REFRESH, "+ Row" (the new row is selected and scrolled to), the rows' count with COUNT or
+//! - the table bar ([`TableBar`]): REFRESH, "+ Row" (the new row is selected and scrolled to), the rows' count with COUNT or
 //!   COUNT ROWS, IMPORT and EXPORT (off until M4), and at its right end the value panel's toggle
 //!   (`value-toggle`, `ui.toggleValuePanel`). A page load that has run 300 ms shows CANCEL in
 //!   REFRESH's place and LOADING with its timer in the count's; a count that has run 300 ms shows
@@ -22,8 +21,14 @@
 //!   once its load has run 300 ms, the header from the catalog over ten rows of bars
 //!   ([`crate::grid::skeleton`], LC1; nothing before, and nothing for a table the catalog no
 //!   longer has), or `No rows are loaded.` after a first load that failed or was cancelled;
-//! - the paging bar ([`PagingBar`], its words and rules [`crate::paging`]): the arrows with the
-//!   page's words, a cut page's note, and the staged changes with RESET and APPLY.
+//! - the bottom bar ([`PagingBar`], its words and rules [`crate::paging`]): at its left end DATA /
+//!   STRUCTURE (`table.view`; STRUCTURE shows the table's structure instead,
+//!   [`crate::structure_view`], and DATA's state waits unchanged), in its middle the arrows with
+//!   the page's words and a cut page's note, at its right end the staged changes with RESET and
+//!   APPLY. It is drawn in every state of the tab (no page loaded, a load that failed, a lost
+//!   connection) and in both views, so the switch is always there and in the same place:
+//!   STRUCTURE's holds the switch alone, as DATA's does while no page is loaded. Tab reaches the
+//!   switch after the grid (or the structure's sections) and before the paging.
 //!
 //! While the value panel shows ([`crate::value_panel`]) it stands beside the band and the grid,
 //! from the table bar's bottom to the paging bar's top; the note, the filter bar and the two bars
@@ -234,7 +239,6 @@ fn table_bar_tags(
 ) -> Option<(&'static str, Json)> {
     let (rows, count) = words;
     let (refresh_blocked, add_blocked, count_blocked) = why;
-    view_tags(&shown, tags, View::Data);
     // Without its words (a narrow bar) REFRESH's hover names it; + ROW's always does.
     let words = shown.fit.words;
     if let Some(r) = shown.refresh {
@@ -290,12 +294,11 @@ fn table_bar_tags(
         TableAsked::AddRow => ("row.add", json!({})),
         TableAsked::Count => ("table.count", json!({})),
         TableAsked::Value => ("ui.toggleValuePanel", json!({})),
-        TableAsked::View(v) => view_command(v),
     })
 }
 
 /// Tags the view switch's segments, `chosen` the view that shows.
-fn view_tags(shown: &TableShown, tags: &mut Tags, chosen: View) {
+fn view_tags(shown: &PagingShown, tags: &mut Tags, chosen: View) {
     if let [data, structure] = shown.view.as_slice() {
         tags.tag_value("table-view-data", data, chosen == View::Data);
         tags.tag_value("table-view-structure", structure, chosen == View::Structure);
@@ -314,7 +317,6 @@ fn view_command(v: View) -> (&'static str, Json) {
 /// Tags what the table bar drew in its structure state (as [`table_bar_tags`] does in DATA's):
 /// LOADING while a read shows its loading state, else the facts as written (`structure-facts`).
 fn structure_bar_tags(shown: TableShown, tags: &mut Tags, facts: &str, refresh_blocked: Option<&str>) -> Option<(&'static str, Json)> {
-    view_tags(&shown, tags, View::Structure);
     if let Some(r) = shown.refresh {
         let r = match refresh_blocked {
             Some(why) => r.hint_disabled(format!("Refresh: not now, {why}")),
@@ -338,7 +340,6 @@ fn structure_bar_tags(shown: TableShown, tags: &mut Tags, facts: &str, refresh_b
     Some(match shown.asked? {
         TableAsked::Refresh => ("table.refresh", json!({})),
         TableAsked::Cancel => ("table.cancel", json!({})),
-        TableAsked::View(v) => view_command(v),
         // The structure state has none of these.
         TableAsked::AddRow | TableAsked::Count | TableAsked::Value => return None,
     })
@@ -355,8 +356,9 @@ fn structure_count(t: &TableTab, estimate: Option<u64>) -> RowCount {
 }
 
 /// Draws table tab `id` in its STRUCTURE view into `ui`: the table bar's structure state over
-/// [`structure_view::show`], the body's full width (no note, filter bar, paging bar or value
-/// panel), and runs what it asks for.
+/// [`structure_view::show`], and under it the bottom bar with the view switch alone, where DATA's
+/// has it; each the body's full width (no note, filter bar, paging or value panel). Runs what
+/// they ask for.
 fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     let mut runs: Vec<(&'static str, Json)> = Vec::new();
     {
@@ -366,13 +368,15 @@ fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let info = connected.and_then(|c| c.catalog.table(&tab.table));
         let lost = connected.is_none_or(|c| c.lost);
         let body = ui.available_rect_before_wrap();
+        let split = (body.bottom() - BAR_H).max(body.top());
         let clip = ui.clip_rect().intersect(body);
         // An editor open over a cell of DATA's grid left the view: it commits, as when scrolled
         // out of sight.
         if let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id) {
             editors::left_view(editor, ui.ctx().input(|i| i.time));
         }
-        let mut top = ui.new_child(UiBuilder::new().id_salt("dbee-table-tab").max_rect(body).layout(Layout::top_down(Align::Min)));
+        let above = Rect::from_min_max(body.min, pos2(body.right(), split));
+        let mut top = ui.new_child(UiBuilder::new().id_salt("dbee-table-tab").max_rect(above).layout(Layout::top_down(Align::Min)));
         top.set_clip_rect(clip);
         top.spacing_mut().item_spacing.y = 0.0;
         let ctx = top.ctx().clone();
@@ -386,7 +390,6 @@ fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let refresh_blocked = lost.then_some(LOST);
         let table_bar = TableBar {
             view: View::Structure,
-            structure: true,
             loading: loading.map(|elapsed| Loading { elapsed }),
             count: structure_count(tab, estimate),
             shown: None,
@@ -400,8 +403,8 @@ fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
         let facts = table_bar.structure_words();
         let drawn = table_bar.show(&mut top);
         runs.extend(structure_bar_tags(drawn, tags, &facts, refresh_blocked));
-        let below = top.available_rect_before_wrap().top().min(body.bottom());
-        let page = Rect::from_min_max(pos2(body.left(), below), body.max);
+        let below = top.available_rect_before_wrap().top().min(split);
+        let page = Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), split));
         let mut page_ui = top.new_child(UiBuilder::new().id_salt("dbee-structure").max_rect(page).layout(Layout::top_down(Align::Min)));
         page_ui.set_clip_rect(clip.intersect(page));
         let kept = view.work.structures.entry(id).or_default();
@@ -421,6 +424,10 @@ fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
                 _ => (command, params),
             }
         }));
+        // The bottom bar, after the sections: the switch alone, where DATA's bar has it.
+        let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(body.left(), split), body.max)));
+        bottom.set_clip_rect(clip);
+        runs.extend(paging_bar(&mut bottom, None, View::Structure, tags));
     }
     for (command, params) in runs {
         // A read's failure shows in the page's band, not as a notice.
@@ -429,13 +436,26 @@ fn show_structure(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) {
     }
 }
 
-/// Draws the paging bar for `p` into `ui`, tags what it drew, says on hover why something is off,
-/// and gives the command its click asked for.
-fn paging_bar(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Option<(&'static str, Json)> {
+/// Draws the tab's bottom bar into `ui`, `view` chosen in its switch, with the paging and the
+/// staged changes of `p` when there is one (DATA with a page loaded); tags what it drew, says on
+/// hover why something is off, and gives the command its click asked for.
+fn paging_bar(ui: &mut egui::Ui, p: Option<&Paging>, view: View, tags: &mut Tags) -> Option<(&'static str, Json)> {
+    let Some(p) = p else {
+        let bar = PagingBar { view, structure: true, pages: false, page: "", back: false, forward: false, changes: 0, can_apply: false, note: None };
+        let shown = bar.show(ui);
+        view_tags(&shown, tags, view);
+        return match shown.asked? {
+            PagingAsked::View(v) => Some(view_command(v)),
+            _ => None,
+        };
+    };
     let page = page_text(p.page, p.total);
     let note = cut_note(p.rows, p.complete);
     let (back, forward) = (p.back_blocked(), p.forward_blocked());
     let bar = PagingBar {
+        view,
+        structure: true,
+        pages: true,
         page: &page,
         back: back.is_none(),
         forward: forward.is_none(),
@@ -444,10 +464,12 @@ fn paging_bar(ui: &mut egui::Ui, p: &Paging, tags: &mut Tags) -> Option<(&'stati
         note: note.as_deref(),
     };
     let shown = bar.show(ui);
+    view_tags(&shown, tags, view);
     paging_tags(shown, tags, p, (&page, note.as_deref()), (back, forward))
 }
 
-/// Tags what the paging bar drew (as [`table_bar_tags`] does the table bar's).
+/// Tags what the bottom bar drew of the paging and the changes (as [`table_bar_tags`] does the
+/// table bar's).
 fn paging_tags(
     shown: PagingShown,
     tags: &mut Tags,
@@ -462,11 +484,14 @@ fn paging_tags(
         };
         tags.tag_value_as(id, &r, hover, why_not.is_none());
     };
-    arrow("page-first", &shown.first, back, "First page");
-    arrow("page-prev", &shown.previous, back, "Previous page");
-    arrow("page-next", &shown.next, forward, "Next page");
-    arrow("page-last", &shown.last, forward, "Last page (counts the rows)");
-    tags.tag_value("page-number", &shown.page, page);
+    // Short of room the paging is not drawn: its ids are then not listed.
+    if let Some(pages) = &shown.pages {
+        arrow("page-first", &pages.first, back, "First page");
+        arrow("page-prev", &pages.previous, back, "Previous page");
+        arrow("page-next", &pages.next, forward, "Next page");
+        arrow("page-last", &pages.last, forward, "Last page (counts the rows)");
+        tags.tag_value("page-number", &pages.page, page);
+    }
     if let (Some(r), Some(note)) = (&shown.note, note) {
         tags.tag_value("page-cut", r, note);
     }
@@ -486,6 +511,7 @@ fn paging_tags(
         tags.tag_value_as("edit-apply", &r, "Apply", p.apply_blocked.is_none());
     }
     Some(match shown.asked? {
+        PagingAsked::View(v) => view_command(v),
         PagingAsked::First => ("table.page", json!({ "to": "first" })),
         PagingAsked::Previous => ("table.page", json!({ "to": "prev" })),
         PagingAsked::Next => ("table.page", json!({ "to": "next" })),
@@ -652,7 +678,6 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         let count_blocked = lost.then_some(LOST);
         let table_bar = TableBar {
             view: View::Data,
-            structure: true,
             loading: loading.map(|elapsed| Loading { elapsed }),
             count,
             shown,
@@ -757,9 +782,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         }
         let mut bottom = ui.new_child(UiBuilder::new().id_salt("dbee-table-paging").max_rect(Rect::from_min_max(pos2(body.left(), split), body.max)));
         bottom.set_clip_rect(clip);
-        if tab.data.is_some() {
-            runs.extend(paging_bar(&mut bottom, &paging(tab, lost), tags));
-        }
+        // In every state, so the switch is always there: the paging only with a page loaded.
+        let pages = tab.data.is_some().then(|| paging(tab, lost));
+        runs.extend(paging_bar(&mut bottom, pages.as_ref(), View::Data, tags));
     }
     for (command, params) in runs {
         if command == "row.add" {
