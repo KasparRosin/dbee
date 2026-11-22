@@ -133,8 +133,37 @@ fn structure_shows_sa() {
     assert_eq!(ui.value("table-view-structure"), true);
     assert_eq!(ui.value("table-view-data"), false);
     assert!(enabled(&mut ui, "table-view-structure"));
-    for id in ["filter-0-column", "page-first", "row-add", "table-import", "table-export", "table-note", "value-toggle", "grid-header-0"] {
+    for id in [
+        "filter-0-column",
+        "page-first",
+        "page-number",
+        "edit-apply",
+        "row-add",
+        "table-import",
+        "table-export",
+        "table-note",
+        "value-toggle",
+        "grid-header-0",
+    ] {
         assert!(ui.tag(id).is_none(), "no `{id}` in STRUCTURE");
+    }
+    // The bottom bar, with the switch alone: the body's width along the tab's bottom, the switch
+    // 12 in; the page ends on its top line.
+    let (body, switch) = (ui.tab_x(), ui.drawn("table-view-data").union(ui.drawn("table-view-structure")));
+    let foot = painted_at(&ui, pos2(body.max - 2.0, switch.center().y)).map(|(_, r)| r).expect("the bottom bar's ground");
+    let status = ui.drawn("status-connection");
+    assert!(close(foot.left(), body.min) && close(foot.right(), body.max) && close(foot.height(), 36.0), "the bottom bar {body:?}: {foot:?}");
+    assert!(
+        foot.bottom() <= status.top() && foot.bottom() >= status.top() - 36.0,
+        "along the tab's bottom, over the status bar: {foot:?}, {status:?}"
+    );
+    assert!(
+        close(switch.left(), body.min + 13.0) && close(switch.center().y, foot.top() + 18.5),
+        "the switch 12 in, centred under the line: {switch:?}"
+    );
+    let cells: Vec<String> = ids(&ui.inspect()).into_iter().filter(|c| c.starts_with("structure-") && !c.contains("-edge-")).collect();
+    for id in cells.iter().filter(|id| ui.shows(id)) {
+        assert!(ui.drawn(id).bottom() <= foot.top() + 0.5, "`{id}` ends above the bottom bar: {:?}, {foot:?}", ui.drawn(id));
     }
     let facts = ui.value("structure-facts").as_str().unwrap_or_default().to_string();
     assert!(facts.starts_with("9 columns  ") && facts.ends_with(" rows"), "the facts: {facts}");
@@ -142,8 +171,8 @@ fn structure_shows_sa() {
 
     // COLUMNS' heading right under the bar, its words 12 in from the body's left.
     let body = ui.tab_x();
-    let data = ui.drawn("table-view-data");
-    let bar = painted_at(&ui, pos2(body.min + 2.0, data.center().y)).map(|(_, r)| r).expect("the bar's ground");
+    let refresh = ui.drawn("table-refresh");
+    let bar = painted_at(&ui, pos2(body.max - 2.0, refresh.center().y)).map(|(_, r)| r).expect("the bar's ground");
     assert_eq!(ui.value("structure-columns"), "Columns");
     let heading = ui.drawn("structure-columns");
     assert!(close(heading.top(), bar.bottom()), "COLUMNS starts at the bar's bottom {}: {heading:?}", bar.bottom());
@@ -320,8 +349,8 @@ fn the_first_read_shows_the_skeleton_after_300_ms() {
     let empty = ui.drawn("structure-empty");
     let (words, _) = ui.text_in(empty, "The structure is not loaded.").expect("the words painted");
     let body = ui.tab_x();
-    let data = ui.drawn("table-view-data");
-    let bar = painted_at(&ui, pos2(body.min + 2.0, data.center().y)).map(|(_, r)| r).expect("the bar's ground");
+    let refresh = ui.drawn("table-refresh");
+    let bar = painted_at(&ui, pos2(body.max - 2.0, refresh.center().y)).map(|(_, r)| r).expect("the bar's ground");
     assert!(close(words.left(), body.min + 12.0), "12 in: {words:?}");
     assert!(close(empty.top(), bar.bottom() + 12.0), "12 down from the bar {}: {empty:?}", bar.bottom());
     let colours = text_colours(&ui.shapes().into_iter().filter(|(_, s)| empty.contains_rect(s.visual_bounding_rect())).collect::<Vec<_>>());
@@ -348,8 +377,8 @@ fn a_failed_read_shows_the_band() {
     assert_eq!(ui.value("structure-error"), lost);
     let band = ui.drawn("structure-error");
     let body = ui.tab_x();
-    let data = ui.drawn("table-view-data");
-    let bar = painted_at(&ui, pos2(body.min + 2.0, data.center().y)).map(|(_, r)| r).expect("the bar's ground");
+    let refresh = ui.drawn("table-refresh");
+    let bar = painted_at(&ui, pos2(body.max - 2.0, refresh.center().y)).map(|(_, r)| r).expect("the bar's ground");
     assert!(close(band.top(), bar.bottom()), "the band under the bar {}: {band:?}", bar.bottom());
     assert!(close(band.left(), body.min) && close(band.right(), body.max), "the band the body's width {body:?}: {band:?}");
     assert!(ui.text_in(band, "The structure did not load").is_some(), "the band's heading");

@@ -318,8 +318,10 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     app.shot(root, &format!("{p}-2c-counted"));
     // 2d. STRUCTURE: the page reads the orders' structure (COLUMNS as the server has them, the
     //     facts with the count from 2c), and DATA comes back with its rows and filters.
+    let switch = app.rect("table-view-data");
     app.click("table-view-structure");
     app.until("the structure", |app| app.tag("structure-columns-0-name").is_some());
+    assert_eq!(app.rect("table-view-data"), switch, "{name}: the view switch stands where it stood in DATA, in the bottom bar");
     assert_eq!(app.value("structure-columns-0-name"), "id", "{name}");
     assert_eq!(app.value("structure-columns-0-keys"), "primary key", "{name}");
     assert_eq!(app.value("structure-columns-1-keys"), format!("{shop}.customers.id"), "{name}");
@@ -333,6 +335,11 @@ fn the_day(app: &mut App, root: &Path, e: &Engine, day: &DayRows) {
     let mut apart = vec!["table-view-data", "table-view-structure", "table-refresh", "structure-facts"];
     apart.extend(row.iter().map(String::as_str));
     app.assert_apart(&apart, &format!("{name} 2d"));
+    // A double-click on a column's edge fits the column to its content: Name, 150 as drawn.
+    let drawn = app.value("structure-columns-edge-name").as_f64().unwrap();
+    app.double_click("structure-columns-edge-name");
+    app.until("the fitted column", |app| app.value("structure-columns-edge-name").as_f64().is_some_and(|w| w < drawn - 1.0));
+    app.shot(root, &format!("{p}-2d-fitted"));
     // The other sections (SQLite's rowid key has no index), REFERENCED BY below the page's
     // bottom (listed, out of view); a foreign key's link opens its table, and closing that comes
     // back to orders' STRUCTURE.

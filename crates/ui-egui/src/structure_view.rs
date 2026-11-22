@@ -1,5 +1,6 @@
-//! A table tab's STRUCTURE view ([`show`]), under the table bar in its structure state (drawn by
-//! [`crate::table_tab`]), each area the body's full width (SA):
+//! A table tab's STRUCTURE view ([`show`]), between the table bar in its structure state and the
+//! tab's bottom bar with the view switch (both drawn by [`crate::table_tab`]), each area the
+//! body's full width (SA):
 //!
 //! - the error band (`structure-error`, [`crate::components::error_band`]) when the last read
 //!   failed: `The structure did not load`, the reason, and a note when the page from before still
@@ -41,7 +42,7 @@
 //! loaded.` where the page would be.
 //!
 //! It reads the tab's [`TabStructure`](dbee_engine::TabStructure) each frame and starts nothing
-//! itself but the links' commands: the table bar's STRUCTURE (`table.view`), REFRESH (`table.refresh`) and CANCEL
+//! itself but the links' commands: the bottom bar's STRUCTURE (`table.view`) and the table bar's REFRESH (`table.refresh`) and CANCEL
 //! (`table.cancel`) are the table tab's. Nothing on the page is selectable.
 
 use std::sync::Arc;

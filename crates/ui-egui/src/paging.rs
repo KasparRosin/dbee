@@ -1,9 +1,9 @@
-//! The table tab's paging bar in words and rules: the page's words ([`page_text`]), the cut
-//! page's note ([`cut_note`]), the count of staged changes ([`edits_text`]), and when the arrows
-//! and APPLY work and why not ([`Paging`]). The bar is drawn by
-//! [`crate::components::table_bars::PagingBar`], which the table tab ([`crate::table_tab`])
-//! places and tags; the row count, refresh and "+ Row" are the table bar's, and [`count_text`] is
-//! the count's words there.
+//! The paging in the table tab's bottom bar, in words and rules: the page's words
+//! ([`page_text`]), the cut page's note ([`cut_note`]), the count of staged changes
+//! ([`edits_text`]), and when the arrows and APPLY work and why not ([`Paging`]). The bar is drawn
+//! by [`crate::components::table_bars::PagingBar`], which the table tab ([`crate::table_tab`])
+//! places and tags, with the DATA / STRUCTURE switch at its left end in both views; the row count,
+//! refresh and "+ Row" are the table bar's, and [`count_text`] is the count's words there.
 //!
 //! The row count ([`count_text`]) shows the planner's estimate as `~100,000 rows` while that is
 //! all there is: the engine's, or the catalog's for an unfiltered table, materialized view or
@@ -13,10 +13,10 @@
 //! Paging waits while changes are staged (the engine's rule) and while the connection is lost;
 //! the buttons say why when hovered.
 //!
-//! Automation ids (tagged by the table tab): `page-first`, `page-prev`, `page-number` (value:
-//! `Page 3` or `Page 3 of 10`), `page-next`, `page-last`, `page-cut` (value: the note; not drawn
-//! without room for it), `edits-count` (value: `2 changes`; not drawn while short of room),
-//! `edit-reset`, `edit-apply`.
+//! Automation ids (tagged by the table tab): `table-view-data`, `table-view-structure`,
+//! `page-first`, `page-prev`, `page-number` (value: `Page 3` or `Page 3 of 10`), `page-next`,
+//! `page-last`, `page-cut` (value: the note; not drawn without room for it), `edits-count` (value:
+//! `2 changes`; not drawn while short of room), `edit-reset`, `edit-apply`.
 
 use dbee_engine::Total;
 use dbee_sql::select::PAGE_SIZE;
