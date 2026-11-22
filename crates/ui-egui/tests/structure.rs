@@ -1018,3 +1018,46 @@ fn a_column_is_resized_at_its_edge() {
     assert!(close(ui.laid("structure-indexes-0-name").width(), index.width() + 60.0), "INDEXES' Name 60 wider");
     assert!((0..5).all(|i| close(columns_row(&mut ui)[i].width(), fitted[i].width())), "COLUMNS as it was");
 }
+
+/// The chosen view's `ink` ground meets the switch's edge at every scale, in both modes: from the
+/// middle of the chosen segment out to the switch's outside, sideways at its end and up and down,
+/// every pixel is the ground, the edge or a blend of the two. (The edge is 1 point wide from the
+/// outside, 1.25 px at 125 %, and the ground ended on a whole pixel short of it: STRUCTURE chosen
+/// showed a sliver of the box's `card` between the two.)
+#[test]
+fn the_chosen_view_meets_the_switchs_edge_at_every_scale() {
+    let db = dbee_testkit::require_testdb!();
+    let mut ui = orders_structure(db);
+    let themes = [("ui.themeLight", dbee_ui_egui::theme::LIGHT), ("ui.themeDark", dbee_ui_egui::theme::DARK)];
+    for (theme, t) in themes {
+        ui.execute(theme, json!({}));
+        let within = |c: egui::Color32| {
+            let (a, b) = (t.ink.to_array(), t.line_strong.to_array());
+            (0..3).all(|i| c.a() == 255 && c.to_array()[i] + 3 >= a[i].min(b[i]) && c.to_array()[i] <= a[i].max(b[i]) + 3)
+        };
+        for scale in [1.0, 1.15, 1.25, 1.5, 1.75, 2.0] {
+            ui.harness.ctx.set_pixels_per_point(scale);
+            ui.frame();
+            for view in ["data", "structure"] {
+                let id = format!("table-view-{view}");
+                ui.click(&id);
+                ui.until("the view", |ui| ui.value(&id) == true);
+                ui.hover_away();
+                ui.frame();
+                let (data, structure) = (ui.drawn("table-view-data"), ui.drawn("table-view-structure"));
+                let chosen = if view == "data" { data } else { structure };
+                let outer = data.union(structure).expand(1.0);
+                let px = ui.pixels(outer.expand(2.0));
+                let at = format!("{theme} at {scale}, {view} chosen: the switch {outer:?}");
+                let whole = |v: f32| (v * scale).round() as i32;
+                let (mid_x, mid_y) = (whole(chosen.center().x), whole(chosen.center().y));
+                let across = if view == "data" { whole(outer.left())..mid_x } else { mid_x..whole(outer.right()) };
+                let bad: Vec<(i32, egui::Color32)> = across.map(|x| (x, px.at(x, mid_y))).filter(|(_, c)| !within(*c)).collect();
+                assert!(bad.is_empty(), "{at}: pixels along row {mid_y} that are neither its ground nor its edge: {bad:?}");
+                let bad: Vec<(i32, egui::Color32)> =
+                    (whole(outer.top())..whole(outer.bottom())).map(|y| (y, px.at(mid_x, y))).filter(|(_, c)| !within(*c)).collect();
+                assert!(bad.is_empty(), "{at}: pixels down column {mid_x} that are neither its ground nor its edge: {bad:?}");
+            }
+        }
+    }
+}

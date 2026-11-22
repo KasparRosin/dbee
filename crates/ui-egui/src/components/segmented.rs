@@ -3,12 +3,17 @@
 //! wide as its words) or small (words in `small` as written, the segments sharing the box's
 //! width, each one's words cut with "…" when its share is too narrow, whole on hover). Each
 //! segment is its own control, reached with Tab and chosen with a click or Space.
+//!
+//! The box's edge is drawn over its segments, and a segment's ground runs on under the edge where
+//! the segment meets it. The edge is 1 point wide from the box's outside, which is not a whole
+//! number of pixels at every scale (1.25 at 125 %), while a ground ends on a whole pixel: a ground
+//! that stopped at the edge's inside left a sliver of the box's `card` between the two.
 
 use std::sync::Arc;
 
 use egui::{
-    Align, Color32, CornerRadius, Galley, Layout, Rect, Response, Sense, Stroke, StrokeKind, Ui, UiBuilder, Widget, WidgetInfo, WidgetType, pos2,
-    vec2,
+    Align, Color32, CornerRadius, Galley, Layout, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, Widget, WidgetInfo, WidgetType,
+    pos2, vec2,
 };
 
 use super::tooltip::Hint;
@@ -105,13 +110,7 @@ impl Widget for Segment<'_> {
         }
         let t = tokens(ui.ctx());
         let p = painter(ui);
-        let ground = match (self.selected, look.disabled) {
-            (true, true) => Some(t.fill),
-            (true, false) => Some(t.ink),
-            (false, false) if look.hovered => Some(t.hover),
-            (false, _) => None,
-        };
-        if let Some(ground) = ground {
+        if let Some(ground) = ground(t, self.selected, look.hovered, look.disabled) {
             p.rect_filled(rect, CornerRadius::ZERO, ground);
         }
         let colour = match (self.selected, look.disabled) {
@@ -134,6 +133,16 @@ impl Widget for Segment<'_> {
             }
         }
         r
+    }
+}
+
+/// A segment's ground: `ink` when chosen (`fill` while off), `hover` under the pointer, else none.
+fn ground(t: &crate::theme::Tokens, selected: bool, hovered: bool, disabled: bool) -> Option<Color32> {
+    match (selected, disabled) {
+        (true, true) => Some(t.fill),
+        (true, false) => Some(t.ink),
+        (false, false) if hovered => Some(t.hover),
+        (false, _) => None,
     }
 }
 
@@ -205,13 +214,17 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
         let n = choices.len();
         let widths: Vec<f32> = segments.iter().map(|s| s.parts(ui).2).collect();
         let (rect, mut row) = ui.allocate_exact_size(vec2(widths.iter().sum::<f32>() + 2.0, SEGMENTED_H), Sense::hover());
-        if ui.is_rect_visible(rect) {
-            let t = tokens(ui.ctx());
-            let p = painter(ui);
-            let radius = CornerRadius::same(RADIUS_CONTROL);
+        let visible = ui.is_rect_visible(rect);
+        let t = tokens(ui.ctx());
+        let p = painter(ui);
+        let radius = CornerRadius::same(RADIUS_CONTROL);
+        // The grounds under the edge go here, between the box's ground and the segments.
+        let under = visible.then(|| {
             p.rect_filled(rect, radius, t.card);
-            p.rect_stroke(rect, radius, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
-        }
+            p.add(Shape::Noop)
+        });
+        let chosen: Vec<bool> = segments.iter().map(|s| s.selected).collect();
+        let mut grounds = Vec::new();
         let mut inside = ui.new_child(UiBuilder::new().max_rect(rect.shrink(1.0)).layout(Layout::left_to_right(Align::Min)));
         let mut drawn = Vec::with_capacity(n);
         let mut x = rect.left() + 1.0;
@@ -220,11 +233,27 @@ impl<'a, T: PartialEq + Copy> Segmented<'a, T> {
             let at = Rect::from_min_size(pos2(x, rect.top() + 1.0), vec2(w, SEGMENT_H));
             let r = inside.add_enabled_ui(off != Some(*value), |ui| ui.put(at, s)).inner;
             x += w;
+            let i = drawn.len();
+            if let Some(colour) = ground(t, chosen.get(i).copied().unwrap_or(false), r.hovered(), !r.enabled()) {
+                // The segment's ground again, out to the box's outside where it meets the edge.
+                let (first, last) = (i == 0, i + 1 == n);
+                let reach = Rect::from_min_max(
+                    pos2(if first { rect.left() } else { at.left() }, rect.top()),
+                    pos2(if last { rect.right() } else { at.right() }, rect.bottom()),
+                );
+                let (west, east) = (if first { RADIUS_CONTROL } else { 0 }, if last { RADIUS_CONTROL } else { 0 });
+                let corners = CornerRadius { nw: west, sw: west, ne: east, se: east };
+                grounds.push(Shape::rect_filled(reach, corners, colour));
+            }
             if r.clicked() && *selected != *value {
                 *selected = *value;
                 row.mark_changed();
             }
             drawn.push(r);
+        }
+        if let Some(under) = under {
+            p.set(under, Shape::Vec(grounds));
+            p.rect_stroke(rect, radius, Stroke::new(1.0, t.line_strong), StrokeKind::Inside);
         }
         Shown { row, segments: drawn }
     }
@@ -403,6 +432,69 @@ mod tests {
             assert!(fills.contains(&(segments[1], t.ink)), "{theme:?}: prefer chosen, on ink");
             assert_eq!(caps.height(), 28.0, "{theme:?}: the caps box");
             assert!((caps.width() - (2.0 + 51.0 + 86.0)).abs() <= 2.0, "{theme:?}: the caps box hugs DATA and STRUCTURE: {caps:?}");
+        }
+    }
+
+    #[test]
+    fn a_chosen_segments_ground_runs_under_the_boxs_edge() {
+        // The edge is 1 point from the box's outside (1.25 px at 125 %) and a ground ends on a
+        // whole pixel, so a ground that stopped at the edge's inside left a sliver of `card`
+        // beside the chosen end segment. The ground runs on to the box's outside, with the box's
+        // corners there, and the edge is drawn after it; a middle segment's reaches up and down.
+        const VIEWS: [(u8, &str); 2] = [(0, "Data"), (1, "Structure")];
+        const AUTHS: [(u8, &str); 3] = [(0, "Key"), (1, "Agent"), (2, "Password")];
+        let order = |shapes: &[egui::epaint::ClippedShape], ground: (Rect, egui::Color32), edge: Rect| {
+            let flat = crate::components::flat(shapes);
+            let at = |want: &dyn Fn(&egui::epaint::RectShape) -> bool| flat.iter().position(|s| matches!(s, Shape::Rect(r) if want(r)));
+            let same = |a: Rect, b: Rect| (a.min - b.min).length() < 0.05 && (a.max - b.max).length() < 0.05;
+            let ground = at(&|r| same(r.rect, ground.0) && r.fill == ground.1);
+            (ground, at(&|r| r.rect == edge && r.stroke.width == 1.0))
+        };
+        for (theme, t) in both() {
+            for chosen in [0u8, 1] {
+                let mut shown = (Rect::NOTHING, Vec::new());
+                let shapes = painted(theme, |ui| {
+                    ui.add_space(ROOM);
+                    let mut view = chosen;
+                    let s = Segmented::caps(&mut view, &VIEWS).show(ui);
+                    shown = (s.row.rect, s.segments.iter().map(|r| r.rect).collect());
+                });
+                let (at, segments) = shown;
+                let own = segments[usize::from(chosen)];
+                let reach = match chosen {
+                    0 => Rect::from_min_max(at.min, pos2(own.right(), at.bottom())),
+                    _ => Rect::from_min_max(pos2(own.left(), at.top()), at.max),
+                };
+                let (ground, edge) = order(&shapes, (reach, t.ink), at);
+                assert!(ground.is_some(), "{theme:?} {chosen}: the chosen ground out to the box's outside {reach:?}: {:?}", fills_in(&shapes, at));
+                assert!(ground < edge, "{theme:?} {chosen}: the edge is drawn over it: {ground:?}, {edge:?}");
+                let corners: Vec<CornerRadius> = crate::components::flat(&shapes)
+                    .into_iter()
+                    .filter_map(|s| match s {
+                        Shape::Rect(r) if r.rect == reach && r.fill == t.ink => Some(r.corner_radius),
+                        _ => None,
+                    })
+                    .collect();
+                let (west, east) = if chosen == 0 { (2, 0) } else { (0, 2) };
+                assert_eq!(corners, [CornerRadius { nw: west, sw: west, ne: east, se: east }], "{theme:?} {chosen}: the box's corners at its end");
+                let other = segments[usize::from(1 - chosen)];
+                assert!(
+                    !fills_in(&shapes, at).iter().any(|(r, c)| *c != t.card && r.intersects(other.shrink(1.5))),
+                    "{theme:?} {chosen}: none under the other"
+                );
+            }
+            // A middle segment's ground reaches the box's top and bottom, and no further sideways.
+            let mut shown = (Rect::NOTHING, Vec::new());
+            let shapes = painted(theme, |ui| {
+                ui.add_space(ROOM);
+                let mut auth = 1u8;
+                let s = Segmented::small(&mut auth, &AUTHS).width(300.0).show(ui);
+                shown = (s.row.rect, s.segments.iter().map(|r| r.rect).collect());
+            });
+            let (at, segments) = shown;
+            let reach = Rect::from_x_y_ranges(segments[1].x_range(), at.y_range());
+            let (ground, edge) = order(&shapes, (reach, t.ink), at);
+            assert!(ground.is_some() && ground < edge, "{theme:?}: the middle one's ground from the box's top to its bottom, under the edge");
         }
     }
 
