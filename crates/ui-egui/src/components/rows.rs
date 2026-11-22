@@ -4,7 +4,8 @@
 //! menus and tags, and say what each row is: selected, under the pointer, showing keyboard focus.
 //!
 //! Names keep their case: a schema, table or column name, a type and a connection's name are
-//! drawn as written. A selected row doesn't change on hover. Keyboard focus is a 2 px `ink` box
+//! drawn as written. A selected row doesn't change on hover. Keyboard focus is a 2 px `ink` box:
+//! a tree row's along the row's own edges, as far as its hover ground reaches, a connection row's
 //! inside the row.
 
 use dbee_config::DbKind;
@@ -117,7 +118,8 @@ impl TreeRow<'_> {
             p.galley(pos2(end - size.x, y - size.y / 2.0), g, t.text_muted);
         }
         if self.focused {
-            focus::box_inside(&p, rect);
+            // Along the row's own edges: the box is as large as the hover ground, square as it is.
+            focus::own_edge(&p, rect, 0);
         }
         if self.chevron_focused {
             focus::box_inside(&p, TreeRow::expander(rect, self.level));
@@ -292,7 +294,8 @@ mod tests {
         // The table icon's header band is a fill of its own, in its square.
         let fills: Vec<_> = fills_in(&shapes, r).into_iter().filter(|(at, _)| !slot.contains_rect(*at)).collect();
         assert_eq!(fills, [(r, ground)], "{at_}: one ground, square");
-        let ring = Edge { outer: r.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
+        // The focus box runs along the edges of the ground, the hover ground's too: as large, as square.
+        let ring = Edge { outer: r, width: 2.0, colour: t.ink, radius: CornerRadius::ZERO };
         assert_eq!(edges_in(&shapes, r, 0.0), if focus { vec![ring] } else { vec![] }, "{at_}: the focus box");
         let want = match row.open {
             Some(open) => alone(theme, if open { Icon::ChevronDown } else { Icon::ChevronRight }, chevron.center(), t.text_muted),
@@ -324,7 +327,8 @@ mod tests {
         // icon's 14 square (`text_muted`; `icon/key-primary` in `key`, `icon/key-foreign`, nothing on
         // a plain column), 6, the name in `body` `text`; a column's type in `data` `text_muted` ends
         // 12 from the right. Hovered `hover`; selected `selection`, also when hovered; keyboard focus
-        // a 2 px `ink` box 2 inside, corners 2.
+        // a 2 px `ink` box along the row's edges, square, as large as the hover ground (the page
+        // drew it 2 inside with corners 2: smaller than the ground beside it).
         let rel = TreeKind::Relation;
         for (theme, t) in both() {
             let muted = |icon| Some((icon, t.text_muted));
@@ -760,7 +764,8 @@ mod tests {
         h.key_press(Keys::Tab);
         h.run();
         let id = rect_of(&h, "tree-column-shop.orders.id");
-        assert_eq!(edges_in(&h.output().shapes, id, 0.0), [ring(id)], "the next row's focus box");
+        let whole = Edge { outer: id, width: 2.0, colour: t.ink, radius: CornerRadius::ZERO };
+        assert_eq!(edges_in(&h.output().shapes, id, 0.0), [whole], "the next row's focus box, along its edges");
     }
 
     #[test]
@@ -1061,7 +1066,7 @@ mod tests {
         assert_eq!(h.state().tree.selected_schema(&h.state().catalog), Some("shop"), "a click on a table selects it");
         let orders = rect_of(&h, "tree-table-shop.orders");
         let t = crate::theme::LIGHT;
-        let ring = Edge { outer: orders.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
+        let ring = Edge { outer: orders, width: 2.0, colour: t.ink, radius: CornerRadius::ZERO };
         assert!(fills_in(&h.output().shapes, orders).contains(&(orders, t.selection)), "selected");
         assert!(edges_in(&h.output().shapes, orders, 0.0).contains(&ring), "a click gives the row the keyboard and its focus box");
         // From the filter, Tab goes to the refresh, then to the first row: its focus box shows.
@@ -1072,7 +1077,7 @@ mod tests {
             h.run();
         }
         let shop = rect_of(&h, "tree-schema-shop");
-        let ring = Edge { outer: shop.shrink(2.0), width: 2.0, colour: t.ink, radius: CornerRadius::same(2) };
+        let ring = Edge { outer: shop, width: 2.0, colour: t.ink, radius: CornerRadius::ZERO };
         assert!(edges_in(&h.output().shapes, shop, 0.0).contains(&ring), "Tab shows the focus box: {:?}", edges_in(&h.output().shapes, shop, 0.0));
 
         // The connection list: `conn-saved-<id>` and `conn-recent-<n>` (a connection used and not
