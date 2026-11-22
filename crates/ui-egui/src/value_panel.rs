@@ -62,15 +62,17 @@
 //! the session, in memory only, one for every tab. It is drawn after the tab's grid ([`reserve`],
 //! then [`fill`]), so a click on a cell shows its value in the same frame.
 //!
-//! **Editing.** While the open cell editor is the panel's (several lines, [`crate::editors`]),
-//! the panel is that editor: its bar names the column, CANCEL and SAVE at its right in place of
-//! COPY and WRAP, the editor's text in the value's box, the facts counting the text as typed.
+//! **Editing.** While a cell editor is open on the tab ([`crate::editors`]), the panel shows its
+//! draft, live: its bar names the column, CANCEL and SAVE at its right in place of COPY and WRAP,
+//! the draft in the value's box, the facts counting it as it is typed. The editor opens in its
+//! cell; a press in the panel's text moves the keyboard and the caret here, where a text of
+//! several lines takes Enter as a newline.
 //!
 //! Automation ids: `value-panel` (value `{column, row, type, label, null, bytes, truncated,
 //! note, facts, wrap, editing}`, `row` the number of a whole selected row (`column` and `type` then empty) or
 //! null, `label` the JSON label or null, `bytes` the whole value's length, `note` what a cut value
 //! says (not drawn), `facts` the facts as written before capitals or null with no facts strip;
-//! `wrap` whether WRAP is on; `editing` whether the panel is the cell editor; `null` when no cell
+//! `wrap` whether WRAP is on; `editing` whether the panel shows an open cell editor's draft; `null` when no cell
 //! is selected), `value-cancel` and `value-save` (CANCEL and SAVE while editing), `value-copy` (COPY; value
 //! `{label, why}`, `label` `Copy` or `Copied`, `why` while it is off), `value-wrap` (WRAP; value
 //! whether it is on), `value-text` (value `{text, cut, selection, highlighted, rows, firstRow,
@@ -97,7 +99,7 @@ use crate::automation::Tags;
 use crate::components::toast::Kind;
 use crate::components::tooltip::Hint;
 use crate::components::value::{self, COPY_HOVER, COPY_ROW_HOVER, CopyButton, Facts, Panel, Shown, State};
-use crate::editors::{self, EditorKey, Place, size_text};
+use crate::editors::{self, EditorKey, size_text};
 use crate::shortcuts;
 use crate::theme::{
     self, Text,
@@ -617,8 +619,7 @@ pub struct PanelState {
     holding_rows: bool,
     /// COPY copied the value shown: it reads ✓ COPIED until then, on egui's clock.
     copied_until: Option<f64>,
-    /// The table tab drawn last has room for the panel ([`has_room`]): a several-line editor
-    /// opening now goes in it ([`crate::editors`]).
+    /// The table tab drawn last has room for the panel ([`has_room`]).
     pub(crate) room: bool,
 }
 
@@ -786,7 +787,7 @@ fn panel_id() -> Id {
 /// COPY as `value.copy` allows, running `clipboard.copyValue` when pressed.
 pub(crate) fn fill(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
     let active = app.session.state().active;
-    if app.view.work.editor.as_ref().is_some_and(|e| e.place == Place::Panel && Some(e.tab) == active) {
+    if app.view.work.editor.as_ref().is_some_and(|e| Some(e.tab) == active) {
         editing(app, ui, rect);
         return;
     }
@@ -834,8 +835,9 @@ fn live_facts(text: &str) -> Facts {
     Facts { lines: text.bytes().filter(|&b| b == b'\n').count().saturating_add(1), bytes: text.len(), formatted: false, whole: None }
 }
 
-/// [`fill`] while the open cell editor is the panel's (MC+): the bar names the column, CANCEL and
-/// SAVE at its right; the editor's text in the value's box; the live facts at the foot. No COPY,
+/// [`fill`] while a cell editor is open on the tab: the bar names the column, CANCEL and SAVE at
+/// its right; the editor's draft in the value's box, the same text its cell holds; the live facts
+/// at the foot. No COPY,
 /// WRAP or `value-text`; CANCEL and SAVE act once the frame has drawn, as the editor's keys do.
 fn editing(app: &mut DbeeApp, ui: &mut egui::Ui, rect: Rect) {
     // The value view names the column and its type (the editor's cell is the selection's focus).

@@ -733,7 +733,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     links: !lost,
                     first_number: tab.shown.page.saturating_mul(PAGE_SIZE).saturating_add(1),
                     editing: view.work.editor.as_ref().filter(|e| e.tab == id).map(|e| (e.row, e.col)),
-                    edited_elsewhere: view.work.editor.as_ref().is_some_and(|e| e.tab == id && e.place == Place::Panel),
+                    // The editor is always drawn over its cell; out of view, the cell draws nothing of it.
+                    edited_elsewhere: false,
                     saved,
                     dimmed: loading.is_some(),
                 };
@@ -748,8 +749,9 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
                     }
                     runs.extend(command(act, Some(data)));
                 }
-                // One in the value panel is drawn there ([`value_panel::fill`]).
-                if let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id && e.place == Place::Cell) {
+                // Over its cell, wherever its keyboard is; the value panel shows the same draft
+                // ([`value_panel::fill`]).
+                if let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id) {
                     // egui lays out every column of a row in view, also those scrolled away to the
                     // side: whether the cell shows is whether it meets the rows in view.
                     match state.editing_rect().filter(|(cell, rows)| editors::in_view(*cell, *rows)) {

@@ -182,16 +182,17 @@ impl Drop for DayRows<'_> {
     }
 }
 
-/// Opens the editor of cell `(row, column)`, types `text` over its value and commits it: a
-/// several-line one (in the value panel) with SAVE when `save`, else with Ctrl+Enter.
+/// Opens the editor of cell `(row, column)`, in the cell, types `text` over its value and commits
+/// it: a several-line one with the value panel's SAVE when `save`, else with Ctrl+Enter.
 fn edit_cell(app: &mut App, row: usize, column: usize, text: &str, save: bool) {
     app.double_click(&format!("grid-cell-{row}-{column}"));
     let editor = app.value("cell-editor");
     app.ctrl("A");
     app.text(text);
-    // A multi-line editor is the value panel's and takes Enter as a newline.
+    // Every editor is over its cell; the value panel shows the same draft under CANCEL and SAVE.
+    assert!(!app.inside("cell-editor", "value-panel"), "edited in the cell");
     if editor["multiline"] == true {
-        assert!(app.inside("cell-editor", "value-panel"), "several lines are edited in the value panel");
+        assert_eq!(app.value("value-editor")["text"].as_str(), Some(text), "the panel follows the typing");
         if save {
             app.click("value-save");
         } else {

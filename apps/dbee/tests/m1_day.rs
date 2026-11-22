@@ -537,11 +537,14 @@ fn m1_day_end_to_end() {
     app.double_click("grid-cell-0-1");
     let editor = app.value("cell-editor");
     assert_eq!((editor["text"].as_str(), editor["multiline"].as_bool()), (Some(day.typo.as_str()), Some(true)), "{editor}");
-    // Several lines: the value panel is the editor, with CANCEL and SAVE in its bar.
-    assert!(app.inside("cell-editor", "value-panel"), "the name is edited in the value panel");
+    // In its cell, as every value is; the value panel shows the same draft, with CANCEL and
+    // SAVE in its bar.
+    assert!(!app.inside("cell-editor", "value-panel"), "the name is edited in its cell");
+    assert_eq!(app.value("value-editor")["focused"], false, "the panel shows the draft, the keyboard in the cell");
     assert!(app.tag("value-save").is_some(), "SAVE in the panel's bar");
     app.ctrl("A");
     app.text(&day.fixed);
+    assert_eq!(app.value("value-editor")["text"].as_str(), Some(day.fixed.as_str()), "the panel follows the typing");
     app.shot(&root, "6a0-name-editing");
     app.click("value-save");
     assert!(app.tag("cell-editor").is_none(), "SAVE closed the editor");
