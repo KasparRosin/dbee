@@ -63,7 +63,14 @@
 //! **Foreign keys.** With [`Grid::links`], each non-NULL foreign key cell of the selected row
 //! (the focus cell's) shows a link that follows it.
 //!
-//! Automation ids: `grid-header-<col>` (value `{name, type, key, sort}`), `grid-cell-<row>-<col>`
+//! **The header.** A column's type is drawn in its short spelling (`display::short_type`:
+//! `timestamptz` for `timestamp with time zone`); a name or type that does not fit is cut with
+//! `…`, the sort mark keeping its room at any width ([`Header::paint`]). The hover says the whole
+//! name and type, as the database writes it, whenever the header shows less, then what a click
+//! does.
+//!
+//! Automation ids: `grid-header-<col>` (value `{name, type, shown, cut, key, sort}`: `type` the
+//! whole type, `shown` the one drawn, `cut` whether the name or it was cut), `grid-cell-<row>-<col>`
 //! (value `{text, null, state?, deleted?}`: the text as shown, `NULL` for NULL, `state` one of
 //! `staged`, `new`, `deleted`, `failed`, `saved` (while its mark shows), and `deleted: true` on a
 //! row to delete, also when it is the failed one), `grid-row-<row>` (a row's number, value
@@ -79,7 +86,7 @@
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use dbee_core::display::grid_text;
+use dbee_core::display::{grid_text, short_type};
 use dbee_core::{ResultSet, TypeClass};
 use dbee_engine::Selection;
 use dbee_sql::filter::SortDir;
@@ -115,7 +122,8 @@ pub const LINK: &str = "fk-link-";
 pub trait GridSource {
     fn columns(&self) -> usize;
     fn column_name(&self, col: usize) -> &str;
-    /// The type the header shows (`bigint`, `character varying(200)`).
+    /// The column's type as the database writes it (`bigint`, `character varying(200)`); the
+    /// header draws its short spelling (`display::short_type`).
     fn column_type(&self, col: usize) -> &str;
     fn rows(&self) -> usize;
     /// The text of cell `(row, col)`; `None` is NULL.
@@ -306,8 +314,8 @@ pub fn initial_widths(source: &dyn GridSource, keys: &[Option<Key>]) -> Vec<f32>
         .map(|col| {
             let key = if keys.get(col).copied().flatten().is_some() { Icon::Key.size().x + gap } else { 0.0 };
             let sort = gap + 2.0 * Icon::SortAscending.size().x + size::GRID_SORT_HINT_GAP;
-            let head =
-                2.0 * pad + key + chars(source.column_name(col)) * DATA_CHAR_W + gap + chars(source.column_type(col)) * DATA_CHAR_W * 0.85 + sort;
+            let ty = short_type(source.column_type(col));
+            let head = 2.0 * pad + key + chars(source.column_name(col)) * DATA_CHAR_W + gap + chars(&ty) * DATA_CHAR_W + sort;
             let cells = (0..rows)
                 .map(|row| match source.cell(row, col) {
                     None => 4.0,
@@ -340,7 +348,7 @@ pub fn skeleton(ui: &mut egui::Ui, columns: &ResultSet, keys: &[Option<Key>], so
         let align = if columns.right_aligned(col) { grid_cell::Align::Right } else { grid_cell::Align::Left };
         let header = Header {
             name: columns.column_name(col),
-            ty: columns.column_type(col),
+            ty: &short_type(columns.column_type(col)),
             key: keys.get(col).copied().flatten(),
             sort: sort.filter(|(c, _)| *c == col).map(|(_, dir)| dir),
             align,
@@ -438,16 +446,15 @@ impl Grid<'_> {
             let table = table.header(HEADER_H, |mut header| {
                 header.col(|ui| grid_cell::corner(ui, ui.max_rect()));
                 for (col, head) in heads.iter_mut().enumerate() {
-                    let mut resp = None;
-                    header.col(|ui| resp = Some(self.draw_head(ui, col)));
-                    let Some(r) = resp else { continue };
+                    let mut drawn = None;
+                    header.col(|ui| drawn = Some(self.draw_head(ui, col)));
+                    let Some((r, cut)) = drawn else { continue };
                     *head = (r.rect.left(), r.rect.right());
-                    let r = match (self.sortable, self.blocked) {
-                        (true, None) => r.hint("Sort by this column"),
-                        (true, Some(why)) => r.hint(format!("Sort by this column: not now, {why}")),
-                        (false, _) => r,
+                    let r = match self.head_hint(col, cut) {
+                        Some(words) => r.hint(words),
+                        None => r,
                     };
-                    tags.tag_value(&format!("grid-header-{col}"), &r, self.head_value(col));
+                    tags.tag_value(&format!("grid-header-{col}"), &r, self.head_value(col, cut));
                     if self.sortable && r.clicked() {
                         acts.push(GridAct::Sort(col));
                     }
@@ -629,29 +636,48 @@ impl Grid<'_> {
         if self.source.right_aligned(col) { grid_cell::Align::Right } else { grid_cell::Align::Left }
     }
 
-    fn head_value(&self, col: usize) -> serde_json::Value {
+    /// `type` is the column's whole type, `shown` the type its header draws
+    /// (`display::short_type`), `cut` whether the name or that type did not fit.
+    fn head_value(&self, col: usize, cut: bool) -> serde_json::Value {
         let sort = self.sort_of(col).map(|d| match d {
             SortDir::Asc => "asc",
             SortDir::Desc => "desc",
         });
-        json!({ "name": self.source.column_name(col), "type": self.source.column_type(col), "key": self.key(col).map(Key::id), "sort": sort })
+        let ty = self.source.column_type(col);
+        json!({ "name": self.source.column_name(col), "type": ty, "shown": short_type(ty), "cut": cut, "key": self.key(col).map(Key::id), "sort": sort })
     }
 
-    /// Draws column `col`'s header and returns its response.
-    fn draw_head(&self, ui: &mut egui::Ui, col: usize) -> Response {
+    /// Column `col`'s hover text: its whole name and type when the header shows less (`cut`, or
+    /// the type in its short spelling), then what a click does.
+    fn head_hint(&self, col: usize, cut: bool) -> Option<String> {
+        let (name, ty) = (self.source.column_name(col), self.source.column_type(col));
+        let whole = (cut || short_type(ty) != ty).then(|| if ty.is_empty() { name.to_owned() } else { format!("{name} {ty}") });
+        let sort = match (self.sortable, self.blocked) {
+            (true, None) => Some("Sort by this column".to_owned()),
+            (true, Some(why)) => Some(format!("Sort by this column: not now, {why}")),
+            (false, _) => None,
+        };
+        match (whole, sort) {
+            (Some(whole), Some(sort)) => Some(format!("{whole}\n{sort}")),
+            (whole, sort) => whole.or(sort),
+        }
+    }
+
+    /// Draws column `col`'s header and returns its response, and whether its name or type was cut.
+    fn draw_head(&self, ui: &mut egui::Ui, col: usize) -> (Response, bool) {
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.id().with("dbee-head"), Sense::click());
         let head = Header {
             name: self.source.column_name(col),
-            ty: self.source.column_type(col),
+            ty: &short_type(self.source.column_type(col)),
             key: self.key(col),
             sort: self.sort_of(col),
             align: self.align(col),
             sortable: self.sortable,
             hovered: resp.hovered(),
         };
-        head.paint(ui, rect);
-        resp
+        let cut = head.paint(ui, rect);
+        (resp, cut)
     }
 
     /// Draws row `row`'s number, `hovered` when the row is under the pointer, and returns its

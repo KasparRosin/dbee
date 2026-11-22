@@ -237,6 +237,9 @@ pub const GRID_ROW_NUMBER_MIN_W: f32 = 36.0;
 pub const GRID_OUTLINE_W: f32 = 2.0;
 pub const GRID_LINK_GAP: f32 = 6.0;
 pub const GRID_FAILED_MARK: f32 = 6.0;
+/// A header's sort mark keeps this far from the cell's right edge (its line and 1 px of air)
+/// when the name and type are cut to make room for it.
+pub const GRID_SORT_EDGE: f32 = 2.0;
 
 /// A tree row (`tree/row`): a row's height; what it holds starts this far in, one level this much
 /// further; the chevron's square, then the icon's, then the name, this far apart; the type ends
