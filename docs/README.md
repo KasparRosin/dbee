@@ -15,7 +15,7 @@ Start with the [README](../README.md) for what dbee is and how to build it. Agen
 - [testing.md](testing.md): the kinds of tests, the Docker test servers and the timing tests.
 - [decisions.md](decisions.md): significant decisions and why they were made.
 - [releasing.md](releasing.md): the release pipeline and signing.
-- [contributors.md](contributors.md): how contributors are credited in the About window.
+- [contributors.md](contributors.md): how contributors will be credited in the About window (planned), and the files behind it.
 - Standards: [never crash](standards/never-crash.md), [progress docs](standards/progress-docs.md), [licensing](standards/licensing.md).
 
 ## Where dbee stands
