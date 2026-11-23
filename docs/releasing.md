@@ -1,6 +1,6 @@
 # Releasing dbee
 
-> **Last reviewed:** 2026-11-10 · **Last updated:** 2026-11-23 · **Change:** minor (the repository's own setup checklist is no longer part of this page; before: releases are full releases from 0.2.0; the notes link to installing.md)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (Linux riscv64 is built as `.deb`, `.rpm` and `.tar.gz`, as the release workflow does)
 
 Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `v<version>`, the tag alone. Nobody sees a draft until the owner publishes it. The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 
@@ -19,7 +19,7 @@ Every push to the `release` branch runs `.github/workflows/release.yml`. The wor
 2. **Push `main` to `release`:** `git push origin main:release`. The workflow starts by itself.
 3. **Wait for the draft.** Notarization and the FreeBSD VM are the slow parts. The Releases page then has a draft `v<version>`, tagged the same on the pushed commit, with every artifact and `SHA256SUMS.txt`.
 4. **Check it.** Download an installer or two and read the job summaries. A `::warning::` there means a signing secret was missing and that artifact is unsigned.
-5. **Write the notes and publish** the draft in the GitHub UI. Publishing creates the tag. From 0.2.0 on, releases are full releases, not pre-releases (the maintainer's call, 2026-11-10); a version containing `-` (such as `0.0.1-rc.1`) would still be marked as one. The notes link to [installing.md](installing.md) for opening an unsigned build, instead of repeating the steps; links into the repository point at the release's commit, since its tag only exists once it's published.
+5. **Write the notes and publish** the draft in the GitHub UI. Publishing creates the tag. From 0.2.0 on, releases are full releases, not pre-releases; a version containing `-` (such as `0.0.1-rc.1`) would still be marked as one. The notes link to [installing.md](installing.md) for opening an unsigned build, instead of repeating the steps; links into the repository point at the release's commit, since its tag only exists once it's published.
 
 Pushing to `release` again before you publish rebuilds the same draft and replaces its assets. After publishing, the workflow refuses to touch that version again, so bump first.
 
@@ -37,7 +37,7 @@ Pushing to `release` again before you publish rebuilds the same draft and replac
 | Windows x86 | `dbee-<v>-windows-x86.msi`, `dbee-<v>-windows-x86-portable.zip` |
 | Linux x86_64 | `dbee-<v>-linux-x86_64.{AppImage,AppImage.zsync,flatpak,deb,rpm,tar.gz}` |
 | Linux aarch64 | `dbee-<v>-linux-aarch64.{AppImage,AppImage.zsync,flatpak,deb,rpm,tar.gz}` |
-| Linux riscv64 | `dbee-<v>-linux-riscv64.tar.gz` (cross-compiled) |
+| Linux riscv64 | `dbee-<v>-linux-riscv64.{deb,rpm,tar.gz}` (cross-compiled) |
 | FreeBSD x86_64 | `dbee-<v>-freebsd-x86_64.tar.gz` (built in a FreeBSD VM by the `freebsd` job of `release.yml`) |
 | All | `SHA256SUMS.txt` |
 
