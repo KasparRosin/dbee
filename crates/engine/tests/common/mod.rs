@@ -100,6 +100,7 @@ fn session_with(home: TempHome, exclusive: bool, adjust: impl FnOnce(&mut Sessio
         allowed_targets: None,
         allowed_dirs: None,
         drivers: dbee_drivers::all(),
+        updates: None,
     };
     adjust(&mut options);
     TestSession { session: Session::new(options).unwrap(), secrets, home, hold }
@@ -137,6 +138,7 @@ pub fn second_session(home: &TempHome) -> Session {
         allowed_targets: None,
         allowed_dirs: None,
         drivers: dbee_drivers::all(),
+        updates: None,
     })
     .unwrap()
 }

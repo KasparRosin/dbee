@@ -14,6 +14,7 @@
 //! one exception is a query run whose tab closed: what it did to the query connection is kept
 //! (see [`query`]).
 
+pub mod app;
 pub mod connection;
 pub mod edit;
 pub mod query;
@@ -74,7 +75,8 @@ impl CommandInfo {
 }
 
 /// Every command table, in menu order. A new command module adds its `SPECS` here.
-const GROUPS: &[&[CommandSpec]] = &[tabs::SPECS, connection::SPECS, schema::SPECS, table::SPECS, edit::SPECS, query::SPECS, selection::SPECS];
+const GROUPS: &[&[CommandSpec]] =
+    &[tabs::SPECS, connection::SPECS, schema::SPECS, table::SPECS, edit::SPECS, query::SPECS, selection::SPECS, app::SPECS];
 
 #[cfg(test)]
 fn test_specs() -> &'static [CommandSpec] {

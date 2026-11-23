@@ -19,6 +19,7 @@ dbee-engine = { workspace = true }
 dbee-drivers = { workspace = true }
 dbee-config = { workspace = true }
 dbee-ssh = { workspace = true }
+dbee-update = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
 egui = { workspace = true }
 log = { workspace = true }

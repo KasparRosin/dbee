@@ -18,6 +18,7 @@ pub mod fuzzy;
 mod jobs;
 pub mod state;
 mod turns;
+pub mod update;
 pub mod view;
 
 use std::any::Any;
@@ -41,6 +42,7 @@ pub use state::{
     Connected, CurrentDatabase, PageView, QueryError, QueryTab, Screen, Selection, Showing, State, StatementOutcome, StructureRead, Tab,
     TabStructure, TableTab, Total, Transaction, Which,
 };
+pub use update::{UpdateState, Updates};
 pub use view::{VALUE_VIEW_MAX_BYTES, ValueView};
 
 /// Params, results and error data.
@@ -132,12 +134,14 @@ pub enum EngineError {
     Internal { id: String, msg: String },
     /// Settings or the connections file could not be used.
     Config(String),
+    /// The update check could not get or read its answer.
+    Update(String),
 }
 
 impl EngineError {
     /// A stable id: `unknownCommand`, `disabled`, `badParams`, `needsHostKey`, `needsPassphrase`,
     /// `needsPassword`, `needsSshPassword`, `needsConfirm`, `needsTransactionEnd`, a database code (`server`,
-    /// `connectionLost`, …), `busy`, `timeout`, `internal` or `config`.
+    /// `connectionLost`, …), `busy`, `timeout`, `internal`, `config` or `update`.
     pub fn code(&self) -> &'static str {
         match self {
             EngineError::UnknownCommand(_) => "unknownCommand",
@@ -156,6 +160,7 @@ impl EngineError {
             EngineError::Timeout => "timeout",
             EngineError::Internal { .. } => "internal",
             EngineError::Config(_) => "config",
+            EngineError::Update(_) => "update",
         }
     }
 
@@ -183,7 +188,7 @@ impl EngineError {
                 Need::Password | Need::SshPassword => json!({}),
             },
             EngineError::Db { data, .. } => data.clone(),
-            EngineError::Busy(_) | EngineError::Timeout | EngineError::Config(_) => json!({}),
+            EngineError::Busy(_) | EngineError::Timeout | EngineError::Config(_) | EngineError::Update(_) => json!({}),
         }
     }
 }
@@ -198,7 +203,7 @@ impl std::fmt::Display for EngineError {
             EngineError::Busy(what) => write!(f, "busy: {what}"),
             EngineError::Timeout => write!(f, "gave up waiting: it took too long"),
             EngineError::Internal { id, msg } => write!(f, "internal error in `{id}` (the session was kept as it was): {msg}"),
-            EngineError::Config(m) => write!(f, "{m}"),
+            EngineError::Config(m) | EngineError::Update(m) => write!(f, "{m}"),
         }
     }
 }
@@ -236,6 +241,9 @@ pub struct SessionOptions {
     /// The drivers connections open with (the app's are `dbee_drivers::all()`). A database type
     /// none of them opens is refused with `disabled`.
     pub drivers: Drivers,
+    /// What the update check runs with (the app's fetches from GitHub). `None`, the default, is
+    /// a session that never checks: tests, isolated runs and development builds.
+    pub updates: Option<Updates>,
 }
 
 impl std::fmt::Debug for SessionOptions {
@@ -248,6 +256,7 @@ impl std::fmt::Debug for SessionOptions {
             .field("allowed_targets", &self.allowed_targets)
             .field("allowed_dirs", &self.allowed_dirs)
             .field("drivers", &self.drivers)
+            .field("updates", &self.updates)
             .finish()
     }
 }
@@ -289,6 +298,12 @@ pub struct Session {
     pub(crate) allowed_targets: Option<Vec<(String, u16)>>,
     pub(crate) allowed_dirs: Option<Vec<PathBuf>>,
     pub(crate) drivers: Drivers,
+    /// The update checker; `None` in a run that never checks.
+    pub(crate) updates: Option<update::Updater>,
+    /// The settings' switch of the automatic update check.
+    pub(crate) update_check_enabled: bool,
+    /// The settings folder, for the settings the engine's commands keep.
+    pub(crate) config_dir: Option<PathBuf>,
     journal: Vec<(String, Json)>,
     value_cache: view::Cache,
 }
@@ -309,8 +324,18 @@ impl Session {
         if store_warning.is_some() {
             log::warn!("the connections file could not be used; connections are kept in memory or start empty");
         }
+        let update_check_enabled = dbee_config::load_update_check(o.config_dir.as_deref());
+        let (updates, update) = match o.updates {
+            Some(options) => {
+                let (updater, state) = update::Updater::start(options, o.config_dir.clone());
+                (Some(updater), state)
+            }
+            None => (None, UpdateState::None),
+        };
+        let mut state = State::new(store, store_warning);
+        state.update = update;
         Ok(Session {
-            state: State::new(store, store_warning),
+            state,
             jobs,
             ui_requests: Vec::new(),
             secrets: o.secrets,
@@ -318,6 +343,9 @@ impl Session {
             allowed_targets: o.allowed_targets,
             allowed_dirs: o.allowed_dirs,
             drivers: o.drivers,
+            updates,
+            update_check_enabled,
+            config_dir: o.config_dir,
             journal: Vec::new(),
             value_cache: view::Cache::default(),
         })
@@ -411,6 +439,7 @@ impl Session {
     /// returns them, oldest first, including those applied while [`Session::wait`] or
     /// [`Session::wait_idle`] waited. Never blocks; the UI calls it every frame.
     pub fn pump(&mut self) -> Vec<(JobId, Result<Json, EngineError>)> {
+        self.update_tick();
         let mut out = self.jobs.take_delivered();
         while let Some(done) = self.jobs.try_next() {
             out.push(self.apply(done));
@@ -561,7 +590,7 @@ impl Session {
 
     /// A JSON summary for agents and tests (`document.inspect`): the screen, the database types
     /// the session can open (`kinds`, their ids), the active tab's connection and every open one,
-    /// the tabs and the active one in detail, and the running jobs. Never contains a secret.
+    /// the tabs and the active one in detail, the update's state, and the running jobs. Never contains a secret.
     pub fn inspect(&self) -> Json {
         let st = &self.state;
         let summary = |c: &Connected| c.summary(st.store.is_saved(&c.config.id));
@@ -588,6 +617,7 @@ impl Session {
             "table": table,
             "selection": view::selection_json(active),
             "value": self.value_view_shared().map_or(Json::Null, |v| view::summary(&v)),
+            "update": self.update_json(),
             "jobs": self.jobs.running().map(|(job, label)| json!({ "job": job, "label": label })).collect::<Vec<_>>(),
         })
     }

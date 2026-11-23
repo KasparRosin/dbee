@@ -158,6 +158,7 @@ impl Rig {
             allowed_targets: None,
             allowed_dirs: None,
             drivers: Drivers::new(vec![Arc::new(StandIn { received: Arc::clone(&self.received), accepts: self.accepts })]),
+            updates: None,
         })
         .unwrap()
     }

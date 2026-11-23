@@ -110,6 +110,7 @@ impl Ui {
             allowed_targets: None,
             allowed_dirs: None,
             drivers: setup.drivers.unwrap_or_else(dbee_drivers::all),
+            updates: None,
         })
         .unwrap();
         let (tx, rx) = mpsc::channel();

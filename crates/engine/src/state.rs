@@ -770,6 +770,8 @@ pub struct State {
     /// Why the connections file could not be used, at the start or at a later change (then the
     /// store may be empty, or memory only), for the UI to show.
     pub store_warning: Option<String>,
+    /// Where the update stands: a newer release, its install, or nothing.
+    pub update: crate::update::UpdateState,
 }
 
 impl State {
@@ -783,6 +785,7 @@ impl State {
             next_tab: 1,
             next_connection: 1,
             store_warning,
+            update: crate::update::UpdateState::None,
         }
     }
 

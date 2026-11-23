@@ -153,6 +153,7 @@ fn options() -> SessionOptions {
         allowed_targets: None,
         allowed_dirs: None,
         drivers: dbee_driver::Drivers::default(),
+        updates: None,
     }
 }
 
