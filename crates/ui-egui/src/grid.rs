@@ -640,9 +640,9 @@ impl Grid<'_> {
     }
 
     /// A cell of row `row` is being edited. The row then shows no selection ground, on its cells,
-    /// its number or past its last column: selected text in the editor is drawn on the very
-    /// colour a selected row has (`text_selection` is `selection`), and would not stand out from
-    /// the row round it. The editor's `ink` outline says which cell, and the selection itself is
+    /// its number or past its last column: selected text in the editor is drawn on
+    /// `text_selection`, a step from `selection`, and would hardly stand out from a lit row round
+    /// it. The editor's `ink` outline says which cell, and the selection itself is
     /// unchanged: it lights again when the editor closes.
     fn edited(&self, row: usize) -> bool {
         self.editing.is_some_and(|(r, _)| r == row)

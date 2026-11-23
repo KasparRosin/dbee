@@ -73,7 +73,7 @@ pub const LIGHT: Tokens = Tokens {
     fill: rgb(0xE8E8E8),
     hover: rgba(0xE8E8E880),
     selection: rgb(0xE8E8E8),
-    text_selection: rgb(0xE8E8E8),
+    text_selection: rgb(0xD8D8D8),
     raised: rgb(0xFFFFFF),
     raised_hover: rgb(0xE8E8E8),
     raised_line: rgb(0xE8E8E8),
@@ -120,7 +120,7 @@ pub const DARK: Tokens = Tokens {
     fill: rgb(0x2A2A2A),
     hover: rgba(0xF2F2F214),
     selection: rgb(0x2A2A2A),
-    text_selection: rgb(0x2A2A2A),
+    text_selection: rgb(0x3D3D3D),
     raised: rgb(0x2A2A2A),
     raised_hover: rgba(0xF2F2F214),
     raised_line: rgb(0x111111),
@@ -336,7 +336,33 @@ mod tests {
             assert!(t.bg == t.card && t.card == t.on_ink, "{mode}: white family");
             assert_eq!(t.ink, t.text, "{mode}: black family");
             assert_eq!(t.text_muted, t.line_strong, "{mode}: grey");
-            assert!(t.line == t.fill && t.fill == t.selection && t.selection == t.text_selection, "{mode}: tint");
+            assert!(t.line == t.fill && t.fill == t.selection, "{mode}: tint");
+            assert_ne!(t.text_selection, t.selection, "{mode}: selected text has a ground of its own, stronger than a selected row's");
+        }
+    }
+
+    /// Selected text's ground stands out from `card` more than a selected row's does, and what
+    /// can be drawn on it stays readable: `ink` (every editor and input draws its selected text
+    /// in it) at 7 to 1, and the colours the value panel keeps inside a selection (`text_muted`
+    /// and the JSON colours) at 4.5 to 1. One falls short: `text_muted` in dark, at 4.46.
+    #[test]
+    fn selected_text_stands_out_and_reads() {
+        for (mode, t) in both() {
+            let (own, row) = (contrast(t.text_selection, t.card), contrast(t.selection, t.card));
+            assert!(own >= 1.4 && own > row, "{mode}: text_selection on card {own:.2}, selection {row:.2}");
+            assert!(contrast(t.ink, t.text_selection) >= 7.0, "{mode}: ink: {:.2}", contrast(t.ink, t.text_selection));
+            let kept = [
+                ("text", t.text),
+                ("muted", t.text_muted),
+                ("keyword", t.syn_keyword),
+                ("string", t.syn_string),
+                ("number", t.syn_number),
+                ("literal", t.syn_literal),
+            ];
+            for (name, c) in kept {
+                let least = if (mode, name) == ("dark", "muted") { 4.4 } else { 4.5 };
+                assert!(contrast(c, t.text_selection) >= least, "{mode}: {name} on text_selection: {:.2}", contrast(c, t.text_selection));
+            }
         }
     }
 

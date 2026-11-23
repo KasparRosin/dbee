@@ -1871,3 +1871,92 @@ fn selected_text_in_the_cell_editor_shows_as_well_as_in_the_panel() {
         }
     }
 }
+
+/// Selected text has `text_selection` behind it wherever text can be selected, in dark and in
+/// light: the tree's filter, a filter's value, the quick search, the cell's editor, the value
+/// panel's editor, a value read in the panel, and the SQL editor. A selected row keeps
+/// `selection`, which is another colour.
+#[test]
+fn selected_text_is_drawn_on_text_selection_everywhere() {
+    let db = dbee_testkit::require_testdb!();
+    let t = orders(db);
+    for (mode, command, tokens) in [("dark", "ui.themeDark", dbee_ui_egui::theme::DARK), ("light", "ui.themeLight", dbee_ui_egui::theme::LIGHT)] {
+        let mut ui = opened_in(db, &t, APP_SIZE);
+        ui.execute(command, json!({}));
+        ui.frame();
+        assert_ne!(tokens.text_selection, tokens.selection, "{mode}");
+        let own = [tokens.text, tokens.ink];
+        // Fields: typed text, all of it selected.
+        for (field, typed) in [("tree-filter", "zzq"), ("filter-0-value", "42x")] {
+            ui.click(field);
+            ui.text(typed);
+            ui.ctrl("A");
+            ui.frame();
+            let at = ui.drawn(field);
+            assert_eq!(selection_ground(&ui, at, typed, own), Some(tokens.text_selection), "{mode}: `{field}`");
+        }
+        ui.click("tree-filter");
+        ui.ctrl("A");
+        ui.key("Delete");
+        ui.ctrl("P");
+        ui.until("the quick search", |ui| ui.tag("qs-input").is_some());
+        ui.text("zzq");
+        ui.ctrl("A");
+        ui.frame();
+        let at = ui.drawn("qs-input");
+        assert_eq!(selection_ground(&ui, at, "zzq", own), Some(tokens.text_selection), "{mode}: the quick search");
+        ui.key("Escape");
+        ui.frame();
+        // The cell's editor (all selected as it opens), then the same draft in the panel.
+        ui.click("grid-cell-1-1");
+        for _ in 0..3 {
+            ui.frame();
+        }
+        ui.key("Enter");
+        ui.frame();
+        ui.frame();
+        let (cell, panel) = (ui.drawn("cell-editor"), ui.drawn("value-editor"));
+        assert_eq!(selection_ground(&ui, cell, "Bob", own), Some(tokens.text_selection), "{mode}: the cell's editor");
+        ui.click("value-editor");
+        ui.ctrl("A");
+        ui.frame();
+        assert_eq!(selection_ground(&ui, panel, "Bob", own), Some(tokens.text_selection), "{mode}: the panel's editor");
+        ui.key("Escape");
+        for _ in 0..3 {
+            ui.frame();
+        }
+        // A selected row: `selection`, on its cells and its number.
+        ui.click("grid-row-0");
+        ui.frame();
+        for id in ["grid-cell-0-0", "grid-cell-0-3", "grid-row-0"] {
+            assert_eq!(colour_at(&ui, ui.drawn(id).center()), Some(tokens.selection), "{mode}: `{id}` of a selected row");
+        }
+        // A value read in the panel: its own selection, the JSON's colours kept on it.
+        ui.click("grid-cell-0-5");
+        for _ in 0..3 {
+            ui.frame();
+        }
+        ui.click("value-text");
+        ui.ctrl("A");
+        ui.frame();
+        assert!(ui.value("value-text")["selection"].is_array(), "{mode}: the panel's text is selected: {}", ui.value("value-text"));
+        let at = ui.drawn("value-text");
+        let behind: Vec<egui::Color32> = ui
+            .shapes()
+            .into_iter()
+            .filter_map(|(_, s)| match s {
+                egui::Shape::Rect(r) if at.expand(1.0).contains_rect(r.rect) && r.rect.height() <= 24.0 && r.fill.a() > 0 => Some(r.fill),
+                _ => None,
+            })
+            .collect();
+        assert!(!behind.is_empty() && behind.iter().all(|c| *c == tokens.text_selection), "{mode}: behind the value's selected rows: {behind:?}");
+        // The SQL editor.
+        ui.ctrl("T");
+        ui.frame();
+        ui.text("select 1");
+        ui.ctrl("A");
+        ui.frame();
+        let at = ui.drawn("query-editor");
+        assert_eq!(selection_ground(&ui, at, "select 1", own), Some(tokens.text_selection), "{mode}: the SQL editor");
+    }
+}

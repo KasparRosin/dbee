@@ -44,7 +44,9 @@ fn style_for(style: &mut egui::Style, t: &Tokens, dark: bool) {
     v.error_fg_color = t.danger;
     v.warn_fg_color = t.staged_strong;
     v.hyperlink_color = t.ink;
-    v.selection.bg_fill = t.selection;
+    // egui paints this behind selected text, in every text field and selectable label; nothing
+    // of dbee's draws an egui widget in its `selected` look, which would take it too.
+    v.selection.bg_fill = t.text_selection;
     v.selection.stroke = Stroke::new(1.0, t.ink);
     v.text_cursor.stroke = Stroke::new(CARET_W, t.ink);
     v.window_shadow = Shadow::NONE;
