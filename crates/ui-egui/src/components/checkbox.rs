@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn each_checkbox_state_matches_the_page() {
-        // Node 161167: 18 tall; a 14 box with corners 2, 2 down, then 8, then the label in `body`.
+        // 18 tall; a 14 box with corners 2, 2 down, then 8, then the label in `body`.
         // On: `ink` with the check in `on_ink`; off: `card` in a 1 px `line_strong` edge. Disabled:
         // the box `text_faint` (on) or a `text_faint` edge (off), the label `text_faint`. Focus: a
         // 2 px `ink` box 4 px around the box and the label together.

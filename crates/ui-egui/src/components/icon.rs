@@ -471,8 +471,7 @@ mod tests {
 
     use super::*;
 
-    /// The page's icon nodes, 160919 to 160986, 162610 and 162613, and 166645 and 166648: name
-    /// and box.
+    /// The page's icons: name and box.
     const PAGE: [(&str, f32, f32); 36] = [
         ("icon/chevron-down", 8.0, 4.0),
         ("icon/chevron-right", 4.0, 8.0),
@@ -564,7 +563,7 @@ mod tests {
 
     #[test]
     fn success_and_error_are_the_pages_drawings() {
-        // Nodes 162610 and 162613: a 1.2 ring of radius 6.4 round the box's centre (7, 7); in it
+        // Success and error: a 1.2 ring of radius 6.4 round the box's centre (7, 7); in it
         // the check (4.2, 7.1) (6.2, 9.1) (9.9, 5.2), or the bar (7, 3.9) to (7, 8) over a dot of
         // radius 0.7 at (7, 10).
         let near = |a: Pos2, b: Pos2| (a - b).length() < 1e-3;
@@ -595,10 +594,10 @@ mod tests {
 
     #[test]
     fn follow_and_line_break_are_the_pages_drawings() {
-        // Node 166645 (`icon/follow`, 14 square): a ring inside the ellipse at (1.4, 1.4) of 11.2,
+        // `icon/follow`, 14 square: a ring inside the ellipse at (1.4, 1.4) of 11.2,
         // its 1.1 stroke inside, so centred on radius 5.05 round (7, 7); the glyph's frame at
         // (3.9, 4.6) holds the line (0, 2.4) to (5.9, 2.4) and the head (3.4, 0) (5.9, 2.4)
-        // (3.4, 4.8), round ends. Node 166648 (`icon/line-break`, 10 square): the glyph's frame
+        // (3.4, 4.8), round ends. `icon/line-break`, 10 square: the glyph's frame
         // at (2, 1.5) holds (6, 0) (6, 5) (0, 5) and the head (2.2, 2.7) (0, 5) (2.2, 7.3).
         let near = |a: Pos2, b: Pos2| (a - b).length() < 1e-3;
         let follow = drawn(Icon::Follow, pos2(40.0, 30.0), Color32::BLACK, 1.0);

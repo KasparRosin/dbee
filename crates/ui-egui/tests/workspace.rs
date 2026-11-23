@@ -1435,7 +1435,7 @@ fn tabs_open_close_and_mark_filters_and_text() {
     assert_eq!(ui.document()["tabs"].as_array().map(Vec::len), Some(1));
 }
 
-/// The tabs strip as the last frame drew it (the page's `tab strip`, node 163870): a band on
+/// The tabs strip as the last frame drew it (the page's `tab strip`): a band on
 /// `card` that the tabs fill top to bottom, side by side, each with a 1 px `line` at its right
 /// end; the `line` along the band's bottom under everything but the active tab (`active`), which
 /// has the 2 px `ink` line along its top; no other tab has that line.
@@ -2269,7 +2269,7 @@ fn lines(ui: &Ui, line: egui::Color32) -> Vec<egui::Rect> {
         .collect()
 }
 
-/// Shell screen (query tab 43147, table tab 84237, dark beside each): the sidebar is 260 wide with
+/// The workspace with a query tab and with a table tab, in light and dark: the sidebar is 260 wide with
 /// no margin and a `line` down its right edge; what it holds starts 12 from the window's edge; its
 /// filter row is 36 tall, so the row's line and the tab strip's meet; the first tab starts at the
 /// sidebar's line.
@@ -3050,7 +3050,7 @@ fn words_at(ui: &Ui, words: &str) -> (egui::Rect, egui::Color32) {
     (at, colour_of(ui, at.expand(0.5), words).expect("its colour"))
 }
 
-/// Empty state C1 (98322, dark 99827): "No tab open" in `body` `text_muted`, centred in the work
+/// The work area with no tab open, in light and dark: "No tab open" in `body` `text_muted`, centred in the work
 /// area; under it, 16 apart, New query with CTRL T and Quick search with CTRL P, 8 apart, the
 /// words on the left and the keycaps on the right of a 220 wide block. The strip shows only +.
 /// Open or shut, the value panel has no place with no tab: the block is centred in the whole area.

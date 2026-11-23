@@ -186,7 +186,7 @@ mod tests {
     use crate::theme::Text;
     use crate::theme::size::BAR_H;
 
-    /// The page's header is this wide (`sidebar/filter` 164486, `sidebar/count` 164511).
+    /// The page's header is this wide (`sidebar/filter`, `sidebar/count`).
     const W: f32 = 259.0;
 
     fn close(a: f32, b: f32) -> bool {
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn the_sidebar_filter_matches_the_page() {
-        // Node 164486: a row 36 tall with a 1 px `line` along its bottom and no ground. The field
+        // A row 36 tall with a 1 px `line` along its bottom and no ground. The field
         // fills it up to the refresh, 35 tall above the line, its words 12 in and centred, in
         // `body`: the placeholder `text_muted`, what is typed `text`. Keyboard focus is a 2 px
         // `ink` box 2 inside the field, corners 2. The refresh is a plain icon button, a 28
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn the_count_matches_the_page() {
-        // Node 164511: a row 28 tall, its words 12 in and centred, in `label` capitals,
+        // A row 28 tall, its words 12 in and centred, in `label` capitals,
         // `text_muted`; read out as written.
         let counts = [
             (Count::All(516, TABLES), "516 TABLES", "516 tables"),

@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn each_menu_item_state_matches_the_page() {
-        // Node 162639: 28 tall; the words in `button`, 8 in (30 with the chosen mark's 14 px
+        // 28 tall; the words in `button`, 8 in (30 with the chosen mark's 14 px
         // column and 8), centred; the keys 3 apart, ending 8 from the right, 24 after the words
         // at least; the submenu's arrow in `text_muted`, ending 8 from the right. Hover:
         // `raised_hover`, corners 2. Words `text`, destructive `danger`, disabled `text_faint`.
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn the_keyboard_highlight_looks_like_hover() {
-        // Node 162639's hover is also the keyboard's highlight, whether egui's focus moved there
+        // A menu item's hover is also the keyboard's highlight, whether egui's focus moved there
         // (Tab, the arrows) or a list moves its own highlight (`highlighted`).
         struct S {
             at: [Rect; 2],
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn a_menu_has_a_line_edge_and_a_tooltip_doesnt() {
-        // Node 162690: `raised`, a 1 px `line` edge, corners 4, the one shadow, 4 inside the
+        // `raised`, a 1 px `line` edge, corners 4, the one shadow, 4 inside the
         // edge. Tooltips keep the theme's `raised_line` edge.
         const TIP: &str = "New query tab (Ctrl+T)";
         for (theme, t) in both() {
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn an_open_menu_title_takes_the_fill_box() {
-        // Node 162732: the word in `body` as written, 8 in from either end, 24 tall; open, a
+        // The word in `body` as written, 8 in from either end, 24 tall; open, a
         // `fill` box with corners 2. Its menu opens under it.
         for (theme, t) in both() {
             let mut h = harness(theme, (Rect::NOTHING, Rect::NOTHING), |ui, (title, item)| {

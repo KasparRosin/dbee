@@ -587,12 +587,9 @@ pub(crate) fn value_facts_samples() -> [(ValueSample, f32); 3] {
 /// narrowest bar.
 fn value_panels(ui: &mut Ui) {
     let samples = value_samples();
-    section(
-        ui,
-        "value panel: json, text, NULL, empty (inferred), no cell selected (B4), COPIED, editing several lines (MC+), #17 a row as JSON (inferred)",
-        SPACE_8,
-        |ui| panels(ui, samples.len(), |ui, i, at| _ = value_panel(ui, &samples[i], at)),
-    );
+    section(ui, "value panel: json, text, NULL, empty (inferred), no cell selected, COPIED, editing, #17 a row as JSON (inferred)", SPACE_8, |ui| {
+        panels(ui, samples.len(), |ui, i, at| _ = value_panel(ui, &samples[i], at))
+    });
     let facts = value_facts_samples();
     section(ui, "value panel: FORMATTED AS JSON (K2), a cut value (N2), 240 wide with a long name and type", SPACE_8, |ui| {
         panels(ui, facts.len(), |ui, i, at| {
@@ -754,7 +751,7 @@ const STRUCTURE_ROWS: [[structure::Cell<'static>; 6]; 4] = {
 
 /// The structure view's parts as the page's frame draws them: COLUMNS, the header, four columns.
 fn structure_sample(ui: &mut Ui) {
-    let caption = "structure view (SA): a section heading, the header (ink line under it), rows with position, name, type, nullable check, default, keys (primary key, foreign key link)";
+    let caption = "structure view: a section heading, the header (ink line under it), rows with position, name, type, nullable check, default, keys (primary key, foreign key link)";
     section(ui, caption, 0.0, |ui| {
         let rows = STRUCTURE_ROWS.len() as f32;
         let (frame, _) = ui.allocate_exact_size(vec2(STRUCTURE_W, STRUCTURE_HEADING_H + STRUCTURE_HEADER_H + STRUCTURE_ROW_H * rows), Sense::hover());
@@ -1462,7 +1459,7 @@ fn tabs(ui: &mut Ui) {
     });
 }
 
-/// The page's tabs that don't fit (174394), in strip order: each title and whether it is a query
+/// The page's tabs that don't fit, in strip order: each title and whether it is a query
 /// tab. Query 1 is the active one, with unsaved text.
 const TOO_MANY_TABS: [(&str, bool); 7] = [
     ("orders [3]", false),

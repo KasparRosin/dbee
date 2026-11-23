@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn each_box_button_state_matches_the_page() {
-        // Node 160992: 28 tall, corners 2, the words 12 inside the box (and inside the outline's
+        // 28 tall, corners 2, the words 12 inside the box (and inside the outline's
         // 1 px edge), a shortcut 8 after them.
         for (theme, t) in both() {
             for style in [Style::Primary, Style::Outline, Style::Danger] {
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn text_button_focus_is_a_box_around_it() {
-        // Node 161015: no ground, no edge; the words 10 in from either end; focus a 2 px ink box
+        // No ground, no edge; the words 10 in from either end; focus a 2 px ink box
         // 4 px around it.
         for (theme, t) in both() {
             let mut at = [Rect::NOTHING; 3];
@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn each_icon_button_state_matches_the_page() {
-        // Node 161038: 28 square, corners 2, the icon centred in `text`. Boxed: a 1 px line_strong
+        // 28 square, corners 2, the icon centred in `text`. Boxed: a 1 px line_strong
         // edge and no ground; plain: no edge, so its focus is a box around it.
         let hovered = Look { hovered: true, ..Look::default() };
         let focused = Look { focused: true, ..Look::default() };
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn each_bar_button_state_matches_the_page() {
-        // Node 161067: 36 tall; the label kind 12, its icon, 8, its words in `label` caps, 12; the
+        // 36 tall; the label kind 12, its icon, 8, its words in `label` caps, 12; the
         // icon kind 36 square, its icon centred. Hover `hover`, on `fill` over the whole cell (and
         // hovering it changes nothing), the divider a 1 px `line` at its left end over the ground,
         // focus a 2 px ink box 2 px inside.
@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn bar_buttons_are_as_wide_as_the_pages() {
-        // The instances of the page's bar row (161306) and the icon kind, to a point: egui
+        // The page's bar row of buttons and the icon kind, to a point: egui
         // measures these words a little narrower than the page's font does.
         let mut widths = Vec::new();
         painted(Theme::Light, |ui| {
@@ -830,7 +830,7 @@ mod tests {
 
     #[test]
     fn a_boxed_icon_button_that_is_on_matches_the_page() {
-        // Node 174286 (`style=boxed, state=on`): a `fill` ground inside its 1 px `line_strong`
+        // Boxed and on: a `fill` ground inside its 1 px `line_strong`
         // edge, the icon in `text` as in default; hovering changes nothing. Read out as on.
         use egui::accesskit::Toggled;
         use egui_kittest::kittest::NodeT;

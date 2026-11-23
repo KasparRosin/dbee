@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn each_dropdown_state_matches_the_page() {
-        // Node 161127: 160 by 28, `card` in a 1 px `line_strong` edge, corners 2; the chosen text
+        // 160 by 28, `card` in a 1 px `line_strong` edge, corners 2; the chosen text
         // in `body`, `text`, 9 in and centred; the chevron in `text_muted`, its right end 9 from
         // the box's. Focus: the edge turns 2 px `ink`. Disabled: text and chevron `text_faint`.
         let focused = Look { focused: true, ..Look::default() };

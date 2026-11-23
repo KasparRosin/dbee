@@ -13,7 +13,7 @@ use serde_json::Value;
 /// Platforms whose dependency trees are checked.
 pub const TARGETS: &[&str] = &["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-freebsd"];
 
-/// Packages approved by the owner despite a licence outside the allowlist: (crate name, reason).
+/// Packages allowed despite a licence outside the allowlist: (crate name, reason).
 pub const EXCEPTIONS: &[(&str, &str)] = &[("epaint_default_fonts", "egui's built-in fonts, kept as the fallback (OFL-1.1, Ubuntu-font-1.0)")];
 
 /// Licence ids the project may depend on.

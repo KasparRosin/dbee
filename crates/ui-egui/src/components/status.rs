@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn each_connection_block_matches_the_page() {
-        // Node 163915 in the status bar (163971): a 30 tall bar on `bg`, the colour as a 2 px edge
+        // The connection's block in the status bar: a 30 tall bar on `bg`, the colour as a 2 px edge
         // along its top and as the block under it, from the bar's left end, 28 tall, its name in
         // `label` capitals 12 in from either end, in the colour's own text colour. No colour: a
         // 1 px `line` edge, no block, the name in `text`.
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn each_activity_matches_the_page() {
-        // Node 163955, at the bar's right, 12 from its end, centred under the edge. In
+        // The state, at the bar's right, 12 from its end, centred under the edge. In
         // transaction: an 8 px `staged_strong` square, 8, the words in `text`. Disconnected: the
         // words in `danger`, 8, RECONNECT (`button/text`). Reconnecting: the words in `text_muted`,
         // 12, the timer in `data`. Exporting and importing: the icon and the words in `text`, 8

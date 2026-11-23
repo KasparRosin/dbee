@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn line_numbers_match_the_page() {
-        // Node 168934: default, current, error, each 36 by 20, the number flush right; and line 12
+        // Default, current, error, each 36 by 20, the number flush right; and line 12
         // with the cursor and the error on it.
         let numbers = [
             LineNumber { n: 1, current: false, error: false },
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn the_error_token_matches_the_page() {
-        // Node 168939: `o.totl` in `code` `text`, a 1.5 `danger` line 17 down its 20 tall row,
+        // `o.totl` in `code` `text`, a 1.5 `danger` line 17 down its 20 tall row,
         // as wide as the token.
         for (theme, t) in both() {
             let at = pos2(10.0, 10.0);

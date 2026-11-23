@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(tops(&commands), ["File", "Query", "Tools", "Help"]);
     }
 
-    /// Edit as the Screens page draws it (85237, dark 85754): Undo, Redo | Copy, Select All |
+    /// Edit, in light and dark: Undo, Redo | Copy, Select All |
     /// Apply, Reset.
     #[test]
     fn the_edit_menu_has_the_pages_groups() {

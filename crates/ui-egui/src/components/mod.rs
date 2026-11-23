@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn keycap_and_chip_match_the_page() {
-        // Nodes 161025 (keycap) and 161031 (chip) of the Components page.
+        // The keycap and the chip of the Components page.
         for (theme, t) in [(egui::Theme::Light, LIGHT), (egui::Theme::Dark, DARK)] {
             let mut at = [Rect::NOTHING; 4];
             let shapes = painted(theme, |ui| {

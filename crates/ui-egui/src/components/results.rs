@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn the_run_row_matches_the_page() {
-        // Node 164094: 36 tall on `card` with a 1 px `line` along its bottom; its buttons 28 tall,
+        // 36 tall on `card` with a 1 px `line` along its bottom; its buttons 28 tall,
         // 12 in from its left, 4 apart, centred in the 35 above the line. Idle: RUN, the main
         // button, with its shortcut. Running: RUN off, then CANCEL, the main button. RUN CURRENT,
         // an outline button with its shortcut, after them when shown, off while running. The
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     fn each_result_tab_state_matches_the_page() {
-        // Node 164099: 35 tall (the bar's line under it), its title in `button` as written 12 in
+        // 35 tall (the bar's line under it), its title in `button` as written 12 in
         // from either end, then a 1 px `line` at its right end; 119 wide for `select ... series`.
         // Inactive on `bg`, its title `text_muted`; hover on `hover`; active on `card`, the title
         // in `text`, a 2 px `ink` line along its top over the whole width; focus on `bg` with a
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn each_result_bar_state_matches_the_page() {
-        // Node 164136 and the page's rows of it: 36 tall on `card` with a 1 px `line` along its
+        // The result bar and the page's rows of it: 36 tall on `card` with a 1 px `line` along its
         // bottom. From the left the result tabs, side by side; at the right end the value panel's
         // toggle (a bar button, 36 wide), EXPORT before it (off), each with its divider and 35
         // tall; before them, 12 in, the facts 12 apart, centred above the line: what the result
@@ -1017,7 +1017,7 @@ mod tests {
 
     #[test]
     fn each_row_count_matches_the_page() {
-        // Node 164223: 28 tall; the rows shown and how many there are in `label` capitals,
+        // 28 tall; the rows shown and how many there are in `label` capitals,
         // `text_muted`, numbers and all; an estimate with COUNT and no count with
         // COUNT ROWS (`button/text`), 8 after the words; counting: 12, COUNTING in `label`, 12,
         // the timer in `data`. The page's COUNT is 56 wide, COUNT ROWS 92.
@@ -1355,7 +1355,7 @@ mod tests {
         }
     }
 
-    /// The page's many results (174564), the first one shown.
+    /// The page's many results, the first one shown.
     const MANY: [&str; 6] =
         ["select ... orders", "select ... series", "select ... customers", "update ... dealers", "select ... line_items", "select ... totals"];
     const PAGE_W: f32 = 840.0;
@@ -1422,7 +1422,7 @@ mod tests {
 
     #[test]
     fn many_results_scroll_with_the_list_after_them() {
-        // Node 174564 (`state=many results`), 840 wide: the result tabs scroll from the bar's left
+        // Many results, 840 wide: the result tabs scroll from the bar's left
         // end in what the facts leave, resting at a tab's edge and cut at the list button
         // (`tab/list`, 32 by 36 on the bar's line), which stands right after them and right before
         // the facts' words; the facts end 12 before EXPORT as ever. The list shows every result in

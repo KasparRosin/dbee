@@ -1300,7 +1300,7 @@ fn assert_full_width_at(ui: &mut Ui, x: f32, (lit, plain, col): (usize, usize, u
 }
 
 /// The header's `ink` line, the rows' lines and their selection and hover grounds run the grid's
-/// area to its right edge, past the last column (Screens 43147): a 2-column result in a wide tab.
+/// area to its right edge, past the last column: a 2-column result in a wide tab.
 /// A row lights under the pointer wherever it is on the row.
 #[test]
 fn lines_and_grounds_run_the_full_width() {
@@ -1594,7 +1594,7 @@ fn cancel_shows_from_300_ms() {
     }
 }
 
-/// A2+: before the first run there is no result bar.
+/// Before the first run there is no result bar.
 #[test]
 fn no_result_bar_before_the_first_run() {
     let db = dbee_testkit::require_testdb!();

@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn the_url_error_keeps_its_line_and_takes_the_red_edge() {
-        // Node 162794: the reason a URL didn't parse in `small` `danger` under the field, which
+        // The reason a URL didn't parse in `small` `danger` under the field, which
         // takes a red edge even while it has focus; with no reason the line's room stays, so the
         // buttons don't move.
         for (theme, t) in both() {
@@ -1265,7 +1265,7 @@ mod tests {
 
     #[test]
     fn the_transaction_prompt_matches_the_page() {
-        // Nodes 163357 (light) and 163678 (dark), the dialog with three buttons: the title, the
+        // The dialog with three buttons, in light and dark: the title, the
         // text in `body` with the names in `data` as written, then CANCEL, ROLLBACK and COMMIT
         // from the left, 8 apart, COMMIT the main button in `ink` and the others outlined. A
         // failed transaction, or a run still going in it, offers CANCEL and ROLLBACK (main).
@@ -1464,7 +1464,7 @@ mod tests {
 
     #[test]
     fn names_in_dialogs_are_mono_as_written() {
-        // The design's Dialogs (DA): the names, hosts and paths dbee puts in a dialog's text are
+        // The names, hosts and paths dbee puts in a dialog's text are
         // drawn in `data` as written, the rest in `body`, all in `text`; `dialog-text` still says
         // it all as plain words.
         use Text::{Body, Data};

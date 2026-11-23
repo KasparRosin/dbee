@@ -124,7 +124,7 @@ pub const TAB_ACTIVE_LINE: f32 = 2.0;
 pub const NEW_TAB_W: f32 = 32.0;
 pub const TAB_LIST_GAP: f32 = 2.0;
 
-/// The work area with no tab open (empty state C1): a block this wide holding the phrase, then
+/// The work area with no tab open: a block this wide holding the phrase, then
 /// this far under it the ways to start, one a row, this far apart.
 pub const NO_TAB_W: f32 = 220.0;
 pub const NO_TAB_GAP: f32 = 16.0;
@@ -314,7 +314,7 @@ pub const STRUCTURE_CELL_PAD_X: f32 = 8.0;
 pub const STRUCTURE_POSITION_PAD_X: f32 = 12.0;
 pub const STRUCTURE_ICON_GAP: f32 = 6.0;
 pub const STRUCTURE_LINK_GAP: f32 = 4.0;
-/// The structure view's page (SA): a section's heading this far under the last line of the
+/// The structure view's page: a section's heading this far under the last line of the
 /// section above it; every table's first column (COLUMNS' positions, empty in the others) this
 /// wide; what an empty page says this far in and down.
 pub const STRUCTURE_SECTION_GAP: f32 = SPACE_12;

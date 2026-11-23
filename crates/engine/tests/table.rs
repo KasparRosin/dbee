@@ -1270,7 +1270,7 @@ fn cancelling_a_structure_read() {
     });
 }
 
-/// Review B3 M5: a structure read replaced by a newer one (another switch to STRUCTURE, or its
+/// A structure read replaced by a newer one (another switch to STRUCTURE, or its
 /// REFRESH) is stopped: it ends at once (ignored, or cancelled), leaving the browse connection's
 /// queue, and the newer one runs and lands.
 #[test]

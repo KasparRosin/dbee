@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn a_tooltip_matches_the_page() {
-        // Node 162737: `raised`, a 1 px `raised_line` edge inside, corners 4, the shadow (0 6,
+        // `raised`, a 1 px `raised_line` edge inside, corners 4, the shadow (0 6,
         // the page's blur 18, egui's 36); the words 8 in from the outside edge and 4 down, in
         // `text`; one line hugs its words, a long text wraps to keep the tooltip at most 320 wide.
         for (theme, t) in both() {
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn a_tooltip_is_small_text_at_the_pointer() {
-        // Node 162737: the words in `small` (Inter 12, a 16 line) in `text`, one line 24 tall; the
+        // The words in `small` (Inter 12, a 16 line) in `text`, one line 24 tall; the
         // tooltip 4 below the pointer, its left edge at the pointer. A widget that is off says
         // why the same way.
         for (theme, t) in both() {

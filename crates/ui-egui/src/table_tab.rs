@@ -345,7 +345,7 @@ fn structure_bar_tags(shown: TableShown, tags: &mut Tags, facts: &str, refresh_b
     })
 }
 
-/// The structure state's row count (brief §2.1): exact when the tab knows the whole table's
+/// The structure state's row count: exact when the tab knows the whole table's
 /// count, else the catalog's estimate above 0, else none. A count running in DATA shows as the
 /// estimate.
 fn structure_count(t: &TableTab, estimate: Option<u64>) -> RowCount {

@@ -240,7 +240,7 @@ mod tests {
     const LONG_ERROR: &str = "invalid connection URL: expected a postgres://, postgresql://, mysql:// or mariadb:// URL, but this one \
                               starts with shop@pg14. Paste the whole URL your provider gave you, its scheme and two slashes first.";
 
-    /// The page's five contents (node 162771), a confirm with a long message and a field with a
+    /// The page's five contents, a confirm with a long message and a field with a
     /// long error.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Content {
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn each_dialog_matches_the_page() {
-        // Node 162771: 440 wide, `raised`, a 1 px `line` edge, corners 4, the shadow (0 6, the
+        // 440 wide, `raised`, a 1 px `line` edge, corners 4, the shadow (0 6, the
         // page's blur 18, egui's 36); 20 inside the edge; the title (`title`) and 6 under it the
         // text (`body`), both `text`; 20 to the body (a field, 12 to a checkbox; a field's error
         // line under it), 20 to the buttons: 28 tall, at least 80 wide, 8 apart, the first on the
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_click_on_the_scrim_presses_nothing() {
-        // Node 162837: a click on the scrim does nothing for a dialog, and what is under it gets
+        // A click on the scrim does nothing for a dialog, and what is under it gets
         // nothing either.
         let mut h = open(Theme::Light, Content::Confirm);
         let behind = h.get_by_label("Behind").rect().center();

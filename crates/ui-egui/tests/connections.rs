@@ -614,7 +614,7 @@ fn the_filter_finds_what_the_cards_show() {
 
 /// The connection list's filter is the sidebar's filter (`components::sidebar`), without a
 /// refresh: `conn-filter` keeps its id and its value as typed; the field is 35 tall over a 1 px
-/// `line`, its placeholder `Filter connections` as Screens writes it (node 61737); what is typed is
+/// `line`, its placeholder `Filter connections`; what is typed is
 /// drawn as typed. A click gives it focus without the ring, Shift+Tab back to it shows the ring.
 #[test]
 fn the_connection_filter_is_the_sidebar_filter() {

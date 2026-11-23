@@ -248,7 +248,7 @@ mod tests {
     use crate::components::{Edge, ROOM, both, edges_in, fills_in, flat, harness_in, icon_in, images, painted, sections, texts};
     use crate::tree::{MenuState, Tree, TreeAct};
 
-    /// The page's rows are this wide (`tree/row` 167592, `sidebar/connection` 167734).
+    /// The page's rows are this wide (`tree/row`, `sidebar/connection`).
     const TREE_W: f32 = 259.0;
     const CONNECTION_W: f32 = 279.0;
 
@@ -282,7 +282,7 @@ mod tests {
         TreeRow { level, kind, name, right, open, selected: false, focused: false, chevron_focused: false, hovered: false }
     }
 
-    /// `row` drawn 259 by 26 matches node 167592: on `ground`, the focus box when `focus`, the
+    /// `row` drawn 259 by 26 is the page's `tree/row`: on `ground`, the focus box when `focus`, the
     /// chevron and `icon` in their squares, the name and the type.
     fn check_tree_row(theme: Theme, t: &Tokens, state: &str, row: TreeRow<'_>, ground: Color32, focus: bool, icon: Option<(Icon, Color32)>) {
         let at_ = format!("{theme:?} {state}");
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn each_tree_row_matches_the_page() {
-        // Node 167592: 26 tall on `bg`, square. From 12 in, 16 more per level: the chevron's 12
+        // 26 tall on `bg`, square. From 12 in, 16 more per level: the chevron's 12
         // square (`icon/chevron-right`, down when open, `text_muted`; empty on a column), 6, the
         // icon's 14 square (`text_muted`; `icon/key-primary` in `key`, `icon/key-foreign`, nothing on
         // a plain column), 6, the name in `body` `text`; a column's type in `data` `text_muted` ends
@@ -382,8 +382,8 @@ mod tests {
 
     #[test]
     fn each_connection_row_matches_the_page() {
-        // Node 167734's variants 167726 (default), 167735 (hover), 167743 (selected), 167751
-        // (focus): 40 tall on `bg`, `hover` or `selection` (also when hovered), square, a 1 px
+        // `sidebar/connection` in its default, hover, selected and focus states:
+        // 40 tall on `bg`, `hover` or `selection` (also when hovered), square, a 1 px
         // `line` along the bottom; the connection's colour 3 wide down the whole left edge, none
         // without one; the engine's logo (`logo/postgresql`) in its 14 square 12 in, centred
         // down the row (13 down), `text_muted` in every state; the name in `body` `text` 34 in

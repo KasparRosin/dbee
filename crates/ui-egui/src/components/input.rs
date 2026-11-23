@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn each_input_state_matches_the_page() {
-        // Node 161106: 28 tall, corners 2, on `card`; the words 8 inside the 1 px edge and centred
+        // 28 tall, corners 2, on `card`; the words 8 inside the 1 px edge and centred
         // up and down, in `body` or `data`; the placeholder `text_muted`; off, the words
         // `text_faint` and the edge as it was; keyboard focus a 2 px `ink` edge; an error a 1 px
         // `danger` edge, also when focused.
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_field_shows_its_error_line() {
-        // Node 161156: the label (`label` caps, `text_muted`, 14 tall), 4, the input, 4, the error
+        // The label (`label` caps, `text_muted`, 14 tall), 4, the input, 4, the error
         // line (`small`, `danger`, 16 tall): 66 with the line, 46 without.
         for (theme, t) in both() {
             let mut at = [Rect::NOTHING; 3];

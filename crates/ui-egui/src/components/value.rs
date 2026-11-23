@@ -54,7 +54,7 @@ pub enum State {
     NoCell,
     /// Just copied: COPY reads ✓ COPIED in `text_muted`.
     Copied,
-    /// Several lines being edited (MC+): CANCEL and SAVE in the bar, the caret in the text.
+    /// A value being edited: CANCEL and SAVE in the bar, the caret in the text.
     Editing,
     /// A whole row selected (#17), as JSON, titled with the row ("Row 3") and no type.
     Row,
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn each_value_panel_state_matches_the_page() {
-        // Node 167904: 340 by 372 on `card`, a 1 px `line` down the left; the bar 36 tall with its
+        // 340 by 372 on `card`, a 1 px `line` down the left; the bar 36 tall with its
         // line along the bottom, the name 12 in (`header` `text`), the type 6 after (`data`
         // `text_muted`); COPY 82 wide, 6 before WRAP at the right end; the value 12 in and 12
         // under the bar, in `code`; the facts in a 30 tall strip with its line along the top.
@@ -909,8 +909,8 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_matches_b1() {
-        // B1: COPY then WRAP at the bar's right end, a 1 px `line` at the left of each; COPY's
+    fn copy_and_wrap_stand_at_the_bars_right_end() {
+        // COPY then WRAP at the bar's right end, a 1 px `line` at the left of each; COPY's
         // cell as wide as ✓ COPIED's, so nothing moves when it reads COPIED (`text_muted`); with
         // no cell COPY is off (`text_faint`).
         for (theme, t) in both() {

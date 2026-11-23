@@ -992,7 +992,7 @@ mod tests {
 
     #[test]
     fn the_editor_takes_the_pages_editing_look() {
-        // `grid/cell` (node 166898), `editing` (167055) and `editing selected` (167068): over its
+        // The page's `grid/cell` in its `editing` and `editing selected` states: over its
         // cell, on `card`, square, a 2 px `ink` edge inside it (the grid's outline); the value in
         // `data` `text` 8 in, as the grid draws it, 5 down in the 26 tall row; the caret 1 px
         // `ink` down the value's 16 tall line, after it (egui draws it 1.5 longer at either end,

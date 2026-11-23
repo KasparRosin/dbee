@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn each_swatch_matches_the_page() {
-        // Node 161215: 20 by 20, corners 2. A colour fills it, with no edge; none is `card` in a
+        // 20 by 20, corners 2. A colour fills it, with no edge; none is `card` in a
         // 1 px `line_strong` edge with the no-colour mark in `text_muted`. Chosen: a 2 px `ink`
         // edge inside. Focus: a 2 px `ink` box 4 px around it. Review Focus 5: dark too.
         let focused = Look { focused: true, ..Look::default() };

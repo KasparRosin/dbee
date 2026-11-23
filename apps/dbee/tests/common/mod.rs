@@ -204,7 +204,7 @@ impl App {
         x >= ox - 0.5 && y >= oy - 0.5 && x + w <= ox + ow + 0.5 && y + h <= oy + oh + 0.5
     }
 
-    /// In a table tab with the value panel shown (MC+): the panel's top is the table bar's bottom,
+    /// In a table tab with the value panel shown: the panel's top is the table bar's bottom,
     /// its foot the paging bar's top; the panel's and the bars' controls don't overlap.
     #[allow(dead_code)]
     pub fn panel_between_the_bars(&mut self, at: &str) {

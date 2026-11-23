@@ -515,7 +515,7 @@ fn body(app: &mut DbeeApp, ui: &mut egui::Ui, top: f32, acts: &mut Vec<Act>) -> 
 /// The ways to start with no tab open, in order: the words, and the command.
 const STARTS: [(&str, &str); 2] = [("New query", "tab.newQuery"), ("Quick search", "ui.quickSearch")];
 
-/// The work area with no tab open (empty state C1): "No tab open", and under it a row for each of
+/// The work area with no tab open: "No tab open", and under it a row for each of
 /// [`STARTS`] with its shortcut's keys, the block centred in the area.
 fn no_tab(app: &mut DbeeApp, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     let t = theme::tokens(ui.ctx());

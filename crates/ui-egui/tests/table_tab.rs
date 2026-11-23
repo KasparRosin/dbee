@@ -1252,7 +1252,7 @@ fn assert_starts_at_the_body(ui: &mut Ui, at: &str) {
     }
 }
 
-/// The grid sits edge to edge in the tab's body, no margin (Screens 53193, 43147): its row numbers
+/// The grid sits edge to edge in the tab's body, no margin: its row numbers
 /// start at the body's left edge, in the table tab and in a query's results. The table tab's bars
 /// run the body's full width too, the filter bar's first control 12 in (TA); so does the query
 /// tab's run row.
@@ -1296,7 +1296,7 @@ fn assert_header_only(ui: &mut Ui, at: &str) {
     }
 }
 
-/// An empty result draws its header only (A3 103221, an empty table 110109): a query with no rows,
+/// An empty result draws its header only: a query with no rows,
 /// an empty table and a filter that matches nothing.
 #[test]
 fn an_empty_result_draws_the_header_only() {
@@ -1354,7 +1354,7 @@ fn rows_area(ui: &mut Ui) -> egui::Rect {
     egui::Rect::from_min_max(egui::pos2(x.min, head.bottom()), egui::pos2(x.max, head.bottom() + 2000.0))
 }
 
-/// One selected cell (65722, row 3): its whole row takes `selection`, the number cell and the
+/// One selected cell: its whole row takes `selection`, the number cell and the
 /// room past the last column included, and the cell an `ink` outline (the component's width). A
 /// marked cell in that row keeps its mark. The other rows stay plain.
 #[test]
@@ -2448,7 +2448,7 @@ fn no_bar_draws_one_control_over_another() {
     drop(lock);
 }
 
-/// The value panel's place in a table tab (MC+): the table bar and the paging bar run the body's
+/// The value panel's place in a table tab: the table bar and the paging bar run the body's
 /// width, the panel stands between them (its top on the table bar's bottom, its foot on the paging
 /// bar's top), the band and the grid beside it; EXPORT and the toggle stay in the table bar, the
 /// toggle and APPLY keep their places at the body's right end.

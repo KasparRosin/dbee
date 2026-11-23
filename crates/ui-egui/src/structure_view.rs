@@ -1,6 +1,6 @@
 //! A table tab's STRUCTURE view ([`show`]), between the table bar in its structure state and the
 //! tab's bottom bar with the view switch (both drawn by [`crate::table_tab`]), each area the
-//! body's full width (SA):
+//! body's full width:
 //!
 //! - the error band (`structure-error`, [`crate::components::error_band`]) when the last read
 //!   failed: `The structure did not load`, the reason, and a note when the page from before still
@@ -261,7 +261,7 @@ fn reference(table: &TableRef, columns: &[String]) -> String {
     }
 }
 
-/// A foreign key action's words (brief §1.2).
+/// A foreign key action's words.
 fn action(a: FkAction) -> &'static str {
     match a {
         FkAction::NoAction => "no action",
@@ -715,7 +715,7 @@ fn skeleton(ui: &mut egui::Ui, tags: &mut Tags, id: TabId) {
 mod tests {
     use super::*;
 
-    /// Brief §5: a failed read's band shows the server's DETAIL and HINT as fields of their own,
+    /// A failed read's band shows the server's DETAIL and HINT as fields of their own,
     /// the message without them; `structure-error`'s value keeps the whole text.
     #[test]
     fn the_error_band_shows_detail_and_hint() {

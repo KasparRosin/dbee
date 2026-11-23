@@ -686,7 +686,7 @@ mod tests {
 
     #[test]
     fn the_table_bar_matches_the_page() {
-        // Node 164278, without the view switch and the divider after it (they moved to the bottom
+        // The table bar, without the view switch and the divider after it (they stand in the bottom
         // bar): 36 tall on `card`, a 1 px `line` along its bottom; from its left end REFRESH, with
         // no divider before it and its icon 12 in, then + ROW with its divider; at the right end
         // IMPORT and EXPORT (83 each, EXPORT without a divider) and the value panel's toggle (36);
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn the_table_bar_gives_way_in_its_order() {
-        // From wide to narrow (the brief §7): everything; the count without its range; IMPORT and
+        // From wide to narrow: everything; the count without its range; IMPORT and
         // EXPORT gone too; REFRESH and + ROW without their words; the count without its words,
         // COUNT kept; the count gone; then the left group cut at the bar's end. No two parts
         // overlap and nothing is drawn past the bar.
@@ -944,7 +944,7 @@ mod tests {
 
     #[test]
     fn the_structure_bar_gives_way_in_its_order() {
-        // The brief §7, from wide to narrow: everything; the facts gone; REFRESH's word gone too
+        // From wide to narrow: everything; the facts gone; REFRESH's word gone too
         // (its icon stays); then the left group cut at the bar's end. While a read shows its
         // loading state, LOADING goes first and CANCEL keeps its word. No two parts overlap and
         // nothing is drawn past the bar.
@@ -1045,7 +1045,7 @@ mod tests {
 
     #[test]
     fn the_paging_bar_matches_the_page() {
-        // Node 164453 with the view switch in it: 36 tall on `card`, a 1 px `line` along its top.
+        // The paging bar with the view switch in it: 36 tall on `card`, a 1 px `line` along its top.
         // At the left end, 12 in and centred under the line, the switch (caps segments in a 28
         // box, 139 wide). In the bar's middle the plain arrows (28) and `PAGE 1 OF 250` in
         // `label`, `text_muted`, side by side, centred on the bar's width. At the right end, 12
@@ -1435,7 +1435,7 @@ mod tests {
 
     #[test]
     fn the_filter_row_matches_the_page() {
-        // Node 164428 in the page's filter bar (165200): on `card`, its rows 4 from its top and
+        // A filter row in the page's filter bar: on `card`, its rows 4 from its top and
         // bottom and 12 from its left, a 1 px `line` under it. A row is 36 tall, its controls 28
         // tall, 4 from its top, 8 apart: the raw SQL toggle (`button/icon` boxed, code), the column
         // and the operator (`dropdown`), the value (`input` data), remove, add (boxed, minus and

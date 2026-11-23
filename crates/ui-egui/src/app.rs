@@ -1053,7 +1053,7 @@ mod tests {
 
     #[test]
     fn a_notice_closes_on_its_close_button() {
-        // Decided by the design: a notice can be closed. Its close is tagged `notice-close`, so
+        // A notice can be closed. Its close is tagged `notice-close`, so
         // an agent can close it too; the next notice is the oldest shown then.
         let (mut h, tx, _home) = window();
         h.state_mut().notice(Kind::Error, "The count failed.");

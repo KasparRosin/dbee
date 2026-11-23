@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn each_segment_state_matches_the_page() {
-        // Node 161186: 26 tall. Selected: `ink`, its words `on_ink`; hovering it changes nothing;
+        // 26 tall. Selected: `ink`, its words `on_ink`; hovering it changes nothing;
         // off on `fill`. Not selected: no ground, `hover` when hovered, words `text`. Off: words
         // `text_faint`. Focus within the cell (the segment less its divider slot): a selected one
         // a 1 px `on_ink` line 2 px inside, corners 1; another its edge 2 px `ink`, square.
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn each_segmented_control_matches_the_page() {
-        // Node 161251: a 28 box, `card` in a 1 px `line_strong` edge, corners 2; the segments 26
+        // A 28 box, `card` in a 1 px `line_strong` edge, corners 2; the segments 26
         // tall inside the edge, small ones sharing its width, caps ones as wide as their words. A
         // segment that isn't chosen and isn't the last ends in a 1 px `line` divider.
         const MODES: [(u8, &str); 5] = [(0, "disable"), (1, "prefer"), (2, "require"), (3, "verify-ca"), (4, "verify-full")];

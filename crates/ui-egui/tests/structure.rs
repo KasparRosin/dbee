@@ -123,10 +123,10 @@ fn orders_structure(db: &TestDb) -> Ui {
     ui
 }
 
-/// SA: the bar's structure state over the page's five sections, COLUMNS filled as the engine
-/// gave it, the headers' titles where SA draws them.
+/// The bar's structure state over the page's five sections, COLUMNS filled as the engine
+/// gave it, and its columns' widths.
 #[test]
-fn structure_shows_sa() {
+fn structure_shows_its_page() {
     let db = dbee_testkit::require_testdb!();
     let mut ui = orders_structure(db);
     let t = dbee_ui_egui::theme::LIGHT;
@@ -199,7 +199,7 @@ fn structure_shows_sa() {
     assert_eq!(ui.value("structure-columns-8-position"), 9);
     assert!(ui.tag("structure-columns-9-name").is_none(), "nine columns");
 
-    // The header's titles where SA draws them: Name, Type and Nullable as drawn. Default, whose
+    // The columns' widths: Name, Type and Nullable as drawn. Default, whose
     // `nextval(…)` is longer than its drawn 150, takes the little the body has past COLUMNS'
     // least widths (796) and what Keys can spare of its 240, its foreign key staying whole and in
     // view; that is not enough here, so Default still cuts it, whole on hover.
@@ -390,7 +390,7 @@ fn a_failed_read_shows_the_band() {
     assert!(ui.tag("structure-error").is_none() && ui.tag("grid-header-0").is_some(), "DATA's rows, not the structure's band");
 }
 
-/// Brief §6: the grid's keys don't act on a selection out of sight.
+/// The grid's keys don't act on a selection out of sight.
 #[test]
 fn grid_keys_do_nothing_in_structure() {
     let db = dbee_testkit::require_testdb!();
@@ -440,7 +440,7 @@ impl Drop for SchemaGuard {
     }
 }
 
-/// The brief §9's scratch tables: `p` with a unique pair, an expression index, a partial index
+/// The scratch tables: `p` with a unique pair, an expression index, a partial index
 /// with a descending part and two triggers; `c` with a one-column and a two-column foreign key
 /// to `p`.
 fn st_tables(s: &str) -> String {
@@ -471,9 +471,9 @@ fn row_where(ui: &mut Ui, section: &str, key: &str, value: &str) -> usize {
         .unwrap_or_else(|| panic!("a row of {section} with {key} `{value}`"))
 }
 
-/// Brief §3.2–§3.5: each section's cells as the brief writes them, data as Postgres wrote it.
+/// Each section's cells, data as Postgres wrote it.
 #[test]
-fn the_sections_read_as_the_brief_writes_them() {
+fn the_sections_read_as_postgres_wrote_them() {
     let db = dbee_testkit::require_testdb!();
     let schema = SchemaGuard::new(db, st_tables);
     let s = schema.0.as_str();
@@ -563,7 +563,7 @@ fn a_huge_trigger_definition_draws_on_one_line() {
     }
 }
 
-/// Review B3 M1: on SQLite a key whose REFERENCES spells the table in another case still shows
+/// On SQLite a key whose REFERENCES spells the table in another case still shows
 /// its ON DELETE, as `table.structure` gives it (the catalog names the table its own way).
 #[test]
 fn on_delete_shows_when_references_spells_the_table_in_another_case() {
@@ -578,7 +578,7 @@ fn on_delete_shows_when_references_spells_the_table_in_another_case() {
     assert_eq!(ui.value("structure-foreign-keys-0-onDelete"), "cascade");
 }
 
-/// Review B3 M2, brief §3.4: a link to the tab's own table (a key that references it) shows that
+/// A link to the tab's own table (a key that references it) shows that
 /// tab's DATA, opening no other tab.
 #[test]
 fn a_link_to_its_own_table_shows_data() {
@@ -599,7 +599,7 @@ fn a_link_to_its_own_table_shows_data() {
     }
 }
 
-/// Review B3 M4: a cut default thousands of bytes long reads on hover as a definition does: as
+/// A cut default thousands of bytes long reads on hover as a definition does: as
 /// written, at most 4 KiB, ending with `…`.
 #[test]
 fn a_huge_default_hovers_at_most_4_kib() {
@@ -622,7 +622,7 @@ fn a_huge_default_hovers_at_most_4_kib() {
     assert!(hover.ends_with('…') && hover.len() <= 4096 + '…'.len_utf8(), "at most 4 KiB, cut with `…`: {} bytes", hover.len());
 }
 
-/// Brief §3.7: a foreign key's link opens its table, by a click or by Enter with the keyboard;
+/// A foreign key's link opens its table, by a click or by Enter with the keyboard;
 /// an open tab is reused.
 #[test]
 fn a_link_opens_its_table() {
@@ -663,7 +663,7 @@ fn a_link_opens_its_table() {
     ui.until("order_items", |ui| ui.table()["name"] == "order_items");
 }
 
-/// Brief §3.7: while the connection is lost the links are off and say why.
+/// While the connection is lost the links are off and say why.
 #[test]
 fn links_are_off_on_a_lost_connection() {
     let db = dbee_testkit::require_testdb!();
@@ -686,7 +686,7 @@ fn links_are_off_on_a_lost_connection() {
     assert_eq!(ui.table()["name"], "orders", "nothing opened");
 }
 
-/// Brief §3.6: a view's empty sections keep their heading and header, and say nothing.
+/// A view's empty sections keep their heading and header, and say nothing.
 #[test]
 fn empty_sections_keep_their_header() {
     let db = dbee_testkit::require_testdb!();
@@ -707,7 +707,7 @@ fn empty_sections_keep_their_header() {
     assert!(words.is_empty(), "no phrase under an empty section: {words:?}");
 }
 
-/// Spec §7: names, types and indexes are drawn as written, never in capitals.
+/// Names, types and indexes are drawn as written, never in capitals.
 #[test]
 fn data_is_never_uppercased() {
     let db = dbee_testkit::require_testdb!();
@@ -730,7 +730,7 @@ fn data_is_never_uppercased() {
     }
 }
 
-/// Brief §2.2, call 6: a section's Name column is at least `max(drawn, widest name + 16)`, up to
+/// A section's Name column is at least `max(drawn, widest name + 16)`, up to
 /// twice its drawn width; in a body no wider than the tables it gets no more than the last column
 /// can spare, and a name longer than that is cut with `…` and reads whole on hover. In a body
 /// with room to spare the name shows whole.
@@ -780,7 +780,7 @@ fn long_names_widen_their_column_up_to_twice() {
     assert!(!cut && name.width() > 300.5 && name.width() <= at.width() + 16.0 + 1.0, "the long name whole: {name:?}, the words {at:?}");
 }
 
-/// Brief §7: the page keeps its widths and scrolls sideways; the header's `ink` line runs as wide
+/// The page keeps its widths and scrolls sideways; the header's `ink` line runs as wide
 /// as the widest table (TRIGGERS: 40 + 240 + 110 + 180 + 100 + 240).
 #[test]
 fn the_page_scrolls_sideways_when_narrow() {

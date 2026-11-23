@@ -219,8 +219,8 @@ mod tests {
 
     #[test]
     fn the_error_band_matches_the_page() {
-        // Node 168920 (its default: hint, detail and a position) and the Error band frame's five
-        // bands (171342 / 173961), then a note and a server's detail and hint without a
+        // The band's default (hint, detail and a position) and the page's five
+        // bands, then a note and a server's detail and hint without a
         // position, which the page doesn't draw.
         let default = Band { detail: Some("Failing row contains (691, 42, null)."), ..PAGE_BANDS[0] };
         let [noted, both_fields] = [APP_BANDS[1], APP_BANDS[5]];

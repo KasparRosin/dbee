@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn each_tab_state_matches_the_page() {
-        // Node 163793: 36 tall; 12, the icon, 8, the title in `button`, [8, the 8 px `ink` dot], 8,
+        // 36 tall; 12, the icon, 8, the title in `button`, [8, the 8 px `ink` dot], 8,
         // the 7 px close, 12, a 1 px `line` at its right end. Inactive: `bg`, a `line` under it,
         // icon and title `text_muted`, centred above the line; hover: `hover`, the close shown;
         // active: `card`, no line under it, the 2 px `ink` line along its top, icon and title
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn the_new_tab_button_matches_the_page() {
-        // Node 163861: 32 by 36, a `line` under it; `+` in `text_muted`, centred above the line;
+        // 32 by 36, a `line` under it; `+` in `text_muted`, centred above the line;
         // hover `hover`; focus a 2 px `ink` box 2 px inside.
         for (theme, t) in both() {
             for state in [State::Inactive, State::Hover, State::Focus] {
@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn the_strip_lies_on_card_with_the_line_under_inactive_tabs() {
-        // Node 163870: on `card`, 36 tall; the tabs from its left end, side by side, then the new
+        // On `card`, 36 tall; the tabs from its left end, side by side, then the new
         // tab button; the `line` along its bottom under all but the active tab, on to its end.
         for (theme, t) in both() {
             let mut at: Vec<Rect> = Vec::new();
@@ -787,7 +787,7 @@ mod tests {
         }
     }
 
-    /// The page's tabs that don't fit (174313), in strip order: each title and whether it is a
+    /// The page's tabs that don't fit, in strip order: each title and whether it is a
     /// query tab. Query 1 has unsaved text.
     const PAGE: [(&str, bool); 7] = [
         ("orders [3]", false),
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn the_list_button_matches_the_page() {
-        // Node 174295: 32 by 36 like `tab/new`, a `line` under it; ⌄ (`icon/chevron-down`, 8 by
+        // 32 by 36 like `tab/new`, a `line` under it; ⌄ (`icon/chevron-down`, 8 by
         // 4 at 12, 15.5) in `text_muted`, centred above the line; hover `hover`; focus a 2 px `ink`
         // box 2 px inside; open `fill`, as an open menu title.
         for (theme, t) in both() {
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn a_strip_that_fits_has_no_list_button() {
-        // Node 163870 (`overflow=no`): the tabs, then the new tab button right after the last
+        // No overflow: the tabs, then the new tab button right after the last
         // one, the line on to the strip's end; no list button.
         for (theme, t) in both() {
             let h = seven(theme, 1000.0, 2);
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn a_strip_that_overflows_pins_new_and_list_at_its_right_end() {
-        // Node 174313 (`overflow=yes`): the tabs scroll in what the strip leaves before + and the
+        // With overflow: the tabs scroll in what the strip leaves before + and the
         // list button, which stand at its right end, outside the scrolled part, and stay put as
         // the tabs scroll. The strip rests with a tab's left edge at its left, or at its end with
         // the last tab against +: no empty room after it.

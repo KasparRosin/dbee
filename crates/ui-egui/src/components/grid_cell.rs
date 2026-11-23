@@ -489,7 +489,7 @@ mod tests {
         (a - b).abs() <= 0.5
     }
 
-    /// A plain cell of the page's (`grid/cell` 166898: 150 by 26).
+    /// A plain cell of the page's (`grid/cell`: 150 by 26).
     fn plain(text: CellText<'_>) -> Cell<'_> {
         Cell {
             text,
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn each_cell_state_matches_the_page() {
-        // Node 166898: 26 tall, its value in `data`, 8 in from its sides and centred. Plain on
+        // 26 tall, its value in `data`, 8 in from its sides and centred. Plain on
         // `card`, hovered (its row) `hover`, selected `selection`, each with a 1 px `line` at its
         // right and bottom; the focus cell `selection` with a 2 px `ink` outline inside and no
         // line. A mark is its own ground; selected, a 2 px outline, `staged_strong` on a staged
@@ -734,7 +734,7 @@ mod tests {
 
     #[test]
     fn the_header_cell_matches_the_page() {
-        // Node 167321: 30 tall on `card`, a 1 px `line` at its right and a 1 px `ink` line along
+        // 30 tall on `card`, a 1 px `line` at its right and a 1 px `ink` line along
         // its bottom; 8 in from its sides, its parts 6 apart: `icon/key` (`key` on a primary key,
         // `text_muted` on a foreign one), the name in `header` `text`, the type in `data`
         // `text_muted` as the database writes it, then the sort: the one arrow in `ink`, or on
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn the_row_number_matches_the_page() {
-        // Node 167565: 26 tall, at least 36 wide, on `card` with a 1 px `line` at its right and
+        // 26 tall, at least 36 wide, on `card` with a 1 px `line` at its right and
         // bottom; the number in `data` `text_muted`, 8 from the right. Hovered `hover`; selected
         // `selection`; the whole row selected `selection` with the number in `text`; a new row
         // `new_row` with `*`; a row to delete `deleted` with a 1 px `text_muted` line across.

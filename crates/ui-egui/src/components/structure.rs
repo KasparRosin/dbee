@@ -445,7 +445,7 @@ mod tests {
         Rect::from_min_max(pos2(r.left(), r.bottom() - 1.0), r.max)
     }
 
-    /// `cell` drawn `w` by 26 matches node 168953: no ground, a 1 px `line` along its bottom, no
+    /// `cell` drawn `w` by 26 is the page's cell: no ground, a 1 px `line` along its bottom, no
     /// edge; `icon` (with its centre's distance from the left) and `words` (each with its left's
     /// distance from the cell's left and its colour), centred down the cell, in `data`.
     fn check_cell(theme: Theme, t: &Tokens, cell: Cell<'_>, w: f32, icon: Option<(Icon, f32, Color32)>, words: &[(&str, f32, Color32)]) {
@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn structure_cells_match_the_page() {
-        // Nodes 168942 (heading), 168944 (header cell) and 168953 (cell: text, muted, position,
+        // The heading, the header cell and the cell (text, muted, position,
         // nullable, primary key, foreign key), in both modes. None has a ground of its own: the
         // view's table is on `card`.
         for (theme, t) in both() {
@@ -547,7 +547,7 @@ mod tests {
     }
     #[test]
     fn a_link_without_its_key_icon() {
-        // Brief §3.7: FOREIGN KEYS' and REFERENCED BY's links are COLUMNS' foreign key without
+        // FOREIGN KEYS' and REFERENCED BY's links are COLUMNS' foreign key without
         // its icon: the words and the arrow in `text_muted`, `text` while hovered, `text_faint`
         // while off.
         for (theme, t) in both() {
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn a_column_widens_for_its_text_up_to_twice() {
-        // Brief §2.2, call 6: a Name column takes `max(drawn, widest + 16)`, at most twice as drawn.
+        // A Name column takes `max(drawn, widest + 16)`, at most twice as drawn.
         assert_eq!(widened(150.0, 100.0), 150.0);
         assert_eq!(widened(150.0, 144.0), 160.0);
         assert_eq!(widened(150.0, 432.0), 300.0);
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn a_table_draws_its_lines_the_full_width() {
-        // SA: the heading 36 tall, the header 30, each row 26; the header's `ink` line and every
+        // The heading 36 tall, the header 30, each row 26; the header's `ink` line and every
         // row's `line` run the table's full width, past its last column's minimum; no column lines.
         let columns = [
             Column { title: "", width: 40.0 },
