@@ -42,6 +42,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("sql", Class::Layer(1)),
     ("config", Class::Layer(1)),
     ("ssh", Class::Layer(2)),
+    ("update", Class::Layer(2)),
     ("driver", Class::Layer(3)),
     ("pg", Class::Driver),
     ("mysql", Class::Driver),
