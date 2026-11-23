@@ -172,10 +172,6 @@ pub struct DbeeApp {
     /// has settled it, the mode `System` means.
     desktop_mode: Option<egui::Theme>,
     pub(crate) system_mode: Option<egui::Theme>,
-    /// How the window reaches the screen ([`DbeeApp::with_window_backend`]), for the log.
-    window_backend: &'static str,
-    /// The scale factor and zoom last written to the log ([`DbeeApp::window_note`]).
-    window_noted: Option<(Option<u32>, u32)>,
     /// Keyboard events held back for the next frame: those after a cell editor's key in the same
     /// frame ([`crate::editors::before_frame`]).
     pub(crate) carry: Vec<egui::Event>,
@@ -338,8 +334,6 @@ impl DbeeApp {
             settings_dir: None,
             desktop_mode: None,
             system_mode: None,
-            window_backend: "unknown",
-            window_noted: None,
             carry: Vec::new(),
             file: None,
         }
@@ -377,36 +371,6 @@ impl DbeeApp {
     pub fn with_desktop_mode(mut self, mode: Option<egui::Theme>) -> DbeeApp {
         self.desktop_mode = mode;
         self
-    }
-
-    /// This app naming `backend` in the log as the way its window reaches the screen (Wayland,
-    /// X11, …).
-    pub fn with_window_backend(mut self, backend: &'static str) -> DbeeApp {
-        self.window_backend = backend;
-        self
-    }
-
-    /// What the window got from the desktop, the first time and whenever it changes (another
-    /// monitor, another scale): text is drawn for this many pixels per point, so a report of soft
-    /// text starts from this line.
-    fn window_note(&mut self, ctx: &egui::Context) -> Option<String> {
-        let (native, zoom) = (ctx.native_pixels_per_point(), ctx.zoom_factor());
-        let key = (native.map(f32::to_bits), zoom.to_bits());
-        if self.window_noted == Some(key) {
-            return None;
-        }
-        self.window_noted = Some(key);
-        let scale = native.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
-        let points = ctx.content_rect().size();
-        let ppp = ctx.pixels_per_point();
-        Some(format!(
-            "window: {}, scale factor {scale}, zoom {zoom}, {ppp} pixels per point, {} x {} points ({} x {} pixels)",
-            self.window_backend,
-            points.x,
-            points.y,
-            (points.x * ppp).round(),
-            (points.y * ppp).round()
-        ))
     }
 
     /// The mode the window draws in now.
@@ -725,9 +689,6 @@ impl DbeeApp {
     /// before it, as eframe does.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        if let Some(note) = self.window_note(&ctx) {
-            log::info!("{note}");
-        }
         if !self.themed {
             // The fonts load at the start of the next frame, and the screens name them: draw
             // nothing until then.
@@ -908,35 +869,6 @@ mod tests {
 
     use super::*;
     use crate::ControlRequest;
-
-    /// The log says what the window got, once, and again when the scale changes.
-    #[test]
-    fn the_window_note_is_said_once_per_scale() {
-        let home = temp_home(None, None);
-        let session = Session::new(SessionOptions {
-            config_dir: Some(home.home.join("config")),
-            secrets: Some(Arc::new(MemoryStore::default())),
-            ..SessionOptions::default()
-        })
-        .unwrap();
-        let mut app = DbeeApp::new(session, None).with_window_backend("wayland");
-        let ctx = egui::Context::default();
-        let frame = |ctx: &egui::Context, scale: f32| {
-            let mut raw =
-                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() };
-            raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(scale);
-            ctx.run_ui(raw, |_| {}).textures_delta.clear();
-        };
-        frame(&ctx, 1.0);
-        let first = app.window_note(&ctx);
-        assert_eq!(first.as_deref(), Some("window: wayland, scale factor 1, zoom 1, 1 pixels per point, 800 x 600 points (800 x 600 pixels)"));
-        frame(&ctx, 1.0);
-        assert_eq!(app.window_note(&ctx), None, "nothing changed: said once");
-        frame(&ctx, 1.25);
-        let moved = app.window_note(&ctx);
-        assert_eq!(moved.as_deref(), Some("window: wayland, scale factor 1.25, zoom 1, 1.25 pixels per point, 800 x 600 points (1000 x 750 pixels)"));
-        assert_eq!(app.window_note(&ctx), None);
-    }
 
     #[test]
     fn ui_click_by_id_reaches_the_widget() {

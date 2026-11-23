@@ -204,22 +204,6 @@ fn panic_line(location: Option<&std::panic::Location<'_>>, thread: Option<&str>)
     format!("internal error: a panic on thread {} at {at}", thread.unwrap_or("?"))
 }
 
-/// How the window reaches the screen, for the log: on a Wayland desktop an X11 window goes
-/// through XWayland, and the compositor may rescale it.
-fn window_backend(display: &impl eframe::wgpu::rwh::HasDisplayHandle) -> &'static str {
-    use eframe::wgpu::rwh::RawDisplayHandle;
-    let wayland_session =
-        std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) || std::env::var_os("XDG_SESSION_TYPE").is_some_and(|v| v == "wayland");
-    match display.display_handle().map(|h| h.as_raw()) {
-        Ok(RawDisplayHandle::Wayland(_)) => "Wayland",
-        Ok(RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_)) if wayland_session => "X11 through XWayland",
-        Ok(RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_)) => "X11",
-        Ok(RawDisplayHandle::AppKit(_)) => "macOS",
-        Ok(RawDisplayHandle::Windows(_)) => "Windows",
-        _ => "unknown",
-    }
-}
-
 fn main() -> ExitCode {
     let logger = logging::install();
     if let Some(logger) = logger {
@@ -327,8 +311,7 @@ fn main() -> ExitCode {
                     .with_clipboard(clipboard)
                     .with_screenshot_dir(shots)
                     .with_settings_dir(config_dir().filter(|_| prefs_enabled()))
-                    .with_desktop_mode(desktop_mode)
-                    .with_window_backend(window_backend(cc));
+                    .with_desktop_mode(desktop_mode);
                 Ok(Box::new(match file.take() {
                     Some(path) => app.with_file(path),
                     None => app,
