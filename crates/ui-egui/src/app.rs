@@ -139,6 +139,8 @@ fn not_saved(e: &dbee_config::SaveError) -> Words {
 
 /// The command the update button runs.
 const UPDATE: &str = "app.update";
+/// The command whose job an update check is.
+const CHECK_FOR_UPDATES: &str = "app.checkForUpdates";
 
 /// The window over one session.
 pub struct DbeeApp {
@@ -810,8 +812,9 @@ impl DbeeApp {
         if self.session.busy() {
             ctx.request_repaint_after(BUSY_REPAINT);
         }
-        // The automatic update check starts in a frame's pump: wake up for it.
-        if let Some(wait) = self.session.next_update_check() {
+        // The automatic update check starts in a frame's pump: wake up for it. While a check
+        // runs, its job's end wakes the window.
+        if let Some(wait) = self.session.next_update_check().filter(|_| !self.session.running(CHECK_FOR_UPDATES)) {
             ctx.request_repaint_after(wait);
         }
         // A mode chosen in this frame is set before the next one (`feed_input`).

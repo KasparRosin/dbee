@@ -1,6 +1,6 @@
 # Releasing dbee
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (the status names `v0.2.0`, the first full release)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (the packages' install-kind markers and their check; the asset names are what the app's update check reads)
 
 Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds installers for macOS, Windows, Linux and FreeBSD and creates or updates a **draft** GitHub Release named `v<version>`, the tag alone. Nobody sees a draft until the owner publishes it. The workflows use no shared tooling from outside this repository; third-party actions are pinned to commit SHAs.
 
@@ -27,7 +27,7 @@ Pushing to `release` again before you publish rebuilds the same draft and replac
 
 ## What gets built
 
-`<v>` is the version. Every file is listed in `SHA256SUMS.txt`.
+`<v>` is the version. Every file is listed in `SHA256SUMS.txt`, which is also what a running dbee reads to learn of a newer release: its file names must keep the form `dbee(-cli)?-<v>-<platform>-<arch>[-portable].<ext>`, all of one version, or the copies in use stop seeing new releases.
 
 | Platform | Assets |
 |---|---|
@@ -68,7 +68,7 @@ Windows signing uses the `.pfx` pair if both are set, otherwise Azure Trusted Si
 
 ## Checks
 
-- `.github/workflows/packaging-lint.yml` (on changes to `packaging/`, the workflows or the icons; no build, no secrets): actionlint, shellcheck, PowerShell parse, xmllint, `desktop-file-validate`, `appstreamcli validate`, Flatpak manifest checks.
+- `.github/workflows/packaging-lint.yml` (on changes to `packaging/`, the workflows or the icons; no build, no secrets): actionlint, shellcheck, PowerShell parse, xmllint, `desktop-file-validate`, `appstreamcli validate`, Flatpak manifest checks, and `packaging/check-install-kind.sh`: each package format writes its one-word install-kind marker, which tells the app how it was installed ([decisions](decisions.md)), and the AppImage, the Flatpak and the macOS app carry none. The packaging scripts read the marker back from the `.deb`, the `.rpm`, the tarballs and the portable zip they build.
 - `.github/workflows/windows-arm64.yml` (on `release` pushes): installs, runs and uninstalls the arm64 MSI on a Windows 11 ARM64 runner.
 - `.github/workflows/freebsd.yml`: FreeBSD build and tests.
 - `.github/workflows/ci.yml`: the everyday gates. Locally: `cargo xtask ci`.

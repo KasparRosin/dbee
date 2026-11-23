@@ -1,6 +1,6 @@
 # Installing dbee
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-10 · **Change:** major (new: installing each download, and opening an unsigned build)
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (new: how a copy learns of a newer release)
 
 Downloads are on the [Releases page](https://github.com/KasparRosin/dbee/releases). Each file is named `dbee-<version>-<platform>-<arch>.<ext>`; pick the one for your system below.
 
@@ -38,6 +38,12 @@ The Flatpak can't reach the keyring yet ([gaps.md](gaps.md), 11).
 ## FreeBSD (x86_64)
 
 Unpack `dbee-<version>-freebsd-x86_64.tar.gz` and run `bin/dbee`.
+
+## Updates
+
+dbee looks for a newer release by itself: a few seconds after it starts, and once a day while it is open, it asks GitHub for the newest release's checksum file. When a newer release is out, the right end of the menu bar reads `DOWNLOAD <version>`; a click opens that release's page in the browser, and you install it as you did the first time. dbee does not install anything by itself. With no newer release nothing is shown there.
+
+What the check sends, and how to turn it off: [SECURITY.md](../SECURITY.md#what-dbee-sends-by-itself).
 
 ## Checking a download
 

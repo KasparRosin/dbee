@@ -274,8 +274,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "core", "testkit", "sql", "config", "ssh", "driver", "pg", "mysql", "sqlite", "drivers", "engine", "ui-egui", "mcp", "dbee", "cli",
-                "xtask"
+                "core", "testkit", "sql", "config", "ssh", "update", "driver", "pg", "mysql", "sqlite", "drivers", "engine", "ui-egui", "mcp",
+                "dbee", "cli", "xtask"
             ]
         );
         assert!(INTRA_LAYER_ORDER.is_empty());

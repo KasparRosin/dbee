@@ -5,6 +5,8 @@
 //! redirect to the newest release that is not a pre-release. No API, no JSON, and no URL read
 //! from an answer: every URL is built here. The request carries `User-Agent: dbee/<version>` and
 //! nothing else of dbee's; HTTPS only, redirects included.
+//! A proxy the environment names (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, with `NO_PROXY`) is
+//! used, as `ureq` reads them; the TLS session is still with GitHub.
 //!
 //! For tests, [`MANIFEST_URL_ENV`] names another base URL, taken only when it is plain HTTP on
 //! `127.0.0.1` with a port, so it can never point a copy at another machine.

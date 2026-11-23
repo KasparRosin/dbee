@@ -134,7 +134,7 @@ if has deb || has rpm; then
   fi
   if has rpm; then
     if command -v rpm2cpio >/dev/null && command -v cpio >/dev/null; then
-      check_marker rpm "$(rpm2cpio "$DIST/$BASENAME.rpm" | cpio --quiet -i --to-stdout ./usr/share/dbee/install-kind)"
+      check_marker rpm "$(rpm2cpio "$DIST/$BASENAME.rpm" | cpio --quiet -i --to-stdout '*usr/share/dbee/install-kind')"
     else
       warn "rpm2cpio or cpio not found, so the .rpm's install-kind marker was not checked"
     fi
