@@ -1,6 +1,6 @@
 # Agents
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review's lane C: §2 and §4, a client sends the token first, screenshots go in one folder, an isolated run checks SSH key and CA files; before: §4: the M2 day)
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (the security review: §2 and §4, a client sends the token first, screenshots go in one folder, an isolated run checks SSH key and CA files; before: §4: the M2 day)
 
 dbee is built to be driven by AI agents, and largely built by them. Part 1 covers using dbee from an agent. Part 2 covers developing dbee as an agent.
 
