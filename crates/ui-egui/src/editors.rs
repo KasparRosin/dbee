@@ -1189,8 +1189,8 @@ mod tests {
 
     #[test]
     fn a_panel_editor_is_not_committed_by_scrolling() {
-        // In the value panel the editor is not over its cell: its cell scrolled away leaves it
-        // open. Over its cell (no room for the panel) it commits, as before.
+        // With the keyboard in the value panel, the cell scrolled away leaves the editor open.
+        // With the keyboard in the cell's editor it commits.
         let mut e = editor(Kind::Lines, Some("a"));
         e.place = Place::Panel;
         e.fresh = false;

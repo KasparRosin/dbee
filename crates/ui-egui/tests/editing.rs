@@ -678,8 +678,7 @@ fn an_editor_opens_over_its_own_cell_after_a_wider_one() {
 #[test]
 fn an_editor_scrolled_out_of_view_sideways_commits() {
     let db = dbee_testkit::require_testdb!();
-    // Ten wide one-line columns: far wider than the window. (A several-line editor is in the
-    // value panel, which its cell scrolling away leaves open.)
+    // Ten wide columns: far wider than the window.
     let name = unique("t_edit_wide");
     let columns: Vec<String> = (1..=10).map(|c| format!("c{c} varchar(200)")).collect();
     let values: Vec<String> = (1..=10).map(|c| format!("repeat('{c}', 60)")).collect();

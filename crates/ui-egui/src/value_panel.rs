@@ -619,8 +619,6 @@ pub struct PanelState {
     holding_rows: bool,
     /// COPY copied the value shown: it reads ✓ COPIED until then, on egui's clock.
     copied_until: Option<f64>,
-    /// The table tab drawn last has room for the panel ([`has_room`]).
-    pub(crate) room: bool,
 }
 
 /// Leaves the value out: it is a cell's.

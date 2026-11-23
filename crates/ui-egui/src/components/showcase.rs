@@ -312,7 +312,6 @@ fn grid(ui: &mut Ui) {
                         row_selected: row.focus.is_some(),
                         hovered: row.hovered,
                         strength: 1.0,
-                        editing: false,
                     };
                     let at = Rect::from_min_size(pos2(x, top), vec2(w, ROW_H));
                     cell.show(ui, at, ui.id().with(("showcase-grid-link", r, c)));
@@ -888,7 +887,6 @@ fn wait_grid(ui: &mut Ui, reload: bool) {
                     row_selected: false,
                     hovered: false,
                     strength: 1.0,
-                    editing: false,
                 };
                 cell.show(ui, Rect::from_min_size(pos2(x, top), vec2(w, ROW_H)), ui.id().with(("showcase-wait-cell", r, c)));
                 x += w;

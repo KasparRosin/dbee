@@ -631,8 +631,6 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         let split = (body.bottom() - BAR_H).max(body.top());
         // The panel gives way before the grid does: with no room beside it, its toggle is off.
         let narrow = open && !value_panel::has_room(body.width());
-        // Whether a several-line editor opening now goes in the panel.
-        view.panel.room = value_panel::has_room(body.width());
         // Every bar is cut at the body's edges: nothing is drawn past them at any width.
         let clip = ui.clip_rect().intersect(body);
         let mut top = ui.new_child(
@@ -695,8 +693,8 @@ pub(crate) fn show(app: &mut DbeeApp, ui: &mut egui::Ui, id: TabId) -> bool {
         // at their right while it shows.
         let below = top.available_rect_before_wrap().top().min(split);
         panel = value_panel::reserve(open, ui, Rect::from_min_max(pos2(body.left(), below), pos2(body.right(), split)));
-        // An editor in a panel that went away (hidden by an agent, or no room left) floats over
-        // its cell from now on.
+        // The keyboard of an editor in a panel that went away (hidden by an agent, or no room
+        // left) goes back to the editor over its cell.
         if panel.is_none()
             && let Some(editor) = view.work.editor.as_mut().filter(|e| e.tab == id && e.place == Place::Panel)
         {

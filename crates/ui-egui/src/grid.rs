@@ -763,7 +763,6 @@ impl Grid<'_> {
             row_selected: focus.is_some_and(|f| f.0 == row),
             hovered,
             strength: if mark == Some(Mark::Saved) { self.saved } else { 1.0 },
-            editing: false,
         };
         let link = cell.show(ui, rect, ui.id().with(("dbee-fk-link", row, col)));
         Drawn { text, null, resp, link }

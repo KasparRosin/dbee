@@ -296,9 +296,6 @@ pub struct Cell<'a> {
     /// How strongly its mark's ground shows, 1 at full: a saved mark fades out
     /// ([`saved_strength`]). Its outline, when selected, stays whole.
     pub strength: f32,
-    /// Its value is being edited elsewhere (the value panel): the `editing` look, `card` with a
-    /// 2 px `ink` edge inside it, over any mark or selection, its text as before.
-    pub editing: bool,
 }
 
 impl Cell<'_> {
@@ -307,7 +304,6 @@ impl Cell<'_> {
         let t = tokens(ui.ctx());
         let p = painter(ui);
         let ground = match self.mark {
-            _ if self.editing => t.card,
             Some(mark) => faded(mark.ground(t), self.strength),
             None if self.selected || self.focused => t.selection,
             None if self.hovered => t.hover,
@@ -348,9 +344,7 @@ impl Cell<'_> {
             let corner = vec![pos2(rect.right() - side, rect.top()), rect.right_top(), pos2(rect.right(), rect.top() + side)];
             p.add(Shape::convex_polygon(corner, t.danger, Stroke::NONE));
         }
-        if self.editing {
-            p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(GRID_OUTLINE_W, t.ink), StrokeKind::Inside);
-        } else if self.focused || (self.selected && self.mark.is_some()) {
+        if self.focused || (self.selected && self.mark.is_some()) {
             let colour = self.mark.map_or(t.ink, |m| m.outline(t));
             p.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(GRID_OUTLINE_W, colour), StrokeKind::Inside);
         } else if failed {
@@ -508,7 +502,6 @@ mod tests {
             row_selected: false,
             hovered: false,
             strength: 1.0,
-            editing: false,
         }
     }
 
