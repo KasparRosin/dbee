@@ -3,8 +3,9 @@
 //! (`docs/control-protocol.md`), with `document.inspect` checked after every step and a screenshot
 //! of each saved as `target/m1-day/<n>-<step>.png`, to look at.
 //!
-//! It opens a window on the desktop, so it runs by hand only, with the test servers up and the
-//! window shown (a hidden window runs no frames on Wayland, `docs/testing.md` §4):
+//! It opens a window on the desktop, so `cargo xtask ci` skips it: the CI workflow runs it on a
+//! virtual screen, and by hand it runs with the test servers up and the window shown (a hidden
+//! window runs no frames on Wayland, `docs/testing.md` §4):
 //!
 //! ```sh
 //! cargo xtask testdb up

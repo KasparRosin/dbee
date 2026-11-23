@@ -18,8 +18,9 @@
 //!    through the question about the query text; the same steps there, the chip moving the query tab
 //!    to `many`; Ctrl+P switches back to the SQLite file.
 //!
-//! It opens a window on the desktop, so it runs by hand only, with the test servers up and the
-//! window shown (a hidden window runs no frames on Wayland, `docs/testing.md` §4):
+//! It opens a window on the desktop, so `cargo xtask ci` skips it: the CI workflow runs it on a
+//! virtual screen, and by hand it runs with the test servers up and the window shown (a hidden
+//! window runs no frames on Wayland, `docs/testing.md` §4):
 //!
 //! ```sh
 //! cargo xtask testdb up

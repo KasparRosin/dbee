@@ -2,9 +2,9 @@
 
 **Stage: pre-alpha** · next: alpha, once file export lands (M4). M1 "Daily Postgres workflow" and M2 "Three databases" are built and wait for their last check: a day of real use on the maintainer's own databases.
 
-> **Last reviewed:** 2026-11-20 · **Last updated:** 2026-11-20 · **Change:** minor (M3's Phase 3 screens built: Structure 40 %, ~30 % overall) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (M3 to 2026-11-23: the grid, the cell editor, STRUCTURE's columns and the view switch; the CI workflow runs the day tests; numbers unchanged; before: M3's Phase 3 screens built: Structure 40 %, ~30 % overall) · **Target:** Beekeeper Studio 5.5.7
 
-Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs` on Postgres, `apps/dbee/tests/m2_day.rs` on MySQL, MariaDB and SQLite; both run by hand: `#[ignore]`, ci skips them). They are connecting (a server also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M4. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
+Why pre-alpha: five of the six alpha gate rows work end to end, measured in the real window (`apps/dbee/tests/m1_day.rs` on Postgres, `apps/dbee/tests/m2_day.rs` on MySQL, MariaDB and SQLite; both `#[ignore]`: `cargo xtask ci` skips them, and the CI workflow runs them on a virtual screen on every pull request). They are connecting (a server also through an SSH tunnel), browsing and filtering tables, running a query, editing a row and copying results. The sixth, export to a file, is M4. Detail: [`docs/target-app-parity.md`](docs/target-app-parity.md) (the assessment), [`docs/gaps.md`](docs/gaps.md) (the ranked work list), [`docs/roadmap.md`](docs/roadmap.md) (gates and milestones); every doc is listed in [`docs/README.md`](docs/README.md).
 
 ## Headline numbers
 
@@ -54,13 +54,14 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 ## Upcoming
 
 1. The last check of M1 and M2: a day of real use of a Linux release build on the maintainer's own Postgres, MySQL, MariaDB and SQLite databases. Only the maintainer does this step; agents never connect to those databases.
-2. M3 Redesign: a new look and layout for every screen, with dark mode, from the design round. Its Phase 3 screens are built (2026-11-20); the checkpoint reviews and the day pictures come next.
+2. M3 Redesign: a new look and layout for every screen, with dark mode. Its screens are built (2026-11-20), and the fixes from looking at them are in up to 2026-11-23 (the grid's header and row selection, the cell editor, STRUCTURE's columns, the view switch, selected text); its last checks and the day pictures come next.
 3. M4 Import and export, for all four engines: file export and import, the last alpha gate row, and dump and restore with each engine's own tools.
 
 ## Progress log
 
 | Date | Entry |
 |---|---|
+| 2026-11-23 | M3, the fixes from looking at the screens (2026-11-22 and 2026-11-23): several whole rows are selected by a drag over the row numbers or by Shift with the arrow keys, which also move the selection, and are copied whole; every cell editor opens in its cell, one line whatever the type, while the value panel shows the same draft; a grid header cuts its words with `…`, draws long type names in their short spelling and says the whole on hover; STRUCTURE's columns take the page's spare room where their content is cut and are resized at their edges; the DATA / STRUCTURE switch stands in the table tab's bottom bar in both views; selected text has a colour of its own, stronger than a selected row's. Parity numbers unchanged. |
 | 2026-11-20 | M3 Phase 3 screens 3–10 built: the table tab's bars, the query tab (result bar, error band with ROLLBACK), the value panel inside the tab (WRAP, editing several lines), the schema tree's menu and count, the connection screen (one list, a two-column form, CONNECT saves), the quick search grouped by connection, the empty and loading states on one 300 ms clock, and a read-only STRUCTURE page; light and dark. The review rounds' fixes landed with them. |
 | 2026-11-08 | Milestones renumbered: M3 is the Redesign, and import and export move to M4. Alpha waits for M4's file export. |
 | 2026-11-08 | The larger review's bugs fixed: two dbee windows no longer lose each other's saved connections (each change re-reads the file under a lock); a newer dbee's connections file is read and never overwritten, and fields an older build does not know survive; a table tab's stopped load stops no other tab; the Postgres cancel and the MySQL KILL go to the server the connection reached; every wall-clock bound in a test is in an ignored timing twin. |
@@ -76,6 +77,7 @@ Breadth grades Beekeeper's observed feature list row by row: done 1, partial 0.5
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-23 | minor | Progress log and upcoming list to 2026-11-23 (the grid, the cell editor, STRUCTURE's columns, the view switch, selected text); the day tests run in the CI workflow; numbers unchanged. |
 | 2026-11-20 | minor | M3's Phase 3 screens: Structure 40 %, Tools and App 5 %, features ~38 %, overall ~30 % (estimated); upcoming list and progress log. |
 | 2026-11-08 | minor | M3 is the Redesign; import and export are M4; upcoming list and progress log updated. |
 | 2026-11-08 | minor | Progress log: the larger review's bugs. |

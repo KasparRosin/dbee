@@ -1,6 +1,6 @@
 # Roadmap: gates and milestones
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-08 · **Change:** minor (M3 is the Redesign, import and export are M4; checked against the code) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-23 · **Change:** minor (M3 is in progress: its screens are built; before: M3 is the Redesign, import and export are M4; checked against the code) · **Target:** Beekeeper Studio 5.5.7
 
 The one-page summary is [`ROADMAP.md`](../ROADMAP.md) at the repository root. This page holds the detail behind it: the current focus, the alpha and beta gates, and the milestones.
 
@@ -8,7 +8,7 @@ The one-page summary is [`ROADMAP.md`](../ROADMAP.md) at the repository root. Th
 
 M1 "Daily Postgres workflow" is built. Every task of its plan is done, and the M1 day runs end to end in the real window. It waits for its last check: a day of real use of a Linux release build on the maintainer's own databases. Only the maintainer does that; agents never connect to those databases.
 
-M2 "Three databases" is built: one driver interface, with Postgres behind it, and MySQL, MariaDB and SQLite on it with the whole M1 workflow. The M2 day runs end to end in the real window on all three (`apps/dbee/tests/m2_day.rs`). Like M1, it waits for a day of real use on the maintainer's own MySQL, MariaDB and SQLite databases. The Redesign (M3) and then M4 "Import and export" come next, for all four engines.
+M2 "Three databases" is built: one driver interface, with Postgres behind it, and MySQL, MariaDB and SQLite on it with the whole M1 workflow. The M2 day runs end to end in the real window on all three (`apps/dbee/tests/m2_day.rs`). Like M1, it waits for a day of real use on the maintainer's own MySQL, MariaDB and SQLite databases. The Redesign (M3) is in progress: its screens are built (2026-11-20), in light and dark, and the fixes from looking at them followed up to 2026-11-23. M4 "Import and export" comes next, for all four engines.
 
 ## Alpha gate
 
@@ -35,7 +35,7 @@ Not defined yet: they follow M4, from the ranked list in [gaps.md](gaps.md) and 
 | M0 | Scaffold | done (2026-10-16) |
 | M1 | Daily Postgres workflow | built (2026-10-26); waits for a day of real use on the maintainer's own databases |
 | M2 | Three databases | built (2026-11-05); waits for a day of real use on the maintainer's own databases |
-| M3 | Redesign | not started |
+| M3 | Redesign | in progress: the screens are built (2026-11-20), fixes from looking at them up to 2026-11-23 |
 | M4 | Import and export | not started |
 
 The packages offer dbee for SQLite files without taking the file type over: the Linux desktop entry and AppStream data list `application/vnd.sqlite3` and `application/x-sqlite3` (the user's settings pick the default), and the Windows installer adds dbee to the Open with list of `.sqlite` and `.sqlite3`. The macOS bundle declares no document types yet ([gaps.md](gaps.md) entry 17). On every platform a file named on the command line, or dropped on the window, opens.
@@ -48,6 +48,7 @@ Percentages and hours come from [target-app-parity.md](target-app-parity.md) and
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-23 | minor | M3 is in progress: its screens are built (2026-11-20), with fixes up to 2026-11-23. |
 | 2026-11-08 | minor | Import and export is now M4; M3 is the Redesign. Checked against the code after the review fixes: still true. |
 | 2026-11-05 | major | M2 "Three databases" built: MySQL, MariaDB and SQLite with the whole M1 workflow; the alpha gate's rows cover them (`m2_day`). |
 | 2026-11-05 | minor | The packages offer dbee for SQLite files (Linux MIME types, Windows Open with), never as the default; macOS not yet (gaps.md entry 17). |
