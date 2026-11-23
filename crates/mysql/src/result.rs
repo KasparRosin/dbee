@@ -627,7 +627,7 @@ pub(crate) mod tests {
         assert!(kept.len() <= 1024 + '\u{2026}'.len_utf8() && kept.starts_with("nnn"), "{} bytes", kept.len());
     }
 
-    /// Minor 7: a result whose columns do not fit is read to the end of the answer, later results
+    /// A result whose columns do not fit is read to the end of the answer, later results
     /// included, before the statement fails, so the next command reads its own answer.
     #[tokio::test]
     async fn columns_that_do_not_fit_are_read_to_the_end_of_the_answer() {
@@ -653,7 +653,7 @@ pub(crate) mod tests {
         assert!(next.columns.is_empty());
     }
 
-    /// Minor 6: the database a session state names is kept to what a server can name.
+    /// The database a session state names is kept to what a server can name.
     #[tokio::test]
     async fn a_session_tracked_database_name_is_kept_cut() {
         let lenenc = |b: &[u8]| [&[0xFC][..], &u16::try_from(b.len()).unwrap().to_le_bytes(), b].concat();

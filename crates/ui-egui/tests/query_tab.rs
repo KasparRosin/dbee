@@ -294,7 +294,7 @@ fn many_results_fit_the_toolbar() {
     assert!(ui.tag("result-list-1").is_none(), "the list closed");
 }
 
-/// Review 2, Minor 3: the `…` list of every result, chosen from with the keyboard, closes as
+/// The `…` list of every result, chosen from with the keyboard, closes as
 /// after a click.
 #[test]
 fn the_result_list_closes_when_chosen_by_keyboard() {
@@ -322,7 +322,7 @@ fn the_result_list_closes_when_chosen_by_keyboard() {
     assert!(ui.tag("result-list-1").is_none(), "the list closed");
 }
 
-/// Review 2, Minor 3: the database chip's list, chosen from with the keyboard, closes as after a
+/// The database chip's list, chosen from with the keyboard, closes as after a
 /// click. The arrows take the keyboard down into the list (egui may stop on the list's frame on
 /// the way).
 #[test]

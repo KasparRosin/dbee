@@ -79,7 +79,7 @@ fn day_filters_through_the_bar() {
     ui.until("the page with two filters", |ui| ui.table()["applied"]["filters"].as_array().map(Vec::len) == Some(2));
 }
 
-/// Review 2, Minor 8: the filter bar's icon buttons read out by what they do, the hover's words,
+/// The filter bar's icon buttons read out by what they do, the hover's words,
 /// not by their icons (`code`, `minus`, `plus`); the raw toggle says whether it is on.
 #[test]
 fn the_filter_bars_icon_buttons_read_out_what_they_do() {
@@ -101,7 +101,7 @@ fn the_filter_bars_icon_buttons_read_out_what_they_do() {
     assert_eq!(toggled(&ui), Some(Toggled::True), "on");
 }
 
-/// Review 2, Minor 3: a filter's dropdown chosen from with the keyboard closes its list, as after
+/// A filter's dropdown chosen from with the keyboard closes its list, as after
 /// a click: Enter opens it, the arrow takes the keyboard to its first item, Enter chooses it.
 #[test]
 fn a_filter_dropdown_closes_when_chosen_by_keyboard() {

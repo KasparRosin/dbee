@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn a_cut_name_or_line_reads_whole_on_hover() {
-        // Review 1, M1: when the name or the line is cut, the list shows both whole on hover, the
+        // When the name or the line is cut, the list shows both whole on hover, the
         // name over the line; with nothing cut, no hover. No time words before the line.
         const FAR: &str = "postgres@analytics-replica.internal.example.com:5432/analytics";
         let row = |name: &'static str, address: &str| ConnectionRow {
@@ -710,7 +710,7 @@ mod tests {
 
     #[test]
     fn the_tables_count_says_table_for_one() {
-        // Review 1, M2: the count's word follows the total: `1 TABLE`, also filtered (`1 OF 1
+        // The count's word follows the total: `1 TABLE`, also filtered (`1 OF 1
         // TABLE`); `2 TABLES`, `1 OF 2 TABLES`.
         use egui_kittest::kittest::Queryable;
         for (n, all, filtered) in [(1, "1 TABLE", "1 OF 1 TABLE"), (2, "2 TABLES", "1 OF 2 TABLES")] {
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn a_tables_chevron_shows_focus_and_reads_out_what_it_opens() {
-        // Review 2, Minor 2: Tab goes row, chevron, next row. On the chevron the tab close's focus
+        // Tab goes row, chevron, next row. On the chevron the tab close's focus
         // look shows, a 2 px `ink` box 2 inside its square, and the
         // row shows none. It reads out as a button, "Columns of <table>", pressed while open.
         let tables = vec![table("shop", "orders", RelKind::Table, vec![column("id", "int8")]), table("shop", "users", RelKind::Table, vec![])];

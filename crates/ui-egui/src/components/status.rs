@@ -830,7 +830,7 @@ mod tests {
 
     #[test]
     fn a_long_job_leaves_the_connection_its_name() {
-        // Review 1, I1: in a small window a job on a table with a 63-letter name ran over the
+        // In a small window a job on a table with a 63-letter name ran over the
         // block, and the name went. The job's name is cut instead, keeping dbee's words and
         // CANCEL; its whole words on hover. The block keeps a few letters.
         const TABLE: &str = "rev1_customer_success_quarterly_revenue_reconciliation_2026_abc";
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn a_cut_name_reads_whole_on_hover() {
-        // Review 1, M1: a name cut at its most, or short of room, reads whole on hover, as
+        // A name cut at its most, or short of room, reads whole on hover, as
         // written; a name drawn whole has no hover.
         const LONG: &str = "Reporting replica for the Customer Success team (read-only, EU)";
         for (name, cut) in [(LONG, true), ("Shop live", false)] {

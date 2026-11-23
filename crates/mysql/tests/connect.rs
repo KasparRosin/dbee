@@ -1421,7 +1421,7 @@ async fn long_server_text_is_cut_where_it_is_kept() {
     assert!(e.to_string().contains("unreadable version") && e.to_string().len() < 1024, "{} bytes", e.to_string().len());
 }
 
-/// Minor 7: columns that do not fit in what is left of a run's budget end the statement in a plain
+/// Columns that do not fit in what is left of a run's budget end the statement in a plain
 /// error, once its answer is read to the end, and the next statement runs: the connection is not
 /// lost.
 #[tokio::test]

@@ -2372,7 +2372,7 @@ fn a_connect_through_the_tunnel_can_be_cancelled() {
     s.run_blocking("schema.refresh", json!({}), T).unwrap();
 }
 
-/// Review 2, Minor 1: a direct Postgres connect cancelled after the login leaves nothing open.
+/// A direct Postgres connect cancelled after the login leaves nothing open.
 /// The server logs the client in, then stops answering: during the session's setup, or, once the
 /// setup is answered, during the catalog's load. Cancelled there, the attempt ends `cancelled` and
 /// the socket to the server closes. How long each took from the cancel to the close.

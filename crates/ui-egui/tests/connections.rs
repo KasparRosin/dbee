@@ -565,7 +565,7 @@ fn a_sqlite_path_on_a_row_is_cut_in_the_middle_and_whole_on_hover() {
     assert!(ui.texts().iter().any(|(_, g)| g.text() == hover), "whole on hover: {:?}", ui.texts().iter().map(|(_, g)| g.text()).collect::<Vec<_>>());
 }
 
-/// Review 1, M1: a row whose name or line is cut shows both whole on hover, the name over the
+/// A row whose name or line is cut shows both whole on hover, the name over the
 /// line; a row with nothing cut shows no hover.
 #[test]
 fn a_cut_name_on_a_row_reads_whole_on_hover() {

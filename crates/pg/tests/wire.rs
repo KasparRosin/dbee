@@ -609,7 +609,7 @@ async fn column_names_are_cut_and_columns_that_do_not_fit_fail_the_statement() {
     joined(server).await;
 }
 
-/// Minor 6: every text taken from tokio-postgres is cut: here the error a SCRAM exchange ends in,
+/// Every text taken from tokio-postgres is cut: here the error a SCRAM exchange ends in,
 /// the server's own words.
 #[tokio::test]
 async fn a_scram_error_is_cut() {

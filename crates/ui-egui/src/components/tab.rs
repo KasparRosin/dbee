@@ -999,7 +999,7 @@ mod tests {
 
     #[test]
     fn a_plain_wheel_scrolls_the_strip() {
-        // Review 2, Minor 4: an ordinary mouse's wheel turns up and down; over the strip it moves
+        // An ordinary mouse's wheel turns up and down; over the strip it moves
         // the tabs sideways, rest by rest, as a sideways wheel or Shift and the wheel do.
         let mut h = seven(Theme::Light, 560.0, 0);
         h.hover_at(h.state().band.left_center() + vec2(40.0, 0.0));
@@ -1071,7 +1071,7 @@ mod tests {
 
     #[test]
     fn choosing_from_the_list_by_keyboard_closes_it() {
-        // Review 2, Minor 3: Enter on the list button opens the list; the arrows and Enter choose
+        // Enter on the list button opens the list; the arrows and Enter choose
         // a tab, which becomes active, and the list closes, as after a click.
         let mut h = seven(Theme::Light, STRIP, 0);
         h.get_by_label("All tabs").focus();
@@ -1115,7 +1115,7 @@ mod tests {
         h.state_mut().active = 3;
         h.run();
         assert!(whole_in_view(h.state(), 3), "line_items in view: {:?}", h.state().tabs);
-        // Review 2, Minor 11: wheeled away from the active tab, it comes back into view when the
+        // Wheeled away from the active tab, it comes back into view when the
         // strip's width changes, and when the number of tabs does.
         h.state_mut().active = 0;
         h.run();

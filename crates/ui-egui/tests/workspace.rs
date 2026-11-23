@@ -2072,7 +2072,7 @@ fn a_server_version_keeps_its_case() {
 #[test]
 fn the_status_bar_gives_way_at_the_smallest_window() {
     let db = dbee_testkit::require_testdb!();
-    // Review 1, I1: a job on a table with a 63-letter name, the most Postgres takes.
+    // A job on a table with a 63-letter name, the most Postgres takes.
     let long = Scratch::new(db, "customer_success_quarterly_revenue_reconciliation_2026q4", |t| format!("CREATE TABLE scratch.{t} (id int)"));
     assert_eq!(long.0.len(), 63);
     for size in [APP_SIZE, egui::vec2(640.0, 420.0)] {
@@ -2161,7 +2161,7 @@ fn status_gives_way(ui: &mut Ui, size: egui::Vec2, at: &str) -> Vec<(&'static st
     drawn
 }
 
-/// Review 1: Tab reaches the value toggle at the result bar's right end, from the result's tab
+/// Tab reaches the value toggle at the result bar's right end, from the result's tab
 /// (the editor keeps Tab for itself). Reached by the keyboard, it shows the focus look of a bar
 /// button, a 2 px `ink` box 2 inside its cell; a click shows none.
 #[test]
