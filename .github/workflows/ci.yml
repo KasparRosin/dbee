@@ -1,6 +1,7 @@
-# The AGENTS.md quality gate (`cargo xtask ci`: fmt, clippy -D warnings, test, assets, layers,
-# provenance) on every pull request and every push to main, so a merge burst can't land
-# a red tree that nobody notices until the next change.
+# The AGENTS.md quality gate (`cargo xtask ci`: fmt, clippy -D warnings, test, assets, tokens,
+# layers, provenance) on every pull request and every push to main, so a merge burst can't land
+# a red tree that nobody notices until the next change. After it, the M1 and M2 days and
+# `control_access` run in the real app on a virtual screen.
 name: CI
 
 on:
