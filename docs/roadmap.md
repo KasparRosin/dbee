@@ -1,12 +1,12 @@
 # Roadmap: gates and milestones
 
-> **Last reviewed:** 2026-11-08 · **Last updated:** 2026-11-23 · **Change:** minor (M3 is in progress: its screens are built; before: M3 is the Redesign, import and export are M4; checked against the code) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** trivial (wording: M1 is built, the query tab's error band; checked against the code) · **Target:** Beekeeper Studio 5.5.7
 
 The one-page summary is [`ROADMAP.md`](../ROADMAP.md) at the repository root. This page holds the detail behind it: the current focus, the alpha and beta gates, and the milestones.
 
 ## Current focus
 
-M1 "Daily Postgres workflow" is built. Every task of its plan is done, and the M1 day runs end to end in the real window. It waits for its last check: a day of real use of a Linux release build on the maintainer's own databases. Only the maintainer does that; agents never connect to those databases.
+M1 "Daily Postgres workflow" is built, and the M1 day runs end to end in the real window. It waits for its last check: a day of real use of a Linux release build on the maintainer's own databases. Only the maintainer does that; agents never connect to those databases.
 
 M2 "Three databases" is built: one driver interface, with Postgres behind it, and MySQL, MariaDB and SQLite on it with the whole M1 workflow. The M2 day runs end to end in the real window on all three (`apps/dbee/tests/m2_day.rs`). Like M1, it waits for a day of real use on the maintainer's own MySQL, MariaDB and SQLite databases. The Redesign (M3) is in progress: its screens are built (2026-11-20), in light and dark, and the fixes from looking at them followed up to 2026-11-23. M4 "Import and export" comes next, for all four engines.
 
@@ -16,7 +16,7 @@ M2 "Three databases" is built: one driver interface, with Postgres behind it, an
 |---|---|---|---|
 | Connect to Postgres, MySQL, MariaDB or SQLite (M1, M2) | yes (measured) | `m1_day` step 1 (`apps/dbee/tests/m1_day.rs`): a double-click on a saved connection reaches the workspace through the test sshd with the key found on its own, no prompt. Driver and engine tests: TLS modes, the CA file, key, agent and password SSH logins, host keys, read-only mode, lost connections (`crates/pg/tests`, `crates/ssh/tests`, `crates/engine/tests/connection.rs`), on Postgres 14 and 18. `m2_day`: MySQL 8.0 through the test sshd from the connection form (the engine cards, the Database field's list), the newest MariaDB directly, and a SQLite file opened with `dbee <file>`; the driver tests in `crates/mysql/tests` and `crates/sqlite/tests`. | 0 |
 | Browse and filter tables (M1) | yes (measured) | `m1_day` steps 2, 3 and 5, and `m2_day` on each engine: Ctrl+P, three filters through the bar, a foreign key followed into a filtered tab. Paging, sort, count and odd identifiers in `crates/engine/tests/table.rs` and `crates/ui-egui/tests/table_tab.rs`; the next page of a million-row table in 1.06–1.09 ms on Postgres at the end of M1, and in 0.4–2.9 ms on every engine at the end of M2 (release build, loaded laptop; `next_page_on_a_million_rows_is_fast`; [target-app-parity.md](target-app-parity.md), "Performance"). | 0 |
-| Run a query (M1) | yes (measured) | `m1_day` step 7: a join pasted and run with Ctrl+Enter. `m2_day` on each engine: three result sets, a cancelled statement, a join; on MySQL and MariaDB the query tab's database. Run current, cancel, several results, error cards and the row cap in `crates/engine/tests/query.rs` and `crates/ui-egui/tests/query_tab.rs`. | 0 |
+| Run a query (M1) | yes (measured) | `m1_day` step 7: a join pasted and run with Ctrl+Enter. `m2_day` on each engine: three result sets, a cancelled statement, a join; on MySQL and MariaDB the query tab's database. Run current, cancel, several results, the error band and the row cap in `crates/engine/tests/query.rs` and `crates/ui-egui/tests/query_tab.rs`. | 0 |
 | Edit a row (M1) | yes (measured) | `m1_day` step 6: a name fixed and a date cleared to NULL, each written with Ctrl+S and checked with psql. `m2_day` on each engine: a name fixed, a row deleted and one added, all in one Ctrl+S, checked with the engine's own client. All-or-nothing Apply with a failing change in `crates/pg/tests/apply.rs`, `crates/engine/tests/edit.rs` and `crates/ui-egui/tests/editing.rs`. | 0 |
 | Copy results (M1) | yes (measured) | `m1_day` steps 4 and 7, and `m2_day` on each engine: a JSON line copied from the value panel, and a result copied with its header row (Ctrl+A, Ctrl+Shift+C). The formats in `crates/core` and `crates/ui-egui/tests/clipboard.rs`. | 0 |
 | Export to a file (M4) | no | Not built ([gaps.md](gaps.md) entry 1). | not estimated yet |
@@ -48,8 +48,9 @@ Percentages and hours come from [target-app-parity.md](target-app-parity.md) and
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-23 | trivial | Checked against the code (the day tests' steps, the test servers' versions, the milestones): still true. Wording: M1 is built; the query tab's errors are the error band. |
 | 2026-11-23 | minor | M3 is in progress: its screens are built (2026-11-20), with fixes up to 2026-11-23. |
-| 2026-11-08 | minor | Import and export is now M4; M3 is the Redesign. Checked against the code after the review fixes: still true. |
+| 2026-11-08 | minor | Import and export is now M4; M3 is the Redesign. Checked against the code: still true. |
 | 2026-11-05 | major | M2 "Three databases" built: MySQL, MariaDB and SQLite with the whole M1 workflow; the alpha gate's rows cover them (`m2_day`). |
 | 2026-11-05 | minor | The packages offer dbee for SQLite files (Linux MIME types, Windows Open with), never as the default; macOS not yet (gaps.md entry 17). |
 | 2026-10-28 | major | Milestones renumbered: M2 "Three databases" (driver interface, MySQL/MariaDB, SQLite) is in progress; "Import and export" is now M3. |
