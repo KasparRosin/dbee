@@ -56,7 +56,7 @@ Features, weighted by area: **42 %**, put at **~38 % (estimated)**.
 |---|---|---|---|---|
 | Features | 40 | ~38 % | estimated | the feature areas above |
 | Database engines | 20 | 20 % | measured (4 of 20 engines) | [driver-parity.md](driver-parity.md) |
-| UI | 12 | ~45 % | estimated | [ui-parity.md](ui-parity.md): 24 elements graded, 3 done and 18 partial |
+| UI | 12 | ~45 % | estimated | [ui-parity.md](ui-parity.md): 24 elements graded, 3 done and 19 partial |
 | Performance | 8 | ~30 % | estimated | dbee meets its own M1 targets (measured, below), but a frame passes 16.7 ms at about 100 columns in most runs. Beekeeper's timings were not measured, so there is no side-by-side. |
 | Stability | 8 | ~25 % | estimated | Never-crash rules and the panic guard; the command-sequence fuzz at 20,000 steps (again on 2026-11-06, seed 1793954111563178215) and every command with empty params pass (measured). No use on real databases yet. |
 | File formats (import/export) | 4 | 0 % | measured | none ([file-format-parity.md](file-format-parity.md)) |

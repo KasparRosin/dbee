@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (checked row by row against the M3 tree: the Status bar and Transactions rows name IN TRANSACTION and the close question, the Data grid row its header; grades unchanged) · **Target:** Beekeeper Studio 5.5.7
+> **Last reviewed:** 2026-11-23 · **Last updated:** 2026-11-23 · **Change:** minor (Transactions regraded partial: a transaction a query opens is tracked, asked about on close and can be committed or rolled back; 3 of 24 done, 19 partial, 52 % by count; ~45 % stands) · **Target:** Beekeeper Studio 5.5.7
 
 Graded by behaviour against what was observed in Beekeeper Studio, not by whether a control exists. The evidence is in observation notes kept outside the repository (they hold Beekeeper Studio screenshots, which are not ours to publish). Status: **done** (does what the observed element does, on every engine dbee has: PostgreSQL, MySQL, MariaDB and SQLite), **partial** (some of it), **not started**. dbee's styling and wording are its own. Every element below that dbee has was driven through the control channel and checked on screenshots (`apps/dbee/tests/m1_day.rs`, `apps/dbee/tests/m2_day.rs`, `crates/ui-egui/tests/`).
 
@@ -25,13 +25,13 @@ Graded by behaviour against what was observed in Beekeeper Studio, not by whethe
 | Edit in a modal | Text, JSON, HTML; Minify & Apply | None | not started |
 | Query editor | Line numbers, syntax colours, autocomplete, find and replace, Vim keymap, wrap | Line numbers, syntax colours in the engine's own SQL, Ctrl+Enter (all), Ctrl+Shift+Enter (the statement under the cursor), Tab indents, a draggable split; on MySQL and MariaDB the database a tab runs in, opened on the tree's selection and chosen from a list | partial: no autocomplete, find, Vim keymap or wrap |
 | Query results | Result selector, row count, affected rows, timing, error card, download | A result bar with a tab per result (a ⌄ list when they don't fit), the row count with the cap notice, rows affected, how long each statement took, an error band that jumps to the position and underlines the token there, ROLLBACK under a failed transaction, cancel (CANCELLED in the bar, no band); EXPORT drawn, off; when narrow the run row and the result bar give up room in order and no control is drawn over another | partial: no download |
-| Transactions | Auto commit or manual (Begin, Commit, Rollback) | Auto commit only: no manual mode and no Begin or Commit control. A transaction a query opens itself is tracked: IN TRANSACTION in the status bar, COMMIT, ROLLBACK or CANCEL asked when its tab, the connection or the window closes, ROLLBACK under a failed one's error | not started |
+| Transactions | Auto commit or manual (Begin, Commit, Rollback) | Auto commit only: no manual mode and no Begin or Commit control. A transaction a query opens itself is tracked: IN TRANSACTION in the status bar, COMMIT, ROLLBACK or CANCEL asked when its tab, the connection or the window closes, ROLLBACK under a failed one's error | partial |
 | Saved queries and history | Side panels | None | not started |
 | Structure and new table | Columns, indexes, relations, triggers; table editor | A table tab's STRUCTURE, read each time it is chosen: one page of COLUMNS (place, name, type, nullable, default, primary or foreign key), INDEXES, FOREIGN KEYS (with ON DELETE), REFERENCED BY and TRIGGERS, data as the server writes it, read-only, on every engine; a foreign key or a referencing table is a link that opens that table (a click, or Enter from the keyboard); REFRESH and CANCEL (after 300 ms, with the first read's bars or the page from before at half), the error band when a read fails; a long name widens its column up to twice, spare room, and what a table's last column can spare, goes to the columns whose content is cut, a column's edge is dragged to resize it or double-clicked to fit it (kept for the tab's life), cut text whole on hover, the page scrolls both ways and the bar gives way in order when narrow; DATA comes back as it was | partial: no table editor or new table (later), no copying from the page, no CHECK constraints or comments |
 | Notifications | Toasts with actions; export progress | Notices at the bottom right ("Copied 13 rows", why something cannot run) | partial |
 | Themes | System, light, dark, Solarized | Light and dark themes of dbee's own, following the system or chosen in the View menu | partial: no Solarized |
 
-By count: 3 of 24 elements done and 18 partial, which at half weight is 50 % (estimated). Screens not observed yet (settings, plugins, backup and restore) are not in the list, so the UI dimension is put at **~45 % (estimated)**.
+By count: 3 of 24 elements done and 19 partial, which at half weight is 52 % (estimated). Screens not observed yet (settings, plugins, backup and restore) are not in the list, so the UI dimension is put at **~45 % (estimated)**.
 
 ## Work
 
@@ -41,6 +41,7 @@ From [gaps.md](gaps.md): wide results first (5), then the editing limits (9, 10)
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-23 | minor | Transactions regraded from not started to partial: a transaction a query opens itself is tracked, asked about on close and can be committed or rolled back; still no manual mode. 3 of 24 done, 19 partial, 52 % by count; ~45 % stands. |
 | 2026-11-23 | minor | Checked row by row against the M3 tree. Status bar: IN TRANSACTION, the link's security, SAVE CONNECTION. Transactions: what dbee does with a transaction a query opens itself; still no manual mode. Data grid: short type names and the header's hover. The 2026-11-22 rows of this table moved above the 2026-11-20 ones. Grades unchanged. |
 | 2026-11-23 | minor | Themes (partial): the row says what is built, light and dark themes that follow the system or are chosen in the View menu; no Solarized. Grade unchanged. |
 | 2026-11-22 | minor | Table bar and Paging bar (both partial): the DATA / STRUCTURE switch moves from the table bar to the left end of the tab's bottom bar, which shows in both views and in every state, so the switch no longer jumps by the filter bar's height; the table bar starts with REFRESH; the paging stands in the bottom bar's middle and gives way before the switch and APPLY when narrow; grades unchanged. |
