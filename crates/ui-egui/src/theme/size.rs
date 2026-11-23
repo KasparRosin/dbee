@@ -133,6 +133,16 @@ pub const NO_TAB_ROW_GAP: f32 = 8.0;
 /// The menu bar (`menu bar`): a slim bar, its titles this far in from its ends.
 pub const MENU_BAR_PAD_X: f32 = 4.0;
 
+/// The update button at the menu bar's right end: a box as tall as a title, its right end this
+/// far from the bar's; its words this far in from either end, an icon this far before them;
+/// RETRY this far after UPDATE FAILED; and at least this much clear between the last title and
+/// the button, which is not drawn with less.
+pub const UPDATE_EDGE: f32 = 12.0;
+pub const UPDATE_PAD_X: f32 = MENU_TITLE_PAD_X;
+pub const UPDATE_ICON_GAP: f32 = 6.0;
+pub const UPDATE_RETRY_GAP: f32 = 4.0;
+pub const UPDATE_CLEAR: f32 = 12.0;
+
 /// The status bar (`status bar`): a slim bar with the connection's colour this thick along its
 /// top; the name's block this tall, the name this far in from its ends and cut at this width;
 /// this between the block and the first fact; this between the facts, and between an activity's

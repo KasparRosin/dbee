@@ -9,7 +9,7 @@
 use egui::epaint::RectShape;
 use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Shape, Stroke, Vec2, pos2, vec2};
 
-/// One of the 36 icons, by name (`icon/none` is [`Icon::NoColour`]).
+/// One of the 37 icons, by name (`icon/none` is [`Icon::NoColour`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     ChevronDown,
@@ -48,6 +48,7 @@ pub enum Icon {
     Error,
     Follow,
     LineBreak,
+    Download,
 }
 
 /// The table's header band: 45 % of the icon's colour.
@@ -56,7 +57,7 @@ const TABLE_BAND: f32 = 0.45;
 const CURVE_STEPS: usize = 12;
 
 impl Icon {
-    pub const ALL: [Icon; 36] = [
+    pub const ALL: [Icon; 37] = [
         Icon::ChevronDown,
         Icon::ChevronRight,
         Icon::SortAscending,
@@ -93,6 +94,7 @@ impl Icon {
         Icon::Error,
         Icon::Follow,
         Icon::LineBreak,
+        Icon::Download,
     ];
 
     /// Its name, after `icon/`.
@@ -134,6 +136,7 @@ impl Icon {
             Icon::Error => "error",
             Icon::Follow => "follow",
             Icon::LineBreak => "line-break",
+            Icon::Download => "download",
         }
     }
 
@@ -168,7 +171,8 @@ impl Icon {
             | Icon::KeyForeign
             | Icon::Success
             | Icon::Error
-            | Icon::Follow => vec2(14.0, 14.0),
+            | Icon::Follow
+            | Icon::Download => vec2(14.0, 14.0),
             Icon::LineBreak => vec2(10.0, 10.0),
         }
     }
@@ -366,6 +370,12 @@ impl Icon {
                 pen.round(&[p(8.0, 1.5), p(8.0, 6.5), p(2.0, 6.5)]);
                 pen.round(&[p(4.2, 4.2), p(2.0, 6.5), p(4.2, 8.8)]);
             }
+            // A ring with an arrow pointing down in it.
+            Icon::Download => {
+                pen.ring(p(7.0, 7.0), 6.4);
+                pen.round(&[p(7.0, 3.9), p(7.0, 9.8)]);
+                pen.round(&[p(4.6, 7.4), p(7.0, 9.8), p(9.4, 7.4)]);
+            }
         }
     }
 }
@@ -472,7 +482,7 @@ mod tests {
     use super::*;
 
     /// The icons: name and box.
-    const PAGE: [(&str, f32, f32); 36] = [
+    const PAGE: [(&str, f32, f32); 37] = [
         ("icon/chevron-down", 8.0, 4.0),
         ("icon/chevron-right", 4.0, 8.0),
         ("icon/sort-ascending", 6.0, 8.0),
@@ -509,6 +519,7 @@ mod tests {
         ("icon/error", 14.0, 14.0),
         ("icon/follow", 14.0, 14.0),
         ("icon/line-break", 10.0, 10.0),
+        ("icon/download", 14.0, 14.0),
     ];
 
     /// Every shape `icon` paints centred on `center`, at `ppp` pixels per point.
@@ -551,9 +562,9 @@ mod tests {
     }
 
     #[test]
-    fn there_are_36_icons_each_with_its_box() {
+    fn there_are_37_icons_each_with_its_box() {
         let names: Vec<String> = Icon::ALL.iter().map(|i| format!("icon/{}", i.name())).collect();
-        assert_eq!(names.iter().collect::<HashSet<_>>().len(), 36, "36 distinct names: {names:?}");
+        assert_eq!(names.iter().collect::<HashSet<_>>().len(), 37, "37 distinct names: {names:?}");
         for (icon, name) in Icon::ALL.into_iter().zip(&names) {
             let page = PAGE.iter().find(|(n, _, _)| n == name);
             let Some((_, w, h)) = page else { panic!("{icon:?}: {name} isn't in the list") };

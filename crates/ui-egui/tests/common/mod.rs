@@ -66,11 +66,23 @@ pub struct Setup {
     /// The session's drivers; `None` is every driver dbee ships.
     pub drivers: Option<Drivers>,
     pub app: Option<MakeApp>,
+    /// What the session checks for updates with; `None` is a session that never checks.
+    pub updates: Option<dbee_engine::Updates>,
 }
 
 impl Default for Setup {
     fn default() -> Setup {
-        Setup { size: egui::vec2(1400.0, 900.0), step: None, home: None, secrets: true, exclusive: false, config: None, drivers: None, app: None }
+        Setup {
+            size: egui::vec2(1400.0, 900.0),
+            step: None,
+            home: None,
+            secrets: true,
+            exclusive: false,
+            config: None,
+            drivers: None,
+            app: None,
+            updates: None,
+        }
     }
 }
 
@@ -81,6 +93,8 @@ pub struct Ui {
     pub tx: mpsc::Sender<ControlRequest>,
     /// Every text a frame put on the clipboard (egui's `CopyText`), oldest first.
     pub copied: Vec<String>,
+    /// Every page a frame asked the desktop to open (egui's `OpenUrl`), oldest first.
+    pub opened: Vec<String>,
     /// Every command a frame sent the window (`Close`, `CancelClose`, …), oldest first.
     pub sent: Vec<egui::ViewportCommand>,
     /// The slowest frame since [`Ui::time_frames`].
@@ -110,7 +124,7 @@ impl Ui {
             allowed_targets: None,
             allowed_dirs: None,
             drivers: setup.drivers.unwrap_or_else(dbee_drivers::all),
-            updates: None,
+            updates: setup.updates,
         })
         .unwrap();
         let (tx, rx) = mpsc::channel();
@@ -123,7 +137,7 @@ impl Ui {
             builder = builder.with_step_dt(step);
         }
         let harness = builder.build_ui_state(|ui, app: &mut DbeeApp| app.ui(ui), app);
-        let mut ui = Ui { harness, tx, copied: Vec::new(), sent: Vec::new(), slowest: Duration::ZERO, secrets, home, hold };
+        let mut ui = Ui { harness, tx, copied: Vec::new(), opened: Vec::new(), sent: Vec::new(), slowest: Duration::ZERO, secrets, home, hold };
         ui.frame();
         ui
     }
@@ -194,8 +208,10 @@ impl Ui {
         self.harness.step();
         self.slowest = self.slowest.max(start.elapsed());
         for c in &self.harness.output().platform_output.commands {
-            if let egui::OutputCommand::CopyText(t) = c {
-                self.copied.push(t.clone());
+            match c {
+                egui::OutputCommand::CopyText(t) => self.copied.push(t.clone()),
+                egui::OutputCommand::OpenUrl(open) => self.opened.push(open.url.clone()),
+                egui::OutputCommand::CopyImage(_) => {}
             }
         }
         self.sent.extend(self.harness.output().viewport_output.values().flat_map(|v| v.commands.iter().cloned()));

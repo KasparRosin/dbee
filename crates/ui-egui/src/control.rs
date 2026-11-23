@@ -352,6 +352,7 @@ fn ui_inspect(app: &DbeeApp, ctx: &egui::Context) -> Json {
         "frame": app.frames(),
         "editor": app.view.work.editor.as_ref().map(|e| e.tag_cell()),
         "theme": { "choice": app.theme_choice.as_str(), "mode": if app.mode() == egui::Theme::Dark { "dark" } else { "light" } },
+        "openedUrl": app.opened_url(),
         "automation": app.tags.to_json(),
     })
 }

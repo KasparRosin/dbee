@@ -1267,6 +1267,7 @@ dependencies = [
  "dbee-sql",
  "dbee-ssh",
  "dbee-testkit",
+ "dbee-update",
  "eframe",
  "egui",
  "egui_extras",
